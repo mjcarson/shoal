@@ -227,8 +227,13 @@ whichever shard was quicker — the defect this replaced
 A query answered by one shard alone leaves `gather` as `None` and keeps the direct
 shard-to-socket reply below, so the common path pays nothing for any of this.
 
-The gather entry is only released when every shard has reported. A shard that dies mid-query
-leaks it and the client waits forever, since there are no timeouts anywhere
+~~The gather entry is only released when every shard has reported. A shard that dies mid-query
+leaks it and the client waits forever, since there are no timeouts anywhere.~~ Since
+[F41](../features/read-consistency.md) a gather has a slot per share and a deadline: it is
+released when every slot is covered or one has failed, or at the bundle's
+`networking.query_deadline`, when the query is answered `Timeout` once and a share that arrives
+afterwards is dropped by identity ([Resolved #33](../appendix/resolved/gather-expiry.md)). What
+a shard holds while it waits is still unbounded
 ([Known Issues #15](../appendix/known-issues.md#15-no-backpressure-anywhere)).
 
 ## 4. Executing

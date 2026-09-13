@@ -58,6 +58,12 @@ pub enum ReplicateKind {
     Propose = 3,
     /// A whole snapshot with its vote and metadata, which M7 delivers and this build refuses
     Snapshot = 4,
+    /// Ask the group's leader for a read barrier: the log id a linearizable read must apply past
+    ///
+    /// Carries no payload. The leader answers with its read log id once a heartbeat round has
+    /// confirmed its term, and the asking replica waits until it has applied that far
+    /// ([F41](../../../../../docs/src/features/read-consistency.md)).
+    ReadBarrier = 5,
 }
 
 impl ReplicateKind {
@@ -79,6 +85,7 @@ impl ReplicateKind {
             2 => Ok(ReplicateKind::Vote),
             3 => Ok(ReplicateKind::Propose),
             4 => Ok(ReplicateKind::Snapshot),
+            5 => Ok(ReplicateKind::ReadBarrier),
             unknown => Err(ProtocolError::UnknownReplicateKind(unknown)),
         }
     }
@@ -91,6 +98,7 @@ impl ReplicateKind {
             ReplicateKind::Vote => "vote",
             ReplicateKind::Propose => "propose",
             ReplicateKind::Snapshot => "snapshot",
+            ReplicateKind::ReadBarrier => "read_barrier",
         }
     }
 }

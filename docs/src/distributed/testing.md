@@ -38,7 +38,14 @@ hash over every shard's applied state that every convergence test compares acros
 flush completions on that node so a test can build a quorum short by exactly one durable
 voter; the builder sets `primary_failover_after` (a second by default in tests), the write
 deadline, the pending bound and one node's durability; and the write ledger below is what
-`conditional_results_follow_committed_order` feeds the `shoal-model` oracle. Benchmark
+`conditional_results_follow_committed_order` feeds the `shoal-model` oracle. Since
+[F41](../features/read-consistency.md) a child answers `HOLD_SHARES <shard> <ms> [dup]`, which
+keeps every share that shard would send for that long and sends each twice on release if asked,
+`GATHERS`, the resident gathers and every read counter folded over the node, and
+`SET_TABLE_READ_POLICY <table> <one|quorum|clear>`; the builder sets `read_consistency` and
+`query_deadline`; and the helpers read and write with `SendOptions` and keep a write's session
+token. A standalone node in the same test binary is started in process, since the fixture's
+directories all belong to the cluster. Benchmark
 readiness probes and tracing-based path assertions provide reusable patterns. There is no whole-engine deterministic simulator; this proposal does not require
 building one before testing the new protocol state machine, and `shoal-model` is the pure model
 it asks for instead.

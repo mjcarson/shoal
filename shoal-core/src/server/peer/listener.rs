@@ -382,6 +382,9 @@ async fn peer_tx_relay(
             span,
             mut stamps,
             archived,
+            attempt,
+            slot,
+            token,
             ..
         } = reply;
         let guard = span.enter();
@@ -403,6 +406,11 @@ async fn peer_tx_relay(
             kind: forwarded,
             // what this node learned running it, for the origin's record of the same query
             served: stamps.served_byte(),
+            // the origin judges a share by the attempt and slot it echoes
+            attempt,
+            slot,
+            // the token a write minted rides the answer head, since the payload is sealed
+            token,
         }
         .encode();
         let header = match codec::header(
@@ -423,6 +431,9 @@ async fn peer_tx_relay(
                     index: index as u64,
                     kind: ForwardedKind::Error,
                     served: stamps.served_byte(),
+                    attempt,
+                    slot,
+                    token: None,
                 }
                 .encode();
                 let Ok(header) = codec::header(

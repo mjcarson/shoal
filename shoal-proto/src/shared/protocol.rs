@@ -7,13 +7,17 @@
 //!  │ version │  type   │  flags   │   length (u32 LE)  │
 //!  │  (1 B)  │  (1 B)  │  (2 B)   │       (4 B)        │
 //!  └─────────┴─────────┴──────────┴────────────────────┘
-//!  request  : [header][trace context 26 B]?[rkyv Queries]
-//!  response : [header][query id 16 B][rkyv ResponseKinds]
+//!  request  : [header][trace context 26 B]?[read options 16 B + tokens]?[rkyv Queries]
+//!  response : [header][query id 16 B][session token 48 B]?[rkyv ResponseKinds]
 //! ```
 //!
 //! A request frame's trace context is present only when [`Flags::TRACE_CONTEXT`] is set, which is
 //! what makes the request preamble the one variable length preamble here
-//! ([F35](../../../docs/src/features/wire-trace-context.md)).
+//! ([F35](../../../docs/src/features/wire-trace-context.md)). A read options section follows it
+//! under [`Flags::READ_OPTIONS`], and a response frame carries a session token under
+//! [`Flags::SESSION_TOKEN`] - both only between peers that negotiated them, since a section a
+//! peer cannot size is not a section it can skip
+//! ([F41](../../../docs/src/features/read-consistency.md)).
 //!
 //! # Invariants
 //!
@@ -48,6 +52,7 @@ pub mod error;
 pub mod fingerprint;
 pub mod handshake;
 pub mod peer;
+pub mod read;
 pub mod trace;
 
 #[cfg(test)]
@@ -308,6 +313,19 @@ impl Flags {
     /// *next* optional block costs no version byte.
     pub const TRACE_CONTEXT: Flags = Flags(1 << 4);
 
+    /// A read options section sits between this request frame's trace context and its payload
+    ///
+    /// Unlike the trace context this section is not fixed length, so a peer that round trips
+    /// the bit still cannot skip the bytes behind it. That is why it is sent only to a server
+    /// whose hello ack granted [`read::CLIENT_CAP_READ_OPTIONS`]
+    /// ([F41](../../../docs/src/features/read-consistency.md)).
+    pub const READ_OPTIONS: Flags = Flags(1 << 5);
+
+    /// A session token sits between this response frame's query id and its payload
+    ///
+    /// Written only to a connection whose hello asked for it, for the same reason.
+    pub const SESSION_TOKEN: Flags = Flags(1 << 6);
+
     /// Build a flag set from its raw bits
     ///
     /// Unknown bits are kept as they are, since a bit this build does not know about is a bit a
@@ -368,6 +386,16 @@ pub enum ProtocolError {
     UnknownTraceContextVersion(u8),
     /// The peer said a trace context followed and then wrote one that names no parent
     InvalidTraceContext,
+    /// The peer wrote a read options section in a version this build does not read
+    UnknownReadOptionsVersion(u8),
+    /// The peer named a read level this build does not know
+    UnknownReadLevel(u8),
+    /// The peer wrote a session token in a version this build does not read
+    UnknownSessionTokenVersion(u8),
+    /// The peer put more tokens in one bundle than a section may carry
+    TooManySessionTokens(usize),
+    /// A read options section's fixed fields do not describe its bytes
+    MalformedReadOptions(&'static str),
     /// The peer sent a valid message type, but not the one this frame had to be
     UnexpectedMessageType {
         /// The message type that had to be here
@@ -466,6 +494,23 @@ impl std::fmt::Display for ProtocolError {
             }
             ProtocolError::InvalidTraceContext => {
                 write!(f, "the peer sent a trace context that names no parent")
+            }
+            ProtocolError::UnknownReadOptionsVersion(raw) => {
+                write!(f, "the peer wrote an unknown read options version: {raw}")
+            }
+            ProtocolError::UnknownReadLevel(raw) => {
+                write!(f, "the peer named an unknown read level: {raw}")
+            }
+            ProtocolError::UnknownSessionTokenVersion(raw) => {
+                write!(f, "the peer wrote an unknown session token version: {raw}")
+            }
+            ProtocolError::TooManySessionTokens(count) => write!(
+                f,
+                "the peer put {count} session tokens in one bundle; at most {} are carried",
+                read::MAX_SESSION_TOKENS
+            ),
+            ProtocolError::MalformedReadOptions(what) => {
+                write!(f, "the peer sent a malformed read options section: {what}")
             }
             ProtocolError::UnexpectedMessageType { expected, got } => {
                 write!(f, "expected a {expected} frame but got a {got} frame")
@@ -705,11 +750,22 @@ impl Header {
         }
     }
 
+    /// Whether a read options section follows this request frame's trace context
+    ///
+    /// The section is not fixed length, so unlike [`Header::trace_len`] this can only say that
+    /// one is there: its head says how long it is, and is read separately
+    /// ([F41](../../../docs/src/features/read-consistency.md)).
+    #[inline]
+    pub const fn has_read_options(&self) -> bool {
+        self.flags.contains(Flags::READ_OPTIONS)
+    }
+
     /// Get the number of payload bytes this request frame carries after its trace context
     ///
     /// This is only meaningful for a request frame, since it is the one frame kind whose preamble
     /// is variable length. A response frame's fixed fields are subtracted by
-    /// [`decode_server_frame`] instead.
+    /// [`decode_server_frame`] instead. A frame carrying a read options section has that taken
+    /// off too, by [`Header::payload_len_after`], once its head has said how long it is.
     ///
     /// # Errors
     ///
@@ -718,11 +774,27 @@ impl Header {
     /// counts everything after the header rather than just the payload.
     #[inline]
     pub const fn request_payload_len(&self) -> Result<usize, ProtocolError> {
+        self.payload_len_after(0)
+    }
+
+    /// Get the number of payload bytes after the trace context and this many more bytes
+    ///
+    /// # Arguments
+    ///
+    /// * `ahead` - How many bytes sit between the trace context and the payload
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::BodyTooShort`] when the body cannot hold what sits ahead of the
+    /// payload.
+    #[inline]
+    pub const fn payload_len_after(&self, ahead: usize) -> Result<usize, ProtocolError> {
         // take off whatever sits between the header and the payload
-        match self.body_len().checked_sub(self.trace_len()) {
+        let ahead = self.trace_len() + ahead;
+        match self.body_len().checked_sub(ahead) {
             Some(payload_len) => Ok(payload_len),
             None => Err(ProtocolError::BodyTooShort {
-                need: TRACE_CONTEXT_LEN,
+                need: ahead,
                 got: self.len,
             }),
         }
@@ -742,6 +814,40 @@ pub struct ServerFrame {
     pub query_id: Uuid,
     /// The number of body bytes after the query id
     pub rest_len: usize,
+}
+
+impl ServerFrame {
+    /// How many of the bytes after the query id are a session token
+    ///
+    /// Zero unless [`Flags::SESSION_TOKEN`] is set, which only a response frame carries. The
+    /// token is read into its own buffer ahead of the payload, for the reason the query id is
+    /// ([F41](../../../docs/src/features/read-consistency.md)).
+    #[inline]
+    #[must_use]
+    pub const fn token_len(&self) -> usize {
+        if self.header.flags.contains(Flags::SESSION_TOKEN) {
+            read::SESSION_TOKEN_LEN
+        } else {
+            0
+        }
+    }
+
+    /// How many payload bytes follow the token, if there is one
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::BodyTooShort`] when the flag is set on a frame too short to hold
+    /// a token.
+    #[inline]
+    pub const fn payload_len(&self) -> Result<usize, ProtocolError> {
+        match self.rest_len.checked_sub(self.token_len()) {
+            Some(payload_len) => Ok(payload_len),
+            None => Err(ProtocolError::BodyTooShort {
+                need: QUERY_ID_LEN + read::SESSION_TOKEN_LEN,
+                got: self.header.len,
+            }),
+        }
+    }
 }
 
 /// A response frame's header and the routing fields that follow it
@@ -795,7 +901,7 @@ pub fn response_preamble(
     payload_len: usize,
     max_frame_bytes: u32,
 ) -> Result<[u8; RESPONSE_PREAMBLE_LEN], ProtocolError> {
-    server_preamble(MessageType::Response, query_id, payload_len, max_frame_bytes)
+    server_preamble(MessageType::Response, Flags::NONE, query_id, payload_len, max_frame_bytes)
 }
 
 /// Build the header and query id that go ahead of any frame a server writes under a query id
@@ -807,8 +913,9 @@ pub fn response_preamble(
 /// # Arguments
 ///
 /// * `kind` - What kind of frame this is
+/// * `flags` - The flags to set, which say what sits between the id and the payload
 /// * `query_id` - The query this frame answers, or the nil id for a push nobody asked for
-/// * `payload_len` - How many bytes follow the id
+/// * `payload_len` - How many bytes follow the id, any session token included
 /// * `max_frame_bytes` - The largest frame the receiver will accept
 ///
 /// # Errors
@@ -816,13 +923,14 @@ pub fn response_preamble(
 /// Fails if the frame would be larger than the receiver accepts.
 pub fn server_preamble(
     kind: MessageType,
+    flags: Flags,
     query_id: &Uuid,
     payload_len: usize,
     max_frame_bytes: u32,
 ) -> Result<[u8; RESPONSE_PREAMBLE_LEN], ProtocolError> {
     // the query id is part of the frame body, so it counts towards the length
     let body_len = QUERY_ID_LEN.saturating_add(payload_len);
-    let header = Header::new(kind, Flags::NONE, body_len, max_frame_bytes)?;
+    let header = Header::new(kind, flags, body_len, max_frame_bytes)?;
     // lay the header down first and the query id after it
     let mut preamble = [0u8; RESPONSE_PREAMBLE_LEN];
     preamble[..HEADER_LEN].copy_from_slice(&header.encode());
@@ -953,6 +1061,85 @@ pub const fn request_preamble_traced(
         bytes,
         len: MAX_REQUEST_PREAMBLE_LEN,
     })
+}
+
+/// The bytes ahead of a bundle's payload, with or without a read options section
+///
+/// A bundle with nothing to say about its reads is framed by [`RequestPreamble`] exactly as it
+/// was before options existed, allocation free. One that carries a level, a deadline or tokens
+/// has a section of variable length behind its header, which is what the second shape holds
+/// ([F41](../../../docs/src/features/read-consistency.md)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestHead {
+    /// The fixed preamble alone
+    Fixed(RequestPreamble),
+    /// The preamble with a read options section after it
+    Extended(Vec<u8>),
+}
+
+impl RequestHead {
+    /// Get the bytes to write ahead of this bundle's payload
+    #[inline]
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            RequestHead::Fixed(preamble) => preamble.as_bytes(),
+            RequestHead::Extended(bytes) => bytes,
+        }
+    }
+}
+
+/// Build the bytes that go ahead of a bundle of queries, with a trace context and read options
+///
+/// Passing no options, or empty ones, writes exactly what [`request_preamble_traced`] writes -
+/// so a caller that has nothing to say about its reads pays nothing on the wire, and a peer
+/// that never negotiated the section is never sent one.
+///
+/// # Arguments
+///
+/// * `trace` - The trace context to carry, if this caller is in a trace
+/// * `options` - What the bundle says about its reads, if anything
+/// * `payload_len` - The number of archived bytes that will follow this preamble
+/// * `max_frame_bytes` - The largest frame the server will accept
+///
+/// # Errors
+///
+/// Fails if the frame would be larger than the server accepts, or the options carry more
+/// tokens than a section may.
+pub fn request_preamble_with(
+    trace: Option<&TraceContext>,
+    options: Option<&read::ReadOptions>,
+    payload_len: usize,
+    max_frame_bytes: u32,
+) -> Result<RequestHead, ProtocolError> {
+    // a bundle with no options is framed exactly as it was before they existed
+    let Some(options) = options.filter(|options| !options.is_empty()) else {
+        return request_preamble_traced(trace, payload_len, max_frame_bytes).map(RequestHead::Fixed);
+    };
+    // the section and the context are both part of the body, so both count towards the length
+    let section = options.encode()?;
+    let trace_len = if trace.is_some() { TRACE_CONTEXT_LEN } else { 0 };
+    let body_len = payload_len
+        .checked_add(trace_len)
+        .and_then(|len| len.checked_add(section.len()))
+        .ok_or(ProtocolError::PayloadTooLarge {
+            len: payload_len,
+            max: max_frame_bytes,
+        })?;
+    // build the header, saying what follows it
+    let mut flags = Flags::READ_OPTIONS;
+    if trace.is_some() {
+        flags = flags.union(Flags::TRACE_CONTEXT);
+    }
+    let header = Header::new(MessageType::Queries, flags, body_len, max_frame_bytes)?;
+    // lay the header down, then the context, then the section, in flag bit order
+    let mut bytes = Vec::with_capacity(HEADER_LEN + trace_len + section.len());
+    bytes.extend_from_slice(&header.encode());
+    if let Some(trace) = trace {
+        bytes.extend_from_slice(&trace.encode());
+    }
+    bytes.extend_from_slice(&section);
+    Ok(RequestHead::Extended(bytes))
 }
 
 /// Widen an encoded header into the buffer a request preamble is held in

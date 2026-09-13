@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::runtime::GlommioRuntime;
-use crate::server::conf::cluster::BootstrapPolicy;
+use crate::server::conf::cluster::{BootstrapPolicy, Consistency};
 use crate::shared::identity::{ClusterId, NodeId, TableId};
 
 declare_raft_types!(
@@ -255,6 +255,22 @@ pub enum ControlCommand {
         /// The new count
         count: u32,
     },
+    /// Set, or clear, the level one table's reads are served at when a bundle does not say
+    ///
+    /// Versioned control state rather than a per-node setting, so every coordinator resolves a
+    /// table the same way ([F41](../../../../docs/src/features/read-consistency.md)).
+    SetTableReadPolicy {
+        /// The identity of the operation
+        op: Uuid,
+        /// Who asked
+        principal: String,
+        /// The topology version the request was written against
+        expected_version: u64,
+        /// The table
+        table: TableId,
+        /// The level, or none to fall back to the cluster's default
+        level: Option<Consistency>,
+    },
 }
 
 impl ControlCommand {
@@ -276,6 +292,12 @@ impl ControlCommand {
                 expected_version,
                 ..
             } => Some((*op, principal, "set_control_voters", *expected_version)),
+            ControlCommand::SetTableReadPolicy {
+                op,
+                principal,
+                expected_version,
+                ..
+            } => Some((*op, principal, "set_table_read_policy", *expected_version)),
             _ => None,
         }
     }
@@ -298,6 +320,9 @@ impl fmt::Display for ControlCommand {
             }
             ControlCommand::Initialize { nodes, .. } => write!(f, "Initialize({} nodes)", nodes.len()),
             ControlCommand::SetControlVoters { count, .. } => write!(f, "SetControlVoters({count})"),
+            ControlCommand::SetTableReadPolicy { table, level, .. } => {
+                write!(f, "SetTableReadPolicy({table} {})", level.map_or("clear", |level| level.as_str()))
+            }
         }
     }
 }
@@ -384,6 +409,12 @@ pub struct ControlState {
     /// is what says the union is not yet the whole story.
     #[serde(default)]
     pub joint: bool,
+    /// The level each table's reads are served at when a bundle does not say, where set
+    ///
+    /// A table not named here is served at the policy's `read_consistency`
+    /// ([F41](../../../../docs/src/features/read-consistency.md)).
+    #[serde(default)]
+    pub table_read_policy: BTreeMap<TableId, Consistency>,
 }
 
 impl ControlState {
@@ -632,6 +663,49 @@ impl ControlState {
                 self.topology_version += 1;
                 self.applied()
             }
+            // one table's read policy
+            ControlCommand::SetTableReadPolicy {
+                expected_version,
+                table,
+                level,
+                ..
+            } => {
+                if self.policy.is_none() {
+                    return ControlResponse::Refused {
+                        reason: "no cluster has been bootstrapped to set a policy on".to_string(),
+                    };
+                }
+                // `All` is not a read level anything serves; the only strong read is `Quorum`
+                if *level == Some(Consistency::All) {
+                    return ControlResponse::Refused {
+                        reason: "read_consistency All is not served; the strong read level is Quorum (C6)".to_string(),
+                    };
+                }
+                // the table has to be one the schema serves, which the initialization recorded
+                if !self.tables.iter().any(|(_, id)| id == table) {
+                    return ControlResponse::Refused {
+                        reason: format!("table {table} is not one the placement was initialized with"),
+                    };
+                }
+                if let Some(refusal) = self.check_version(*expected_version) {
+                    return refusal;
+                }
+                // unchanged is applied without moving the version
+                let current = self.table_read_policy.get(table).copied();
+                if current == *level {
+                    return self.applied();
+                }
+                match level {
+                    Some(level) => {
+                        self.table_read_policy.insert(*table, *level);
+                    }
+                    None => {
+                        self.table_read_policy.remove(table);
+                    }
+                }
+                self.topology_version += 1;
+                self.applied()
+            }
         }
     }
 
@@ -859,7 +933,8 @@ impl ControlState {
 #[cfg(test)]
 mod tests {
     use super::{
-        ControlCommand, ControlResponse, ControlState, MemberHealth, MemberRecord, MemberRole,
+        Consistency, ControlCommand, ControlResponse, ControlState, MemberHealth, MemberRecord,
+        MemberRole,
     };
     use crate::server::conf::Cluster;
     use crate::shared::identity::{ClusterId, NodeId, TableId};
@@ -1205,6 +1280,87 @@ mod tests {
             state.apply(&set(Uuid::new_v4(), 1, 3)),
             ControlResponse::Refused { .. }
         ));
+    }
+
+    /// A table's read policy records, clears, moves the version once per change, refuses `All`
+    /// and an unknown table, and is idempotent when unchanged (F41)
+    #[test]
+    fn mixed_table_bundle_resolves_each_table_policy() {
+        let (mut state, _, node) = bootstrapped();
+        let tables = vec![
+            ("Row".to_string(), TableId::of("Row")),
+            ("Note".to_string(), TableId::of("Note")),
+        ];
+        // a policy needs a table the placement was initialized with
+        let set = |op, expected_version, table, level| ControlCommand::SetTableReadPolicy {
+            op,
+            principal: "alice".to_string(),
+            expected_version,
+            table,
+            level,
+        };
+        assert!(matches!(
+            state.apply(&set(Uuid::new_v4(), 1, TableId::of("Note"), Some(Consistency::Quorum))),
+            ControlResponse::Refused { reason } if reason.contains("not one the placement")
+        ));
+        assert_eq!(
+            state.apply(&ControlCommand::Initialize {
+                op: Uuid::new_v4(),
+                principal: "alice".to_string(),
+                expected_version: 1,
+                nodes: vec![node],
+                tables: tables.clone(),
+            }),
+            ControlResponse::Applied { topology_version: 2 }
+        );
+        // `All` is not a read level
+        assert!(matches!(
+            state.apply(&set(Uuid::new_v4(), 2, TableId::of("Note"), Some(Consistency::All))),
+            ControlResponse::Refused { reason } if reason.contains("C6")
+        ));
+        // a stale version is refused before anything is recorded
+        assert!(matches!(
+            state.apply(&set(Uuid::new_v4(), 1, TableId::of("Note"), Some(Consistency::Quorum))),
+            ControlResponse::Refused { reason } if reason.contains("stale")
+        ));
+        // setting records, and moves the version once
+        assert_eq!(
+            state.apply(&set(Uuid::new_v4(), 2, TableId::of("Note"), Some(Consistency::Quorum))),
+            ControlResponse::Applied { topology_version: 3 }
+        );
+        assert_eq!(state.table_read_policy.get(&TableId::of("Note")), Some(&Consistency::Quorum));
+        assert_eq!(state.table_read_policy.get(&TableId::of("Row")), None);
+        // the same level again applies without moving the version
+        assert_eq!(
+            state.apply(&set(Uuid::new_v4(), 3, TableId::of("Note"), Some(Consistency::Quorum))),
+            ControlResponse::Applied { topology_version: 3 }
+        );
+        // the map resolves each table on its own: Note at its policy, Row at the cluster's
+        let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
+        assert_eq!(map.read_level_of(TableId::of("Note")), Consistency::Quorum);
+        assert_eq!(map.read_level_of(TableId::of("Row")), Consistency::One);
+        assert_eq!(map.frame().table_read_policy, vec![("Note".to_string(), "quorum".to_string())]);
+        // clearing removes it and moves the version once; clearing again moves nothing
+        assert_eq!(
+            state.apply(&set(Uuid::new_v4(), 3, TableId::of("Note"), None)),
+            ControlResponse::Applied { topology_version: 4 }
+        );
+        assert!(state.table_read_policy.is_empty());
+        assert_eq!(
+            state.apply(&set(Uuid::new_v4(), 4, TableId::of("Note"), None)),
+            ControlResponse::Applied { topology_version: 4 }
+        );
+        // and a repeated op is answered as it was the first time
+        let op = Uuid::new_v4();
+        assert_eq!(
+            state.apply(&set(op, 4, TableId::of("Row"), Some(Consistency::One))),
+            ControlResponse::Applied { topology_version: 5 }
+        );
+        assert!(matches!(
+            state.apply(&set(op, 5, TableId::of("Row"), Some(Consistency::Quorum))),
+            ControlResponse::Repeated { .. }
+        ));
+        assert_eq!(state.table_read_policy.get(&TableId::of("Row")), Some(&Consistency::One));
     }
 
     /// A membership entry sets roles, admits configured strangers as joining, and moves once

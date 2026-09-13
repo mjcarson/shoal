@@ -588,7 +588,8 @@ fn the_presets_pick_arms_that_answer_their_own_metric() {
 #[test]
 fn the_facts_mirrors_are_total() {
     use shoal_bench::model::macro_layer::{
-        ClusterFacts, ConfFacts, HopFacts, HopMix, NodeCores, OfferedLoad, OutcomeFacts, ReplicaFacts, ScaleFacts,
+        ClusterFacts, ConfFacts, FanoutFacts, HopFacts, HopMix, NodeCores, NodeReadFacts, OfferedLoad,
+        OutcomeFacts, ReadFacts, ReplicaFacts, ScaleFacts,
     };
     let keys = |value: serde_json::Value| -> Vec<String> {
         value
@@ -683,9 +684,52 @@ fn the_facts_mirrors_are_total() {
             unknown: 0,
             rejected: 0,
         }),
+        // a read arm's record travels too, with its fanout and every node's counters (F41)
+        reads: Some(ReadFacts {
+            level: "quorum".to_string(),
+            session: true,
+            fanout: Some(FanoutFacts {
+                nodes: 3,
+                keys_per_query: 6,
+                filtered: true,
+                limit: Some(3),
+                empty: false,
+            }),
+            barriers: 10,
+            barrier_hops: 4,
+            barrier_wait_mean_us: 120,
+            barrier_wait_max_us: 900,
+            apply_wait_mean_us: 30,
+            apply_wait_max_us: 200,
+            session_waits: 10,
+            timeouts: 0,
+            late_shares: 0,
+            duplicate_shares: 0,
+            per_node: vec![NodeReadFacts {
+                node: "n0".to_string(),
+                barriers: 10,
+                barrier_hops: 4,
+                session_waits: 10,
+                timeouts: 0,
+                late_shares: 0,
+                duplicate_shares: 0,
+            }],
+        }),
     };
     let mirrored = explore::index::cluster_facts(&cluster);
     assert_eq!(keys(serde_json::to_value(&cluster).unwrap()), keys(serde_json::to_value(&mirrored).unwrap()));
+    assert_eq!(
+        keys(serde_json::to_value(&cluster.reads).unwrap()),
+        keys(serde_json::to_value(&mirrored.reads).unwrap())
+    );
+    assert_eq!(
+        keys(serde_json::to_value(cluster.reads.as_ref().and_then(|reads| reads.fanout.as_ref())).unwrap()),
+        keys(serde_json::to_value(mirrored.reads.as_ref().and_then(|reads| reads.fanout.as_ref())).unwrap())
+    );
+    assert_eq!(
+        keys(serde_json::to_value(&cluster.reads.as_ref().unwrap().per_node[0]).unwrap()),
+        keys(serde_json::to_value(&mirrored.reads.as_ref().unwrap().per_node[0]).unwrap())
+    );
     assert_eq!(
         keys(serde_json::to_value(&cluster.replicas[0]).unwrap()),
         keys(serde_json::to_value(&mirrored.replicas[0]).unwrap())

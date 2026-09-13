@@ -367,6 +367,15 @@ pub struct StageStamps {
     /// in the reply channel so that a build with the feature off does not pay eight bytes per
     /// response for something only the profile ever reads.
     pub index: usize,
+    /// Nanoseconds this read spent obtaining its barriers, saturated at four seconds
+    ///
+    /// A wait rather than an offset: it sits inside `exec_queue` on the record, and is
+    /// carried separately so a strong read's barrier can be told apart from a queue
+    /// ([F41](../../../docs/src/features/read-consistency.md)).
+    pub barrier_wait: u32,
+    /// Nanoseconds this read spent waiting for its replica to apply through a barrier or past
+    /// a token, saturated the same way
+    pub apply_wait: u32,
     /// What this query was, and what happened to it on the way
     pub flags: StageFlags,
 }
@@ -416,9 +425,33 @@ impl StageStamps {
             queued_to_client: Offset::UNSET,
             socket_written: Offset::UNSET,
             commit_pos: 0,
+            barrier_wait: 0,
+            apply_wait: 0,
             flags: StageFlags::default(),
         }
     }
+
+    /// Record what a strong or session read waited on before it ran
+    ///
+    /// # Arguments
+    ///
+    /// * `barrier_ns` - Nanoseconds spent obtaining barriers
+    /// * `apply_ns` - Nanoseconds spent waiting for the replica to apply far enough
+    #[cfg(feature = "stage-profile")]
+    pub fn set_read_waits(&mut self, barrier_ns: u64, apply_ns: u64) {
+        self.barrier_wait = u32::try_from(barrier_ns).unwrap_or(u32::MAX);
+        self.apply_wait = u32::try_from(apply_ns).unwrap_or(u32::MAX);
+    }
+
+    /// Record what a read waited on, which does nothing in this build
+    ///
+    /// # Arguments
+    ///
+    /// * `barrier_ns` - Ignored, since there is nothing to record it on
+    /// * `apply_ns` - Ignored, for the same reason
+    #[cfg(not(feature = "stage-profile"))]
+    #[inline(always)]
+    pub fn set_read_waits(&mut self, _barrier_ns: u64, _apply_ns: u64) {}
 
     /// Start a new set of stamps, which records nothing in this build
     ///

@@ -13,7 +13,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::event::{Actor, Body, Effect, Message};
-use crate::ids::{LogIndex, NodeId, TabletId, Term};
+use crate::ids::{Attempt, Key, LogIndex, NodeId, TabletId, Term};
 use crate::raft::{Node, Role, Status};
 use crate::world::World;
 
@@ -32,6 +32,8 @@ pub enum Property {
     P5,
     /// No cross-tablet transaction promise
     P6,
+    /// A strong read observes every write acknowledged before it began (C6)
+    Linearizable,
 }
 
 impl fmt::Display for Property {
@@ -92,6 +94,8 @@ pub struct Coverage {
     pub retries: u32,
     /// Attempts whose outcome became unknown
     pub unknown_outcomes: u32,
+    /// Strong reads that completed
+    pub strong_reads: u32,
 }
 
 impl Coverage {
@@ -109,6 +113,7 @@ impl Coverage {
         self.commits += other.commits;
         self.retries += other.retries;
         self.unknown_outcomes += other.unknown_outcomes;
+        self.strong_reads += other.strong_reads;
     }
 }
 
@@ -123,6 +128,10 @@ pub struct Checker {
     acks: BTreeMap<(TabletId, NodeId, Term), BTreeMap<NodeId, LogIndex>>,
     /// Delivered granted votes: for a candidate in a term, who granted
     votes: BTreeMap<(TabletId, NodeId, Term), BTreeSet<NodeId>>,
+    /// The highest acknowledged index of a write to each key of each tablet
+    acknowledged: BTreeMap<(TabletId, Key), LogIndex>,
+    /// The floor each strong read in flight has to observe: what was acknowledged when it began
+    read_floors: BTreeMap<Attempt, LogIndex>,
     /// What the run exercised
     pub coverage: Coverage,
 }
@@ -368,6 +377,48 @@ impl Checker {
                         format!(
                             "P3: attempt {}/{} was acknowledged at index {} of tablet {tablet} with only {} committed",
                             attempt.id.0, attempt.retry, index.0, committed.0
+                        ),
+                    ));
+                }
+                // an acknowledged write is what a later strong read of its key has to see
+                if let Some(key) = world.nodes.values().find_map(|node| {
+                    node.groups
+                        .get(tablet)
+                        .and_then(|group| group.entry(*index))
+                        .and_then(|entry| entry.command.key())
+                }) {
+                    let floor = self.acknowledged.entry((*tablet, key)).or_default();
+                    *floor = (*floor).max(*index);
+                }
+                None
+            }
+            Effect::StrongReadBegan {
+                attempt,
+                tablet,
+                key,
+                ..
+            } => {
+                // the read has to observe everything acknowledged on its key up to now
+                let floor = self.acknowledged.get(&(*tablet, *key)).copied().unwrap_or_default();
+                self.read_floors.insert(*attempt, floor);
+                None
+            }
+            Effect::StrongRead {
+                attempt,
+                node,
+                tablet,
+                key,
+                observed,
+            } => {
+                self.coverage.strong_reads += 1;
+                // Linearizable: a strong read observes every write acknowledged before it began
+                let floor = self.read_floors.remove(attempt).unwrap_or_default();
+                if *observed < floor {
+                    return Some(self.violation(
+                        Property::Linearizable,
+                        format!(
+                            "Linearizable: node {} answered a strong read of key {} on tablet {tablet} from index {} with {} acknowledged before it began",
+                            node.0, key.0, observed.0, floor.0
                         ),
                     ));
                 }

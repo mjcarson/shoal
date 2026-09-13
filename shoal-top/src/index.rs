@@ -294,6 +294,82 @@ pub struct ClusterFactsLite {
     /// Writes the run could not answer definitely; absent before F40
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcomes: Option<OutcomeFactsLite>,
+    /// What a read arm's reads waited on; absent for every other arm and before F41
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reads: Option<ReadFactsLite>,
+}
+
+/// What a read arm's reads waited on
+///
+/// A mirror of the artifact's `ReadFacts`, whole: the level and the session flag say what the
+/// arm sent, the waits are the barrier's and the application's cost apart from the round trip,
+/// and the per node list says which node hopped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadFactsLite {
+    /// `one` or `quorum`
+    pub level: String,
+    /// Whether every read carried a session token
+    pub session: bool,
+    /// How the reads fanned out, if this is a fanout arm
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fanout: Option<FanoutFactsLite>,
+    /// Barriers obtained, over every node
+    pub barriers: u64,
+    /// Barriers that hopped to a leader elsewhere
+    pub barrier_hops: u64,
+    /// The mean barrier wait, in microseconds
+    pub barrier_wait_mean_us: u64,
+    /// The longest barrier wait, in microseconds
+    pub barrier_wait_max_us: u64,
+    /// The mean application wait, in microseconds
+    pub apply_wait_mean_us: u64,
+    /// The longest application wait, in microseconds
+    pub apply_wait_max_us: u64,
+    /// Reads served past a token
+    pub session_waits: u64,
+    /// Reads answered `Timeout`
+    pub timeouts: u64,
+    /// Shares dropped as late
+    pub late_shares: u64,
+    /// Shares dropped as duplicates
+    pub duplicate_shares: u64,
+    /// Every node's own counters
+    pub per_node: Vec<NodeReadFactsLite>,
+}
+
+/// One node's read counters
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeReadFactsLite {
+    /// The node's identity
+    pub node: String,
+    /// Barriers its shards obtained
+    pub barriers: u64,
+    /// Barriers that hopped
+    pub barrier_hops: u64,
+    /// Reads served past a token
+    pub session_waits: u64,
+    /// Reads answered `Timeout`
+    pub timeouts: u64,
+    /// Shares dropped as late
+    pub late_shares: u64,
+    /// Shares dropped as duplicates
+    pub duplicate_shares: u64,
+}
+
+/// How a fanout arm spread each read
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FanoutFactsLite {
+    /// How many nodes each read touched
+    pub nodes: u32,
+    /// How many keys each read named
+    pub keys_per_query: u32,
+    /// Whether the read filtered its rows
+    pub filtered: bool,
+    /// The limit the read set, if any
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Whether the keys were never written
+    pub empty: bool,
 }
 
 /// How an arm scheduled its load

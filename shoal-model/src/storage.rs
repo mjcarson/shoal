@@ -28,6 +28,16 @@ pub enum Command {
     },
 }
 
+impl Command {
+    /// The key a client's mutation touches; a noop touches none
+    pub fn key(&self) -> Option<Key> {
+        match self {
+            Command::Noop => None,
+            Command::Client { op, .. } => Some(op.key()),
+        }
+    }
+}
+
 /// One entry in a tablet's log
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {

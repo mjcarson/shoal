@@ -48,6 +48,7 @@ use shoal_proto::shared::auth::{AuthError, Credentials};
 use shoal_proto::shared::protocol::admin::{self as proto_admin, AdminRequest, AdminResponse, TopologyFrame};
 use shoal_proto::shared::protocol::auth::{self as proto_auth, AuthMechanism, AuthStatus};
 use shoal_proto::shared::protocol::error::{self, ErrorCode};
+use shoal_proto::shared::protocol::read::{self, SessionToken};
 use shoal_proto::shared::protocol::trace::TraceContext;
 use shoal_proto::shared::protocol::{self, handshake, MessageType, ProtocolError};
 use shoal_proto::shared::responses::{ArchivedResponseError, ArchivedRowGroup, ResponseActionNames};
@@ -59,6 +60,8 @@ pub use shoal_proto::client::{
     ChannelError, ConnectError, Errors, FromShoal, QuerySuceededOpts, ShqlParseError,
 };
 use messages::{BatchStamps, ClientMsg, ClientStamps};
+pub use messages::SendOptions;
+pub use shoal_proto::shared::protocol::read::ReadLevel;
 
 /// Say that a send found nobody left to receive it
 ///
@@ -219,6 +222,12 @@ struct ShoalConnection {
     writer: OwnedWriteHalf,
     /// Which connection this is
     id: u64,
+    /// The optional sections the server granted this connection in its hello ack
+    ///
+    /// A read options section is written down this connection only when the bit is set; a
+    /// server built before the section existed grants nothing and is sent nothing
+    /// ([F41](../../../docs/src/features/read-consistency.md)).
+    caps: u8,
 }
 
 impl std::ops::Deref for ShoalConnection {
@@ -414,6 +423,10 @@ impl ShoalConnectionManager {
             schema_fingerprint: self.schema_fingerprint,
             max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
             mechanisms: self.credentials.mechanisms(),
+            // ask for the read options and token sections; the ack says whether this server
+            // reads them, and nothing is sent until it does
+            // ([F41](../../../docs/src/features/read-consistency.md))
+            caps: read::CLIENT_CAP_READ_OPTIONS,
         };
         stream
             .write_all(&hello.frame(protocol::DEFAULT_MAX_FRAME_BYTES)?)
@@ -650,6 +663,7 @@ impl ShoalConnectionManager {
         Ok(ShoalConnection {
             writer: tcp_tx,
             id,
+            caps: ack.caps,
         })
     }
 }
@@ -763,6 +777,8 @@ pub struct Shoal<S: QuerySupport> {
     proxy_handle: JoinHandle<()>,
     /// The topology the servers last pushed, and a watch on its version
     topology: Arc<TopologyState>,
+    /// What every send says about its reads unless told otherwise
+    read_options: SendOptions,
     /// The database kind we are querying
     phantom: PhantomData<S>,
 }
@@ -848,6 +864,7 @@ impl<S: QuerySupport> Shoal<S> {
             ClientOptions::new(),
             PoolConfig::default(),
             Deadlines::default(),
+            SendOptions::default(),
         )
         .await
     }
@@ -903,6 +920,7 @@ impl<S: QuerySupport> Shoal<S> {
             ClientOptions::new().credentials(credentials),
             PoolConfig::default(),
             Deadlines::default(),
+            SendOptions::default(),
         )
         .await
     }
@@ -961,6 +979,7 @@ impl<S: QuerySupport> Shoal<S> {
             options,
             PoolConfig::default(),
             Deadlines::default(),
+            SendOptions::default(),
         )
         .await
     }
@@ -976,11 +995,13 @@ impl<S: QuerySupport> Shoal<S> {
     /// * `options` - What to prove this client's identity with and what to encrypt with
     /// * `pool_config` - How to size and age the pool underneath this client
     /// * `deadlines` - How long to give each part of this client's work
+    /// * `read_options` - What every send says about its reads unless told otherwise
     pub(crate) async fn connect(
         endpoints: Vec<SocketAddr>,
         options: ClientOptions,
         pool_config: PoolConfig,
         deadlines: Deadlines,
+        read_options: SendOptions,
     ) -> Result<Self, Errors>
     where
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
@@ -1049,6 +1070,7 @@ impl<S: QuerySupport> Shoal<S> {
             peer_max_frame_bytes,
             proxy_handle,
             topology,
+            read_options,
             phantom: PhantomData,
         };
         Ok(shoal)
@@ -1219,6 +1241,26 @@ impl<S: QuerySupport> Shoal<S> {
         self.send_stamped(queries).await.map(|(stream, _)| stream)
     }
 
+    /// Send a bundle of queries, saying how its reads are to be served
+    ///
+    /// The options override the client's defaults for this bundle alone: a read level, a
+    /// deadline shorter than the server's, and the tokens earlier writes handed back
+    /// ([F41](../../../docs/src/features/read-consistency.md)). A server that does not read
+    /// the section is sent none and serves the bundle as it always has.
+    ///
+    /// # Arguments
+    ///
+    /// * `queries` - The queries to execute
+    /// * `options` - How the bundle's reads are served
+    #[instrument(name = "Shoal::send_with", skip_all, err(Debug))]
+    pub async fn send_with(
+        &self,
+        queries: Queries<S>,
+        options: &SendOptions,
+    ) -> Result<ShoalResultStream<S>, Errors> {
+        self.send_stamped_with(queries, options).await.map(|(stream, _)| stream)
+    }
+
     /// Send a query to our server, keeping what sending it cost
     ///
     /// The four stamps returned beside the stream are batch level costs shared by every query in
@@ -1238,7 +1280,25 @@ impl<S: QuerySupport> Shoal<S> {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn send_stamped(
         &self,
+        queries: Queries<S>,
+    ) -> Result<(ShoalResultStream<S>, BatchStamps), Errors> {
+        self.send_stamped_with(queries, &self.read_options).await
+    }
+
+    /// Send a bundle with options and keep what sending it cost
+    ///
+    /// [`Shoal::send_stamped`] with the client's default options, and [`Shoal::send_with`]
+    /// with the stamps kept, are both this.
+    ///
+    /// # Arguments
+    ///
+    /// * `queries` - The queries to execute
+    /// * `options` - How the bundle's reads are served
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    pub async fn send_stamped_with(
+        &self,
         mut queries: Queries<S>,
+        options: &SendOptions,
     ) -> Result<(ShoalResultStream<S>, BatchStamps), Errors> {
         // start timing this bundle
         let mut stamps = BatchStamps::entered_now();
@@ -1253,11 +1313,12 @@ impl<S: QuerySupport> Shoal<S> {
         // to the pool wait, the same way the streaming path attributes it
         // the context names this send's own span, so the server's root hangs off it. resolving it
         // here rather than at the socket keeps it inside the span it is naming
-        let preamble = protocol::request_preamble_traced(
-            current_trace_context().as_ref(),
+        let trace = current_trace_context();
+        let mut head = protocol::RequestHead::Fixed(protocol::request_preamble_traced(
+            trace.as_ref(),
             archived.len(),
             self.peer_max_frame_bytes(),
-        )?;
+        )?);
         // start tracking this response
         let (response_tx, response_rx) = self.track_response(&mut queries.id)?;
         // get a connection from our connection pool and send our query
@@ -1268,8 +1329,19 @@ impl<S: QuerySupport> Shoal<S> {
         //
         // this is where client side backpressure shows up once enough queries are in flight
         stamps.mark_pooled();
+        // a bundle with something to say about its reads says it, but only down a connection
+        // whose server reads the section; the head is rebuilt here because which connection
+        // the pool hands out is only known now ([F41](../../../docs/src/features/read-consistency.md))
+        if !options.is_empty() && conn.caps & read::CLIENT_CAP_READ_OPTIONS != 0 {
+            head = protocol::request_preamble_with(
+                trace.as_ref(),
+                Some(&options.to_wire()),
+                archived.len(),
+                self.peer_max_frame_bytes(),
+            )?;
+        }
         // build our vectored byte slices to send
-        let mut bufs = &mut [IoSlice::new(preamble.as_bytes()), IoSlice::new(&archived)][..];
+        let mut bufs = &mut [IoSlice::new(head.as_bytes()), IoSlice::new(&archived)][..];
         // keep sending our data until all of this archive has been sent
         while !bufs.is_empty() {
             // send this data back to our client
@@ -1420,6 +1492,91 @@ impl<S: QuerySupport> Shoal<S> {
             .map(|(response, _)| response)
     }
 
+    /// Send a single query with options and wait for the response
+    ///
+    /// [`Shoal::send_one`] with the reads served as the options say
+    /// ([F41](../../../docs/src/features/read-consistency.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query to execute
+    /// * `options` - How the query is served, if it is a read
+    pub async fn send_one_with<Q: Into<S::QueryKinds>>(
+        &self,
+        query: Q,
+        options: &SendOptions,
+    ) -> Result<ShoalResponse<S>, Errors>
+    where
+        <S::ResponseKinds as Archive>::Archived:
+            rkyv::Deserialize<S::ResponseKinds, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        // build a query bundle with our single query
+        let queries = self.query().add(query);
+        // send it, with the options
+        let (mut stream, _) = self.send_stamped_with(queries, options).await?;
+        // wait for our single response
+        let response = stream
+            .next()
+            .await?
+            .ok_or(Errors::StreamAlreadyTerminated)?;
+        // check if this query succeeded
+        response.suceeded(QuerySuceededOpts::default())?;
+        Ok(response)
+    }
+
+    /// Send a single query with options and wait for the response, keeping what sending it cost
+    ///
+    /// [`Shoal::send_one_stamped`] with the reads served as the options say, which is what a
+    /// benchmark arm that stamps its reads and serves them at a level uses
+    /// ([F41](../../../docs/src/features/read-consistency.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query to execute
+    /// * `options` - How the query is served, if it is a read
+    pub async fn send_one_stamped_with<Q: Into<S::QueryKinds>>(
+        &self,
+        query: Q,
+        options: &SendOptions,
+    ) -> Result<(ShoalResponse<S>, BatchStamps), Errors>
+    where
+        <S::ResponseKinds as Archive>::Archived:
+            rkyv::Deserialize<S::ResponseKinds, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        // build a query bundle with our single query
+        let queries = self.query().add(query);
+        // send it, with the options, keeping what it cost
+        let (mut stream, stamps) = self.send_stamped_with(queries, options).await?;
+        // wait for our single response
+        let response = stream
+            .next()
+            .await?
+            .ok_or(Errors::StreamAlreadyTerminated)?;
+        // check if this query succeeded
+        response.suceeded(QuerySuceededOpts::default())?;
+        Ok((response, stamps))
+    }
+
     /// Send a single query and wait for the response, keeping what sending it cost
     ///
     /// The stamps come back beside the response rather than on it, because they describe the
@@ -1543,6 +1700,18 @@ impl<S: QuerySupport> Shoal<S> {
 
     /// Create a new stream to send and receive results on
     pub fn stream(&self) -> Result<(ShoalQueryStream<S>, ShoalResultStream<S>), Errors> {
+        self.stream_with(self.read_options.clone())
+    }
+
+    /// Create a new stream whose every bundle says how its reads are served
+    ///
+    /// # Arguments
+    ///
+    /// * `options` - How the stream's reads are served
+    pub fn stream_with(
+        &self,
+        options: SendOptions,
+    ) -> Result<(ShoalQueryStream<S>, ShoalResultStream<S>), Errors> {
         // generate a random ID to override all of the ids used in our queries
         let mut id = Uuid::new_v4();
         // start tracking this response
@@ -1570,6 +1739,7 @@ impl<S: QuerySupport> Shoal<S> {
             data_kind: PhantomData,
             base_index: 0,
             peer_max_frame_bytes: self.peer_max_frame_bytes.clone(),
+            options,
         };
         Ok((query_stream, result_stream))
     }
@@ -1606,6 +1776,7 @@ impl<S: QuerySupport> Shoal<S> {
             data_kind: PhantomData,
             base_index: 0,
             peer_max_frame_bytes: self.peer_max_frame_bytes.clone(),
+            options: self.read_options.clone(),
         };
         Ok((query_stream, result_stream))
     }
@@ -1626,8 +1797,8 @@ impl<S: QuerySupport> Drop for Shoal<S> {
 /// read by the same function and told apart here rather than by the caller.
 #[derive(Debug)]
 enum Frame {
-    /// A response to a query, as the aligned bytes of its archive
-    Response(Uuid, AlignedVec<16>),
+    /// A response to a query, as the aligned bytes of its archive, and the token it carried
+    Response(Uuid, AlignedVec<16>, Option<SessionToken>),
     /// A failure, for the query it names or for the connection if that id is nil
     Error(Uuid, ErrorCode, String),
     /// A topology frame the server pushed, as its JSON
@@ -1788,12 +1959,23 @@ impl TcpProxy {
         // read the rest of this frame according to what it turned out to be
         match frame.header.kind {
             MessageType::Response => {
+                // a session token sits between the id and the payload when the flags say so,
+                // and is read into its own buffer so the payload still lands at the start of
+                // an aligned allocation ([F41](../../../docs/src/features/read-consistency.md))
+                let payload_len = frame.payload_len()?;
+                let token = if frame.token_len() > 0 {
+                    let mut raw = [0u8; read::SESSION_TOKEN_LEN];
+                    self.reader.read_exact(&mut raw).await?;
+                    Some(SessionToken::decode(&raw)?)
+                } else {
+                    None
+                };
                 // read the payload into an aligned buffer that is never written twice
                 //
                 // this used to `resize(rest_len, 0)` first, which is a full write of zeroes over
                 // a buffer whose every byte the read on the next line overwrote
-                let aligned_buff = read_payload(&mut self.reader, frame.rest_len).await?;
-                Ok(Some(Frame::Response(frame.query_id, aligned_buff)))
+                let aligned_buff = read_payload(&mut self.reader, payload_len).await?;
+                Ok(Some(Frame::Response(frame.query_id, aligned_buff, token)))
             }
             MessageType::Error => {
                 // size this frame's message before anything allocates for it
@@ -1934,8 +2116,8 @@ impl TcpProxy {
             let stamps = ClientStamps::arrived_now();
             // work out which query this frame belongs to and what to hand that query
             let (query_id, wrapped) = match frame {
-                Frame::Response(query_id, aligned_buff) => {
-                    (query_id, ClientMsg::Response(aligned_buff, stamps))
+                Frame::Response(query_id, aligned_buff, token) => {
+                    (query_id, ClientMsg::Response(aligned_buff, stamps, token))
                 }
                 Frame::Error(query_id, code, msg) => {
                     // a failure with no query to attach it to is about the connection itself,
@@ -2108,6 +2290,11 @@ pub struct ShoalResponse<S: QuerySupport> {
     archived: *const <S::ResponseKinds as Archive>::Archived,
     /// When this response arrived on the client side
     stamps: ClientStamps,
+    /// The session token the server sent with this response, if it answered a committed write
+    ///
+    /// A committed lower bound on the tablet the write named; a later read carrying it is
+    /// served past the write ([F41](../../../docs/src/features/read-consistency.md)).
+    token: Option<SessionToken>,
     /// The type of data this is a response for
     phantom: PhantomData<S>,
 }
@@ -2139,7 +2326,7 @@ where
 }
 
 impl<S: QuerySupport> ShoalResponse<S> {
-    pub(super) fn new(buff: AlignedVec, stamps: ClientStamps) -> Result<Self, Errors>
+    pub(super) fn new(buff: AlignedVec, stamps: ClientStamps, token: Option<SessionToken>) -> Result<Self, Errors>
     where
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -2153,8 +2340,19 @@ impl<S: QuerySupport> ShoalResponse<S> {
             _buff: buff,
             archived: const_archived,
             stamps,
+            token,
             phantom: PhantomData,
         })
+    }
+
+    /// Get the session token this response carried, if the server sent one
+    ///
+    /// Only a committed write's answer carries one, and only down a connection that asked for
+    /// the section, which every client built with this method does. Hand it back on a later
+    /// read through [`SendOptions`](crate::client::SendOptions) to be served past the write.
+    #[must_use]
+    pub fn session_token(&self) -> Option<SessionToken> {
+        self.token
     }
 
     /// Where the buffer backing this response starts in memory
@@ -2181,8 +2379,8 @@ impl<S: QuerySupport> ShoalResponse<S> {
     /// Both halves are handed back together on purpose. The reorder buffer takes a response
     /// apart and puts it back together, and a version of this that returned only the buffer
     /// would silently drop the stamps on every out of order response.
-    pub(super) fn inner(self) -> (AlignedVec, ClientStamps) {
-        (self._buff, self.stamps)
+    pub(super) fn inner(self) -> (AlignedVec, ClientStamps, Option<SessionToken>) {
+        (self._buff, self.stamps, self.token)
     }
 
     /// Get when this response arrived on the client side
@@ -2364,9 +2562,9 @@ where
                         // handle the different client messages
                         match msg {
                             // get this responses message
-                            ClientMsg::Response(response, stamps) => {
+                            ClientMsg::Response(response, stamps, token) => {
                                 // wrap our response so we don't have to keep repaying access costs
-                                let response = ShoalResponse::<S>::new(response, stamps)?;
+                                let response = ShoalResponse::<S>::new(response, stamps, token)?;
                                 // only bother to check our server sent end of stream if our queries are bounded
                                 let end = if self.unbounded_queries {
                                     // we have unbounded queries so set end to false
@@ -2404,9 +2602,9 @@ where
             // handle the different client messages
             match msg {
                 // get this responses message
-                ClientMsg::Response(response, stamps) => {
+                ClientMsg::Response(response, stamps, token) => {
                     // wrap our response so we don't have to keep repaying access costs
-                    let response = ShoalResponse::<S>::new(response, stamps)?;
+                    let response = ShoalResponse::<S>::new(response, stamps, token)?;
                     // get the index for this message
                     let index = response.get_index();
                     // if this is the next row then return it
@@ -2429,8 +2627,8 @@ where
                     // the stamps come back apart with the buffer here, so a response that has
                     // to wait in the reorder buffer keeps the arrival time it was read with
                     // rather than picking up a new one when it is finally returned
-                    let (buff, stamps) = response.inner();
-                    let rewrapped = ClientMsg::Response(buff, stamps);
+                    let (buff, stamps, token) = response.inner();
+                    let rewrapped = ClientMsg::Response(buff, stamps, token);
                     // push this into our pending responses and wait for the next response
                     self.pending.insert(index, rewrapped);
                 }
@@ -2683,9 +2881,9 @@ where
         loop {
             // wait for the next message to return
             match response_rx.recv().await.map_err(receive_failed)? {
-                ClientMsg::Response(archived, stamps) => {
+                ClientMsg::Response(archived, stamps, token) => {
                     // wrap our response so we don't have to keep repaying access costs
-                    let response = ShoalResponse::<S>::new(archived, stamps)?;
+                    let response = ShoalResponse::<S>::new(archived, stamps, token)?;
                     // get the index for this message
                     let index = response.get_index();
                     // if this is our next index then increment next as far as we can
@@ -2819,6 +3017,8 @@ pub struct ShoalQueryStream<Q: QuerySupport> {
     pub base_index: usize,
     /// The largest frame the server will accept, which it told us when a connection opened
     peer_max_frame_bytes: Arc<AtomicU32>,
+    /// How every bundle on this stream says its reads are served
+    options: SendOptions,
 }
 
 impl<Q: QuerySupport> ShoalQueryStream<Q> {
@@ -2870,11 +3070,12 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
         //
         // this is attributed to serialization rather than to the pool wait, since it is the last
         // thing done to the bytes before a connection is asked for
-        let preamble = protocol::request_preamble_traced(
-            current_trace_context().as_ref(),
+        let trace = current_trace_context();
+        let mut head = protocol::RequestHead::Fixed(protocol::request_preamble_traced(
+            trace.as_ref(),
             archived.len(),
             self.peer_max_frame_bytes.load(Ordering::Relaxed),
-        )?;
+        )?);
         // get a connection from our connection pool and send our query
         let mut conn = self.pool.get().await.map_err(|e| {
             Errors::ConnectionPool(format!("failed to get connection from pool: {e}"))
@@ -2883,8 +3084,17 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
         //
         // this is where client side backpressure shows up once enough queries are in flight
         stamps.mark_pooled();
+        // say how the reads are served, down a connection whose server reads the section
+        if !self.options.is_empty() && conn.caps & read::CLIENT_CAP_READ_OPTIONS != 0 {
+            head = protocol::request_preamble_with(
+                trace.as_ref(),
+                Some(&self.options.to_wire()),
+                archived.len(),
+                self.peer_max_frame_bytes.load(Ordering::Relaxed),
+            )?;
+        }
         // build our vectored byte slices to send
-        let mut bufs = &mut [IoSlice::new(preamble.as_bytes()), IoSlice::new(&archived)][..];
+        let mut bufs = &mut [IoSlice::new(head.as_bytes()), IoSlice::new(&archived)][..];
         // keep sending our data until all of this archive has been sent
         while !bufs.is_empty() {
             // send this data back to our client
@@ -3015,7 +3225,7 @@ mod tests {
                 .expect("the connection closed instead of yielding a frame");
             server.await.expect("the writer task panicked");
             // a response frame has to read back as one and not as anything else
-            let super::Frame::Response(read_id, buff) = frame else {
+            let super::Frame::Response(read_id, buff, _) = frame else {
                 panic!("a response frame read back as something else for len {len}");
             };
             // the routing field and the payload both survived
@@ -3086,7 +3296,7 @@ mod tests {
             .expect("the connection closed instead of yielding a frame");
         server.await.expect("the writer task panicked");
         // every byte of it is the byte that was sent, in the order it was sent
-        let super::Frame::Response(read_id, buff) = frame else {
+        let super::Frame::Response(read_id, buff, _) = frame else {
             panic!("a response frame read back as something else");
         };
         assert_eq!(read_id, query_id);
@@ -3235,7 +3445,7 @@ mod tests {
                 .await
                 .expect("failed to read the response frame")
                 .expect("the connection closed instead of yielding the response frame");
-            let Frame::Response(read_id, buff) = second else {
+            let Frame::Response(read_id, buff, _) = second else {
                 panic!("a response frame read back as an error for len {len}");
             };
             server.await.expect("the writer task panicked");

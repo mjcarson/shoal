@@ -46,7 +46,9 @@ Its `Policy` has a safe setting, which is the contract, and six unsafe settings,
 violations the contract table says the model must reject: election by heartbeat-max report (P5),
 a quorum counted over the observer's Up list (P3), a duplicated acknowledgement counted twice (P3),
 an `Async` receipt counted as durable (P3), reads and checkpoints that see the appended suffix (P4),
-and an acknowledgement sent on receipt rather than after fsync (P1). A checker computes what is
+and an acknowledgement sent on receipt rather than after fsync (P1) - and, since
+[F41](read-consistency.md), a seventh: a strong read answered from what a node believes rather
+than from a heartbeat round a majority confirmed, which breaks `Linearizable`. A checker computes what is
 committed from durable facts alone — which entries are in which stable logs, and what term each
 node held when each became durable, which is Raft's figure 8 made explicit — and judges every
 transition against the `P` number it enforces. A ledger records every client attempt with its
@@ -115,7 +117,7 @@ grew a `cluster` key.
 make room would change every historical assignment. The frozen map makes the append rule a test
 rather than a comment.
 
-**The literal stale-report schedule is built, not saved.** The seven saved files are small and
+**The literal stale-report schedule is built, not saved.** The ~~seven~~ eight saved files are small and
 reviewable; the 100/101/102 one is 1,341 events because every write is replicated and fsynced in
 full. The builder is deterministic, the test asserts the detail names 101 and 102, and a unit test
 runs the same builder at prefixes of one, two and four.

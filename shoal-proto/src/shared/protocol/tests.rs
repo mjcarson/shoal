@@ -18,10 +18,15 @@ use super::error::{
 };
 use super::fingerprint::{self, ROLE_FILTER, ROLE_PARTITION, ROLE_SORT, ROLE_UPDATE};
 use super::handshake::{Hello, HelloAck, RefusalReason, HANDSHAKE_BODY_LEN, HANDSHAKE_FRAME_LEN};
+use super::read::{
+    self, ReadLevel, ReadOptions, SessionToken, MAX_SESSION_TOKENS, READ_OPTIONS_HEAD_LEN,
+    SESSION_TOKEN_LEN,
+};
 use super::trace::{TraceContext, TRACE_CONTEXT_LEN, TRACE_CONTEXT_VERSION};
 use super::{
-    decode_request, decode_response, request_preamble, request_preamble_traced, response_preamble,
-    Flags, Header, MessageType, ProtocolError, RawHeader, HEADER_LEN, MAX_REQUEST_PREAMBLE_LEN,
+    decode_request, decode_response, decode_server_frame, request_preamble, request_preamble_traced,
+    request_preamble_with, response_preamble, server_preamble, Flags, Header, MessageType,
+    ProtocolError, RawHeader, RequestHead, HEADER_LEN, MAX_REQUEST_PREAMBLE_LEN,
     PROTOCOL_VERSION, QUERY_ID_LEN, REQUEST_PREAMBLE_LEN, RESPONSE_PREAMBLE_LEN,
 };
 
@@ -56,7 +61,7 @@ const ALL_TYPES: [MessageType; 26] = [
 ];
 
 /// Every error code this build knows, so a test can walk all of them
-const ALL_CODES: [ErrorCode; 18] = [
+const ALL_CODES: [ErrorCode; 21] = [
     ErrorCode::Unknown,
     ErrorCode::Internal,
     ErrorCode::StorageRead,
@@ -71,6 +76,9 @@ const ALL_CODES: [ErrorCode; 18] = [
     ErrorCode::GoingAway,
     ErrorCode::Unavailable,
     ErrorCode::QuorumUnavailable,
+    ErrorCode::WrongCluster,
+    ErrorCode::UnknownLineage,
+    ErrorCode::UnsupportedReadLevel,
     ErrorCode::Unauthorized,
     ErrorCode::StaleVersion,
     ErrorCode::NotLeader,
@@ -357,6 +365,7 @@ fn a_hello_round_trips() {
         schema_fingerprint: 0xdead_beef_cafe_f00d,
         max_frame_bytes: 4096,
         mechanisms: AuthMechanisms::SCRAM_SHA_256,
+        caps: read::CLIENT_CAP_READ_OPTIONS,
     };
     assert_eq!(Hello::decode(&hello.encode()), hello);
     // and the whole frame is a header this build can read
@@ -384,6 +393,7 @@ fn a_hello_ack_round_trips() {
             max_frame_bytes: 8192,
             reason,
             mechanism: Some(AuthMechanism::ScramSha256),
+            caps: read::CLIENT_CAP_READ_OPTIONS,
         };
         assert_eq!(HelloAck::decode(&ack.encode()), ack);
         // a refusal is flagged in the header too, so a peer can tell without reading the body
@@ -504,6 +514,9 @@ fn every_error_code_round_trips_through_its_discriminant() {
         (ErrorCode::GoingAway, 41),
         (ErrorCode::Unavailable, 50),
         (ErrorCode::QuorumUnavailable, 51),
+        (ErrorCode::WrongCluster, 52),
+        (ErrorCode::UnknownLineage, 53),
+        (ErrorCode::UnsupportedReadLevel, 54),
         (ErrorCode::Unauthorized, 60),
         (ErrorCode::StaleVersion, 61),
         (ErrorCode::NotLeader, 62),
@@ -526,7 +539,7 @@ fn every_error_code_round_trips_through_its_discriminant() {
 #[test]
 fn an_unknown_error_code_reads_as_unknown() {
     // walk some numbers no variant claims, including the gaps inside the bands
-    for raw in [2u16, 13, 22, 42, 52, 64, 9000, u16::MAX] {
+    for raw in [2u16, 13, 22, 42, 55, 64, 9000, u16::MAX] {
         assert_eq!(ErrorCode::from_u16(raw), ErrorCode::Unknown);
     }
 }
@@ -839,6 +852,7 @@ fn an_unknown_mechanism_in_an_ack_reads_as_none() {
         max_frame_bytes: 4096,
         reason: RefusalReason::Accepted,
         mechanism: None,
+        caps: 0,
     };
     // hand-write a mechanism byte from a build that does not exist yet
     let mut body = ack.encode();
@@ -1010,4 +1024,146 @@ fn the_trace_context_flag_is_its_own_bit() {
         assert!(!Flags::TRACE_CONTEXT.contains(other));
         assert!(!other.contains(Flags::TRACE_CONTEXT));
     }
+}
+
+/// A token with recognisable bytes in every field
+///
+/// # Arguments
+///
+/// * `index` - The index to put in it, so several tokens can be told apart
+fn a_token(index: u64) -> SessionToken {
+    SessionToken {
+        cluster: crate::shared::identity::ClusterId(Uuid::from_bytes([0xc1; 16])),
+        table: crate::shared::identity::TableId(0x1122_3344_5566_7788),
+        tablet: 0x0abc,
+        group: crate::shared::identity::GroupId(0x99aa_bbcc_ddee_ff00),
+        index,
+    }
+}
+
+/// The read options head, sixteen tokens, the refused shapes, the response token section and
+/// the capability bytes all round trip, and a bundle with no options is framed as before (F41)
+///
+/// The last assertion is the one that matters for compatibility: a client with nothing to say
+/// about its reads writes the bytes an M4 client wrote, and an M4 server reads them.
+#[test]
+fn read_options_and_tokens_round_trip_on_the_wire() {
+    // a token is forty eight bytes and comes back whole
+    let token = a_token(42);
+    let raw = token.encode();
+    assert_eq!(raw.len(), SESSION_TOKEN_LEN);
+    assert_eq!(SessionToken::decode(&raw).unwrap(), token);
+    // and a token of a version this build does not read is refused
+    let mut unknown = raw;
+    unknown[0] = 2;
+    assert_eq!(SessionToken::decode(&unknown).unwrap_err(), ProtocolError::UnknownSessionTokenVersion(2));
+    // the head alone: a level, a deadline, no tokens
+    let head_only = ReadOptions {
+        level: Some(ReadLevel::Quorum),
+        deadline_ms: 2500,
+        tokens: Vec::new(),
+    };
+    let bytes = head_only.encode().unwrap();
+    assert_eq!(bytes.len(), READ_OPTIONS_HEAD_LEN);
+    assert_eq!(ReadOptions::decode(&bytes).unwrap(), head_only);
+    // sixteen tokens, the most a section carries, come back in order
+    let full = ReadOptions {
+        level: None,
+        deadline_ms: 0,
+        tokens: (0..MAX_SESSION_TOKENS as u64).map(a_token).collect(),
+    };
+    let bytes = full.encode().unwrap();
+    assert_eq!(bytes.len(), READ_OPTIONS_HEAD_LEN + MAX_SESSION_TOKENS * SESSION_TOKEN_LEN);
+    assert_eq!(ReadOptions::decode(&bytes).unwrap(), full);
+    // a seventeenth is refused on the way out and on the way in
+    let mut over = full.clone();
+    over.tokens.push(a_token(99));
+    assert_eq!(over.encode().unwrap_err(), ProtocolError::TooManySessionTokens(17));
+    let mut counted = bytes.clone();
+    counted[2] = 17;
+    let mut head = [0u8; READ_OPTIONS_HEAD_LEN];
+    head.copy_from_slice(&counted[..READ_OPTIONS_HEAD_LEN]);
+    assert_eq!(ReadOptions::decode_head(&head).unwrap_err(), ProtocolError::TooManySessionTokens(17));
+    // a head version and a level byte this build does not know are refused too
+    let mut versioned = head;
+    versioned[0] = 9;
+    assert_eq!(ReadOptions::decode_head(&versioned).unwrap_err(), ProtocolError::UnknownReadOptionsVersion(9));
+    let mut levelled = head;
+    levelled[1] = 7;
+    assert_eq!(ReadOptions::decode_head(&levelled).unwrap_err(), ProtocolError::UnknownReadLevel(7));
+    // zero is inherit and the two named levels are themselves
+    assert_eq!(ReadLevel::from_byte(0).unwrap(), None);
+    assert_eq!(ReadLevel::from_byte(1).unwrap(), Some(ReadLevel::One));
+    assert_eq!(ReadLevel::from_byte(2).unwrap(), Some(ReadLevel::Quorum));
+    // a request head with a context and options lays them down in flag bit order
+    let context = TraceContext::new([9; 16], [4; 8], 1).expect("a valid context was refused");
+    let options = ReadOptions {
+        level: Some(ReadLevel::One),
+        deadline_ms: 10,
+        tokens: vec![a_token(1), a_token(2)],
+    };
+    let RequestHead::Extended(framed) = request_preamble_with(Some(&context), Some(&options), 4096, ROOMY).unwrap() else {
+        panic!("options were dropped");
+    };
+    let mut header_bytes = [0u8; REQUEST_PREAMBLE_LEN];
+    header_bytes.copy_from_slice(&framed[..REQUEST_PREAMBLE_LEN]);
+    let header = decode_request(&header_bytes, ROOMY).unwrap();
+    assert!(header.flags.contains(Flags::TRACE_CONTEXT));
+    assert!(header.has_read_options());
+    assert_eq!(header.body_len(), 4096 + TRACE_CONTEXT_LEN + options.encoded_len());
+    let mut context_bytes = [0u8; TRACE_CONTEXT_LEN];
+    context_bytes.copy_from_slice(&framed[REQUEST_PREAMBLE_LEN..REQUEST_PREAMBLE_LEN + TRACE_CONTEXT_LEN]);
+    assert_eq!(TraceContext::decode(&context_bytes).unwrap(), context);
+    let section = &framed[REQUEST_PREAMBLE_LEN + TRACE_CONTEXT_LEN..];
+    assert_eq!(ReadOptions::decode(section).unwrap(), options);
+    assert_eq!(header.payload_len_after(section.len()).unwrap(), 4096);
+    // and one without a context puts the section straight after the header
+    let RequestHead::Extended(framed) = request_preamble_with(None, Some(&options), 16, ROOMY).unwrap() else {
+        panic!("options were dropped");
+    };
+    assert_eq!(ReadOptions::decode(&framed[REQUEST_PREAMBLE_LEN..]).unwrap(), options);
+    // no options, or empty ones, is the preamble a client wrote before options existed
+    let plain = request_preamble_traced(None, 4096, ROOMY).unwrap();
+    assert_eq!(request_preamble_with(None, None, 4096, ROOMY).unwrap(), RequestHead::Fixed(plain));
+    assert_eq!(
+        request_preamble_with(None, Some(&ReadOptions::default()), 4096, ROOMY).unwrap(),
+        RequestHead::Fixed(plain)
+    );
+    // a response frame with a token says so, and the client sizes the token ahead of the payload
+    let query_id = Uuid::new_v4();
+    let preamble = server_preamble(MessageType::Response, Flags::SESSION_TOKEN, &query_id, SESSION_TOKEN_LEN + 64, ROOMY).unwrap();
+    let frame = decode_server_frame(&preamble, ROOMY).unwrap();
+    assert_eq!(frame.token_len(), SESSION_TOKEN_LEN);
+    assert_eq!(frame.payload_len().unwrap(), 64);
+    // one without is sized as it always was
+    let preamble = response_preamble(&query_id, 64, ROOMY).unwrap();
+    let frame = decode_server_frame(&preamble, ROOMY).unwrap();
+    assert_eq!(frame.token_len(), 0);
+    assert_eq!(frame.payload_len().unwrap(), 64);
+    // and a flagged frame too short to hold a token is refused
+    let preamble = server_preamble(MessageType::Response, Flags::SESSION_TOKEN, &query_id, 8, ROOMY).unwrap();
+    let frame = decode_server_frame(&preamble, ROOMY).unwrap();
+    assert!(matches!(frame.payload_len().unwrap_err(), ProtocolError::BodyTooShort { .. }));
+    // the capability byte is offset fourteen in both handshake bodies, and zero is none
+    let hello = Hello {
+        schema_fingerprint: 1,
+        max_frame_bytes: 4096,
+        mechanisms: AuthMechanisms::NONE,
+        caps: read::CLIENT_CAP_READ_OPTIONS,
+    };
+    assert_eq!(hello.encode()[14], read::CLIENT_CAP_READ_OPTIONS);
+    let mut older = hello.encode();
+    older[14] = 0;
+    assert_eq!(Hello::decode(&older).caps, 0);
+    let ack = HelloAck {
+        schema_fingerprint: 1,
+        max_frame_bytes: 4096,
+        reason: RefusalReason::Accepted,
+        mechanism: None,
+        caps: read::CLIENT_CAP_READ_OPTIONS,
+    };
+    assert_eq!(ack.encode()[14], read::CLIENT_CAP_READ_OPTIONS);
+    // the two new flag bits are their own bits
+    assert_eq!(Flags::READ_OPTIONS.bits(), 1 << 5);
+    assert_eq!(Flags::SESSION_TOKEN.bits(), 1 << 6);
 }

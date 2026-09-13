@@ -116,6 +116,8 @@ pub struct Staged {
     pub files: Vec<PathBuf>,
     /// The hop the arm was built to take, if it is a hop arm
     pub hop: Option<HopFacts>,
+    /// How the arm's reads are served, if it is a read arm
+    pub read: Option<crate::workloads::workload::ReadArm>,
 }
 
 /// One cpu the machine offers, in the order the server walks them
@@ -257,6 +259,7 @@ pub fn stage(base: &Conf, id: &str, overrides: &ConfOverrides, port: u16) -> Res
         nodes: staged,
         files,
         hop: cluster.hop.clone(),
+        read: cluster.read.clone(),
     })
 }
 
@@ -717,7 +720,67 @@ pub fn placed_facts(
     Ok(facts)
 }
 
-/// Every node's replication state at the end of a run, node zero first
+/// Waits until every peer's shards hold the placement and every group they host is up
+///
+/// `initialize` waits for node zero's shards alone; a peer installs the pushed map a moment
+/// later and builds its groups on tasks after that, so a write forwarded to it in between is
+/// refused as one no group serves. That refusal is honest and the seed is not retried, so the
+/// harness waits here instead, the way an operator waits for readiness before opening a
+/// cluster to clients ([F41](../../../../docs/src/features/read-consistency.md)).
+///
+/// # Arguments
+///
+/// * `staged` - The cluster
+/// * `runtime` - The client runtime the peers are asked on
+pub fn wait_peers_placed(staged: &Staged, runtime: &tokio::runtime::Runtime) -> Result<()> {
+    let deadline = std::time::Instant::now() + ready::TIMEOUT;
+    for node in staged.nodes.iter().filter(|node| node.index != 0) {
+        let addr = format!("127.0.0.1:{}", node.client_port);
+        loop {
+            // the peer's own readiness, over its client endpoint
+            let value = runtime.block_on(async {
+                let client = shoal::Shoal::<crate::workloads::schema::BenchClient>::new(&addr)
+                    .await
+                    .with_context(|| format!("failed to reach node {} at {addr}", node.index))?;
+                let response = client
+                    .admin(&AdminRequest {
+                        op: uuid::Uuid::new_v4(),
+                        expected_version: 0,
+                        kind: AdminKind::Readiness,
+                    })
+                    .await
+                    .with_context(|| format!("node {} did not answer a readiness read", node.index))?;
+                match response.outcome {
+                    Ok(shoal::shared::protocol::admin::AdminOutcome::Read(value)) => Ok(value),
+                    other => bail!("node {} refused a readiness read: {other:?}", node.index),
+                }
+            })?;
+            // placed, and every group its shards host built
+            let placed = value["data"]["placed"].as_bool().unwrap_or(false)
+                && value["data"]["initialized"].as_bool().unwrap_or(false);
+            let groups = value["data"]["replication"]["groups"].as_u64().unwrap_or(0);
+            let all_up = value["data"]["replication"]["shards"]
+                .as_array()
+                .is_some_and(|shards| {
+                    shards.iter().all(|shard| {
+                        shard["groups"]
+                            .as_array()
+                            .is_some_and(|groups| groups.iter().all(|group| group["up"].as_bool().unwrap_or(false)))
+                    })
+                });
+            if placed && groups > 0 && all_up {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                bail!("node {} did not hold the placement within {:?}: {value}", node.index, ready::TIMEOUT);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    Ok(())
+}
+
+/// Every node's replication report at the end of a run, node zero first
 ///
 /// Node zero's is read from its pool; a peer's through an admin read over its client endpoint,
 /// which the node that accepts the connection answers for itself from the reports its shards
@@ -733,12 +796,12 @@ pub fn placed_facts(
 /// * `pool` - Node zero's running pool
 /// * `conf` - The configuration node zero was started with, for the report cadence
 /// * `runtime` - The client runtime the peers are asked on
-pub fn replica_facts(
+pub fn node_reports(
     staged: &Staged,
     pool: &shoal::ShoalPool<crate::workloads::schema::Bench>,
     conf: &Conf,
     runtime: &tokio::runtime::Runtime,
-) -> Result<Vec<ReplicaFacts>> {
+) -> Result<Vec<(String, shoal::server::replication::NodeReplication)>> {
     // a shard reports to its control thread on the forward sweeper's tick, which is a tenth of
     // the forward timeout and never under fifty milliseconds
     let tick = conf
@@ -747,7 +810,7 @@ pub fn replica_facts(
         .map_or(Duration::from_millis(500), |cluster| cluster.transport.forward_timeout.duration() / 10)
         .max(Duration::from_millis(50));
     std::thread::sleep(tick * 2);
-    let mut replicas = Vec::with_capacity(staged.nodes.len());
+    let mut reports = Vec::with_capacity(staged.nodes.len());
     for node in &staged.nodes {
         let report = if node.index == 0 {
             pool.replication()
@@ -775,8 +838,22 @@ pub fn replica_facts(
             serde_json::from_value::<shoal::server::replication::NodeReplication>(value)
                 .with_context(|| format!("node {}'s replication report did not parse", node.index))?
         };
-        replicas.push(ReplicaFacts {
-            node: node.node.clone(),
+        reports.push((node.node.clone(), report));
+    }
+    Ok(reports)
+}
+
+/// Every node's replication state at the end of a run, from its report
+///
+/// # Arguments
+///
+/// * `reports` - Every node's report, node zero first
+#[must_use]
+pub fn replica_facts(reports: &[(String, shoal::server::replication::NodeReplication)]) -> Vec<ReplicaFacts> {
+    reports
+        .iter()
+        .map(|(node, report)| ReplicaFacts {
+            node: node.clone(),
             groups: u32::try_from(report.groups).unwrap_or(u32::MAX),
             leading: u32::try_from(report.leading).unwrap_or(u32::MAX),
             lag_end: report.lag_max,
@@ -784,9 +861,59 @@ pub fn replica_facts(
             volatile_bytes_end: report.volatile_bytes as u64,
             unknown: report.unknown_outcomes,
             rejected: report.rejected,
+        })
+        .collect()
+}
+
+/// What a read arm's reads waited on, from every node's report
+///
+/// The counters are summed over the nodes and the waits averaged over the barriers and the
+/// waits that happened, in microseconds; the per node list keeps each node's own so a reader
+/// can see which node hopped ([F41](../../../../docs/src/features/read-consistency.md)).
+///
+/// # Arguments
+///
+/// * `arm` - How the arm was built
+/// * `reports` - Every node's report, node zero first
+#[must_use]
+pub fn read_facts(
+    arm: &crate::workloads::workload::ReadArm,
+    reports: &[(String, shoal::server::replication::NodeReplication)],
+) -> crate::model::macro_layer::ReadFacts {
+    use crate::model::macro_layer::{NodeReadFacts, ReadFacts};
+    let mut folded = shoal::server::replication::ReadStats::default();
+    let mut per_node = Vec::with_capacity(reports.len());
+    for (node, report) in reports {
+        folded.absorb(&report.reads);
+        per_node.push(NodeReadFacts {
+            node: node.clone(),
+            barriers: report.reads.barriers,
+            barrier_hops: report.reads.barrier_hops,
+            session_waits: report.reads.session_waits,
+            timeouts: report.reads.timeouts,
+            late_shares: report.reads.late_shares,
+            duplicate_shares: report.reads.duplicate_shares,
         });
     }
-    Ok(replicas)
+    // a mean over what happened, and zero when nothing did
+    let mean_us = |total_ns: u64, count: u64| if count == 0 { 0 } else { total_ns / count / 1000 };
+    let waits = folded.barriers.max(folded.session_waits);
+    ReadFacts {
+        level: arm.level.clone(),
+        session: arm.session,
+        fanout: arm.fanout.clone(),
+        barriers: folded.barriers,
+        barrier_hops: folded.barrier_hops,
+        barrier_wait_mean_us: mean_us(folded.barrier_wait_ns_total, folded.barriers),
+        barrier_wait_max_us: folded.barrier_wait_ns_max / 1000,
+        apply_wait_mean_us: mean_us(folded.apply_wait_ns_total, waits),
+        apply_wait_max_us: folded.apply_wait_ns_max / 1000,
+        session_waits: folded.session_waits,
+        timeouts: folded.timeouts,
+        late_shares: folded.late_shares,
+        duplicate_shares: folded.duplicate_shares,
+        per_node,
+    }
 }
 
 /// The writes a run could not answer definitely, summed over every replica
@@ -917,6 +1044,95 @@ mod tests {
         assert!(error.to_string().contains("offers 5"), "{error}");
     }
 
+    /// A read arm's record carries the level, the session flag, every node's barrier and
+    /// application wait, and the shares it dropped; a record from before it still loads (F41)
+    #[test]
+    fn read_capture_records_barrier_and_application_wait() {
+        use super::read_facts;
+        use crate::model::macro_layer::{ClusterFacts, FanoutFacts, ReadFacts};
+        use crate::workloads::workload::ReadArm;
+        use shoal::server::replication::{NodeReplication, ReadStats};
+        // two nodes' reports: one hopped twice and waited, one did nothing
+        let mut busy = NodeReplication::default();
+        busy.reads = ReadStats {
+            barriers: 4,
+            barrier_hops: 2,
+            barrier_wait_ns_total: 8_000_000,
+            barrier_wait_ns_max: 5_000_000,
+            apply_wait_ns_total: 2_000_000,
+            apply_wait_ns_max: 1_500_000,
+            session_waits: 0,
+            lineage_refusals: 0,
+            timeouts: 1,
+            late_shares: 3,
+            duplicate_shares: 1,
+        };
+        let reports = vec![("n0".to_string(), busy), ("n1".to_string(), NodeReplication::default())];
+        let arm = ReadArm {
+            level: "quorum".to_string(),
+            session: false,
+            fanout: Some(FanoutFacts {
+                nodes: 3,
+                keys_per_query: 6,
+                filtered: false,
+                limit: Some(3),
+                empty: false,
+            }),
+        };
+        let facts = read_facts(&arm, &reports);
+        assert_eq!(facts.level, "quorum");
+        assert_eq!(facts.barriers, 4);
+        assert_eq!(facts.barrier_hops, 2);
+        // the means are over the barriers and waits that happened, in microseconds
+        assert_eq!(facts.barrier_wait_mean_us, 2_000);
+        assert_eq!(facts.barrier_wait_max_us, 5_000);
+        assert_eq!(facts.apply_wait_mean_us, 500);
+        assert_eq!(facts.apply_wait_max_us, 1_500);
+        assert_eq!(facts.timeouts, 1);
+        assert_eq!(facts.late_shares, 3);
+        assert_eq!(facts.duplicate_shares, 1);
+        assert_eq!(facts.per_node.len(), 2);
+        assert_eq!(facts.per_node[0].barrier_hops, 2);
+        assert_eq!(facts.per_node[1].barriers, 0);
+        assert_eq!(facts.fanout.as_ref().map(|fanout| fanout.limit), Some(Some(3)));
+        // the record round trips on the cluster facts, and a record without it still loads
+        let mut cluster = ClusterFacts {
+            nodes: 2,
+            desired_rf: 1,
+            active_rf: 1,
+            write_policy: "quorum".to_string(),
+            read_policy: "one".to_string(),
+            durability: "fsync".to_string(),
+            driver: "in-process".to_string(),
+            cores: Vec::new(),
+            driver_cores: Vec::new(),
+            tables: 1,
+            tablets: 4096,
+            offered_load: None,
+            emulated: true,
+            placement: Vec::new(),
+            members: Vec::new(),
+            map_version: 0,
+            voters: 0,
+            learners: 0,
+            hop: None,
+            transport: None,
+            replicas: Vec::new(),
+            outcomes: None,
+            reads: Some(facts),
+        };
+        let text = serde_json::to_string(&cluster).expect("serializes");
+        let back: ClusterFacts = serde_json::from_str(&text).expect("parses");
+        assert_eq!(back, cluster);
+        assert!(text.contains("\"reads\""));
+        cluster.reads = None;
+        let older = serde_json::to_string(&cluster).expect("serializes");
+        assert!(!older.contains("\"reads\""));
+        let back: ClusterFacts = serde_json::from_str(&older).expect("an older record parses");
+        assert_eq!(back.reads, None);
+        let _: ReadFacts = back.reads.unwrap_or_else(|| read_facts(&arm, &[]));
+    }
+
     /// A staged node survives the trip through the file its child reads it from
     #[test]
     fn a_staged_node_round_trips_through_json() {
@@ -993,6 +1209,7 @@ mod tests {
             transport: None,
             outcomes: Some(outcome_facts(&replicas)),
             replicas,
+            reads: None,
         };
         // the record round trips with every replica's debt and the schedule on it
         let text = serde_json::to_string(&facts).expect("serializes");

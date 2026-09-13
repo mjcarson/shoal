@@ -80,6 +80,16 @@ pub enum AdminKind {
         /// The new count, which has to be one, three or five
         count: u32,
     },
+    /// Set, or clear, the level one table's reads are served at when a bundle does not say
+    ///
+    /// `one` or `quorum`, or none to fall back to the cluster's `read_consistency`
+    /// ([F41](../../../../docs/src/features/read-consistency.md)).
+    SetTableReadPolicy {
+        /// The table, by the name the schema spells it
+        table: String,
+        /// The level, or none to clear it
+        level: Option<String>,
+    },
 }
 
 impl AdminKind {
@@ -88,7 +98,7 @@ impl AdminKind {
     pub const fn is_mutation(&self) -> bool {
         matches!(
             self,
-            AdminKind::Initialize { .. } | AdminKind::SetControlVoters { .. }
+            AdminKind::Initialize { .. } | AdminKind::SetControlVoters { .. } | AdminKind::SetTableReadPolicy { .. }
         )
     }
 
@@ -102,6 +112,7 @@ impl AdminKind {
             AdminKind::Replication => "replication",
             AdminKind::Initialize { .. } => "initialize",
             AdminKind::SetControlVoters { .. } => "set_control_voters",
+            AdminKind::SetTableReadPolicy { .. } => "set_table_read_policy",
         }
     }
 }
@@ -218,6 +229,10 @@ pub struct TopologyFrame {
     pub read_consistency: String,
     /// The tables the schema serves, with their stable identities
     pub tables: Vec<(String, TableId)>,
+    /// The tables whose reads are served at a level of their own, by name
+    /// ([F41](../../../../docs/src/features/read-consistency.md))
+    #[serde(default)]
+    pub table_read_policy: Vec<(String, String)>,
 }
 
 /// Write a body of `[id][json]` for any of the three frames
@@ -316,6 +331,7 @@ mod tests {
             write_consistency: "quorum".to_string(),
             read_consistency: "one".to_string(),
             tables: vec![("Row".to_string(), TableId::of("Row"))],
+            table_read_policy: vec![("Row".to_string(), "quorum".to_string())],
         };
         let body = encode_body(&Uuid::nil(), &frame).expect("a topology encodes");
         let back: TopologyFrame = decode_rest(&body[QUERY_ID_LEN..]).expect("a topology decodes");

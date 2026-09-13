@@ -18,7 +18,7 @@ handed to it only once every group applied past its frames and deleted only once
 purged past them, so an uncommitted suffix never reaches an archive and a lagging member's
 history stays until openraft says it is not needed. What is not there: a member behind the
 purge point cannot be fed a snapshot (M7), an isolated leader learns it is not one at its lease
-(M6), and leadership after a failover stays where the election put it (M5). Before that: local
+(M6), and leadership after a failover stays where the election put it (~~M5~~ M6). Before that: local
 [recovery](../storage/recovery.md) replays per-shard/table logs and compacts them, which a
 standalone node still does. Archives
 hold current state, not historical versions. Once compaction merged an intent and deleted its

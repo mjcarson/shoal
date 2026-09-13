@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
-use shoal::client::QuerySuceededOpts;
+use shoal::client::{QuerySuceededOpts, SendOptions};
 use shoal::shared::responses::ResponseActionNames;
 use shoal::Shoal;
 
@@ -369,6 +369,88 @@ where
                 measured.count("retrieved", rows);
                 // the warmup covers connection establishment and the first cold partitions, and
                 // is counted on the claimed index so every slot agrees on where it ends
+                if index >= warmup {
+                    measured.record(&op, elapsed);
+                }
+            }
+            Ok::<Measurement, anyhow::Error>(measured)
+        });
+    }
+    // pool what every slot gathered
+    let mut measured = Measurement::default();
+    while let Some(slot) = slots.join_next().await {
+        measured.absorb(slot.context("a query slot panicked")??);
+    }
+    Ok(measured)
+}
+
+/// Runs queries one at a time per slot, each with the options its builder chose
+///
+/// [`drive_per_query`] with a [`SendOptions`] beside every query: a read level, a deadline, or
+/// the session token of the last write to the key's tablet. The measurement is the same round
+/// trip; what changes is what the server does before it reads
+/// ([F41](../../../../docs/src/features/read-consistency.md)). What counts as a success is the
+/// caller's too: an arm that reads keys it never wrote is measuring an empty answer, which the
+/// default would call a failure.
+///
+/// # Arguments
+///
+/// * `client` - The client to send on
+/// * `concurrency` - How many queries may be outstanding at once, one per slot
+/// * `total` - How many queries to send in all
+/// * `warmup` - How many to send before sampling starts
+/// * `op` - The operation name to record samples under
+/// * `success` - What an answer has to be to count
+/// * `build` - Builds the query and its options with a given index
+pub async fn drive_per_query_with<F, Q>(
+    client: Arc<Shoal<BenchClient>>,
+    concurrency: u32,
+    total: u64,
+    warmup: u64,
+    op: &str,
+    success: QuerySuceededOpts,
+    build: F,
+) -> Result<Measurement>
+where
+    F: Fn(u64) -> (Q, SendOptions) + Send + Sync + 'static,
+    Q: Into<crate::workloads::schema::BenchQueryKinds> + Send,
+{
+    // one shared cursor, as the plain per query driver has
+    let next = Arc::new(AtomicU64::new(0));
+    let build = Arc::new(build);
+    let mut slots = tokio::task::JoinSet::new();
+    for _ in 0..concurrency.max(1) {
+        let client = client.clone();
+        let next = next.clone();
+        let build = build.clone();
+        let op = op.to_string();
+        slots.spawn(async move {
+            let mut measured = Measurement::default();
+            loop {
+                // claim the next query, and stop when they have all been claimed
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                if index >= total {
+                    break;
+                }
+                // one timestamp either side of one query, options included
+                let (query, options) = build(index);
+                let started = Instant::now();
+                let queries = client.query().add(query);
+                let (mut stream, stamps) = client
+                    .send_stamped_with(queries, &options)
+                    .await
+                    .context("a query failed")?;
+                let response = stream
+                    .next()
+                    .await
+                    .context("a query failed")?
+                    .context("a query was answered with nothing")?;
+                // judged the caller's way: an empty answer is a success where it was expected
+                response.suceeded(success).context("a query failed")?;
+                let elapsed = started.elapsed();
+                measured.stages.one(stamps, &response);
+                let rows = rows_in(&response);
+                measured.count("retrieved", rows);
                 if index >= warmup {
                     measured.record(&op, elapsed);
                 }

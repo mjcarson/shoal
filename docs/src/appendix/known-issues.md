@@ -31,10 +31,12 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 17, 25, 26, 31, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
+list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
 76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90 and 94, and
-why ~~item 91~~ item 97 is the newest entry here and the newest number, and why 17, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90 and 94 are on the resolved page. **94 never appeared here either**: it
+why ~~item 91~~ ~~item 97~~ item 100 is the newest entry here and item 100 the newest number, and why 17, 33, 78, 79, 80, 82,
+83, 84, 85, 86, 88, 89, 90 and 94 are on the resolved page. **33 moved at M5**
+([Resolved #33](resolved/gather-expiry.md)): it was the oldest open hang, and it was reproduced
+before it was fixed. **94 never appeared here either**: it
 was found and fixed while [F38](../features/inter-node-transport.md) made a peer link a client,
 and is the fixed half of item 32 ([Resolved #94](resolved/disconnected-client-cleanup.md)). **38, 58 and 88 moved together**
 ([Resolved #38, 58, 88](resolved/pool-readiness.md)): three symptoms of one cause, the pool
@@ -56,7 +58,7 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ **1,342 tests**, four ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ **1,361 tests**, four ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
 [F37](../features/node-identity-control-plane.md) took the total to 1,265 and did not update this
 line; [F38](../features/inter-node-transport.md) added 24 more and did;
@@ -353,24 +355,6 @@ before the socket closes rather than discovering the disconnect afterwards. The 
 complementary: `ClientGone` is what the server tells itself, `GoAway` is what the peers tell each
 other, and [D6](../direction/connection-pool.md#connection-death) needs the second to fail the
 right streams on the client side.
-
-### 33. Collected split-query state has no expiry
-
-A `Gather` is inserted when a query is split across shards (`shard.rs:557-571`) and removed only
-when `outstanding` reaches zero (`shard.rs:789-797`). Nothing else ever removes one.
-
-A shard that never sends its share leaves the entry resident forever and the client waiting
-forever, and there is no timeout anywhere to break the wait ([TODOs](todos.md#timeouts)).
-
-~~That is not hypothetical: a partition load that fails to spawn hits the `todo!()` in the
-loader and panics it, stranding every query blocked on it.~~ That route is closed — a partition
-read that fails now releases the queries parked on it
-([Resolved #16, 51](resolved/partition-load-failure.md)). What remains is the general defect:
-nothing bounds how long a `Gather` waits for a share, so any *other* way a shard can fail to
-send one leaks it just as permanently.
-
-Client disconnect does not clear them either, so this compounds with
-[item 32](#32-a-disconnected-client-is-never-cleaned-up-anywhere).
 
 ### 36. A partial intent log buffer is only written when the shard's channel drains
 

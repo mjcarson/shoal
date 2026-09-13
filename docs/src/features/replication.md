@@ -274,7 +274,7 @@ node agreed about decides how fast a leader is missed. The fixture sets it to a 
   write deadline. M6 makes that a `NotLeader` at the lease.
 - **Group leadership after a failover is wherever the election put it.** The primary
   preference is a head start at first start and nothing after; a leader on a non-primary stays
-  there. M5.
+  there. ~~M5~~ M6 - [F41](read-consistency.md) left it where it was.
 - **The capture is the benchmark host's.** The arms ran at smoke scale on the development host;
   the numbers below prove they run and record, and nothing else.
 

@@ -814,6 +814,7 @@ mod tests {
                 transport: None,
                 replicas: Vec::new(),
                 outcomes: None,
+                reads: None,
             });
         }
         capture

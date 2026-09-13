@@ -216,6 +216,7 @@ fn peer_rejects_wrong_cluster_identity_and_malformed_payload() {
         origin_shard: 0,
         gather: false,
         trace: None,
+        read: None,
         keys: vec![1, 2, 3],
     };
     let entry_bytes = encode_entries(&[entry.clone()]).expect("entries");

@@ -164,7 +164,14 @@ not failed. A single-bundle `send` is unaffected, which is every call except the
 
 **A server that stops answering on an open socket is still a hang.** Nothing here is a timeout. A
 peer that accepts bytes and never replies is [item 62](../appendix/known-issues.md) and the
-[Timeouts](../appendix/todos.md) entry, not this.
+[Timeouts](../appendix/todos.md) entry, not this. *Since [F41](../features/read-consistency.md)
+the server's side of that has one:* a bundle expires at `networking.query_deadline` and a query
+still owed at that point is answered `Timeout` (31), which this page reserved and nothing
+produced. The same milestone added three codes in the fifties, all refusals a read can meet by
+name: `WrongCluster` (52), a session token from another cluster or sent to a node in none;
+`UnknownLineage` (53), a token naming a group that does not serve its tablet on the replica
+asked; `UnsupportedReadLevel` (54), a level byte this server does not serve. The client with an
+open socket and no server answer is still the hang the entry describes.
 
 **`ResponseAction::Error` is a wire format change with no compatibility story.** The version byte is
 the mechanism and it did not move: two peers built either side of this change disagree about the

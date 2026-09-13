@@ -474,6 +474,15 @@ pub const IDS: &[&str] = &[
     "macro/cluster/overhead/nodes/3",
     "macro/cluster/replication/durable",
     "macro/cluster/replication/volatile",
+    // the read arms (F41): a One, a barrier and a session read on the replicated placement,
+    // then a six key get over three nodes four ways. appended after the replication arms
+    "macro/cluster/reads/one",
+    "macro/cluster/reads/barrier",
+    "macro/cluster/reads/session",
+    "macro/cluster/fanout/get",
+    "macro/cluster/fanout/filter",
+    "macro/cluster/fanout/limit",
+    "macro/cluster/fanout/empty",
 ];
 
 /// Whether an id names a workload this build knows about

@@ -862,6 +862,75 @@ mod tests {
         }
     }
 
+    /// A limit applied on each share, then on the ordered union, is the limit applied once to the
+    /// whole ordered answer - for any layout of partitions over shards and any arrival order (F41)
+    ///
+    /// The property behind the per share limit pushdown, checked rather than argued: a share's
+    /// partitions are a subsequence of the query's in the same relative order, so a row at
+    /// position `i < L` in the global concatenation sits at some `j <= i` in its share's and
+    /// the share's cap never drops it, while a row the cap drops sits at `j >= L` and so at
+    /// `i >= L`, where the final truncation drops it too. A per row filter only removes rows,
+    /// which keeps both halves of that. It does not hold for a limit after a cross partition
+    /// sort, which no query has ([C6](../../../docs/src/distributed/reads.md)).
+    #[test]
+    fn limits_apply_after_complete_ordered_gather() {
+        use rand::seq::SliceRandom;
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0xf41);
+        for case in 0..400 {
+            // a query over some partitions, in a random order, with random row counts
+            let partitions: u64 = rng.gen_range(1..=7);
+            let mut order: Vec<u64> = (1..=partitions).map(|p| p * 10).collect();
+            order.shuffle(&mut rng);
+            let counts: Vec<u64> = order.iter().map(|_| rng.gen_range(0..=4)).collect();
+            let limit = rng.gen_range(0..=12usize);
+            // what the whole answer is, before any limit: every partition's rows in named order
+            let whole: Vec<Placed> = order
+                .iter()
+                .zip(&counts)
+                .flat_map(|(partition, count)| run(*partition, *count).1)
+                .collect();
+            let expected: Vec<Placed> = whole.iter().take(limit).cloned().collect();
+            // the partitions dealt over one to four shards, each share keeping named order
+            let shards = rng.gen_range(1..=4usize);
+            let owner: Vec<usize> = order.iter().map(|_| rng.gen_range(0..shards)).collect();
+            let mut shares: Vec<GetRows<Placed>> = Vec::new();
+            for shard in 0..shards {
+                let slots: Vec<(u64, Vec<Placed>)> = order
+                    .iter()
+                    .zip(&counts)
+                    .zip(&owner)
+                    .filter(|(_, owned)| **owned == shard)
+                    .map(|((partition, count), _)| run(*partition, *count))
+                    .collect();
+                if slots.is_empty() {
+                    continue;
+                }
+                // each shard applies the limit to its own share as it scans
+                let mut share = GetRows::from_slots(slots);
+                share.truncate(limit);
+                shares.push(share);
+            }
+            // merged in whatever order the shares arrive, then ordered, then capped once more
+            shares.shuffle(&mut rng);
+            let mut merged: Option<GetRows<Placed>> = None;
+            for share in shares {
+                match &mut merged {
+                    Some(merged) => merged.absorb(share),
+                    None => merged = Some(share),
+                }
+            }
+            let mut merged = merged.unwrap_or_else(|| GetRows::from_slots(Vec::<(u64, Vec<Placed>)>::new()));
+            merged.order_by(|partition| order.iter().position(|key| *key == partition));
+            merged.truncate(limit);
+            assert!(merged.is_consistent(), "case {case}: the index disagrees with the rows");
+            assert_eq!(
+                merged.rows, expected,
+                "case {case}: partitions {order:?} with counts {counts:?} over shards {owner:?} at limit {limit}"
+            );
+        }
+    }
+
     /// A limit trims the index with the rows it trims
     ///
     /// The rows and the index have to be cut in the same place. Trimming one and not the other

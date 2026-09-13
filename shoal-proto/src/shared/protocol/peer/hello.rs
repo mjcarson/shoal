@@ -44,12 +44,17 @@ pub const CAP_MEMBERSHIP_V1: u64 = 1 << 3;
 /// This peer hosts tablet groups and carries their consensus RPCs on its replication lane
 pub const CAP_REPLICATION_V1: u64 = 1 << 4;
 
+/// This peer carries read plans on its forward entries, attempts and tokens on its answers, and
+/// read barriers on its replication lane ([F41](../../../../../docs/src/features/read-consistency.md))
+pub const CAP_READ_CONSISTENCY_V1: u64 = 1 << 5;
+
 /// Everything this build can act on
 pub const CAPABILITIES: u64 = CAP_FORWARD_V1
     | CAP_CONTROL_RAFT_V1
     | CAP_BULK_SNAPSHOT_V1
     | CAP_MEMBERSHIP_V1
-    | CAP_REPLICATION_V1;
+    | CAP_REPLICATION_V1
+    | CAP_READ_CONSISTENCY_V1;
 
 /// Where each field sits in the body
 const CLUSTER_AT: usize = 0;

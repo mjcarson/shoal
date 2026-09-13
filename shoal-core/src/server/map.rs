@@ -121,6 +121,9 @@ pub struct TabletMap {
     pub write_consistency: Consistency,
     /// What a read is served at
     pub read_consistency: Consistency,
+    /// The tables whose reads are served at a level of their own
+    /// ([F41](../../../../docs/src/features/read-consistency.md))
+    pub table_read_policy: BTreeMap<TableId, Consistency>,
     /// The principals allowed to change the cluster
     pub admins: Vec<String>,
 }
@@ -138,6 +141,7 @@ impl Default for TabletMap {
             desired_rf: 0,
             write_consistency: Consistency::Quorum,
             read_consistency: Consistency::One,
+            table_read_policy: BTreeMap::new(),
             admins: Vec::new(),
         }
     }
@@ -205,8 +209,22 @@ impl TabletMap {
             desired_rf: policy.map_or(0, |policy| policy.replication_factor),
             write_consistency: policy.map_or(Consistency::Quorum, |policy| policy.write_consistency),
             read_consistency: policy.map_or(Consistency::One, |policy| policy.read_consistency),
+            table_read_policy: state.table_read_policy.clone(),
             admins: policy.map_or_else(Vec::new, |policy| policy.admins.clone()),
         }
+    }
+
+    /// The level a table's reads are served at when a bundle does not say
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    #[must_use]
+    pub fn read_level_of(&self, table: TableId) -> Consistency {
+        self.table_read_policy
+            .get(&table)
+            .copied()
+            .unwrap_or(self.read_consistency)
     }
 
     /// One member, if the map knows it
@@ -480,6 +498,16 @@ impl TabletMap {
             write_consistency: self.write_consistency.as_str().to_string(),
             read_consistency: self.read_consistency.as_str().to_string(),
             tables: self.tables.clone(),
+            table_read_policy: self
+                .table_read_policy
+                .iter()
+                .filter_map(|(id, level)| {
+                    self.tables
+                        .iter()
+                        .find(|(_, table)| table == id)
+                        .map(|(name, _)| (name.clone(), level.as_str().to_string()))
+                })
+                .collect(),
         }
     }
 

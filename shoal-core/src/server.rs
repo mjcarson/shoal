@@ -510,6 +510,48 @@ where
         Ok(answers)
     }
 
+    /// Drive a read verb on one shard, or on every shard, for the fixture
+    ///
+    /// Standalone-safe, unlike [`ShoalPool::replication_verb`]: a standalone node has gathers to
+    /// hold and expire too ([F41](../../../docs/src/features/read-consistency.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `shard` - The shard to drive, or every shard
+    /// * `verb` - What to do
+    ///
+    /// # Errors
+    ///
+    /// Fails if a shard is gone or does not answer; a shard's own refusal is in its answer.
+    pub fn read_verb(
+        &self,
+        shard: Option<usize>,
+        verb: replication::ReadVerb,
+    ) -> Result<Vec<Result<serde_json::Value, String>>, ServerError> {
+        // the shards asked: one, or all in order
+        let targets: Vec<&kanal::Sender<messages::ServerMsg<S>>> = match shard {
+            Some(shard) => vec![self.shard_txs.get(shard).ok_or_else(|| ServerError::ShardFailed {
+                shard,
+                error: "no such shard".to_string(),
+            })?],
+            None => self.shard_txs.iter().collect(),
+        };
+        let mut answers = Vec::with_capacity(targets.len());
+        for tx in targets {
+            let (reply, rx) = std::sync::mpsc::channel();
+            tx.send(messages::ServerMsg::ReadVerb {
+                verb: verb.clone(),
+                reply,
+            })
+            .map_err(|_| ServerError::Shoal(ShoalError::NotClustered))?;
+            match rx.recv_timeout(Duration::from_secs(30)) {
+                Ok(answer) => answers.push(answer),
+                Err(_) => return Err(ServerError::Shoal(ShoalError::NotClustered)),
+            }
+        }
+        Ok(answers)
+    }
+
     /// Start a bulk probe of a given size at a peer, for the bounded-bytes test
     ///
     /// # Arguments

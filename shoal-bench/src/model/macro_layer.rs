@@ -327,6 +327,84 @@ pub struct ClusterFacts {
     /// beside a nonzero count here is a number a reader has to discount.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcomes: Option<OutcomeFacts>,
+    /// What the arm's reads waited on, if it is a read arm
+    ///
+    /// Only the read and fanout arms carry one; absent before
+    /// [F41](../../../docs/src/features/read-consistency.md). The level and the session flag
+    /// are how the arm was built; the counters are what every node's shards reported after the
+    /// measured phase, which is what separates a barrier's cost from a routing hop's
+    /// ([C10](../../../docs/src/distributed/performance.md)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reads: Option<ReadFacts>,
+}
+
+/// How a read arm was built and what its reads waited on
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadFacts {
+    /// The level every read was sent at: `one` or `quorum`
+    pub level: String,
+    /// Whether every read carried the token of the last write to its tablet
+    pub session: bool,
+    /// How the arm fanned its reads out, if it is a fanout arm
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fanout: Option<FanoutFacts>,
+    /// Barriers obtained, over every node
+    pub barriers: u64,
+    /// Barriers that hopped to a leader on another shard
+    pub barrier_hops: u64,
+    /// The mean wait for a barrier, in microseconds
+    pub barrier_wait_mean_us: u64,
+    /// The longest wait for a barrier, in microseconds
+    pub barrier_wait_max_us: u64,
+    /// The mean wait for a replica to apply through a barrier or past a token, in microseconds
+    pub apply_wait_mean_us: u64,
+    /// The longest such wait, in microseconds
+    pub apply_wait_max_us: u64,
+    /// Reads served past a token's lower bound
+    pub session_waits: u64,
+    /// Reads answered `Timeout`
+    pub timeouts: u64,
+    /// Shares dropped as late
+    pub late_shares: u64,
+    /// Shares dropped as duplicates
+    pub duplicate_shares: u64,
+    /// Every node's own counters, node zero first
+    pub per_node: Vec<NodeReadFacts>,
+}
+
+/// One node's read counters at the end of a run
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeReadFacts {
+    /// The node's identity
+    pub node: String,
+    /// Barriers its shards obtained
+    pub barriers: u64,
+    /// Barriers that hopped
+    pub barrier_hops: u64,
+    /// Reads served past a token
+    pub session_waits: u64,
+    /// Reads answered `Timeout`
+    pub timeouts: u64,
+    /// Shares dropped as late
+    pub late_shares: u64,
+    /// Shares dropped as duplicates
+    pub duplicate_shares: u64,
+}
+
+/// How a fanout arm spread each read over the placement
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FanoutFacts {
+    /// How many nodes each read touched
+    pub nodes: u32,
+    /// How many keys each read named
+    pub keys_per_query: u32,
+    /// Whether the read filtered its rows
+    pub filtered: bool,
+    /// The limit the read set, if any
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Whether the keys were never written, so every share is empty
+    pub empty: bool,
 }
 
 /// How an arm scheduled its load

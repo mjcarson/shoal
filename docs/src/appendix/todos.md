@@ -258,7 +258,42 @@ phi-accrual detector commits a silent member `Down`. M4 is delivered as
 group's log is one shared WAL per shard, a write is one command applied in committed order
 everywhere with its result derived there, a default write waits for a durable majority, and
 three arms price a durable and a volatile quorum against the same placement replicating to
-nobody.
+nobody. M5 is delivered as [F41](../features/read-consistency.md): a `Quorum` read obtains a
+read barrier from its group's leader and applies through it, a committed write hands back a
+session token a later read is served past, every gather has a slot per share and a deadline, a
+bundle's level resolves per table from versioned control state, and seven arms price a barrier,
+a session token and a fan-out.
+
+**What F41 left undone, deliberately.** Recorded here so the next milestone starts from the
+list rather than from the diff:
+
+- **A read retry within its budget.** The attempt is minted per bundle on the coordinator and
+  echoed by every share, so a late one is dropped by identity; nothing reroutes yet. The reroute
+  has to invalidate the old attempt's slots and re-forward the bundle's bytes, which is M6's
+  retry work beside the write retry.
+- **A coverage list on the response frame.** Coverage is the slot on the coordinator, and no
+  reply is built from fewer covered slots than slots; the client sees a complete answer or one
+  error and cannot see which partitions were covered. It would ride the response under the same
+  capability bit the token section does, once something reconciles across shares.
+- **`Primary` as a routing choice.** Not a level, decided under Q5 ([C13](../distributed/protocol.md#q5-at-m5));
+  "execute the share at the leader" is a third arm of the match in `await_read_barrier` and
+  additive, for a caller that would rather pay the hop with the rows than with the barrier.
+- **A read arm with a write background.** The three read arms carry no writes on purpose, so the
+  barrier's cost is not inside a difference that also holds follower lag; the arm that reads
+  under a write stream belongs beside the open-loop capacity schedule above and reads the same
+  way.
+- **A sorted table in the fixture.** A third table is nine more groups a node at a factor of
+  three on every fixture test's start; the limit proof in `responses.rs` and `sorted.rs`'s own
+  limit tests cover the sorted shape until M9a needs a second persistent table anyway.
+- **Drawing the two wait stamps.** `StageStamps` carries `barrier_wait` and `apply_wait` since
+  F41 and the stage report renders neither, so the read arms stay out of the stage layer; the
+  waits are on `cluster.reads` instead, summed and per node. Rendering them is the one change
+  that would put the arms into `STAGED_WORKLOADS`.
+- **Moving leadership toward a reader.** A strong read through a follower hops to the leader on
+  every read; nothing transfers leadership. M6, with the failover work that decides where
+  leadership lives.
+- **Cancelling a barrier's work at the deadline.** A read that times out is answered and its
+  wait task finishes on its own; the `Cancel` question below covers what stopping it would buy.
 
 **What F40 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
@@ -273,7 +308,7 @@ list rather than from the diff:
   that into `NotLeader` at the lease.
 - **Moving leadership back, or the write ring with it.** The placement primary is preferred
   at first start by a head start and by nothing after; a node holding no replica of a tablet
-  routes its writes to the primary's node whoever leads. M5 and M6.
+  routes its writes to the primary's node whoever leads. ~~M5 and~~ M6; M5 left it where it was.
 - **An open-loop capacity arm.** The three arms are closed loops at one depth, which cannot
   expose an overload pause or a lag that grows; the schedule C10 asks for, with completion
   against scheduled issue times, is the arm that would.
@@ -628,9 +663,14 @@ hit, in [D6](../direction/connection-pool.md#bounded-channels).
 
 ### Timeouts
 
-Nothing anywhere has a deadline: no query timeout on the client, no timeout on a blocked
+~~Nothing anywhere has a deadline: no query timeout on the client, no timeout on a blocked
 query waiting for a partition, and no timeout on the connection pool beyond the initial
-connect.
+connect.~~ **Since [F41](../features/read-consistency.md) every bundle has one on the server**:
+`networking.query_deadline`, ten seconds unless a bundle names less, from its last byte off the
+socket; a split query's gather, a forward and a strong read's waits all expire at it and the
+query is answered `Timeout` once ([Resolved #33](resolved/gather-expiry.md)). What is still
+missing is the rest of this entry: a client-side deadline, a deadline on a query parked on a
+partition load that neither completes nor fails, and a pool timeout past the initial connect.
 
 The client half is designed in [D6](../direction/connection-pool.md#deadlines), which adds one
 thing this entry does not: **a deadline without a way to cancel converts a slow query into a
@@ -684,7 +724,12 @@ after the error code.
 
 [F17](../direction/connection-pool.md#deadlines) ships `Deadlines::request` and `Deadlines::idle` as
 `Option<Duration>`, both `None`. That is the choice that breaks nothing on landing and it gives
-nobody the stability D6 exists for — a caller who never reads the docs keeps the hang.
+nobody the stability D6 exists for — a caller who never reads the docs keeps the hang. **The
+server's half was chosen at [F41](../features/read-consistency.md)**: `networking.query_deadline`
+defaults to ten seconds, which is the number `shoal.yml` resolves to without naming it, so the
+frozen baseline stayed comparable; a bundle's `SendOptions::deadline` shortens it per send and
+travels on the wire, which is why it is not a `Deadlines` field. The client-side half - what a
+caller does when the server's answer never comes at all - is still this entry.
 
 The reason it was not decided there is that a non-`None` default changes the behaviour of every
 existing caller, including `shoal-bench`, and the evidence for a number does not exist yet: nothing

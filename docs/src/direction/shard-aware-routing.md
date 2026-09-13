@@ -116,8 +116,10 @@ the coordinator runs today (`shoal-core/src/shared/traits.rs:126-168`).
 
 That is where a token-aware driver's cost lives, and it has a real secondary benefit: the
 server-side `Gather` disappears, and with it
-[item 33](../appendix/known-issues.md#33-collected-split-query-state-has-no-expiry), which is that
-nothing bounds how long a `Gather` waits for a share that may never come.
+[~~item 33~~ Resolved #33](../appendix/resolved/gather-expiry.md), which ~~is~~ was that
+nothing bounds how long a `Gather` waits for a share that may never come - a gather expires at
+its bundle's deadline since [F41](../features/read-consistency.md), so what the move would now
+remove is the state, not a hang.
 
 `limit` semantics survive the move. Each shard returning up to `limit` rows and the client
 truncating the merged result is equivalent to the coordinator truncating a merge of the same

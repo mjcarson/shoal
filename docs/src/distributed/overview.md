@@ -32,7 +32,11 @@ outcome, `One` reads from the local replica's committed state, checkpoints the c
 moves, and three arms that price a durable and a volatile quorum against the same placement
 replicating to nobody — as [F40](../features/replication.md).
 ~~No node speaks to a node yet.~~ ~~A node speaks to a node it was placed beside; nothing joins,
-elects across nodes or replicates yet.~~ What is not there: strong reads (M5), failover that
+elects across nodes or replicates yet.~~ And a read that can be made to see the write: a
+`Quorum` read through a barrier from the tablet's leader, a session token a write hands back,
+every gather with a slot per share and a deadline, and seven arms that price a barrier, a
+token and a fan-out — as [F41](../features/read-consistency.md). What is not there: ~~strong
+reads (M5),~~ failover that
 moves leadership and the retry table's durable mark (M6), a member behind the purge point
 catching up (M7), and everything from rebalancing on. They extend the unbuilt
 [Distribution](../appendix/todos.md#distribution) and

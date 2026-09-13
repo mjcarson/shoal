@@ -179,7 +179,7 @@ the F page; the rest of this section is the gate as it was set. *Not done, on pu
 member behind the purge point cannot catch up, since installing a snapshot is M7's; the retry
 table is a bounded in-memory LRU rebuilt from the log, and its durable low-water mark is M6's;
 an isolated leader learns it is not one at its lease and not before (M6); leadership after a
-failover stays where the election put it (M5); a node holding no replica of a tablet still
+failover stays where the election put it (~~M5~~ M6); a node holding no replica of a tablet still
 routes its writes to the placement primary's node, which nothing moves before M6; the arms are
 closed-loop and the open-loop capacity schedule is filed; and the capture is the benchmark
 host's - the arms ran at smoke scale on the development host.
@@ -233,6 +233,32 @@ default stayed a fsynced quorum, and `One` writes and `Async` replicas are refus
 
 ### M5. Read consistency levels
 
+**Delivered** on 2026-09-13 as [F41](../features/read-consistency.md). All five C6 rows below
+are runnable as `cargo test -p shoal --test cluster_fixture`, with the limit row's proof and the
+timeout row's identity rules as unit tests beside them, the mixed-policy row's control state as
+a unit test in `shoal-core`, the C10 row as `cargo test -p shoal-bench`, and the protocol model's
+strong read as `cargo test -p shoal-model`. What was delivered, what was not, and the evidence
+are on the F page; the rest of this section is the gate as it was set. *Not done, on purpose:*
+a read is not retried within its budget, though the attempt identity a retry needs is minted
+and echoed (M6); a token through a leader change and a barrier through one are M6 gates and
+were not run; leadership is not moved toward a reader; `Primary` is not a level (Q5); no
+coverage list rides the response frame; leases stay deferred (Q6); the stage report does not
+yet draw the two wait stamps a read carries; and the capture is the benchmark host's - the seven
+arms ran at smoke scale on the development host.
+
+| Test | Where | What it asserts |
+| --- | --- | --- |
+| `barrier_read_observes_prior_quorum_write` | `shoal/tests/cluster_fixture.rs` ([C6](reads.md)) | Twenty keys written through node zero and read at `Quorum` through the other two at once, never stale; node one cut from the others: a `Quorum` read through it is `Timeout` and never the old value, a `One` read is the old value, a session read past the new write's token is `Timeout`; healed, both see the new value and node one's counters show the barrier hopped and the replica waited |
+| `empty_and_deleted_partitions_have_explicit_coverage` | `shoal/tests/cluster_fixture.rs` ([C6](reads.md)) | Six keys over three nodes at a factor of one, three never written: exactly three rows and success; the node-two key deleted through node two: two rows; a get over unwritten keys alone is a successful empty answer; the lane to node two cut: one error, never the two rows that did arrive; healed: two rows, and no gather resident |
+| `limits_apply_after_complete_ordered_gather` | `shoal-proto/src/shared/responses.rs`, `shoal/tests/cluster_fixture.rs` ([C6](reads.md)) | Unit: over four hundred random layouts of partitions over shards and arrival orders, a limit applied per share and then to the ordered union is the limit applied once to the whole; fixture: a limited six key get over three nodes is the first four in named order, in either order, and with one node's shares held it is `Timeout` and never four rows of six |
+| `gather_timeout_completes_once_and_discards_late_replies` | `shoal-core/src/server/shard/gather.rs`, `shoal/tests/cluster_fixture.rs` ([C6](reads.md)) | Unit: an expired gather is taken once, a share after expiry or for an older attempt is late, a covered slot again is a duplicate, completion fires once; fixture: node one's shares held and sent twice, node two's held longer, a half-second bundle of a six key get and a single key get is one `Timeout` and one success and the stream ends once, a second get completes at the release, and afterwards nothing is resident and late and duplicate shares were both counted |
+| `mixed_table_bundle_resolves_each_table_policy` | `shoal-core/src/server/control/types.rs`, `shoal/tests/cluster_fixture.rs` ([C6](reads.md)) | Unit: a table's read policy records, clears, refuses `All` and an unknown table, moves the version once per change and is idempotent; fixture: `Note` set to `quorum` through the control plane, a `Row` get beside a `Note` get through node one pays one barrier with no override, two under `Quorum`, none under `One`; node one cut, the `Note` half is `Timeout` and the `Row` half succeeds; an unknown table and an unknown level are refused by name |
+| `session_token_lineage_is_checked_by_name` | `shoal/tests/cluster_fixture.rs` ([C6](reads.md)) | A minted token is honoured; forged to another cluster it is `WrongCluster`, to another group `UnknownLineage` and counted, sent to a standalone node `WrongCluster`; a raw connection that asked for no token section is sent none and one that asked is sent the token |
+| `a_standalone_gather_expires_at_the_query_deadline` | `shoal/tests/gather_expiry.rs` ([Resolved #33](../appendix/resolved/gather-expiry.md)) | A two shard standalone get whose shares are all held is `Timeout` within its second, once; with the expiry absent it never returns |
+| `strong_reads_are_linearizable_and_the_cached_leader_knob_is_not` | `shoal-model/tests/protocol_model.rs` ([C13](protocol.md)) | Thirty-two seeded schedules with strong reads complete them under the safe barrier rule without a stale observation; the cached-leader knob deviates in its own name and its saved schedule replays to `Linearizable` |
+| `read_capture_records_barrier_and_application_wait` | `shoal-bench/src/workloads/harness/cluster.rs` ([C10](performance.md)) | A read arm's record carries the level, the session flag, the fanout, every node's barriers, hops, barrier and apply waits, session waits, timeouts and dropped shares, summed and per node; a record from before it loads |
+| `the_read_arms_share_the_replication_placement` | `shoal-bench/src/workloads/cluster_reads.rs` ([C10](performance.md)) | Three read arms on the factor three placement at every read, four fan-out arms on the factor one placement, every arm feasible, the ids in registry order |
+
 **Delivers.** Data-quorum read barriers, application waits, session-token design/path, complete
 negative-result coverage, ordered gather/limit semantics, deadlines/late-reply handling and mixed
 bundle policy resolution. Resolve whether Primary and Quorum need distinct API names (Q5).
@@ -244,6 +270,19 @@ filtered and deleted partitions. Strong reads during leader changes remain an M6
 **Evidence/exit.** One/barrier/session and fanout read captures with barrier/application wait and
 tails visible. No cross-tablet snapshot claim; session lower bounds are scoped and bounded.
 Leases remain deferred until Q6 has both a timing proof and worthwhile measured benefit.
+*Met:* a strong read through another node sees the write at once and a cut node's cannot be
+served stale (`barrier_read_observes_prior_quorum_write`); an empty share, a deleted row and a
+missing share are three different answers (`empty_and_deleted_partitions_have_explicit_coverage`);
+a limit is proved to commute with the gather rather than assumed to
+(`limits_apply_after_complete_ordered_gather`); a gather answers once at its deadline and drops
+what comes after by identity (`gather_timeout_completes_once_and_discards_late_replies`); a
+mixed bundle resolves each table on its own (`mixed_table_bundle_resolves_each_table_policy`);
+Q5 is decided as one strong level and recorded in [C13](protocol.md#q5-at-m5); a session lower
+bound is one index in one group of one table of one cluster, sixteen a bundle at most, and is
+refused by name outside that scope; no cross-tablet snapshot is claimed, and the read arms'
+barrier and apply waits are on their record separately from the round trip - the smoke numbers
+on the [F41 page](../features/read-consistency.md#performance) are what they are, not a capture;
+and `LeaseRead` is never used.
 
 ## Group B — Survive failures and return safely
 

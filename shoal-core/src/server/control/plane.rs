@@ -36,7 +36,6 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use glommio::net::TcpListener;
 use glommio::{LocalExecutorBuilder, Placement};
 use openraft::error::{ClientWriteError, RaftError};
 use openraft::metrics::RaftMetrics;
@@ -1112,7 +1111,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         }));
     }
     // bind the control listener and drive inbound RPCs into this node's group, on this executor
-    let listener = TcpListener::bind(bind).map_err(|error| ServerError::ControlFailed {
+    let listener = crate::server::peer::bind_reusable(bind).map_err(|error| ServerError::ControlFailed {
         error: format!("binding the control listener on {bind}: {error}"),
     })?;
     let (inbound_tx, inbound_rx) = kanal::unbounded_async::<Inbound>();
@@ -1718,6 +1717,36 @@ impl Core {
                 expected_version: call.request.expected_version,
                 count: *count,
             },
+            // the table is resolved by name against what this node serves, and the level
+            // parsed, before anything is proposed
+            AdminKind::SetTableReadPolicy { table, level } => {
+                let Some((_, id)) = self.tables.iter().find(|(name, _)| name == table) else {
+                    let _ = call.reply.send(answer(Err(AdminError::new(
+                        ErrorCode::Internal,
+                        format!("no table is named {table}; the schema serves {:?}", self.tables.iter().map(|(name, _)| name).collect::<Vec<_>>()),
+                    ))));
+                    return;
+                };
+                let level = match level.as_deref() {
+                    None => None,
+                    Some("one") => Some(crate::server::conf::cluster::Consistency::One),
+                    Some("quorum") => Some(crate::server::conf::cluster::Consistency::Quorum),
+                    Some(other) => {
+                        let _ = call.reply.send(answer(Err(AdminError::new(
+                            ErrorCode::UnsupportedReadLevel,
+                            format!("{other} is not a read level; one or quorum, or nothing to clear"),
+                        ))));
+                        return;
+                    }
+                };
+                ControlCommand::SetTableReadPolicy {
+                    op: call.request.op,
+                    principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                    expected_version: call.request.expected_version,
+                    table: *id,
+                    level,
+                }
+            }
         };
         // a mutation needs a principal the committed policy names, unless the process itself asks
         if !call.trusted {

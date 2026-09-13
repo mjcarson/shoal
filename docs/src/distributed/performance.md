@@ -37,7 +37,15 @@ table, which share the command encoding C5 asked for. Every cluster record now c
 groups led, lag, pending and volatile bytes and unknown and rejected writes at the end of the
 run, read from each node's own report, and `outcomes` summed; all three are mirrored into the
 explorer with defaults, so every committed artifact still loads. An arm asking for more copies
-than it places nodes is refused before a server starts
+than it places nodes is refused before a server starts. Since [F41](../features/read-consistency.md)
+seven read arms run: `macro/cluster/reads/{one,barrier,session}` on the replication arms'
+placement at a factor of three, differing only in what the read asks for, and
+`macro/cluster/fanout/{get,filter,limit,empty}` on the same nodes at a factor of one, a six key
+get split three ways in four shapes. Every read arm's record carries `reads` - the level, the
+session flag, the fanout, and every node's barriers, hops, barrier and application wait means
+and maxima, session waits, timeouts and late and duplicate shares - mirrored into the explorer
+the same way. The harness waits for every peer to hold the placement before it seeds, and the
+cluster port blocks are numbered among the cluster arms so none sits in the ephemeral range
 (`ClusterOverride::feasibility`), which is what "not a Cartesian product that silently lowers
 RF" means in code. The open-loop schedule is not built; the arms are closed loops at one
 depth.
@@ -125,8 +133,8 @@ expanded only into feasible combinations, not a Cartesian product that silently 
 | `macro/cluster/overhead/nodes/{1,2,3}` | Fixed total resource budget; explicit feasible RF/policy. `1` since F37, `3` since [F40](../features/replication.md) at three shards a node - not the one-node arm's twelve, which is why the three-node arms are read against each other |
 | `macro/cluster/replication/{durable,volatile}` | Same command encoding and workload with distinct durability contracts. Both since [F40](../features/replication.md), on the `nodes/3` placement at a factor of three |
 | `macro/cluster/scaleout/nodes/{3,4,6}` | RF=3, resources per node fixed; emulated cases explicitly identified |
-| `macro/cluster/reads/{one,barrier,session}` | Read-only and write-background consistency costs |
-| `macro/cluster/fanout/{get,filter,limit,empty}` | Remote gathering, decoding, coverage and ordering |
+| `macro/cluster/reads/{one,barrier,session}` | Read-only ~~and write-background~~ consistency costs. All three since [F41](../features/read-consistency.md), on the `replication/` placement at a factor of three and read against each other; the write-background variant is filed with the open-loop schedule |
+| `macro/cluster/fanout/{get,filter,limit,empty}` | Remote gathering, decoding, coverage and ordering. All four since [F41](../features/read-consistency.md), on the `nodes/3` placement at a factor of one |
 | `macro/cluster/writes/{insert,update,delete,conditional,retry}` | Result derivation, no-ops, deduplication and hot-key behavior |
 | `macro/cluster/failover` | Outage and recovery under a specified fault schedule |
 | `macro/cluster/catchup/{log,snapshot}` | Time/bytes to catch up at several foreground mutation rates |
@@ -179,7 +187,11 @@ quorum. An optional `One` accepted-only result is never plotted as equivalent to
 host and recorded on the [F40 page](../features/replication.md#performance) as not a capture -
 a durable quorum at about twice a single fsync's median on a shared device, a volatile one
 under two milliseconds; the curve, and whether the leader's flush overlaps its followers', is
-the benchmark host's to draw ([O47](../appendix/optimizations.md)).
+the benchmark host's to draw ([O47](../appendix/optimizations.md)). *At M5:* the read gate has
+its first numbers the same way, on the [F41 page](../features/read-consistency.md#performance):
+a barrier about a millisecond over a `One` read at the median, of which the barrier wait itself
+is 590 µs on average with the hop on two reads in three, an application wait of nothing with no
+writes running, and a session read within a tenth of a millisecond of `One`.
 
 ## Alternatives rejected
 
@@ -225,6 +237,7 @@ assign the gates. Generated cluster pages retain the book's scope/comparability 
 | `historical_artifacts_and_ports_remain_compatible` | Existing facts parse and historical single-node port assignments remain unchanged | M0 |
 | `infeasible_rf_policy_is_not_a_throughput_arm` | Desired RF=3 on one node yields an availability test, not downgraded quorum throughput | M4 |
 | `capacity_capture_records_lag_and_offered_load` | Capacity records include scheduled load, completion/error/tail and every replica's debt | M4 |
+| `read_capture_records_barrier_and_application_wait` | A read arm's record carries the level, the session flag, the fanout and every node's barrier and application waits, summed and per node; an older record still loads | M5 |
 | `fault_capture_preserves_outage_time_series` | Failure/recovery window remains visible with separate before/during/after distributions | M6 |
 | `physical_cluster_records_each_node_environment` | Unequal real hardware and primary placement are retained in comparability metadata | M10 |
 

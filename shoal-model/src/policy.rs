@@ -1,9 +1,10 @@
-//! The safe protocol, and the six ways of getting it wrong
+//! The safe protocol, and the seven ways of getting it wrong
 //!
 //! Every knob's first variant is what the contract requires. Every other variant is one of the
 //! violations the contract table in `docs/src/distributed/protocol.md` says the M0 model must
-//! reject, and each is named for the `P` number it breaks. The unsafe settings are not options;
-//! they exist so that the checker can be shown to catch them, on a saved schedule, every time.
+//! reject, and each is named for the `P` number it breaks - or, for the read barrier M5 added,
+//! for the linearizability C6 promises. The unsafe settings are not options; they exist so that
+//! the checker can be shown to catch them, on a saved schedule, every time.
 
 use serde::{Deserialize, Serialize};
 
@@ -71,7 +72,27 @@ pub enum AckTiming {
     OnReceipt,
 }
 
-/// The six knobs together
+/// How a strong read establishes that its leader still leads (C6)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BarrierRule {
+    /// A heartbeat round started after the read index was recorded, answered by a majority in
+    /// the leader's term, then application through that index
+    #[default]
+    QuorumConfirmed,
+    /// Whatever the node believes: it answers from its cached commit index without a round, so a
+    /// leader that was deposed and has not heard of it answers too
+    CachedLeaderUnconfirmed,
+}
+
+impl BarrierRule {
+    /// Whether this is the contract, which a schedule leaves unwritten
+    pub fn is_safe(&self) -> bool {
+        *self == BarrierRule::QuorumConfirmed
+    }
+}
+
+/// The seven knobs together
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Policy {
@@ -87,6 +108,12 @@ pub struct Policy {
     pub visibility: Visibility,
     /// When a follower vouches for an entry
     pub ack_timing: AckTiming,
+    /// How a strong read confirms its leader
+    ///
+    /// Unwritten in a schedule at the contract, so every file saved before the knob existed is
+    /// still canonical ([F41](../../docs/src/features/read-consistency.md)).
+    #[serde(default, skip_serializing_if = "BarrierRule::is_safe")]
+    pub barrier: BarrierRule,
 }
 
 impl Policy {
@@ -99,6 +126,7 @@ impl Policy {
             async_receipt: AsyncReceipt::NotDurable,
             visibility: Visibility::CommittedApplied,
             ack_timing: AckTiming::AfterFsync,
+            barrier: BarrierRule::QuorumConfirmed,
         }
     }
 
@@ -156,6 +184,14 @@ impl Policy {
                 },
                 Property::P1,
             ),
+            (
+                "strong_read_from_cached_leader",
+                Policy {
+                    barrier: BarrierRule::CachedLeaderUnconfirmed,
+                    ..safe
+                },
+                Property::Linearizable,
+            ),
         ]
     }
 
@@ -182,6 +218,9 @@ impl Policy {
         if self.ack_timing != safe.ack_timing {
             out.push("ack_on_receipt");
         }
+        if self.barrier != safe.barrier {
+            out.push("strong_read_from_cached_leader");
+        }
         out
     }
 }
@@ -207,7 +246,7 @@ mod tests {
     #[test]
     fn every_unsafe_knob_deviates_in_exactly_its_own_name() {
         let knobs = Policy::unsafe_knobs();
-        assert_eq!(knobs.len(), 6);
+        assert_eq!(knobs.len(), 7);
         for (name, policy, _) in knobs {
             assert_eq!(policy.deviations(), vec![name]);
         }

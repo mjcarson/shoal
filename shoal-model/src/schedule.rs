@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::event::{Actor, ClientOp, Event, MutationOp};
+use crate::event::{Actor, ClientOp, Event, MutationOp, ReadLevel};
 use crate::ids::{Attempt, Key, NodeId, OpId, TabletId, Value};
 use crate::invariants::Violation;
 use crate::policy::Policy;
@@ -40,6 +40,12 @@ pub struct Weights {
     pub client: u32,
     /// Send a client read
     pub read: u32,
+    /// Send a strong read to a node that believes it leads
+    ///
+    /// Unwritten when zero, so a schedule saved before strong reads existed stays canonical
+    /// ([F41](../../docs/src/features/read-consistency.md)).
+    #[serde(default, skip_serializing_if = "is_zero_weight")]
+    pub strong_read: u32,
     /// Retry an unknown attempt
     pub retry: u32,
     /// Give up on a pending attempt
@@ -71,6 +77,7 @@ impl Default for Weights {
             report: 3,
             client: 10,
             read: 6,
+            strong_read: 4,
             retry: 4,
             timeout: 3,
             crash: 2,
@@ -219,6 +226,15 @@ impl Schedule {
     }
 }
 
+/// Whether a weight is the zero a schedule leaves unwritten
+///
+/// # Arguments
+///
+/// * `weight` - The weight
+fn is_zero_weight(weight: &u32) -> bool {
+    *weight == 0
+}
+
 /// Generate a schedule from a seed
 ///
 /// A random walk: at every step the world says what could happen, a category is picked by
@@ -252,6 +268,7 @@ pub fn generate(name: &str, seed: u64, params: &ScheduleParams, policy: Policy) 
             (Category::Report, w.report, !enabled.report.is_empty()),
             (Category::Client, w.client, has_client),
             (Category::Read, w.read, !enabled.up.is_empty()),
+            (Category::StrongRead, w.strong_read, !enabled.heartbeat.is_empty()),
             (Category::Retry, w.retry, !enabled.retry.is_empty()),
             (Category::Timeout, w.timeout, !enabled.timeout.is_empty()),
             (Category::Crash, w.crash, !enabled.crash.is_empty()),
@@ -292,7 +309,12 @@ pub fn generate(name: &str, seed: u64, params: &ScheduleParams, policy: Policy) 
                 event
             }
             Category::Read => {
-                let event = read_op(&mut rng, params, &enabled, next_op);
+                let event = read_op(&mut rng, params, &enabled, next_op, ReadLevel::One);
+                next_op += 1;
+                event
+            }
+            Category::StrongRead => {
+                let event = strong_read_op(&mut rng, params, &enabled, next_op);
                 next_op += 1;
                 event
             }
@@ -346,6 +368,8 @@ enum Category {
     Report,
     Client,
     Read,
+    /// A strong read to a believed leader
+    StrongRead,
     Retry,
     Timeout,
     Crash,
@@ -384,8 +408,16 @@ fn client_op(rng: &mut SplitMix64, params: &ScheduleParams, enabled: &Enabled, o
     }
 }
 
-/// A client read of a random key from a random up node
-fn read_op(rng: &mut SplitMix64, params: &ScheduleParams, enabled: &Enabled, op: u32) -> Event {
+/// A client read of a random key from a random up node, at a level
+///
+/// # Arguments
+///
+/// * `rng` - The seed's stream
+/// * `params` - The topology and limits
+/// * `enabled` - What the world allows
+/// * `op` - The operation number
+/// * `level` - The level to read at
+fn read_op(rng: &mut SplitMix64, params: &ScheduleParams, enabled: &Enabled, op: u32, level: ReadLevel) -> Event {
     let key = Key(rng.below(u64::from(params.keys)) as u8);
     let tablet = params.tablets[rng.below(params.tablets.len() as u64) as usize];
     let target = enabled.up[rng.below(enabled.up.len() as u64) as usize];
@@ -395,7 +427,40 @@ fn read_op(rng: &mut SplitMix64, params: &ScheduleParams, enabled: &Enabled, op:
             retry: 0,
         },
         tablet,
-        op: ClientOp::Read { key },
+        op: ClientOp::Read { key, level },
+        target,
+    }
+}
+
+/// A strong read of a random key, sent to a node that believes it leads the key's tablet
+///
+/// A believed leader rather than a random node, since a strong read anywhere else is refused
+/// and shows nothing; a leader that was deposed and has not heard of it is exactly what the
+/// barrier rule has to survive.
+///
+/// # Arguments
+///
+/// * `rng` - The seed's stream
+/// * `params` - The topology and limits
+/// * `enabled` - What the world allows
+/// * `op` - The operation number
+fn strong_read_op(rng: &mut SplitMix64, params: &ScheduleParams, enabled: &Enabled, op: u32) -> Event {
+    let key = Key(rng.below(u64::from(params.keys)) as u8);
+    let leader = &enabled.heartbeat[rng.below(enabled.heartbeat.len() as u64) as usize];
+    let (target, tablet) = match leader {
+        Event::HeartbeatTick { node, tablet } => (*node, *tablet),
+        _ => unreachable!("a heartbeat candidate is a heartbeat tick"),
+    };
+    Event::ClientInvoke {
+        attempt: Attempt {
+            id: OpId(op),
+            retry: 0,
+        },
+        tablet,
+        op: ClientOp::Read {
+            key,
+            level: ReadLevel::Strong,
+        },
         target,
     }
 }

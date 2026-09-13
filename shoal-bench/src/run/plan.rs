@@ -331,7 +331,20 @@ pub fn port_for(id: &str) -> u16 {
 /// ([C10](../../../docs/src/distributed/performance.md), "preserve historical single-node port
 /// allocations"). Eight thousand ports above the base leaves room for eight thousand more
 /// single-node workloads before the two ranges could meet, and the allocator refuses before then.
+///
+/// The blocks are numbered by an arm's position among the *cluster* arms rather than among every
+/// workload. Numbered by every workload, the two hundredth block crossed 32768 - the floor of
+/// Linux's ephemeral port range - and an arm there could find its control port taken by the
+/// `TIME_WAIT` of a link some earlier arm dialled out through that port, which no socket option
+/// on the listener gets past ([F41](../../../docs/src/features/read-consistency.md)).
 pub const CLUSTER_BASE_PORT: u16 = 20_000;
+
+/// The floor of Linux's default ephemeral port range, which no listener of ours may sit in
+///
+/// A listener on an ephemeral port races every outbound connection on the machine for it, and
+/// loses to a `TIME_WAIT` it cannot see. `/proc/sys/net/ipv4/ip_local_port_range` is where a
+/// machine says its own; this is the default, and the allocator keeps every block below it.
+pub const EPHEMERAL_PORT_FLOOR: u16 = 32_768;
 
 /// How many ports each node of a cluster arm is given
 ///
@@ -365,9 +378,11 @@ pub struct NodePorts {
 /// * `id` - The workload
 /// * `nodes` - How many nodes it runs
 pub fn cluster_ports(id: &str, nodes: u16) -> anyhow::Result<Vec<NodePorts>> {
-    // one block per workload, wide enough for the largest cluster this allocator allows
+    // one block per cluster arm, in the order the arms are declared, wide enough for the
+    // largest cluster this allocator allows; an id that is not a cluster arm takes block zero
     let offset = crate::workload_ids::IDS
         .iter()
+        .filter(|declared| declared.starts_with("macro/cluster/"))
         .position(|declared| *declared == id)
         .unwrap_or(0) as u32;
     let block = u32::from(CLUSTER_PORTS_PER_NODE) * u32::from(MAX_CLUSTER_NODES);
@@ -383,6 +398,10 @@ pub fn cluster_ports(id: &str, nodes: u16) -> anyhow::Result<Vec<NodePorts>> {
     }
     if first <= single_node_top {
         anyhow::bail!("{id}: its cluster ports at {first} overlap the single-node range ending at {single_node_top}");
+    }
+    // and never in the ephemeral range, where an outbound link's TIME_WAIT can take a port
+    if last >= u32::from(EPHEMERAL_PORT_FLOOR) {
+        anyhow::bail!("{id}: its cluster ports at {last} reach the ephemeral range at {EPHEMERAL_PORT_FLOOR}");
     }
     Ok((0..nodes)
         .map(|node| {
@@ -909,12 +928,14 @@ mod tests {
         // every declared workload at the largest cluster, every port above the single-node range
         // and distinct across nodes
         let mut all = std::collections::BTreeSet::new();
-        for id in crate::workload_ids::IDS {
+        for id in crate::workload_ids::IDS.iter().filter(|id| id.starts_with("macro/cluster/")) {
             let ports = cluster_ports(id, MAX_CLUSTER_NODES).expect("the block fits");
             assert_eq!(ports.len(), usize::from(MAX_CLUSTER_NODES));
             for node in ports {
                 for port in [node.client, node.data, node.control, node.spare] {
                     assert!(port > single_node_top, "{id} was given {port}");
+                    // below the ephemeral range, where a dialled link's TIME_WAIT could take it
+                    assert!(port < EPHEMERAL_PORT_FLOOR, "{id} was given {port}, an ephemeral port");
                     assert!(all.insert(port), "{id} shares port {port} with another arm");
                 }
             }

@@ -136,6 +136,10 @@ pub struct ClusterBuilder {
     write_timeout_ms: Option<u64>,
     /// The bound on bytes proposed and unanswered per group, if lowered
     pending_bytes: Option<usize>,
+    /// The cluster's default read level, if set
+    read_consistency: Option<String>,
+    /// The bundle deadline, in milliseconds, if shortened
+    query_deadline_ms: Option<u64>,
 }
 
 impl ClusterBuilder {
@@ -281,6 +285,29 @@ impl ClusterBuilder {
     /// * `timeout` - The deadline
     pub fn write_timeout(mut self, timeout: Duration) -> Self {
         self.write_timeout_ms = Some(u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX));
+        self
+    }
+
+    /// Seed the cluster's default read level, `one` or `quorum`
+    /// ([F41](../../../docs/src/features/read-consistency.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `level` - The level's name
+    #[must_use]
+    pub fn read_consistency(mut self, level: &str) -> Self {
+        self.read_consistency = Some(level.to_string());
+        self
+    }
+
+    /// Shorten every node's bundle deadline
+    ///
+    /// # Arguments
+    ///
+    /// * `deadline` - The budget a bundle gets
+    #[must_use]
+    pub fn query_deadline(mut self, deadline: Duration) -> Self {
+        self.query_deadline_ms = Some(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX));
         self
     }
 
@@ -566,6 +593,8 @@ impl Cluster {
             durability: Vec::new(),
             write_timeout_ms: None,
             pending_bytes: None,
+            read_consistency: None,
+            query_deadline_ms: None,
         }
     }
 
@@ -1213,6 +1242,8 @@ fn build_membership_cluster(
             failover_ms: Some(builder.failover_ms),
             write_timeout_ms: builder.write_timeout_ms,
             pending_bytes: builder.pending_bytes,
+            read_consistency: builder.read_consistency.clone(),
+            query_deadline_ms: builder.query_deadline_ms,
         });
     }
     Ok(StagedPlan { per_node, reservations })

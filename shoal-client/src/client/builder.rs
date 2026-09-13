@@ -26,7 +26,7 @@ use shoal_proto::shared::tls::TlsClientOptions;
 use shoal_proto::shared::traits::QuerySupport;
 use tracing::{event, Level};
 
-use super::{ClientOptions, Errors, Shoal};
+use super::{ClientOptions, Errors, SendOptions, Shoal};
 
 /// How the pool of connections underneath a client is sized and aged
 ///
@@ -95,8 +95,10 @@ impl PoolConfig {
 /// How long each part of a client's work is given before it is given up on
 ///
 /// This holds one deadline today and is a struct rather than an argument because it is the seam
-/// the rest of them land on — a per query deadline and a read idle deadline both belong here, and
-/// both change what a caller must handle rather than only what it may configure.
+/// the rest of them land on — a read idle deadline belongs here, and changes what a caller must
+/// handle rather than only what it may configure. A per bundle deadline is not here: it travels
+/// on the wire with the bundle, as [`SendOptions::deadline`], since the server is what enforces it
+/// ([F41](../../../../docs/src/features/read-consistency.md)).
 ///
 /// Note this deliberately does **not** hold the pool's `connection_timeout`. That is a `bb8`
 /// setting bounding a checkout, it lives on [`PoolConfig`] beside the other four, and calling
@@ -213,6 +215,8 @@ pub struct ShoalBuilder<S: QuerySupport> {
     deadlines: Deadlines,
     /// What this client proves itself with and encrypts with
     options: ClientOptions,
+    /// What every send says about its reads unless told otherwise
+    read_options: SendOptions,
     /// The database kind this client will query
     phantom: PhantomData<S>,
 }
@@ -225,6 +229,7 @@ impl<S: QuerySupport> Default for ShoalBuilder<S> {
             pool: PoolConfig::default(),
             deadlines: Deadlines::default(),
             options: ClientOptions::new(),
+            read_options: SendOptions::default(),
             phantom: PhantomData,
         }
     }
@@ -283,6 +288,21 @@ impl<S: QuerySupport> ShoalBuilder<S> {
     #[must_use]
     pub fn deadlines(mut self, deadlines: Deadlines) -> Self {
         self.deadlines = deadlines;
+        self
+    }
+
+    /// Say how every send's reads are served unless the send says otherwise
+    ///
+    /// A read level, a deadline shorter than the server's, and tokens earlier writes handed
+    /// back; [`Shoal::send_with`] overrides this for one bundle
+    /// ([F41](../../../../docs/src/features/read-consistency.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `read_options` - What every send says about its reads
+    #[must_use]
+    pub fn read_options(mut self, read_options: SendOptions) -> Self {
+        self.read_options = read_options;
         self
     }
 
@@ -365,7 +385,7 @@ impl<S: QuerySupport> ShoalBuilder<S> {
                 }
             }
         }
-        Shoal::connect(endpoints, self.options, self.pool, self.deadlines).await
+        Shoal::connect(endpoints, self.options, self.pool, self.deadlines, self.read_options).await
     }
 }
 

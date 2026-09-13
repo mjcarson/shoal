@@ -35,3 +35,17 @@ pub enum ProposalOutcome {
     /// The group is stopped or the write failed some other way: a definite refusal
     Failed(String),
 }
+
+/// What a group's leader answers a read barrier request with
+///
+/// Carried over the replication lane as postcard, like a proposal's outcome
+/// ([F41](../../../../docs/src/features/read-consistency.md)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BarrierAnswer {
+    /// The member leads, its term is confirmed, and a read applied through this id is current
+    Ready(openraft::raft::linearizable_read::ReadLogId<super::DataConfig>),
+    /// The member does not lead; this is who it believes does, if it knows
+    NotLeader(Option<crate::shared::identity::ShardAddr>),
+    /// The member leads but could not reach a quorum to confirm it
+    NoQuorum(String),
+}
