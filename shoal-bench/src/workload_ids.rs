@@ -490,6 +490,9 @@ pub const IDS: &[&str] = &[
     // appended after the failover arm
     "macro/cluster/catchup/log",
     "macro/cluster/catchup/snapshot",
+    // the background arm (F44): the kill arm's placement and mixture with a verify of the table
+    // scrubbed in the background. appended after the catch-up arms
+    "macro/cluster/background/repair",
 ];
 
 /// Whether an id names a workload this build knows about

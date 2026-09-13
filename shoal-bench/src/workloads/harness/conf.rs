@@ -222,6 +222,7 @@ pub fn cluster_facts(
         reads: None,
         fault: None,
         catchup: None,
+        background: None,
     }))
 }
 

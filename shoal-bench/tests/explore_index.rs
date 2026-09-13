@@ -588,7 +588,7 @@ fn the_presets_pick_arms_that_answer_their_own_metric() {
 #[test]
 fn the_facts_mirrors_are_total() {
     use shoal_bench::model::macro_layer::{
-        CatchupFacts, CatchupSecondFacts, ClusterFacts, ConfFacts, FanoutFacts, FaultFacts, HopFacts, HopMix, NodeCores,
+        BackgroundFacts, CatchupFacts, CatchupSecondFacts, ClusterFacts, ConfFacts, FanoutFacts, FaultFacts, HopFacts, HopMix, NodeCores,
         NodeReadFacts, OfferedLoad, OutcomeFacts, ReadFacts, ReplicaFacts, ScaleFacts, SecondFacts, WindowFacts,
     };
     let keys = |value: serde_json::Value| -> Vec<String> {
@@ -761,8 +761,44 @@ fn the_facts_mirrors_are_total() {
                 applied: 1_000,
             }],
         }),
+        // the background arm's record travels whole, windows and series (F44)
+        background: Some(BackgroundFacts {
+            kind: "verify".to_string(),
+            started_ms: Some(20_000),
+            finished_ms: Some(25_000),
+            seconds: Some(5),
+            groups: 36,
+            clean: 36,
+            partitions: 4_000,
+            bytes: 900_000,
+            windows: vec![WindowFacts {
+                name: "during".to_string(),
+                from_ms: 20_000,
+                to_ms: 25_000,
+                ops: 500,
+                errors: 0,
+                p50_us: 400,
+                p99_us: 1_200,
+                max_us: 5_000,
+            }],
+            series: vec![SecondFacts {
+                second: 21,
+                ops: 100,
+                errors: 0,
+                p50_us: 400,
+                p99_us: 1_200,
+            }],
+        }),
     };
     let mirrored = explore::index::cluster_facts(&cluster);
+    assert_eq!(
+        keys(serde_json::to_value(&cluster.background).unwrap()),
+        keys(serde_json::to_value(&mirrored.background).unwrap())
+    );
+    assert_eq!(
+        keys(serde_json::to_value(&cluster.background.as_ref().unwrap().windows[0]).unwrap()),
+        keys(serde_json::to_value(&mirrored.background.as_ref().unwrap().windows[0]).unwrap())
+    );
     assert_eq!(
         keys(serde_json::to_value(&cluster.catchup).unwrap()),
         keys(serde_json::to_value(&mirrored.catchup).unwrap())

@@ -354,7 +354,7 @@ pub fn cut(
 /// * `from` - Where it starts, inclusive
 /// * `to` - Where it ends, exclusive
 /// * `timeline` - Every operation of the run
-fn window(name: &str, from: Duration, to: Duration, timeline: &[TimelineSample]) -> WindowFacts {
+pub(super) fn window(name: &str, from: Duration, to: Duration, timeline: &[TimelineSample]) -> WindowFacts {
     // an operation is in the window it was sent in
     let mut ops = 0u64;
     let mut errors = 0u64;

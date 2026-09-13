@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 
 use shoal_top::index::{
-    Capture, CatchupFactsLite, CatchupSecondFactsLite, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, FaultFactsLite,
+    BackgroundFactsLite, Capture, CatchupFactsLite, CatchupSecondFactsLite, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, FaultFactsLite,
     INDEX_VERSION, Index, Layer as IndexLayer, HopFactsLite, HopMixLite, MacroPoint, NodeCoresLite,
     NodeReadFactsLite, OfferedLoadLite, OpStats, OutcomeFactsLite, ReadFactsLite, ReplicaFactsLite,
     ScaleFactsLite, SecondFactsLite, Timing, Verdict, WindowFactsLite, Workload,
@@ -581,6 +581,43 @@ pub fn cluster_facts(cluster: &ClusterFacts) -> ClusterFactsLite {
                     installing: second.installing,
                     snapshot_bytes: second.snapshot_bytes,
                     applied: second.applied,
+                })
+                .collect(),
+        }),
+        // the background arm's record travels whole, windows and series
+        // ([F44](../../../docs/src/features/repair.md))
+        background: cluster.background.as_ref().map(|background| BackgroundFactsLite {
+            kind: background.kind.clone(),
+            started_ms: background.started_ms,
+            finished_ms: background.finished_ms,
+            seconds: background.seconds,
+            groups: background.groups,
+            clean: background.clean,
+            partitions: background.partitions,
+            bytes: background.bytes,
+            windows: background
+                .windows
+                .iter()
+                .map(|window| WindowFactsLite {
+                    name: window.name.clone(),
+                    from_ms: window.from_ms,
+                    to_ms: window.to_ms,
+                    ops: window.ops,
+                    errors: window.errors,
+                    p50_us: window.p50_us,
+                    p99_us: window.p99_us,
+                    max_us: window.max_us,
+                })
+                .collect(),
+            series: background
+                .series
+                .iter()
+                .map(|second| SecondFactsLite {
+                    second: second.second,
+                    ops: second.ops,
+                    errors: second.errors,
+                    p50_us: second.p50_us,
+                    p99_us: second.p99_us,
                 })
                 .collect(),
         }),
