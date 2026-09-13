@@ -1712,8 +1712,14 @@ where
             }
             None => None,
         };
-        // bind our tcp socket
-        let tcp_sock = TcpListener::bind(self.conf.networking.to_addr())?;
+        // bind our tcp socket, reusably, so a restart on the same port binds at once
+        let addr: SocketAddr = self
+            .conf
+            .networking
+            .to_addr()
+            .parse()
+            .map_err(|error| ServerError::GlommioGeneric(format!("the client address does not parse: {error}")))?;
+        let tcp_sock = peer::bind_reusable(addr)?;
         // remember what the kernel actually gave us, which is the only answer when the config
         // asked for port zero
         self.bound = Some(tcp_sock.local_addr()?);
@@ -3263,7 +3269,7 @@ where
             }),
         );
         // bind the peer listener, every shard on the same port with SO_REUSEPORT
-        let listener = TcpListener::bind(setup.bind)?;
+        let listener = peer::bind_reusable(setup.bind)?;
         let ctx = ListenerContext {
             comms: self.comms.clone(),
             node_local_tx: self.shard_local_tx.clone(),

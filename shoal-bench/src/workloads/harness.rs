@@ -190,7 +190,11 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // does and what the arm's keys assume; a cluster of one is placed on itself for the same
     // reason ([F39](../../../docs/src/features/membership.md))
     match (&staged, pool.as_ref()) {
-        (Some(staged), Some(pool)) => cluster::initialize(staged, pool)?,
+        (Some(staged), Some(pool)) => {
+            cluster::initialize(staged, pool)?;
+            // and every peer holding it too, or the seed's first forwards find no group
+            cluster::wait_peers_placed(staged, &runtime)?;
+        }
         (None, Some(pool)) if conf.as_ref().is_some_and(|conf| conf.cluster.is_some()) => {
             cluster::initialize_alone(pool)?;
         }
@@ -261,9 +265,12 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
         (cluster_facts.as_mut(), pool.as_ref(), conf.as_ref(), staged.as_ref())
     {
         facts.transport = Some(cluster::transport_facts(pool, conf)?);
-        let replicas = cluster::replica_facts(staged, pool, conf, &runtime)?;
+        let reports = cluster::node_reports(staged, pool, conf, &runtime)?;
+        let replicas = cluster::replica_facts(&reports);
         facts.outcomes = Some(cluster::outcome_facts(&replicas));
         facts.replicas = replicas;
+        // a read arm records what its reads waited on ([F41](../../docs/src/features/read-consistency.md))
+        facts.reads = staged.read.as_ref().map(|arm| cluster::read_facts(arm, &reports));
     }
     // stop the server whatever happened, so a failing run does not leave shards holding cores
     stop(pool)?;
@@ -293,7 +300,7 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // mixture records `read`, and a guard that knew only the first would let every read arm of the
     // grid report an empty table as a fast one
     let timed_reads = measured.ops.contains_key("get") || measured.ops.contains_key("read");
-    if timed_reads && measured.counters.get("retrieved").copied() == Some(0) {
+    if timed_reads && workload.expects_rows() && measured.counters.get("retrieved").copied() == Some(0) {
         bail!(
             "{} timed gets but retrieved no rows, so its samples measure lookups that found nothing",
             workload.id()

@@ -213,6 +213,8 @@ pub fn cluster_facts(
         // ([F40](../../../../docs/src/features/replication.md))
         replicas: Vec::new(),
         outcomes: None,
+        // and a read arm's counters are read the same way, after the run
+        reads: None,
     }))
 }
 

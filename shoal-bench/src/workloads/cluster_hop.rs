@@ -288,6 +288,7 @@ impl Workload for ClusterHop {
                     replication_factor: 1,
                     peers: vec![PEER_SHARDS],
                     hop: Some(self.hop.facts()),
+                    read: None,
                 }),
                 ..ConfOverrides::default()
             }),

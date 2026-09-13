@@ -640,6 +640,45 @@ pub const FAMILIES: &[Family] = &[
              is M6's capture.",
     },
     Family {
+        name: "cluster-reads",
+        title: "What a strong read and a fan-out read cost",
+        surface: Surface::AllWorkloads,
+        what_it_measures:
+            "Two sets of read-only arms. `reads/one`, `reads/barrier` and `reads/session` are one \
+             get of one reference width row at the reference depth against the replication arms' \
+             placement - three nodes of three shards, every tablet on every node - and differ only \
+             in what the read asks for: the local replica's state, a `Quorum` read that obtains a \
+             barrier from the group's leader and applies through it first, or a `One` read \
+             carrying the session token of the write that seeded its tablet. `fanout/get`, \
+             `fanout/filter`, `fanout/limit` and `fanout/empty` are one get of six keys, two on \
+             each of three nodes at a factor of one, so every read is split three ways; they \
+             return six rows, the three a filter passes, the three a limit keeps, and none.",
+        how_to_read_it:
+            "`barrier` less `one` is the barrier: the leader's heartbeat round, the hop two times \
+             in three, and the application wait, which the `cluster.reads` record separates - \
+             `barriers`, `barrier_hops`, `barrier_wait_mean_us`, `apply_wait_mean_us` and their \
+             maxima, summed over the nodes and listed per node. `session` less `one` is the token \
+             check and a wait that is almost always already satisfied. The fanout arms are read \
+             against each other: `empty` against `get` is what the fan-out costs with no rows to \
+             carry, and the `fanout` record on each says how many keys, whether filtered, and the \
+             limit. `timeouts`, `late_shares` and `duplicate_shares` should be zero; a run with \
+             any is a run that dropped something.",
+        what_would_make_it_wrong:
+            "A run whose replicas ended behind, which turns the apply wait into follower lag; \
+             `lag_end` on the `replicas` record says so. A nonzero `timeouts` count, which means \
+             reads were answered with an error the closed loop then measured. Comparing the read \
+             arms against the grid or `overhead/nodes/1`, which run twelve shards on one node \
+             where these run nine over three, or the fanout arms against the hop arms, whose \
+             placement is two nodes.",
+        what_it_cannot_say:
+            "What a barrier costs over a network: three processes on loopback have no bandwidth, \
+             no congestion and no independent failure, and C10 says never to multiply a loopback \
+             number by an RTT. What a strong read costs under writes: these arms carry no write \
+             background, on purpose, so the barrier's own cost is not inside a difference that \
+             also holds follower lag; the read-under-writes arm is filed with the open-loop \
+             schedule. What a strong read costs through a leader change, which is M6's capture.",
+    },
+    Family {
         name: "retired",
         title: "The retired blended workload",
         surface: Surface::AllWorkloads,
@@ -699,6 +738,9 @@ pub fn family_for(id: &str) -> Option<&'static Family> {
     } else if id.starts_with("macro/cluster/hop/") {
         // before the wider cluster prefix, which would otherwise take these
         "cluster-hop"
+    } else if id.starts_with("macro/cluster/reads/") || id.starts_with("macro/cluster/fanout/") {
+        // the read arms, before the wider cluster prefix for the same reason
+        "cluster-reads"
     } else if id.starts_with("macro/cluster/replication/") || id == "macro/cluster/overhead/nodes/3" {
         // the three node arms are read against each other and not against the one node one,
         // whose shard count they do not share

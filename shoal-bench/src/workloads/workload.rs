@@ -185,6 +185,20 @@ pub struct ClusterOverride {
     /// A fact about the arm's construction and nothing the server reads, carried here because
     /// the override is the one thing a workload states about its server and the harness records.
     pub hop: Option<crate::model::macro_layer::HopFacts>,
+    /// How this arm's reads are served, if it is a read arm, recorded the same way
+    /// ([F41](../../../docs/src/features/read-consistency.md))
+    pub read: Option<ReadArm>,
+}
+
+/// How a read arm was built: the level it reads at, whether it carries tokens, and its fanout
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadArm {
+    /// The level every read is sent at, `one` or `quorum`
+    pub level: String,
+    /// Whether every read carries the token of the last write to its tablet
+    pub session: bool,
+    /// How the reads fan out, if this is a fanout arm
+    pub fanout: Option<crate::model::macro_layer::FanoutFacts>,
 }
 
 impl ClusterOverride {
@@ -199,6 +213,7 @@ impl ClusterOverride {
             replication_factor,
             peers: Vec::new(),
             hop: None,
+            read: None,
         }
     }
 
@@ -215,6 +230,7 @@ impl ClusterOverride {
             replication_factor,
             peers: vec![shards; peers],
             hop: None,
+            read: None,
         }
     }
 
@@ -394,6 +410,16 @@ pub trait Workload: Send + Sync {
     /// attribution before this existed still gets both.
     fn stage_profiles(&self) -> bool {
         self.profiles()
+    }
+
+    /// Whether this workload's reads are expected to find rows
+    ///
+    /// The harness refuses a run that timed reads and retrieved nothing, since that is almost
+    /// always a read arm over an empty table reporting how fast the server finds nothing. An
+    /// arm that reads keys it never wrote, on purpose, says so here and is let through
+    /// ([F41](../../../docs/src/features/read-consistency.md)).
+    fn expects_rows(&self) -> bool {
+        true
     }
 
     /// What this workload needs before it can run

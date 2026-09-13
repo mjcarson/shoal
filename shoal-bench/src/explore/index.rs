@@ -24,9 +24,10 @@
 use std::collections::BTreeMap;
 
 use shoal_top::index::{
-    Capture, ClusterFactsLite, ConfFactsLite, FamilyText, INDEX_VERSION, Index, Layer as IndexLayer,
-    HopFactsLite, HopMixLite, MacroPoint, NodeCoresLite, OfferedLoadLite, OpStats, OutcomeFactsLite,
-    ReplicaFactsLite, ScaleFactsLite, Timing, Verdict, Workload,
+    Capture, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, INDEX_VERSION, Index,
+    Layer as IndexLayer, HopFactsLite, HopMixLite, MacroPoint, NodeCoresLite, NodeReadFactsLite,
+    OfferedLoadLite, OpStats, OutcomeFactsLite, ReadFactsLite, ReplicaFactsLite, ScaleFactsLite,
+    Timing, Verdict, Workload,
 };
 
 use crate::model::macro_layer::{
@@ -485,6 +486,42 @@ pub fn cluster_facts(cluster: &ClusterFacts) -> ClusterFactsLite {
         outcomes: cluster.outcomes.as_ref().map(|outcomes| OutcomeFactsLite {
             unknown: outcomes.unknown,
             rejected: outcomes.rejected,
+        }),
+        // a read arm's waits travel whole: a barrier's cost apart from the round trip is the
+        // number the arm exists for ([F41](../../../docs/src/features/read-consistency.md))
+        reads: cluster.reads.as_ref().map(|reads| ReadFactsLite {
+            level: reads.level.clone(),
+            session: reads.session,
+            fanout: reads.fanout.as_ref().map(|fanout| FanoutFactsLite {
+                nodes: fanout.nodes,
+                keys_per_query: fanout.keys_per_query,
+                filtered: fanout.filtered,
+                limit: fanout.limit,
+                empty: fanout.empty,
+            }),
+            barriers: reads.barriers,
+            barrier_hops: reads.barrier_hops,
+            barrier_wait_mean_us: reads.barrier_wait_mean_us,
+            barrier_wait_max_us: reads.barrier_wait_max_us,
+            apply_wait_mean_us: reads.apply_wait_mean_us,
+            apply_wait_max_us: reads.apply_wait_max_us,
+            session_waits: reads.session_waits,
+            timeouts: reads.timeouts,
+            late_shares: reads.late_shares,
+            duplicate_shares: reads.duplicate_shares,
+            per_node: reads
+                .per_node
+                .iter()
+                .map(|node| NodeReadFactsLite {
+                    node: node.node.clone(),
+                    barriers: node.barriers,
+                    barrier_hops: node.barrier_hops,
+                    session_waits: node.session_waits,
+                    timeouts: node.timeouts,
+                    late_shares: node.late_shares,
+                    duplicate_shares: node.duplicate_shares,
+                })
+                .collect(),
         }),
     }
 }

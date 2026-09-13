@@ -36,7 +36,6 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use glommio::net::TcpListener;
 use glommio::{LocalExecutorBuilder, Placement};
 use openraft::error::{ClientWriteError, RaftError};
 use openraft::metrics::RaftMetrics;
@@ -1112,7 +1111,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         }));
     }
     // bind the control listener and drive inbound RPCs into this node's group, on this executor
-    let listener = TcpListener::bind(bind).map_err(|error| ServerError::ControlFailed {
+    let listener = crate::server::peer::bind_reusable(bind).map_err(|error| ServerError::ControlFailed {
         error: format!("binding the control listener on {bind}: {error}"),
     })?;
     let (inbound_tx, inbound_rx) = kanal::unbounded_async::<Inbound>();

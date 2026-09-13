@@ -1534,6 +1534,49 @@ impl<S: QuerySupport> Shoal<S> {
         Ok(response)
     }
 
+    /// Send a single query with options and wait for the response, keeping what sending it cost
+    ///
+    /// [`Shoal::send_one_stamped`] with the reads served as the options say, which is what a
+    /// benchmark arm that stamps its reads and serves them at a level uses
+    /// ([F41](../../../docs/src/features/read-consistency.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query to execute
+    /// * `options` - How the query is served, if it is a read
+    pub async fn send_one_stamped_with<Q: Into<S::QueryKinds>>(
+        &self,
+        query: Q,
+        options: &SendOptions,
+    ) -> Result<(ShoalResponse<S>, BatchStamps), Errors>
+    where
+        <S::ResponseKinds as Archive>::Archived:
+            rkyv::Deserialize<S::ResponseKinds, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        // build a query bundle with our single query
+        let queries = self.query().add(query);
+        // send it, with the options, keeping what it cost
+        let (mut stream, stamps) = self.send_stamped_with(queries, options).await?;
+        // wait for our single response
+        let response = stream
+            .next()
+            .await?
+            .ok_or(Errors::StreamAlreadyTerminated)?;
+        // check if this query succeeded
+        response.suceeded(QuerySuceededOpts::default())?;
+        Ok((response, stamps))
+    }
+
     /// Send a single query and wait for the response, keeping what sending it cost
     ///
     /// The stamps come back beside the response rather than on it, because they describe the

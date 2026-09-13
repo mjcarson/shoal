@@ -26,6 +26,7 @@
 
 pub mod cluster_hop;
 pub mod cluster_overhead;
+pub mod cluster_reads;
 pub mod cluster_replication;
 pub mod conf_sweep;
 pub mod fanout;
@@ -145,6 +146,14 @@ pub fn all() -> Vec<Box<dyn Workload>> {
     // ([F40](../../docs/src/features/replication.md))
     built.extend(
         cluster_replication::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    // the read arms, appended after the replication arms: a One, a barrier and a session read
+    // on the replicated placement, then four fan-out shapes on the factor one placement
+    // ([F41](../../docs/src/features/read-consistency.md))
+    built.extend(
+        cluster_reads::all()
             .into_iter()
             .map(|workload| Box::new(workload) as Box<dyn Workload>),
     );

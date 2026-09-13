@@ -44,6 +44,35 @@ use crate::shared::identity::NodeId;
 
 pub use crate::shared::protocol::peer::Lane;
 pub use handshake::Local;
+
+/// Bind a listener that a restart on the same port can bind again at once
+///
+/// glommio's own bind sets `SO_REUSEPORT` and nothing else, and on Linux a port with a
+/// connection still in `TIME_WAIT` refuses a new bind unless `SO_REUSEADDR` is set too. A node
+/// restarted on its own ports, or a benchmark arm run twice, would otherwise fail to bind for
+/// a minute after the last connection closed ([F41](../../../docs/src/features/read-consistency.md)).
+/// Every listener a node opens goes through here.
+///
+/// # Arguments
+///
+/// * `addr` - The address to bind
+///
+/// # Errors
+///
+/// Fails as the socket calls do.
+pub fn bind_reusable(addr: std::net::SocketAddr) -> std::io::Result<glommio::net::TcpListener> {
+    use std::os::fd::{FromRawFd, IntoRawFd};
+    // the same socket glommio would build, with the address reuse it leaves off
+    let domain = if addr.is_ipv6() { socket2::Domain::IPV6 } else { socket2::Domain::IPV4 };
+    let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    socket.set_reuse_port(true)?;
+    socket.bind(&socket2::SockAddr::from(addr))?;
+    socket.listen(1024)?;
+    // SAFETY: the descriptor is bound and listening, which is what glommio's conversion asks
+    // for, and it is owned by nothing else once it leaves the socket
+    Ok(unsafe { glommio::net::TcpListener::from_raw_fd(socket.into_raw_fd()) })
+}
 pub use link::{Frame, FrameKey, Link, LinkEvent, LinkView};
 pub use listener::{peer_acceptor, ListenerContext, ReplicateReply};
 pub use peers::{Peers, Pending};
