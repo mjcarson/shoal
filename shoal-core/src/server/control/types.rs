@@ -32,6 +32,7 @@ use openraft::declare_raft_types;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::migrate::{DataConfiguration, MoveRecord};
 use super::runtime::GlommioRuntime;
 use super::repair::{GroupRepair, QuarantinedCopy, RepairMode, RepairOutcome, RepairPhase, RepairRecord, KEPT_REPAIRS};
 use crate::server::conf::cluster::{BootstrapPolicy, Consistency};
@@ -484,6 +485,14 @@ pub struct ControlState {
     /// ([F44](../../../../docs/src/features/repair.md))
     #[serde(default)]
     pub repairs: BTreeMap<Uuid, RepairRecord>,
+    /// The replica sets that no longer follow the placement rule, by their first tablet
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    #[serde(default)]
+    pub configurations: BTreeMap<u16, DataConfiguration>,
+    /// The move operations, by identity, the newest `KEPT_MOVES` of them
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    #[serde(default)]
+    pub moves: BTreeMap<Uuid, MoveRecord>,
 }
 
 impl ControlState {
@@ -666,8 +675,8 @@ impl ControlState {
                 }
                 if self.initialized.is_some() {
                     return ControlResponse::Refused {
-                        reason: "the placement is already initialized; moving tablets between \
-                                 nodes is a migration (M9a), not a second initialization"
+                        reason: "the placement is already initialized; a replica set moves \
+                                 between nodes by a Move operation, not a second initialization"
                             .to_string(),
                     };
                 }
@@ -1462,7 +1471,7 @@ mod tests {
         // and a fresh op is refused, naming the migration
         assert!(matches!(
             state.apply(&initialize(Uuid::new_v4(), 4, vec![joiner])),
-            ControlResponse::Refused { reason } if reason.contains("M9a")
+            ControlResponse::Refused { reason } if reason.contains("Move")
         ));
         assert_eq!(state.operations.len(), 1);
     }

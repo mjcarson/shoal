@@ -450,7 +450,10 @@ rather than from the diff:
 - **Per-tablet map records and deltas.** The map is an ordered node list pushed whole, which the
   fanout spike prices at under 16 KiB for sixty-four members; per-tablet records arrive when a
   tablet can move (M9a), and a delta arrives when a whole map is too large to push.
-- **A second `Initialize`**, and placing anything on a node admitted after the first. M9a.
+- ~~**A second `Initialize`**, and placing anything on a node admitted after the first. M9a.~~
+  Built by [F45](../features/replica-migration.md): a node admitted after the placement is
+  placed by a `Move`, which brings it into a replica set under a data configuration; a second
+  `Initialize` is still refused, naming the move.
 - **Grace expiry, `Leaving`, `Removing` and removal.** A `Down` episode is minted and committed
   so that M9b has something to name; nothing acts on it.
 - **The certificate-to-node binding** the `shoal-node://<id>` SAN is written for. Q11's identity

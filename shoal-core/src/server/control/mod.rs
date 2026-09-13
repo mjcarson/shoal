@@ -23,6 +23,7 @@
 pub mod cores;
 pub mod detector;
 pub mod listener;
+pub mod migrate;
 pub mod network;
 pub mod plane;
 pub mod repair;

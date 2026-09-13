@@ -6,7 +6,10 @@
 //! [F39](../../../docs/src/features/membership.md)). At M3 it is an ordered node list and a
 //! rule rather than a table of tablets: tablet `t` belongs to `placement[t % N]` and, on that
 //! node, to shard `(t / N) % shards`, which is the rule every ring is built from and the reason
-//! a push is a few hundred bytes. Per tablet records arrive when tablets move (M9a).
+//! a push is a few hundred bytes. Since [F45](../../../docs/src/features/replica-migration.md)
+//! a replica set that moved is a [`DataConfiguration`] carried beside the rule: the rule is the
+//! default and a configuration overrides it for exactly its tablets, so a map with no moves
+//! behind it is still the list and the rule.
 //!
 //! # Invariants
 //!
@@ -27,6 +30,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use super::conf::cluster::{BootstrapPolicy, Consistency, DurationSpec};
+use super::control::migrate::{DataConfiguration, MoveRecord};
 use super::control::repair::{QuarantinedCopy, RepairRecord};
 use super::control::types::{ControlState, MemberHealth, MemberRole};
 use super::peer::handshake::{Admission, PeerAddr, Verdict};
@@ -34,7 +38,8 @@ use super::ring::{Ring, TABLET_COUNT};
 use super::shard::ShardContact;
 use super::ServerError;
 use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
-use crate::shared::protocol::admin::{QuarantinedMember, TopologyFrame, TopologyMember};
+use crate::shared::protocol::admin::{ConfiguredSet, MoveSummary, QuarantinedMember, TopologyFrame, TopologyMember};
+use uuid::Uuid;
 
 /// One member of the cluster, as the map carries it
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,18 +84,30 @@ pub struct QuorumShortfall {
 /// `nodes × shards` groups per table rather than a group per tablet - the shape the Q13 spike
 /// pointed at, since per-group heartbeats do not coalesce. The leader is preferred on the
 /// placement primary, which is the first member.
+///
+/// The identity is the hash of the table and the members the rule derived at initialization,
+/// and a move keeps it: a set that moved has the same identity over different members
+/// ([F45](../../../docs/src/features/replica-migration.md)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupSpec {
-    /// The group's identity, the hash of the table and the members
+    /// The group's identity, the hash of the table and the members the rule first derived
     pub id: GroupId,
     /// The table it serves
     pub table: TableId,
-    /// Its members, the placement primary first
+    /// Its members, the primary first
     pub members: Vec<ShardAddr>,
     /// The tablets it serves, ascending
     pub tablets: Vec<u16>,
     /// Which of this node's shards hosts it
     pub mine: u16,
+    /// Whether this node hosts it as a learner: the destination of a move not yet published
+    ///
+    /// A learner's shard builds the group so the leader's replication reaches a `Raft`, and
+    /// never initializes it or stands for its election
+    /// ([F45](../../../docs/src/features/replica-migration.md)).
+    pub learner: bool,
+    /// The move the group is under, if one is not done
+    pub transition: Option<Uuid>,
 }
 
 impl GroupSpec {
@@ -145,6 +162,14 @@ pub struct TabletMap {
     /// ([F42](../../../docs/src/features/primary-failover.md)).
     #[serde(default)]
     pub primary_failover_ms: u64,
+    /// The replica sets that no longer follow the placement rule, by first tablet ascending
+    /// ([F45](../../../docs/src/features/replica-migration.md))
+    #[serde(default)]
+    pub configurations: Vec<DataConfiguration>,
+    /// The move operations not yet done, which the destination learns from and the source
+    /// retires under ([F45](../../../docs/src/features/replica-migration.md))
+    #[serde(default)]
+    pub moves: Vec<MoveRecord>,
 }
 
 impl Default for TabletMap {
@@ -164,6 +189,8 @@ impl Default for TabletMap {
             admins: Vec::new(),
             repairs: Vec::new(),
             primary_failover_ms: 0,
+            configurations: Vec::new(),
+            moves: Vec::new(),
         }
     }
 }
@@ -237,6 +264,8 @@ impl TabletMap {
             // truncation cannot happen: a failover base is seconds, not weeks
             #[allow(clippy::cast_possible_truncation)]
             primary_failover_ms: policy.map_or(0, |policy| policy.primary_failover_after.duration().as_millis() as u64),
+            configurations: state.configurations.values().cloned().collect(),
+            moves: state.moves.values().filter(|record| !record.is_done()).cloned().collect(),
         }
     }
 
@@ -431,20 +460,21 @@ impl TabletMap {
         self.desired_rf.max(1).min(nodes)
     }
 
-    /// The replicas of a tablet, the placement primary first
+    /// The replicas of a tablet under the placement rule alone, the placement primary first
     ///
     /// Tablet `t` lives on `placement[(t + k) % N]` for `k` below the active factor, and on
     /// each of those nodes on shard `(t / N) % shards` - the same shard the primary rule picks,
     /// so a node's replica of a tablet is on the shard that would own it were the node primary
     /// ([F40](../../../docs/src/features/replication.md)). The nodes are distinct by
     /// construction, since the factor never passes the placement's size
-    /// ([C4](../../../docs/src/distributed/tablet-map.md)).
+    /// ([C4](../../../docs/src/distributed/tablet-map.md)). This is what a group's identity
+    /// is minted from; what serves the tablet now is [`TabletMap::replicas_of`].
     ///
     /// # Arguments
     ///
     /// * `tablet` - The tablet
     #[must_use]
-    pub fn replicas_of(&self, tablet: usize) -> Vec<ShardAddr> {
+    pub fn rule_replicas_of(&self, tablet: usize) -> Vec<ShardAddr> {
         let counts = self.placement_counts();
         let nodes = counts.len();
         if nodes == 0 {
@@ -462,41 +492,116 @@ impl TabletMap {
             .collect()
     }
 
+    /// The configuration overriding the rule for a tablet, if a move left one
+    ///
+    /// # Arguments
+    ///
+    /// * `tablet` - The tablet
+    #[must_use]
+    pub fn configuration_of(&self, tablet: usize) -> Option<&DataConfiguration> {
+        // truncation cannot happen: a tablet id is twelve bits
+        #[allow(clippy::cast_possible_truncation)]
+        let tablet = tablet as u16;
+        self.configurations.iter().find(|configuration| configuration.covers(tablet))
+    }
+
+    /// The move a tablet is under, if one is not done
+    ///
+    /// # Arguments
+    ///
+    /// * `tablet` - The tablet
+    #[must_use]
+    pub fn move_of(&self, tablet: usize) -> Option<&MoveRecord> {
+        // truncation cannot happen: a tablet id is twelve bits
+        #[allow(clippy::cast_possible_truncation)]
+        let tablet = tablet as u16;
+        self.moves.iter().find(|record| record.covers(tablet))
+    }
+
+    /// The member learning a tablet's groups: the destination of a move not yet published
+    ///
+    /// # Arguments
+    ///
+    /// * `tablet` - The tablet
+    #[must_use]
+    pub fn learner_of(&self, tablet: usize) -> Option<ShardAddr> {
+        self.move_of(tablet)
+            .filter(|record| !record.is_queued() && !record.is_published())
+            .map(|record| record.to)
+    }
+
+    /// The replicas of a tablet, the primary first: the configuration a move left, or the rule
+    ///
+    /// ~~Tablet `t` lives on `placement[(t + k) % N]`~~ The rule is the default; a replica set
+    /// that moved is served by the members its [`DataConfiguration`] names, on the shards it
+    /// names, under the identity the rule minted
+    /// ([F45](../../../docs/src/features/replica-migration.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `tablet` - The tablet
+    #[must_use]
+    pub fn replicas_of(&self, tablet: usize) -> Vec<ShardAddr> {
+        match self.configuration_of(tablet) {
+            Some(configuration) => configuration.members.clone(),
+            None => self.rule_replicas_of(tablet),
+        }
+    }
+
+    /// Every replica set the rule derives, keyed by the rule's members, with the tablets under it
+    ///
+    /// The sets a group's identity is minted from; a set that moved is still one set here,
+    /// under the members the rule named, and its configuration is read beside it.
+    fn rule_sets(&self) -> BTreeMap<Vec<ShardAddr>, Vec<u16>> {
+        let mut sets: BTreeMap<Vec<ShardAddr>, Vec<u16>> = BTreeMap::new();
+        for tablet in 0..TABLET_COUNT {
+            let members = self.rule_replicas_of(tablet);
+            if !members.is_empty() {
+                // truncation cannot happen: a tablet id is twelve bits
+                #[allow(clippy::cast_possible_truncation)]
+                sets.entry(members).or_default().push(tablet as u16);
+            }
+        }
+        sets
+    }
+
     /// The groups a node hosts, one per table and replica set it holds a member of
     ///
     /// Every node computes the same groups from the same map, and a shard builds only the ones
     /// whose members name its own address. Sorted by identity, so two nodes' lists line up.
+    /// A set that moved is hosted by its configuration's members under the rule's identity,
+    /// and the destination of a move not yet published hosts the set's groups as a learner
+    /// ([F45](../../../docs/src/features/replica-migration.md)).
     ///
     /// # Arguments
     ///
     /// * `me` - This node
     #[must_use]
     pub fn replica_groups(&self, me: NodeId) -> Vec<GroupSpec> {
-        // every replica set this node is in, keyed by the set, with the tablets under it
-        let mut sets: BTreeMap<Vec<ShardAddr>, Vec<u16>> = BTreeMap::new();
-        for tablet in 0..TABLET_COUNT {
-            let members = self.replicas_of(tablet);
-            if members.iter().any(|member| member.node == me) {
-                // truncation cannot happen: a tablet id is twelve bits
-                #[allow(clippy::cast_possible_truncation)]
-                sets.entry(members).or_default().push(tablet as u16);
-            }
-        }
-        // one group per table per set
-        let mut groups = Vec::with_capacity(sets.len() * self.tables.len());
-        for (members, tablets) in sets {
-            let mine = members
-                .iter()
-                .find(|member| member.node == me)
-                .map(|member| member.shard)
-                .expect("the set names this node");
+        let mut groups = Vec::new();
+        for (rule, tablets) in self.rule_sets() {
+            // the set's tablets share one configuration and one move, since both cover whole sets
+            let first = usize::from(tablets[0]);
+            let members = self.replicas_of(first);
+            let learner = self.learner_of(first).filter(|learner| learner.node == me);
+            let transition = self.move_of(first).map(|record| record.op);
+            // this node's member, or the learner's shard when it is the destination
+            let mine = match members.iter().find(|member| member.node == me) {
+                Some(member) => (member.shard, false),
+                None => match learner {
+                    Some(learner) => (learner.shard, true),
+                    None => continue,
+                },
+            };
             for (_, table) in &self.tables {
                 groups.push(GroupSpec {
-                    id: GroupId::of(*table, &members),
+                    id: GroupId::of(*table, &rule),
                     table: *table,
                     members: members.clone(),
                     tablets: tablets.clone(),
-                    mine,
+                    mine: mine.0,
+                    learner: mine.1,
+                    transition,
                 });
             }
         }
@@ -504,10 +609,11 @@ impl TabletMap {
         groups
     }
 
-    /// Every group of one table the placement derives, with its members and its tablets
+    /// Every group of one table, with its members and its tablets
     ///
-    /// What a repair record is filled with at apply: the same sets every node builds its own
-    /// groups from, over every node rather than one
+    /// What a repair or a move record is filled with at apply: the same sets every node builds
+    /// its own groups from, over every node rather than one, each under the identity the rule
+    /// minted and the members that serve it now
     /// ([F44](../../../docs/src/features/repair.md)).
     ///
     /// # Arguments
@@ -515,19 +621,13 @@ impl TabletMap {
     /// * `table` - The table
     #[must_use]
     pub fn groups_of(&self, table: TableId) -> Vec<(GroupId, Vec<ShardAddr>, Vec<u16>)> {
-        // every replica set, keyed by the set, with the tablets under it
-        let mut sets: BTreeMap<Vec<ShardAddr>, Vec<u16>> = BTreeMap::new();
-        for tablet in 0..TABLET_COUNT {
-            let members = self.replicas_of(tablet);
-            if !members.is_empty() {
-                // truncation cannot happen: a tablet id is twelve bits
-                #[allow(clippy::cast_possible_truncation)]
-                sets.entry(members).or_default().push(tablet as u16);
-            }
-        }
-        let mut groups: Vec<(GroupId, Vec<ShardAddr>, Vec<u16>)> = sets
+        let mut groups: Vec<(GroupId, Vec<ShardAddr>, Vec<u16>)> = self
+            .rule_sets()
             .into_iter()
-            .map(|(members, tablets)| (GroupId::of(table, &members), members, tablets))
+            .map(|(rule, tablets)| {
+                let members = self.replicas_of(usize::from(tablets[0]));
+                (GroupId::of(table, &rule), members, tablets)
+            })
             .collect();
         groups.sort_by_key(|(id, _, _)| *id);
         groups
@@ -544,14 +644,42 @@ impl TabletMap {
         self.replicas_of(tablet).iter().any(|member| member.node == me)
     }
 
-    /// Whether this node holds tablets under the placement
+    /// Whether this node holds tablets: under the placement, under a configuration, or as
+    /// the learner of a move
     ///
     /// # Arguments
     ///
     /// * `me` - This node
     #[must_use]
     pub fn places(&self, me: NodeId) -> bool {
-        self.placement.contains(&me)
+        self.routing_counts().iter().any(|(node, _)| *node == me)
+    }
+
+    /// Every node a ring names: the placement, then every node a configuration or a move
+    /// not yet published brings in that the placement does not, each with its shard count
+    ///
+    /// A member admitted after the placement was initialized is brought in by a move, and
+    /// routes and is routed to from then on
+    /// ([F45](../../../docs/src/features/replica-migration.md)).
+    #[must_use]
+    pub fn routing_counts(&self) -> Vec<(NodeId, u16)> {
+        let mut counts = self.placement_counts();
+        // the nodes the configurations and the moves name, in node order, once each
+        let mut extra: Vec<NodeId> = self
+            .configurations
+            .iter()
+            .flat_map(|configuration| configuration.members.iter().map(|member| member.node))
+            .chain(self.moves.iter().filter(|record| !record.is_queued()).map(|record| record.to.node))
+            .filter(|node| !self.placement.contains(node))
+            .collect();
+        extra.sort_unstable();
+        extra.dedup();
+        for node in extra {
+            if let Some(member) = self.members.get(&node) {
+                counts.push((node, member.shards));
+            }
+        }
+        counts
     }
 
     /// The placement as the ring builder takes it: each placed node with its shard count
@@ -577,7 +705,7 @@ impl TabletMap {
         if !self.places(me) {
             return Ok(None);
         }
-        Ring::with_placement(shards, &self.placement_counts(), me).map(Some)
+        Ring::with_placement(shards, &self.routing_counts(), me).map(Some)
     }
 
     /// The ring this node serves queries with: a tablet it holds a replica of is served locally
@@ -602,23 +730,22 @@ impl TabletMap {
         if !self.places(me) {
             return Ok(None);
         }
-        let mut ring = Ring::with_placement(shards, &self.placement_counts(), me)?;
-        let counts = self.placement_counts();
-        let nodes = counts.len();
+        let mut ring = Ring::with_placement(shards, &self.routing_counts(), me)?;
         for tablet in 0..TABLET_COUNT {
-            // truncation cannot happen: the modulus is a u16
-            #[allow(clippy::cast_possible_truncation)]
-            let local = ((tablet / nodes) % shards.max(1)) as u16;
+            let replicas = self.replicas_of(tablet);
+            // the shard this node's copy is on, if it holds one: the rule's, or the
+            // configuration's ([F45](../../../docs/src/features/replica-migration.md))
+            let local = replicas.iter().find(|replica| replica.node == me).map(|replica| replica.shard);
             // a copy this node holds and may serve is read here; a quarantined one is read
             // elsewhere while another holder is up, and here as the backstop, where the
             // refusal names the quarantine ([F44](../../../docs/src/features/repair.md))
-            if self.holds(me, tablet) && !self.is_quarantined(me, tablet) {
+            if let Some(local) = local.filter(|_| !self.is_quarantined(me, tablet)) {
                 ring.set_owner(tablet, local);
             } else if let Some(holder) = self.preferred_holder(tablet, None) {
                 // a tablet this node holds no copy of goes to a holder that is up, which is
                 // the primary until the primary is called down
                 if holder.node == me {
-                    ring.set_owner(tablet, local);
+                    ring.set_owner(tablet, holder.shard);
                     continue;
                 }
                 let contact = ShardContact::Remote {
@@ -628,7 +755,7 @@ impl TabletMap {
                 if let Some(index) = ring.index_of(&contact) {
                     ring.set_owner(tablet, index);
                 }
-            } else if self.holds(me, tablet) {
+            } else if let Some(local) = local {
                 ring.set_owner(tablet, local);
             }
         }
@@ -681,6 +808,26 @@ impl TabletMap {
                         .iter()
                         .find(|(_, table)| table == id)
                         .map(|(name, _)| (name.clone(), level.as_str().to_string()))
+                })
+                .collect(),
+            configurations: self
+                .configurations
+                .iter()
+                .map(|configuration| ConfiguredSet {
+                    tablets: configuration.tablets.clone(),
+                    members: configuration.members.clone(),
+                    published_at: configuration.published_at,
+                })
+                .collect(),
+            moves: self
+                .moves
+                .iter()
+                .map(|record| MoveSummary {
+                    op: record.op,
+                    tablets: record.tablets.clone(),
+                    from: record.from,
+                    to: record.to,
+                    phase: record.phase.name().to_string(),
                 })
                 .collect(),
         }
@@ -1078,5 +1225,135 @@ mod tests {
         let (map, _) = placed(&[1, 1], 3);
         assert_eq!(map.active_rf(), 2);
         assert!((0..TABLET_COUNT).all(|tablet| map.replicas_of(tablet).len() == 2));
+    }
+
+    /// A configuration overrides the rule for exactly its tablets and keeps the group's
+    /// identity, a member outside the placement is placed by one, and a move's destination
+    /// hosts the set as a learner until the move is published
+    ///
+    /// Three placed nodes at a factor of three and a fourth member the placement never named:
+    /// one replica set is moved from node two to node three. Under the move the fourth node
+    /// derives the set's groups as learner specs on the shard the record names, is placed,
+    /// and holds nothing; under the configuration it is a member, node two is not, every other
+    /// set is where the rule puts it, and every group's identity is the one the rule minted
+    /// ([F45](../../../docs/src/features/replica-migration.md)).
+    #[test]
+    fn a_configuration_overrides_the_rule_and_keeps_the_id() {
+        use crate::server::control::migrate::{DataConfiguration, GroupMove, MovePhase, MoveRecord};
+        let (mut map, nodes) = placed(&[1, 1, 1], 3);
+        // a fourth member, admitted after the placement, with two shards
+        let fourth = NodeId::mint();
+        map.members.insert(
+            fourth,
+            MapMember {
+                node: fourth,
+                client: "c".to_string(),
+                data: "d".to_string(),
+                control: "e".to_string(),
+                shards: 2,
+                role: MemberRole::Learner,
+                health: MemberHealth::Up,
+                incarnation: 1,
+                shards_failed: Vec::new(),
+                quarantined: Vec::new(),
+            },
+        );
+        assert!(!map.places(fourth));
+        assert!(map.ring_for(fourth, 2).expect("a ring").is_none());
+        // the set node two leads, and its tablets, from the groups the rule derives
+        let before = map.groups_of(TableId::of("Row"));
+        let (id, expected, tablets) = before
+            .iter()
+            .find(|(_, members, _)| members[0].node == nodes[2])
+            .cloned()
+            .expect("node two leads a set");
+        assert_eq!(expected.len(), 3);
+        let from = expected[0];
+        let to = ShardAddr::new(fourth, 1);
+        let mut target = expected.clone();
+        target[0] = to;
+        // the move, planned: the fourth node learns the set's groups on the shard named
+        let record = MoveRecord {
+            op: uuid::Uuid::new_v4(),
+            tablets: tablets.clone(),
+            from,
+            to,
+            expected: expected.clone(),
+            target: target.clone(),
+            phase: MovePhase::Planned,
+            groups: [(id, GroupMove::default())].into_iter().collect(),
+            principal: String::new(),
+            requested_at: map.version,
+            outcome: None,
+        };
+        map.moves.push(record.clone());
+        assert!(map.places(fourth));
+        assert!(!map.holds(fourth, usize::from(tablets[0])));
+        assert_eq!(map.replicas_of(usize::from(tablets[0])), expected);
+        assert_eq!(map.learner_of(usize::from(tablets[0])), Some(to));
+        let learners = map.replica_groups(fourth);
+        assert_eq!(learners.len(), 1, "one table, one set: {learners:?}");
+        assert!(learners[0].learner);
+        assert_eq!(learners[0].id, id);
+        assert_eq!(learners[0].mine, 1);
+        assert_eq!(learners[0].members, expected);
+        assert_eq!(learners[0].transition, Some(record.op));
+        assert!(!learners[0].is_primary(fourth));
+        // the rings route: the fourth node is in them, and its learner tablets go to the source
+        let ring = map.read_ring_for(fourth, 2).expect("a ring").expect("placed by the move");
+        let key = (u64::from(tablets[0])) << (u64::BITS - super::super::ring::TABLET_BITS);
+        assert_eq!(
+            ring.find_shard(key).contact,
+            ShardContact::Remote {
+                node: from.node,
+                shard: from.shard
+            }
+        );
+        // the source still hosts the set as a member, under the move
+        let sources = map.replica_groups(nodes[2]);
+        let source = sources.iter().find(|spec| spec.id == id).expect("the source hosts it");
+        assert!(!source.learner);
+        assert_eq!(source.transition, Some(record.op));
+        // published: the configuration overrides the rule for the set's tablets alone
+        map.moves.clear();
+        map.configurations.push(DataConfiguration {
+            tablets: tablets.clone(),
+            members: target.clone(),
+            configs: [(id, 12)].into_iter().collect(),
+            published_at: map.version + 1,
+        });
+        for tablet in 0..TABLET_COUNT {
+            // truncation cannot happen: a tablet id is twelve bits
+            #[allow(clippy::cast_possible_truncation)]
+            let moved = tablets.contains(&(tablet as u16));
+            assert_eq!(map.replicas_of(tablet) == target, moved, "tablet {tablet}");
+            assert_eq!(map.rule_replicas_of(tablet) == expected, moved, "tablet {tablet}");
+            assert_eq!(map.holds(fourth, tablet), moved);
+            assert_eq!(map.holds(nodes[2], tablet), !moved);
+        }
+        // the identity is the rule's, on every node, and the members are the target's
+        let after = map.groups_of(TableId::of("Row"));
+        assert_eq!(after.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(), before.iter().map(|(id, _, _)| *id).collect::<Vec<_>>());
+        let moved = after.iter().find(|(found, _, _)| *found == id).expect("the set is still there");
+        assert_eq!(moved.1, target);
+        assert_eq!(moved.2, tablets);
+        let hosted = map.replica_groups(fourth);
+        assert_eq!(hosted.len(), 1);
+        assert!(!hosted[0].learner);
+        assert_eq!(hosted[0].members, target);
+        assert!(hosted[0].is_primary(fourth));
+        assert_eq!(hosted[0].transition, None);
+        assert!(map.replica_groups(nodes[2]).iter().all(|spec| spec.id != id));
+        // the fourth node reads its copy on its own shard; node two sends there
+        let ring = map.read_ring_for(fourth, 2).expect("a ring").expect("placed");
+        assert_eq!(ring.find_shard(key).contact, ShardContact::Local(1));
+        let ring = map.read_ring_for(nodes[2], 1).expect("a ring").expect("placed");
+        assert_eq!(ring.find_shard(key).contact, ShardContact::Remote { node: fourth, shard: 1 });
+        assert_eq!(map.preferred_holder(usize::from(tablets[0]), None), Some(to));
+        // and the frame carries the configuration
+        let frame = map.frame();
+        assert_eq!(frame.configurations.len(), 1);
+        assert_eq!(frame.configurations[0].members, target);
+        assert!(frame.moves.is_empty());
     }
 }

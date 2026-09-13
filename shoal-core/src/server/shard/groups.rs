@@ -365,8 +365,13 @@ where
                 replication.tablets.insert((spec.table, *tablet), spec.id);
             }
             if let Some(existing) = replication.groups.get_mut(&spec.id) {
-                // the same identity is the same table over the same members; the tablets are
-                // the same too, since the identity is a function of the members
+                // the same identity is the same table over the same tablets; the members may
+                // have moved under it, and a learner may have become a member, which the
+                // raft already knows from its own log - the spec refreshes in place and the
+                // handle is never rebuilt ([F45](../../../../docs/src/features/replica-migration.md))
+                if existing.spec.members != spec.members || existing.spec.learner != spec.learner {
+                    event!(Level::INFO, msg = "a tablet group's members moved under it", group = %spec.id, members = ?spec.members, learner = spec.learner);
+                }
                 existing.spec = spec;
                 continue;
             }
@@ -2239,7 +2244,8 @@ fn spawn_group_start<D: ShoalDatabase>(
     previous: Option<Raft<DataConfig, GroupMachine<D>>>,
 ) {
     let addr = ShardAddr::new(me, spec.mine);
-    let primary = spec.is_primary(me);
+    // a learner is never the primary, whatever slot the target puts it in
+    let primary = spec.is_primary(me) && !spec.learner;
     glommio::spawn_local(async move {
         // the old handle first, whole, so two cores never share one log
         if let Some(previous) = previous {
@@ -2303,6 +2309,13 @@ async fn start_group<D: ShoalDatabase>(
         Err(error) => return Err((group, format!("asking whether the group is initialized: {error}"))),
     };
     let members: BTreeMap<ShardAddr, ShardAddr> = spec.members.iter().map(|member| (*member, *member)).collect();
+    // a learner initializes nothing and elects nobody: the group exists on its members, and
+    // the leader's replication is what brings this copy up
+    // ([F45](../../../../docs/src/features/replica-migration.md))
+    if spec.learner {
+        event!(Level::INFO, msg = "built a tablet group as its learner", group = %group, members = spec.members.len());
+        return Ok((group, raft));
+    }
     if !initialized && (primary || spec.members.len() == 1) {
         if let Err(error) = raft.initialize(members.clone()).await {
             event!(Level::DEBUG, msg = "a group was initialized already", group = %group, %error);
