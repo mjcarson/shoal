@@ -164,6 +164,8 @@ pub struct ClusterBuilder {
     catchup_lag: Option<u64>,
     /// How long one phase of a move may take, in milliseconds, if shortened
     migration_timeout_ms: Option<u64>,
+    /// How long a write's identity may be retried within, in milliseconds, if shortened
+    retry_window_ms: Option<u64>,
 }
 
 impl ClusterBuilder {
@@ -416,6 +418,17 @@ impl ClusterBuilder {
     /// * `timeout` - The deadline
     pub fn migration_timeout(mut self, timeout: Duration) -> Self {
         self.migration_timeout_ms = Some(timeout.as_millis() as u64);
+        self
+    }
+
+    /// Shorten how long a write's identity may be retried within
+    /// ([F45](../../../docs/src/features/replica-migration.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - The window
+    pub fn retry_window(mut self, window: Duration) -> Self {
+        self.retry_window_ms = Some(window.as_millis() as u64);
         self
     }
 
@@ -755,6 +768,7 @@ impl Cluster {
             retire_after_ms: None,
             catchup_lag: None,
             migration_timeout_ms: None,
+            retry_window_ms: None,
             snapshot_timeout_ms: None,
             snapshot_chunk_bytes: None,
             bulk_queue_bytes: None,
@@ -1423,6 +1437,7 @@ fn build_membership_cluster(
             retire_after_ms: builder.retire_after_ms,
             catchup_lag: builder.catchup_lag,
             migration_timeout_ms: builder.migration_timeout_ms,
+            retry_window_ms: builder.retry_window_ms,
             move_crash_at: None,
         });
     }

@@ -1163,6 +1163,10 @@ async fn cluster_server_child() {
             if let Some(ms) = staged.snapshot_timeout_ms {
                 replication.snapshot_timeout = Duration::from_millis(ms).into();
             }
+            // the retry window ([F45](../../docs/src/features/replica-migration.md))
+            if let Some(ms) = staged.retry_window_ms {
+                replication.retry_window = Duration::from_millis(ms).into();
+            }
             block = block.replication(replication);
             if let Some(bytes) = staged.bulk_queue_bytes {
                 block.transport.bulk_queue_bytes = bytes;
@@ -9062,6 +9066,90 @@ async fn shared_wal_cleanup_preserves_other_tablets() -> Result<(), FixtureError
         }
         assert!(Instant::now() < deadline, "the segments holding the retired group's frames were never reclaimed: {remaining:?} of {holding:?}");
     }
+    for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A retry identity survives a checkpoint and a move, and one past the window is refused (C5 M9a)
+///
+/// A note is written under a time-ordered identity through the leader of its set, the leader
+/// checkpoints past it, and the set is moved from node two to node three. A retry of the
+/// identity through the destination and through the leader is the original result, once: the
+/// row still holds what the first write put there. The identity under a changed payload is
+/// refused by name. An identity minted before the window is `IdentityExpired` through every
+/// node, and a fresh identity that is not time-ordered is applied
+/// ([F45](../../docs/src/features/replica-migration.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_identity_survives_snapshot_and_migration() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(2))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .migration_timeout(Duration::from_secs(300))
+            .checkpoint_entries(8)
+            .retained_entries(16)
+            .retry_window(Duration::from_secs(30)),
+    )
+    .await?;
+    let (key, group) = key_led_by(&mut cluster, "Note", 0, 9700)?;
+    let keys = note_keys_in_group(&mut cluster, &group, 9700, 6)?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    // the write under a time-ordered identity, answered once
+    let identity = uuid::Uuid::now_v7();
+    let options = SendOptions::new().identity(identity);
+    write_note_as(&addr0, key, "first", &options).await?;
+    for other in &keys[1..] {
+        write_note(&addr0, *other, "filler").await?;
+    }
+    // checkpointed past it on the leader, so the identity lives in the sidecar and the trailer
+    for round in 0..3u32 {
+        for other in &keys[1..] {
+            write_note(&addr0, *other, &format!("filler-{round}")).await?;
+        }
+        compact_now(&mut cluster, 0, "Note")?;
+    }
+    wait_checkpointed(&mut cluster, 0, "Note", Duration::from_secs(30))?;
+    // the set moved to node three
+    let op = move_as_process(&mut cluster, 0, key, 2, 3)?;
+    let record = wait_move_done_via(&mut cluster, 0, op, Duration::from_secs(150))?;
+    assert_eq!(record["outcome"], serde_json::json!("Moved"), "{record}");
+    let addr3 = cluster.node(3).endpoints.client.to_string();
+    wait_note(&addr3, key, Some("first"), Duration::from_secs(20)).await?;
+    // a retry through the destination and through the leader is the original result, once
+    let retried = write_note_as(&addr3, key, "first", &options).await?;
+    assert!(retried.suceeded(shoal::client::QuerySuceededOpts::default()).is_ok());
+    let retried = write_note_as(&addr0, key, "first", &options).await?;
+    assert!(retried.suceeded(shoal::client::QuerySuceededOpts::default()).is_ok());
+    // and a changed payload under the same identity is refused by name
+    let reused = write_note_as(&addr3, key, "second", &options).await;
+    match reused {
+        Err(shoal::client::Errors::Server { msg, .. }) => assert!(msg.contains("reused"), "{msg}"),
+        Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => {}
+        other => panic!("a reused identity with another payload was answered {other:?}"),
+    }
+    wait_note(&addr3, key, Some("first"), Duration::from_secs(10)).await?;
+    wait_note(&addr0, key, Some("first"), Duration::from_secs(10)).await?;
+    // an identity minted before the window is expired through every node
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("after the epoch");
+    let stale = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, now.as_secs() - 120, 0));
+    let expired = SendOptions::new().identity(stale);
+    for node in [0, 1, 3] {
+        let addr = cluster.node(node).endpoints.client.to_string();
+        let answered = write_note_as(&addr, key, "late", &expired).await;
+        assert_eq!(failure_code(&answered), Some(ErrorCode::IdentityExpired), "through node {node}: {answered:?}");
+    }
+    wait_note(&addr3, key, Some("first"), Duration::from_secs(10)).await?;
+    // a fresh identity that is not time-ordered is applied
+    let random = SendOptions::new().identity(uuid::Uuid::new_v4());
+    write_note_as(&addr3, key, "random", &random).await?;
+    wait_note(&addr0, key, Some("random"), Duration::from_secs(10)).await?;
+    wait_digests_equal(&mut cluster, &[0, 1, 3], "Note", Duration::from_secs(30))?;
     for id in 0..4 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }

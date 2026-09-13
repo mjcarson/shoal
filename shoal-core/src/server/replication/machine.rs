@@ -120,6 +120,38 @@ pub struct MachineState {
     /// Whether the pending install is a repair's, whose merged tail has to be merged again
     /// once it lands ([F44](../../../../docs/src/features/repair.md))
     pub repair_pending: bool,
+    /// Every membership applied since the checkpoint, oldest first, so a snapshot cut between
+    /// the checkpoint and the applied position carries the membership as of its boundary
+    ///
+    /// A cut's manifest with a membership newer than its boundary makes the receiver install a
+    /// membership the entry for which arrives next, which openraft refuses as going backward
+    /// ([F45](../../../../docs/src/features/replica-migration.md)).
+    pub memberships: VecDeque<StoredMembershipOf<DataConfig>>,
+    /// The newest time-ordered identity this replica has forgotten, in milliseconds since the
+    /// epoch; zero while nothing time-ordered was ever evicted
+    ///
+    /// An unknown identity minted before it might be one whose first result is gone, so the
+    /// proposer refuses it by name rather than applying it as new. Carried by the checkpoint
+    /// and by a snapshot's manifest, so a copy built from either refuses what its source
+    /// would ([F45](../../../../docs/src/features/replica-migration.md)).
+    pub expired_before: u64,
+}
+
+/// The millisecond a time-ordered identity was minted at, or none for one that is not
+///
+/// # Arguments
+///
+/// * `request` - The identity
+#[must_use]
+pub fn identity_ms(request: &RequestId) -> Option<u64> {
+    let uuid = uuid::Uuid::from_bytes(request.bundle);
+    if uuid.get_version_num() != 7 {
+        return None;
+    }
+    // a version 7 identity's first forty-eight bits are the millisecond it was minted at,
+    // read as they are rather than through a conversion that rounds its sub-millisecond bits
+    let bytes = request.bundle;
+    Some(u64::from_be_bytes([0, 0, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]]))
 }
 
 impl MachineState {
@@ -156,7 +188,80 @@ impl MachineState {
             quarantined: None,
             hold_checkpoint_until: None,
             repair_pending: false,
+            memberships: VecDeque::new(),
+            expired_before: 0,
         }
+    }
+
+    /// Note a membership applied, keeping the ones a cut between the checkpoint and here may need
+    ///
+    /// # Arguments
+    ///
+    /// * `membership` - The membership, at the entry it was applied from
+    pub fn note_membership(&mut self, membership: StoredMembershipOf<DataConfig>) {
+        self.membership = membership.clone();
+        self.memberships.push_back(membership);
+        // what the checkpoint already covers is never asked for again
+        let checkpoint = self.checkpoint_index();
+        while self.memberships.len() > 1 && self.memberships.front().is_some_and(|kept| kept.log_id().as_ref().is_some_and(|log_id| log_id.index <= checkpoint)) {
+            self.memberships.pop_front();
+        }
+    }
+
+    /// The membership as of an index: the newest applied at or below it
+    ///
+    /// The checkpoint's membership when nothing newer applied at or below the index; a snapshot
+    /// cut at a boundary carries this, never the membership applied since
+    /// ([F45](../../../../docs/src/features/replica-migration.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The boundary
+    #[must_use]
+    pub fn membership_at(&self, index: u64) -> StoredMembershipOf<DataConfig> {
+        self.memberships
+            .iter()
+            .rev()
+            .find(|membership| membership.log_id().as_ref().is_none_or(|log_id| log_id.index <= index))
+            .cloned()
+            .unwrap_or_else(|| self.checkpoint_membership.clone())
+    }
+
+    /// Remember a request's result, forgetting the oldest once the bound is passed
+    ///
+    /// The one way into the retry table: an eviction of a time-ordered identity moves
+    /// `expired_before` to its timestamp, so a retry of anything at least that old is refused
+    /// rather than applied twice ([F45](../../../../docs/src/features/replica-migration.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The identity
+    /// * `remembered` - What applying it produced
+    pub fn remember(&mut self, request: RequestId, remembered: Remembered) {
+        if let Some((evicted, _)) = self.dedup.push(request, remembered) {
+            if let Some(minted) = identity_ms(&evicted) {
+                self.expired_before = self.expired_before.max(minted);
+            }
+        }
+    }
+
+    /// Whether an identity is older than the group promises to remember
+    ///
+    /// A time-ordered identity minted before the window, or before the newest identity this
+    /// replica forgot; an identity that is not time-ordered expires never, and is applied as
+    /// new once forgotten, as before ([F45](../../../../docs/src/features/replica-migration.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The identity
+    /// * `now_ms` - The proposer's clock, in milliseconds since the epoch
+    /// * `window_ms` - The retry window, in milliseconds
+    #[must_use]
+    pub fn is_expired(&self, request: &RequestId, now_ms: u64, window_ms: u64) -> bool {
+        let Some(minted) = identity_ms(request) else {
+            return false;
+        };
+        minted < now_ms.saturating_sub(window_ms) || minted < self.expired_before
     }
 
     /// Whether the checkpoint is held where it is for a repair stream
@@ -435,4 +540,84 @@ impl<D: ShoalDatabase> RaftStateMachine<DataConfig> for GroupMachine<D> {
 #[must_use]
 pub fn no_membership() -> StoredMembershipOf<DataConfig> {
     StoredMembership::default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::replication::types::{CommandResult, ResultKind};
+    use crate::server::wal::GroupCheckpoint;
+
+    /// A time-ordered identity minted at a moment, as a request id
+    ///
+    /// # Arguments
+    ///
+    /// * `ms` - Milliseconds since the epoch
+    /// * `index` - The write's index in its bundle
+    fn minted_at(ms: u64, index: u64) -> RequestId {
+        let timestamp = uuid::Timestamp::from_unix(uuid::NoContext, ms / 1000, u32::try_from((ms % 1000) * 1_000_000).unwrap_or(0));
+        RequestId {
+            bundle: *uuid::Uuid::new_v7(timestamp).as_bytes(),
+            index,
+        }
+    }
+
+    /// A remembered result
+    fn remembered(applied: u64) -> Remembered {
+        Remembered {
+            digest: applied,
+            result: CommandResult {
+                kind: ResultKind::Insert,
+                ok: true,
+            },
+            applied,
+        }
+    }
+
+    /// An identity older than the window, or than the newest identity forgotten, is expired;
+    /// one that is not time-ordered never is; the checkpoint carries the watermark (F45)
+    #[test]
+    fn an_identity_past_the_window_is_expired() {
+        let now = 1_800_000_000_000u64;
+        let window = 300_000u64;
+        let mut state = MachineState::at(None, no_membership(), Vec::new());
+        // fresh within the window, and old past it
+        assert_eq!(identity_ms(&minted_at(now, 0)), Some(now));
+        assert!(!state.is_expired(&minted_at(now - 1_000, 0), now, window));
+        assert!(!state.is_expired(&minted_at(now - window + 1_000, 0), now, window));
+        assert!(state.is_expired(&minted_at(now - window - 1_000, 0), now, window));
+        // an identity that is not time-ordered expires never
+        let random = RequestId {
+            bundle: *uuid::Uuid::new_v4().as_bytes(),
+            index: 0,
+        };
+        assert_eq!(identity_ms(&random), None);
+        assert!(!state.is_expired(&random, now, window));
+        // nothing forgotten yet: a recent unknown identity is not expired
+        assert_eq!(state.expired_before, 0);
+        // the table filled past its bound forgets the oldest, which moves the watermark
+        for at in 0..=REMEMBERED_REQUESTS as u64 {
+            state.remember(minted_at(now - 100_000 + at, at), remembered(at));
+        }
+        assert_eq!(state.dedup.len(), REMEMBERED_REQUESTS);
+        assert_eq!(state.expired_before, now - 100_000, "the oldest identity's time is the watermark");
+        // an unknown identity minted before the watermark is expired even inside the window
+        assert!(state.is_expired(&minted_at(now - 100_001, 7), now, window));
+        assert!(!state.is_expired(&minted_at(now - 99_000, 7), now, window));
+        // a forgotten identity that was not time-ordered moves nothing: remembered first, it
+        // is the first forgotten once the table fills, and the watermark stays where it was
+        let mut mixed = MachineState::at(None, no_membership(), Vec::new());
+        mixed.remember(random, remembered(9));
+        for at in 0..REMEMBERED_REQUESTS as u64 {
+            mixed.remember(minted_at(now + at, at), remembered(at));
+        }
+        assert_eq!(mixed.dedup.len(), REMEMBERED_REQUESTS);
+        assert!(mixed.dedup.peek(&random).is_none(), "the random identity was kept");
+        assert_eq!(mixed.expired_before, 0);
+        // the checkpoint carries the watermark, and a file without it seeds zero
+        let checkpoint = GroupCheckpoint::new(None, &no_membership()).expired_before(state.expired_before);
+        assert_eq!(checkpoint.expired_before, now - 100_000);
+        let without: GroupCheckpoint = serde_json::from_str("{\"applied\":null,\"membership_at\":null,\"configs\":[],\"members\":[]}").expect("an old file decodes");
+        assert_eq!(without.expired_before, 0);
+    }
 }

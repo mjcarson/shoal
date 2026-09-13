@@ -1255,8 +1255,8 @@ impl<S: QuerySupport> Shoal<S> {
                     "bundle {query_id} is still in flight on this client; a retry waits for its last try to end"
                 )));
             }
-            // try to generate a unique query id
-            *query_id = Uuid::new_v4();
+            // try to generate a unique query id, time-ordered like every bundle identity
+            *query_id = Uuid::now_v7();
         }
         // return our channels
         Ok((tx, rx))
@@ -1541,8 +1541,9 @@ impl<S: QuerySupport> Shoal<S> {
                 >,
             >,
     {
-        // one identity for every try, serialized once
-        let identity = options.identity.unwrap_or_else(Uuid::new_v4);
+        // one identity for every try, serialized once: time-ordered, so a group that forgot it
+        // can say so by its age ([F45](../../../docs/src/features/replica-migration.md))
+        let identity = options.identity.unwrap_or_else(Uuid::now_v7);
         queries.id = identity;
         let archived = rkyv::to_bytes::<_>(&queries)?;
         let budget = options.retry;
@@ -1913,8 +1914,8 @@ impl<S: QuerySupport> Shoal<S> {
         &self,
         options: SendOptions,
     ) -> Result<(ShoalQueryStream<S>, ShoalResultStream<S>), Errors> {
-        // generate a random ID to override all of the ids used in our queries
-        let mut id = Uuid::new_v4();
+        // generate a time-ordered ID to override all of the ids used in our queries
+        let mut id = Uuid::now_v7();
         // start tracking this response
         let (response_tx, response_rx) = self.track_response(&mut id, false)?;
         // build a new shoal result stream
@@ -1951,8 +1952,8 @@ impl<S: QuerySupport> Shoal<S> {
     pub fn stream_unordered(
         &self,
     ) -> Result<(ShoalQueryStream<S>, ShoalUnorderedResultStream<S>), Errors> {
-        // generate a random ID to override all of the ids used in our queries
-        let mut id = Uuid::new_v4();
+        // generate a time-ordered ID to override all of the ids used in our queries
+        let mut id = Uuid::now_v7();
         // start tracking this response
         let (response_tx, response_rx) = self.track_response(&mut id, false)?;
         // build a new shoal result stream

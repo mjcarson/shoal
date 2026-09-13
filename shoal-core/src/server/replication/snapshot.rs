@@ -146,6 +146,11 @@ pub struct SnapshotManifest {
     pub checksum: u64,
     /// How many remembered requests the trailer holds
     pub retries: u32,
+    /// The newest time-ordered identity the sender had forgotten, in milliseconds since the
+    /// epoch, so the receiver refuses what the sender would
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    #[serde(default)]
+    pub expired_before: u64,
 }
 
 /// The header of a snapshot file
@@ -691,6 +696,7 @@ mod tests {
                 total,
                 checksum,
                 retries: 1,
+                expired_before: 0,
             };
             verify(&path, &manifest).await.expect("the file does not verify");
             // the checksum is the same however the bytes are chunked

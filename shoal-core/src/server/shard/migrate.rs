@@ -396,8 +396,8 @@ fn step(progress: &mut GroupMove, phase: MovePhase) {
     progress.phase = phase;
 }
 
-/// Milliseconds since the epoch, for the record's timings
-fn now_ms() -> u64 {
+/// Milliseconds since the epoch, for the record's timings and an identity's age
+pub(super) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))

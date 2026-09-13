@@ -2,6 +2,7 @@
 
 mod gather;
 mod groups;
+pub use groups::membership_as_of;
 pub mod migrate;
 mod reads;
 pub mod repair;

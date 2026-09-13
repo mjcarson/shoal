@@ -78,6 +78,13 @@ pub enum ErrorCode {
     ResponseTooLarge = 20,
     /// This request is larger than the frame bound the connection agreed on - reserved
     RequestTooLarge = 21,
+    /// The request's identity is older than the group promises to remember
+    ///
+    /// A definite refusal, judged before anything is proposed: a time-ordered identity
+    /// minted before the retry window, or before the newest identity the group has
+    /// forgotten, is answered by name rather than applied as new - a retry that late might be
+    /// the write's second effect ([F45](../../../../docs/src/features/replica-migration.md)).
+    IdentityExpired = 22,
     /// The server is over capacity and did not run this query
     ///
     /// A definite refusal: nothing accepted the query, so a write behind it did not apply. Sent
@@ -179,6 +186,7 @@ impl ErrorCode {
             12 => ErrorCode::CorruptArchive,
             20 => ErrorCode::ResponseTooLarge,
             21 => ErrorCode::RequestTooLarge,
+            22 => ErrorCode::IdentityExpired,
             30 => ErrorCode::Shedding,
             31 => ErrorCode::Timeout,
             32 => ErrorCode::OutcomeUnknown,
@@ -210,6 +218,7 @@ impl ErrorCode {
             ErrorCode::CorruptArchive => "CorruptArchive",
             ErrorCode::ResponseTooLarge => "ResponseTooLarge",
             ErrorCode::RequestTooLarge => "RequestTooLarge",
+            ErrorCode::IdentityExpired => "IdentityExpired",
             ErrorCode::Shedding => "Shedding",
             ErrorCode::Timeout => "Timeout",
             ErrorCode::OutcomeUnknown => "OutcomeUnknown",

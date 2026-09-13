@@ -204,6 +204,9 @@ pub struct StagedCluster {
     /// A move phase the node's driver exits the process right after committing, if armed
     #[serde(default)]
     pub move_crash_at: Option<String>,
+    /// How long a write's identity may be retried within, in milliseconds, if the test shortened it
+    #[serde(default)]
+    pub retry_window_ms: Option<u64>,
 }
 
 /// The endpoints a child bound, and the identity it reported

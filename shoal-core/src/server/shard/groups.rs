@@ -456,6 +456,9 @@ where
                 event!(Level::DEBUG, msg = "seeded a group's retry table from its sidecar", group = %spec.id, entries = seed.len());
             }
             let mut machine_state = MachineState::at(checkpoint, membership, seed);
+            // what the checkpoint says this copy had forgotten
+            // ([F45](../../../../docs/src/features/replica-migration.md))
+            machine_state.expired_before = replication.checkpoint.get(spec.id).map_or(0, |point| point.expired_before);
             // a received snapshot past the checkpoint, which openraft installs as it builds
             // the group ([F43](../../../../docs/src/features/node-recovery.md))
             machine_state.pending_install = replication.pending_installs.remove(&spec.id);
@@ -537,9 +540,9 @@ where
         let table = slot.table;
         let tablets = slot.spec.tablets.clone();
         // the state a restart would find: the checkpoint, and the file pending past it
-        let (checkpoint, membership, quarantined) = {
+        let (checkpoint, membership, quarantined, expired_before) = {
             let state = slot.state.borrow();
-            (state.checkpoint.clone(), state.checkpoint_membership.clone(), state.quarantined)
+            (state.checkpoint.clone(), state.checkpoint_membership.clone(), state.quarantined, state.expired_before)
         };
         let seed = match checkpoint.as_ref().and_then(|point| replication.checkpoint.get(group).map(|file| (point, file))) {
             Some((point, file)) if file.applied.as_ref() == Some(point) => replication.retries.seed_for(group, file),
@@ -549,6 +552,7 @@ where
         machine_state.pending_install = Some((path, manifest));
         machine_state.repair_pending = true;
         machine_state.quarantined = quarantined;
+        machine_state.expired_before = expired_before;
         let state = Rc::new(RefCell::new(machine_state));
         slot.state = state.clone();
         slot.snapshot = None;
@@ -789,7 +793,7 @@ where
                 // a blank or a membership entry moves the applied position and nothing else
                 EntryPayload::Blank => None,
                 EntryPayload::Membership(membership) => {
-                    state.borrow_mut().membership = StoredMembership::new(Some(log_id.clone()), membership.clone());
+                    state.borrow_mut().note_membership(StoredMembership::new(Some(log_id.clone()), membership.clone()));
                     None
                 }
                 EntryPayload::Normal(command) if command.scrub_op().is_some() => {
@@ -820,7 +824,7 @@ where
                                     result,
                                     applied: log_id.index,
                                 };
-                                state.borrow_mut().dedup.put(command.request, remembered);
+                                state.borrow_mut().remember(command.request, remembered);
                                 Some(ApplyOutcome::Applied(result))
                             }
                             ApplyStep::Refused(reason) => Some(ApplyOutcome::Refused(reason)),
@@ -1061,14 +1065,28 @@ where
             ));
             return self.answer_proposal(meta, table, tablet, None, outcome, 0).await;
         }
+        // an identity older than the group promises to remember is refused before anything
+        // is proposed, so the log never carries a retry that might be a second effect
+        // ([F45](../../../../docs/src/features/replica-migration.md))
+        let request = RequestId {
+            bundle: *meta.id.as_bytes(),
+            index: meta.index as u64,
+        };
+        // truncation cannot happen: a retry window is minutes, not weeks
+        #[allow(clippy::cast_possible_truncation)]
+        let window_ms = cluster.replication.retry_window.duration().as_millis() as u64;
+        if group.state.borrow().is_expired(&request, super::migrate::now_ms(), window_ms) {
+            let outcome = ProposalOutcome::Expired(format!(
+                "the identity of this write is older than the {:?} retry window, or older than an identity group {id} has forgotten; a retry this late is not answered its first result",
+                cluster.replication.retry_window.duration()
+            ));
+            return self.answer_proposal(meta, table, tablet, None, outcome, 0).await;
+        }
         group.pending_bytes += bytes;
         let command = Command {
             table: table.table_id(),
             tablet,
-            request: RequestId {
-                bundle: *meta.id.as_bytes(),
-                index: meta.index as u64,
-            },
+            request,
             payload,
         };
         let raft = group.raft.clone();
@@ -1130,7 +1148,7 @@ where
             }
             match &outcome {
                 ProposalOutcome::Unknown(_) => replication.stats.unknown += 1,
-                ProposalOutcome::Shed(_) | ProposalOutcome::NotLeader(_) | ProposalOutcome::Failed(_) => {
+                ProposalOutcome::Shed(_) | ProposalOutcome::NotLeader(_) | ProposalOutcome::Failed(_) | ProposalOutcome::Expired(_) => {
                     replication.stats.rejected += 1;
                 }
                 ProposalOutcome::Answered {
@@ -1185,6 +1203,9 @@ where
             }
             ProposalOutcome::Failed(msg) => {
                 D::ClientType::failed(table, id, index, end, ResponseError::new(ErrorCode::Unavailable, msg))
+            }
+            ProposalOutcome::Expired(msg) => {
+                D::ClientType::failed(table, id, index, end, ResponseError::new(ErrorCode::IdentityExpired, msg))
             }
         };
         meta.stamps.mark_exec_done();
@@ -1597,7 +1618,9 @@ where
             }
             if state.checkpoint_index() < last.index {
                 state.checkpoint = Some(last.clone());
-                state.checkpoint_membership = state.membership.clone();
+                // the membership as of the checkpoint, not the one applied since it
+                // ([F45](../../../../docs/src/features/replica-migration.md))
+                state.checkpoint_membership = state.membership_at(last.index);
                 state.checkpoint_durable = false;
                 moved = true;
             }
@@ -1652,7 +1675,8 @@ where
                 file.groups.insert(
                     id.to_string(),
                     GroupCheckpoint::new(Some(applied.clone()), &state.checkpoint_membership)
-                        .retries(applied.index, state.retry_floor()),
+                        .retries(applied.index, state.retry_floor())
+                        .expired_before(state.expired_before),
                 );
             }
         }
@@ -2028,12 +2052,17 @@ where
             return Ok(());
         }
         slot.snapshot_building = true;
-        let (at_least, membership, retries) = {
+        let (at_least, memberships, retries, expired_before) = {
             let state = slot.state.borrow();
+            // every membership a cut between the checkpoint and here could be as of, the
+            // checkpoint's first; the compactor picks the one at its boundary
+            let mut memberships = vec![state.checkpoint_membership.clone()];
+            memberships.extend(state.memberships.iter().cloned());
             (
                 state.checkpoint.clone(),
-                state.membership.clone(),
+                memberships,
                 state.dedup.iter().rev().map(|(request, remembered)| (*request, *remembered)).collect::<Vec<_>>(),
+                state.expired_before,
             )
         };
         let tablets = slot.spec.tablets.clone();
@@ -2051,10 +2080,11 @@ where
                 .into_iter()
                 .filter(|(_, remembered)| remembered.applied <= boundary.index)
                 .collect();
+            let membership = membership_as_of(&memberships, boundary.index);
             let tx = self.shard_local_tx.clone();
             let table_id = table.table_id();
             glommio::spawn_local(async move {
-                let outcome = write_volatile_snapshot(&dir, group, table_id, schema_id, boundary, membership, tablets, records, remembered)
+                let outcome = write_volatile_snapshot(&dir, group, table_id, schema_id, boundary, membership, tablets, records, remembered, expired_before)
                     .await
                     .map_err(|error| format!("{error:?}"));
                 let _ = tx.send(ServerMsg::SnapshotBuilt { group, outcome }).await;
@@ -2078,8 +2108,9 @@ where
             schema_id,
             tablets,
             at_least,
-            membership,
+            memberships,
             retries,
+            expired_before,
             dir,
         })
         .await?;
@@ -2200,6 +2231,7 @@ where
 /// * `tablets` - The tablets the group serves
 /// * `records` - Every resident partition of those tablets, as its key and archived bytes
 /// * `remembered` - The remembered requests at or below the boundary, oldest first
+/// * `expired_before` - The newest time-ordered identity the group has forgotten
 #[allow(clippy::too_many_arguments)]
 async fn write_volatile_snapshot(
     dir: &std::path::Path,
@@ -2211,6 +2243,7 @@ async fn write_volatile_snapshot(
     tablets: Vec<u16>,
     records: Vec<(u64, Vec<u8>)>,
     remembered: Vec<(RequestId, Remembered)>,
+    expired_before: u64,
 ) -> std::io::Result<(PathBuf, SnapshotManifest)> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join(snapshot::snapshot_name(group, boundary.index));
@@ -2239,8 +2272,32 @@ async fn write_volatile_snapshot(
             total,
             checksum,
             retries: u32::try_from(remembered.len()).unwrap_or(u32::MAX),
+            expired_before,
         },
     ))
+}
+
+/// The membership as of a boundary: the newest of the candidates applied at or below it
+///
+/// The candidates are the checkpoint's membership first and every one applied since, so a cut
+/// carries what the receiver's log will continue from rather than a membership whose entry
+/// arrives after the install ([F45](../../../../docs/src/features/replica-migration.md)).
+///
+/// # Arguments
+///
+/// * `memberships` - The candidates, oldest first
+/// * `boundary` - The cut's boundary
+#[must_use]
+pub fn membership_as_of(
+    memberships: &[openraft::type_config::alias::StoredMembershipOf<DataConfig>],
+    boundary: u64,
+) -> openraft::type_config::alias::StoredMembershipOf<DataConfig> {
+    memberships
+        .iter()
+        .rev()
+        .find(|membership| membership.log_id().as_ref().is_none_or(|log_id| log_id.index <= boundary))
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// The openraft configuration a group runs under

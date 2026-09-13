@@ -447,6 +447,11 @@ fn default_retained_bytes() -> u64 {
     1024 * 1024 * 1024
 }
 
+/// The default window a write's identity may be retried within
+fn default_retry_window() -> DurationSpec {
+    DurationSpec(Duration::from_secs(300))
+}
+
 /// The tablet groups' timers and bounds, which are this node's and not the cluster's
 ///
 /// Every field is node-local: a deadline, a byte bound, a segment size. None of them enters
@@ -517,6 +522,13 @@ pub struct Replication {
         deserialize_with = "utils::deserialize_byte_size_u64"
     )]
     pub retained_bytes: u64,
+    /// How long after a write's identity was minted a retry of it is still answered its first result
+    ///
+    /// A time-ordered identity older than this is refused `IdentityExpired` before it is
+    /// proposed, on every replica alike; one within it is answered the first result while the
+    /// group remembers it ([F45](../../../../docs/src/features/replica-migration.md)).
+    #[serde(default = "default_retry_window")]
+    pub retry_window: DurationSpec,
 }
 
 impl Default for Replication {
@@ -534,6 +546,7 @@ impl Default for Replication {
             snapshot_timeout: default_snapshot_timeout(),
             install_bytes: default_install_bytes(),
             retained_bytes: default_retained_bytes(),
+            retry_window: default_retry_window(),
         }
     }
 }
@@ -1125,6 +1138,12 @@ impl Cluster {
                 "cluster.repair.concurrent is zero; at least one group repair has to be driven at a time".to_string(),
             )));
         }
+        // a retry inside the write's own deadline has to be inside the window
+        if self.replication.retry_window.duration() < self.replication.write_timeout.duration() {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.replication.retry_window is shorter than write_timeout".to_string(),
+            )));
+        }
         // a move's learner phase is a snapshot transfer, so its deadline cannot be shorter
         if self.migration.timeout.duration() < self.replication.snapshot_timeout.duration() {
             return Err(ServerError::Shoal(ShoalError::InvalidConfig(
@@ -1350,6 +1369,13 @@ mod tests {
             .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
             .expect_err("no repairs at a time was accepted");
         assert!(format!("{error}").contains("repair.concurrent"), "{error}");
+        // a retry window under the write timeout would expire a retry the write itself allows
+        let mut short_window = Cluster::default().bootstrap(true);
+        short_window.replication.retry_window = DurationSpec(Duration::from_millis(100));
+        let error = short_window
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .expect_err("a retry window under the write timeout was accepted");
+        assert!(format!("{error}").contains("retry_window"), "{error}");
         // and so do the migration settings ([F45](../../../../docs/src/features/replica-migration.md))
         let mut short_move = Cluster::default().bootstrap(true);
         short_move.migration.timeout = DurationSpec(Duration::from_secs(1));
@@ -1428,15 +1454,17 @@ mod tests {
         // the snapshot and retention settings ([F43](../../../../docs/src/features/node-recovery.md))
         assert_eq!(defaults.snapshot_chunk_bytes, 1024 * 1024);
         assert_eq!(defaults.snapshot_timeout.duration(), Duration::from_secs(300));
+        assert_eq!(defaults.retry_window.duration(), Duration::from_secs(300));
         assert_eq!(defaults.install_bytes, 2 * 1024 * 1024 * 1024);
         assert_eq!(defaults.retained_bytes, 1024 * 1024 * 1024);
         // a block naming every field, in the sizes an operator writes
         let parsed: super::Replication = serde_yaml::from_str(
-            "write_timeout: \"2s\"\npending_bytes: \"8MiB\"\nsegment_bytes: \"1MiB\"\ncheckpoint_entries: 64\nretained_entries: 128\nlog_cache_bytes: \"1MiB\"\nvolatile_log_bytes: \"4MiB\"\nsnapshot_chunk_bytes: \"256KiB\"\nsnapshot_timeout: \"1m\"\ninstall_bytes: \"64MiB\"\nretained_bytes: \"4MiB\"\n",
+            "write_timeout: \"2s\"\npending_bytes: \"8MiB\"\nsegment_bytes: \"1MiB\"\ncheckpoint_entries: 64\nretained_entries: 128\nlog_cache_bytes: \"1MiB\"\nvolatile_log_bytes: \"4MiB\"\nsnapshot_chunk_bytes: \"256KiB\"\nsnapshot_timeout: \"1m\"\ninstall_bytes: \"64MiB\"\nretained_bytes: \"4MiB\"\nretry_window: \"2m\"\n",
         )
         .expect("a full replication block parses");
         assert_eq!(parsed.snapshot_chunk_bytes, 256 * 1024);
         assert_eq!(parsed.snapshot_timeout.duration(), Duration::from_secs(60));
+        assert_eq!(parsed.retry_window.duration(), Duration::from_secs(120));
         assert_eq!(parsed.install_bytes, 64 * 1024 * 1024);
         assert_eq!(parsed.retained_bytes, 4 * 1024 * 1024);
         assert_eq!(parsed.write_timeout.duration(), Duration::from_secs(2));

@@ -682,10 +682,16 @@ pub struct GroupCheckpoint {
     pub retries_at: u64,
     /// The lowest applied index the retry table still remembered, or zero
     ///
-    /// The low-water mark: a retry of an identity applied below it is applied as new. M9a's
-    /// expiry check reads it; nothing at M6 refuses on it.
+    /// The low-water mark: a retry of an identity applied below it is applied as new
+    /// ([F45](../../../../docs/src/features/replica-migration.md) refuses by the identity's
+    /// own time instead, since an index says nothing a client can compare its retry to).
     #[serde(default)]
     pub retry_floor: u64,
+    /// The newest time-ordered identity the retry table had forgotten, in milliseconds since
+    /// the epoch; zero for none, and from a file written before there was one
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    #[serde(default)]
+    pub expired_before: u64,
 }
 
 impl GroupCheckpoint {
@@ -709,7 +715,19 @@ impl GroupCheckpoint {
             members: membership.membership().nodes().map(|(addr, _)| *addr).collect(),
             retries_at: 0,
             retry_floor: 0,
+            expired_before: 0,
         }
+    }
+
+    /// Record the newest time-ordered identity the retry table had forgotten
+    ///
+    /// # Arguments
+    ///
+    /// * `expired_before` - Its timestamp, in milliseconds since the epoch
+    #[must_use]
+    pub fn expired_before(mut self, expired_before: u64) -> Self {
+        self.expired_before = expired_before;
+        self
     }
 
     /// Record which retry sidecar goes with this checkpoint, and the table's low-water mark

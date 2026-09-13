@@ -229,10 +229,15 @@ pub enum CompactionJob {
         tablets: Vec<u16>,
         /// The loop's checkpoint for the group, which the boundary is never below
         at_least: Option<crate::server::wal::WalLogId>,
-        /// The membership as of the cut
-        membership: openraft::type_config::alias::StoredMembershipOf<crate::server::replication::DataConfig>,
+        /// Every membership the cut could be as of, the checkpoint's first and the ones applied
+        /// since after it; the one at the boundary goes in the manifest
+        /// ([F45](../../../docs/src/features/replica-migration.md))
+        memberships: Vec<openraft::type_config::alias::StoredMembershipOf<crate::server::replication::DataConfig>>,
         /// Every remembered request of the group, which the trailer filters to the boundary
         retries: Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>,
+        /// The newest time-ordered identity the group has forgotten, for the manifest
+        /// ([F45](../../../docs/src/features/replica-migration.md))
+        expired_before: u64,
         /// The directory the file goes in
         dir: PathBuf,
     },

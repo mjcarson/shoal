@@ -546,7 +546,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     /// * `schema_id` - The schema's fingerprint, for the manifest
     /// * `tablets` - The tablets the group serves
     /// * `at_least` - The loop's checkpoint for the group
-    /// * `membership` - The membership as of the cut
+    /// * `memberships` - Every membership the cut could be as of, oldest first
     /// * `retries` - Every remembered request of the group
     /// * `dir` - The directory the file goes in
     #[allow(clippy::too_many_arguments)]
@@ -557,12 +557,13 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         schema_id: u64,
         tablets: Vec<u16>,
         at_least: Option<WalLogId>,
-        membership: openraft::type_config::alias::StoredMembershipOf<crate::server::replication::DataConfig>,
+        memberships: Vec<openraft::type_config::alias::StoredMembershipOf<crate::server::replication::DataConfig>>,
         retries: Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>,
+        expired_before: u64,
         dir: PathBuf,
     ) -> Result<(), ServerError> {
         let outcome = self
-            .cut_snapshot_file(group, schema_id, tablets, at_least, membership, retries, dir)
+            .cut_snapshot_file(group, schema_id, tablets, at_least, memberships, retries, expired_before, dir)
             .await
             .map_err(|error| format!("{error:?}"));
         // the shard hears what was built, or why nothing was
@@ -578,7 +579,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     /// * `schema_id` - The schema's fingerprint
     /// * `tablets` - The tablets the group serves
     /// * `at_least` - The loop's checkpoint for the group
-    /// * `membership` - The membership as of the cut
+    /// * `memberships` - Every membership the cut could be as of, oldest first
     /// * `retries` - Every remembered request of the group
     /// * `dir` - The directory the file goes in
     #[allow(clippy::too_many_arguments)]
@@ -588,8 +589,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         schema_id: u64,
         tablets: Vec<u16>,
         at_least: Option<WalLogId>,
-        membership: openraft::type_config::alias::StoredMembershipOf<crate::server::replication::DataConfig>,
+        memberships: Vec<openraft::type_config::alias::StoredMembershipOf<crate::server::replication::DataConfig>>,
         retries: Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>,
+        expired_before: u64,
         dir: PathBuf,
     ) -> Result<(PathBuf, SnapshotManifest), ServerError> {
         // the boundary: what was merged here, or the loop's checkpoint if that is further
@@ -642,6 +644,8 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             .collect();
         let (total, checksum) = writer.finish(&remembered).await?;
         snapshot::sync_dir(&dir).await?;
+        // the membership as of the boundary, never one applied since it
+        let membership = crate::server::shard::membership_as_of(&memberships, boundary.index);
         let manifest = SnapshotManifest {
             group,
             table,
@@ -653,6 +657,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             total,
             checksum,
             retries: u32::try_from(remembered.len()).unwrap_or(u32::MAX),
+            expired_before,
         };
         event!(Level::INFO, msg = "cut a snapshot", group = %group, boundary = manifest.boundary.index, records = manifest.records, bytes = total);
         Ok((path, manifest))
@@ -1196,11 +1201,12 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     schema_id,
                     tablets,
                     at_least,
-                    membership,
+                    memberships,
                     retries,
+                    expired_before,
                     dir,
                 } => {
-                    self.cut_snapshot(group, schema_id, tablets, at_least, membership, retries, dir)
+                    self.cut_snapshot(group, schema_id, tablets, at_least, memberships, retries, expired_before, dir)
                         .await?;
                 }
                 CompactionJob::Install { group, tablets, path } => self.install_snapshot(group, tablets, path).await?,
