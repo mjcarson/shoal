@@ -422,6 +422,32 @@ where
     #[allow(async_fn_in_trait)]
     async fn fold_intents(shard_name: &str, table: Self::TableNames, conf: &Conf) -> Result<u64, ServerError>;
 
+    /// Write every archived partition some shards hold of a table as one snapshot file
+    ///
+    /// The export of a standalone node, after a fold
+    /// ([F49](../../../docs/src/features/backup-and-recovery.md)); an ephemeral table
+    /// refuses. Returns the manifest of the file written.
+    ///
+    /// # Arguments
+    ///
+    /// * `shard_names` - The shards whose archives are exported
+    /// * `table` - The table
+    /// * `conf` - The Shoal config
+    /// * `path` - The file to write
+    /// * `provenance` - Where the export is made and which file format it is written in
+    /// * `group` - The group the file is written under, which a restore ignores
+    /// * `schema_id` - The schema's fingerprint
+    #[allow(async_fn_in_trait)]
+    async fn export_archives(
+        shard_names: &[String],
+        table: Self::TableNames,
+        conf: &Conf,
+        path: &std::path::Path,
+        provenance: &crate::server::replication::snapshot::SnapshotProvenance,
+        group: crate::shared::identity::GroupId,
+        schema_id: u64,
+    ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError>;
+
     /// Shutdown this table and flush any data to disk if needed
     #[allow(async_fn_in_trait)]
     async fn shutdown(self) -> Result<(), ServerError>;

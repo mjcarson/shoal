@@ -39,6 +39,10 @@ use openraft::declare_raft_types;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::backup::{
+    judge_coverage, BackupFile, BackupPhase, BackupRecord, GroupBackup, GroupRestore, RecoveryRecord, RestoreRecord,
+    KEPT_BACKUPS, KEPT_RESTORES,
+};
 use super::migrate::{DataConfiguration, GroupMove, MoveOutcome, MovePhase, MoveRecord, KEPT_MOVES};
 use super::plan::{Blocked, PlanKind, PlanOutcome, PlanPhase, PlanRecord, PlanUpdate, KEPT_PLANS};
 use super::runtime::GlommioRuntime;
@@ -56,6 +60,9 @@ declare_raft_types!(
         Node = MemberRecord,
         AsyncRuntime = GlommioRuntime,
 );
+
+/// The node id type the control group is declared over, for a store that names it
+pub type NodeIdOf = NodeId;
 
 /// How many administrative operations the state remembers the outcome of
 ///
@@ -631,6 +638,85 @@ pub enum ControlCommand {
         /// The plan that removed it
         op: Option<Uuid>,
     },
+    /// Back a table, or every table, up: one file per group, cut at a committed boundary each
+    /// ([F49](../../../../docs/src/features/backup-and-recovery.md))
+    Backup {
+        /// The identity of the operation
+        op: Uuid,
+        /// Who asked
+        principal: String,
+        /// The topology version the request was written against
+        expected_version: u64,
+        /// The table, or none for every table
+        table: Option<TableId>,
+        /// The directory the files go under, on every node that writes one
+        path: String,
+    },
+    /// A group's driver says where its backup stands
+    ///
+    /// A node's proposal like `RepairProgress`: no operation id of its own and no version.
+    BackupProgress {
+        /// The operation
+        op: Uuid,
+        /// The group
+        group: GroupId,
+        /// The node driving it
+        node: NodeId,
+        /// The incarnation it drives at
+        incarnation: u64,
+        /// Where the group stands now
+        progress: GroupBackup,
+    },
+    /// Restore a backup into this cluster, which has to be one that has restored nothing
+    /// and whose restored tables hold nothing ([F49](../../../../docs/src/features/backup-and-recovery.md))
+    Restore {
+        /// The identity of the operation
+        op: Uuid,
+        /// Who asked
+        principal: String,
+        /// The topology version the request was written against
+        expected_version: u64,
+        /// The directory the files are read from, on every node
+        path: String,
+        /// The cluster the files were cut in
+        source: ClusterId,
+        /// The structural fingerprint of the schema the files were cut from
+        source_schema: u64,
+        /// Every file, as the leader read the manifests
+        files: Vec<BackupFile>,
+    },
+    /// A group's driver says where its restore stands
+    RestoreProgress {
+        /// The operation
+        op: Uuid,
+        /// The group
+        group: GroupId,
+        /// The node driving it
+        node: NodeId,
+        /// The incarnation it drives at
+        incarnation: u64,
+        /// Where the group stands now
+        progress: GroupRestore,
+    },
+    /// An operator rewrote a stopped survivor's membership after a permanent majority loss
+    ///
+    /// Written by `force_recover` into the survivor's log, offline, and applied when it starts:
+    /// every lost member is removed and tombstoned and the recovery is recorded as evidence
+    /// ([F49](../../../../docs/src/features/backup-and-recovery.md)).
+    ForceRecovered {
+        /// The identity of the recovery, which the plans it opens are derived from
+        op: Uuid,
+        /// The members kept
+        survivors: Vec<NodeId>,
+        /// The members lost
+        lost: Vec<NodeId>,
+        /// The node the recovery was run on
+        at: NodeId,
+        /// The control log index the survivor had committed when it was recovered
+        last_committed: u64,
+        /// When, in milliseconds since the epoch
+        recovered_ms: u64,
+    },
     /// Activate a wire version: every member speaks it from here on, and none rolls back past it
     ///
     /// The versions every member's running build reports ride in the command, read by the
@@ -721,6 +807,18 @@ impl ControlCommand {
                 expected_version,
                 ..
             } => Some((*op, principal, "activate", *expected_version)),
+            ControlCommand::Backup {
+                op,
+                principal,
+                expected_version,
+                ..
+            } => Some((*op, principal, "backup", *expected_version)),
+            ControlCommand::Restore {
+                op,
+                principal,
+                expected_version,
+                ..
+            } => Some((*op, principal, "restore", *expected_version)),
             _ => None,
         }
     }
@@ -769,6 +867,17 @@ impl fmt::Display for ControlCommand {
             ControlCommand::PlanProgress { op, progress, .. } => write!(f, "PlanProgress({op} {progress:?})"),
             ControlCommand::Tombstone { node, .. } => write!(f, "Tombstone({node})"),
             ControlCommand::Activate { op, wire, .. } => write!(f, "Activate({op} wire {wire})"),
+            ControlCommand::Backup { op, table, path, .. } => write!(f, "Backup({op} {table:?} to {path})"),
+            ControlCommand::BackupProgress { op, group, progress, .. } => {
+                write!(f, "BackupProgress({op} {group} {:?})", progress.phase)
+            }
+            ControlCommand::Restore { op, source, path, .. } => write!(f, "Restore({op} from {source} at {path})"),
+            ControlCommand::RestoreProgress { op, group, progress, .. } => {
+                write!(f, "RestoreProgress({op} {group} {:?})", progress.phase)
+            }
+            ControlCommand::ForceRecovered { survivors, lost, .. } => {
+                write!(f, "ForceRecovered({} survivors, {} lost)", survivors.len(), lost.len())
+            }
         }
     }
 }
@@ -896,6 +1005,19 @@ pub struct ControlState {
     /// ([F48](../../../../docs/src/features/rolling-compatibility.md)).
     #[serde(default)]
     pub activated: u8,
+    /// The backup operations, by identity, the newest `KEPT_BACKUPS` of them
+    /// ([F49](../../../../docs/src/features/backup-and-recovery.md))
+    #[serde(default)]
+    pub backups: BTreeMap<Uuid, BackupRecord>,
+    /// The restore operations, by identity, the newest `KEPT_RESTORES` of them
+    #[serde(default)]
+    pub restores: BTreeMap<Uuid, RestoreRecord>,
+    /// The cluster this one was restored from, once; its identities are refused at every door
+    #[serde(default)]
+    pub restored_from: Option<ClusterId>,
+    /// Every recovery an operator ran on a survivor, oldest first
+    #[serde(default)]
+    pub recoveries: Vec<RecoveryRecord>,
 }
 
 impl ControlState {
@@ -1428,6 +1550,49 @@ impl ControlState {
             } => self.apply_plan_progress(*op, *node, *incarnation, progress),
             // a removed identity, for good
             ControlCommand::Tombstone { node, op } => self.apply_tombstone(*node, *op),
+            // a backup: the record, with its groups derived from the placement as it stands
+            ControlCommand::Backup {
+                op,
+                principal,
+                expected_version,
+                table,
+                path,
+            } => self.apply_backup(*op, principal, *expected_version, *table, path),
+            // a driver's word on where a group's backup stands
+            ControlCommand::BackupProgress {
+                op,
+                group,
+                node,
+                incarnation,
+                progress,
+            } => self.apply_backup_progress(*op, *group, *node, *incarnation, progress),
+            // a restore: judged whole against the files and the tables, once per cluster
+            ControlCommand::Restore {
+                op,
+                principal,
+                expected_version,
+                path,
+                source,
+                source_schema,
+                files,
+            } => self.apply_restore(*op, principal, *expected_version, path, *source, *source_schema, files),
+            // a driver's word on where a group's restore stands
+            ControlCommand::RestoreProgress {
+                op,
+                group,
+                node,
+                incarnation,
+                progress,
+            } => self.apply_restore_progress(*op, *group, *node, *incarnation, progress),
+            // an operator's recovery of a survivor after a permanent majority loss
+            ControlCommand::ForceRecovered {
+                op,
+                survivors,
+                lost,
+                at,
+                last_committed,
+                recovered_ms,
+            } => self.apply_force_recovered(*op, survivors, lost, *at, *last_committed, *recovered_ms),
             // a wire version activated, judged against what every member reported
             ControlCommand::Activate {
                 expected_version,
@@ -2242,6 +2407,380 @@ impl ControlState {
                 self.applied()
             }
         }
+    }
+
+    /// Record a backup, with a group per table group the placement derives
+    ///
+    /// A group whose set is under a move or a repair not yet done waits behind it, since a
+    /// cut under either would be a cut of a set half moved or half judged.
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The operation
+    /// * `principal` - Who asked
+    /// * `expected_version` - The version the request was written against
+    /// * `table` - The table, or none for every table
+    /// * `path` - The directory the files go under
+    fn apply_backup(&mut self, op: Uuid, principal: &str, expected_version: u64, table: Option<TableId>, path: &str) -> ControlResponse {
+        if self.policy.is_none() || self.initialized.is_none() {
+            return ControlResponse::Refused {
+                reason: "no placement has been initialized to back up".to_string(),
+            };
+        }
+        if let Some(table) = table {
+            if !self.tables.iter().any(|(_, id)| *id == table) {
+                return ControlResponse::Refused {
+                    reason: format!("table {table} is not one the placement was initialized with"),
+                };
+            }
+        }
+        if path.is_empty() {
+            return ControlResponse::Refused {
+                reason: "a backup needs a directory to write under".to_string(),
+            };
+        }
+        // the file header that identifies a backup's cluster is the one written past the
+        // activation of wire version 5 ([F48](../../../../docs/src/features/rolling-compatibility.md))
+        let needed = crate::server::replication::snapshot::SNAPSHOT_V2_FROM_WIRE;
+        if self.activated_wire() < needed {
+            return ControlResponse::Refused {
+                reason: format!(
+                    "a backup needs wire version {needed} activated, and the cluster has activated {}; a \
+                     backup file identifies its cluster in a header only that version writes",
+                    self.activated_wire()
+                ),
+            };
+        }
+        if let Some(refusal) = self.check_version(expected_version) {
+            return refusal;
+        }
+        // every group of the table or the tables, queued behind whatever holds its set
+        let map = crate::server::map::TabletMap::from_state(self, None, &self.tables.clone());
+        let mut groups: BTreeMap<GroupId, GroupBackup> = BTreeMap::new();
+        for (_, id) in self.tables.clone() {
+            if table.is_some_and(|wanted| wanted != id) {
+                continue;
+            }
+            for (group, _, _) in map.groups_of(id) {
+                let behind = self
+                    .moves
+                    .values()
+                    .filter(|record| !record.is_done() && record.groups.contains_key(&group))
+                    .map(|record| (record.requested_at, record.op))
+                    .chain(
+                        self.repairs
+                            .values()
+                            .filter(|record| !record.is_done() && record.groups.contains_key(&group))
+                            .map(|record| (record.requested_at, record.op)),
+                    )
+                    .max()
+                    .map(|(_, op)| op);
+                let progress = match behind {
+                    Some(behind) => GroupBackup {
+                        phase: BackupPhase::Queued { behind },
+                        ..GroupBackup::default()
+                    },
+                    None => GroupBackup::default(),
+                };
+                groups.insert(group, progress);
+            }
+        }
+        if groups.is_empty() {
+            return ControlResponse::Refused {
+                reason: "the placement derives no groups to back up".to_string(),
+            };
+        }
+        self.topology_version += 1;
+        self.backups.insert(
+            op,
+            BackupRecord {
+                op,
+                table,
+                path: path.to_string(),
+                principal: principal.to_string(),
+                requested_at: self.topology_version,
+                groups,
+            },
+        );
+        // forget the oldest once too many are kept
+        while self.backups.len() > KEPT_BACKUPS {
+            let oldest = self.backups.values().min_by_key(|record| record.requested_at).map(|record| record.op);
+            match oldest {
+                Some(op) => {
+                    self.backups.remove(&op);
+                }
+                None => break,
+            }
+        }
+        self.applied()
+    }
+
+    /// Apply a driver's word on where a group's backup stands
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The operation
+    /// * `group` - The group
+    /// * `node` - The driver
+    /// * `incarnation` - The incarnation it drives at
+    /// * `progress` - Where the group stands
+    fn apply_backup_progress(&mut self, op: Uuid, group: GroupId, node: NodeId, incarnation: u64, progress: &GroupBackup) -> ControlResponse {
+        let Some(member) = self.members.get(&node) else {
+            return ControlResponse::Refused {
+                reason: format!("{node} is not a member, so cannot drive a backup"),
+            };
+        };
+        if incarnation < member.record.incarnation {
+            return ControlResponse::Fenced {
+                node,
+                committed: member.record.incarnation,
+                offered: incarnation,
+            };
+        }
+        let Some(record) = self.backups.get_mut(&op) else {
+            return ControlResponse::Refused {
+                reason: format!("no backup operation {op} is recorded"),
+            };
+        };
+        let Some(current) = record.groups.get_mut(&group) else {
+            return ControlResponse::Refused {
+                reason: format!("group {group} is not part of backup {op}"),
+            };
+        };
+        // a group that is done stays done, whatever a late driver says
+        if current.is_done() {
+            return self.applied();
+        }
+        if current.is_queued() {
+            return ControlResponse::Refused {
+                reason: format!("group {group} of backup {op} is queued behind another operation and cannot be driven yet"),
+            };
+        }
+        if current == progress {
+            return self.applied();
+        }
+        *current = progress.clone();
+        self.topology_version += 1;
+        self.applied()
+    }
+
+    /// Record a restore, judged whole against the files and this cluster's tables
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The operation
+    /// * `principal` - Who asked
+    /// * `expected_version` - The version the request was written against
+    /// * `path` - The directory the files are read from
+    /// * `source` - The cluster the files were cut in
+    /// * `source_schema` - The schema they were cut from
+    /// * `files` - Every file, as the leader read the manifests
+    #[allow(clippy::too_many_arguments)]
+    fn apply_restore(
+        &mut self,
+        op: Uuid,
+        principal: &str,
+        expected_version: u64,
+        path: &str,
+        source: ClusterId,
+        source_schema: u64,
+        files: &[BackupFile],
+    ) -> ControlResponse {
+        if self.policy.is_none() || self.initialized.is_none() {
+            return ControlResponse::Refused {
+                reason: "no placement has been initialized to restore into".to_string(),
+            };
+        }
+        // once per cluster: a second restore would put two histories under one identity
+        if let Some(restored) = self.restored_from {
+            return ControlResponse::Refused {
+                reason: format!("this cluster was already restored from {restored}; a restore is once, into a new cluster"),
+            };
+        }
+        if Some(source) == self.cluster {
+            return ControlResponse::Refused {
+                reason: "a backup is restored into a new cluster, never into the one it was cut in".to_string(),
+            };
+        }
+        // every tablet of every restored table in exactly one file
+        // a tablet id is twelve bits, so the count fits a u16
+        #[allow(clippy::cast_possible_truncation)]
+        let coverage = match judge_coverage(files, &self.tables, crate::server::ring::TABLET_COUNT as u16) {
+            Ok(coverage) => coverage,
+            Err(reason) => return ControlResponse::Refused { reason },
+        };
+        if let Some(refusal) = self.check_version(expected_version) {
+            return refusal;
+        }
+        // every group of every covered table, with the files covering its tablets
+        let map = crate::server::map::TabletMap::from_state(self, None, &self.tables.clone());
+        let mut groups: BTreeMap<GroupId, GroupRestore> = BTreeMap::new();
+        for (table, covered) in &coverage {
+            for (group, _, tablets) in map.groups_of(*table) {
+                let mut names: Vec<String> = tablets.iter().filter_map(|tablet| covered.get(tablet).cloned()).collect();
+                names.sort();
+                names.dedup();
+                groups.insert(
+                    group,
+                    GroupRestore {
+                        files: names,
+                        ..GroupRestore::default()
+                    },
+                );
+            }
+        }
+        if groups.is_empty() {
+            return ControlResponse::Refused {
+                reason: "the placement derives no groups to restore into".to_string(),
+            };
+        }
+        self.topology_version += 1;
+        self.restored_from = Some(source);
+        self.restores.insert(
+            op,
+            RestoreRecord {
+                op,
+                path: path.to_string(),
+                source,
+                source_schema,
+                principal: principal.to_string(),
+                requested_at: self.topology_version,
+                files: files.to_vec(),
+                groups,
+            },
+        );
+        while self.restores.len() > KEPT_RESTORES {
+            let oldest = self.restores.values().min_by_key(|record| record.requested_at).map(|record| record.op);
+            match oldest {
+                Some(op) => {
+                    self.restores.remove(&op);
+                }
+                None => break,
+            }
+        }
+        self.applied()
+    }
+
+    /// Apply a driver's word on where a group's restore stands
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The operation
+    /// * `group` - The group
+    /// * `node` - The driver
+    /// * `incarnation` - The incarnation it drives at
+    /// * `progress` - Where the group stands
+    fn apply_restore_progress(&mut self, op: Uuid, group: GroupId, node: NodeId, incarnation: u64, progress: &GroupRestore) -> ControlResponse {
+        let Some(member) = self.members.get(&node) else {
+            return ControlResponse::Refused {
+                reason: format!("{node} is not a member, so cannot drive a restore"),
+            };
+        };
+        if incarnation < member.record.incarnation {
+            return ControlResponse::Fenced {
+                node,
+                committed: member.record.incarnation,
+                offered: incarnation,
+            };
+        }
+        let Some(record) = self.restores.get_mut(&op) else {
+            return ControlResponse::Refused {
+                reason: format!("no restore operation {op} is recorded"),
+            };
+        };
+        let Some(current) = record.groups.get_mut(&group) else {
+            return ControlResponse::Refused {
+                reason: format!("group {group} is not part of restore {op}"),
+            };
+        };
+        if current.is_done() {
+            return self.applied();
+        }
+        if current == progress {
+            return self.applied();
+        }
+        *current = progress.clone();
+        self.topology_version += 1;
+        self.applied()
+    }
+
+    /// Apply an operator's recovery: every lost member tombstoned and removing, the evidence kept
+    ///
+    /// A lost member is refused at every door from here on, by its tombstone, and is
+    /// `Removing` under a `Remove` plan of its own - derived from the recovery's identity, so
+    /// every replica derives the same - which the leader drives once a member outside its
+    /// sets is there to take them, exactly as an expired grace is
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md)); the plan's end is what
+    /// moves it to `Removed`.
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The recovery
+    /// * `survivors` - The members kept
+    /// * `lost` - The members lost
+    /// * `at` - The node the recovery was run on
+    /// * `last_committed` - The index the survivor had committed
+    /// * `recovered_ms` - When
+    fn apply_force_recovered(&mut self, op: Uuid, survivors: &[NodeId], lost: &[NodeId], at: NodeId, last_committed: u64, recovered_ms: u64) -> ControlResponse {
+        if self.cluster.is_none() {
+            return ControlResponse::Refused {
+                reason: "no cluster has been bootstrapped to recover".to_string(),
+            };
+        }
+        // every survivor has to be a member, and no survivor is lost
+        for node in survivors {
+            if !self.members.contains_key(node) {
+                return ControlResponse::Refused {
+                    reason: format!("{node} is not a member, so cannot survive a recovery"),
+                };
+            }
+            if lost.contains(node) {
+                return ControlResponse::Refused {
+                    reason: format!("{node} is named both surviving and lost"),
+                };
+            }
+        }
+        self.topology_version += 1;
+        let version = self.topology_version;
+        // the lost members are tombstoned, so their identities never return, and removing
+        // under a plan each, so their sets are rebuilt once there is somebody to rebuild on
+        for node in lost {
+            let Some(member) = self.members.get_mut(node) else {
+                continue;
+            };
+            if member.phase == MemberPhase::Removed {
+                continue;
+            }
+            member.phase = MemberPhase::Removing;
+            member.health = MemberHealth::Down;
+            member.since = version;
+            member.grace = None;
+            member.role = MemberRole::Learner;
+            let incarnation = member.record.incarnation;
+            self.tombstones.entry(*node).or_insert(Tombstone {
+                incarnation,
+                removed_at: version,
+                op: Some(op),
+            });
+            // the plan's identity, derived from the recovery's and the member's so every
+            // replica derives the same one
+            let mut seed = Vec::with_capacity(32);
+            seed.extend_from_slice(op.as_bytes());
+            seed.extend_from_slice(node.0.as_bytes());
+            let plan = Uuid::from_u64_pair(gxhash::gxhash64(&seed, 0), gxhash::gxhash64(&seed, 1));
+            if self.check_one_plan(Some(*node)).is_none() {
+                self.record_plan(PlanRecord::new(plan, PlanKind::Remove { node: *node, replacement: None }, "recovery", version));
+            }
+        }
+        self.recoveries.push(RecoveryRecord {
+            survivors: survivors.to_vec(),
+            lost: lost.to_vec(),
+            at,
+            last_committed,
+            applied_at: version,
+            recovered_ms,
+        });
+        self.applied()
     }
 
     /// Activate a wire version, once every member speaks it

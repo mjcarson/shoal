@@ -674,6 +674,33 @@ pub trait StorageSupport: Sized {
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >;
 
+    /// Write every archived partition some shards hold of a table as one snapshot file
+    ///
+    /// The export of a standalone node
+    /// ([F49](../../../docs/src/features/backup-and-recovery.md)): after a fold, the shards'
+    /// data for the table is archives and a map, and this writes every live record of every
+    /// shard named into one file in the snapshot format a restore reads, in key order, under
+    /// the provenance given. An engine with no archives has nothing to export. Returns the
+    /// manifest of the file written.
+    ///
+    /// # Arguments
+    ///
+    /// * `shard_names` - The shards whose archives are exported
+    /// * `conf` - The Shoal config
+    /// * `path` - The file to write
+    /// * `provenance` - Where the export is made and which file format it is written in
+    /// * `group` - The group the file is written under, which a restore ignores
+    /// * `schema_id` - The schema's fingerprint, for the header and the manifest
+    #[allow(async_fn_in_trait)]
+    async fn export_archives<R: PartitionKeySupport + 'static>(
+        shard_names: &[String],
+        conf: &Conf,
+        path: &std::path::Path,
+        provenance: &crate::server::replication::snapshot::SnapshotProvenance,
+        group: crate::shared::identity::GroupId,
+        schema_id: u64,
+    ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError>;
+
     /// Commit an operation to this storages intent log
     ///
     /// # Arguments

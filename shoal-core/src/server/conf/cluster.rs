@@ -370,6 +370,40 @@ fn default_reconnect_min() -> DurationSpec {
     DurationSpec(Duration::from_millis(100))
 }
 
+/// How a node cuts and writes backups ([F49](../../../../docs/src/features/backup-and-recovery.md))
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Backup {
+    /// How many group backups one shard drives at a time
+    #[serde(default = "default_backup_concurrent")]
+    pub concurrent: u32,
+    /// How long one group's backup may take: the cut and the copy together
+    ///
+    /// No shorter than `replication.snapshot_timeout`, since the cut is a snapshot.
+    #[serde(default = "default_backup_timeout")]
+    pub timeout: DurationSpec,
+}
+
+/// The default group backups one shard drives at a time
+fn default_backup_concurrent() -> u32 {
+    1
+}
+
+/// The default deadline for one group's backup
+fn default_backup_timeout() -> DurationSpec {
+    DurationSpec(Duration::from_secs(600))
+}
+
+impl Default for Backup {
+    /// The bounds the configuration page writes down
+    fn default() -> Self {
+        Backup {
+            concurrent: default_backup_concurrent(),
+            timeout: default_backup_timeout(),
+        }
+    }
+}
+
 /// The default longest reconnect wait
 fn default_reconnect_max() -> DurationSpec {
     DurationSpec(Duration::from_secs(5))
@@ -928,6 +962,9 @@ pub struct Cluster {
     /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
     #[serde(default)]
     pub rebalance: Rebalance,
+    /// The backup settings ([F49](../../../../docs/src/features/backup-and-recovery.md))
+    #[serde(default)]
+    pub backup: Backup,
     /// Where this node dials particular members, keyed by their identity, when not where they advertise
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub dial: std::collections::BTreeMap<NodeId, DialOverride>,
@@ -961,6 +998,7 @@ impl Default for Cluster {
             repair: Repair::default(),
             migration: Migration::default(),
             rebalance: Rebalance::default(),
+            backup: Backup::default(),
             dial: std::collections::BTreeMap::new(),
         }
     }
@@ -1240,6 +1278,18 @@ impl Cluster {
         if self.transport.reconnect_min.duration() > self.transport.reconnect_max.duration() {
             return Err(ServerError::Shoal(ShoalError::InvalidConfig(
                 "cluster.transport.reconnect_min is longer than reconnect_max".to_string(),
+            )));
+        }
+        // a backup cuts a snapshot, so its deadline covers one, and drives at least one
+        // ([F49](../../../../docs/src/features/backup-and-recovery.md))
+        if self.backup.concurrent == 0 {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.backup.concurrent is 0; a shard drives at least one group backup at a time".to_string(),
+            )));
+        }
+        if self.backup.timeout.duration() < self.replication.snapshot_timeout.duration() {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.backup.timeout is shorter than cluster.replication.snapshot_timeout; a backup cuts a snapshot first".to_string(),
             )));
         }
         // a wire pin has to be a version this build reads
@@ -1737,6 +1787,33 @@ mod tests {
         let empty: super::Replication = serde_yaml::from_str("{}").expect("an empty block parses");
         assert_eq!(empty, defaults);
         assert!(serde_yaml::from_str::<super::Replication>("fsync_every: 3\n").is_err());
+    }
+
+    /// The backup block's defaults are the documented ones, every field parses, and the
+    /// bounds are refused by name ([F49](../../../../docs/src/features/backup-and-recovery.md))
+    #[test]
+    fn the_backup_block_parses_with_its_defaults() {
+        use crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES;
+        let defaults = super::Backup::default();
+        assert_eq!(defaults.concurrent, 1);
+        assert_eq!(defaults.timeout.duration(), Duration::from_secs(600));
+        // a block naming every field
+        let parsed: super::Backup = serde_yaml::from_str("concurrent: 2\ntimeout: \"20m\"\n").expect("a full backup block parses");
+        assert_eq!(parsed.concurrent, 2);
+        assert_eq!(parsed.timeout.duration(), Duration::from_secs(1200));
+        // an empty block is the defaults, and an unknown field is refused
+        let empty: super::Backup = serde_yaml::from_str("{}").expect("an empty block parses");
+        assert_eq!(empty, defaults);
+        assert!(serde_yaml::from_str::<super::Backup>("compress: true\n").is_err());
+        // no drivers, and a deadline under a snapshot's, are refused by name
+        let mut cluster = Cluster::default().bootstrap(true);
+        cluster.backup.concurrent = 0;
+        let error = cluster.validate("127.0.0.1", DEFAULT_MAX_FRAME_BYTES).expect_err("no drivers");
+        assert!(format!("{error}").contains("backup.concurrent"), "{error}");
+        let mut cluster = Cluster::default().bootstrap(true);
+        cluster.backup.timeout = DurationSpec(Duration::from_secs(1));
+        let error = cluster.validate("127.0.0.1", DEFAULT_MAX_FRAME_BYTES).expect_err("a short deadline");
+        assert!(format!("{error}").contains("backup.timeout"), "{error}");
     }
 
     /// A wire pin is accepted inside the range this build reads and refused by name outside it

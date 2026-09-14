@@ -277,6 +277,35 @@ members' running builds report rather than by their committed records, applied b
 and admit, a node's own start. A storage format past the activated version is never written
 before it ([F48](../features/rolling-compatibility.md)).
 
+**Backup** — The admin operation `Backup { table, path }`: a control record naming every
+group of the tables, each driven by its leader to cut the group's own snapshot file at a
+committed boundary of its own and copy it under `<path>/<op>/<table>/` with a JSON manifest
+beside it, verified against that manifest; refused until wire version 5 is activated, since
+the version 2 file header is what names the file's cluster; ephemeral groups skipped. Not one
+cross-tablet snapshot: the record says each group's boundary
+([F49](../features/backup-and-recovery.md)).
+
+**Restore** — The admin operation `Restore { path }` on a fresh, initialized, empty cluster:
+the files' coverage, schema and source judged first, then every group's leader builds a file
+for its tablets from them and installs it on every member through the repair install path
+under a quarantine a scrub lifts; once per cluster, never into the cluster that cut the
+backup, and `restored_from` is committed so the old cluster's nodes are refused as removed
+([F49](../features/backup-and-recovery.md)).
+
+**Export** — `export_standalone`: a stopped standalone node's persistent tables written as
+one backup-shaped file each, after a fold of its intent logs, under an identity no cluster
+has; what a fresh cluster restores to bring single-node data in, the source being the
+rollback. The one supported path from a standalone directory to a cluster: a directory never
+changes mode ([F49](../features/backup-and-recovery.md)).
+
+**Recovery** (forced) — `force_recover`: an operator's offline rewrite of one stopped
+survivor's membership after a permanent majority loss - the control log and every durable
+tablet group to that node alone at a new term, the lost members tombstoned with a `Remove`
+plan each, a `RecoveryRecord` with the data-loss boundary - after which the survivor leads as
+a cluster of one and fresh identities rebuild the sets. Never automatic: the cluster refuses
+writes, strong reads and mutations naming the way out until it is run
+([F49](../features/backup-and-recovery.md)).
+
 **Manifest** (rehome) — `shoal-rehome.json`: the plan a rehome runs under - the hosting before
 and after, every step in order, the report so far - written whole before the first file moves
 and rewritten whole after every step is durable, so a crash at any point is resumed at exactly

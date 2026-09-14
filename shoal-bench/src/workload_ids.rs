@@ -504,6 +504,9 @@ pub const IDS: &[&str] = &[
     "macro/cluster/rebalance/remove",
     "macro/cluster/rebalance/capacity_blocked",
     "macro/rehome/shrink",
+    // the backup arm (F49): the repair arm's placement and mixture with a backup of the table
+    // cut in the background. appended after the rehome arm
+    "macro/cluster/background/backup",
 ];
 
 /// Whether an id names a workload this build knows about

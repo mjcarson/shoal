@@ -356,7 +356,8 @@ pub enum ShoalError {
     ClusterDirectoryInStandalone { cluster: ClusterId },
     /// This storage directory is a standalone node's, and the configuration names a cluster
     ///
-    /// Turning single node data into a cluster member is the migration M10 owns; nothing here
+    /// Turning single node data into a cluster's is an export restored into a new cluster
+    /// ([F49](../../../docs/src/features/backup-and-recovery.md)); nothing here
     /// can do it, and refusing is what keeps a node from claiming a cluster it was never
     /// bootstrapped into.
     StandaloneDirectoryInCluster { node: NodeId },
@@ -440,6 +441,12 @@ pub enum ShoalError {
     /// The activation is the rollback boundary: past it a member speaking only an older
     /// version is refused at every door ([F48](../../../docs/src/features/rolling-compatibility.md)).
     BelowActivatedWire { node: NodeId, activated: u8, offered: u8 },
+    /// A peer belongs to the cluster this one was restored from, whose identities are retired
+    ///
+    /// A restore is into a new cluster; the old cluster's members are refused by name rather
+    /// than by accident, so a node of it started against the new cluster stops with this
+    /// ([F49](../../../docs/src/features/backup-and-recovery.md)).
+    RestoredFrom { found: ClusterId, node: NodeId },
     /// This node's own newest wire version is below the one the cluster has activated
     ///
     /// The other half of the same rule: a build or a pin that cannot speak the activated
@@ -487,8 +494,8 @@ impl std::fmt::Display for ShoalError {
                 f,
                 "the storage marker is format {found} and this build reads {supported:?}; a marker \
                  in another format is unsupported and never migrated in place: serve the directory \
-                 with the build that wrote it, or start a new directory and import or restore \
-                 into it"
+                 with the build that wrote it, or start a new directory and restore a backup \
+                 or an export into it"
             ),
             ShoalError::SlotsFixed { claimed, configured } => write!(
                 f,
@@ -525,8 +532,9 @@ impl std::fmt::Display for ShoalError {
             ShoalError::StandaloneDirectoryInCluster { node } => write!(
                 f,
                 "the storage directory belongs to standalone node {node} and the configuration \
-                 names a cluster; converting single node data into a cluster member is the \
-                 migration M10 owns, and there is no supported path yet"
+                 names a cluster; a directory never changes mode, and single node data is brought \
+                 into a cluster by an export (export_standalone) restored into a new cluster, \
+                 which leaves this directory as the rollback"
             ),
             ShoalError::JoiningDirectoryBootstrapped { node } => write!(
                 f,
@@ -617,6 +625,11 @@ impl std::fmt::Display for ShoalError {
                 f,
                 "{node} speaks wire version {offered} at most and the cluster has activated \
                  {activated}; an activation is the boundary no member rolls back past"
+            ),
+            ShoalError::RestoredFrom { found, node } => write!(
+                f,
+                "{node} belongs to cluster {found}, which this cluster was restored from; a restored \
+                 cluster is a new one and the old cluster's members are retired"
             ),
             ShoalError::WireBelowActivated { node, activated, ours } => write!(
                 f,

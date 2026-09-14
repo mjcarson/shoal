@@ -436,6 +436,9 @@ cluster:
     moves_per_node: 1             # moves one member may be the source of, and the destination of, at a time; at least one
     hysteresis: 0.10              # the share of its target a member has to be over before a rebalance moves a set off it; at least 0 and under 1
     plan_interval: "5s"           # how often the leader looks at its open plans; no shorter than failure_detector.interval_ms
+  backup:                         # backups this node's groups' leaders drive (F49), node-local
+    concurrent: 1                 # group backups one shard drives at a time; at least one
+    timeout: "10m"                # one group's backup, the cut and the copy together; no shorter than replication.snapshot_timeout
 ```
 
 Two settings have no default and are absent above: `advertise`, the address peers reach this
@@ -606,10 +609,10 @@ build reads, and ~~that no migration between formats exists yet - M10 owns one, 
 directory" is a development answer rather than an upgrade procedure~~ that a marker is never
 migrated in place, which since [F48](../features/rolling-compatibility.md) is the supported
 answer rather than a gap: a directory in a format this build does not read is served by the
-build that wrote it, or its data brought into a new directory by an import or a restore. The
+build that wrote it, or its data brought into a new cluster by a restore of a backup or of an export. The
 same marker is what refuses a mode change: a directory bootstrapped into a cluster is refused by
 a config with no `cluster:` block, and a standalone directory is refused by one with a block,
-naming ~~M10's migration~~ the import that is the supported path
+naming ~~M10's migration~~ the export and restore that is the supported path
 ([F49](../features/backup-and-recovery.md)). ~~`topology` is the one field ever rewritten in place~~ `topology`, `incarnation`,
 `physical` and - once, for a joiner - `cluster` are the fields rewritten in place; the identities,
 the shard count and the layout are written once. Beside it, `shoal.lock` is an advisory lock a

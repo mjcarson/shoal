@@ -427,6 +427,13 @@ pub fn add(
             #table_names_ident::#variant_ident => <#field_type>::fold_intents(shard_name, #table_names_ident::#variant_ident, conf).await,
         }
     });
+    // build our export arms, one per table, each naming its own type the same way
+    let export_archives_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
+        let field_type = &field.ty;
+        quote! {
+            #table_names_ident::#variant_ident => <#field_type>::export_archives(shard_names, conf, path, provenance, group, schema_id).await,
+        }
+    });
     // build our table-of-id arms
     let table_of_id_arms = variants.iter().map(|variant_ident| {
         quote! {
@@ -745,6 +752,21 @@ pub fn add(
             async fn fold_intents(shard_name: &str, table: Self::TableNames, conf: &::shoal::server::Conf) -> Result<u64, ::shoal::server::ServerError> {
                 match table {
                     #(#fold_intents_arms)*
+                }
+            }
+
+            /// Write every archived partition some shards hold of a table as one snapshot file
+            async fn export_archives(
+                shard_names: &[String],
+                table: Self::TableNames,
+                conf: &::shoal::server::Conf,
+                path: &::std::path::Path,
+                provenance: &::shoal::server::replication::snapshot::SnapshotProvenance,
+                group: ::shoal::shared::identity::GroupId,
+                schema_id: u64,
+            ) -> Result<::shoal::server::replication::snapshot::SnapshotManifest, ::shoal::server::ServerError> {
+                match table {
+                    #(#export_archives_arms)*
                 }
             }
 

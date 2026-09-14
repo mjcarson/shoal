@@ -390,6 +390,50 @@ pub struct ClusterFacts {
     /// long the start was held for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rehome: Option<RehomeFacts>,
+    /// The backup the arm ran in the background and what the client saw across it, if it did
+    ///
+    /// Only the backup arm carries one; absent before
+    /// [F49](../../../docs/src/features/backup-and-recovery.md). The marks are when the
+    /// backup was asked for and when its record was done, the counts are the files every
+    /// group's leader wrote and the bytes they took, and the windows are the client's
+    /// distribution before, during and after it - what a scheduled backup costs the
+    /// foreground ([C10](../../../docs/src/distributed/performance.md), Q12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<BackupFacts>,
+}
+
+/// A backup run in the background of a measured phase, and what the client saw across it
+///
+/// Every time is milliseconds from the start of the measured phase, on the driver's clock.
+/// The windows are cut at the marks, the same way a repair's are
+/// ([F49](../../../docs/src/features/backup-and-recovery.md)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupFacts {
+    /// When the backup was asked for, if it was inside the run
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_ms: Option<u64>,
+    /// When every group of it was done, if that was inside the run
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_ms: Option<u64>,
+    /// How long that took, in whole seconds, if it finished
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u64>,
+    /// How many groups the record covered
+    pub groups: u64,
+    /// How many of them wrote a file that verified
+    pub written: u64,
+    /// How many were skipped, which every volatile group is
+    pub skipped: u64,
+    /// How many failed
+    pub failed: u64,
+    /// Bytes the files took, summed over the groups
+    pub bytes: u64,
+    /// Records the files hold, summed over the groups
+    pub records: u64,
+    /// The three windows: `before`, `during` and `after`, each with its own distribution
+    pub windows: Vec<WindowFacts>,
+    /// One bucket per second of the measured phase
+    pub series: Vec<SecondFacts>,
 }
 
 /// A plan run in the background of a measured phase, and what the client saw across it

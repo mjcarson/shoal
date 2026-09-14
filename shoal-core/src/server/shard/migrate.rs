@@ -222,6 +222,13 @@ impl<D: ShoalDatabase> MoveContext<D> {
         self.raft.metrics().borrow_watched().current_leader == Some(self.me)
     }
 
+    /// Every member the committed configuration names, voter or learner
+    fn committed_nodes(&self) -> BTreeSet<ShardAddr> {
+        let watch = self.raft.metrics();
+        let metrics = watch.borrow_watched();
+        metrics.committed_membership_config.membership().nodes().map(|(addr, _)| *addr).collect()
+    }
+
     /// The group's committed voters, and whether the committed configuration is joint
     fn committed_voters(&self) -> (BTreeSet<ShardAddr>, bool, Option<u64>) {
         let watch = self.raft.metrics();
@@ -302,7 +309,17 @@ pub async fn drive_group<D: ShoalDatabase>(context: MoveContext<D>) {
 /// * `progress` - Where the group stands, moved as the phases go
 async fn drive_group_inner<D: ShoalDatabase>(context: &MoveContext<D>, progress: &mut GroupMove) -> Result<(), String> {
     let me = context.me.node;
-    let target: BTreeSet<ShardAddr> = context.target.iter().copied().collect();
+    // the voters proposed: the record's target, less any member the group's committed
+    // configuration does not name. a move adds its destination and nothing else, so a member
+    // a recovery rewrote out of the group is not brought back by a record that still lists
+    // it ([F49](../../../../docs/src/features/backup-and-recovery.md))
+    let named = context.committed_nodes();
+    let target: BTreeSet<ShardAddr> = context
+        .target
+        .iter()
+        .copied()
+        .filter(|member| *member == context.to || named.contains(member))
+        .collect();
     progress.driver = Some(me);
     // reconcile first: the group's committed configuration wins over the record. A group
     // whose committed voters are the target is at least configured, and its uniform index is
@@ -327,8 +344,7 @@ async fn drive_group_inner<D: ShoalDatabase>(context: &MoveContext<D>, progress:
         catch_up(context, progress).await?;
         // the source never drives its own removal: hand the lead to a member of the target
         if me == context.from.node {
-            let successor = context
-                .target
+            let successor = target
                 .iter()
                 .find(|member| **member != context.to && **member != context.me && !context.is_down(**member))
                 .copied()

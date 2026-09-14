@@ -245,6 +245,32 @@ where
         S::fold_intents::<SortedPartition<R>, R>(shard_name, shard_table_name, conf).await
     }
 
+    /// Write every archived partition some shards hold of this table as one snapshot file
+    ///
+    /// The export of a standalone node, after a fold
+    /// ([F49](../../../../docs/src/features/backup-and-recovery.md)); an ephemeral table
+    /// refuses, since nothing of it is on disk. Returns the manifest of the file written.
+    ///
+    /// # Arguments
+    ///
+    /// * `shard_names` - The shards whose archives are exported
+    /// * `conf` - The Shoal config
+    /// * `path` - The file to write
+    /// * `provenance` - Where the export is made and which file format it is written in
+    /// * `group` - The group the file is written under, which a restore ignores
+    /// * `schema_id` - The schema's fingerprint
+    pub async fn export_archives(
+        shard_names: &[String],
+        conf: &Conf,
+        path: &std::path::Path,
+        provenance: &crate::server::replication::snapshot::SnapshotProvenance,
+        group: crate::shared::identity::GroupId,
+        schema_id: u64,
+    ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError> {
+        // the engine does the export; this only names the row type
+        S::export_archives::<R>(shard_names, conf, path, provenance, group, schema_id).await
+    }
+
     /// Create a persistent shoal table
     ///
     /// # Arguments
@@ -1598,12 +1624,16 @@ where
 
     /// Hash the applied state, for a fixture comparing replicas at a common boundary
     ///
-    /// Every live row, in partition then sort order, hashed as its partition key and its
-    /// archived bytes; tombstones and archives alike are folded in as rows, so a resident copy
-    /// and one still in its archive hash the same. A partition that is not resident is read
-    /// from its archive, so a replica holding nothing in memory hashes the same state as one
-    /// that applied every write itself ([F43](../../../../docs/src/features/node-recovery.md)).
-    /// Returns how many rows there are and the hash.
+    /// Every live row hashed as its partition key and its archived bytes, and the hashes
+    /// summed, so the digest is of the set of rows and not of their order or of which shard
+    /// holds them: a table dealt over two executors and the same rows on one digest the same,
+    /// which is what an import is judged by
+    /// ([F49](../../../../docs/src/features/backup-and-recovery.md)). Tombstones and
+    /// archives alike are folded in as rows, so a resident copy and one still in its archive
+    /// hash the same. A partition that is not resident is read from its archive, so a replica
+    /// holding nothing in memory hashes the same state as one that applied every write itself
+    /// ([F43](../../../../docs/src/features/node-recovery.md)). Returns how many rows there
+    /// are and the hash.
     ///
     /// # Errors
     ///
@@ -1645,11 +1675,11 @@ where
                 if let MaybeRow::Row(row) = row {
                     rows += 1;
                     let bytes = RkyvSupport::serialize(row);
-                    let mut fold = Vec::with_capacity(16 + bytes.len());
-                    fold.extend_from_slice(&acc.to_le_bytes());
+                    // the row's own hash, summed: the order and the shard are not in it
+                    let mut fold = Vec::with_capacity(8 + bytes.len());
                     fold.extend_from_slice(&key.to_le_bytes());
                     fold.extend_from_slice(&bytes);
-                    acc = gxhash::gxhash64(&fold, 0);
+                    acc = acc.wrapping_add(gxhash::gxhash64(&fold, 0));
                 }
             }
         }

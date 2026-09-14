@@ -110,6 +110,7 @@
   - [F46. Capacity-aware rebalancing and removal](features/capacity-rebalancing.md)
   - [F47. Changing a node's core count: slots, hosting and the rehome](features/local-rehome.md)
   - [F48. Rolling compatibility and activation](features/rolling-compatibility.md)
+  - [F49. Backup, restore, export and permanent quorum loss](features/backup-and-recovery.md)
 
 # Direction
 

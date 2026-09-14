@@ -210,6 +210,31 @@ impl<D: ShoalDatabase> StorageSupport for NoStorage<D> {
         Ok(0)
     }
 
+    /// Export a table's archives, of which this engine has none
+    ///
+    /// # Arguments
+    ///
+    /// * `shard_names` - The shards whose archives are exported
+    /// * `conf` - The Shoal config
+    /// * `path` - The file to write
+    /// * `provenance` - Where the export is made
+    /// * `group` - The group the file is written under
+    /// * `schema_id` - The schema's fingerprint
+    async fn export_archives<R: PartitionKeySupport + 'static>(
+        _shard_names: &[String],
+        _conf: &Conf,
+        _path: &std::path::Path,
+        _provenance: &crate::server::replication::snapshot::SnapshotProvenance,
+        _group: crate::shared::identity::GroupId,
+        _schema_id: u64,
+    ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError> {
+        // an ephemeral table's rows are memory, and an export is of what is on disk
+        Err(ServerError::GlommioGeneric(format!(
+            "table {} is ephemeral; nothing of it is on disk to export",
+            R::name()
+        )))
+    }
+
     /// Commit an operation to this storages intent log
     ///
     /// The data is dropped on the floor. The row itself is already being written into the

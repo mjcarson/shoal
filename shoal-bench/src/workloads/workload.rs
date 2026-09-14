@@ -375,6 +375,10 @@ pub enum BackgroundKind {
         /// is named for the blocked case it shows rather than for a drain
         blocked: bool,
     },
+    /// A `Backup` of a table under the workload's own storage root, after an `Activate` of
+    /// the wire version the file header needs
+    /// ([F49](../../../docs/src/features/backup-and-recovery.md))
+    Backup,
     /// The expiry of a killed node's grace: nothing is asked for; the harness's fault kills
     /// the node and the plan the leader records for it is polled once it appears
     Expire {

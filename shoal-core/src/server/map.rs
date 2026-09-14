@@ -112,6 +112,13 @@ pub struct GroupSpec {
     pub table: TableId,
     /// Its members, the primary first
     pub members: Vec<ShardAddr>,
+    /// The members a fresh group is initialized with: those the cluster has not tombstoned
+    ///
+    /// A member a recovery or an expiry tombstoned never votes again, so a group first built
+    /// after one - a volatile table's after the survivor restarts - is initialized without it,
+    /// or it would wait on a vote that never comes
+    /// ([F49](../../../docs/src/features/backup-and-recovery.md)). The primary first.
+    pub voters: Vec<ShardAddr>,
     /// The tablets it serves, ascending
     pub tablets: Vec<u16>,
     /// Which of this node's shards hosts it
@@ -133,10 +140,10 @@ impl GroupSpec {
         ShardAddr::new(node, self.mine)
     }
 
-    /// Whether this node's member is the placement primary
+    /// Whether this node's member is the placement primary: the first member that can vote
     #[must_use]
     pub fn is_primary(&self, node: NodeId) -> bool {
-        self.members.first().is_some_and(|primary| primary.node == node && primary.shard == self.mine)
+        self.voters.first().is_some_and(|primary| primary.node == node && primary.shard == self.mine)
     }
 }
 
@@ -190,6 +197,19 @@ pub struct TabletMap {
     /// ([F48](../../../docs/src/features/rolling-compatibility.md))
     #[serde(default = "default_activated_wire")]
     pub activated_wire: u8,
+    /// The backup operations not yet done, which a group's leader drives
+    /// ([F49](../../../docs/src/features/backup-and-recovery.md))
+    #[serde(default)]
+    pub backups: Vec<crate::server::control::backup::BackupRecord>,
+    /// The restore operations not yet done, which a group's leader drives
+    #[serde(default)]
+    pub restores: Vec<crate::server::control::backup::RestoreRecord>,
+    /// The cluster this one was restored from, whose identities are refused at every door
+    #[serde(default)]
+    pub restored_from: Option<ClusterId>,
+    /// The identities removed for good, which are refused at every door
+    #[serde(default)]
+    pub tombstones: Vec<NodeId>,
 }
 
 /// The activated wire version a map from before F48 is read with: the floor
@@ -217,6 +237,10 @@ impl Default for TabletMap {
             configurations: Vec::new(),
             moves: Vec::new(),
             activated_wire: crate::shared::protocol::MIN_PEER_VERSION,
+            backups: Vec::new(),
+            restores: Vec::new(),
+            restored_from: None,
+            tombstones: Vec::new(),
         }
     }
 }
@@ -294,6 +318,10 @@ impl TabletMap {
             configurations: state.configurations.values().cloned().collect(),
             moves: state.moves.values().filter(|record| !record.is_done()).cloned().collect(),
             activated_wire: state.activated_wire(),
+            backups: state.backups.values().filter(|record| !record.is_done()).cloned().collect(),
+            restores: state.restores.values().filter(|record| !record.is_done()).cloned().collect(),
+            restored_from: state.restored_from,
+            tombstones: state.tombstones.keys().copied().collect(),
         }
     }
 
@@ -444,11 +472,37 @@ impl TabletMap {
     /// * `consistency` - The write's consistency
     #[must_use]
     pub fn quorum_for(&self, consistency: Consistency) -> u32 {
+        let copies = self.voting_rf();
         match consistency {
             Consistency::One => 1,
-            Consistency::Quorum => self.desired_rf / 2 + 1,
-            Consistency::All => self.desired_rf.max(1),
+            Consistency::Quorum => copies / 2 + 1,
+            Consistency::All => copies.max(1),
         }
+    }
+
+    /// How many copies of a tablet can still vote: the desired factor, less every placed
+    /// member the cluster has given up on - removed, or tombstoned while its sets are rebuilt
+    ///
+    /// A member a recovery or an expiry tombstoned is gone from every group it was in, so a
+    /// quorum counted against the policy's factor would wait for copies nothing holds. After
+    /// a recovery that kept one survivor of three this is one, and the survivor's writes are
+    /// admitted by the quorum its groups actually have
+    /// ([F49](../../../docs/src/features/backup-and-recovery.md)). A member draining under a
+    /// decommission still counts: it is up and its copies vote until each set has moved; and
+    /// so does a down member inside its grace, since its copies are still its.
+    #[must_use]
+    pub fn voting_rf(&self) -> u32 {
+        let gone = self
+            .placement
+            .iter()
+            .filter(|node| {
+                self.members.get(node).is_some_and(|member| {
+                    member.phase == MemberPhase::Removed || (member.phase == MemberPhase::Removing && self.tombstones.contains(node))
+                })
+            })
+            .count();
+        let gone = u32::try_from(gone).unwrap_or(u32::MAX);
+        self.desired_rf.saturating_sub(gone).max(1)
     }
 
     /// Whether a default write can be admitted right now, and if not, why
@@ -649,6 +703,7 @@ impl TabletMap {
             // the set's tablets share one configuration and one move, since both cover whole sets
             let first = usize::from(tablets[0]);
             let members = self.replicas_of(first);
+            let voters: Vec<ShardAddr> = members.iter().filter(|member| !self.tombstones.contains(&member.node)).copied().collect();
             let learner = self.learner_of(first).filter(|learner| learner.node == me);
             let transition = self.move_of(first).map(|record| record.op);
             // this node's member, or the learner's shard when it is the destination
@@ -664,6 +719,7 @@ impl TabletMap {
                     id: GroupId::of(*table, &rule),
                     table: *table,
                     members: members.clone(),
+                    voters: voters.clone(),
                     tablets: tablets.clone(),
                     mine: mine.0,
                     learner: mine.1,
@@ -986,6 +1042,11 @@ impl Admission for MapCell {
         if map.members.is_empty() {
             return Verdict::Member;
         }
+        // a removed identity never comes back, by this door or any other
+        // ([F49](../../../docs/src/features/backup-and-recovery.md))
+        if map.tombstones.contains(&node) || map.members.get(&node).is_some_and(|member| member.phase == MemberPhase::Removed) {
+            return Verdict::Removed;
+        }
         match map.members.get(&node) {
             None => Verdict::Unknown,
             Some(member) if incarnation < member.incarnation => Verdict::Fenced {
@@ -1006,6 +1067,11 @@ impl Admission for MapCell {
     /// The wire version the installed map says the cluster activated
     fn activated_wire(&self) -> u8 {
         self.inner.borrow().activated_wire
+    }
+
+    /// The cluster the installed map says this one was restored from
+    fn restored_from(&self) -> Option<ClusterId> {
+        self.inner.borrow().restored_from
     }
 }
 

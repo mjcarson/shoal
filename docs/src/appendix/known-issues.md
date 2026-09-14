@@ -71,11 +71,18 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ **1,475 tests**, four ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ **1,484 tests**, four ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
-its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ninety-two fail under the load (item 100) and every one of them passes at six;
+its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ninety-five fail under the load (item 100) and every one of them passes at six;
 two of `persistent_unsorted_table.rs` fail about one run in five of that binary (item 107).
+[F49](../features/backup-and-recovery.md) added 9 and took it to 1,484, filing nothing and
+resolving nothing: the three defects it met - a recovered survivor's state diverging from a
+joiner's replay of the same log, two plans planned in one pass picking the same destination
+for one set, and a move re-adding a member a recovery had rewritten out of a group - were
+found by its own fixture test and designed out before the page was written, and are recorded
+on the F page. Under the workspace run at six threads one of F46's fixture tests failed and
+passed alone, and under the fixture suite on its own four did (item 100).
 [F48](../features/rolling-compatibility.md) added 8 and took it to 1,475, filing nothing and
 resolving nothing: the one defect it met - a control state persisted by an older build
 dropping a field the newer one judged by - was found by the run against a real previous

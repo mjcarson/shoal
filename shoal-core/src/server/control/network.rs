@@ -46,7 +46,7 @@ use crate::server::peer::handshake::PeerAddr;
 use crate::server::peer::{self, Frame, FrameKey, Lane, LinkEvent, Local};
 use crate::shared::identity::NodeId;
 use crate::shared::protocol::peer::{
-    ControlKind, ControlRequestHead, ControlResponseHead, ControlStatus, CONTROL_HEAD_LEN,
+    ControlKind, ControlRequestHead, ControlResponseHead, ControlStatus, PeerRefusal, CONTROL_HEAD_LEN,
 };
 use crate::shared::protocol::MessageType;
 
@@ -105,12 +105,14 @@ impl ControlLink {
     /// * `transport` - The bounds and timers
     /// * `tls` - What to dial with, if the lanes are encrypted
     /// * `wires` - Where the newest wire version each peer's hello named is recorded
+    /// * `removed` - Set when a peer refuses this node's hello as a removed identity
     fn new(
         entry: PeerAddr,
         local: Rc<RefCell<Local>>,
         transport: &Transport,
         tls: Option<Arc<ClientConfig>>,
         wires: Rc<RefCell<BTreeMap<NodeId, u8>>>,
+        removed: Rc<Cell<bool>>,
     ) -> Self {
         let pending: Rc<RefCell<HashMap<u64, oneshot::Sender<ControlOutcome>>>> =
             Rc::new(RefCell::new(HashMap::new()));
@@ -138,8 +140,13 @@ impl ControlLink {
                         let _ = tx.send(outcome);
                     }
                 }
-                // a dropped link fails every RPC in flight, unsent or written alike
-                LinkEvent::Down { reason, .. } => {
+                // a dropped link fails every RPC in flight, unsent or written alike; a hello
+                // refused as removed is a verdict on this node, remembered for the loop
+                // ([F49](../../../../docs/src/features/backup-and-recovery.md))
+                LinkEvent::Down { reason, refused, .. } => {
+                    if refused == Some(PeerRefusal::Removed) {
+                        removed.set(true);
+                    }
                     for (_, tx) in pending.borrow_mut().drain() {
                         let _ = tx.send(ControlOutcome::Unreachable(reason.clone()));
                     }
@@ -234,6 +241,8 @@ struct Shared {
     transport: Transport,
     /// The newest wire version each peer's hello named, as this node's links heard it
     wires: Rc<RefCell<BTreeMap<NodeId, u8>>>,
+    /// Whether a peer has refused this node's hello as a removed identity
+    removed: Rc<Cell<bool>>,
 }
 
 /// The control group's network factory
@@ -269,8 +278,19 @@ impl PeerNetwork {
                 tls,
                 transport,
                 wires: Rc::new(RefCell::new(BTreeMap::new())),
+                removed: Rc::new(Cell::new(false)),
             }),
         }
+    }
+
+    /// Whether a peer has refused this node's hello as a removed identity
+    ///
+    /// A verdict on the identity rather than on a connection: the control loop stops on it,
+    /// the way it stops on a `Removed` answer to its own observation
+    /// ([F49](../../../../docs/src/features/backup-and-recovery.md)).
+    #[must_use]
+    pub fn refused_as_removed(&self) -> bool {
+        self.shared.removed.get()
     }
 
     /// The newest wire version each peer's hello named, as this node's links heard it
@@ -329,6 +349,7 @@ impl PeerNetwork {
             &self.shared.transport,
             self.shared.tls.clone(),
             self.shared.wires.clone(),
+            self.shared.removed.clone(),
         ));
         self.shared
             .links

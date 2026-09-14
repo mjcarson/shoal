@@ -821,6 +821,7 @@ mod tests {
                 migration: None,
                 rebalance: None,
                 rehome: None,
+                backup: None,
             });
         }
         capture

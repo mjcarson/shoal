@@ -43,7 +43,7 @@ cluster id too if the intent is `Bootstrap`; on an established directory it hold
 and layout as before and adds the mode: a directory bootstrapped into a cluster is refused by a
 standalone config (`ClusterDirectoryInStandalone`, naming the cluster) and a standalone
 directory by a cluster config (`StandaloneDirectoryInCluster`, naming the node and ~~M10's
-migration~~ the import [F49](backup-and-recovery.md) built). Bootstrap on an established cluster directory keeps everything and mints nothing.
+migration~~ the export [F49](backup-and-recovery.md) built). Bootstrap on an established cluster directory keeps everything and mints nothing.
 **Format 1 is refused**, with an error naming the format found, the formats this build reads and
 that no migration exists yet - C1 permits that for a development build, and it is the choice
 taken. The format is read first and alone, from a struct with one field, so a marker from another
@@ -227,8 +227,8 @@ A spike-only type configuration would have measured a harness.
   tablet term and vote live in the tablet's own manifest, which does not exist yet.
 - **Format 1 has no migration**, and neither does standalone-to-cluster. ~~Both refusals name
   M10.~~ Since [F48](rolling-compatibility.md) the format refusal says a marker is never migrated
-  in place and names the way out - the build that wrote it, or an import or a restore into a
-  new directory - and since [F49](backup-and-recovery.md) the mode refusal names the import.
+  in place and names the way out - the build that wrote it, or a backup or an export restored
+  into a new cluster - and since [F49](backup-and-recovery.md) the mode refusal names the export.
   Format 2 is read and rewritten at format 3 since [F39](membership.md), which is the one
   upgrade the marker has had.
 - **`verify_cluster` has no caller** outside its tests. The M2 handshake
@@ -268,8 +268,8 @@ A spike-only type configuration would have measured a harness.
   against `SUPPORTED_FORMATS`. Adding a format means adding to that list *and* deciding what a
   reader of the old one does, on the marker page.
 - **A directory never changes mode.** Standalone stays standalone and a cluster directory stays
-  in its cluster, ~~until M10 writes the migration~~ and the import [F49](backup-and-recovery.md)
-  built is into a *new* directory, so this stays true. `a_mode_change_is_refused_both_ways`.
+  in its cluster, ~~until M10 writes the migration~~ and the export [F49](backup-and-recovery.md)
+  built is restored into a *new* cluster, so this stays true. `a_mode_change_is_refused_both_ways`.
 - **A second bootstrap never mints a second cluster**, at the marker (`claim` keeps the id) and at
   the state machine (`apply` refuses).
 - **`IOFlushed` completes after `fdatasync`, `save_vote` returns after the rename and directory

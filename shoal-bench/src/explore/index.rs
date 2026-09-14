@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 
 use shoal_top::index::{
-    BackgroundFactsLite, Capture, CatchupFactsLite, CatchupSecondFactsLite, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, FaultFactsLite, MigrationFactsLite, RebalanceFactsLite, RehomeFactsLite,
+    BackgroundFactsLite, BackupFactsLite, Capture, CatchupFactsLite, CatchupSecondFactsLite, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, FaultFactsLite, MigrationFactsLite, RebalanceFactsLite, RehomeFactsLite,
     INDEX_VERSION, Index, Layer as IndexLayer, HopFactsLite, HopMixLite, MacroPoint, NodeCoresLite,
     NodeReadFactsLite, OfferedLoadLite, OpStats, OutcomeFactsLite, ReadFactsLite, ReplicaFactsLite,
     ScaleFactsLite, SecondFactsLite, Timing, Verdict, WindowFactsLite, Workload,
@@ -711,6 +711,44 @@ pub fn cluster_facts(cluster: &ClusterFacts) -> ClusterFactsLite {
             installs_dropped: rehome.installs_dropped,
             steps_redone: rehome.steps_redone,
             millis: rehome.millis,
+        }),
+        // the backup arm's record travels whole, counts, windows and series
+        // ([F49](../../../docs/src/features/backup-and-recovery.md))
+        backup: cluster.backup.as_ref().map(|backup| BackupFactsLite {
+            started_ms: backup.started_ms,
+            finished_ms: backup.finished_ms,
+            seconds: backup.seconds,
+            groups: backup.groups,
+            written: backup.written,
+            skipped: backup.skipped,
+            failed: backup.failed,
+            bytes: backup.bytes,
+            records: backup.records,
+            windows: backup
+                .windows
+                .iter()
+                .map(|window| WindowFactsLite {
+                    name: window.name.clone(),
+                    from_ms: window.from_ms,
+                    to_ms: window.to_ms,
+                    ops: window.ops,
+                    errors: window.errors,
+                    p50_us: window.p50_us,
+                    p99_us: window.p99_us,
+                    max_us: window.max_us,
+                })
+                .collect(),
+            series: backup
+                .series
+                .iter()
+                .map(|second| SecondFactsLite {
+                    second: second.second,
+                    ops: second.ops,
+                    errors: second.errors,
+                    p50_us: second.p50_us,
+                    p99_us: second.p99_us,
+                })
+                .collect(),
         }),
     }
 }

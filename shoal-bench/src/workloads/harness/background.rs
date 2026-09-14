@@ -21,7 +21,7 @@ use shoal::server::control::AdminSender;
 use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest};
 use shoal::shared::protocol::error::ErrorCode;
 
-use crate::model::macro_layer::{BackgroundFacts, MigrationFacts, RebalanceFacts, SecondFacts, WindowFacts};
+use crate::model::macro_layer::{BackgroundFacts, BackupFacts, MigrationFacts, RebalanceFacts, SecondFacts, WindowFacts};
 use crate::workloads::workload::{BackgroundKind, BackgroundSpec, TimelineSample};
 
 /// How often the record is polled
@@ -59,6 +59,14 @@ pub struct Marks {
     pub plan_bytes: u64,
     /// Why a plan could not go on, as its record last said
     pub blocked: Option<String>,
+    /// How many groups of a backup wrote a file ([F49](../../../../docs/src/features/backup-and-recovery.md))
+    pub written: u64,
+    /// How many groups of a backup were skipped
+    pub skipped: u64,
+    /// How many groups of a backup failed
+    pub failed: u64,
+    /// Records a backup's files hold, summed over the groups
+    pub records: u64,
 }
 
 /// A background repair in progress: the thread driving it
@@ -96,14 +104,54 @@ impl Injected {
 /// * `admin` - How to ask, as the process
 /// * `started` - When the measured phase started, which the schedule counts from
 /// * `nodes` - Every staged node's identity, in staged order, which a move names its nodes by
-pub fn inject(spec: &BackgroundSpec, admin: AdminSender, started: Instant, nodes: Vec<shoal::shared::identity::NodeId>) -> Result<Injected> {
+pub fn inject(
+    spec: &BackgroundSpec,
+    admin: AdminSender,
+    started: Instant,
+    nodes: Vec<shoal::shared::identity::NodeId>,
+    backup_dir: std::path::PathBuf,
+) -> Result<Injected> {
     let spec = spec.clone();
     let (stop, stopped) = mpsc::channel();
     let handle = std::thread::Builder::new()
         .name("background".to_string())
-        .spawn(move || schedule(&spec, &admin, started, &stopped, &nodes))
+        .spawn(move || schedule(&spec, &admin, started, &stopped, &nodes, &backup_dir))
         .context("failed to start the background thread")?;
     Ok(Injected { handle, stop })
+}
+
+/// Ask the control plane for a mutation, retried only for a version that moved underneath it
+///
+/// # Arguments
+///
+/// * `admin` - How to ask
+/// * `op` - The operation
+/// * `kind` - What to ask for
+/// * `what` - What it is called, for the error
+fn ask(admin: &AdminSender, op: uuid::Uuid, kind: AdminKind, what: &str) -> Result<(), String> {
+    for _ in 0..8 {
+        let version = match admin.admin(AdminRequest {
+            op: uuid::Uuid::new_v4(),
+            expected_version: 0,
+            kind: AdminKind::Members,
+        }) {
+            Ok(response) => response.topology_version,
+            Err(error) => return Err(format!("reading the topology version: {error:?}")),
+        };
+        match admin.admin(AdminRequest {
+            op,
+            expected_version: version,
+            kind: kind.clone(),
+        }) {
+            Ok(response) => match response.outcome {
+                Ok(AdminOutcome::Applied { .. } | AdminOutcome::Repeated { .. }) => return Ok(()),
+                Err(error) if error.code() == ErrorCode::StaleVersion => std::thread::sleep(Duration::from_millis(100)),
+                other => return Err(format!("the {what} was refused: {other:?}")),
+            },
+            Err(error) => return Err(format!("asking for the {what}: {error:?}")),
+        }
+    }
+    Err("the topology version kept moving under the request".to_string())
 }
 
 /// Runs one background schedule to its end and reports the marks
@@ -120,6 +168,7 @@ fn schedule(
     started: Instant,
     stopped: &mpsc::Receiver<()>,
     nodes: &[shoal::shared::identity::NodeId],
+    backup_dir: &std::path::Path,
 ) -> Marks {
     let mut marks = Marks::default();
     // wait for the mark, unless the run ends first
@@ -154,6 +203,22 @@ fn schedule(
         marks.op = Some(op);
         return poll_plan(admin, op, stopped, marks);
     }
+    // a backup needs the wire version whose file header names the cluster activated first;
+    // every node of an arm runs this build, so the activation is applied at once
+    // ([F49](../../../../docs/src/features/backup-and-recovery.md))
+    if spec.kind == BackgroundKind::Backup {
+        if let Err(error) = ask(
+            admin,
+            uuid::Uuid::new_v4(),
+            AdminKind::Activate {
+                wire: shoal::shared::protocol::PROTOCOL_VERSION,
+            },
+            "activation",
+        ) {
+            marks.error = Some(error);
+            return marks;
+        }
+    }
     // the request, retried only for a version that moved underneath it
     let op = uuid::Uuid::new_v4();
     let kind = match &spec.kind {
@@ -186,45 +251,14 @@ fn schedule(
             };
             AdminKind::Decommission { node: *node }
         }
+        BackgroundKind::Backup => AdminKind::Backup {
+            table: Some(spec.table.to_string()),
+            path: backup_dir.to_string_lossy().into_owned(),
+        },
         BackgroundKind::Expire { .. } => unreachable!("handled above"),
     };
-    let mut asked = false;
-    for _ in 0..8 {
-        let version = match admin.admin(AdminRequest {
-            op: uuid::Uuid::new_v4(),
-            expected_version: 0,
-            kind: AdminKind::Members,
-        }) {
-            Ok(response) => response.topology_version,
-            Err(error) => {
-                marks.error = Some(format!("reading the topology version: {error:?}"));
-                return marks;
-            }
-        };
-        match admin.admin(AdminRequest {
-            op,
-            expected_version: version,
-            kind: kind.clone(),
-        }) {
-            Ok(response) => match response.outcome {
-                Ok(AdminOutcome::Applied { .. } | AdminOutcome::Repeated { .. }) => {
-                    asked = true;
-                    break;
-                }
-                Err(error) if error.code() == ErrorCode::StaleVersion => std::thread::sleep(Duration::from_millis(100)),
-                other => {
-                    marks.error = Some(format!("the repair was refused: {other:?}"));
-                    return marks;
-                }
-            },
-            Err(error) => {
-                marks.error = Some(format!("asking for the repair: {error:?}"));
-                return marks;
-            }
-        }
-    }
-    if !asked {
-        marks.error = Some("the topology version kept moving under the request".to_string());
+    if let Err(error) = ask(admin, op, kind, "operation") {
+        marks.error = Some(error);
         return marks;
     }
     marks.started_at = Some(Instant::now());
@@ -238,6 +272,7 @@ fn schedule(
         let status = match &spec.kind {
             BackgroundKind::Repair => AdminKind::RepairStatus { op },
             BackgroundKind::Move { .. } => AdminKind::MoveStatus { op },
+            BackgroundKind::Backup => AdminKind::BackupStatus { op },
             BackgroundKind::Rebalance | BackgroundKind::Decommission { .. } | BackgroundKind::Expire { .. } => {
                 unreachable!("a plan is polled by its own record")
             }
@@ -290,9 +325,32 @@ fn schedule(
                 _ => None,
             };
         }
+        // a backup's record carries what each group's leader wrote, or why it did not
+        // ([F49](../../../../docs/src/features/backup-and-recovery.md))
+        if spec.kind == BackgroundKind::Backup {
+            let (mut written, mut skipped, mut failed, mut bytes, mut records) = (0u64, 0u64, 0u64, 0u64, 0u64);
+            for group in groups.into_iter().flat_map(|groups| groups.values()) {
+                let outcome = &group["outcome"];
+                if outcome["Written"].is_object() {
+                    written += 1;
+                    bytes += outcome["Written"]["bytes"].as_u64().unwrap_or(0);
+                    records += outcome["Written"]["records"].as_u64().unwrap_or(0);
+                } else if outcome["Skipped"].is_object() {
+                    skipped += 1;
+                } else if outcome["Failed"].is_object() {
+                    failed += 1;
+                }
+            }
+            marks.written = written;
+            marks.skipped = skipped;
+            marks.failed = failed;
+            marks.bytes = bytes;
+            marks.records = records;
+        }
         let done = match &spec.kind {
             BackgroundKind::Repair => groups.is_some_and(|groups| !groups.is_empty() && groups.values().all(|group| group["phase"] == "Done")),
             BackgroundKind::Move { .. } => record["phase"] == "Done",
+            BackgroundKind::Backup => groups.is_some_and(|groups| !groups.is_empty() && groups.values().all(|group| group["phase"] == "Done")),
             BackgroundKind::Rebalance | BackgroundKind::Decommission { .. } | BackgroundKind::Expire { .. } => true,
         };
         if done {
@@ -535,6 +593,58 @@ pub fn migration_cut(
     }
 }
 
+/// Cuts a timeline at a backup's marks into its record
+///
+/// # Arguments
+///
+/// * `started` - When the measured phase started, on the driver's clock
+/// * `marks` - When the thread did what, and what the record said
+/// * `timeline` - Every operation of the run, in the order it was sent
+/// * `run_for` - How long the run was scheduled for
+#[must_use]
+pub fn backup_facts(started: Instant, marks: &Marks, timeline: &[TimelineSample], run_for: Duration) -> BackupFacts {
+    let started_at = marks.started_at.map(|at| at.saturating_duration_since(started));
+    let finished_at = marks.finished_at.map(|at| at.saturating_duration_since(started));
+    backup_cut(started_at, finished_at, marks, timeline, run_for)
+}
+
+/// The pure half of [`backup_facts`], on durations from the start of the run
+///
+/// # Arguments
+///
+/// * `started_at` - When the backup was asked for, if it was
+/// * `finished_at` - When every group of it was done, if inside the run
+/// * `marks` - What the record said
+/// * `timeline` - Every operation of the run, in the order it was sent
+/// * `run_for` - How long the run was scheduled for
+#[must_use]
+pub fn backup_cut(
+    started_at: Option<Duration>,
+    finished_at: Option<Duration>,
+    marks: &Marks,
+    timeline: &[TimelineSample],
+    run_for: Duration,
+) -> BackupFacts {
+    // the windows and the series are cut exactly as a repair's are
+    let windows = cut(started_at, finished_at, marks.groups, 0, timeline, run_for, 0, 0);
+    BackupFacts {
+        started_ms: started_at.map(millis),
+        finished_ms: finished_at.map(millis),
+        seconds: match (started_at, finished_at) {
+            (Some(from), Some(to)) => Some(millis(to.saturating_sub(from)) / 1000),
+            _ => None,
+        },
+        groups: marks.groups,
+        written: marks.written,
+        skipped: marks.skipped,
+        failed: marks.failed,
+        bytes: marks.bytes,
+        records: marks.records,
+        windows: windows.windows,
+        series: windows.series,
+    }
+}
+
 /// Cuts a timeline at a plan's marks into its record
 ///
 /// # Arguments
@@ -717,6 +827,10 @@ mod tests {
             moved: 0,
             plan_bytes: 0,
             blocked: None,
+            written: 0,
+            skipped: 0,
+            failed: 0,
+            records: 0,
         };
         let facts = super::migration_cut(Some(Duration::from_secs(10)), Some(Duration::from_secs(20)), &marks, &timeline, Duration::from_secs(30));
         assert_eq!(facts.started_ms, Some(10_000));
@@ -744,6 +858,71 @@ mod tests {
             }))
             .expect("an F44 record loads");
         assert!(older.migration.is_none());
+    }
+
+    /// A backup's record carries its marks, the files' counts, bytes and records, and its
+    /// windows and series are cut as a repair's are; a run that ended first has no `seconds`
+    /// and an empty `after`; an F47 record loads without the block (F49)
+    #[test]
+    fn backup_capture_records_files_and_windows() {
+        let timeline: Vec<TimelineSample> = (0..300u64)
+            .map(|index| {
+                let at = Duration::from_millis(index * 100);
+                let slow = (10..20).contains(&(index / 10));
+                TimelineSample {
+                    at,
+                    elapsed: Duration::from_micros(if slow { 900 } else { 300 }),
+                    ok: true,
+                }
+            })
+            .collect();
+        let marks = super::Marks {
+            started_at: None,
+            finished_at: None,
+            groups: 6,
+            clean: 0,
+            op: None,
+            error: None,
+            outcome: None,
+            phase_ms: Vec::new(),
+            bytes: 45_678,
+            entries: 0,
+            steps: 0,
+            moved: 0,
+            plan_bytes: 0,
+            blocked: None,
+            written: 3,
+            skipped: 3,
+            failed: 0,
+            records: 1_200,
+        };
+        let facts = super::backup_cut(Some(Duration::from_secs(10)), Some(Duration::from_secs(20)), &marks, &timeline, Duration::from_secs(30));
+        assert_eq!(facts.started_ms, Some(10_000));
+        assert_eq!(facts.finished_ms, Some(20_000));
+        assert_eq!(facts.seconds, Some(10));
+        assert_eq!((facts.groups, facts.written, facts.skipped, facts.failed), (6, 3, 3, 0));
+        assert_eq!((facts.bytes, facts.records), (45_678, 1_200));
+        let names: Vec<&str> = facts.windows.iter().map(|window| window.name.as_str()).collect();
+        assert_eq!(names, ["before", "during", "after"]);
+        assert!(facts.windows[1].p50_us > facts.windows[0].p50_us, "{:?}", facts.windows);
+        assert_eq!(facts.series.len(), 30);
+        // the record round trips through the artifact's json
+        let json = serde_json::to_value(&facts).expect("a backup record is json");
+        let back: crate::model::macro_layer::BackupFacts = serde_json::from_value(json).expect("a backup record loads");
+        assert_eq!(back, facts);
+        // a run that ended before the backup was done
+        let unfinished = super::backup_cut(Some(Duration::from_secs(10)), None, &marks, &timeline, Duration::from_secs(30));
+        assert_eq!(unfinished.seconds, None);
+        assert_eq!(unfinished.windows[2].ops, 0);
+        // a record from before the arm carries no backup block and loads
+        let older: crate::model::macro_layer::ClusterFacts =
+            serde_json::from_value(serde_json::json!({
+                "nodes": 3, "desired_rf": 3, "active_rf": 3, "write_policy": "quorum",
+                "read_policy": "one", "durability": "durable", "driver": "node", "cores": [],
+                "tables": 1, "tablets": 4096, "emulated": true
+            }))
+            .expect("an F47 record loads");
+        assert!(older.backup.is_none());
     }
 
     /// A plan's record carries its kind, marks, steps, bytes, blocked reason, windows, series
@@ -777,6 +956,10 @@ mod tests {
             moved: 3,
             plan_bytes: 9_000,
             blocked: None,
+            written: 0,
+            skipped: 0,
+            failed: 0,
+            records: 0,
         };
         let facts = super::rebalance_cut("decommission", Some(Duration::from_secs(10)), Some(Duration::from_secs(20)), &marks, &timeline, Duration::from_secs(30));
         assert_eq!(facts.kind, "decommission");

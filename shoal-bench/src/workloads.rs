@@ -25,6 +25,7 @@
 //! workload that is never run.
 
 pub mod cluster_background;
+pub mod cluster_backup;
 pub mod cluster_migration;
 pub mod cluster_rebalance;
 pub mod cluster_rehome;
@@ -208,6 +209,14 @@ pub fn all() -> Vec<Box<dyn Workload>> {
     // ([F47](../../docs/src/features/local-rehome.md))
     built.extend(
         cluster_rehome::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    // the backup arm, appended after the rehome arm: the repair arm's placement and mixture
+    // with a backup of the table cut in the background of the run
+    // ([F49](../../docs/src/features/backup-and-recovery.md))
+    built.extend(
+        cluster_backup::all()
             .into_iter()
             .map(|workload| Box::new(workload) as Box<dyn Workload>),
     );

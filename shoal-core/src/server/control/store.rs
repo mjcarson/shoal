@@ -827,6 +827,110 @@ impl RaftStateMachine<ControlConfig> for ControlStateMachine {
     }
 }
 
+/// Rewrite a stopped survivor's membership after a permanent majority loss
+///
+/// Appends a membership entry naming the survivors as the whole configuration and a
+/// [`ControlCommand::ForceRecovered`] after it, both at a term past every term the log and the
+/// vote have seen and led by this node; grants this node's vote at that term; marks both
+/// committed, which a configuration of one survivor makes true by itself; and applies both to
+/// the state machine, so the node starts with the lost members removed and the recovery
+/// recorded. Every entry the log holds past what the machine applied is applied first, in
+/// order: the recovery commits the whole log, so a joiner replaying it applies those entries
+/// too, and a survivor that skipped them would carry a state no replay of its own log
+/// reproduces. Offline only: run on a stopped directory under its lock
+/// ([F49](../../../../docs/src/features/backup-and-recovery.md)). Idempotent by inspection: a
+/// log whose last entry is already the same recovery is left alone.
+///
+/// # Arguments
+///
+/// * `log` - The survivor's control log
+/// * `machine` - Its state machine
+/// * `me` - The survivor
+/// * `membership` - The membership to write: the survivors, with their records
+/// * `command` - The recovery to record
+///
+/// # Errors
+///
+/// Fails if a write does not land.
+pub async fn force_recover(
+    log: &mut ControlLog,
+    machine: &ControlStateMachine,
+    me: super::types::NodeIdOf,
+    membership: openraft::Membership<super::types::NodeIdOf, super::types::MemberRecord>,
+    command: super::types::ControlCommand,
+) -> io::Result<u64> {
+    use openraft::storage::RaftLogStorageExt as _;
+    use openraft::vote::{RaftLeaderId as _, RaftVote as _};
+    // where the log and the vote stand, so the recovery is past both
+    let state = log.get_log_state().await?;
+    let vote = log.read_vote().await?;
+    let last = state.last_log_id.clone();
+    let last_index = last.as_ref().map_or_else(|| machine.applied_index(), |log_id| log_id.index());
+    let last_term = last.as_ref().map_or(0, |log_id| log_id.leader_id.term);
+    let vote_term = vote.as_ref().map_or(0, |vote| vote.leader_id().term);
+    let term = last_term.max(vote_term) + 1;
+    // the same recovery already written is not written twice: the same survivors, the same
+    // lost members, run on the same node, whatever its identity and time
+    if let Some(last) = &last {
+        if let Some(entry) = log.inner.borrow().entries.get(&last.index()) {
+            if let (
+                EntryPayload::Normal(super::types::ControlCommand::ForceRecovered { survivors, lost, at, .. }),
+                super::types::ControlCommand::ForceRecovered { survivors: wanted, lost: lost_wanted, at: at_wanted, .. },
+            ) = (&entry.payload, &command)
+            {
+                if survivors == wanted && lost == lost_wanted && at == at_wanted {
+                    return Ok(last.index());
+                }
+            }
+        }
+    }
+    let leader = openraft::impls::leader_id_adv::LeaderId::new(term, me);
+    let vote_at = Vote::from_leader_id(leader.clone(), true);
+    let first = LogId::new(leader.clone(), last_index + 1);
+    let second = LogId::new(leader.clone(), last_index + 2);
+    let entries = vec![
+        Entry::new_membership(first.clone(), membership.clone()),
+        Entry::new_normal(second.clone(), command.clone()),
+    ];
+    // the log first: the entries, the vote at the new term, and the commit
+    log.blocking_append(entries).await.map_err(|error| io::Error::other(format!("{error}")))?;
+    log.save_vote(&vote_at).await?;
+    log.save_committed(Some(second.clone())).await?;
+    // then the applied state, so the start finds the lost members removed. what the log held
+    // unapplied is applied first: it is committed now, and every replica of this log applies
+    // it in order, so the survivor has to as well or its state diverges from every joiner's
+    let unapplied: Vec<Entry> = {
+        let inner = log.inner.borrow();
+        inner
+            .entries
+            .range(machine.applied_index() + 1..=last_index)
+            .map(|(_, entry)| entry.clone())
+            .collect()
+    };
+    {
+        let mut inner = machine.inner.borrow_mut();
+        for entry in unapplied {
+            match &entry.payload {
+                EntryPayload::Membership(named) => {
+                    inner.persisted.state.observe_membership(named);
+                    inner.persisted.membership = StoredMembership::new(Some(entry.log_id()), named.clone());
+                }
+                EntryPayload::Normal(command) => {
+                    inner.persisted.state.apply(command);
+                }
+                EntryPayload::Blank => {}
+            }
+            inner.persisted.applied = Some(entry.log_id());
+        }
+        inner.persisted.state.observe_membership(&membership);
+        inner.persisted.membership = StoredMembership::new(Some(first), membership);
+        inner.persisted.state.apply(&command);
+        inner.persisted.applied = Some(second.clone());
+    }
+    machine.persist().await?;
+    Ok(second.index())
+}
+
 /// Open both halves of the store under a control directory
 ///
 /// # Arguments
@@ -955,6 +1059,172 @@ mod tests {
             }
             let (log, _machine) = open(&control).await.expect("failed to reopen a corrupt log");
             assert_eq!(log.len(), 4, "a corrupt entry was recovered as whole");
+        });
+    }
+
+    /// A recovery rewrites a survivor's membership to itself alone and a sole voter leads
+    ///
+    /// The spike [F49](../../../../../docs/src/features/backup-and-recovery.md) asked for: a
+    /// control store whose committed membership names three voters is recovered offline to one,
+    /// and a `Raft` opened over it with `enable_leader_restore: Some(false)` - the setting the
+    /// control plane runs under, which refuses to lead from a lease it cannot prove - elects
+    /// itself from the rewritten membership without reaching anybody. The lost members are
+    /// removed and tombstoned in the applied state, the recovery is recorded, and running the
+    /// recovery again writes nothing. An entry the log held past what the machine had applied -
+    /// what a leader appended and lost its quorum before committing - is applied by the
+    /// recovery, since it commits the whole log and every joiner replays it.
+    #[test]
+    fn a_recovery_rewrites_membership_and_a_sole_voter_leads() {
+        use crate::server::control::network::PeerNetwork;
+        use crate::server::control::types::{ControlCommand, MemberPhase, MemberRecord};
+        use crate::server::meta::Identity;
+        use crate::server::peer::Local;
+        use crate::shared::identity::{ClusterId, NodeId};
+        use openraft::storage::RaftLogStorageExt as _;
+        use openraft::vote::RaftLeaderIdExt as _;
+        use openraft_rt::WatchReceiver as _;
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let mut runtime = GlommioRuntime::new(1);
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("failed to build a temp dir");
+            let control = dir.path().join(CONTROL_DIR);
+            let (a, b, c) = (NodeId::from(1), NodeId::from(2), NodeId::from(3));
+            let record = |node: NodeId| MemberRecord {
+                node,
+                client: format!("127.0.0.1:1{}", node.0.as_u128() % 1000),
+                data: "127.0.0.1:2".to_string(),
+                control: format!("127.0.0.1:3{}", node.0.as_u128() % 1000),
+                shards: 1,
+                incarnation: 1,
+                ..MemberRecord::default()
+            };
+            // a cluster of three voters, bootstrapped and admitted, as the log would hold it
+            let cluster = ClusterId::mint();
+            let leader = <ControlConfig as openraft::RaftTypeConfig>::LeaderId::new_committed(1, a);
+            let nodes: BTreeMap<NodeId, MemberRecord> = [a, b, c].into_iter().map(|node| (node, record(node))).collect();
+            let three = openraft::Membership::new(vec![BTreeSet::from([a, b, c])], nodes).expect("a membership of three");
+            let policy = crate::server::conf::Cluster::default().policy();
+            let entries: Vec<Entry> = vec![
+                Entry::new_membership(LogId::new(leader.clone(), 0), three.clone()),
+                Entry::new_normal(
+                    LogId::new(leader.clone(), 1),
+                    ControlCommand::Bootstrap { cluster, policy, member: record(a) },
+                ),
+                Entry::new_normal(LogId::new(leader.clone(), 2), ControlCommand::Admit(record(b))),
+                Entry::new_normal(LogId::new(leader.clone(), 3), ControlCommand::Admit(record(c))),
+            ];
+            {
+                let (mut log, machine) = open(&control).await.expect("failed to open");
+                log.blocking_append(entries.clone()).await.expect("failed to append");
+                log.save_vote(&Vote::new(1, a)).await.expect("failed to save a vote");
+                log.save_committed(Some(LogId::new(leader.clone(), 3))).await.expect("failed to save the commit");
+                // applied, the way a running node would have
+                {
+                    let mut inner = machine.inner.borrow_mut();
+                    for entry in &entries {
+                        match &entry.payload {
+                            EntryPayload::Membership(membership) => {
+                                inner.persisted.state.observe_membership(membership);
+                                inner.persisted.membership = StoredMembership::new(Some(entry.log_id()), membership.clone());
+                            }
+                            EntryPayload::Normal(command) => {
+                                inner.persisted.state.apply(command);
+                            }
+                            EntryPayload::Blank => {}
+                        }
+                        inner.persisted.applied = Some(entry.log_id());
+                    }
+                }
+                machine.persist().await.expect("failed to persist");
+                assert_eq!(machine.state().members.len(), 3);
+                // and one more appended, never committed and never applied: the leader lost
+                // its quorum with it in flight
+                let version = machine.state().topology_version;
+                let pending = ControlCommand::SetControlVoters { op: uuid::Uuid::new_v4(), principal: "test".to_string(), expected_version: version, count: 1 };
+                log.blocking_append(vec![Entry::new_normal(LogId::new(leader.clone(), 4), pending)])
+                    .await
+                    .expect("failed to append the pending entry");
+                assert_eq!(machine.state().policy.as_ref().expect("a policy").control_voters, 3, "the pending entry is not applied");
+            }
+            // the recovery: a alone, b and c lost
+            let command = ControlCommand::ForceRecovered {
+                op: uuid::Uuid::new_v4(),
+                survivors: vec![a],
+                lost: vec![b, c],
+                at: a,
+                last_committed: 3,
+                recovered_ms: 1,
+            };
+            let alone = openraft::Membership::new(vec![BTreeSet::from([a])], BTreeMap::from([(a, record(a))])).expect("a membership of one");
+            let recovered_at = {
+                let (mut log, machine) = open(&control).await.expect("failed to reopen");
+                let at = force_recover(&mut log, &machine, a, alone.clone(), command.clone()).await.expect("the recovery failed");
+                assert_eq!(at, 6, "the recovery lands past the five entries");
+                // the applied state: the pending entry applied, b and c removed and
+                // tombstoned, the recovery recorded
+                let state = machine.state();
+                assert_eq!(state.policy.as_ref().expect("a policy").control_voters, 1, "the entry the log held unapplied is applied by the recovery");
+                assert_eq!(state.members[&b].phase, MemberPhase::Removing);
+                assert_eq!(state.members[&c].phase, MemberPhase::Removing);
+                assert!(state.tombstones.contains_key(&b) && state.tombstones.contains_key(&c));
+                assert_eq!(state.open_plans().len(), 2, "a removal plan per lost member");
+                assert_eq!(state.members[&a].phase, MemberPhase::Member);
+                assert_eq!(state.recoveries.len(), 1);
+                assert_eq!(state.recoveries[0].lost, vec![b, c]);
+                assert_eq!(state.recoveries[0].last_committed, 3);
+                // the log: a membership of one at term 2, then the command, both committed
+                let log_state = log.get_log_state().await.expect("a log state");
+                assert_eq!(log_state.last_log_id.as_ref().map(|id| (id.leader_id.term, id.index)), Some((2, 6)));
+                assert_eq!(log.read_committed().await.expect("a commit").map(|id| id.index), Some(6));
+                assert_eq!(log.read_vote().await.expect("a vote").map(|vote| vote.leader_id().term), Some(2));
+                // and again is nothing: the same recovery is not written twice
+                let again = force_recover(&mut log, &machine, a, alone.clone(), command.clone()).await.expect("the second run failed");
+                assert_eq!(again, 6);
+                assert_eq!(log.len(), 7);
+                at
+            };
+            // a group opened over the recovered store elects itself, reaching nobody
+            let (log, machine) = open(&control).await.expect("failed to reopen for the group");
+            let identity = Identity {
+                node: a,
+                cluster: Some(cluster),
+                incarnation: 2,
+                slots: 1,
+                physical: 1,
+                rehome: None,
+                layout: crate::server::meta::CLUSTER_LAYOUT,
+                topology_at_claim: 0,
+                fresh: false,
+                mode: crate::server::meta::MarkerMode::Cluster,
+            };
+            let local = Rc::new(RefCell::new(Local::new(&identity, 1, 0, 1 << 20, None)));
+            let network = PeerNetwork::new(local, BTreeMap::new(), None, crate::server::conf::cluster::Transport::default());
+            let config = openraft::Config {
+                cluster_name: "recovered".to_string(),
+                enable_leader_restore: Some(false),
+                election_timeout_min: 150,
+                election_timeout_max: 300,
+                heartbeat_interval: 50,
+                ..openraft::Config::default()
+            }
+            .validate()
+            .expect("a config");
+            let raft = openraft::Raft::<ControlConfig, ControlStateMachine>::new(a, std::sync::Arc::new(config), network, log, machine.clone())
+                .await
+                .expect("the group starts");
+            raft.wait(Some(std::time::Duration::from_secs(10)))
+                .current_leader(a, "the sole voter leads")
+                .await
+                .expect("the survivor never led");
+            // and commits on its own
+            let written = raft
+                .client_write(ControlCommand::SetControlVoters { op: uuid::Uuid::new_v4(), principal: "test".to_string(), expected_version: machine.state().topology_version, count: 1 })
+                .await
+                .expect("a write through the sole voter");
+            assert!(written.log_id.index > recovered_at);
+            assert_eq!(raft.metrics().borrow_watched().membership_config.membership().voter_ids().collect::<Vec<_>>(), vec![a]);
+            raft.shutdown().await.expect("shutdown");
         });
     }
 }
