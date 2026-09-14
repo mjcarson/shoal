@@ -233,7 +233,9 @@ A spike-only type configuration would have measured a harness.
   refusal into the ack before the error returns and the seam's signature has nowhere to put that.
   The seam stays as the tested statement of the rule.
 - **The marker's `layout` is always 1.** The check exists so that a rehome (M9c) has a place to
-  bump it; nothing bumps it.
+  bump it; nothing bumps it. *Since [F40](replication.md) a cluster node's is 2, and since
+  [F47](local-rehome.md) a rehome bumps nothing: the files are the same files on more or fewer
+  executors, and the executor table is the hosting's, not the layout's.*
 - **The control thread's failure is reported as shard `usize::MAX`** through `ShoalPool::failure`,
   which keeps that handle's shape; a caller matching on the shard index sees a number no shard
   has.
@@ -255,7 +257,9 @@ A spike-only type configuration would have measured a harness.
 
 - **The identities, the shard count and the layout are written once.** `StorageMeta::new` is the
   only constructor, the claim is the only writer of those fields, and `observe_topology` rewrites
-  `topology` and nothing else. `a_topology_observation_moves_one_field` holds it.
+  `topology` and nothing else. `a_topology_observation_moves_one_field` holds it. *Since
+  [F47](local-rehome.md) the shard count is the slots and stays write-once; the executors the
+  files are on is `physical`, rewritten by the rehome's finalize alone.*
 - **The format is checked before anything else in the marker is trusted**, from `FormatOnly`,
   against `SUPPORTED_FORMATS`. Adding a format means adding to that list *and* deciding what a
   reader of the old one does, on the marker page.
@@ -335,7 +339,7 @@ fsyncs, about eight. Both are unit tests of `shoal-core`.
 | `control::store::tests::control_store_recovers_from_a_torn_append` | A frame cut off mid-body and a frame with a wrong checksum both truncated at open, the entries before them whole, the vote intact, the next append landing after the last whole frame |
 | `control::types::tests::a_bootstrap_is_applied_once` | `ControlState::apply`: a second bootstrap refused, an observation before one refused, an unchanged observation moving nothing, a changed one moving the version |
 | `control::cores::tests::*` (four) | The affinity read and ascending; the default core resolving to cpu 0's whole core or refused by name when cpu 0 is not allowed; an impossible cpu refused naming the affinity; standalone having no placement |
-| `meta::tests::*` (nine) | The format 2 claim, restart, refusal of format 1 and 3 by name, shard count, bootstrap idempotence, both mode changes, `verify_cluster` without a write, the one-field rewrite that never goes backwards, and the exclusive lock |
+| `meta::tests::*` (nine; twelve since [F47](local-rehome.md)) | The format 2 claim, restart, refusal of format 1 and 3 by name, ~~shard count~~ a changed core count as a pending rehome and the slots claimed once, bootstrap idempotence, both mode changes, `verify_cluster` without a write, the one-field rewrite that never goes backwards, and the exclusive lock |
 | `conf::cluster::tests::*` (four) | `DurationSpec` parsing and round trip; the defaults being C1's; `validate` refusing seeds (M3), ~~tls (M2)~~ an unreadable peer certificate (since F38), an even voter count and an unadvertised `0.0.0.0` |
 | `identity::tests::*` (three) | Distinct mints, transparent serde, integer ids ordered and never minted |
 | `cluster_overhead::tests::the_arm_is_the_reference_cell_with_a_cluster_block` | The arm differing from `macro/grid/unsorted/r50/1024` in the block alone |

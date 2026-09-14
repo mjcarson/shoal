@@ -393,7 +393,8 @@ cluster:
   primary_failover_after: "5s"    # base data election timeout
   auto_remove_after: "30m"        # null disables automatic removal of a Down node; counted by the leader in committed eighths and acted on since F46
   admins: []
-  weight: null                    # this node's share of the cluster's bytes against the others' (F46); absent or 0 is its shard count
+  weight: null                    # this node's share of the cluster's bytes against the others' (F46); absent or 0 is its executor count
+  slots: null                     # how many slots this node claims, once, at its first claim (F47); absent is one per core, above the cores is headroom, below them is refused, and changing it later is refused
   transport:                      # the peer lanes (F38); every bound is in bytes
     data_queue_bytes: "64MiB"     # queued to one peer on the data lane; a forward past it is shed
     control_queue_bytes: "8MiB"   # the control lane's queue to one peer
@@ -556,26 +557,42 @@ off the *throughput-sensitive* path, so the two can live on different devices:
         └── Shard-0                    # the archive map's own intent log
 ```
 
-Every filename is prefixed by shard name. This is the mechanism by which shard count becomes
-part of the on-disk format — see
+Every filename is prefixed by shard name. ~~This is the mechanism by which shard count becomes
+part of the on-disk format~~ Since [F47](../features/local-rehome.md) the shard in the name is
+an *executor*, one per core, and `shoal-hosting.json` beside the marker says which executor owns
+each tablet and, on a cluster node, hosts each *slot* — see
 [Partitioning](../architecture/partitioning.md#limitations).
 
-Because of that, **changing `resources.cores` between restarts on the same data directory is
+~~Because of that, **changing `resources.cores` between restarts on the same data directory is
 refused**. `shoal-meta.json` in the storage root records the shard count that wrote the
 directory, and `ShoalPool::start` errors with `ShardCountMismatch` before any shard spawns
 rather than starting and failing to find data that moved to another shard. There is no
-migration: to change the core count, start from an empty directory.
+migration: to change the core count, start from an empty directory.~~ **Changing
+`resources.cores` between restarts on the same data directory runs a rehome** before any shard
+starts ([F47](../features/local-rehome.md)): the executors that no longer run have their intent
+logs folded into their archives, their records copied onto the executors that remain, their
+tablet groups' logs moved, and their files reclaimed, under `shoal-rehome.json`, a manifest a
+crash at any point resumes on the next start at the same count. The start is held for it - the
+`rehome` group of the benchmarks prices the hold - and the pool logs what moved at INFO. Three
+things are still refused by name: a start under a *third* count while a manifest towards a
+second is on disk (`RehomeInProgress`, which names the count to start with), a `cluster.slots`
+that differs from the one the directory was claimed with (`SlotsFixed`), and on a cluster node
+more cores than slots (`CoresExceedSlots`; the way up is a `Replace` onto a fresh identity).
 
-The marker is **format 2** since [F37](../features/node-identity-control-plane.md):
+The marker is **format 2** since [F37](../features/node-identity-control-plane.md), format 3
+since [F39](../features/membership.md), and since F47 carries an optional `physical`:
 
 ```json
 {
-  "format": 2,
-  "shards": 12,
+  "format": 3,
+  "shards": 12,             // the count the directory was laid out as; on a cluster node its slots, claimed once
+  "physical": 8,            // F47: the executors the files are laid out on now; absent means shards
   "node": "5b1f…",          // minted the first time the directory was claimed, never changed
   "cluster": null,          // the cluster id a bootstrap minted, or null for a standalone node
   "layout": 1,              // the shard layout the data is under; 1 is tablet % shard_count
-  "topology": 0             // the last topology version the control plane observed
+  "topology": 0,            // the last topology version the control plane observed
+  "mode": "standalone",     // F39: standalone, cluster, or joining
+  "incarnation": 3          // F39: how many times the directory has been started
 }
 ```
 
@@ -588,12 +605,15 @@ build reads, and that no migration between formats exists yet - M10 owns one, an
 directory" is a development answer rather than an upgrade procedure. The same marker is what
 refuses a mode change: a directory bootstrapped into a cluster is refused by a config with no
 `cluster:` block, and a standalone directory is refused by one with a block, naming M10's
-migration. `topology` is the one field ever rewritten in place; the identities, the shard count
-and the layout are written once. Beside it, `shoal.lock` is an advisory lock a running server
-holds, so a second process on the same directory is refused rather than claiming the same node.
+migration. ~~`topology` is the one field ever rewritten in place~~ `topology`, `incarnation`,
+`physical` and - once, for a joiner - `cluster` are the fields rewritten in place; the identities,
+the shard count and the layout are written once. Beside it, `shoal.lock` is an advisory lock a
+running server holds, so a second process on the same directory is refused rather than claiming
+the same node; `shoal-hosting.json` is the executor table, absent until a rehome or a claim with
+headroom writes one; and `shoal-rehome.json` exists only while a rehome is in progress.
 
 Two holes remain in the guard. It covers the default storage root only, not a per-table
-`storage.tables` override
+`storage.tables` override, whose files a rehome moves untested
 ([item 43](../appendix/known-issues.md#43-the-storage-marker-only-guards-the-default-storage-root)),
 and a directory with *no* marker is claimed rather than refused — which includes every directory
 written before the marker existed

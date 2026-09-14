@@ -108,6 +108,7 @@
   - [F44. Repair](features/repair.md)
   - [F45. Safe replica migration](features/replica-migration.md)
   - [F46. Capacity-aware rebalancing and removal](features/capacity-rebalancing.md)
+  - [F47. Changing a node's core count: slots, hosting and the rehome](features/local-rehome.md)
 
 # Direction
 
@@ -197,6 +198,7 @@
   - [104. A restart merged every sealed segment below the checkpoint into the archives again](appendix/resolved/segments-recompacted-after-restart.md)
   - [105. A volatile group never checkpointed, so its log was never purged](appendix/resolved/volatile-groups-never-purged.md)
   - [108. A cluster arm's server overrides were dropped on the way to every node](appendix/resolved/cluster-arm-overrides-dropped.md)
+  - [111. Removing an archive held the handle cache across its close](appendix/resolved/archive-removal-borrow.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

@@ -32,9 +32,12 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 99, 101, 104, 105 and 108, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ item 110 is the newest entry here and the newest number, and why 17, 33, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 99, 101, 104, 105 and 108 are on the resolved page. **108 never
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 99, 101, 104, 105, 108 and 111, and
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ item 110 is the newest entry here ~~and the newest number~~ and 111 the newest number, and why 17, 33, 78, 79, 80, 82,
+83, 84, 85, 86, 88, 89, 90, 94, 99, 101, 104, 105, 108 and 111 are on the resolved page. **111 never
+appeared here**: it was found by [F47](../features/local-rehome.md)'s crash matrix - a read
+landing while an archive closed panicked the executor - reproduced against the map alone and
+fixed in the same change ([Resolved #111](resolved/archive-removal-borrow.md)). **108 never
 appeared here**: it was found by [F45](../features/replica-migration.md)'s first smoke run and
 fixed in the same change ([Resolved #108](resolved/cluster-arm-overrides-dropped.md)). **99 moved at M8**
 ([Resolved #99](resolved/durable-log-reversion.md)): it was filed at M6, left for M8 by M7 on
@@ -68,11 +71,16 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ **1,432 tests**, four ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ **1,467 tests**, four ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
-its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ eighty fail under the load (item 100) and every one of them passes at six;
+its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ eighty-nine fail under the load (item 100) and every one of them passes at six;
 two of `persistent_unsorted_table.rs` fail about one run in five of that binary (item 107).
+[F47](../features/local-rehome.md) added 18 and took it to 1,467, resolving item 111 on the
+way - found by its crash matrix, reproduced first - and filing nothing new: what it left undone
+is on the todos page, and item 43 now says what the rehome does not cover.
+[F46](../features/capacity-rebalancing.md) added 17 and took it to 1,449, filing item 110 on the
+way; this line did not say so until F47, which is the staleness the paragraph below warns of.
 [F45](../features/replica-migration.md) added 18 and took it to 1,432, resolving item 108 on
 the way and filing 109.
 [F44](../features/repair.md) added 16 and took it to 1,414, resolving item 99 before its own
@@ -690,15 +698,20 @@ already been made three times without this being considered.
 
 ### 43. The storage marker only guards the default storage root
 
-`shoal-core/src/server.rs:87` claims `storage.default.filesystem.latency_sensitive.path`, and that
+`shoal-core/src/server.rs` claims `storage.default.filesystem.latency_sensitive.path`, and that
 one path alone, with the shard count that wrote it
 ([items 11, 12](resolved/tablet-ring.md)).
 
 A table with its own `storage.tables` entry pointing somewhere else is not covered. So a
 configuration that overrides one table's path keeps the guard for every other table and loses it
-for that one: reopening with a changed `cores` refuses to start only if the default root was
+for that one: ~~reopening with a changed `cores` refuses to start only if the default root was
 also written, and if it was not, the overridden table's data is stranded exactly as silently as
-before.
+before.~~ Since [F47](../features/local-rehome.md) reopening with a changed `cores` is a rehome
+rather than a refusal, and the rehome resolves every table's settings by name through
+`table_settings` and moves files under the table's own paths - but the marker, the hosting and
+the manifest live under the default root alone, the lock is that root's, and every crash test
+runs with one root. A table under a second root is moved on the same manifest and is untested
+there; a second root that is not on the same device is untested twice.
 
 Found while building the marker rather than by reading the storage config, which is why it is
 recorded here instead of being fixed there — covering it properly means claiming every distinct
@@ -706,7 +719,8 @@ root a config names, and deciding what a marker means when two tables disagree.
 
 **Fix direction:** collect the distinct roots across `storage.default` and every `storage.tables`
 entry, and claim each one. The shard count is the same for all of them, so the file's contents do
-not change — only how many are written.
+not change — only how many are written. The rehome's manifest belongs with the marker and stays
+one file.
 
 ### 46. An unmarked storage directory is claimed rather than refused
 

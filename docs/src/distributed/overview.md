@@ -56,11 +56,20 @@ driven phase by phase under the identity the rule minted, the destination a lear
 group's own joint transition and its own apply make it count, a configuration published beside
 the rule, the source's copy retired for a grace and refusing by name, a retry identity with a
 time and a window, and one arm that prices the move — as
-[F45](../features/replica-migration.md). What is not there: ~~strong
+[F45](../features/replica-migration.md). And [M9b](milestones.md#m9b-capacity-aware-rebalancing-and-removal)
+— the plan: a phase beside every member's health, a grace counted in committed eighths that
+expires into a removal, `Decommission`, `Remove`, `Maintenance` and `Rebalance` as recorded
+plans whose steps are moves, a planner over weights and reported bytes, a tombstone that
+refuses a removed identity, and four arms — as [F46](../features/capacity-rebalancing.md). And
+[M9c](milestones.md#m9c-change-local-shard-count) — a node's core count: slots a peer names
+and never move beside executors that host them through a node-local table, and a changed count
+rehomed at start under a manifest a crash resumes, with one arm that prices the hold — as
+[F47](../features/local-rehome.md). What is not there: ~~strong
 reads (M5),~~ ~~failover that
 moves leadership and the retry table's durable mark (M6),~~ ~~a member behind the purge point
-catching up (M7),~~ ~~repair (M8), a replica set that moves (M9a),~~ leadership moved toward a reader or
-back to a returning node, and everything from the rebalancer on. They extend the unbuilt
+catching up (M7),~~ ~~repair (M8), a replica set that moves (M9a),~~ ~~everything from the
+rebalancer on (M9b, M9c),~~ leadership moved toward a reader or
+back to a returning node, and the operations milestone. They extend the unbuilt
 [Distribution](../appendix/todos.md#distribution) and
 [Rebalancing](../appendix/todos.md#rebalancing) entries.
 
@@ -161,8 +170,8 @@ groups can operate if their data quorum survives, while topology changes stop.
 | C2 onward → C9 | Compatibility and admin authorization are designed early, exercised throughout |
 
 M5 and M6 together ~~establish~~ established strong-read behavior during failover. C7's snapshot/checkpoint
-contract is designed before M4, although transfer ~~lands~~ landed in M7. M9 separates migration mechanics,
-placement policy and changing shard counts. See the detailed exit gates on the milestones page.
+contract is designed before M4, although transfer ~~lands~~ landed in M7. M9 ~~separates~~ separated migration mechanics,
+placement policy and changing shard counts, and all three are delivered. See the detailed exit gates on the milestones page.
 
 ## How a C page is written
 

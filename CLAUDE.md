@@ -56,7 +56,9 @@ cargo run -p shoal-model --example regenerate_schedules   # after a model change
 # tests leave a node behind the purge point, throttle and cut the snapshot streams that feed it,
 # and crash it at every point of an install (CRASH_AT); since F46 the seven M9b tests drain,
 # expire, block and rebalance them (DECOMMISSION, REMOVE, MAINTENANCE, REBALANCE, PLAN_STATUS,
-# FREE_BYTES).
+# FREE_BYTES); since F47 the two M9c tests restart a node at another core count on its lease and
+# crash the rehome at every point (restart_with_cores, ChildOverrides, REHOME, HOSTING,
+# SHARD_DIRS), one of them on a standalone child, which answers the command loop too.
 # every test allocates whole cores, so the suite is what a loaded machine makes it: a failure
 # that passes alone was a timeout, and the child logs are under SHOAL_CHILD_LOG=<dir> (one file
 # per child, DEBUG, hundreds of MB each - point it under target/, never at a tmpfs). run it at
@@ -192,7 +194,7 @@ data and proves every workload still runs — which is what you want before spen
 real one. Budget twenty minutes for a macro-only smoke pass; the criterion layer is what makes a
 full smoke run take longer than you expect.
 
-The macro layer is three hundred and ninety **workloads** living in `shoal-bench/src/workloads/`,
+The macro layer is three hundred and ninety-eight **workloads** living in `shoal-bench/src/workloads/`,
 each generating its own rows from `--seed` — there is no dataset to fetch
 ([F8](docs/src/features/purpose-built-workloads.md)). They come in three kinds and the differences
 matter:
@@ -244,6 +246,12 @@ matter:
   spare that stays blocked by name. Each carries `cluster.rebalance` with `p99_ratio_permille`,
   the number M9b's two-times budget is judged on; the blocked arm's `outcome` is `unfinished`
   by construction.
+- **The rehome arm** is one workload ([F47](docs/src/features/local-rehome.md)):
+  `macro/rehome/shrink`, the `nodes/1` arm seeded at twelve executors and started again at
+  eight (`ConfOverrides.restart_shards`, applied by the harness to the server that comes back),
+  so the start between runs a rehome of four executors' files; its capture carries
+  `cluster.rehome`, the pool's report with `millis` for the hold. It is read on its own, never
+  against the reference cell: eight executors hosting twelve slots is another server.
 - **The background arm** is one workload ([F44](docs/src/features/repair.md)):
   `macro/cluster/background/repair`, the kill arm's placement and mixture with nothing killed
   and a `Repair` of the reference table in verify mode asked for a third of the way through
@@ -268,7 +276,7 @@ line in `workloads::all()`, one line in `workload_ids::IDS`, and a family in
 
 A full capture is about two hours and its macro layer is most of it, so **use a group**
 rather than a prefix ([F21](docs/src/features/benchmark-groups.md)) when a question is narrower than
-the whole set. `list --groups` prints the thirteen declared sets, what each answers, and what a
+the whole set. `list --groups` prints the fourteen declared sets, what each answers, and what a
 capture of it would cost — projected onto `FULL_MACRO_CAPTURE_SECS`, which is hand-maintained and
 has not been re-measured since the macro layer grew by 165 arms, so every projection it prints is
 currently low; `--group grid` is the grid alone, `--group
@@ -442,6 +450,17 @@ go through `shoal`.**
 
 - One shard per CPU core (cpu 0 reserved for coordination; a cluster node also reserves the
   control core's whole physical core for its control thread unless `cluster.control_core_shared`)
+- Since [F47](docs/src/features/local-rehome.md) a shard is two things: an *executor*, one per
+  core, that owns the `Shard-N` files, and a *slot*, the shard a peer names. A cluster node's
+  slots (`cluster.slots`, one per core by default) are claimed once into the marker's `shards`
+  and never move - every group identity is hashed from them - and `shoal-hosting.json` says
+  which executor hosts each slot and owns each tablet (`server/hosting.rs`); a standalone node
+  hosts per tablet. Changing `resources.cores` is a rehome (`server/rehome/`) run before any
+  shard starts under `shoal-rehome.json`, a manifest resumed at its step: fold, copy the moving
+  archived records, move the moving groups' WAL entries and sidecars through `GroupStore`,
+  reclaim, finalize. A peer never learns an executor number: `peer::listener::dispatch_target`
+  is the one place a slot becomes one, and a group's address on this node is `spec.me(node)`,
+  never the executor id. More cores than slots is refused; grow past them with a `Replace`.
 - Since [F44](docs/src/features/repair.md) every archive record is `[size][gxhash64][payload]`
   behind a format 2 header, written by `write_record` and verified by `ArchiveMap::read_record`
   and nowhere else; a scrub is `Command::scrub`, a command whose tablet is `SCRUB_TABLET`,

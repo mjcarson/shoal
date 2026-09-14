@@ -400,7 +400,12 @@ replanned - and `Plans` every plan the state keeps. `Members` carries, per membe
 `state_name` (the one name of C3's six states), `grace` with its committed `elapsed_ms`,
 `suspended` and `expired`, `grace_remaining_ms`, `weight`, and the `free_bytes` and
 `held_bytes` the leader last heard, beside `under_replicated_sets`, `auto_remove_after_ms`, the
-open `plans` and the `tombstones`. The leader logs a grace that elapsed at `WARN` (`"a down
+open `plans` and the `tombstones`. Since [F47](../features/local-rehome.md) a member's `record`
+carries `physical` beside `shards`: the executors it runs beside the slots its peers name it
+by, which differ once its core count has changed; a node whose start ran a rehome logs
+`rehoming the storage directory before any shard starts` with the counts and `rehomed the
+storage directory` with what moved - slots, groups, records, bytes, steps redone - and how many
+milliseconds the start was held, which is `ShoalPool::rehome()` in process. The leader logs a grace that elapsed at `WARN` (`"a down
 member's grace has elapsed; removing it"`), every plan step at `INFO` (`"plan progress"` with
 the update), a member taken out of the control group at `INFO` (`"a member was removed from
 the cluster"`) and one that could not be yet at `WARN` with the reason. `SnapshotStats` counts

@@ -146,9 +146,14 @@ bootstrap old local files as a new authoritative group. *At M9b a removed node's
 tombstoned in the control state and refused at every door; its files are never a source
 ([F46](../features/capacity-rebalancing.md)).*
 
-Keep `ShardCountMismatch` until M9c implements durable local rehoming of logs, archives and
-metadata, including files of shards that no longer run. A per-tablet index helps discovery; it is
-not by itself a recovery executor for those files.
+~~Keep `ShardCountMismatch` until M9c implements durable local rehoming of logs, archives and
+metadata, including files of shards that no longer run.~~ M9c did ([F47](../features/local-rehome.md)):
+the rehome moves the logs, archives and metadata of executors that no longer run onto the ones
+that do before a shard starts, and the refusal is gone. What the map records for a node - its
+`shards` - is its *slots*, claimed once; which executor hosts a slot is the node's own table
+and never reaches the map, so a rehome changes no address, no rule and no identity. A per-tablet
+index helps discovery; it is
+not by itself a recovery executor for those files, and the executor is the manifest's.
 
 ## Alternatives rejected
 

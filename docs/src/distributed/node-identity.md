@@ -12,7 +12,9 @@ require a separately deployed service; [C13](protocol.md) states that constraint
 design up to the point where a second node would be needed. `StorageMeta`
 (`shoal-core/src/server/meta.rs`) ~~records format and shard count~~ is at format 2: shard count,
 node id, cluster id, shard layout and last observed topology version, with format 1 refused by
-name. `Resources::cpus` (`server/conf.rs`) excludes logical CPU 0 ~~, but does not reserve its
+name - and since [F47](../features/local-rehome.md) the shard count is the node's *slots*, claimed
+once, beside an optional `physical` for the executors the files are on, which is the one field a
+rehome rewrites. `Resources::cpus` (`server/conf.rs`) excludes logical CPU 0 ~~, but does not reserve its
 whole physical core~~ for a standalone node, and `cpus_reserving` keeps a cluster node's shards
 off the control core's whole physical core. The `cluster:` block below is implemented, with the
 settings later milestones own refused at startup. The control thread runs an embedded openraft
@@ -96,6 +98,7 @@ cluster:                          # absent: standalone local operation
     phi_threshold: 8.0
   primary_failover_after: "5s"    # base data-election timeout, not a read lease or post-Down delay
   auto_remove_after: "30m"        # proposed default; null explicitly disables automatic removal
+  slots: null                     # F47: the slots this node claims once; absent is one per core
   admins: []
   tls:
     cert: "/etc/shoal/node.pem"
@@ -148,7 +151,10 @@ replace that data protocol.
 
 Use `(NodeId, shard_id)` in placement and logs, with table-qualified tablet identities in data
 messages. A node advertises separate client, data peer and control endpoints. File paths remain
-node-local and may keep shard prefixes; changing shard counts is gated by M9c's safe rehome.
+node-local and may keep shard prefixes; ~~changing shard counts is gated by M9c's safe rehome~~
+since M9c ([F47](../features/local-rehome.md)) the `shard_id` in an address is a *slot* the
+node claimed once and never moves, and which executor hosts it is the node's own table, so a
+node's core count changes without any address changing.
 Short identity strings are display conveniences, never protocol keys.
 
 ## Alternatives rejected
@@ -167,7 +173,9 @@ C10 measures that rather than describing the reserved core as inherently free.
 
 Configuration, storage metadata, startup readiness and diagnostics. Standalone behavior and
 performance must be compared against an unchanged matched baseline; no frozen capture is rewritten.
-The existing shard-layout refusal remains until rehome is implemented.
+~~The existing shard-layout refusal remains until rehome is implemented.~~ The rehome is
+implemented ([F47](../features/local-rehome.md)) and the shard-count refusal is gone; the
+layout refusal stays, since a rehome changes no layout.
 
 ## Invariants to uphold
 

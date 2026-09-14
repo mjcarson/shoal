@@ -179,7 +179,9 @@ topology push and the report traffic.
   is bumped by every claim on an established directory because the claim is the one moment a
   run provably begins. Format 2 is read, its mode inferred and its incarnation zero, and the
   first rewrite writes 3; the rewritten fields are now `topology`, `incarnation` and a joiner's
-  one-time `cluster`, and identity, shard count and layout stay write-once.
+  one-time `cluster`, and identity, shard count and layout stay write-once - with
+  [F47](local-rehome.md)'s `physical` the fourth rewritten field, and the shard count restated
+  as the slots.
 - **`TableId` is the hash of the name.** [P2](../distributed/protocol.md#the-contract) forbids
   the enum discriminant, since reordering a schema would rename every stream on disk. The seed
   is frozen beside the function and the literals are pinned in a test; the model's
