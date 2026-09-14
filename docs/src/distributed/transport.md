@@ -182,15 +182,24 @@ Negotiate a supported protocol and capability set, then actually encode/decode t
 ~~The current schema fingerprint folds PROTOCOL_VERSION (`shoal-derive/src/traits/fingerprint.rs`);
 separate structural schema identity from transport capabilities~~ *Done at M2: `SCHEMA_ID` is the
 structural fingerprint without the version, and the hello carries it beside a version range and a
-capability set as three things; at M2 all three must match exactly* ~~or provide explicit versioned
+capability set as three things; ~~at M2 all three must match exactly~~ since
+[F48](../features/rolling-compatibility.md) the schema id matches exactly, the version is
+negotiated to the highest both read, and the capabilities intersect* ~~or provide explicit versioned
 fingerprints/codecs~~. Merely accepting n−1 in the handshake leaves incompatible payload layouts,
-which is why M2 does not.
+which is why M2 did not and why F48's every frame names the version its body is encoded at, with
+the snapshot manifest as the one body with two codecs.
 
-Define a cluster minimum/active feature version. Enable new commands or formats only after all
+~~Define a cluster minimum/active feature version. Enable new commands or formats only after all
 required participants can process them; persist that activation decision. Record rollback limits
 once a new storage feature is activated. Test old/new binaries exchanging queries, replication,
-snapshots, elections and reconfiguration, not only a successful hello. Schema evolution beyond
-exact structural compatibility needs a separately specified migration path (Q10).
+snapshots, elections and reconfiguration, not only a successful hello.~~ *Done at M10a:
+`ControlState::activated` is the committed activation, `Activate` is refused until every
+member's running build reports the version, a member below it is refused at every door, the
+version 2 snapshot header is written only past it, the rollback matrix is on the F page, and
+the three tests exchange forwards, quorum writes, barrier reads, snapshots over the older link
+and an election - one of them against a real previous build.* Schema evolution beyond exact
+structural compatibility ~~needs a separately specified migration path (Q10)~~ is explicitly
+unsupported as a rolling operation: a new cluster and a restore or an import is the path.
 
 ## Alternatives rejected
 
@@ -238,7 +247,7 @@ connection counts, queue byte limits and mixed-version operation. Record validat
 | `control_elections_do_not_depend_on_data_shard_relay` | A stalled data receiver leaves direct control networking functional | M3 |
 | `trace_context_crosses_nodes_without_false_batch_parent` | Remote work retains the originating context or correct batch links | M2 |
 | `deadline_and_operation_id_survive_forwarding` | Redirect/reconnect cannot reset budgets or replay accepted writes under a new identity | M6 |
-| `mixed_versions_exchange_real_cluster_operations` | n/n−1 codecs support queries, replication, snapshots and elections until explicit activation | M10 |
+| `mixed_versions_exchange_real_cluster_operations` | n/n−1 codecs support queries, replication, snapshots and elections until explicit activation ([F48](../features/rolling-compatibility.md)) | M10a |
 
 ## Related and implementation references
 

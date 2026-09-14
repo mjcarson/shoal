@@ -62,8 +62,12 @@ operational readiness provide a tested path from existing single-node data to a 
 checksums, row counts, cutover and rollback boundaries. An initial development build may refuse
 format-1 data, but “delete the directory” is not a production upgrade procedure. **F37 took that
 choice**: a format 1 marker is refused with an error naming the format found, the formats the
-build reads, and that no migration exists yet with M10 owning one. The same refusal covers a
-standalone directory opened by a cluster configuration.
+build reads, and ~~that no migration exists yet with M10 owning one~~ since
+[F48](../features/rolling-compatibility.md) that a marker is never migrated in place - the
+supported answer, not a gap: the build that wrote it serves it, or its data is brought into a
+new directory by an import or a restore ([F49](../features/backup-and-recovery.md)). The same
+refusal covers a standalone directory opened by a cluster configuration, whose supported path is
+the import.
 
 ### The cluster block
 
@@ -206,7 +210,7 @@ C10 includes disjoint emulated control cores and intentionally shared-core cases
 | `standalone_needs_no_peer_or_control_listener` | Absent cluster block retains standalone deployment shape | M1 |
 | `documented_cluster_defaults_match_policy_bootstrap` | Defaults include Quorum/One, three voters and finite configurable auto-removal grace | M1 |
 | `duplicate_node_identity_is_fenced` | Concurrent cloned identities cannot both join/serve as the same replica | M3 |
-| `single_node_data_has_a_verified_cluster_migration_path` | Supported conversion/import preserves data and records cutover/rollback boundaries | M10 |
+| `single_node_data_has_a_verified_cluster_migration_path` | Supported conversion/import preserves data and records cutover/rollback boundaries | M10b |
 
 ## Related
 

@@ -71,11 +71,17 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ **1,467 tests**, four ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ **1,475 tests**, four ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
-its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ eighty-nine fail under the load (item 100) and every one of them passes at six;
+its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ninety-two fail under the load (item 100) and every one of them passes at six;
 two of `persistent_unsorted_table.rs` fail about one run in five of that binary (item 107).
+[F48](../features/rolling-compatibility.md) added 8 and took it to 1,475, filing nothing and
+resolving nothing: the one defect it met - a control state persisted by an older build
+dropping a field the newer one judged by - was found by the run against a real previous
+binary and designed out before the page was written, and is recorded on the F page rather
+than here. Under the workspace run at six threads one of F46's fixture tests failed and
+passed alone, and under the fixture suite on its own one of F47's did the same (item 100).
 [F47](../features/local-rehome.md) added 18 and took it to 1,467, resolving item 111 on the
 way - found by its crash matrix, reproduced first - and filing nothing new: what it left undone
 is on the todos page, and item 43 now says what the rehome does not cover.

@@ -262,6 +262,21 @@ finalizing the hosting and the marker. Not a migration between nodes, which is a
 ([F45](../features/replica-migration.md)); not a change of slots, which is a `Replace`
 ([F47](../features/local-rehome.md)).
 
+**Wire version** — The version byte every frame carries. Since
+[F48](../features/rolling-compatibility.md) three constants: `PROTOCOL_VERSION`, the newest this
+build speaks (5); `MIN_PEER_VERSION`, the oldest it reads (4), which the peer hello is written
+at; and `CLIENT_WIRE_VERSION`, what the client lane is exact at (4), which the schema
+fingerprint folds. Two peers **negotiate** the highest version both read, every frame after
+the hello names the version its body is encoded at, and a receiver decodes by the header. A
+node can be **pinned** below the build's newest by `cluster.transport.wire_version`.
+
+**Activation** (wire) — The cluster's committed decision that every member speaks a wire
+version from here on and none rolls back past it: `Activate { wire }`, judged by what the
+members' running builds report rather than by their committed records, applied by moving
+`ControlState::activated` and healing the records, and read at every door - the hello, observe
+and admit, a node's own start. A storage format past the activated version is never written
+before it ([F48](../features/rolling-compatibility.md)).
+
 **Manifest** (rehome) — `shoal-rehome.json`: the plan a rehome runs under - the hosting before
 and after, every step in order, the report so far - written whole before the first file moves
 and rewritten whole after every step is durable, so a crash at any point is resumed at exactly

@@ -164,8 +164,10 @@ is a guard against a change that has not happened yet, which is the only time it
 without a migration behind it.~~ **Format 2 exists**, since
 [F37](../../features/node-identity-control-plane.md), and this check refuses format 1 in the
 field: every directory written before that feature. The refusal names the format found, the
-formats the build reads (`SUPPORTED_FORMATS`), and that no migration exists yet, with M10 owning
-one. The format is now read from a one-field struct before the rest of the marker is parsed,
+formats the build reads (`SUPPORTED_FORMATS`), and ~~that no migration exists yet, with M10 owning
+one~~ that a marker is never migrated in place, which [F48](../../features/rolling-compatibility.md)
+made the supported answer: the build that wrote it serves it, or an import or a restore brings
+the data into a new directory. The format is now read from a one-field struct before the rest of the marker is parsed,
 which is what keeps a format 1 marker failing on its format rather than on a field it never had.
 **And format 3**, since [F39](../../features/membership.md), is the first upgrade the marker has
 had: `SUPPORTED_FORMATS` is `[2, 3]`, a format 2 marker is read with its mode inferred from

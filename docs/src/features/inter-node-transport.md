@@ -153,11 +153,14 @@ still refused naming M3, and every node of a placed cluster still bootstraps a g
 Building the transport against a map that cannot change is what let its invariants be tested
 before membership added the ways a map changes.
 
-**Exact match on version, capabilities and schema.** The hello carries a version range and a
-capability set so that M10 has somewhere to negotiate, and at M2 `speaks_our_version` requires
-equality. C2's rule is that a compatible handshake has to imply working payloads at the selected
-version, and the only version with a codec is this one; accepting n−1 now would be accepting a
-layout nothing can decode.
+**~~Exact match on version, capabilities and schema.~~ Exact match on the schema; the version
+and the capabilities are negotiated since [F48](rolling-compatibility.md).** The hello carries
+a version range and a capability set so that M10 has somewhere to negotiate, and at M2
+`speaks_our_version` required equality. C2's rule is that a compatible handshake has to imply
+working payloads at the selected version, and at M2 the only version with a codec was this
+one; accepting n−1 then would have been accepting a layout nothing could decode. F48 moved the
+version to 5 keeping the version 4 codec, so the range is negotiated to the highest both read
+and every frame names the version its body is encoded at.
 
 **The control lane speaks JSON.** openraft's RPC types are serde types, the control lane moves
 a few small messages a second per group, and a JSON body under a fixed head is the encoding
@@ -260,8 +263,9 @@ process keeps both true: a multi-node arm is one `run` command, and the children
   its own comes with the first committed capture.
 - ~~**Incarnation is provisional.** Process start time, not a persisted counter.~~ A persisted
   counter in the marker since [F39](membership.md), and the fencing rule is written against it.
-- **Wire version and capabilities match exactly or refuse.** M10's codecs are what make a
-  range mean something.
+- ~~**Wire version and capabilities match exactly or refuse.** M10's codecs are what make a
+  range mean something.~~ Negotiated since [F48](rolling-compatibility.md): the highest
+  version both read, the capabilities intersected with every defined one required.
 
 ## Invariants to uphold
 

@@ -109,6 +109,7 @@
   - [F45. Safe replica migration](features/replica-migration.md)
   - [F46. Capacity-aware rebalancing and removal](features/capacity-rebalancing.md)
   - [F47. Changing a node's core count: slots, hosting and the rehome](features/local-rehome.md)
+  - [F48. Rolling compatibility and activation](features/rolling-compatibility.md)
 
 # Direction
 

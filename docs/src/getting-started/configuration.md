@@ -406,6 +406,7 @@ cluster:
     handshake_timeout: "10s"      # to dial and finish the hello
     ping_interval: "1s"           # how often a node pings each member over its control lane
     replication_queue_bytes: "64MiB" # queued to one peer on the replication lane; an append past it is refused and retried
+    wire_version: null            # the newest wire version this node advertises (F48); null is the build's newest, a number holds it there through a rolling upgrade; never below the build's floor or the cluster's activated version
   replication:                    # the tablet groups (F40); every bound is in bytes, node-local
     write_timeout: "5s"           # after this a proposal is answered OutcomeUnknown; no longer than forward_timeout
     pending_bytes: "64MiB"        # proposed and unanswered bytes one shard holds per group; a write past it is shed
@@ -601,11 +602,15 @@ refused before its shard count is trusted - a count read out of a layout we cann
 a guess, and a guess that happens to match starts the server
 ([item 45](../appendix/resolved/storage-marker-format.md)). That includes **format 1**, the shape
 of every directory written before F37: the refusal names the format found, the formats this
-build reads, and that no migration between formats exists yet - M10 owns one, and "delete the
-directory" is a development answer rather than an upgrade procedure. The same marker is what
-refuses a mode change: a directory bootstrapped into a cluster is refused by a config with no
-`cluster:` block, and a standalone directory is refused by one with a block, naming M10's
-migration. ~~`topology` is the one field ever rewritten in place~~ `topology`, `incarnation`,
+build reads, and ~~that no migration between formats exists yet - M10 owns one, and "delete the
+directory" is a development answer rather than an upgrade procedure~~ that a marker is never
+migrated in place, which since [F48](../features/rolling-compatibility.md) is the supported
+answer rather than a gap: a directory in a format this build does not read is served by the
+build that wrote it, or its data brought into a new directory by an import or a restore. The
+same marker is what refuses a mode change: a directory bootstrapped into a cluster is refused by
+a config with no `cluster:` block, and a standalone directory is refused by one with a block,
+naming ~~M10's migration~~ the import that is the supported path
+([F49](../features/backup-and-recovery.md)). ~~`topology` is the one field ever rewritten in place~~ `topology`, `incarnation`,
 `physical` and - once, for a joiner - `cluster` are the fields rewritten in place; the identities,
 the shard count and the layout are written once. Beside it, `shoal.lock` is an advisory lock a
 running server holds, so a second process on the same directory is refused rather than claiming
