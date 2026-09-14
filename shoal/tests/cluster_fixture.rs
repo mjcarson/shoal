@@ -10221,3 +10221,203 @@ async fn node_transfer_budgets_bound_concurrent_sources() -> Result<(), FixtureE
     }
     Ok(())
 }
+
+/// A live member drained one set at a time while writers through every node continue: zero
+/// final errors under the oracle, the member leaving then removed, every key on the new
+/// holders; the p99 before and during recorded (C8 M9b)
+///
+/// Three placed at a factor of three and a spare, writers through every node under
+/// identities with a retry budget throughout. `DECOMMISSION 1`: every set leaves node one one
+/// at a time under `moves_per_node`, node one is leaving the while - it still serves and
+/// counts - then removed with its voter seat, if it had one, refilled by the spare. Every
+/// write is acknowledged inside its retry budget, the history is sequential, and every key
+/// reads back on the new holders. The p99 before and during the drain are printed and
+/// carried by the arm's capture; the two-times budget is judged there, not here on a shared
+/// machine at smoke scale ([F46](../../docs/src/features/capacity-rebalancing.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn decommission_drains_within_supported_load_envelope() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal_model::event::{ClientOp, MutationOp, OpResult, ReadLevel};
+    use shoal_model::ids::{Attempt, Key, OpId, TabletId, Value};
+    use shoal_model::oracle::{Ledger, Outcome};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .plan_interval(Duration::from_millis(500)),
+    )
+    .await?;
+    cluster.wait_voters(0, 3)?;
+    let voters_before = voter_indices(&mut cluster, 0)?;
+    let addrs: Vec<String> = (0..4).map(|node| cluster.node(node).endpoints.client.to_string()).collect();
+    // six keys per writer, one writer per node, inserted before anything is concurrent
+    let keys: Vec<u64> = (8000..8024).collect();
+    let ledger = Arc::new(Mutex::new(Ledger::default()));
+    let clock = Arc::new(AtomicU64::new(0));
+    let next_id = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let latencies: Arc<Mutex<Vec<(Instant, Duration)>>> = Arc::new(Mutex::new(Vec::new()));
+    let unknown = Arc::new(AtomicU64::new(0));
+    let tablet_id = |key: u64| TabletId {
+        table: shoal_model::ids::TableId(1),
+        range: tablet_of(key) as u16,
+    };
+    for key in &keys {
+        let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+        let attempt = Attempt { id, retry: 0 };
+        let invoke = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().invoke(attempt, tablet_id(*key), ClientOp::Mutate(MutationOp::Insert { key: Key((*key % 251) as u8), value: Value(0) }), invoke);
+        write_note(&addrs[0], *key, "0").await?;
+        let complete = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Applied(true)));
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // the writers go through the placed nodes: the spare coordinates nothing until a set is
+    // on it, and a write sent to it is refused by name rather than forwarded
+    let mut tasks = Vec::new();
+    for node in 0..4 {
+        let endpoints: Vec<String> = addrs[..3].to_vec();
+        let keys: Vec<u64> = keys[node * 6..node * 6 + 6].to_vec();
+        let (ledger, clock, next_id, stop, latencies, unknown) =
+            (ledger.clone(), clock.clone(), next_id.clone(), stop.clone(), latencies.clone(), unknown.clone());
+        tasks.push(tokio::spawn(async move {
+            let mut ordered = endpoints.clone();
+            ordered.rotate_left(node % 3);
+            let mut round = 0u32;
+            while !stop.load(Ordering::SeqCst) && round < 26 {
+                let Ok(client) = Shoal::<TestDbClient>::builder().endpoints(ordered.clone()).build().await else {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                };
+                for (at, key) in keys.iter().enumerate() {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let value = Value(node as u32 * 1000 + round + 1);
+                    let delete = (round as usize + at + node) % 5 == 0;
+                    let op = if delete {
+                        MutationOp::Delete { key: Key((*key % 251) as u8) }
+                    } else {
+                        MutationOp::Update { key: Key((*key % 251) as u8), value }
+                    };
+                    let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+                    let attempt = Attempt { id, retry: 0 };
+                    let invoke = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().invoke(attempt, TabletId { table: shoal_model::ids::TableId(1), range: tablet_of(*key) as u16 }, ClientOp::Mutate(op), invoke);
+                    let options = SendOptions::new().identity(uuid::Uuid::new_v4()).retry(Duration::from_secs(20));
+                    let sent = Instant::now();
+                    let outcome = if delete {
+                        match client.send_one_with(cluster::schema::NoteDelete::new(*key), &options).await {
+                            Ok(_) => Outcome::Ok(OpResult::Applied(true)),
+                            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Outcome::Ok(OpResult::Applied(false)),
+                            Err(_) => Outcome::Unknown,
+                        }
+                    } else {
+                        let update = cluster::schema::NoteUpdate { partition_key: *key, text: Some(value.0.to_string()) };
+                        match client.send_one_with(update, &options).await {
+                            Ok(_) => Outcome::Ok(OpResult::Applied(true)),
+                            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Outcome::Ok(OpResult::Applied(false)),
+                            Err(error) => {
+                                eprintln!("writer {node}: {error:?}");
+                                Outcome::Unknown
+                            }
+                        }
+                    };
+                    if outcome == Outcome::Unknown {
+                        unknown.fetch_add(1, Ordering::SeqCst);
+                        eprintln!("writer {node} round {round} key {key}: unknown after {:?}", sent.elapsed());
+                    }
+                    latencies.lock().unwrap().push((sent, sent.elapsed()));
+                    let complete = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().complete(attempt, complete, outcome);
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                round += 1;
+            }
+            Ok::<(), shoal::client::Errors>(())
+        }));
+    }
+    // a few seconds of the writers alone, then the drain
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let drained_at = Instant::now();
+    let plan = plan_as_process(&mut cluster, 0, "DECOMMISSION 1")?;
+    // leaving throughout: it still serves and counts, and never holds more than one moving step
+    let record = loop {
+        let record = plan_record_via(&mut cluster, 0, plan)?;
+        let moving = record["steps"].as_array().into_iter().flatten().filter(|step| step["state"] == "Moving").count();
+        assert!(moving <= 1, "more than one set moves at a time under a cap of one: {record}");
+        if record["phase"] == "Done" {
+            break record;
+        }
+        // leaving while its sets move; the tombstone lands as the plan finishes
+        let view = member_view(&mut cluster, 0, 1)?;
+        if record["phase"] == "Finishing" {
+            assert!(view["state_name"] == "leaving" || view["state_name"] == "removed", "{view}");
+        } else {
+            assert_eq!(view["state_name"], "leaving", "{view}");
+            assert_eq!(view["health"], "up", "{view}");
+        }
+        assert!(drained_at.elapsed() < Duration::from_secs(300), "the drain never finished: {record}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    let finished_at = Instant::now();
+    assert!(record["outcome"]["Completed"].is_object(), "{record}");
+    assert_eq!(record["outcome"]["Completed"]["moved"], 3, "{record}");
+    wait_member_state(&mut cluster, 0, 1, "removed", Duration::from_secs(60))?;
+    stop.store(true, Ordering::SeqCst);
+    for task in tasks {
+        task.await.expect("a writer task panicked")?;
+    }
+    // zero final errors: every write was acknowledged inside its retry budget
+    assert_eq!(unknown.load(Ordering::SeqCst), 0, "a write was not acknowledged inside its budget");
+    // the p99 before and during, for the record; the budget is the arm's to judge
+    let samples = latencies.lock().unwrap().clone();
+    let p99 = |window: &[Duration]| -> Duration {
+        let mut sorted = window.to_vec();
+        sorted.sort();
+        sorted.get(sorted.len().saturating_sub(1).saturating_mul(99) / 100).copied().unwrap_or_default()
+    };
+    let before: Vec<Duration> = samples.iter().filter(|(at, _)| *at < drained_at).map(|(_, took)| *took).collect();
+    let during: Vec<Duration> = samples.iter().filter(|(at, _)| *at >= drained_at && *at < finished_at).map(|(_, took)| *took).collect();
+    eprintln!(
+        "decommission: {} writes before at p99 {:?}, {} during at p99 {:?}, drained in {:?}",
+        before.len(),
+        p99(&before),
+        during.len(),
+        p99(&during),
+        finished_at.saturating_duration_since(drained_at)
+    );
+    assert!(!before.is_empty() && !during.is_empty());
+    // the voter seat, if node one had one, is refilled by the spare
+    cluster.wait_voters(0, 3)?;
+    assert_eq!(voter_indices(&mut cluster, 0)?, vec![0, 2, 3], "before: {voters_before:?}");
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![3, 0, 3, 3]);
+    // every key on the new holders, and the history joined by those reads is sequential
+    let holders = [0usize, 2, 3];
+    wait_digests_equal(&mut cluster, &holders, "Note", Duration::from_secs(60))?;
+    for node in holders {
+        let addr = cluster.node(node).endpoints.client.to_string();
+        for key in &keys {
+            let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+            let attempt = Attempt { id, retry: 0 };
+            let invoke = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().invoke(attempt, tablet_id(*key), ClientOp::Read { key: Key((*key % 251) as u8), level: ReadLevel::One }, invoke);
+            let seen = read_note(&addr, *key).await?.map(|text| Value(text.parse().expect("a value")));
+            let complete = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Value(seen)));
+        }
+    }
+    let ledger = ledger.lock().unwrap().clone();
+    shoal_model::oracle::check(&ledger).unwrap_or_else(|error| panic!("the history is not sequential: {error:?}"));
+    // the drained member stopped on its own once it learned it was removed
+    let stopped = Cluster::wait_failure(cluster.node(1), Duration::from_secs(30)).expect("the removed node kept running");
+    assert!(stopped.contains("removed"), "node one stopped for another reason: {stopped}");
+    for id in holders {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
