@@ -27,8 +27,10 @@ and, since [F38](../features/inter-node-transport.md), bound: the data port by e
 directory from a standalone one and an `incarnation` bumped on every start - `seeds` is
 accepted, a node joins through them, an established directory with unreachable seeds comes back
 `recovering` and creates nothing, and a cloned directory is fenced by its incarnation: the
-higher run wins and the lower stops. The certificate half of Q11 - the SAN binding - is still
-unread.
+higher run wins and the lower stops. ~~The certificate half of Q11 - the SAN binding - is still
+unread.~~ Since [F50](../features/cluster-operations.md) the SAN is read and bound on both ends
+of every lane, and a member's new address is followed by the control leader rather than only
+recorded.
 
 ## The design
 
@@ -211,6 +213,8 @@ C10 includes disjoint emulated control cores and intentionally shared-core cases
 | `documented_cluster_defaults_match_policy_bootstrap` | Defaults include Quorum/One, three voters and finite configurable auto-removal grace | M1 |
 | `duplicate_node_identity_is_fenced` | Concurrent cloned identities cannot both join/serve as the same replica | M3 |
 | `single_node_data_has_a_verified_cluster_migration_path` | Supported conversion/import preserves data and records cutover/rollback boundaries: an export of the stopped standalone directory restored into a fresh cluster, judged by digest, with the source as the rollback ([F49](../features/backup-and-recovery.md)) | M10b |
+| `certificate_rotation_binds_identity` | A peer certificate is bound to the node it claims on both ends of every lane, a leaf and an authority rotate on a live cluster through a reload and a bundle, and a leaf naming another node or none is refused by name ([F50](../features/cluster-operations.md)); skips by name without kTLS | M10c |
+| `address_change_is_observed_and_a_stale_clone_is_fenced` | An address change at a restart is observed at a higher incarnation by every member, the cluster reaches the member there, and a clone at the old address is refused as a duplicate ([F50](../features/cluster-operations.md)) | M10c |
 
 ## Related
 

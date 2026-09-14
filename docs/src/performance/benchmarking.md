@@ -288,10 +288,14 @@ saying what each one isolates.
 | `--stage-sample <N>` | 1 | Keep one record in every `N`. Taken on the query index, so both halves keep the same queries. `4` keeps the record volume manageable on a full run |
 | `--server <ADDR>` | none | Drive a server somebody else started rather than starting one ([F36](../features/cluster-harness.md)). `--conf` is still read for the client's TLS settings and the facts recorded; `--port` is ignored; a workload that restarts its server between phases is refused |
 | `--cluster-facts <PATH>` | none | A json `ClusterFacts` record to carry on the capture verbatim; only with `--server` |
+| `--remote <INDEX=USER@HOST:DIR>` | none | Run a node of every placed arm on another host, repeatable ([F50](../features/cluster-operations.md)): the directory there holds a `shoal-workload` of this build and the `shoal.yml` it resolves from with local storage paths; the node's staged file is copied over with `scp`, the node started over `ssh` and killed by the pid file it writes. Node zero is always the driver's own process; the same flag on `shoal-bench run` passes it through to every placed arm |
+| `--driver-address <ADDR>` | none | Where remote nodes reach node zero; required with `--remote` |
 
 The other half of `--server` is `shoal-workload serve --id <ID> [--conf] [--scale] [--port 0]`,
 which starts the named workload's server — resolved exactly as `run` would resolve it — and prints
-`SHOAL_WORKLOAD_SERVING <addr>` once every shard answers, then holds it until killed. `serve
+`SHOAL_WORKLOAD_SERVING <addr> <environment>` once every shard answers - the machine it runs on
+as json, since [F50](../features/cluster-operations.md), which the parent records under
+`cluster.environments` and whose build digest it checks against its own - then holds it until killed. `serve
 --staged <PATH>` is the same server become one node of a placement: the file is a `StagedNode` the
 measured process wrote — its identity, ports, cores, exclusions and the placement every node
 shares — and `run` starts one of these per placed peer before its own node comes up

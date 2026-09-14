@@ -218,6 +218,11 @@ pub struct PlanInputs {
     pub storage: Vec<PathBuf>,
     /// Whether to leave criterion's previous output in place
     pub keep_criterion: bool,
+    /// The nodes of every placed arm that run on other hosts, as `--remote` was given
+    /// ([F50](../../../docs/src/features/cluster-operations.md))
+    pub remotes: Vec<String>,
+    /// The address remote nodes reach node zero at, when any is remote
+    pub driver_address: Option<String>,
     /// Whether to skip restoring the uninstrumented build
     pub no_restore: bool,
 }
@@ -292,6 +297,15 @@ fn workload(inputs: &PlanInputs, id: &str, extra: Vec<String>, stdout: Stdout) -
         "--port".to_string(),
         port_for(id).to_string(),
     ];
+    // the nodes on other hosts, and where they reach this one, for every placed arm
+    for remote in &inputs.remotes {
+        args.push("--remote".to_string());
+        args.push(remote.clone());
+    }
+    if let Some(driver) = &inputs.driver_address {
+        args.push("--driver-address".to_string());
+        args.push(driver.clone());
+    }
     args.extend(extra);
     CommandPlan {
         program: inputs
@@ -712,6 +726,8 @@ mod tests {
             storage: vec![PathBuf::from("/opt/shoal")],
             keep_criterion: false,
             no_restore: false,
+            remotes: Vec::new(),
+            driver_address: None,
         }
     }
 

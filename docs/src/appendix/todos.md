@@ -280,6 +280,29 @@ tablet, and a changed core count is a rehome run before a shard starts - fold, c
 reclaim, finalize - under a manifest that is resumed at its step, with one arm pricing the
 start.
 
+**What F50 left undone, deliberately.** Recorded here so the next milestone starts from the
+list rather than from the diff:
+
+- **Issuing and distributing certificates.** A leaf is issued for a node id by the operator
+  and placed by the operator; nothing mints one at first boot, since the id is minted at the
+  first claim and a leaf without a node in it is refused under the binding. A `shoalctl`
+  `issue` that takes the authority's key and a node id is the shape; not built.
+- **A cluster-wide reload.** `ReloadTls` reaches the node the connection did; a fan-out that
+  asks every member to reload and reports each is a loop an operator runs, and the cluster
+  tab's `reload-tls` reaches one node.
+- **Per-tablet readiness and a lag histogram in the cluster tab.** The frames carry a node's
+  widest lag and its groups' counts; a per-tablet view needs a read the control plane does not
+  answer yet.
+- **A physical capture.** The record and the launcher exist and the launcher was proven
+  against no host but by its command lines: `SHOAL_REMOTE_SMOKE` names the host it would run
+  against. The capture on unequal hardware, and the render of it, are the benchmark host's.
+- **The certificate test on this host.** `certificate_rotation_binds_identity` skips by name
+  without the kernel's TLS module and was not run where it was written; `modprobe tls` is the
+  one step between it and a run.
+- **A remote launcher that reads the host's own configuration.** The remote `shoal.yml` is the
+  operator's to write with local storage paths; the launcher copies the staged file and nothing
+  else, and refuses a build that is not its own by digest.
+
 **What F49 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
 
@@ -610,8 +633,9 @@ rather than from the diff:
   [F46](../features/capacity-rebalancing.md): the grace is counted in committed increments and
   expires into a removal plan, `Leaving` and `Removing` are phases beside the health, and a
   removed identity is tombstoned.
-- **The certificate-to-node binding** the `shoal-node://<id>` SAN is written for. Q11's identity
-  half is the incarnation; the certificate half is still unread.
+- ~~**The certificate-to-node binding** the `shoal-node://<id>` SAN is written for. Q11's identity
+  half is the incarnation; the certificate half is still unread.~~ Bound by
+  [F50](../features/cluster-operations.md).
 - **A detector grace that is a setting** rather than five intervals, and the `Detector` view on a
   follower meaning more than its local table.
 - **A refusal kind beside a refusal's reason**, so an admin client gets a code rather than a
@@ -639,9 +663,9 @@ rather than from the diff:
   server-side retry safe.~~ Half built by [F42](../features/primary-failover.md): a forward the
   link never wrote is sent to another holder once, and everything else is the client's under
   its identity - the server never re-sends a frame that was written.
-- **The certificate-to-node binding** the `shoal-node://<id>` SAN is written for, with the
+- ~~**The certificate-to-node binding** the `shoal-node://<id>` SAN is written for, with the
   joiner (Q11). The joiner came ([F39](../features/membership.md)) and fences by incarnation;
-  the binding is still open, above.
+  the binding is still open, above.~~ Bound by [F50](../features/cluster-operations.md).
 - **Draining the serving node's stage records.** A query served for a peer is stamped
   `served_for_peer` in the peer's process; the harness drains only its own. The origin's record
   now carries the op and the hop, which is enough for the report; the serving side's stages are

@@ -243,6 +243,7 @@ pub fn cluster_facts(
         rebalance: None,
             rehome: None,
             backup: None,
+            environments: Vec::new(),
     }))
 }
 

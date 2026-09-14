@@ -120,9 +120,14 @@ A seed address discovers the embedded cluster; it is not an external membership 
 Use mTLS and a defined certificate-to-node binding when configured; validate chain, expected
 identity and authorization to join. *At M2 the chain is validated to `ca` on every lane and the
 `shoal-node://<id>` SAN is written and not yet read; ~~the binding lands with the joiner~~ the
-joiner landed at M3 fencing by incarnation and the SAN is still unread.* Q11 resolves first-boot certificate provisioning before a
+joiner landed at M3 fencing by incarnation and the SAN is still unread. At M10c
+([F50](../features/cluster-operations.md)) the SAN is read on both ends of every lane and judged
+against the hello, a leaf and an authority rotate on a live node through `ReloadTls` and a
+bundle, and an address change is followed by the cluster.* Q11 resolves first-boot certificate provisioning before a
 random NodeId exists, SAN encoding, CA/certificate rotation and cloned-node fencing. TLS cannot
-be described as a complete identity design until that bootstrap path exists. When deployment
+be described as a complete identity design until that bootstrap path exists - *which is
+explicitly manual: the id is minted at the first claim and the leaf issued for it before the
+node joins under the binding ([runbook 14](../operations/runbooks.md#14-rotate-certificates-and-authorities))*. When deployment
 policy allows plaintext, document that peer identity is trusted inside that explicit boundary.
 Client encryption requires equivalent protection on both control and data peer lanes.
 

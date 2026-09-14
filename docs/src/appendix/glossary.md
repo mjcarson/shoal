@@ -306,6 +306,24 @@ a cluster of one and fresh identities rebuild the sets. Never automatic: the clu
 writes, strong reads and mutations naming the way out until it is run
 ([F49](../features/backup-and-recovery.md)).
 
+**Certificate binding** — Under `cluster.tls`, the rule that a peer's leaf names the node its
+hello claims through a `shoal-node://<id>` URI SAN, read off the DER at the end of every
+handshake and judged on both ends of every lane: another node is `IdentityMismatch`, none is
+`Unauthorized`, and `bind_identity: false` trusts the chain alone. A leaf or an authority is
+rotated on a live node by `ReloadTls`, which swaps both configs or neither
+([F50](../features/cluster-operations.md)).
+
+**Cluster tab** — `shoalctl`'s view of the cluster the connection reached (`Space c`): one model
+built from six admin reads a second, its headline the copies against the factor and who is
+missing, and a command line that previews an operation's identity, movement and boundary,
+sends it on the second `Enter` and follows its record ([F50](../features/cluster-operations.md)).
+
+**Environment** (node) — What the process that became a node read of its own machine at its
+ready line - host, CPU, governor, kernel, memory, SMT, NUMA, the filesystem under its storage,
+a digest of its binary - carried on a capture as `cluster.environments`, one per node, from
+which `emulated` is derived ([F50](../features/cluster-operations.md)). Not the capture's
+`env`, which is the driver's machine and toolchain.
+
 **Manifest** (rehome) — `shoal-rehome.json`: the plan a rehome runs under - the hosting before
 and after, every step in order, the report so far - written whole before the first file moves
 and rewritten whole after every step is durable, so a crash at any point is resumed at exactly

@@ -87,6 +87,97 @@ pub trait Facts {
     fn env_var(&self, name: &str) -> Option<String>;
 }
 
+/// The machine this process runs on, as one node of a placement records it
+///
+/// Read here rather than in the harness so the process that *becomes* a node - on whatever
+/// host - reports its own machine, and carried back on the ready line
+/// ([F50](../../docs/src/features/cluster-operations.md)).
+///
+/// # Arguments
+///
+/// * `index` - The node's position in the placement
+/// * `storage` - The node's storage directory, for the filesystem it is on
+#[must_use]
+pub fn node_environment(index: u32, storage: &Path) -> crate::model::macro_layer::NodeEnvFacts {
+    let facts = RealFacts::new(".");
+    crate::model::macro_layer::NodeEnvFacts {
+        index,
+        hostname: facts.hostname(),
+        cpu_model: facts.cpu_model(),
+        cpu_online: facts.cpu_online(),
+        governor: facts.governor(),
+        kernel: facts.kernel(),
+        memory_bytes: memory_bytes(),
+        smt: RealFacts::read_system("/sys/devices/system/cpu/smt/active") == "1",
+        numa_nodes: numa_nodes(),
+        storage_fs: storage_fs(storage),
+        build: build_digest(),
+    }
+}
+
+/// The host's memory, from `/proc/meminfo`, or zero where it cannot be read
+fn memory_bytes() -> u64 {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|body| {
+            body.lines()
+                .find(|line| line.starts_with("MemTotal:"))
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|kib| kib.parse::<u64>().ok())
+        })
+        .map_or(0, |kib| kib * 1024)
+}
+
+/// How many NUMA nodes the host has, from `/sys`, or one where it cannot be read
+fn numa_nodes() -> usize {
+    std::fs::read_dir("/sys/devices/system/node")
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with("node") && name[4..].chars().all(|c| c.is_ascii_digit())
+                })
+                .count()
+        })
+        .unwrap_or(1)
+        .max(1)
+}
+
+/// The filesystem and device a directory is on, by the longest mount point under it
+///
+/// # Arguments
+///
+/// * `path` - The directory
+fn storage_fs(path: &Path) -> String {
+    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+        return "unknown".to_string();
+    };
+    let wanted = path.to_string_lossy();
+    let mut best: Option<(usize, String)> = None;
+    for line in mounts.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(device), Some(point), Some(kind)) = (fields.next(), fields.next(), fields.next()) else {
+            continue;
+        };
+        // a mount point is a prefix of the path at a component boundary
+        let covers = point == "/" || wanted == point || wanted.starts_with(&format!("{point}/"));
+        if covers && best.as_ref().is_none_or(|(len, _)| point.len() > *len) {
+            best = Some((point.len(), format!("{kind} on {device}")));
+        }
+    }
+    best.map_or_else(|| "unknown".to_string(), |(_, found)| found)
+}
+
+/// A digest of the binary running this process, so two nodes prove they run the same one
+fn build_digest() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| std::fs::read(exe).ok())
+        .map_or_else(|| "unknown".to_string(), |bytes| format!("{:016x}", shoal::gxhash::gxhash64(&bytes, 0)))
+}
+
 /// The real facts, read off the machine this is running on
 #[derive(Debug, Clone)]
 pub struct RealFacts {

@@ -57,6 +57,11 @@ pub struct RunRequest {
     pub server: ServerSource,
     /// The cluster the server belongs to, when the caller started one; recorded verbatim
     pub cluster: Option<ClusterFacts>,
+    /// The nodes of a placement that run on other hosts
+    /// ([F50](../../docs/src/features/cluster-operations.md))
+    pub remotes: Vec<cluster::RemoteSpec>,
+    /// The address remote nodes reach node zero at, when any is remote
+    pub driver_address: Option<String>,
 }
 
 /// Where a workload's server comes from
@@ -134,7 +139,14 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
                     workload.id()
                 ),
                 Some(_) => {
-                    let staged = cluster::stage(&resolved, workload.id(), overrides, request.port)?;
+                    let staged = cluster::stage_with(
+                        &resolved,
+                        workload.id(),
+                        overrides,
+                        request.port,
+                        &request.remotes,
+                        request.driver_address.as_deref(),
+                    )?;
                     (cluster::apply(resolved, &staged.nodes[0])?, Some(staged))
                 }
                 None => (resolved, None),
@@ -231,7 +243,18 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
                     rate: None,
                 });
                 match &staged {
-                    Some(staged) => Some(cluster::placed_facts(staged, pool, conf, facts)?),
+                    Some(staged) => {
+                        // every node's machine: node zero's read here, the peers' off the
+                        // ready lines they printed ([F50](../../docs/src/features/cluster-operations.md))
+                        let mut environments = vec![crate::fingerprint::node_environment(
+                            0,
+                            &conf.storage.default.filesystem.latency_sensitive.path,
+                        )];
+                        if let Ok(peers) = peers.lock() {
+                            environments.extend(peers.iter().filter_map(|peer| peer.environment.clone()));
+                        }
+                        Some(cluster::placed_facts(staged, pool, conf, facts, environments)?)
+                    }
                     None => Some(facts),
                 }
             }

@@ -1,7 +1,7 @@
 # Milestones
 
 The Before-M0 gate is settled ([decision record](protocol.md#decision-record), 2026-09-11), and
-~~M0, M1 and M2~~ ~~M0 through M7~~ ~~M0 through M8 and M9a~~ M0 through M9c, M10a and M10b are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
+~~M0, M1 and M2~~ ~~M0 through M7~~ ~~M0 through M8 and M9a~~ M0 through M10 are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
 and M10a/b/c refine M10 without renumbering later work. Acceptance tests live in their owning C pages and are indexed
 by [C11](testing.md#the-acceptance-test-table). Each test names one gate below. This is an order
 with dependencies and measurable exit criteria, not dates.
@@ -630,7 +630,8 @@ files, and every step reads and writes them.
 Split into three substages on 2026-09-14, each with an F page, a table of its acceptance
 rows and a commit series of its own: M10a is the rolling upgrade, M10b backup, restore, export
 and permanent quorum loss, M10c rotation, the cluster tab, the runbooks and the physical
-capture. M10 is delivered when all three are. The gate as it was set:
+capture. M10 is delivered when all three are, which it was on 2026-09-14 with
+[F50](../features/cluster-operations.md): the gate as it was set, then the three tables:
 
 **Delivers.** Full runbooks/TUI, rolling wire/schema/storage compatibility and activation rules,
 certificate/address rotation, backup/restore and permanent-quorum-loss recovery, supported
@@ -644,7 +645,10 @@ restore to a new cluster identity, not just create backup files. Q10–Q12 recei
 **Evidence/exit.** Operable three-node RF=3 redundancy with measured tails, lag and failover on unequal
 hardware; no claim of physical N>RF scale-out without that experiment. Render generated results
 from committed captures and run render --check. Update delivered F pages and current docs only
-for behavior actually implemented; keep unsupported limits visible.
+for behavior actually implemented; keep unsupported limits visible. *Where it stands:* every
+row is met on an emulated three-node cluster and the record and launcher for an unequal one
+exist; no capture on unequal hardware is committed, and no scale-out is claimed. The renders
+and `render --check` are the benchmark host's.
 
 ### M10a. Rolling compatibility and activation
 
@@ -716,8 +720,40 @@ single-node data restored into a cluster of three and judged by digest against i
 
 ### M10c. Rotation, the cluster tab, runbooks and the physical cluster
 
-Not started. The C1 rotation row, the C10 physical environments row and the backup arm,
-runbooks, the `shoalctl` cluster tab, and Q11's certificate half.
+**Delivered** on 2026-09-14 as [F50](../features/cluster-operations.md), which makes
+[M10](#m10-operations-and-the-real-cluster) delivered whole. The fixture rows below are
+runnable as `cargo test -p shoal --test cluster_fixture -- --test-threads 6`; the certificate
+row needs the kernel's TLS module and skips by name without it, and was written on a host
+without one and not run there; the remote smoke runs when `SHOAL_REMOTE_SMOKE` names a host and
+says so otherwise. What was delivered, what was not, and the table of every M10-named debt are
+on the F page; the rest of this section is the gate as it was set. *Not done, on purpose:*
+nothing issues or distributes a certificate - a leaf is issued for a node id that exists, by the
+operator; no physical capture is committed - the record and the launcher are, and the capture
+is the benchmark host's to take; and the backup arm of this gate was delivered by
+[F49](../features/backup-and-recovery.md) under M10b.
+
+| Test | Where | What it asserts |
+| --- | --- | --- |
+| `certificate_rotation_binds_identity` | `shoal/tests/cluster_fixture.rs` ([C1](node-identity.md)) | Three nodes at a factor of three on mutual TLS under a fixture authority, every leaf naming its node, rows on every node. Node one's leaf reissued and reloaded: the report names the node, node two restarted dials it under the new leaf and is dialled by it, writes through both commit. The authority rotated through a bundle: every node trusts both, every leaf reissued under the new one and reloaded, the old retired, a restarted node joins with every link up. Node two's leaf reissued naming node one: node zero restarted refuses its hello as an identity mismatch and its own dials to node two fail naming the certificate; reissued naming no node, they fail as unauthorized; a key that does not parse is refused with nothing changed; reissued as itself, every link comes up and the cluster serves every row. Skips by name without kTLS |
+| `address_change_is_observed_and_a_stale_clone_is_fenced` | `shoal/tests/cluster_fixture.rs` ([C1](node-identity.md)) | Three nodes at a factor of three with rows on every node. Node two stopped, its directory copied, started again at fresh peer ports: the same node one start later, every member's record of it - its own included - at the new address and incarnation, its links up both ways at the new address, a write through it committed and every earlier row read through it. The copy started at the old address is the same identity at the same incarnation from another address, refused as a duplicate, stopping on its own, while the restarted node stays on record and serving |
+| `a_peer_certificate_names_its_node_and_a_reload_swaps_whole` | `shoal-proto/src/shared/tls/tests.rs` ([C2](transport.md)) | The `shoal-node://<id>` name is read off a leaf's DER and a leaf with a host name only, another scheme or no uuid names none, bytes that are not a certificate are an error; both ends of a finished handshake report the peer's node; a holder swaps both configs on new material, reports the new leaf's node and the counts, keeps both on material that does not parse, and a plaintext holder has nothing to reload |
+| `peer_rejects_wrong_cluster_identity_and_malformed_payload` | `shoal-core/src/server/peer/tests.rs` ([C2](transport.md)) | Beside the M2 and M10a refusals: a leaf naming the hello's node is accepted, one naming another node is `IdentityMismatch`, one naming none is `Unauthorized`, with the binding off the chain alone is trusted, and a joiner's certificate is bound before it has a cluster |
+| `the_cluster_model_reads_the_admin_frames` | `shoalctl/src/cluster/model.rs` ([C9](operations.md)) | The admin frames as the server writes them build the M9b figure - two copies, desired three, awaiting a member - with the members' phases, grace and bytes, a blocked plan, a backup, a recovery and the wire; the lines say what the figure says; frames from before a field leave the default |
+| `an_action_previews_its_boundary_and_follows_its_record` | `shoalctl/src/cluster/actions.rs` ([C9](operations.md)) | Every operation parses from its line and a malformed one is refused by name; a preview names the identity as the model knows it, what moves and the boundary; each sends the request it names and is followed by the record that says when it is done |
+| `physical_cluster_records_each_node_environment` | `shoal-bench/src/model/macro_layer.rs` ([C10](performance.md)) | Three unequal environments round trip under `cluster.environments` in node order, `emulated` is false only when the hostnames differ, a difference names the node and the fields, a build difference is not a machine difference, and an F47 record loads without the block |
+| `a_remote_spec_parses_and_builds_its_commands` | `shoal-bench/src/workloads/harness/cluster.rs` ([C10](performance.md)) | `<index>=<user@host>:<dir>` parses into its parts, node zero and a relative directory are refused, and the copy, serve and kill command lines are what the launcher runs; a ready line with an environment yields it and one without yields none |
+| `a_remote_node_serves_a_smoke_capture` | `shoal-bench/tests/remote_smoke.rs` ([C10](performance.md)) | With `SHOAL_REMOTE_SMOKE` set: the three node arm captured at smoke scale with node one on the named host, and the record naming the machines. Unset, it says so and passes |
+| `duplicate_node_identity_is_fenced` | `shoal/tests/cluster_fixture.rs` ([C1](node-identity.md)) | The M3 row, which now reaches the winning clone and feeds it past its shorter log rather than stopping the leader's control thread |
+
+**Delivers.** Certificate binding and rotation, the runbooks and the cluster tab, and the
+per-node environment record with a node on another host. **Acceptance.** The C1 rotation row,
+the C10 physical environments row, and Q11's decision record. **Evidence/exit.** *Met:* a
+certificate is bound on both ends and rotated live, an address change is followed by the
+cluster, an operator has a page per procedure and a tab that previews an operation's boundary,
+every node's machine is on a capture and a node runs on another host. *Not met, and said:* no
+heterogeneous three-node capture is committed; the launcher and the record are what make one
+possible, and `render --check` is left for the benchmark host with the rest of this
+milestone's renders. *Decided:* [Q11 at M10c](protocol.md#q11-at-m10c).
 
 ## The order is a claim
 
@@ -726,7 +762,9 @@ and resource bounds ship with replication. Read barriers, retry identity and fai
 application-correctness gate. Atomic recovery precedes migration; safe migration precedes automatic
 placement policy; local shard rehome is separate, and was. Compatibility is designed with the first transport,
 admin authorization with its first mutation, and real upgrade/restore exercises gate operational
-readiness. Performance evidence can change an implementation choice, not weaken its safety contract.
+readiness - which they did: the rolling upgrade ran against a real previous build, the restore
+went into a new cluster identity, and each found a defect before the page that describes it
+was written. Performance evidence can change an implementation choice, not weaken its safety contract.
 
 ## Related
 

@@ -793,6 +793,7 @@ fn the_facts_mirrors_are_total() {
         rebalance: None,
         rehome: None,
         backup: None,
+        environments: Vec::new(),
     };
     let mirrored = explore::index::cluster_facts(&cluster);
     assert_eq!(

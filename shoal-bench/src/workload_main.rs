@@ -108,13 +108,21 @@ fn serve(args: &ServeArgs) -> Result<()> {
         Some(path) => harness::cluster::apply(conf, &harness::cluster::load(path)?)?,
         None => conf,
     };
+    let storage = conf.storage.default.filesystem.latency_sensitive.path.clone();
+    // which node this is, off its staged file; a server with none is node zero of nothing
+    let index = match &args.staged {
+        Some(path) => harness::cluster::load(path)?.index,
+        None => 0,
+    };
     let mut pool = shoal::ShoalPool::<shoal_bench::workloads::schema::Bench>::start(conf)
         .map_err(|error| anyhow::anyhow!("failed to start a server: {error:?}"))?;
-    // answering, on the address the shards actually bound
+    // answering, on the address the shards actually bound, and what machine this is: the
+    // parent reads both off the line ([F50](../../docs/src/features/cluster-operations.md))
     let addr = pool
         .ready(harness::ready::TIMEOUT)
         .map_err(|error| anyhow::anyhow!("a shard failed to start: {error:?}"))?;
-    println!("{SERVE_READY_LINE} {addr}");
+    let environment = shoal_bench::fingerprint::node_environment(index, &storage);
+    println!("{SERVE_READY_LINE} {addr} {}", serde_json::to_string(&environment)?);
     use std::io::Write as _;
     std::io::stdout().flush()?;
     // hold the server up until killed, reporting a shard that dies rather than serving on
@@ -179,6 +187,13 @@ struct RunArgs {
     /// `--server`, since a server this process starts is one node with no cluster around it.
     #[clap(long, requires = "server")]
     cluster_facts: Option<PathBuf>,
+    /// A node of the placement on another host: `<index>=<user@host>:<dir>`, repeatable
+    /// ([F50](../../docs/src/features/cluster-operations.md))
+    #[clap(long = "remote", value_name = "INDEX=USER@HOST:DIR")]
+    remotes: Vec<String>,
+    /// The address remote nodes reach node zero at; required with `--remote`
+    #[clap(long, requires = "remotes")]
+    driver_address: Option<String>,
 }
 
 /// What a listing was asked for
@@ -303,6 +318,12 @@ fn run(args: &RunArgs) -> Result<()> {
                 Some(addr) => ServerSource::External(addr.clone()),
                 None => ServerSource::InProcess,
             },
+            remotes: args
+                .remotes
+                .iter()
+                .map(|spec| harness::cluster::RemoteSpec::parse(spec))
+                .collect::<Result<Vec<_>>>()?,
+            driver_address: args.driver_address.clone(),
             cluster: match &args.cluster_facts {
                 Some(path) => {
                     let text = std::fs::read_to_string(path)
@@ -382,6 +403,8 @@ mod tests {
             stage_sample: 1,
             server: None,
             cluster_facts: None,
+            remotes: Vec::new(),
+            driver_address: None,
         }
     }
 

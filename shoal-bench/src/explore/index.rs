@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 
 use shoal_top::index::{
-    BackgroundFactsLite, BackupFactsLite, Capture, CatchupFactsLite, CatchupSecondFactsLite, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, FaultFactsLite, MigrationFactsLite, RebalanceFactsLite, RehomeFactsLite,
+    BackgroundFactsLite, BackupFactsLite, Capture, NodeEnvFactsLite, CatchupFactsLite, CatchupSecondFactsLite, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, FaultFactsLite, MigrationFactsLite, RebalanceFactsLite, RehomeFactsLite,
     INDEX_VERSION, Index, Layer as IndexLayer, HopFactsLite, HopMixLite, MacroPoint, NodeCoresLite,
     NodeReadFactsLite, OfferedLoadLite, OpStats, OutcomeFactsLite, ReadFactsLite, ReplicaFactsLite,
     ScaleFactsLite, SecondFactsLite, Timing, Verdict, WindowFactsLite, Workload,
@@ -750,6 +750,23 @@ pub fn cluster_facts(cluster: &ClusterFacts) -> ClusterFactsLite {
                 })
                 .collect(),
         }),
+        // every node's machine ([F50](../../../docs/src/features/cluster-operations.md))
+        environments: cluster
+            .environments
+            .iter()
+            .map(|environment| NodeEnvFactsLite {
+                index: environment.index,
+                hostname: environment.hostname.clone(),
+                cpu_model: environment.cpu_model.clone(),
+                cpu_online: environment.cpu_online,
+                governor: environment.governor.clone(),
+                kernel: environment.kernel.clone(),
+                memory_bytes: environment.memory_bytes,
+                smt: environment.smt,
+                numa_nodes: environment.numa_nodes,
+                storage_fs: environment.storage_fs.clone(),
+            })
+            .collect(),
     }
 }
 

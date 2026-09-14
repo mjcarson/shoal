@@ -105,8 +105,9 @@ makes every lane a kTLS session exactly as `networking.tls` does for clients
 ([F14](encryption-in-transit.md)): the listener requires a certificate chained to `ca`, the
 dialler presents its own, tickets are off and secrets are extracted. Absent, the lanes are
 plaintext and peer identity is trusted inside whatever boundary the deployment draws around them,
-which the configuration page now says. A SAN of `shoal-node://<id>` is written; nothing checks it
-yet (Q11, below).
+which the configuration page now says. A SAN of `shoal-node://<id>` is written; ~~nothing checks it
+yet (Q11, below)~~ since [F50](cluster-operations.md) it is read on both ends of every lane and a
+leaf naming another node, or none, is refused.
 
 **The fixture places a cluster** ([F36](cluster-harness.md)). `Cluster::builder().cluster(n,
 cores)` mints one cluster id and a node id per child, reserves a data and a control port each,
@@ -222,11 +223,14 @@ process keeps both true: a multi-node arm is one `run` command, and the children
 
 ## Limitations
 
-- **A certificate is not yet bound to a node.** The listener checks the chain to `ca` and
+- ~~**A certificate is not yet bound to a node.** The listener checks the chain to `ca` and
   nothing else; the `shoal-node://<id>` SAN is written and unread, and `PeerRefusal::Unauthorized`
-  and `IdentityMismatch` are defined and never produced. ~~That binding is Q11's and lands with
-  the joiner at M3.~~ The joiner landed at M3 ([F39](membership.md)) and fences by incarnation;
-  the certificate binding is still open.
+  and `IdentityMismatch` are defined and never produced. That binding is Q11's and lands with
+  the joiner at M3. The joiner landed at M3 ([F39](membership.md)) and fences by incarnation;
+  the certificate binding is still open.~~ Bound by [F50](cluster-operations.md): the SAN is
+  read at every handshake and judged against the hello on both ends, `IdentityMismatch` and
+  `Unauthorized` are produced, and `cluster.tls.bind_identity: false` is the shared-leaf
+  deployment that keeps the old behaviour by name.
 - ~~**The placement is static and every node is a group of one.** `seeds` is refused naming M3;
   a placement is replaced, never extended; nothing observes a peer's topology version beyond the
   pong that carries it.~~ Since [F39](membership.md) the placement is the committed map, pushed
