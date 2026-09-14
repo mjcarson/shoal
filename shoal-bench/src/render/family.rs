@@ -762,37 +762,50 @@ pub const FAMILIES: &[Family] = &[
     },
     Family {
         name: "cluster-background",
-        title: "What a scrub costs the foreground while it runs",
+        title: "What a scrub or a backup costs the foreground while it runs",
         surface: Surface::AllWorkloads,
         what_it_measures:
-            "One arm, `background/repair`: the kill arm's placement, mixture and client, driven \
-             for the kill arm's time with nothing killed, and a `Repair` of the reference table \
-             in verify mode asked for a third of the way through, its record polled each second \
-             until every group is done. Every group's leader scrubs it while the mixture goes on: \
-             the resident partitions hashed on the shard loop, the archived ones read off the disk \
-             and hashed on a task, every member's report polled and judged. `cluster.background` \
-             is when the repair was asked for and done, how many groups it covered and how many \
-             were clean, what the scrubs hashed and read across every node, and the client's \
-             distribution before, during and after it with a per second series.",
+            "Two arms on the kill arm's placement, mixture and client, driven for the kill arm's \
+             time with nothing killed. `background/repair` asks for a `Repair` of the reference \
+             table in verify mode a third of the way through, its record polled each second until \
+             every group is done: every group's leader scrubs it while the mixture goes on, the \
+             resident partitions hashed on the shard loop, the archived ones read off the disk and \
+             hashed on a task, every member's report polled and judged. `cluster.background` is \
+             when the repair was asked for and done, how many groups it covered and how many were \
+             clean, what the scrubs hashed and read across every node, and the client's \
+             distribution before, during and after it with a per second series. \
+             `background/backup` asks for a `Backup` of the same table at the same mark, after \
+             activating the wire version its file header needs: every persistent group's leader \
+             nudges its checkpoint, cuts a snapshot at that boundary on its compactor and copies \
+             the file under the run's storage root with a manifest beside it, and every volatile \
+             group is skipped. `cluster.backup` is the same marks and windows with the files' \
+             counts, bytes and records.",
         how_to_read_it:
-            "`during` against `before` is the number: what a scrub of the whole table costs the \
-             foreground's median and tail while it runs, and `seconds` is how long it costs it \
-             for. `bytes` over `seconds` is what the scrubs read off the archives per second, \
-             which a scheduled scrub at an interval would spend that fraction of the time; \
-             `partitions` says how much of that was resident and cost the loop rather than the \
-             disk. A `clean` under `groups` is a verdict to read the record for, not a cost.",
+            "`during` against `before` is the number on both arms: what a scrub or a backup of \
+             the whole table costs the foreground's median and tail while it runs, and `seconds` \
+             is how long it costs it for. On the repair arm `bytes` over `seconds` is what the \
+             scrubs read off the archives per second, which a scheduled scrub at an interval \
+             would spend that fraction of the time; `partitions` says how much of that was \
+             resident and cost the loop rather than the disk, and a `clean` under `groups` is a \
+             verdict to read the record for, not a cost. On the backup arm `bytes` over \
+             `seconds` is what the cuts wrote per second, which is the same archives read and a \
+             copy written; `written` against `groups` less `skipped` is whether every durable \
+             group cut, and a `failed` above zero is a record to read.",
         what_would_make_it_wrong:
-            "A `finished_ms` that is absent, which means the run ended inside the scrub and the \
-             `after` window is empty. A `bytes` of zero at full scale, which means every partition \
-             was resident and the arm priced the loop's hashing alone. Reading `during` as an \
-             outage: the client keeps its depth throughout and a slower window is the scrub's \
-             share of the cores and the device, not a refusal.",
+            "A `finished_ms` that is absent, which means the run ended inside the operation and \
+             the `after` window is empty. A `bytes` of zero at full scale on the repair arm, which \
+             means every partition was resident and the arm priced the loop's hashing alone. \
+             Reading `during` as an outage: the client keeps its depth throughout and a slower \
+             window is the operation's share of the cores and the device, not a refusal. Reading \
+             the two arms against each other as the same cost: a backup writes what a scrub only \
+             hashes, and its nudge commits a checkpoint the scrub does not.",
         what_it_cannot_say:
             "What a repair that installs costs, which is the snapshot arm's transfer on top of \
-             this. What a scrub costs over a network, where the digests are a round trip each. \
-             What it costs on a table whose archives are wider than memory, where the archived \
-             pass is the whole of it. What a scheduled interval should be: this is the cost of one \
-             pass, and the interval multiplies it.",
+             this. What either costs over a network, where the digests are a round trip each and \
+             the backup's files land on every leader's own disk. What it costs on a table whose \
+             archives are wider than memory, where the archived pass is the whole of it. What a \
+             scheduled interval should be: this is the cost of one pass, and the interval \
+             multiplies it. What a restore costs, which no arm prices.",
     },
     Family {
         name: "cluster-migration",

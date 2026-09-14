@@ -333,7 +333,12 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
                 .transpose()
                 .context("a staged node's identity does not parse")?
                 .unwrap_or_default();
-            Some(background::inject(spec, admin, run_started, nodes)?)
+            // a backup's files go under the workload's own storage root, which the next run wipes
+            let backup_dir = conf
+                .as_ref()
+                .map(|conf| conf.storage.default.filesystem.latency_sensitive.path.join("backup"))
+                .with_context(|| format!("{} asks for a background operation with no configuration", workload.id()))?;
+            Some(background::inject(spec, admin, run_started, nodes, backup_dir)?)
         }
         _ => None,
     };
@@ -409,6 +414,11 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
             // ([F45](../../docs/src/features/replica-migration.md))
             crate::workloads::workload::BackgroundKind::Move { .. } => {
                 facts.migration = Some(background::migration_facts(started, &marks, &measured.timeline, spec.run_for));
+            }
+            // a backup arm records the backup's marks, files and bytes the same way
+            // ([F49](../../docs/src/features/backup-and-recovery.md))
+            crate::workloads::workload::BackgroundKind::Backup => {
+                facts.backup = Some(background::backup_facts(started, &marks, &measured.timeline, spec.run_for));
             }
             // a rebalance arm records its plan's marks, steps and blocked reason the same way
             // ([F46](../../docs/src/features/capacity-rebalancing.md))

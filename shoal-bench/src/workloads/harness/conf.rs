@@ -242,6 +242,7 @@ pub fn cluster_facts(
         migration: None,
         rebalance: None,
             rehome: None,
+            backup: None,
     }))
 }
 

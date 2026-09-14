@@ -321,6 +321,44 @@ pub struct ClusterFactsLite {
     /// before F47
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rehome: Option<RehomeFactsLite>,
+    /// The backup the backup arm ran and what its client saw across it; absent for every
+    /// other arm and before F49
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<BackupFactsLite>,
+}
+
+/// A backup run in the background of a measured phase, and what the client saw across it
+///
+/// A mirror of the artifact's `BackupFacts`, whole: the marks, the counts, the bytes, the
+/// windows and the series, so a backup can be drawn as the plateau it is and its tail read
+/// against the run's own ([F49](../../docs/src/features/backup-and-recovery.md)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupFactsLite {
+    /// When the backup was asked for, in milliseconds from the start of the measured phase
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_ms: Option<u64>,
+    /// When every group of it was done, if inside the run
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_ms: Option<u64>,
+    /// How long that took, in whole seconds
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u64>,
+    /// How many groups the record covered
+    pub groups: u64,
+    /// How many wrote a file that verified
+    pub written: u64,
+    /// How many were skipped
+    pub skipped: u64,
+    /// How many failed
+    pub failed: u64,
+    /// Bytes the files took, summed over the groups
+    pub bytes: u64,
+    /// Records the files hold, summed over the groups
+    pub records: u64,
+    /// The three windows: `before`, `during` and `after`
+    pub windows: Vec<WindowFactsLite>,
+    /// One bucket per second of the measured phase
+    pub series: Vec<SecondFactsLite>,
 }
 
 /// What a rehome moved when a server restarted at another executor count, and what it cost
