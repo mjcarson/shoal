@@ -325,7 +325,9 @@ async fn a_hello_of_an_unsupported_version_is_refused_with_an_ack() -> Result<()
     frame[0] = protocol::PROTOCOL_VERSION.wrapping_add(1);
     hostile.write_all(&frame).await?;
     hostile.flush().await?;
-    // the server answers before it closes, in a header written with its own version
+    // the server answers before it closes, in a header written with the client lane's
+    // version, which is the one every client reads
+    // ([F48](../../docs/src/features/rolling-compatibility.md))
     let mut answer = [0u8; handshake::HANDSHAKE_FRAME_LEN];
     hostile.read_exact(&mut answer).await?;
     let mut header_bytes = [0u8; protocol::HEADER_LEN];
@@ -333,7 +335,7 @@ async fn a_hello_of_an_unsupported_version_is_refused_with_an_ack() -> Result<()
     let header = protocol::RawHeader::decode(&header_bytes);
     assert_eq!(
         header.version,
-        protocol::PROTOCOL_VERSION,
+        protocol::CLIENT_WIRE_VERSION,
         "the refusal was written with a version the client cannot read"
     );
     assert!(

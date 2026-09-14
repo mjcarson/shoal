@@ -106,7 +106,7 @@ pub struct PeerSetup {
 pub struct ShardTransportView {
     /// The shard this is
     pub shard: usize,
-    /// Every outbound link this shard owns, data and bulk
+    /// Every outbound link this shard owns: data, bulk and, since F48, replication
     pub links: Vec<LinkView>,
     /// Bytes received on bulk lanes accepted by this shard
     pub bulk_received: u64,

@@ -287,7 +287,7 @@ assign the gates. Generated cluster pages retain the book's scope/comparability 
 | `background_capture_records_scrub_interference` | A background repair's record carries its marks, the windows before, during and after it with their own distributions, a bucket per second and what the scrubs read; a run with no repair is all `before`; an older record loads without it | M8 |
 | `migration_capture_records_transfer_and_pauses` | A move's record carries its marks, the time each phase took, what the destination was fed, the windows before, during and after with their own distributions and a bucket per second, and `unfinished` for a run that ended first; an F44 record loads without it | M9a |
 | `rebalance_capture_records_plan_and_windows` | A plan's record carries its kind, its marks, its steps and what they moved, its blocked reason, the windows and the series, and the p99 ratio in thousandths; a blocked plan the run outlasted is `unfinished` with its reason kept; an F45 record loads without it | M9b |
-| `physical_cluster_records_each_node_environment` | Unequal real hardware and primary placement are retained in comparability metadata | M10 |
+| `physical_cluster_records_each_node_environment` | Unequal real hardware and primary placement are retained in comparability metadata | M10c |
 
 ## Related
 

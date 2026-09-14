@@ -21,7 +21,7 @@ use crate::shared::protocol::peer::{
     decode_entries, encode_entries, ForwardEntry, ForwardPreamble, PeerHello, PeerHelloAck,
     PeerRefusal, FORWARD_PREAMBLE_LEN, PEER_HELLO_BODY_LEN, PEER_HELLO_FRAME_LEN,
 };
-use crate::shared::protocol::{HEADER_LEN, PROTOCOL_VERSION};
+use crate::shared::protocol::{HEADER_LEN, MIN_PEER_VERSION, PROTOCOL_VERSION};
 use futures::AsyncWriteExt;
 
 /// An identity for a node in a placed cluster
@@ -143,7 +143,7 @@ fn peer_rejects_wrong_cluster_identity_and_malformed_payload() {
     let node0 = NodeId::mint();
     let node1 = NodeId::mint();
     let schema_id = 0xabcd_1234_5678_9abc;
-    let local = Local::new(&identity(node1, cluster), 2, schema_id, 1 << 20);
+    let local = Local::new(&identity(node1, cluster), 2, schema_id, 1 << 20, None);
     let placement = two_nodes(cluster, node0, node1);
 
     let mut runtime = GlommioRuntime::new(1);
@@ -205,6 +205,39 @@ fn peer_rejects_wrong_cluster_identity_and_malformed_payload() {
         assert_eq!(reason, PeerRefusal::LaneRefused);
         assert!(!ok);
         // and a matching hello is accepted
+        let (reason, ok) =
+            exchange(&listener, &local, &placement, data, a_hello(c, n0, 2, Lane::Data, schema_id)).await;
+        assert_eq!(reason, PeerRefusal::Accepted);
+        assert!(ok);
+        // a peer whose range shares no version, and one without a required capability
+        // ([F48](../../../../docs/src/features/rolling-compatibility.md))
+        let mut apart = a_hello(c, n0, 2, Lane::Data, schema_id);
+        apart.wire_min = PROTOCOL_VERSION + 1;
+        apart.wire_max = PROTOCOL_VERSION + 2;
+        let (reason, ok) = exchange(&listener, &local, &placement, data, apart).await;
+        assert_eq!(reason, PeerRefusal::NoCommonVersion);
+        assert!(!ok);
+        let mut lacking = a_hello(c, n0, 2, Lane::Data, schema_id);
+        lacking.capabilities &= !crate::shared::protocol::peer::CAP_READ_CONSISTENCY_V1;
+        let (reason, ok) = exchange(&listener, &local, &placement, data, lacking).await;
+        assert_eq!(reason, PeerRefusal::CapabilityMissing);
+        assert!(!ok);
+        // a peer pinned at the floor is accepted, and the two speak the floor
+        let mut pinned = a_hello(c, n0, 2, Lane::Data, schema_id);
+        pinned.wire_min = MIN_PEER_VERSION;
+        pinned.wire_max = MIN_PEER_VERSION;
+        let (reason, ok) = exchange(&listener, &local, &placement, data, pinned).await;
+        assert_eq!(reason, PeerRefusal::Accepted);
+        assert!(ok);
+        // but not once the cluster has activated a version above what it speaks
+        let mut activated = (*placement.get()).clone();
+        activated.activated_wire = PROTOCOL_VERSION;
+        activated.version += 1;
+        assert!(placement.install(std::sync::Arc::new(activated)));
+        let (reason, ok) = exchange(&listener, &local, &placement, data, pinned).await;
+        assert_eq!(reason, PeerRefusal::BelowActivatedWire);
+        assert!(!ok);
+        // while one that speaks it still is
         let (reason, ok) =
             exchange(&listener, &local, &placement, data, a_hello(c, n0, 2, Lane::Data, schema_id)).await;
         assert_eq!(reason, PeerRefusal::Accepted);

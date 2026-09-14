@@ -44,7 +44,7 @@ use crate::server::database::ShoalDatabase;
 use crate::server::map::GroupSpec;
 use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::peer::{LinkEvent, ReplicateReply};
-use crate::server::replication::snapshot::{self, BuiltSnapshot, SnapshotHeader, SnapshotManifest, SnapshotWriter, SNAPSHOTS_DIR};
+use crate::server::replication::snapshot::{self, BuiltSnapshot, SnapshotManifest, SnapshotProvenance, SnapshotWriter, SNAPSHOTS_DIR};
 use crate::server::replication::{
     ApplyOutcome, BarrierAnswer, CommandResult, DataConfig, GroupMachine, GroupNetwork, GroupReport, IntegrityStats,
     Lease, MachineState, ProposalOutcome, Remembered, ReplicationVerb, ResultKind, RpcFailure, ShardNetwork, ShardPeer,
@@ -55,7 +55,7 @@ use crate::server::stage_profile::{StageDurability, StageOp, Stamp};
 use crate::server::tables::ApplyStep;
 use crate::server::wal::{Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, ShardWal};
 use crate::server::ServerError;
-use crate::shared::identity::{GroupId, NodeId, ShardAddr, TableId};
+use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::protocol::peer::{Command, ReplicateKind, ReplicateRequestHead, RequestId};
 use crate::shared::protocol::read::SessionToken;
@@ -1232,12 +1232,14 @@ where
     /// * `origin` - The peer
     /// * `head` - The request's fixed fields
     /// * `payload` - Its payload
+    /// * `version` - The wire version the payload is encoded at
     /// * `reply` - Where the answer goes
     pub(super) fn handle_replication(
         &mut self,
         origin: NodeId,
         head: ReplicateRequestHead,
         payload: Vec<u8>,
+        version: u8,
         reply: kanal::AsyncSender<ReplicateReply>,
     ) {
         let group = GroupId(head.group);
@@ -1264,7 +1266,7 @@ where
         // a snapshot rpc is the receiver's: judged on the loop against what it holds
         // ([F43](../../../../docs/src/features/node-recovery.md))
         if head.kind == ReplicateKind::Snapshot {
-            self.handle_snapshot_rpc(origin, head, payload, reply);
+            self.handle_snapshot_rpc(origin, head, payload, version, reply);
             return;
         }
         // a quarantine is the holding shard's to persist, on the loop, and answered once it is
@@ -2045,6 +2047,7 @@ where
         reply: oneshot::Sender<Result<Rc<BuiltSnapshot>, String>>,
     ) -> Result<(), ServerError> {
         let schema_id = <D::ClientType as QuerySupport>::SCHEMA_ID;
+        let node = self.node_id();
         let Some(replication) = self.replication.as_mut() else {
             let _ = reply.send(Err("this node hosts no tablet groups".to_string()));
             return Ok(());
@@ -2082,6 +2085,12 @@ where
         let tablets = slot.spec.tablets.clone();
         let table = slot.table;
         let dir = replication.wal.dir().join(SNAPSHOTS_DIR);
+        // where the cut is made, and which file format the activated wire version allows
+        // ([F48](../../../../docs/src/features/rolling-compatibility.md))
+        let provenance = {
+            let map = self.map.get();
+            SnapshotProvenance::at(map.cluster.unwrap_or_default(), node, map.activated_wire)
+        };
         if slot.store.is_volatile() {
             // a volatile group's rows are the ephemeral table's resident partitions, cut here
             // where they are all visible, and written on a task of its own
@@ -2098,7 +2107,7 @@ where
             let tx = self.shard_local_tx.clone();
             let table_id = table.table_id();
             glommio::spawn_local(async move {
-                let outcome = write_volatile_snapshot(&dir, group, table_id, schema_id, boundary, membership, tablets, records, remembered, expired_before)
+                let outcome = write_volatile_snapshot(&dir, group, table_id, schema_id, boundary, membership, tablets, records, remembered, expired_before, provenance)
                     .await
                     .map_err(|error| format!("{error:?}"));
                 let _ = tx.send(ServerMsg::SnapshotBuilt { group, outcome }).await;
@@ -2125,6 +2134,7 @@ where
             memberships,
             retries,
             expired_before,
+            provenance,
             dir,
         })
         .await?;
@@ -2246,6 +2256,7 @@ where
 /// * `records` - Every resident partition of those tablets, as its key and archived bytes
 /// * `remembered` - The remembered requests at or below the boundary, oldest first
 /// * `expired_before` - The newest time-ordered identity the group has forgotten
+/// * `provenance` - Where the cut is made and which file format it is written in
 #[allow(clippy::too_many_arguments)]
 async fn write_volatile_snapshot(
     dir: &std::path::Path,
@@ -2258,24 +2269,18 @@ async fn write_volatile_snapshot(
     records: Vec<(u64, Vec<u8>)>,
     remembered: Vec<(RequestId, Remembered)>,
     expired_before: u64,
+    provenance: SnapshotProvenance,
 ) -> std::io::Result<(PathBuf, SnapshotManifest)> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join(snapshot::snapshot_name(group, boundary.index));
-    let header = SnapshotHeader {
-        table,
-        group,
-        boundary: boundary.index,
-        records: records.len() as u64,
-    };
+    let header = provenance.header(table, group, boundary.index, records.len() as u64, schema_id);
     let mut writer = SnapshotWriter::create(&path, header).await?;
     for (key, bytes) in &records {
         writer.record(*key, bytes).await?;
     }
     let (total, checksum) = writer.finish(&remembered).await?;
     snapshot::sync_dir(dir).await?;
-    Ok((
-        path,
-        SnapshotManifest {
+    let manifest = SnapshotManifest {
             group,
             table,
             schema_id,
@@ -2287,8 +2292,12 @@ async fn write_volatile_snapshot(
             checksum,
             retries: u32::try_from(remembered.len()).unwrap_or(u32::MAX),
             expired_before,
-        },
-    ))
+            cluster: ClusterId::default(),
+            origin: NodeId::default(),
+            created_ms: 0,
+        };
+    // stamped with where and when it was cut
+    Ok((path, provenance.stamp(manifest, &header)))
 }
 
 /// The membership as of a boundary: the newest of the candidates applied at or below it

@@ -2,7 +2,7 @@
 
 use super::super::read::{ReadLevel, SessionToken};
 use super::super::trace::TraceContext;
-use super::super::{Header, MessageType, ProtocolError, HEADER_LEN, PROTOCOL_VERSION};
+use super::super::{Header, MessageType, ProtocolError, HEADER_LEN, MIN_PEER_VERSION, PROTOCOL_VERSION};
 use super::*;
 
 /// A hello with every field set to something distinguishable
@@ -44,7 +44,58 @@ fn a_peer_hello_and_its_ack_round_trip() {
             assert_eq!(header.flags.contains(super::super::Flags::REFUSED), !reason.is_accepted());
         }
     }
-    assert!(a_hello(Lane::Data).speaks_our_version());
+    assert_eq!(a_hello(Lane::Data).negotiate(&a_hello(Lane::Data)), Some(PROTOCOL_VERSION));
+    // the hello frame is written at the floor, so a peer anywhere in the range reads it
+    let frame = a_hello(Lane::Data).frame(1 << 20).unwrap();
+    assert_eq!(frame[0], MIN_PEER_VERSION);
+}
+
+/// A version range negotiates to the highest both read, and the capabilities intersect
+///
+/// The Q10 contract as [F48](../../../../../docs/src/features/rolling-compatibility.md)
+/// delivers it: the wire version is a range on each side and the two speak the highest
+/// version both hold; disjoint ranges share nothing; a peer above us is spoken to at our
+/// newest; and what both can act on is the intersection of the capability words.
+#[test]
+fn a_version_range_negotiates_to_the_highest_shared() {
+    // a hello with a range of its own
+    let ranged = |min: u8, max: u8| PeerHello {
+        wire_min: min,
+        wire_max: max,
+        ..a_hello(Lane::Data)
+    };
+    // the table: (ours, theirs, spoken)
+    let table = [
+        ((4, 5), (4, 5), Some(5)),
+        ((4, 5), (4, 4), Some(4)),
+        ((4, 4), (4, 5), Some(4)),
+        ((4, 5), (5, 5), Some(5)),
+        ((4, 5), (5, 6), Some(5)),
+        ((4, 5), (6, 7), None),
+        ((6, 7), (4, 5), None),
+        ((4, 4), (5, 5), None),
+        ((5, 5), (4, 4), None),
+        ((4, 6), (5, 9), Some(6)),
+    ];
+    for ((our_min, our_max), (their_min, their_max), spoken) in table {
+        let ours = ranged(our_min, our_max);
+        let theirs = ranged(their_min, their_max);
+        assert_eq!(theirs.negotiate(&ours), spoken, "ours {our_min}..={our_max} theirs {their_min}..={their_max}");
+        // and the same from the other side
+        assert_eq!(ours.negotiate(&theirs), spoken);
+    }
+    // the range this build advertises is the floor to the newest, and a pin lowers the top
+    assert_eq!(PeerHello::range(None), (MIN_PEER_VERSION, PROTOCOL_VERSION));
+    assert_eq!(PeerHello::range(Some(MIN_PEER_VERSION)), (MIN_PEER_VERSION, MIN_PEER_VERSION));
+    assert_eq!(PeerHello::range(Some(PROTOCOL_VERSION + 3)), (MIN_PEER_VERSION, PROTOCOL_VERSION));
+    assert_eq!(PeerHello::range(Some(0)), (MIN_PEER_VERSION, MIN_PEER_VERSION));
+    // the capabilities both act on are the intersection
+    let ours = PeerHello { capabilities: CAP_FORWARD_V1 | CAP_REPLICATION_V1, ..a_hello(Lane::Data) };
+    let theirs = PeerHello { capabilities: CAP_REPLICATION_V1 | CAP_MEMBERSHIP_V1, ..a_hello(Lane::Data) };
+    assert_eq!(theirs.common_capabilities(&ours), CAP_REPLICATION_V1);
+    assert_eq!(a_hello(Lane::Data).common_capabilities(&a_hello(Lane::Data)), CAPABILITIES);
+    // every capability this build defines is required of a peer
+    assert_eq!(REQUIRED_CAPABILITIES & CAPABILITIES, REQUIRED_CAPABILITIES);
 }
 
 /// Every refusal is pinned to its byte, and an unknown byte is still a refusal
@@ -63,6 +114,9 @@ fn every_peer_refusal_round_trips_and_unknown_fails_closed() {
         (PeerRefusal::Fenced, 10),
         (PeerRefusal::DuplicateIdentity, 11),
         (PeerRefusal::NotJoinable, 12),
+        (PeerRefusal::BelowActivatedWire, 13),
+        (PeerRefusal::Removed, 14),
+        (PeerRefusal::CapabilityMissing, 15),
     ];
     for (reason, byte) in pinned {
         assert_eq!(reason.as_byte(), byte);

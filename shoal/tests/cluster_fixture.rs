@@ -486,7 +486,7 @@ async fn unknown_configuration_and_storage_formats_are_refused() -> Result<(), F
     );
     assert!(format!("{error}").contains("not both"), "{error}");
     // a format 1 marker is refused by name, with the formats this build reads and the fact
-    // that no migration exists
+    // that a marker is never migrated in place ([F48](../../docs/src/features/rolling-compatibility.md))
     let refused = match Cluster::builder()
         .server(CoreClaim::Count(1))
         .staged_marker("{\n  \"format\": 1,\n  \"shards\": 2\n}")
@@ -499,7 +499,7 @@ async fn unknown_configuration_and_storage_formats_are_refused() -> Result<(), F
     let reason = format!("{refused:?}");
     assert!(reason.contains("format 1"), "the refusal did not name the format: {reason}");
     assert!(reason.contains("reads [2, 3]"), "the refusal did not name what it reads: {reason}");
-    assert!(reason.contains("no migration"), "the refusal did not say there is no migration: {reason}");
+    assert!(reason.contains("never migrated"), "the refusal did not say a marker is never migrated in place: {reason}");
     // and a format from the future the same way, whatever else it carries
     let refused = match Cluster::builder()
         .standalone(CoreClaim::Count(1))
@@ -1130,6 +1130,9 @@ async fn cluster_server_child() {
             block.admins = staged.admins.clone();
             // the slots this node claims apart from its cores ([F47](../../docs/src/features/local-rehome.md))
             block = block.slots(staged.slots);
+            // the wire version this node is pinned at, as an unupgraded member
+            // ([F48](../../docs/src/features/rolling-compatibility.md))
+            block.transport.wire_version = staged.wire_version;
             if let Some(interval) = staged.detector_interval_ms {
                 block = block.detector_interval_ms(interval);
             }
@@ -1458,6 +1461,41 @@ fn handle_command(
             .transport()
             .map(|views| serde_json::to_value(views).expect("views serialize"))
             .map_err(|error| format!("{error:?}")),
+        // the wire version every link of this node negotiated, by peer index and lane, and
+        // the version the cluster activated ([F48](../../docs/src/features/rolling-compatibility.md))
+        "WIRE" => pool
+            .transport()
+            .map_err(|error| format!("{error:?}"))
+            .and_then(|views| {
+                let mut links = Vec::new();
+                for view in views {
+                    for link in view.links {
+                        let peer = peers.iter().position(|node| *node == link.node);
+                        links.push(serde_json::json!({
+                            "shard": view.shard,
+                            "peer": peer,
+                            "lane": link.lane,
+                            "state": link.state,
+                            "wire_version": link.wire_version,
+                            "capabilities": link.capabilities,
+                        }));
+                    }
+                }
+                let topology = pool.topology().map_err(|error| format!("{error:?}"))?;
+                Ok(serde_json::json!({
+                    "links": links,
+                    "activated": topology.wire.activated,
+                    "min_member": topology.wire.min_member,
+                    "max_member": topology.wire.max_member,
+                    "newest": topology.wire.newest,
+                    "floor": topology.wire.floor,
+                }))
+            }),
+        // activate a wire version, as the process
+        "ACTIVATE" => match parts.next().and_then(|wire| wire.parse::<u8>().ok()) {
+            Some(wire) => admin(AdminKind::Activate { wire }),
+            None => Err("ACTIVATE needs a wire version".to_string()),
+        },
         // stream bytes at a peer on the bulk lane, for the bounded-lanes test
         "PROBE_BULK" => match node_at(&mut parts) {
             Some(node) => parts
@@ -10650,6 +10688,7 @@ async fn local_rehome_recovers_after_each_crash_point() -> Result<(), FixtureErr
             cluster::ChildOverrides {
                 cores: Some(target),
                 rehome_crash_at: Some((*point).to_string()),
+                ..cluster::ChildOverrides::default()
             },
         )?;
         wait_dead(&cluster, 2, Duration::from_secs(120)).map_err(|_| FixtureError::NotReady(format!("node two never died at {point}")))?;
@@ -10792,6 +10831,7 @@ async fn standalone_rehome_rebalances_tablets_across_restarts() -> Result<(), Fi
             cluster::ChildOverrides {
                 cores: Some(1),
                 rehome_crash_at: Some(point.to_string()),
+                ..cluster::ChildOverrides::default()
             },
         )?;
         wait_dead(&cluster, 0, Duration::from_secs(60)).map_err(|_| FixtureError::NotReady(format!("the node never died at {point}")))?;
@@ -10813,5 +10853,462 @@ async fn standalone_rehome_rebalances_tablets_across_restarts() -> Result<(), Fi
     let dirs = cluster.node_mut(0).command("SHARD_DIRS")?["ok"]["executors"].clone();
     assert_eq!(dirs, serde_json::json!([0]), "the vanished executors left files: {dirs}");
     assert_eq!(cluster.node(0).failure(), None, "the node died");
+    Ok(())
+}
+
+/// The wire version every up link of a node negotiated, by (peer index, lane), and the
+/// cluster's activated version as the node reports it
+/// ([F48](../../docs/src/features/rolling-compatibility.md))
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node to ask
+fn wire_of(cluster: &mut Cluster, node: usize) -> Result<(Vec<(usize, String, u8)>, serde_json::Value), FixtureError> {
+    let wire = cluster.node_mut(node).command("WIRE")?;
+    let Some(ok) = wire.get("ok").cloned() else {
+        return Err(FixtureError::ChildFailed(format!("node {node} answered WIRE with {wire}")));
+    };
+    let links = ok["links"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|link| link["state"] == "up")
+        .filter_map(|link| {
+            Some((
+                link["peer"].as_u64()? as usize,
+                link["lane"].as_str()?.to_string(),
+                link["wire_version"].as_u64()? as u8,
+            ))
+        })
+        .collect();
+    Ok((links, ok))
+}
+
+/// Wait until every up link of a node speaks one version, and there is at least one
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+/// * `version` - The version every link has to report
+/// * `within` - How long to wait
+fn wait_links_at(cluster: &mut Cluster, node: usize, version: u8, within: Duration) -> Result<Vec<(usize, String, u8)>, FixtureError> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let (links, _) = wire_of(cluster, node)?;
+        if !links.is_empty() && links.iter().all(|(_, _, spoken)| *spoken == version) {
+            return Ok(links);
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("node {node}'s links never all spoke {version}: {links:?}")));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Wait until a node reports the cluster's activated wire version
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+/// * `version` - The version
+/// * `within` - How long to wait
+fn wait_activated(cluster: &mut Cluster, node: usize, version: u8, within: Duration) -> Result<(), FixtureError> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let (_, wire) = wire_of(cluster, node)?;
+        if wire["activated"].as_u64() == Some(u64::from(version)) {
+            return Ok(());
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("node {node} never saw wire version {version} activated: {wire}")));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Members at two wire versions serve forwards, quorum writes, barrier reads, a snapshot
+/// over the older link and an election, and the newer version cannot be activated until
+/// every member speaks it (C2 M10)
+///
+/// Three nodes at a factor of three, nodes one and two pinned at wire version 4 as members
+/// not yet upgraded, node zero at the build's 5. Every link negotiates 4, and reports so.
+/// Writes led on every node forward and commit at quorum, barrier reads through every node
+/// see them. Node two is left behind the purge point and fed snapshots by leaders on both
+/// versions over version 4 links, which is the manifest's codec on the wire. Node zero -
+/// the only member at 5 - is killed, and an election among the members elects a leader
+/// that commits writes; it comes back. `ACTIVATE 5` is refused naming the pinned members,
+/// the digests agree, and nobody died ([F48](../../docs/src/features/rolling-compatibility.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn mixed_versions_exchange_real_cluster_operations() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal::shared::protocol::read::ReadLevel;
+    use shoal::shared::protocol::{MIN_PEER_VERSION, PROTOCOL_VERSION};
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .wire_version(1, MIN_PEER_VERSION)
+        .wire_version(2, MIN_PEER_VERSION)
+        .checkpoint_entries(8)
+        .retained_entries(16)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    // the members report what they speak: two at the floor, one at the newest, none activated
+    let (_, wire) = wire_of(&mut cluster, 0)?;
+    assert_eq!(wire["activated"], u64::from(MIN_PEER_VERSION), "{wire}");
+    assert_eq!(wire["min_member"], u64::from(MIN_PEER_VERSION), "{wire}");
+    assert_eq!(wire["max_member"], u64::from(PROTOCOL_VERSION), "{wire}");
+    assert_eq!(wire["newest"], u64::from(PROTOCOL_VERSION), "{wire}");
+    // writes led on every node, forwarded from every other, and committed at quorum
+    let mut keys = Vec::new();
+    for leader in 0..3 {
+        keys.extend(keys_led_by(&mut cluster, "Note", leader, 9000 + leader as u64 * 100, 4)?);
+    }
+    for (at, key) in keys.iter().enumerate() {
+        write_note(&addrs[at % 3], *key, &format!("mixed-{key}")).await?;
+    }
+    // every link that carried one negotiated the floor, since two members speak nothing else
+    for node in 0..3 {
+        let links = wait_links_at(&mut cluster, node, MIN_PEER_VERSION, Duration::from_secs(10))?;
+        assert!(links.iter().any(|(_, lane, _)| lane == "replication"), "node {node} replicated nothing: {links:?}");
+    }
+    // barrier reads through every node see every write
+    let quorum = SendOptions::new().read(ReadLevel::Quorum);
+    for key in &keys {
+        for reader in 0..3 {
+            let seen = read_note_with(&addrs[reader], *key, &quorum).await.map_err(ok)?;
+            assert_eq!(seen.as_deref(), Some(format!("mixed-{key}").as_str()), "a barrier read through node {reader} missed key {key}");
+        }
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // node two left behind the purge point of every group, and fed snapshots over version
+    // 4 links by whichever version leads each group
+    let behind = groups_of(&mut cluster, 2)?;
+    cluster.kill(2)?;
+    let client = Shoal::<TestDbClient>::new(&addrs[0]).await.map_err(ok)?;
+    for key in 9500..9600u64 {
+        write_note_eventually(&addrs[0], key, &format!("snap-{key}"), Duration::from_secs(15)).await?;
+    }
+    for key in 9500..9600u64 {
+        client.send_one(Row { key, data: format!("snap-{key}") }).await.map_err(ok)?;
+    }
+    wait_purged_past(&mut cluster, &[0, 1], "Note", &applied_by_group(&behind, "Note"), Duration::from_secs(90))?;
+    wait_purged_past(&mut cluster, &[0, 1], "Row", &applied_by_group(&behind, "Row"), Duration::from_secs(30))?;
+    cluster.restart(2, NodeKind::Server)?;
+    cluster.wait_joined(&[2])?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(90))?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Row", Duration::from_secs(60))?;
+    wait_not_installing(&mut cluster, 2, Duration::from_secs(10))?;
+    let installed = snapshots_of(&mut cluster, 2)?;
+    assert!(installed["installed"].as_u64().unwrap_or(0) > 0, "node two installed no snapshot: {installed}");
+    // still pinned: every link it came back on speaks the floor
+    wait_links_at(&mut cluster, 2, MIN_PEER_VERSION, Duration::from_secs(10))?;
+    // the one member at the newest version killed: the two at the floor elect, commit, serve
+    cluster.kill(0)?;
+    let leader = cluster.wait_leader_among(1, &[1, 2], Duration::from_secs(30))?;
+    // node two came back on a new client port, so the address is read again
+    let addr = cluster.node(leader).endpoints.client.to_string();
+    for key in 9700..9710u64 {
+        write_note_eventually(&addr, key, &format!("elected-{key}"), Duration::from_secs(20)).await?;
+    }
+    for key in 9700..9710u64 {
+        assert_eq!(read_note_with(&addr, key, &quorum).await.map_err(ok)?.as_deref(), Some(format!("elected-{key}").as_str()));
+    }
+    cluster.restart(0, NodeKind::Server)?;
+    cluster.wait_joined(&[0])?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))?;
+    wait_links_at(&mut cluster, 0, MIN_PEER_VERSION, Duration::from_secs(10))?;
+    // the newest version cannot be activated while two members speak the floor
+    let refused = cluster.node_mut(0).command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
+    let reason = refused["error"].as_str().unwrap_or_default().to_string();
+    let ids = cluster.node_ids();
+    assert!(reason.contains(&ids[1]) && reason.contains(&ids[2]), "the refusal did not name the pinned members: {refused}");
+    assert!(!reason.contains(&ids[0]), "the refusal named the member that speaks it: {refused}");
+    let (_, wire) = wire_of(&mut cluster, 0)?;
+    assert_eq!(wire["activated"], u64::from(MIN_PEER_VERSION), "{wire}");
+    // the floor itself is already activated, and asking for it changes nothing
+    let same = cluster.node_mut(0).command(&format!("ACTIVATE {MIN_PEER_VERSION}"))?;
+    assert!(same["ok"].is_object(), "{same}");
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A rolling upgrade under writers, with a failure inside the mixed window, ends in an
+/// activation past which a member at the old version is refused (C9 M10)
+///
+/// Three nodes at a factor of three, all pinned at wire version 4 - the cluster as it ran
+/// before the upgrade - under writers through every node with identities and a retry
+/// budget. Each node is restarted at the build's newest in turn, readiness waited on
+/// between; inside the mixed window node one is killed and brought back still at the old
+/// version. Once every member reports the newest, `ACTIVATE 5` commits and every node sees
+/// it. A restart of node two pinned at 4 is refused by name before it serves anything, and
+/// it comes back at 5. The writers' ledger, joined by a read of every key on every node, is
+/// accepted by the sequential oracle; the transport report showed 4 on every link before
+/// and 5 on every link after ([F48](../../docs/src/features/rolling-compatibility.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn rolling_upgrade_survives_operations_and_failure() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal::shared::protocol::{MIN_PEER_VERSION, PROTOCOL_VERSION};
+    use shoal_model::event::{ClientOp, MutationOp, OpResult, ReadLevel};
+    use shoal_model::ids::{Attempt, Key, OpId, TabletId, Value};
+    use shoal_model::oracle::{Ledger, Outcome};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .wire_version(0, MIN_PEER_VERSION)
+        .wire_version(1, MIN_PEER_VERSION)
+        .wire_version(2, MIN_PEER_VERSION)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let addrs: Vec<String> = (0..3).map(|node| cluster.node(node).endpoints.client.to_string()).collect();
+    let tablet_id = |key: u64| TabletId {
+        table: shoal_model::ids::TableId(1),
+        range: tablet_of(key) as u16,
+    };
+    // six keys per writer, one writer per node, inserted before anything is concurrent
+    let keys: Vec<u64> = (9800..9818).collect();
+    let ledger = Arc::new(Mutex::new(Ledger::default()));
+    let clock = Arc::new(AtomicU64::new(0));
+    let next_id = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let unknown = Arc::new(AtomicU64::new(0));
+    for key in &keys {
+        let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+        let attempt = Attempt { id, retry: 0 };
+        let invoke = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().invoke(attempt, tablet_id(*key), ClientOp::Mutate(MutationOp::Insert { key: Key((*key % 251) as u8), value: Value(0) }), invoke);
+        write_note(&addrs[0], *key, "0").await?;
+        let complete = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Applied(true)));
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // every link speaks the old version before anything is upgraded
+    for node in 0..3 {
+        wait_links_at(&mut cluster, node, MIN_PEER_VERSION, Duration::from_secs(10))?;
+    }
+    let (_, wire) = wire_of(&mut cluster, 0)?;
+    assert_eq!(wire["max_member"], u64::from(MIN_PEER_VERSION), "{wire}");
+    // the writers, through every node, under identities with a retry budget
+    let mut tasks = Vec::new();
+    for node in 0..3 {
+        let endpoints: Vec<String> = addrs.clone();
+        let keys: Vec<u64> = keys[node * 6..node * 6 + 6].to_vec();
+        let (ledger, clock, next_id, stop, unknown) = (ledger.clone(), clock.clone(), next_id.clone(), stop.clone(), unknown.clone());
+        tasks.push(tokio::spawn(async move {
+            let mut ordered = endpoints.clone();
+            ordered.rotate_left(node);
+            let mut round = 0u32;
+            while !stop.load(Ordering::SeqCst) && round < 200 {
+                let Ok(client) = Shoal::<TestDbClient>::builder().endpoints(ordered.clone()).build().await else {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                };
+                for (at, key) in keys.iter().enumerate() {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let value = Value(node as u32 * 1000 + round + 1);
+                    let delete = (round as usize + at + node) % 5 == 0;
+                    let op = if delete {
+                        MutationOp::Delete { key: Key((*key % 251) as u8) }
+                    } else {
+                        MutationOp::Update { key: Key((*key % 251) as u8), value }
+                    };
+                    let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+                    let attempt = Attempt { id, retry: 0 };
+                    let invoke = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().invoke(attempt, tablet_id(*key), ClientOp::Mutate(op), invoke);
+                    let options = SendOptions::new().identity(uuid::Uuid::new_v4()).retry(Duration::from_secs(20));
+                    let outcome = if delete {
+                        match client.send_one_with(cluster::schema::NoteDelete::new(*key), &options).await {
+                            Ok(_) => Outcome::Ok(OpResult::Applied(true)),
+                            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Outcome::Ok(OpResult::Applied(false)),
+                            Err(_) => Outcome::Unknown,
+                        }
+                    } else {
+                        let update = cluster::schema::NoteUpdate { partition_key: *key, text: Some(value.0.to_string()) };
+                        match client.send_one_with(update, &options).await {
+                            Ok(_) => Outcome::Ok(OpResult::Applied(true)),
+                            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Outcome::Ok(OpResult::Applied(false)),
+                            Err(error) => {
+                                eprintln!("writer {node} round {round} key {key}: {error:?}");
+                                Outcome::Unknown
+                            }
+                        }
+                    };
+                    if outcome == Outcome::Unknown {
+                        unknown.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let complete = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().complete(attempt, complete, outcome);
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                round += 1;
+            }
+            Ok::<(), shoal::client::Errors>(())
+        }));
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    // each node restarted at the newest in turn, with readiness and a leader waited on; the
+    // failure inside the mixed window is node one, killed and back still at the old version
+    for node in 0..3 {
+        cluster.restart_with_wire(node, None)?;
+        cluster.wait_joined(&[node])?;
+        cluster.wait_leader_among(node, &[0, 1, 2], Duration::from_secs(30))?;
+        if node == 0 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            cluster.kill(1)?;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            cluster.restart(1, NodeKind::Server)?;
+            cluster.wait_joined(&[1])?;
+            // still at the old version, so still spoken to at the floor
+            wait_links_at(&mut cluster, 1, MIN_PEER_VERSION, Duration::from_secs(15))?;
+            let (_, wire) = wire_of(&mut cluster, 0)?;
+            assert_eq!(wire["min_member"], u64::from(MIN_PEER_VERSION), "{wire}");
+            assert_eq!(wire["max_member"], u64::from(PROTOCOL_VERSION), "{wire}");
+            // and the newest cannot be activated yet
+            let refused = cluster.node_mut(0).command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
+            assert!(refused["error"].as_str().unwrap_or_default().contains("speak"), "{refused}");
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    // every member reports the newest, and every link speaks it
+    let (_, wire) = wire_of(&mut cluster, 0)?;
+    assert_eq!(wire["min_member"], u64::from(PROTOCOL_VERSION), "{wire}");
+    for node in 0..3 {
+        wait_links_at(&mut cluster, node, PROTOCOL_VERSION, Duration::from_secs(15))?;
+    }
+    // the activation commits, and every node sees it
+    let activated = cluster.node_mut(0).command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
+    assert!(activated["ok"]["version"].is_number(), "{activated}");
+    for node in 0..3 {
+        wait_activated(&mut cluster, node, PROTOCOL_VERSION, Duration::from_secs(30))?;
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    stop.store(true, Ordering::SeqCst);
+    for task in tasks {
+        task.await.expect("a writer task panicked")?;
+    }
+    // a restart pinned below the activated version is refused by name, and the node comes
+    // back once the pin is lifted
+    let refused = cluster.restart_with_wire(2, Some(MIN_PEER_VERSION)).expect_err("a member below the activated wire started");
+    let text = format!("{refused:?}");
+    assert!(text.contains("activated") && text.contains("wire version"), "{text}");
+    cluster.restart_with_wire(2, None)?;
+    cluster.wait_joined(&[2])?;
+    wait_links_at(&mut cluster, 2, PROTOCOL_VERSION, Duration::from_secs(15))?;
+    // every key read on every node joins the history, which the oracle accepts
+    wait_group_rows_agree(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))?;
+    for node in 0..3 {
+        let addr = cluster.node(node).endpoints.client.to_string();
+        for key in &keys {
+            let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+            let attempt = Attempt { id, retry: 0 };
+            let invoke = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().invoke(attempt, tablet_id(*key), ClientOp::Read { key: Key((*key % 251) as u8), level: ReadLevel::One }, invoke);
+            let seen = read_note(&addr, *key).await?.map(|text| Value(text.parse().expect("a value")));
+            let complete = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Value(seen)));
+        }
+    }
+    let ledger = ledger.lock().unwrap().clone();
+    shoal_model::oracle::check(&ledger).unwrap_or_else(|error| panic!("the history is not sequential: {error:?}"));
+    eprintln!("writes unknown at the end of their budget: {}", unknown.load(Ordering::SeqCst));
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A rolling upgrade from a real previous build of this test binary, when one is given
+///
+/// `SHOAL_PREVIOUS_TEST_BINARY` names a `cluster_fixture` test binary built from an earlier
+/// commit; unset, the test says so and passes. Set, three nodes start from it, rows are
+/// written, each node is restarted on this binary in turn with rows written between, and
+/// the newest version is activated once all three report it; every row reads back on every
+/// node ([F48](../../docs/src/features/rolling-compatibility.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn rolling_upgrade_from_previous_binary() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::{MIN_PEER_VERSION, PROTOCOL_VERSION};
+    let Ok(previous) = std::env::var("SHOAL_PREVIOUS_TEST_BINARY") else {
+        eprintln!("skipped: rolling_upgrade_from_previous_binary needs SHOAL_PREVIOUS_TEST_BINARY, a cluster_fixture test binary from an earlier commit");
+        return Ok(());
+    };
+    let previous = std::path::PathBuf::from(previous);
+    assert!(previous.is_file(), "SHOAL_PREVIOUS_TEST_BINARY names no file: {}", previous.display());
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .exe(previous)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let addrs: Vec<String> = (0..3).map(|node| cluster.node(node).endpoints.client.to_string()).collect();
+    // rows written on the previous build
+    let mut keys: Vec<u64> = (9900..9910).collect();
+    for key in &keys {
+        write_note(&addrs[0], *key, &format!("previous-{key}")).await?;
+    }
+    // each node restarted on this build in turn, with rows written through the mixed cluster
+    for node in 0..3 {
+        cluster.restart_with_binary(node, None)?;
+        cluster.wait_joined(&[node])?;
+        cluster.wait_leader_among(node, &[0, 1, 2], Duration::from_secs(30))?;
+        let addr = cluster.node(node).endpoints.client.to_string();
+        for key in 9910 + node as u64 * 10..9920 + node as u64 * 10 {
+            write_note_eventually(&addr, key, &format!("mixed-{key}"), Duration::from_secs(20)).await?;
+            keys.push(key);
+        }
+        // the upgraded node speaks the floor to whoever is left on the previous build, and
+        // the newest to whoever is upgraded
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let (links, _) = wire_of(&mut cluster, node)?;
+            let right = !links.is_empty()
+                && links.iter().all(|(peer, _, spoken)| *spoken == if *peer <= node { PROTOCOL_VERSION } else { MIN_PEER_VERSION });
+            if right {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "node {node}'s links never spoke the right versions: {links:?}");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+    // every member reports the newest, and it activates
+    let (_, wire) = wire_of(&mut cluster, 0)?;
+    assert_eq!(wire["min_member"], u64::from(PROTOCOL_VERSION), "{wire}");
+    let activated = cluster.node_mut(0).command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
+    assert!(activated["ok"]["version"].is_number(), "{activated}");
+    for node in 0..3 {
+        wait_activated(&mut cluster, node, PROTOCOL_VERSION, Duration::from_secs(30))?;
+    }
+    // every row reads back on every node
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))?;
+    for node in 0..3 {
+        let addr = cluster.node(node).endpoints.client.to_string();
+        for key in &keys {
+            let expected = if *key < 9910 { format!("previous-{key}") } else { format!("mixed-{key}") };
+            wait_note(&addr, *key, Some(&expected), Duration::from_secs(10)).await?;
+        }
+    }
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
     Ok(())
 }

@@ -164,6 +164,13 @@ arbitrary lag. Client load balancers need a documented readiness probe, not a fi
 7. **Rolling upgrade.** Validate n/n−1 structural schema and codecs; upgrade one failure domain at
    a time, wait for data readiness/catch-up, then activate new capabilities through control state.
    State the last safe binary/storage rollback point. Changed schema needs its own migration.
+   *At M10a ([F48](../features/rolling-compatibility.md)): the codecs are the negotiated wire
+   with the snapshot manifest as the one body that differs, the activation is `Activate { wire }`
+   judged by the running builds and read at every door, the rollback point is the activation -
+   stated in the F page's matrix - and a changed schema is explicitly unsupported as a rolling
+   operation; a node is held at the old version through the window by
+   `cluster.transport.wire_version`, and `Members.wire` is what an operator reads before
+   activating.*
 8. **Control quorum lost.** Established data groups continue where their own quorums survive.
    Restore original control voters from durable storage; no automatic rebootstrap. Topology/admin
    mutations remain blocked. Permanent majority loss requires the disaster-recovery procedure.
@@ -273,9 +280,10 @@ deployment instead of conflating replica failover with disaster recovery.
 | `repair_detects_corrupt_primary_and_preserves_evidence` | Corrupt the primary; trusted surviving state repairs it, unresolved divergence stops | M8 |
 | `canonical_digest_ignores_archive_layout_at_same_boundary` | Equivalent data compacted differently compares equal; changed/missing data does not | M8 |
 | `repair_serializes_with_migration_and_new_commits` | Concurrent repair/move cannot install stale state or destroy current evidence | M9a |
-| `rolling_upgrade_survives_operations_and_failure` | Mixed binaries replicate, read, snapshot and elect correctly, with activation/rollback limits | M10 |
-| `backup_restore_verifies_history_in_new_cluster` | Restore isolated backups including retry state, validate data, and prohibit old identities joining | M10 |
-| `permanent_quorum_loss_requires_explicit_recovery` | No automatic empty bootstrap or destructive choice when durable majority evidence is unavailable | M10 |
+| `rolling_upgrade_survives_operations_and_failure` | Mixed binaries replicate, read, snapshot and elect correctly, with activation/rollback limits ([F48](../features/rolling-compatibility.md)) | M10a |
+| `rolling_upgrade_from_previous_binary` | A real previous build's nodes are upgraded in place one at a time and the version activated, when `SHOAL_PREVIOUS_TEST_BINARY` names one ([F48](../features/rolling-compatibility.md)) | M10a |
+| `backup_restore_verifies_history_in_new_cluster` | Restore isolated backups including retry state, validate data, and prohibit old identities joining | M10b |
+| `permanent_quorum_loss_requires_explicit_recovery` | No automatic empty bootstrap or destructive choice when durable majority evidence is unavailable | M10b |
 
 ## Related
 

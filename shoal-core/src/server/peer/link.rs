@@ -25,6 +25,15 @@
 //! a dead leader is refused in a hundred milliseconds that way instead of waiting five seconds
 //! for a dial nobody asked for ([F42](../../../../docs/src/features/primary-failover.md)). The
 //! dials a wanted link makes at a dead peer are bounded by the floor, one per `reconnect_min`.
+//!
+//! # Every frame says which version it is written at
+//!
+//! Since [F48](../../../../docs/src/features/rolling-compatibility.md) a link knows what it
+//! negotiated at the hello ([`Link::negotiated`]) and the writer stamps every frame's header
+//! with that version as it goes out, unless the frame was built at a version of its own
+//! ([`Frame::at`]) - which a body that differs between versions is, encoded at what the link
+//! spoke when it was built or at the floor when it was not up. The reader refuses a frame
+//! above the negotiated version, so a peer is never misread, only refused.
 
 use bytes::Bytes;
 use futures::future::{select, Either};
@@ -48,7 +57,7 @@ use tracing::{event, Level};
 use uuid::Uuid;
 
 use super::codec;
-use super::handshake::{self, Local, PeerAddr};
+use super::handshake::{self, Local, Negotiated, PeerAddr};
 use super::Lane;
 use crate::server::conf::cluster::Transport;
 use crate::server::ServerError;
@@ -82,10 +91,16 @@ pub struct Frame {
     key: FrameKey,
     /// How many bytes it takes, header included
     len: usize,
+    /// The version the body is encoded at, if it was encoded at one of its own
+    ///
+    /// None for a body that reads the same at every version, which the writer stamps with
+    /// the link's negotiated version as it goes out
+    /// ([F48](../../../../docs/src/features/rolling-compatibility.md)).
+    version: Option<u8>,
 }
 
 impl Frame {
-    /// Build a frame
+    /// Build a frame whose body reads the same at every version this build speaks
     ///
     /// # Arguments
     ///
@@ -106,7 +121,34 @@ impl Frame {
             parts,
             key,
             len: HEADER_LEN + body_len,
+            version: None,
         })
+    }
+
+    /// Build a frame whose body was encoded at a named version
+    ///
+    /// The header carries that version whatever the link negotiates later, since the receiver
+    /// decodes the body at the version the header names
+    /// ([F48](../../../../docs/src/features/rolling-compatibility.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `version` - The version the body is encoded at
+    /// * `kind` - What the frame carries
+    /// * `parts` - The body, in the order it goes on the wire
+    /// * `key` - What the owner needs back if it is never written
+    /// * `max_frame_bytes` - The largest frame the peer accepts
+    pub fn at(
+        version: u8,
+        kind: MessageType,
+        parts: Vec<Bytes>,
+        key: FrameKey,
+        max_frame_bytes: u32,
+    ) -> Result<Self, ServerError> {
+        let mut frame = Self::new(kind, parts, key, max_frame_bytes)?;
+        frame.header[0] = version;
+        frame.version = Some(version);
+        Ok(frame)
     }
 
     /// How many bytes this frame takes on the wire
@@ -133,6 +175,8 @@ pub enum LinkEvent {
         lane: Lane,
         /// Which run of the peer answered
         incarnation: u64,
+        /// What the hello agreed ([F48](../../../../docs/src/features/rolling-compatibility.md))
+        negotiated: Negotiated,
     },
     /// The connection was lost, or never made
     Down {
@@ -211,6 +255,13 @@ pub struct LinkView {
     pub dials: u64,
     /// The incarnation of the peer the link is up with, if it is up
     pub peer_incarnation: Option<u64>,
+    /// The wire version the link negotiated, if it is up
+    /// ([F48](../../../../docs/src/features/rolling-compatibility.md))
+    #[serde(default)]
+    pub wire_version: Option<u8>,
+    /// The capabilities both ends act on, if it is up
+    #[serde(default)]
+    pub capabilities: Option<u64>,
 }
 
 /// The queue and counters both halves of a link share
@@ -227,6 +278,8 @@ struct Queue {
     state: LinkState,
     /// The peer's incarnation while the link is up
     peer_incarnation: Option<u64>,
+    /// What the hello agreed, while the link is up
+    negotiated: Option<Negotiated>,
     /// Frames written
     sent_frames: u64,
     /// Bytes written
@@ -297,6 +350,7 @@ impl Link {
             waker: None,
             state: LinkState::Idle,
             peer_incarnation: None,
+            negotiated: None,
             sent_frames: 0,
             sent_bytes: 0,
             shed_frames: 0,
@@ -368,6 +422,17 @@ impl Link {
         self.queue.borrow().state == LinkState::Up
     }
 
+    /// What the link negotiated at its hello, or the floor while it is not up
+    ///
+    /// A body that differs between versions is encoded at this and framed with [`Frame::at`],
+    /// so the header says what the body is whatever the link speaks by the time it is written
+    /// ([F48](../../../../docs/src/features/rolling-compatibility.md)).
+    #[must_use]
+    pub fn negotiated(&self) -> Negotiated {
+        let queue = self.queue.borrow();
+        queue.negotiated.unwrap_or_else(|| Negotiated::floor(protocol_default_max()))
+    }
+
     /// Whether the link's owner let it go, after which nothing queued is ever written
     #[must_use]
     pub fn is_closed(&self) -> bool {
@@ -396,8 +461,15 @@ impl Link {
             dropped_frames: queue.dropped_frames,
             dials: queue.dials,
             peer_incarnation: queue.peer_incarnation,
+            wire_version: queue.negotiated.map(|negotiated| negotiated.version),
+            capabilities: queue.negotiated.map(|negotiated| negotiated.capabilities),
         }
     }
+}
+
+/// The frame bound a link assumes of a peer it has not spoken to
+fn protocol_default_max() -> u32 {
+    crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES
 }
 
 impl Drop for Link {
@@ -514,7 +586,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
         // flatten the deadline error and the dial error into one
         .map_err(ServerError::from)
         .and_then(|inner| inner);
-        let (stream, peer_incarnation) = match connected {
+        let (stream, peer_incarnation, negotiated) = match connected {
             Ok(established) => established,
             Err(error) => {
                 // never connected, so everything queued was never written
@@ -555,22 +627,25 @@ async fn run<F: Fn(LinkEvent) + 'static>(
             let mut q = queue.borrow_mut();
             q.state = LinkState::Up;
             q.peer_incarnation = Some(peer_incarnation);
+            q.negotiated = Some(negotiated);
         }
         on_event(LinkEvent::Up {
             node,
             lane,
             incarnation: peer_incarnation,
+            negotiated,
         });
         // carry frames both ways until either direction fails
         let (rx, tx) = stream.split();
         let max_frame_bytes = settings.local.borrow().max_frame_bytes;
-        let outcome = carry(rx, tx, &queue, node, lane, max_frame_bytes, &on_event)
+        let outcome = carry(rx, tx, &queue, node, lane, max_frame_bytes, negotiated.version, &on_event)
             .await;
         // whatever was still queued was never written
         let unsent = {
             let mut q = queue.borrow_mut();
             q.state = LinkState::Backoff;
             q.peer_incarnation = None;
+            q.negotiated = None;
             q.drain_keys()
         };
         event!(Level::WARN, msg = "a peer link dropped", %node, %lane, reason = ?outcome);
@@ -595,7 +670,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
 /// # Arguments
 ///
 /// * `settings` - How to dial and shake hands
-async fn connect(settings: &Settings) -> Result<(TcpStream, u64), ServerError> {
+async fn connect(settings: &Settings) -> Result<(TcpStream, u64, Negotiated), ServerError> {
     // the member's address for this lane, which the bulk lane shares with data
     let addr = match settings.lane {
         Lane::Control => &settings.entry.control,
@@ -615,8 +690,8 @@ async fn connect(settings: &Settings) -> Result<(TcpStream, u64), ServerError> {
     }
     // then say who we are and check who answered, as we are right now
     let local = settings.local.borrow().clone();
-    let peer = handshake::dial(&mut stream, &local, settings.lane, &settings.entry).await?;
-    Ok((stream, peer.incarnation))
+    let (peer, negotiated) = handshake::dial(&mut stream, &local, settings.lane, &settings.entry).await?;
+    Ok((stream, peer.incarnation, negotiated))
 }
 
 /// Write queued frames and read answered ones until either direction fails
@@ -629,7 +704,9 @@ async fn connect(settings: &Settings) -> Result<(TcpStream, u64), ServerError> {
 /// * `node` - The peer
 /// * `lane` - The lane
 /// * `max_frame_bytes` - The largest frame this end accepts
+/// * `version` - The wire version the hello negotiated
 /// * `on_event` - Where to deliver what the link reads
+#[allow(clippy::too_many_arguments)]
 async fn carry<F: Fn(LinkEvent) + 'static>(
     mut rx: ReadHalf<TcpStream>,
     mut tx: WriteHalf<TcpStream>,
@@ -637,6 +714,7 @@ async fn carry<F: Fn(LinkEvent) + 'static>(
     node: NodeId,
     lane: Lane,
     max_frame_bytes: u32,
+    version: u8,
     on_event: &F,
 ) -> Result<(), ServerError> {
     // the writer drains the queue
@@ -649,8 +727,14 @@ async fn carry<F: Fn(LinkEvent) + 'static>(
             else {
                 return Ok(());
             };
+            // a frame built at no version of its own goes out at the negotiated one; one built
+            // at a version of its own keeps it, which is what its body is encoded at
+            let mut header = frame.header;
+            if frame.version.is_none() {
+                header[0] = version;
+            }
             let parts: Vec<&[u8]> = frame.parts.iter().map(|part| &part[..]).collect();
-            codec::write_frame(&mut tx, &frame.header, &parts).await?;
+            codec::write_frame(&mut tx, &header, &parts).await?;
             let mut q = queue.borrow_mut();
             q.sent_frames += 1;
             q.sent_bytes += frame.len() as u64;
@@ -659,7 +743,7 @@ async fn carry<F: Fn(LinkEvent) + 'static>(
     // the reader hands every answer to the owner
     let reader = async {
         loop {
-            let Some(header) = codec::read_header(&mut rx, max_frame_bytes).await? else {
+            let Some(header) = codec::read_header(&mut rx, max_frame_bytes, version).await? else {
                 return Err::<(), ServerError>(
                     std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the peer closed").into(),
                 );

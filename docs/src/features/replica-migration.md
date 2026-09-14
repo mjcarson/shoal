@@ -276,7 +276,9 @@ request is recorded and runs when it can, and the record says what it waits behi
 - **An expiry refusal depends on the coordinator's replica.** Two coordinators can answer the
   same late retry differently when one has evicted more; neither applies it twice.
 - **The manifest gained a field**, which is a wire change for a snapshot's begin RPC and its
-  pending marker; M10's compatibility rules are where that is judged.
+  pending marker; ~~M10's compatibility rules are where that is judged~~ judged at
+  [F48](rolling-compatibility.md): the field is in both codecs, since every build in the
+  negotiable range has it, and the three fields F48 added are what the version 4 codec leaves out.
 - **The volatile-group assertion the crash matrix found is not this milestone's.** Two voters
   of an ephemeral table's group losing their memory log at once elect a fresh leader whose log
   conflicts with the survivor's committed entries, which is that table's data gone by

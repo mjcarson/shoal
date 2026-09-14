@@ -17,10 +17,15 @@
 //! reads, and `capabilities` the peer features it can act on. A client hello folds the protocol
 //! version into its fingerprint and that stays as it is; a peer keeps the three apart so that a
 //! rolling upgrade can tell "different schema" from "newer transport" from "same everything".
-//! At M2 all three are required to match exactly - the contract is defined here, and the codecs
-//! for an older version are what M10 owes before n−1 is accepted.
+//! ~~At M2 all three are required to match exactly - the contract is defined here, and the
+//! codecs for an older version are what M10 owes before n−1 is accepted.~~ Since
+//! [F48](../../../../../docs/src/features/rolling-compatibility.md) the three are judged
+//! apart: the schema id exactly, the wire version as the highest both ranges hold
+//! ([`PeerHello::negotiate`]), and the capabilities as the intersection
+//! ([`PeerHello::common_capabilities`]). The hello frame itself is written at
+//! [`MIN_PEER_VERSION`] so that any peer in the range reads it.
 
-use super::super::{Flags, Header, MessageType, ProtocolError, HEADER_LEN, PROTOCOL_VERSION};
+use super::super::{Flags, Header, MessageType, ProtocolError, HEADER_LEN, MIN_PEER_VERSION, PROTOCOL_VERSION};
 use super::{bytes16_at, u16_at, u32_at, u64_at, Lane, PeerRefusal};
 
 /// The size of a peer hello body in bytes
@@ -55,6 +60,16 @@ pub const CAPABILITIES: u64 = CAP_FORWARD_V1
     | CAP_MEMBERSHIP_V1
     | CAP_REPLICATION_V1
     | CAP_READ_CONSISTENCY_V1;
+
+/// The capabilities a peer has to act on to be a member at all
+///
+/// Every bit above: each is what some version in [`MIN_PEER_VERSION`]`..=`[`PROTOCOL_VERSION`]
+/// carries, so a peer in the range without one is a build this one does not know how to
+/// half serve, and is refused ([`PeerRefusal::CapabilityMissing`]). A capability a future
+/// build adds as optional is left out of this set and gated by `Negotiated::has` at the one
+/// place it is acted on, the way `CLIENT_CAP_READ_OPTIONS` gates a client
+/// ([F48](../../../../../docs/src/features/rolling-compatibility.md)).
+pub const REQUIRED_CAPABILITIES: u64 = CAPABILITIES;
 
 /// Where each field sits in the body
 const CLUSTER_AT: usize = 0;
@@ -166,13 +181,50 @@ impl PeerHello {
         frame_of(MessageType::PeerHello, self.encode(), max_frame_bytes)
     }
 
-    /// Whether this peer reads the wire version this build speaks
+    /// The version two peers speak, if their ranges share one
     ///
-    /// Exact at M2: the peer's range has to contain [`PROTOCOL_VERSION`], and every frame after
-    /// the hello is written at that version. A wider intersection is what M10's codecs are for.
+    /// The highest version both read: the smaller of the two maxima, provided it is at or
+    /// above both minima. Every frame after the hello is written at this version or below it
+    /// ([F48](../../../../../docs/src/features/rolling-compatibility.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `ours` - This end's hello, whose range is what it advertised
     #[must_use]
-    pub const fn speaks_our_version(&self) -> bool {
-        self.wire_min <= PROTOCOL_VERSION && PROTOCOL_VERSION <= self.wire_max
+    pub const fn negotiate(&self, ours: &PeerHello) -> Option<u8> {
+        // the highest version both read
+        let version = if self.wire_max < ours.wire_max { self.wire_max } else { ours.wire_max };
+        // which has to be one both read
+        if version >= self.wire_min && version >= ours.wire_min {
+            Some(version)
+        } else {
+            None
+        }
+    }
+
+    /// The capabilities both peers can act on
+    ///
+    /// # Arguments
+    ///
+    /// * `ours` - This end's hello
+    #[must_use]
+    pub const fn common_capabilities(&self, ours: &PeerHello) -> u64 {
+        self.capabilities & ours.capabilities
+    }
+
+    /// The range this build advertises, bounded above by a pin
+    ///
+    /// # Arguments
+    ///
+    /// * `pin` - The newest version to advertise, or none for [`PROTOCOL_VERSION`]
+    #[must_use]
+    pub const fn range(pin: Option<u8>) -> (u8, u8) {
+        let max = match pin {
+            Some(pin) if pin < PROTOCOL_VERSION => pin,
+            _ => PROTOCOL_VERSION,
+        };
+        let max = if max < MIN_PEER_VERSION { MIN_PEER_VERSION } else { max };
+        (MIN_PEER_VERSION, max)
     }
 }
 
@@ -236,7 +288,8 @@ fn frame_of(
     } else {
         Flags::NONE
     };
-    let header = Header::new(kind, flags, PEER_HELLO_BODY_LEN, max_frame_bytes)?;
+    // the hello is written at the floor, so a peer anywhere in the range reads it
+    let header = Header::at(MIN_PEER_VERSION, kind, flags, PEER_HELLO_BODY_LEN, max_frame_bytes)?;
     let mut frame = [0u8; PEER_HELLO_FRAME_LEN];
     frame[..HEADER_LEN].copy_from_slice(&header.encode());
     frame[HEADER_LEN..].copy_from_slice(&body);

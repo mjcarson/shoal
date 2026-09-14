@@ -52,7 +52,7 @@ pub use forward::{
 pub use hello::{
     PeerHello, PeerHelloAck, CAPABILITIES, CAP_BULK_SNAPSHOT_V1, CAP_CONTROL_RAFT_V1,
     CAP_FORWARD_V1, CAP_MEMBERSHIP_V1, CAP_READ_CONSISTENCY_V1, CAP_REPLICATION_V1,
-    PEER_HELLO_BODY_LEN, PEER_HELLO_FRAME_LEN,
+    PEER_HELLO_BODY_LEN, PEER_HELLO_FRAME_LEN, REQUIRED_CAPABILITIES,
 };
 pub use replicate::{
     Command, ReplicateKind, ReplicateRequestHead, ReplicateResponseHead, ReplicateStatus,
@@ -174,6 +174,25 @@ pub enum PeerRefusal {
     DuplicateIdentity = 11,
     /// A join was asked of a node that cannot admit one - not a member, or not on the control lane
     NotJoinable = 12,
+    /// The peer's newest wire version is below the one the cluster has activated
+    ///
+    /// Once an operator activates a version, a member that cannot speak it is refused at every
+    /// door, which is what makes the activation the rollback boundary
+    /// ([F48](../../../../../docs/src/features/rolling-compatibility.md)). A build from before
+    /// the byte reads it as `Unrecognized`, which is still a refusal.
+    BelowActivatedWire = 13,
+    /// The peer's identity was removed from the cluster and can never return
+    ///
+    /// A tombstoned member, at any incarnation, and a member of a cluster this one was restored
+    /// from ([F49](../../../../../docs/src/features/backup-and-recovery.md)).
+    Removed = 14,
+    /// The peer lacks a capability every member has to act on
+    ///
+    /// The capability words are intersected at the hello and what both act on is what either
+    /// may send; a bit in [`hello::REQUIRED_CAPABILITIES`] is one no version in the range is
+    /// without, so a peer missing it is refused rather than half served
+    /// ([F48](../../../../../docs/src/features/rolling-compatibility.md)).
+    CapabilityMissing = 15,
     /// A reason this build does not know, which is still a refusal
     Unrecognized = 255,
 }
@@ -205,6 +224,9 @@ impl PeerRefusal {
             10 => PeerRefusal::Fenced,
             11 => PeerRefusal::DuplicateIdentity,
             12 => PeerRefusal::NotJoinable,
+            13 => PeerRefusal::BelowActivatedWire,
+            14 => PeerRefusal::Removed,
+            15 => PeerRefusal::CapabilityMissing,
             // a reason we cannot name is still a node that would not have us
             _ => PeerRefusal::Unrecognized,
         }
@@ -238,6 +260,11 @@ impl std::fmt::Display for PeerRefusal {
             PeerRefusal::DuplicateIdentity => {
                 write!(f, "the cluster already holds this identity at this incarnation or later")
             }
+            PeerRefusal::BelowActivatedWire => {
+                write!(f, "the newest wire version this build speaks is below the one the cluster activated")
+            }
+            PeerRefusal::Removed => write!(f, "this identity was removed from the cluster and cannot return"),
+            PeerRefusal::CapabilityMissing => write!(f, "a capability every member acts on is missing"),
             PeerRefusal::NotJoinable => write!(f, "this node cannot admit a joiner here"),
             PeerRefusal::Unrecognized => write!(f, "refused for a reason this build does not know"),
         }

@@ -760,8 +760,10 @@ async fn server_handshake<S: ShoalDatabase>(
     // drain the body before we decide anything, so that a refusal can still be written
     let mut body = vec![0u8; raw.len as usize];
     stream.read_exact(&mut body).await?;
-    // refuse a version we do not speak, naming ours so the client can say what happened
-    if raw.version != protocol::PROTOCOL_VERSION {
+    // refuse a version we do not speak, naming ours so the client can say what happened: a
+    // client is read from the client lane's version to this build's newest, and answered at
+    // the client lane's ([F48](../../../docs/src/features/rolling-compatibility.md))
+    if raw.version < protocol::CLIENT_WIRE_VERSION || raw.version > protocol::PROTOCOL_VERSION {
         // this reply carries our version in its header, which the client can read because the
         // header layout does not move between versions
         let refusal = handshake::HelloAck {
@@ -772,7 +774,7 @@ async fn server_handshake<S: ShoalDatabase>(
         stream.flush().await?;
         return Err(ProtocolError::UnsupportedVersion {
             got: raw.version,
-            ours: protocol::PROTOCOL_VERSION,
+            ours: protocol::CLIENT_WIRE_VERSION,
         }
         .into());
     }
@@ -3034,8 +3036,8 @@ where
                 }
                 self.handle_replication_link(event);
             }
-            PeerEvent::Link(LinkEvent::Up { node, lane, incarnation }) => {
-                event!(Level::DEBUG, msg = "a peer link came up", %node, %lane, incarnation);
+            PeerEvent::Link(LinkEvent::Up { node, lane, incarnation, negotiated }) => {
+                event!(Level::DEBUG, msg = "a peer link came up", %node, %lane, incarnation, wire = negotiated.version);
             }
             // the bulk lane carries snapshot streams and owes nothing to a client: a lost link
             // is dialled afresh by the next stream, and the receiver's resume offset recovers
@@ -3364,9 +3366,16 @@ where
 
     /// What this shard's peer links look like, for the transport view
     fn transport_view(&self) -> ShardTransportView {
+        // the data and bulk links the forwards go over, and the replication links the groups
+        // go over, which is where a mixed cluster's negotiated versions are read from
+        // ([F48](../../../docs/src/features/rolling-compatibility.md))
+        let mut links = self.peers.as_ref().map(Peers::views).unwrap_or_default();
+        if let Some(replication) = self.replication.as_ref() {
+            links.extend(replication.network.views());
+        }
         ShardTransportView {
             shard: self.shard_id,
-            links: self.peers.as_ref().map(Peers::views).unwrap_or_default(),
+            links,
             bulk_received: self.bulk_received.get(),
         }
     }
@@ -3722,8 +3731,9 @@ where
                     origin,
                     head,
                     payload,
+                    version,
                     reply,
-                } => self.handle_replication(origin, head, payload, reply),
+                } => self.handle_replication(origin, head, payload, version, reply),
                 // a group's handle, from the task that built it
                 ServerMsg::GroupUp { group, raft } => self.handle_group_up(group, raft).await?,
                 // every group is down: the shutdown that asked for it can finish

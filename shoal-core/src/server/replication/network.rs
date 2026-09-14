@@ -199,6 +199,37 @@ impl ReplicationLink {
         payload: Vec<u8>,
         deadline: Duration,
     ) -> Result<Vec<u8>, RpcFailure> {
+        self.rpc_at(kind, group, target_shard, None, payload, deadline).await
+    }
+
+    /// The wire version this link negotiated, or the floor while it is not up
+    ///
+    /// What a body that differs between versions is encoded at before it is sent through
+    /// [`ReplicationLink::rpc_at`] ([F48](../../../../docs/src/features/rolling-compatibility.md)).
+    #[must_use]
+    pub fn wire_version(&self) -> u8 {
+        self.link.negotiated().version
+    }
+
+    /// Send one RPC whose payload was encoded at a named version, and wait for its answer
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - Which RPC this is
+    /// * `group` - The group it is for
+    /// * `target_shard` - The shard on the peer that hosts the group
+    /// * `version` - The version the payload is encoded at, or none for a body the same at every version
+    /// * `payload` - Its serialized request
+    /// * `deadline` - How long to wait for an answer
+    pub async fn rpc_at(
+        &self,
+        kind: ReplicateKind,
+        group: GroupId,
+        target_shard: u16,
+        version: Option<u8>,
+        payload: Vec<u8>,
+        deadline: Duration,
+    ) -> Result<Vec<u8>, RpcFailure> {
         // mint an id and a oneshot for the answer
         let id = self.next_id.get();
         self.next_id.set(id.wrapping_add(1));
@@ -215,12 +246,13 @@ impl ReplicationLink {
             deadline_ms,
         }
         .encode();
-        let frame = Frame::new(
-            MessageType::Replicate,
-            vec![bytes::Bytes::copy_from_slice(&head), bytes::Bytes::from(payload)],
-            FrameKey::Replication(id),
-            self.max_frame_bytes,
-        )
+        // a body encoded at a version of its own names it in the header; the rest go out at
+        // whatever the link negotiated ([F48](../../../../docs/src/features/rolling-compatibility.md))
+        let parts = vec![bytes::Bytes::copy_from_slice(&head), bytes::Bytes::from(payload)];
+        let frame = match version {
+            Some(version) => Frame::at(version, MessageType::Replicate, parts, FrameKey::Replication(id), self.max_frame_bytes),
+            None => Frame::new(MessageType::Replicate, parts, FrameKey::Replication(id), self.max_frame_bytes),
+        }
         .map_err(|error| RpcFailure::Unreachable(format!("framing a replication request: {error:?}")))?;
         // a queue that is full or a link that is down is a definite non-answer
         if self.link.enqueue(frame).is_err() {
@@ -734,13 +766,13 @@ impl ShardPeer {
     /// # Arguments
     ///
     /// * `group` - The group
-    /// * `payload` - The RPC body
+    /// * `rpc` - The RPC, encoded afresh at the link's version on every attempt
     /// * `started` - When the transfer started
     /// * `deadline` - How long it may take in all
-    async fn rpc_until(
+    async fn snapshot_rpc_until(
         &self,
         group: GroupId,
-        payload: Vec<u8>,
+        rpc: &SnapshotRpc,
         started: Instant,
         deadline: Duration,
     ) -> Result<Vec<u8>, StreamingError<DataConfig>> {
@@ -749,7 +781,20 @@ impl ShardPeer {
             if remaining.is_zero() {
                 return Err(unreachable("the snapshot transfer ran out of time".to_string()));
             }
-            match self.rpc(ReplicateKind::Snapshot, group, payload.clone(), remaining).await {
+            // the link may have come back at another version since the last attempt, so the
+            // body is encoded at what it speaks now and the frame names that version
+            // ([F48](../../../../docs/src/features/rolling-compatibility.md))
+            let Some(link) = self.network.link(self.target.node) else {
+                return Err(unreachable(format!("{} is not a member the map knows", self.target.node)));
+            };
+            let version = link.wire_version();
+            let payload = rpc
+                .encode_at(version)
+                .map_err(|error| unreachable(format!("encoding a snapshot rpc at wire version {version}: {error}")))?;
+            let sent = link
+                .rpc_at(ReplicateKind::Snapshot, group, self.target.shard, Some(version), payload, remaining)
+                .await;
+            match sent {
                 Ok(answer) => return Ok(answer),
                 Err(RpcFailure::Remote(msg)) => return Err(unreachable(format!("the peer refused the rpc: {msg}"))),
                 // a lost link: wait for it to come back and ask again
@@ -1017,15 +1062,15 @@ impl GroupPeer {
         // ([F45](../../../../docs/src/features/replica-migration.md))
         let transition = network.transition_of(group, target).map_or([0u8; 16], |op| *op.as_bytes());
         let mut cancel = Box::pin(cancel);
-        // begin: what is coming, and where the receiver wants it from
-        let remaining = deadline.saturating_sub(started.elapsed());
-        let begin = encode(&SnapshotRpc::Begin {
+        // begin: what is coming, and where the receiver wants it from, encoded at the version
+        // the link speaks ([F48](../../../../docs/src/features/rolling-compatibility.md))
+        let begin = SnapshotRpc::Begin {
             vote: vote.clone(),
             stream,
             manifest: manifest.clone(),
             repair,
-        })?;
-        let answer: SnapshotAnswer = decode(&self.peer.rpc_until(group, begin, started, deadline).await?)?;
+        };
+        let answer: SnapshotAnswer = decode(&self.peer.snapshot_rpc_until(group, &begin, started, deadline).await?)?;
         event!(Level::DEBUG, msg = "a snapshot stream begins", group = %group, %target, boundary = manifest.boundary.index, bytes = manifest.total, ?answer);
         let mut from = match answer {
             SnapshotAnswer::Resume { from } => from,
@@ -1124,12 +1169,12 @@ impl GroupPeer {
                 let frame = Frame::new(MessageType::SnapshotEnd, vec![bytes::Bytes::copy_from_slice(&end)], FrameKey::Bulk(0), max)
                     .map_err(|error| unreachable(format!("framing a snapshot end: {error:?}")))?;
                 enqueue_or_wait(&link, frame, &mut cancel, started, deadline).await?;
-                let end = encode(&SnapshotRpc::End {
+                let end = SnapshotRpc::End {
                     stream,
                     total: manifest.total,
                     checksum: manifest.checksum,
-                })?;
-                let answer: SnapshotAnswer = decode(&self.peer.rpc_until(group, end, started, deadline).await?)?;
+                };
+                let answer: SnapshotAnswer = decode(&self.peer.snapshot_rpc_until(group, &end, started, deadline).await?)?;
                 match answer {
                     SnapshotAnswer::Installed { vote } => {
                         network.shared.snapshots.borrow_mut().sent += 1;
@@ -1233,15 +1278,6 @@ async fn enqueue_or_wait(
             futures::future::Either::Right(_) => {}
         }
     }
-}
-
-/// Encode an RPC body for the replication lane
-///
-/// # Arguments
-///
-/// * `value` - The body
-fn encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, StreamingError<DataConfig>> {
-    postcard::to_allocvec(value).map_err(|error| unreachable(format!("encoding a snapshot rpc: {error}")))
 }
 
 /// Decode an answer from the replication lane

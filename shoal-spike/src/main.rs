@@ -913,6 +913,7 @@ fn fanout() {
             quarantined: Vec::new(),
             free_bytes: 0,
             group_bytes: Vec::new(),
+            wire_max: shoal::shared::protocol::PROTOCOL_VERSION,
         };
         let bytes = shoal::serde_json::to_vec(&report).expect("a report encodes").len();
         let per_second = (members - 1) as f64 * 1000.0 / REPORT_INTERVAL_MS as f64;

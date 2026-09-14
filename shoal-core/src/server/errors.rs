@@ -435,6 +435,17 @@ pub enum ShoalError {
     PeerLane { node: NodeId, lane: Lane },
     /// A peer's hello carried an incarnation the cluster has superseded
     PeerFenced { node: NodeId, committed: u64, offered: u64 },
+    /// A peer's newest wire version is below the one the cluster has activated
+    ///
+    /// The activation is the rollback boundary: past it a member speaking only an older
+    /// version is refused at every door ([F48](../../../docs/src/features/rolling-compatibility.md)).
+    BelowActivatedWire { node: NodeId, activated: u8, offered: u8 },
+    /// This node's own newest wire version is below the one the cluster has activated
+    ///
+    /// The other half of the same rule: a build or a pin that cannot speak the activated
+    /// version cannot serve this cluster, so the pool refuses to start rather than run a
+    /// member every peer refuses.
+    WireBelowActivated { node: NodeId, activated: u8, ours: u8 },
     /// This node's own incarnation has been superseded by a later start of it
     ///
     /// The fencing rule's other half: a run the cluster has replaced stops serving, since two
@@ -474,9 +485,10 @@ impl std::fmt::Display for ShoalError {
         match self {
             ShoalError::StorageFormatMismatch { found, supported } => write!(
                 f,
-                "the storage marker is format {found} and this build reads {supported:?}; there is \
-                 no migration between marker formats yet (M10 owns one), so a directory in another \
-                 format has to be served by the build that wrote it"
+                "the storage marker is format {found} and this build reads {supported:?}; a marker \
+                 in another format is unsupported and never migrated in place: serve the directory \
+                 with the build that wrote it, or start a new directory and import or restore \
+                 into it"
             ),
             ShoalError::SlotsFixed { claimed, configured } => write!(
                 f,
@@ -600,6 +612,16 @@ impl std::fmt::Display for ShoalError {
                 f,
                 "{node} presented incarnation {offered} and the cluster holds {committed}; a \
                  later start of it has been admitted"
+            ),
+            ShoalError::BelowActivatedWire { node, activated, offered } => write!(
+                f,
+                "{node} speaks wire version {offered} at most and the cluster has activated \
+                 {activated}; an activation is the boundary no member rolls back past"
+            ),
+            ShoalError::WireBelowActivated { node, activated, ours } => write!(
+                f,
+                "this node, {node}, speaks wire version {ours} at most and the cluster has \
+                 activated {activated}; raise the build or lift `cluster.transport.wire_version`"
             ),
             ShoalError::Fenced { node, committed, ours } => write!(
                 f,

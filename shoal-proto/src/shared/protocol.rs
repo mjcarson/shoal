@@ -85,7 +85,39 @@ use trace::{TraceContext, TRACE_CONTEXT_LEN};
 /// request kind - but a peer built before it would apply the entry as a write with no payload
 /// and refuse the request as unknown, and the hello's exact match is what keeps such a peer
 /// out of a group rather than in it, half understanding what it is sent.
-pub const PROTOCOL_VERSION: u8 = 4;
+///
+/// Went to 5 when the peer lanes started negotiating a version rather than matching one
+/// ([F48](../../../docs/src/features/rolling-compatibility.md)). Two peers speak the highest
+/// version both read, never below [`MIN_PEER_VERSION`], and every frame after the hello says
+/// which version its body is encoded at; a snapshot's manifest is the one body whose encoding
+/// differs between 4 and 5. The client lane took no part in the change, which is why
+/// [`CLIENT_WIRE_VERSION`] stayed at 4: a client built at 4 is served by a build at 5, and one
+/// built at 5 is served by a build at 4, because neither writes a frame the other cannot read.
+pub const PROTOCOL_VERSION: u8 = 5;
+
+/// The oldest wire version a peer of this build is spoken to
+///
+/// The floor of the range two nodes negotiate over ([F48](../../../docs/src/features/rolling-compatibility.md)):
+/// a peer whose newest version is below it shares no version with this build and is refused
+/// at the hello, which is itself written at this version so that any peer in the range reads
+/// it. A build that drops a codec raises this, and the floor is what an operator's
+/// `cluster.transport.wire_version` pin can never go under.
+pub const MIN_PEER_VERSION: u8 = 4;
+
+/// The version every frame on the client lane is written at
+///
+/// The client lane is exact, not negotiated: a client writes every frame at this version, a
+/// server answers a client at this version whatever the client wrote, and the schema
+/// fingerprint the two compare folds this in rather than [`PROTOCOL_VERSION`]. It moves when
+/// the framing between a client and a server moves and never when only the peer lanes do, so
+/// a version bump the client lane took no part in does not orphan every client
+/// ([F48](../../../docs/src/features/rolling-compatibility.md)). A server reads a client's
+/// frame at any version from this one up to [`PROTOCOL_VERSION`], which is what lets a client
+/// built when the two were equal keep working.
+pub const CLIENT_WIRE_VERSION: u8 = 4;
+
+// the floor sits at or below the client lane, which sits at or below the newest version
+const _: () = assert!(MIN_PEER_VERSION <= CLIENT_WIRE_VERSION && CLIENT_WIRE_VERSION <= PROTOCOL_VERSION);
 
 /// The size of the frame header in bytes
 pub const HEADER_LEN: usize = 8;
@@ -377,10 +409,14 @@ impl Flags {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolError {
     /// The peer speaks a version of the protocol this build does not
+    ///
+    /// Since [F48](../../../docs/src/features/rolling-compatibility.md) `ours` is the newest
+    /// version this end reads on the connection: [`PROTOCOL_VERSION`] before a hello, and the
+    /// version the two ends negotiated after one.
     UnsupportedVersion {
         /// The version the peer sent
         got: u8,
-        /// The version this build speaks
+        /// The newest version this end reads here
         ours: u8,
     },
     /// The peer sent a message type this build does not know
@@ -610,11 +646,27 @@ impl RawHeader {
     /// * `max_frame_bytes` - The largest frame we are willing to allocate for
     #[inline]
     pub const fn validate(self, max_frame_bytes: u32) -> Result<Header, ProtocolError> {
+        self.validate_at(PROTOCOL_VERSION, max_frame_bytes)
+    }
+
+    /// Check that this header is one we can act on, reading no version past `newest`
+    ///
+    /// A version is read from [`MIN_PEER_VERSION`] up to `newest`: [`PROTOCOL_VERSION`] before
+    /// a connection has negotiated one, and the negotiated version after, so a peer writing a
+    /// frame above what it agreed to is refused by version rather than misread
+    /// ([F48](../../../docs/src/features/rolling-compatibility.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `newest` - The newest version this connection reads
+    /// * `max_frame_bytes` - The largest frame we are willing to allocate for
+    #[inline]
+    pub const fn validate_at(self, newest: u8, max_frame_bytes: u32) -> Result<Header, ProtocolError> {
         // refuse a version we do not speak before we try to make sense of anything else
-        if self.version != PROTOCOL_VERSION {
+        if self.version < MIN_PEER_VERSION || self.version > newest {
             return Err(ProtocolError::UnsupportedVersion {
                 got: self.version,
-                ours: PROTOCOL_VERSION,
+                ours: newest,
             });
         }
         // refuse a length we would not be willing to allocate for, before anything allocates
@@ -641,6 +693,10 @@ impl RawHeader {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
     /// The protocol version this frame was written with
+    ///
+    /// Kept as read, since [F48](../../../docs/src/features/rolling-compatibility.md): a body
+    /// is decoded at the version its own header names, which is how one connection carries
+    /// a frame at the floor beside one at the negotiated version.
     pub version: u8,
     /// The kind of message this frame carries
     pub kind: MessageType,
@@ -651,11 +707,14 @@ pub struct Header {
 }
 
 impl Header {
-    /// Build a header for a frame we are about to write
+    /// Build a header for a frame we are about to write on the client lane
     ///
     /// This is fallible because a body length is a `usize` and the length field is a `u32`, so an
     /// unchecked cast would silently truncate on a 64 bit target and write a frame whose header
-    /// disagrees with its own bytes. Every encode path has to go through here.
+    /// disagrees with its own bytes. Every encode path has to go through here or through
+    /// [`Header::at`]. The version written is [`CLIENT_WIRE_VERSION`], which is the one every
+    /// frame between a client and a server carries; a peer lane names its own through
+    /// [`Header::at`] ([F48](../../../docs/src/features/rolling-compatibility.md)).
     ///
     /// # Arguments
     ///
@@ -663,9 +722,34 @@ impl Header {
     /// * `flags` - The flags to set on this frame
     /// * `body_len` - The number of bytes that will follow this header
     /// * `max_frame_bytes` - The largest frame the peer will accept
-    #[allow(clippy::cast_possible_truncation)]
     #[inline]
     pub const fn new(
+        kind: MessageType,
+        flags: Flags,
+        body_len: usize,
+        max_frame_bytes: u32,
+    ) -> Result<Self, ProtocolError> {
+        Self::at(CLIENT_WIRE_VERSION, kind, flags, body_len, max_frame_bytes)
+    }
+
+    /// Build a header for a frame we are about to write at a named version
+    ///
+    /// The peer lanes' constructor: a hello is written at [`MIN_PEER_VERSION`] so any peer in
+    /// the range reads it, and every frame after one at the version the two ends negotiated,
+    /// or below it when the body was encoded before the link came up
+    /// ([F48](../../../docs/src/features/rolling-compatibility.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `version` - The version the body is encoded at
+    /// * `kind` - The kind of message this frame carries
+    /// * `flags` - The flags to set on this frame
+    /// * `body_len` - The number of bytes that will follow this header
+    /// * `max_frame_bytes` - The largest frame the peer will accept
+    #[allow(clippy::cast_possible_truncation)]
+    #[inline]
+    pub const fn at(
+        version: u8,
         kind: MessageType,
         flags: Flags,
         body_len: usize,
@@ -681,7 +765,7 @@ impl Header {
         // the bound above is a u32, so a body that passed it cannot truncate here
         let len = body_len as u32;
         Ok(Header {
-            version: PROTOCOL_VERSION,
+            version,
             kind,
             flags,
             len,

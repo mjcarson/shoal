@@ -280,6 +280,33 @@ tablet, and a changed core count is a rehome run before a shard starts - fold, c
 reclaim, finalize - under a manifest that is resumed at its step, with one arm pricing the
 start.
 
+**What F48 left undone, deliberately.** Recorded here so the next milestone starts from the
+list rather than from the diff:
+
+- **An optional capability.** `Negotiated::has` is the gate and `REQUIRED_CAPABILITIES` is
+  every bit that exists, so nothing is optional and the gate has nothing to gate. The first
+  feature that wants to be spoken to a peer without it is the one that leaves its bit out of
+  the required set and gates at the place it is acted on; the shape is there so that it costs
+  no version bump.
+- **A schema change as a rolling operation.** Explicitly unsupported: a join with another
+  `schema_id` is refused and the path is a new cluster and a restore or an import
+  ([F49](../features/backup-and-recovery.md)). A schema id that names a *compatible* change -
+  a field added with a default - would need the derive to fingerprint compatibility rather
+  than identity, which is a design and not a gap.
+- **A marker format migration in place.** The refusal now says a marker is never migrated in
+  place and where the way out is. Deliberate, and the same answer as the schema.
+- **Healing the records before an activation.** A record persisted by a build from before
+  the wire fields reads the floor until an activation writes the reported versions into it;
+  `Members.wire` folds in what the node heard on its own links and, on the leader, the
+  reports, and the activation never relies on the records. A leader that re-observed every
+  member it heard a different version from would converge the views earlier, at the cost of
+  a log entry per member per upgrade; not built, since the view is honest where an operator
+  asks and the judgment does not need it.
+- **A previous-binary run in the count.** `rolling_upgrade_from_previous_binary` runs when
+  `SHOAL_PREVIOUS_TEST_BINARY` names a build and skips by name otherwise; it was run once,
+  against the binary of the commit before F48, and passed. A CI job that builds the previous
+  tag's fixture binary and sets the variable is the piece that would make it a standing test.
+
 **What F47 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
 

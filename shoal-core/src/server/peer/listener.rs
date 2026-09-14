@@ -35,7 +35,7 @@ use tracing::{event, Level};
 use uuid::Uuid;
 
 use super::codec;
-use super::handshake::{self, Local};
+use super::handshake::{self, Local, Negotiated};
 use super::Lane;
 use crate::server::comms::Comms;
 use crate::server::map::MapCell;
@@ -247,10 +247,10 @@ pub async fn peer_acceptor<S: ShoalDatabase>(
             );
             let (rx, tx) = stream.split();
             match accepted.lane {
-                Lane::Data => serve_data(ctx, accepted.node, accepted.max_frame_bytes, rx, tx).await,
-                Lane::Bulk => serve_bulk(ctx, accepted.node, rx).await,
+                Lane::Data => serve_data(ctx, accepted.node, accepted.negotiated, rx, tx).await,
+                Lane::Bulk => serve_bulk(ctx, accepted.node, accepted.negotiated, rx).await,
                 Lane::Replication => {
-                    serve_replication(ctx, accepted.node, accepted.max_frame_bytes, rx, tx).await
+                    serve_replication(ctx, accepted.node, accepted.negotiated, rx, tx).await
                 }
                 // the handshake refused it already
                 Lane::Control => (),
@@ -266,13 +266,13 @@ pub async fn peer_acceptor<S: ShoalDatabase>(
 ///
 /// * `ctx` - What every lane shares
 /// * `origin` - The peer this lane comes from
-/// * `peer_max_frame_bytes` - The largest frame the peer accepts
+/// * `negotiated` - What the hello agreed: the peer's frame bound and the wire version
 /// * `rx` - The read half of the connection
 /// * `tx` - The write half of the connection
 async fn serve_data<S: ShoalDatabase>(
     ctx: ListenerContext<S>,
     origin: NodeId,
-    peer_max_frame_bytes: u32,
+    negotiated: Negotiated,
     rx: ReadHalf<TcpStream>,
     tx: WriteHalf<TcpStream>,
 ) {
@@ -300,11 +300,11 @@ async fn serve_data<S: ShoalDatabase>(
     let tx_task = glommio::spawn_local(peer_tx_relay(
         client_rx,
         tx,
-        peer_max_frame_bytes,
+        negotiated,
         inflight.clone(),
     ));
     // forwards come in on this one, until the peer goes away or sends something refused
-    if let Err(error) = peer_rx_relay(&ctx, origin, conn, rx, &inflight).await {
+    if let Err(error) = peer_rx_relay(&ctx, origin, conn, negotiated.version, rx, &inflight).await {
         event!(Level::WARN, msg = "a peer lane ended", %origin, ?error);
     }
     // stop answering a peer that is gone, and tell every shard the client is gone with it
@@ -326,19 +326,21 @@ async fn serve_data<S: ShoalDatabase>(
 /// * `ctx` - What every lane shares
 /// * `origin` - The peer this lane comes from
 /// * `conn` - The client id this lane answers under
+/// * `version` - The wire version the hello negotiated, which a frame above is refused by
 /// * `rx` - The read half of the connection
 /// * `inflight` - What this connection has taken in and not yet answered
 async fn peer_rx_relay<S: ShoalDatabase>(
     ctx: &ListenerContext<S>,
     origin: NodeId,
     conn: Uuid,
+    version: u8,
     mut rx: ReadHalf<TcpStream>,
     inflight: &Rc<RefCell<Inflight>>,
 ) -> Result<(), ServerError> {
     loop {
         // the header, or a clean end
         let max_frame_bytes = ctx.local.borrow().max_frame_bytes;
-        let Some(header) = codec::read_header(&mut rx, max_frame_bytes).await? else {
+        let Some(header) = codec::read_header(&mut rx, max_frame_bytes, version).await? else {
             return Ok(());
         };
         let header = codec::expect(header, MessageType::Forward)?;
@@ -392,14 +394,15 @@ async fn peer_rx_relay<S: ShoalDatabase>(
 ///
 /// * `client_rx` - The channel this node's shards hand answers over
 /// * `tx` - The write half of the connection
-/// * `peer_max_frame_bytes` - The largest frame the peer accepts
+/// * `negotiated` - What the hello agreed: the peer's frame bound and the wire version
 /// * `inflight` - What this connection has taken in and not yet answered
 async fn peer_tx_relay(
     client_rx: AsyncReceiver<Reply>,
     mut tx: WriteHalf<TcpStream>,
-    peer_max_frame_bytes: u32,
+    negotiated: Negotiated,
     inflight: Rc<RefCell<Inflight>>,
 ) {
+    let peer_max_frame_bytes = negotiated.max_frame_bytes;
     loop {
         let Ok(reply) = client_rx.recv().await else {
             break;
@@ -445,7 +448,8 @@ async fn peer_tx_relay(
             token,
         }
         .encode();
-        let header = match codec::header(
+        let header = match codec::header_at(
+            negotiated.version,
             MessageType::Forwarded,
             preamble.len() + archived.len(),
             peer_max_frame_bytes,
@@ -468,7 +472,8 @@ async fn peer_tx_relay(
                     token: None,
                 }
                 .encode();
-                let Ok(header) = codec::header(
+                let Ok(header) = codec::header_at(
+                    negotiated.version,
                     MessageType::Forwarded,
                     preamble.len() + payload.len(),
                     peer_max_frame_bytes,
@@ -552,13 +557,13 @@ impl ReplicateReply {
 ///
 /// * `ctx` - What every lane shares
 /// * `origin` - The peer this lane comes from
-/// * `peer_max_frame_bytes` - The largest frame the peer accepts
+/// * `negotiated` - What the hello agreed: the peer's frame bound and the wire version
 /// * `rx` - The read half of the connection
 /// * `tx` - The write half of the connection
 async fn serve_replication<S: ShoalDatabase>(
     mut ctx: ListenerContext<S>,
     origin: NodeId,
-    peer_max_frame_bytes: u32,
+    negotiated: Negotiated,
     mut rx: ReadHalf<TcpStream>,
     tx: WriteHalf<TcpStream>,
 ) {
@@ -570,11 +575,11 @@ async fn serve_replication<S: ShoalDatabase>(
         waker: None,
     }));
     // answers go out on their own task
-    let tx_task = glommio::spawn_local(replication_tx_relay(reply_rx, tx, peer_max_frame_bytes, inflight.clone()));
+    let tx_task = glommio::spawn_local(replication_tx_relay(reply_rx, tx, negotiated, inflight.clone()));
     let outcome: Result<(), ServerError> = async {
         loop {
             let max_frame_bytes = ctx.local.borrow().max_frame_bytes;
-            let Some(header) = codec::read_header(&mut rx, max_frame_bytes).await? else {
+            let Some(header) = codec::read_header(&mut rx, max_frame_bytes, negotiated.version).await? else {
                 return Ok(());
             };
             let header = codec::expect(header, MessageType::Replicate)?;
@@ -598,11 +603,13 @@ async fn serve_replication<S: ShoalDatabase>(
             .await;
             let payload = codec::read_vec(&mut rx, payload_len).await?;
             inflight.borrow_mut().taken(Uuid::from_u64_pair(head.id, 0), 1, payload_len);
-            // hand it to the executor hosting the slot that hosts the group
+            // hand it to the executor hosting the slot that hosts the group, with the version
+            // its body is encoded at ([F48](../../../../docs/src/features/rolling-compatibility.md))
             let msg = ServerMsg::Replication {
                 origin,
                 head,
                 payload,
+                version: header.version,
                 reply: reply_tx.clone(),
             };
             if ctx
@@ -628,14 +635,15 @@ async fn serve_replication<S: ShoalDatabase>(
 ///
 /// * `reply_rx` - The channel the shards hand answers over
 /// * `tx` - The write half of the connection
-/// * `peer_max_frame_bytes` - The largest frame the peer accepts
+/// * `negotiated` - What the hello agreed: the peer's frame bound and the wire version
 /// * `inflight` - What this connection has taken in and not yet answered
 async fn replication_tx_relay(
     reply_rx: AsyncReceiver<ReplicateReply>,
     mut tx: WriteHalf<TcpStream>,
-    peer_max_frame_bytes: u32,
+    negotiated: Negotiated,
     inflight: Rc<RefCell<Inflight>>,
 ) {
+    let peer_max_frame_bytes = negotiated.max_frame_bytes;
     loop {
         let Ok(reply) = reply_rx.recv().await else {
             break;
@@ -645,7 +653,8 @@ async fn replication_tx_relay(
             status: reply.status,
         }
         .encode();
-        let header = match codec::header(
+        let header = match codec::header_at(
+            negotiated.version,
             MessageType::ReplicateResponse,
             head.len() + reply.payload.len(),
             peer_max_frame_bytes,
@@ -660,7 +669,8 @@ async fn replication_tx_relay(
                     status: failure.status,
                 }
                 .encode();
-                let Ok(header) = codec::header(
+                let Ok(header) = codec::header_at(
+                    negotiated.version,
                     MessageType::ReplicateResponse,
                     head.len() + failure.payload.len(),
                     peer_max_frame_bytes,
@@ -694,10 +704,12 @@ async fn replication_tx_relay(
 ///
 /// * `ctx` - What every lane shares
 /// * `origin` - The peer this lane comes from
+/// * `negotiated` - What the hello agreed, whose version a frame above is refused by
 /// * `rx` - The read half of the connection
 async fn serve_bulk<S: ShoalDatabase>(
     mut ctx: ListenerContext<S>,
     origin: NodeId,
+    negotiated: Negotiated,
     mut rx: ReadHalf<TcpStream>,
 ) {
     // where each stream's chunks go, from its begin
@@ -705,7 +717,7 @@ async fn serve_bulk<S: ShoalDatabase>(
     let outcome: Result<(), ServerError> = async {
         loop {
             let max_frame_bytes = ctx.local.borrow().max_frame_bytes;
-            let Some(header) = codec::read_header(&mut rx, max_frame_bytes).await? else {
+            let Some(header) = codec::read_header(&mut rx, max_frame_bytes, negotiated.version).await? else {
                 return Ok(());
             };
             match header.kind {

@@ -21,9 +21,12 @@ use crate::shared::protocol::{self, Header, ProtocolError, HEADER_LEN};
 ///
 /// * `rx` - The read half of the connection
 /// * `max_frame_bytes` - The largest frame this end accepts
+/// * `version` - The newest wire version this connection negotiated, which a frame above is
+///   refused by ([F48](../../../../docs/src/features/rolling-compatibility.md))
 pub async fn read_header(
     rx: &mut ReadHalf<TcpStream>,
     max_frame_bytes: u32,
+    version: u8,
 ) -> Result<Option<Header>, ServerError> {
     // the header is the one read that may find nothing at all
     let mut raw = [0u8; HEADER_LEN];
@@ -33,8 +36,8 @@ pub async fn read_header(
         Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(error) => return Err(error.into()),
     }
-    // judge it before its length is used for anything
-    Ok(Some(Header::decode(&raw, max_frame_bytes)?))
+    // judge it before its length is used for anything, at the version this connection speaks
+    Ok(Some(protocol::RawHeader::decode(&raw).validate_at(version, max_frame_bytes)?))
 }
 
 /// Read a fixed size head into an array of its own
@@ -133,7 +136,10 @@ pub async fn write_frame(
     Ok(())
 }
 
-/// Build the header for a frame about to be written
+/// Build the header for a frame about to be written, at the floor
+///
+/// A link stamps its negotiated version over this as the frame goes out; a listener's relay
+/// builds its answers with [`header_at`] instead.
 ///
 /// # Arguments
 ///
@@ -145,5 +151,22 @@ pub fn header(
     body_len: usize,
     max_frame_bytes: u32,
 ) -> Result<[u8; HEADER_LEN], ProtocolError> {
-    Ok(Header::new(kind, protocol::Flags::NONE, body_len, max_frame_bytes)?.encode())
+    header_at(protocol::MIN_PEER_VERSION, kind, body_len, max_frame_bytes)
+}
+
+/// Build the header for a frame about to be written at a named version
+///
+/// # Arguments
+///
+/// * `version` - The version the body is encoded at, or the one the connection negotiated
+/// * `kind` - What the frame carries
+/// * `body_len` - How many bytes follow the header
+/// * `max_frame_bytes` - The largest frame the peer accepts
+pub fn header_at(
+    version: u8,
+    kind: protocol::MessageType,
+    body_len: usize,
+    max_frame_bytes: u32,
+) -> Result<[u8; HEADER_LEN], ProtocolError> {
+    Ok(Header::at(version, kind, protocol::Flags::NONE, body_len, max_frame_bytes)?.encode())
 }

@@ -1,8 +1,8 @@
 # Milestones
 
 The Before-M0 gate is settled ([decision record](protocol.md#decision-record), 2026-09-11), and
-~~M0, M1 and M2~~ ~~M0 through M7~~ M0 through M8 and M9a are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
-without renumbering later work. Acceptance tests live in their owning C pages and are indexed
+~~M0, M1 and M2~~ ~~M0 through M7~~ ~~M0 through M8 and M9a~~ M0 through M9c and M10a are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
+and M10a/b/c refine M10 without renumbering later work. Acceptance tests live in their owning C pages and are indexed
 by [C11](testing.md#the-acceptance-test-table). Each test names one gate below. This is an order
 with dependencies and measurable exit criteria, not dates.
 
@@ -627,6 +627,11 @@ files, and every step reads and writes them.
 
 ### M10. Operations and the real cluster
 
+Split into three substages on 2026-09-14, each with an F page, a table of its acceptance
+rows and a commit series of its own: M10a is the rolling upgrade, M10b backup, restore, import
+and permanent quorum loss, M10c rotation, the cluster tab, the runbooks and the physical
+capture. M10 is delivered when all three are. The gate as it was set:
+
 **Delivers.** Full runbooks/TUI, rolling wire/schema/storage compatibility and activation rules,
 certificate/address rotation, backup/restore and permanent-quorum-loss recovery, supported
 single-node data import/cutover. Real heterogeneous three-node capture with per-node facts and
@@ -640,6 +645,49 @@ restore to a new cluster identity, not just create backup files. Q10–Q12 recei
 hardware; no claim of physical N>RF scale-out without that experiment. Render generated results
 from committed captures and run render --check. Update delivered F pages and current docs only
 for behavior actually implemented; keep unsupported limits visible.
+
+### M10a. Rolling compatibility and activation
+
+**Delivered** on 2026-09-14 as [F48](../features/rolling-compatibility.md). Both fixture rows
+below are runnable as `cargo test -p shoal --test cluster_fixture -- --test-threads 6`; the
+third runs when `SHOAL_PREVIOUS_TEST_BINARY` names a `cluster_fixture` binary from an earlier
+commit and prints a skip otherwise, and was run once against the binary of the commit before
+F48. The negotiation, the codec, the header range, the activation and the pin are unit tests
+beside them. What was delivered, what was not, and the evidence are on the F page; the rest of
+this section is the gate as it was set. *Not done, on purpose:* a schema change as a rolling
+operation is explicitly unsupported, and so is a marker format migration in place - both are a
+new cluster and a restore or an import; no capability is optional yet, so the gate that
+intersects them has nothing to gate; and the suite's mixed cluster is one binary pinned two
+ways, with the run from a real previous build opt-in.
+
+| Test | Where | What it asserts |
+| --- | --- | --- |
+| `mixed_versions_exchange_real_cluster_operations` | `shoal/tests/cluster_fixture.rs` ([C2](transport.md)) | Three nodes at a factor of three, nodes one and two pinned at wire version 4 and node zero at the build's 5. `Members.wire` reports the floor activated, the lowest member at 4 and the highest at 5. Writes led on every node are forwarded from every other and committed at quorum; every link that carried one negotiated 4; barrier reads through every node see every write; the digests agree. Node two is left behind the purge point of every group of both tables and fed snapshots by whichever version leads each group over version 4 links, installs them and converges, still spoken to at 4. Node zero - the only member at 5 - is killed; the two at 4 elect a leader that commits writes and serves barrier reads; node zero comes back and converges. `ACTIVATE 5` is refused naming the two pinned members and not the one that speaks it, and `ACTIVATE 4` is applied without moving anything. Nobody died |
+| `rolling_upgrade_survives_operations_and_failure` | `shoal/tests/cluster_fixture.rs` ([C9](operations.md)) | Three nodes at a factor of three, all pinned at 4, every link speaking 4 and the highest member 4, under writers through every node with identities and a twenty second retry budget. Each node is restarted at 5 in turn with readiness and a leader waited on; inside the mixed window, after the first, node one is killed and brought back still at 4, is spoken to at 4, the members report 4 to 5, and `ACTIVATE 5` is refused. Once every member reports 5 and every link speaks it, `ACTIVATE 5` commits and every node sees it activated. A restart of node two pinned at 4 is refused by name before it serves anything, and it comes back at 5 speaking 5. The writers' ledger, joined by a read of every key on every node, is accepted by the sequential oracle |
+| `rolling_upgrade_from_previous_binary` | `shoal/tests/cluster_fixture.rs` ([C9](operations.md)) | With `SHOAL_PREVIOUS_TEST_BINARY` set: three nodes started from that build at a factor of three, rows written; each restarted on this build in turn with a leader waited on and rows written through the mixed cluster, the upgraded node speaking 4 to whoever is on the previous build and 5 to whoever is upgraded; every member reporting 5, `ACTIVATE 5` committed and seen by every node; every row read back on every node. Unset, it says so and passes |
+| `a_version_range_negotiates_to_the_highest_shared` | `shoal-proto/src/shared/protocol/peer/tests.rs` ([C2](transport.md)) | Ten pairs of ranges negotiate to the highest both hold or to nothing, from either side; the advertised range is the floor to the newest and a pin lowers the top and never passes the floor or the newest; the capability words intersect; every capability defined is required |
+| `a_header_below_the_floor_is_refused_and_one_in_range_is_kept` | `shoal-proto/src/shared/protocol/tests.rs` ([C2](transport.md)) | Every version from the floor to the newest decodes and comes back as written; one below the floor is refused naming the newest; a negotiated ceiling refuses what is above it and keeps what is at it; the client lane's version is inside the range |
+| `a_v4_manifest_round_trips_with_defaults` | `shoal-core/src/server/replication/snapshot.rs` ([C7](replication.md)) | A stamped v5 manifest goes to its v4 shape and back with the three fields defaulted, is filled by a receiver with its own cluster and the sender, and left alone when it names them; a pending marker written before F48 loads; a version 2 file header carries the cluster, the schema and the time, round trips, and cut short is refused rather than read as version 1; a begin encoded for a version 4 link is the shorter shape and decodes back, one at 5 carries everything, and an end is the same bytes at either |
+| `peer_rejects_wrong_cluster_identity_and_malformed_payload` | `shoal-core/src/server/peer/tests.rs` ([C2](transport.md)) | Beside the M2 refusals: disjoint ranges are `NoCommonVersion`, a hello without a required capability `CapabilityMissing`, a hello pinned at the floor accepted, the same hello `BelowActivatedWire` once the map says the cluster activated the newest, and one speaking the newest still accepted |
+| `activation_needs_every_member_at_the_wire` | `shoal-core/src/server/control/types.rs` ([C3](membership.md)) | An activation naming the one member below the version is refused naming it, and so is one naming nobody; the floor is applied without moving the version; a third member admitted at the floor holds the activation back until it is removed; a record persisted without the field is healed by the apply; a repeat is answered as the first was; a lower version is refused as never lowering; a stale version is refused; a member below the activated version is refused at observe at a higher incarnation and at admit, and one at it is admitted; the map carries the activation |
+| `the_transport_block_refuses_a_pin_outside_the_range` | `shoal-core/src/server/conf/cluster.rs` | No pin is the default; a pin anywhere in the range validates; one below the floor or above the newest is refused naming the range; the pin parses from yaml |
+
+**Delivers.** Rolling wire compatibility and activation rules; the storage and schema halves as
+explicitly unsupported limits. **Acceptance.** C2 actual mixed-version operations and the C9
+upgrade row, with a node failed during the mixed-version run; Q10's decision record.
+**Evidence/exit.** *Met:* a snapshot crosses a version 4 link in both directions, an election
+among mixed members commits, a kill inside the window is survived, the activation is refused
+until every member speaks the version and refuses a rollback after, and one real previous
+build was upgraded in place. *Decided:* [Q10 at M10a](protocol.md#q10-at-m10a).
+
+### M10b. Backup, restore, import and permanent quorum loss
+
+Not started. The C9 backup and disaster rows, the C1 existing-data row and Q12's backup half.
+
+### M10c. Rotation, the cluster tab, runbooks and the physical cluster
+
+Not started. The C1 rotation row, the C10 physical environments row and the backup arm,
+runbooks, the `shoalctl` cluster tab, and Q11's certificate half.
 
 ## The order is a claim
 

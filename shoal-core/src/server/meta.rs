@@ -11,9 +11,12 @@
 //! directory was claimed, the [`ClusterId`] it was bootstrapped into if it was, the version of
 //! the shard layout the data is under, and the last topology version the node observed. That is
 //! format 2. A format 1 marker - the shape before any of that existed - is refused rather than
-//! upgraded, with an error naming the format and the fact that no migration tool exists yet;
-//! [C1](../../../docs/src/distributed/node-identity.md) permits that for a development build and
-//! M10 owns the real path. ~~There is deliberately no migration of the shard count either. This
+//! upgraded, with an error naming the format; ~~[C1](../../../docs/src/distributed/node-identity.md)
+//! permits that for a development build and M10 owns the real path~~ since
+//! [F48](../../../docs/src/features/rolling-compatibility.md) that is the supported answer,
+//! not a gap: a marker format is never migrated in place, and a directory in a format this
+//! build does not read is served by the build that wrote it or its data brought over into a
+//! new directory by an import or a restore. ~~There is deliberately no migration of the shard count either. This
 //! turns a silent loss into a refusal to start; moving data between shard counts needs tablet
 //! migration, which does not exist yet.~~ The shard count moves since F47; see below.
 //!
@@ -1010,11 +1013,12 @@ mod tests {
                 supported: &[2, 3]
             })
         ));
-        // and the message has to say there is no migration yet, since that is what an operator
-        // holding one of these needs to know
+        // and the message has to say a marker is never migrated in place and where the way
+        // out is, since that is what an operator holding one of these needs to know
+        // ([F48](../../../docs/src/features/rolling-compatibility.md))
         let rendered = format!("{error}");
         assert!(rendered.contains("format 1"), "{rendered}");
-        assert!(rendered.contains("no migration"), "{rendered}");
+        assert!(rendered.contains("never migrated") && rendered.contains("import or restore"), "{rendered}");
         // a format from the future is refused the same way
         let future = StorageMeta {
             format: META_FORMAT + 1,

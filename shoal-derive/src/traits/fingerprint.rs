@@ -108,8 +108,10 @@ pub fn row_expr(
 
 /// Build the constant expression that fingerprints a whole database
 ///
-/// The protocol version is mixed in so that a future wire change which does not bump the version
-/// byte still forces every fingerprint to move. Each table mixes in the name it is held under, the
+/// The client lane's wire version is mixed in so that a change to the framing between a client
+/// and a server forces every fingerprint to move, while a version the peer lanes alone moved to
+/// leaves it where it was ([F48](../../../../docs/src/features/rolling-compatibility.md)). Each
+/// table mixes in the name it is held under, the
 /// whole type it was declared as — which is what carries the table kind and the storage engine —
 /// and the constants of its row and of each projection declared for it.
 ///
@@ -214,14 +216,16 @@ fn db_expr_with(
             }
         })
         .collect();
-    // start from the name of the database and, for the fingerprint, the version of the protocol
-    // it speaks; the structural id skips that one mix and is otherwise the same walk
+    // start from the name of the database and, for the fingerprint, the version of the client
+    // lane it speaks - `CLIENT_WIRE_VERSION`, not `PROTOCOL_VERSION`, since F48: a version the
+    // peer lanes moved to without the client lane does not orphan every client - and the
+    // structural id skips that one mix and is otherwise the same walk
     let db_name = struct_ident.to_string();
     let version = if with_version {
         quote! {
             let hash = ::shoal::shared::protocol::fingerprint::mix_u64(
                 hash,
-                ::shoal::shared::protocol::PROTOCOL_VERSION as u64,
+                ::shoal::shared::protocol::CLIENT_WIRE_VERSION as u64,
             );
         }
     } else {

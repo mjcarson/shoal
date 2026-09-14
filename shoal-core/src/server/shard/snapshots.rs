@@ -275,24 +275,34 @@ where
     /// * `origin` - The peer
     /// * `head` - The request's fixed fields
     /// * `payload` - The RPC body
+    /// * `version` - The wire version the payload is encoded at, from the frame's header
     /// * `reply` - Where the answer goes
     pub(super) fn handle_snapshot_rpc(
         &mut self,
         origin: NodeId,
         head: ReplicateRequestHead,
         payload: Vec<u8>,
+        version: u8,
         reply: kanal::AsyncSender<ReplicateReply>,
     ) {
         let group = GroupId(head.group);
-        let rpc: SnapshotRpc = match postcard::from_bytes(&payload) {
+        // decoded at the version the frame named, which is the manifest's codec
+        // ([F48](../../../../docs/src/features/rolling-compatibility.md))
+        let rpc = match SnapshotRpc::decode_at(&payload, version) {
             Ok(rpc) => rpc,
             Err(error) => {
-                let _ = reply.try_send(ReplicateReply::error(head.id, format!("decoding a snapshot rpc: {error}")));
+                let _ = reply.try_send(ReplicateReply::error(head.id, format!("decoding a snapshot rpc at wire version {version}: {error}")));
                 return;
             }
         };
         let answer = match rpc {
-            SnapshotRpc::Begin { vote, stream, manifest, repair } => self.begin_snapshot(origin, group, stream, vote, manifest, repair),
+            // a manifest from a version 4 link names no cluster: it is this cluster's, from
+            // the sender it was heard from
+            SnapshotRpc::Begin { vote, stream, manifest, repair } => {
+                let cluster = self.map.get().cluster.unwrap_or_default();
+                let manifest = manifest.filled(cluster, origin);
+                self.begin_snapshot(origin, group, stream, vote, manifest, repair)
+            }
             SnapshotRpc::End { stream, total, checksum } => {
                 self.end_snapshot(origin, group, stream, total, checksum, head, reply);
                 return;
