@@ -280,6 +280,34 @@ tablet, and a changed core count is a rehome run before a shard starts - fold, c
 reclaim, finalize - under a manifest that is resumed at its step, with one arm pricing the
 start.
 
+**What F49 left undone, deliberately.** Recorded here so the next milestone starts from the
+list rather than from the diff:
+
+- **Shipping, retention and age of a backup.** A backup's files land on each group's
+  leader's own disk under the path given; copying them out of the failure domain, keeping N
+  of them, and tracking the age of the newest are the operator's, and C9's RPO/RTO
+  objectives have nothing to read yet. A `backups` policy with a destination and a keep
+  count is the shape; nothing is built.
+- **A point-in-time or partial restore.** A restore is once, into an empty new cluster, of
+  every table the files name. Restoring one table into a populated cluster, or a set of
+  backups to a point between them, needs a merge rule the record does not have.
+- **A recovery to more than one survivor.** `force_recover` keeps the node it runs on and
+  nothing else; two survivors with the same history would still have to be recovered one at
+  a time, the second joining as a fresh identity. A recovery that names several survivors
+  and reconciles their logs is the general membership problem with no quorum to solve it,
+  and is not scheduled.
+- **A set the survivor never held.** With more nodes than the factor, a set every member of
+  which was lost is gone and its `Remove` plans stay blocked; the page says so and a
+  restore from a backup is the answer. A recovery that seeds such a set from a backup file
+  in place is not built.
+- **The backup arm at full scale.** `macro/cluster/background/backup` ran at smoke scale on
+  the development host to prove it runs; the number is the benchmark host's. A restore is
+  priced by nothing.
+- **An export unit test beside the fixture.** `export_archives` has no test in `shoal-core`,
+  since no schema lives there; the fixture's migration test is the test. A `shoal` integration
+  test that exports a two-executor directory and reads the file back with `SnapshotReader`
+  would cover the storage step without a cluster.
+
 **What F48 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
 
@@ -289,7 +317,7 @@ list rather than from the diff:
   the required set and gates at the place it is acted on; the shape is there so that it costs
   no version bump.
 - **A schema change as a rolling operation.** Explicitly unsupported: a join with another
-  `schema_id` is refused and the path is a new cluster and a restore or an import
+  `schema_id` is refused and the path is a new cluster and a restore of a backup or an export
   ([F49](../features/backup-and-recovery.md)). A schema id that names a *compatible* change -
   a field added with a default - would need the derive to fingerprint compatibility rather
   than identity, which is a design and not a gap.

@@ -153,7 +153,9 @@ An orphan is data no longer assigned to this node. Report it before deleting; ne
 count it solely because it exists. A verified old checkpoint may seed a new learner only after
 identity/configuration checks and full reconciliation with the current group. A removed NodeId
 cannot regain voting authority by reporting useful files. Reusing an old directory needs an
-explicit replacement/import workflow; it is not a normal rejoin.
+explicit replacement workflow; it is not a normal rejoin, and since
+[F49](../features/backup-and-recovery.md) what it held comes back only through a `Backup` of a
+live cluster restored into a new one.
 
 ### ShardCountMismatch retires
 

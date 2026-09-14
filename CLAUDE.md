@@ -194,7 +194,7 @@ data and proves every workload still runs — which is what you want before spen
 real one. Budget twenty minutes for a macro-only smoke pass; the criterion layer is what makes a
 full smoke run take longer than you expect.
 
-The macro layer is three hundred and ninety-eight **workloads** living in `shoal-bench/src/workloads/`,
+The macro layer is three hundred and ninety-nine **workloads** living in `shoal-bench/src/workloads/`,
 each generating its own rows from `--seed` — there is no dataset to fetch
 ([F8](docs/src/features/purpose-built-workloads.md)). They come in three kinds and the differences
 matter:
@@ -252,12 +252,16 @@ matter:
   so the start between runs a rehome of four executors' files; its capture carries
   `cluster.rehome`, the pool's report with `millis` for the hold. It is read on its own, never
   against the reference cell: eight executors hosting twelve slots is another server.
-- **The background arm** is one workload ([F44](docs/src/features/repair.md)):
-  `macro/cluster/background/repair`, the kill arm's placement and mixture with nothing killed
-  and a `Repair` of the reference table in verify mode asked for a third of the way through
-  (`Workload::background`). Its capture carries `cluster.background` - the marks, the groups,
-  what the scrubs hashed and read, three windows and a per second series - so a scrub's cost
-  to the foreground is `during` read against `before`.
+- **The background arms** are two workloads ([F44](docs/src/features/repair.md),
+  [F49](docs/src/features/backup-and-recovery.md)): `macro/cluster/background/repair`, the
+  kill arm's placement and mixture with nothing killed and a `Repair` of the reference table
+  in verify mode asked for a third of the way through (`Workload::background`), whose capture
+  carries `cluster.background` - the marks, the groups, what the scrubs hashed and read, three
+  windows and a per second series - so a scrub's cost to the foreground is `during` read
+  against `before`; and `macro/cluster/background/backup`, the same with the wire version
+  activated and a `Backup` of the table asked for instead, whose capture carries
+  `cluster.backup` - the marks, the files' counts, bytes and records, the same windows and
+  series. The backup's files go under the workload's own storage root, which the next run wipes.
 - **The configuration sweep** is fifty-eight workloads under `macro/conf/`, each one the grid's
   reference cell `macro/grid/unsorted/r50/1024` with **exactly one field** of the server
   configuration moved ([F20](docs/src/features/configuration-sweeps.md)). It answers what a setting

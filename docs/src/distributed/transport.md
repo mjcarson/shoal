@@ -199,7 +199,7 @@ version 2 snapshot header is written only past it, the rollback matrix is on the
 the three tests exchange forwards, quorum writes, barrier reads, snapshots over the older link
 and an election - one of them against a real previous build.* Schema evolution beyond exact
 structural compatibility ~~needs a separately specified migration path (Q10)~~ is explicitly
-unsupported as a rolling operation: a new cluster and a restore or an import is the path.
+unsupported as a rolling operation: a new cluster and a restore of a backup or an export is the path.
 
 ## Alternatives rejected
 

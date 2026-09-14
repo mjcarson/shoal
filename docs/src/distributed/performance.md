@@ -183,7 +183,7 @@ expanded only into feasible combinations, not a Cartesian product that silently 
 | `macro/cluster/catchup/{log,snapshot}` | Time/bytes to catch up ~~at several foreground mutation rates~~ at the reference mixture. Both since [F43](../features/node-recovery.md), the `failover/kill` arm with the retention at the defaults and shortened past the absence; the mutation rate sweep is filed with the open-loop schedule |
 | `macro/cluster/rebalance/{add,decommission,remove,capacity_blocked}` | Transition progress and supported load envelope |
 | `macro/rehome/shrink` | The startup cost of changing a node's core count. Since [F47](../features/local-rehome.md), the `nodes/1` arm restarted from twelve executors to eight; a growth arm is not built |
-| `macro/cluster/background/{repair,backup}` | Foreground interference, integrity work and restore preparation. `repair` since [F44](../features/repair.md), the `failover/kill` arm with a verify of the table in the background and nothing killed; `backup` is M10's |
+| `macro/cluster/background/{repair,backup}` | Foreground interference, integrity work and restore preparation. `repair` since [F44](../features/repair.md), the `failover/kill` arm with a verify of the table in the background and nothing killed; `backup` since [F49](../features/backup-and-recovery.md), the same with the wire version activated and a `Backup` of the table cut instead, its record `cluster.backup`; a restore is priced by nothing |
 
 Extend ScaleFacts with separate read/write/durability policies, node count, desired/active RF,
 data/control/driver core allocation, table/tablet count, offered load and dataset size. Mirror

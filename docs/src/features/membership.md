@@ -287,6 +287,9 @@ every shard; a stranger's first question belongs on the lane the control thread 
   bootstrapper's rule put it.** `Initialize` places the tablets over every node, and a tablet
   that moved to another node under the new rule is read there, where it has no data. Moving a
   tablet with data is ~~M9a's~~ [F45](replica-migration.md)'s; a cluster loads its tables after it initializes.
+  Since [F49](backup-and-recovery.md) this is why single-node data is an export restored
+  into an initialized cluster rather than an import into a bootstrapper's directory: the
+  first cut of that path served every row on the node of one and none on its joiners.
 - **`Initialize` is applied once.** A second is refused naming ~~M9a~~ the `Move` operation. Adding a node after
   initialization admits it, promotes it under the policy, and places nothing on it ~~.~~ until
   a move brings it into a set ([F45](replica-migration.md)).

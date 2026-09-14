@@ -1,7 +1,7 @@
 # Milestones
 
 The Before-M0 gate is settled ([decision record](protocol.md#decision-record), 2026-09-11), and
-~~M0, M1 and M2~~ ~~M0 through M7~~ ~~M0 through M8 and M9a~~ M0 through M9c and M10a are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
+~~M0, M1 and M2~~ ~~M0 through M7~~ ~~M0 through M8 and M9a~~ M0 through M9c, M10a and M10b are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
 and M10a/b/c refine M10 without renumbering later work. Acceptance tests live in their owning C pages and are indexed
 by [C11](testing.md#the-acceptance-test-table). Each test names one gate below. This is an order
 with dependencies and measurable exit criteria, not dates.
@@ -628,7 +628,7 @@ files, and every step reads and writes them.
 ### M10. Operations and the real cluster
 
 Split into three substages on 2026-09-14, each with an F page, a table of its acceptance
-rows and a commit series of its own: M10a is the rolling upgrade, M10b backup, restore, import
+rows and a commit series of its own: M10a is the rolling upgrade, M10b backup, restore, export
 and permanent quorum loss, M10c rotation, the cluster tab, the runbooks and the physical
 capture. M10 is delivered when all three are. The gate as it was set:
 
@@ -656,7 +656,7 @@ F48. The negotiation, the codec, the header range, the activation and the pin ar
 beside them. What was delivered, what was not, and the evidence are on the F page; the rest of
 this section is the gate as it was set. *Not done, on purpose:* a schema change as a rolling
 operation is explicitly unsupported, and so is a marker format migration in place - both are a
-new cluster and a restore or an import; no capability is optional yet, so the gate that
+new cluster and a restore of a backup or an export; no capability is optional yet, so the gate that
 intersects them has nothing to gate; and the suite's mixed cluster is one binary pinned two
 ways, with the run from a real previous build opt-in.
 
@@ -680,9 +680,39 @@ among mixed members commits, a kill inside the window is survived, the activatio
 until every member speaks the version and refuses a rollback after, and one real previous
 build was upgraded in place. *Decided:* [Q10 at M10a](protocol.md#q10-at-m10a).
 
-### M10b. Backup, restore, import and permanent quorum loss
+### M10b. Backup, restore, export and permanent quorum loss
 
-Not started. The C9 backup and disaster rows, the C1 existing-data row and Q12's backup half.
+**Delivered** on 2026-09-14 as [F49](../features/backup-and-recovery.md). The three fixture rows
+below are runnable as `cargo test -p shoal --test cluster_fixture -- --test-threads 6`; the
+recovery, the coverage rules, the file's identity and the block are unit tests beside them,
+and the arm's record and placement are the bench's. What was delivered, what was not, and the
+evidence are on the F page; the rest of this section is the gate as it was set. *Not done, on
+purpose:* the single-node path is an export restored into a fresh cluster rather than an
+import into a node directory, since rows loaded before `Initialize` do not follow it; a
+recovery keeps one survivor and nothing else; a backup is not shipped, encrypted or aged; and
+a restore is once, into an empty cluster, never over data or into the cluster that cut it.
+The section was retitled from "import" to "export" with the decision.
+
+| Test | Where | What it asserts |
+| --- | --- | --- |
+| `backup_restore_verifies_history_in_new_cluster` | `shoal/tests/cluster_fixture.rs` ([C9](operations.md)) | Three nodes at a factor of three: `BACKUP` is refused until `ACTIVATE 5` is applied on every node; rows on both tables through every node with one key rewritten, one deleted, a retry identity acknowledged and a session token minted; `BACKUP <dir>` comes to `Done` with a file, a manifest, bytes, a checksum and a boundary for every persistent group and `Skipped` for every ephemeral one. A fresh three-node cluster with new identities restores the directory: every persistent group `Restored` and verified, the digests of every node equal, every key read on every new node with its last value and the deleted one absent, the remembered identity answered its original result through the new cluster with a token of the new cluster's groups, a fresh identity applied, the old cluster's token `WrongCluster`, a second `RESTORE` refused as already restored, and an old node's directory started against the new cluster refused as removed, stopping. Nobody died |
+| `permanent_quorum_loss_requires_explicit_recovery` | `shoal/tests/cluster_fixture.rs` ([C9](operations.md)) | Three nodes at a factor of three with rows on every node and two identities held back; nodes one and two killed for good. A write through node zero is unknown or refused for want of a leader and never acknowledged, a strong read is refused, and an admin mutation is refused naming the voters, what this node reaches and `force_recover`. Node zero restarted with `bootstrap: true` keeps its cluster and still has no leader. `force_recover` on its stopped directory refuses a survivor list that is not this node, runs, and a second run writes nothing; started, node zero leads alone, writes commit, every key acknowledged before the loss reads back, `Members` shows one and two removing and tombstoned with the recovery and its boundary recorded, and node one started again from its directory is refused as removed and stops. The two held-back identities join, the recovery's plans move every set onto them, one and two are removed, no set is under-replicated, the three digests agree, and every old and new key reads through both newcomers. Nobody died |
+| `single_node_data_has_a_verified_cluster_migration_path` | `shoal/tests/cluster_fixture.rs` ([C1](node-identity.md)) | A standalone node at two executors with rows on the persistent table and the ephemeral one, half of the former archived by a rotate and half in the active intent logs. An export while it runs is refused as locked; stopped, one into a non-empty directory is refused by name and writes nothing; `export_standalone` folds the intent logs and writes the persistent table as one file with a manifest, nothing of the ephemeral one. A fresh cluster of three at a factor of three restores it: every group `Restored` and verified from the one file, the records summing to the source's rows, the `DIGEST` of the table on every node equal to the source's, the ephemeral table empty, every row read through every node, a write through a follower committed at quorum. The source started standalone again has its identity, no cluster, every row and the same digest, and a cluster member's directory offered as a source is refused by name |
+| `a_recovery_rewrites_membership_and_a_sole_voter_leads` | `shoal-core/src/server/control/store.rs` ([C9](operations.md)) | A cluster of three voters as the log holds it, with one entry appended and never applied: the recovery applies that entry, lands a membership of one and the record at the next index and term with the vote and the commit there, leaves the lost members removing and tombstoned with a plan each, records the recovery with its boundary, writes nothing when run again, and a group opened over the store elects the sole voter without reaching anybody and commits a write |
+| `a_restore_refuses_gaps_overlaps_and_a_foreign_table` | `shoal-core/src/server/control/backup.rs` ([C9](operations.md)) | Files covering every tablet of a table are accepted; a tablet covered by none or by two, or a table the cluster lacks, is refused naming it |
+| `a_backup_file_identifies_its_cluster` | `shoal-core/src/server/replication/snapshot.rs` ([C9](operations.md)) | A file cut past the activation names its cluster, schema and time in its own header and reads them back with no manifest in hand; one cut below is version 1 and names nothing; both manifests are stamped with the cluster and the origin; the backup manifest beside a file rebuilds one the file verifies against, round trips as JSON, and a manifest naming another cluster does not verify the file |
+| `the_backup_block_parses_with_its_defaults` | `shoal-core/src/server/conf/cluster.rs` | `concurrent` 1 and `timeout` ten minutes by default; a timeout under the snapshot timeout or a concurrency of zero is refused; the block parses from yaml |
+| `backup_capture_records_files_and_windows` | `shoal-bench/src/workloads/harness/background.rs` ([C10](performance.md)) | A backup's marks, counts, bytes and records are recorded, its windows and series cut as a repair's, an unfinished run has no `seconds` and an empty `after`, the record round trips, and an F47 capture loads without the block |
+| `the_backup_arm_shares_the_kill_arms_placement` | `shoal-bench/src/workloads/cluster_backup.rs` ([C10](performance.md)) | The arm is appended after the rehome arm, read beside the repair arm, shares the kill arm's placement, scale and schedule with no fault, asks for a backup of a persistent table a third of the way in |
+
+**Delivers.** Backup and restore, permanent-quorum-loss recovery, and the supported single-node
+data path, as C9's runbooks 8, 9 and 10 asked. **Acceptance.** The C9 backup and disaster rows
+and the C1 existing-data row; a real restore to a new cluster identity, not just backup files;
+Q12's decision record. **Evidence/exit.** *Met:* a backup verified per group and restored into
+a cluster with new identities that refuses the old ones, a survivor that stays unavailable
+until an operator recovers it and then leads, rebuilds and serves every acknowledged key, and
+single-node data restored into a cluster of three and judged by digest against its source.
+*Decided:* [Q12 at M10b](protocol.md#q12-at-m10b).
 
 ### M10c. Rotation, the cluster tab, runbooks and the physical cluster
 

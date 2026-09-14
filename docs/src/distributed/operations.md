@@ -160,7 +160,11 @@ arbitrary lag. Client load balancers need a documented readiness probe, not a fi
    verified import; an explicit replacement/import path may reuse validated checkpoint data as
    learner input. Do not delete the only remaining useful evidence on a count-only health check.
    *At M9b the return is refused as a removed identity at every door and the process stops with
-   `ShoalError::Removed`; the directory is untouched; the import path is not built.*
+   `ShoalError::Removed`; the directory is untouched. At M10b
+   ([F49](../features/backup-and-recovery.md)) the same is true of a member lost to a
+   recovery and of a node of the cluster a restore came from; the directory is evidence, and
+   what it held is brought back by a `Backup` of a live cluster restored into a new one, never
+   by the directory rejoining. A cluster member's directory is refused as an export's source.*
 7. **Rolling upgrade.** Validate n/n−1 structural schema and codecs; upgrade one failure domain at
    a time, wait for data readiness/catch-up, then activate new capabilities through control state.
    State the last safe binary/storage rollback point. Changed schema needs its own migration.
@@ -174,12 +178,42 @@ arbitrary lag. Client load balancers need a documented readiness probe, not a fi
 8. **Control quorum lost.** Established data groups continue where their own quorums survive.
    Restore original control voters from durable storage; no automatic rebootstrap. Topology/admin
    mutations remain blocked. Permanent majority loss requires the disaster-recovery procedure.
+   *At M10b ([F49](../features/backup-and-recovery.md)): a write through a survivor is unknown
+   or refused for want of a leader and never acknowledged alone, a strong read is refused, an
+   admin mutation is refused naming the voters, which this node reaches and `force_recover`,
+   and a restart with `bootstrap: true` keeps the cluster and mints nothing. The procedure:
+   stop one survivor - the one whose log is the history - and run `force_recover` on its
+   directory with that node alone as the survivor; it rewrites the control and every durable
+   group's membership to that node at a new term, tombstones the lost members with a `Remove`
+   plan each and records the boundary (`Recoveries`); start it, join fresh identities, and the
+   plans rebuild every set. A lost member's directory that comes back is refused as removed.
+   What the survivor never held is gone, and a set it was not in stays blocked until restored.*
 9. **Backup and restore.** Capture checksummed per-tablet committed checkpoints with configuration,
    schema/format, deduplication state and boundary manifest. Store outside the failure domain being
    protected. The initial backup need not be one cross-tablet transactional snapshot; say so.
    Restore to an isolated new cluster identity, verify histories/data, then explicitly cut over.
+   *At M10b ([F49](../features/backup-and-recovery.md)): `Backup { table, path }`, once wire
+   version 5 is activated, writes one verified snapshot file per group at that group's own
+   committed boundary under `<path>/<op>/<table>/` on the leader's disk, a JSON manifest beside
+   each naming the cluster, the schema, the boundary, the tablets and the checksum, and the
+   retry table in the file's trailer; it is not one cross-tablet snapshot and the record says
+   each group's boundary. Ephemeral tables are skipped. Copying the directory out of the
+   failure domain is the operator's step. `Restore { path }` is asked of a fresh, initialized,
+   empty cluster: the files are judged for coverage, schema and source, every group's leader
+   installs its tablets' records on every member under a quarantine a scrub lifts, and the
+   old identities are refused as removed. Verification is the restore's own scrub and the
+   `DIGEST` of every table against the source's; cutover is pointing clients at the new
+   cluster, whose tokens are its own.*
 10. **Existing single-node data.** Test supported offline conversion or export/import into fresh
     cluster storage, verification, cutover and rollback. Never require destroying the source.
+    *At M10b ([F49](../features/backup-and-recovery.md)): stop the standalone node and run
+    `export_standalone` with its own configuration and an empty directory; it folds the intent
+    logs into the archives - the one thing it writes to the source - and writes each persistent
+    table's archives as one backup-shaped file with a manifest. Bootstrap, join and initialize
+    a fresh cluster of the size and factor wanted, and `Restore { path }` the export; verify by
+    the restore's scrub and by `DIGEST` against the source's, then cut clients over. The source
+    starts standalone again with every row, which is the rollback. A standalone directory
+    started with a `cluster:` block is refused naming this path; nothing converts in place.*
 11. **Changing a node's cores.** *At M9c ([F47](../features/local-rehome.md)):* stop the node,
     change `resources.cores`, start it. The start is held while the files of the executors that
     no longer run are moved onto the ones that do - the log says `rehoming the storage directory
@@ -236,7 +270,9 @@ the targets, the boundary installed and the index verified.
 Repair-from-primary on any mismatch, raw archived-byte digest as universal logical equality,
 handshake-only rolling upgrades, and deleting orphaned data based on RF counts are superseded.
 A forced new majority after permanent quorum loss is disaster recovery with an explicit data-loss
-boundary, not normal automatic failover.
+boundary, not normal automatic failover - since [F49](../features/backup-and-recovery.md) it is
+`force_recover`, offline, to one survivor, and the boundary is the `RecoveryRecord`'s
+`last_committed`.
 
 ## What it costs
 
@@ -282,8 +318,8 @@ deployment instead of conflating replica failover with disaster recovery.
 | `repair_serializes_with_migration_and_new_commits` | Concurrent repair/move cannot install stale state or destroy current evidence | M9a |
 | `rolling_upgrade_survives_operations_and_failure` | Mixed binaries replicate, read, snapshot and elect correctly, with activation/rollback limits ([F48](../features/rolling-compatibility.md)) | M10a |
 | `rolling_upgrade_from_previous_binary` | A real previous build's nodes are upgraded in place one at a time and the version activated, when `SHOAL_PREVIOUS_TEST_BINARY` names one ([F48](../features/rolling-compatibility.md)) | M10a |
-| `backup_restore_verifies_history_in_new_cluster` | Restore isolated backups including retry state, validate data, and prohibit old identities joining | M10b |
-| `permanent_quorum_loss_requires_explicit_recovery` | No automatic empty bootstrap or destructive choice when durable majority evidence is unavailable | M10b |
+| `backup_restore_verifies_history_in_new_cluster` | Restore isolated backups including retry state, validate data, and prohibit old identities joining ([F49](../features/backup-and-recovery.md)) | M10b |
+| `permanent_quorum_loss_requires_explicit_recovery` | No automatic empty bootstrap or destructive choice when durable majority evidence is unavailable; an operator's `force_recover` to one survivor leads, serves every acknowledged key and rebuilds the sets on fresh identities ([F49](../features/backup-and-recovery.md)) | M10b |
 
 ## Related
 

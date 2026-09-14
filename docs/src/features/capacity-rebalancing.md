@@ -158,6 +158,10 @@ tombstoned node from a configuration that still names it, and drops the role of 
 configuration no longer names. A node that finds its own phase `Removed` in the applied state,
 or its own observation answered so, stops with `ShoalError::Removed`, which the pool reports
 through `failure`; its directory is left where it is. A replacement joins as a new identity.
+Since [F49](backup-and-recovery.md) the peer doors say so too: both admission judges answer a
+tombstoned or removed identity `Verdict::Removed` at the hello, a node of the cluster this one
+was restored from the same, a link refused that way stops the control loop rather than
+redialling, and a tombstoned member is not pinged.
 
 ### What a node reports
 
