@@ -20,6 +20,7 @@ use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
 use crate::AppEvent;
+use crate::cluster::{ClusterAction, ClusterModel, Follow};
 
 mod completion;
 mod content;
@@ -31,11 +32,42 @@ pub use content::TabContent;
 pub use error::{ErrorBar, QueryError};
 pub use query_bar::{QueryLayout, QueryRow, TabQueryBar, layout_query};
 
+/// What a tab is for
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabKind {
+    /// Queries against the schema, which is what every tab was before F50
+    Query,
+    /// The cluster's state and the operations run on it
+    /// ([F50](../../../docs/src/features/cluster-operations.md))
+    Cluster,
+}
+
+/// What a cluster tab holds beside its content
+#[derive(Debug, Clone, Default)]
+pub struct ClusterState {
+    /// The cluster as the last poll saw it
+    pub model: Option<ClusterModel>,
+    /// Why the last poll failed, if it did
+    pub poll_error: Option<String>,
+    /// An operation typed and previewed, waiting for a second `Enter`
+    pub pending: Option<ClusterAction>,
+    /// The operation being followed by its record, if one is
+    pub following: Option<(Uuid, Follow)>,
+    /// The lines the follow-up last rendered, drawn under the model
+    pub outcome: Vec<String>,
+    /// Whether the poller should keep going; cleared when the tab closes
+    pub alive: Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// A single tab in the application
 #[derive(Debug, Clone)]
 pub struct Tab<S: QuerySupport> {
     /// The unique identifier for this tab
     pub id: Uuid,
+    /// What this tab is for
+    pub kind: TabKind,
+    /// The cluster this tab shows, on a cluster tab
+    pub cluster: ClusterState,
     /// The display label for this tab
     pub label: String,
     /// The content to display (query results or messages)
@@ -83,6 +115,8 @@ where
     pub fn new<L: Into<String>>(label: L) -> Self {
         Self {
             id: Uuid::new_v4(),
+            kind: TabKind::Query,
+            cluster: ClusterState::default(),
             label: label.into(),
             content: String::new(),
             error: None,
@@ -179,6 +213,11 @@ where
     ///
     /// * `forced` - Whether the user asked for completions rather than just typing
     pub fn refresh_completions(&mut self, forced: bool) {
+        // a cluster tab's command line is not a query, and offers nothing
+        if self.kind == TabKind::Cluster {
+            self.completion.close();
+            return;
+        }
         // ask the client what could be typed at our cursor
         let completions = parser::suggest::<S>(&self.query, self.query_cursor);
         // hand those to the menu, which decides whether they are worth showing
@@ -253,6 +292,11 @@ where
         if self.query.trim().is_empty() {
             return;
         }
+        // a cluster tab's line is an operation, previewed once and sent on the second Enter
+        if self.kind == TabKind::Cluster {
+            self.submit_action(shoal, app_tx);
+            return;
+        }
         // try to parse our query
         let query = match S::parse(&self.query) {
             Ok(q) => q,
@@ -277,6 +321,276 @@ where
         })
         .await
         .unwrap();
+    }
+}
+
+impl<S: QuerySupport + Sync + Send> Tab<S>
+where
+    S::TableNames: Send,
+    for<'a> <<S as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
+        rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    <S::ResponseKinds as rkyv::Archive>::Archived: rkyv::Deserialize<
+            S::ResponseKinds,
+            rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
+        >,
+    <S::ResponseKinds as rkyv::Archive>::Archived: std::marker::Send,
+{
+    /// A cluster tab: the frames polled every second, the command line taking operations
+    /// ([F50](../../../docs/src/features/cluster-operations.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `shoal` - The client to poll through
+    /// * `app_tx` - Where the frames go
+    pub fn cluster(shoal: &Arc<Shoal<S>>, app_tx: &AsyncSender<AppEvent<S>>) -> Self
+    where
+        S: 'static,
+        S::QueryKinds: Send,
+        S::ResponseKinds: Send,
+    {
+        let mut tab = Tab::new("Cluster");
+        tab.kind = TabKind::Cluster;
+        tab.cluster.alive.store(true, std::sync::atomic::Ordering::SeqCst);
+        tab.content = "polling the cluster...".to_string();
+        let alive = tab.cluster.alive.clone();
+        let shoal = shoal.clone();
+        let app_tx = app_tx.clone();
+        let id = tab.id;
+        tokio::task::spawn(async move {
+            while alive.load(std::sync::atomic::Ordering::SeqCst) {
+                let model = poll_cluster::<S>(&shoal).await;
+                if app_tx.send(AppEvent::ClusterFrame { tab_id: id, model }).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        });
+        tab
+    }
+
+    /// Draw the cluster as this tab last saw it, with the pending preview or the follow-up
+    pub fn redraw_cluster(&mut self) {
+        let mut lines = match (&self.cluster.model, &self.cluster.poll_error) {
+            (Some(model), None) => model.render_lines(),
+            (Some(model), Some(error)) => {
+                let mut lines = model.render_lines();
+                lines.insert(0, format!("(the last poll failed: {error})"));
+                lines
+            }
+            (None, Some(error)) => vec![format!("the cluster could not be read: {error}")],
+            (None, None) => vec!["polling the cluster...".to_string()],
+        };
+        if let Some(pending) = &self.cluster.pending {
+            lines.push(String::new());
+            lines.push("--- preview: Enter submits, Esc forgets ---".to_string());
+            let model = self.cluster.model.clone().unwrap_or_default();
+            lines.extend(pending.preview(&model));
+        }
+        if !self.cluster.outcome.is_empty() {
+            lines.push(String::new());
+            lines.extend(self.cluster.outcome.iter().cloned());
+        }
+        self.content = lines.join("\n");
+    }
+
+    /// Take the command line: preview an operation, or send the one previewed
+    ///
+    /// # Arguments
+    ///
+    /// * `shoal` - The client to send through
+    /// * `app_tx` - Where the outcome goes
+    fn submit_action(&mut self, shoal: &Arc<Shoal<S>>, app_tx: &mut AsyncSender<AppEvent<S>>)
+    where
+        S: 'static,
+        S::QueryKinds: Send,
+        S::ResponseKinds: Send,
+    {
+        let line = self.query.trim().to_string();
+        if line == "help" {
+            self.cluster.pending = None;
+            self.cluster.outcome = ClusterAction::help();
+            self.query.clear();
+            self.query_cursor = 0;
+            self.redraw_cluster();
+            return;
+        }
+        let action = match ClusterAction::parse(&line) {
+            Ok(action) => action,
+            Err(error) => {
+                self.error = Some(QueryError::plain(error));
+                return;
+            }
+        };
+        // the first Enter on a mutation previews it; the second, on the same line, sends it
+        if action.is_mutation() && self.cluster.pending.as_ref() != Some(&action) {
+            self.cluster.pending = Some(action);
+            self.cluster.outcome.clear();
+            self.redraw_cluster();
+            return;
+        }
+        self.cluster.pending = None;
+        self.query.clear();
+        self.query_cursor = 0;
+        let version = self.cluster.model.as_ref().map_or(0, |model| model.version);
+        let (kind, follow) = action.request();
+        let op = match &action {
+            ClusterAction::Status { op } => *op,
+            _ => Uuid::new_v4(),
+        };
+        self.cluster.outcome = vec![format!("sending {op}...")];
+        self.redraw_cluster();
+        let shoal = shoal.clone();
+        let app_tx = app_tx.clone();
+        let id = self.id;
+        let is_status = matches!(action, ClusterAction::Status { .. });
+        tokio::task::spawn(async move {
+            let outcome = send_admin::<S>(&shoal, op, version, kind, follow, is_status).await;
+            let follow_up = match &outcome {
+                Ok(_) if follow != Follow::None && !is_status => Some((op, follow)),
+                _ => None,
+            };
+            let _ = app_tx.send(AppEvent::AdminOutcome { tab_id: id, outcome, follow: follow_up }).await;
+        });
+    }
+}
+
+/// Poll the frames a cluster tab draws
+///
+/// # Arguments
+///
+/// * `shoal` - The client to poll through
+async fn poll_cluster<S>(shoal: &Arc<Shoal<S>>) -> Result<ClusterModel, String>
+where
+    S: QuerySupport + Send + Sync + 'static,
+{
+    use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest};
+    // one read per frame, each answered as the json the node built for it
+    let mut frames = Vec::with_capacity(6);
+    for kind in [AdminKind::Members, AdminKind::Readiness, AdminKind::Replication, AdminKind::Plans, AdminKind::Backups, AdminKind::Recoveries] {
+        let name = kind.name();
+        let response = shoal
+            .admin(&AdminRequest {
+                op: Uuid::new_v4(),
+                expected_version: 0,
+                kind,
+            })
+            .await
+            .map_err(|error| format!("{name}: {error:?}"))?;
+        match response.outcome {
+            Ok(AdminOutcome::Read(value)) => frames.push(value),
+            Ok(other) => return Err(format!("{name} answered {other:?}")),
+            Err(error) => return Err(format!("{name}: {} ({:?})", error.msg, error.code())),
+        }
+    }
+    Ok(ClusterModel::from_frames(&frames[0], &frames[1], &frames[2], &frames[3], &frames[4], &frames[5]))
+}
+
+/// Send an operation and read its record once, or read a record
+///
+/// # Arguments
+///
+/// * `shoal` - The client to send through
+/// * `op` - The operation
+/// * `version` - The topology version the request is written against
+/// * `kind` - What to ask for
+/// * `follow` - How the record is read afterwards
+/// * `is_status` - Whether this is a read of an existing record rather than a new operation
+async fn send_admin<S>(
+    shoal: &Arc<Shoal<S>>,
+    op: Uuid,
+    version: u64,
+    kind: shoal::shared::protocol::admin::AdminKind,
+    follow: Follow,
+    is_status: bool,
+) -> Result<Vec<String>, String>
+where
+    S: QuerySupport + Send + Sync + 'static,
+{
+    use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest};
+    // a status is read as a plan first, then as whatever other record answers by that id
+    if is_status {
+        for status in [
+            AdminKind::PlanStatus { op },
+            AdminKind::RepairStatus { op },
+            AdminKind::BackupStatus { op },
+            AdminKind::RestoreStatus { op },
+            AdminKind::MoveStatus { op },
+        ] {
+            let kind_follow = match &status {
+                AdminKind::PlanStatus { .. } => Follow::Plan,
+                AdminKind::RepairStatus { .. } => Follow::Repair,
+                AdminKind::BackupStatus { .. } => Follow::Backup,
+                AdminKind::RestoreStatus { .. } => Follow::Restore,
+                _ => Follow::Move,
+            };
+            let response = shoal
+                .admin(&AdminRequest {
+                    op: Uuid::new_v4(),
+                    expected_version: 0,
+                    kind: status,
+                })
+                .await
+                .map_err(|error| format!("{error:?}"))?;
+            if let Ok(AdminOutcome::Read(record)) = response.outcome {
+                return Ok(kind_follow.render(op, &record));
+            }
+        }
+        return Err(format!("no record of {op} on this node"));
+    }
+    let response = shoal
+        .admin(&AdminRequest {
+            op,
+            expected_version: version,
+            kind,
+        })
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+    match response.outcome {
+        Ok(AdminOutcome::Applied { version }) => Ok(vec![format!("{op} applied at version {version}")]),
+        Ok(AdminOutcome::Repeated { version }) => Ok(vec![format!("{op} was applied before, at version {version}")]),
+        Ok(AdminOutcome::Read(value)) => {
+            let _ = follow;
+            Ok(vec![format!("{op}: {value}")])
+        }
+        Err(error) => Err(format!("{} ({:?})", error.msg, error.code())),
+    }
+}
+
+/// Read a followed operation's record once
+///
+/// # Arguments
+///
+/// * `shoal` - The client to read through
+/// * `op` - The operation
+/// * `follow` - How its record is read
+pub async fn follow_once<S>(shoal: &Arc<Shoal<S>>, op: Uuid, follow: Follow) -> Result<(Vec<String>, bool), String>
+where
+    S: QuerySupport + Send + Sync + 'static,
+{
+    use shoal::shared::protocol::admin::{AdminOutcome, AdminRequest};
+    let Some(kind) = follow.status(op) else {
+        return Ok((Vec::new(), true));
+    };
+    let response = shoal
+        .admin(&AdminRequest {
+            op: Uuid::new_v4(),
+            expected_version: 0,
+            kind,
+        })
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+    match response.outcome {
+        Ok(AdminOutcome::Read(record)) => Ok((follow.render(op, &record), follow.is_done(&record))),
+        Ok(other) => Err(format!("the record read answered {other:?}")),
+        Err(error) => Err(format!("{} ({:?})", error.msg, error.code())),
     }
 }
 
@@ -519,8 +833,29 @@ where
         self.active = self.tabs.len() - 1;
     }
 
+    /// Open a cluster tab, which starts polling at once
+    /// ([F50](../../../docs/src/features/cluster-operations.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `shoal` - The client to poll through
+    /// * `app_tx` - Where the frames go
+    pub fn add_cluster_tab(&mut self, shoal: &Arc<Shoal<S>>, app_tx: &AsyncSender<AppEvent<S>>)
+    where
+        S: 'static,
+        S::QueryKinds: Send,
+        S::ResponseKinds: Send,
+    {
+        self.tabs.push(Tab::cluster(shoal, app_tx));
+        self.active = self.tabs.len() - 1;
+    }
+
     /// Close our currently active tab
     pub fn close_active_tab(&mut self) -> bool {
+        // a cluster tab's poller stops with it
+        if let Some(tab) = self.tabs.get(self.active) {
+            tab.cluster.alive.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
         // remove our current tab
         self.tabs.remove(self.active);
         // if we have no more tabs left then exit

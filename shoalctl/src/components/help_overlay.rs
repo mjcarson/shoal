@@ -65,6 +65,10 @@ impl HelpOverlay {
                 Span::styled("p", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
                 Span::raw(" - close tab"),
             ]),
+            Line::from(vec![
+                Span::styled("c", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(" - cluster tab"),
+            ]),
             Line::from(""),
             Line::from(Span::styled(
                 "completions",

@@ -311,6 +311,14 @@ where
                 // we only exit one thing at a time
                 return;
             }
+            // a cluster tab's previewed operation is forgotten first
+            if let Some(tab) = self.tabs.get_active_mut()
+                && tab.cluster.pending.is_some()
+            {
+                tab.cluster.pending = None;
+                tab.redraw_cluster();
+                return;
+            }
             // check if we need to minimize the shortcut help window
             if self.shortcut_mode_active {
                 // minimize the shortcut help window
@@ -437,6 +445,13 @@ where
             KeyCode::Char('q') => self.focus_query(),
             // clear the query box
             KeyCode::Char('w') => self.tabs.clear_query(),
+            // open a cluster tab ([F50](../../docs/src/features/cluster-operations.md))
+            KeyCode::Char('c') => {
+                self.tabs.add_cluster_tab(&self.shoal, &self.app_tx);
+                self.sync_focused_pane_tab();
+                self.shortcut_mode_active = false;
+                self.focus_query();
+            }
             // create a new tab
             //KeyCode::Char('t') => self.add_tab(),
             // close the current tab
@@ -488,6 +503,63 @@ where
                 }
             }
         }
+    }
+
+    /// Draw a cluster tab's frames, and read the record it follows once more
+    ///
+    /// # Arguments
+    ///
+    /// * `tab_id` - The tab
+    /// * `model` - The model the poll built, or why it could not
+    async fn handle_cluster_frame(&mut self, tab_id: Uuid, model: Result<crate::cluster::ClusterModel, String>) {
+        let Some(tab) = self.tabs.tabs.iter_mut().find(|t| t.id == tab_id) else {
+            return;
+        };
+        match model {
+            Ok(model) => {
+                tab.cluster.model = Some(model);
+                tab.cluster.poll_error = None;
+            }
+            Err(error) => tab.cluster.poll_error = Some(error),
+        }
+        // an operation being followed is read at the same cadence, until its record is done
+        if let Some((op, follow)) = tab.cluster.following {
+            match crate::components::follow_once::<S>(&self.shoal, op, follow).await {
+                Ok((lines, done)) => {
+                    tab.cluster.outcome = lines;
+                    if done {
+                        tab.cluster.following = None;
+                    }
+                }
+                Err(error) => tab.cluster.outcome = vec![format!("following {op}: {error}")],
+            }
+        }
+        tab.redraw_cluster();
+    }
+
+    /// Show what an operation came to, and follow its record if there is one
+    ///
+    /// # Arguments
+    ///
+    /// * `tab_id` - The tab
+    /// * `outcome` - The lines to show, or the error
+    /// * `follow` - The record to follow, if any
+    fn handle_admin_outcome(&mut self, tab_id: Uuid, outcome: Result<Vec<String>, String>, follow: Option<(Uuid, crate::cluster::Follow)>) {
+        let Some(tab) = self.tabs.tabs.iter_mut().find(|t| t.id == tab_id) else {
+            return;
+        };
+        match outcome {
+            Ok(lines) => {
+                tab.cluster.outcome = lines;
+                tab.cluster.following = follow;
+                tab.error = None;
+            }
+            Err(error) => {
+                tab.cluster.outcome.clear();
+                tab.error = Some(QueryError::plain(format!("Error: {error}")));
+            }
+        }
+        tab.redraw_cluster();
     }
 
     /// Handle a mouse click event
@@ -623,6 +695,12 @@ where
                         }
                         AppEvent::QueryResult { tab_id, table_name, result } => {
                             self.handle_result(tab_id, table_name, result);
+                        }
+                        AppEvent::ClusterFrame { tab_id, model } => {
+                            self.handle_cluster_frame(tab_id, model).await;
+                        }
+                        AppEvent::AdminOutcome { tab_id, outcome, follow } => {
+                            self.handle_admin_outcome(tab_id, outcome, follow);
                         }
                     }
                     // Redraw after handling any event
