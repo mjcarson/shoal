@@ -578,6 +578,36 @@ page says so.
 
 ### M9c. Change local shard count
 
+**Delivered** on 2026-09-14 as [F47](../features/local-rehome.md). Both fixture rows below are
+runnable as `cargo test -p shoal --test cluster_fixture -- --test-threads 6`, the in-process
+row as `cargo test -p shoal --test storage_meta`, the C10 rows as `cargo test -p shoal-bench`,
+with the marker, the hosting, the manifest, each step's redo, the rings, the dispatch and the
+archive removal as unit tests beside them. What was delivered, what was not, and the evidence
+are on the F page; the rest of this section is the gate as it was set. *Not done, on purpose:*
+a cluster node's slots are claimed once and bound the executors, so growth past them is
+[M9b](#m9b-capacity-aware-rebalancing-and-removal)'s `Replace` and not a local operation; the
+deal is per slot on a cluster node and per tablet on a standalone one, by count and not by
+bytes; the rehome runs before any shard starts, on one core, and never while serving; a
+growth's donor keeps its dead records until its own compaction; a partial snapshot install is
+dropped for the leader to feed again rather than carried; and every crash test runs one storage
+root, so a table under its own `storage.tables` root is moved on the same manifest untested
+(item 43). The "data configuration/address updates" the gate names are what did not have to
+happen: no address changes, because a peer names a slot and a slot never moves.
+
+| Test | Where | What it asserts |
+| --- | --- | --- |
+| `local_rehome_recovers_after_each_crash_point` | `shoal/tests/cluster_fixture.rs` ([C8](rebalancing.md)) | Three nodes at a factor of three, node two claiming four slots on two cores so every peer records four shards and it hosts two per executor from its first start. Rows in every set, some archived on node two by a rotate and a compaction and some left in its WAL past the checkpoint, and a delete under an identity remembered by its retry table. For each of the six points a cluster node's rehome can die at - `planned`, `after_archives`, `after_log`, `after_reclaim`, `before_finalize`, `after_finalize` - node two is restarted with its core count changed and the point armed, dies there, and is started again clean at the new count, alternating one executor hosting all four slots and two hosting two, so the vanished executor's path and the live donor's are each crossed at every point. After every round: the rehome reports the counts it was between with at least one step redone, a slot and a group moved; the hosting holds four slots on the new count; the only executors with files are the ones that run; every peer's record still says four shards and the executors it runs; every key of the persistent table reads through node two and every row of the ephemeral one once its leaders fed it again; every group's row counts agree across the three; and the remembered identity through node two is the original result once and a fresh delete finds nothing. Writers through the other two nodes run throughout under identities with a retry budget, and their ledger joined by a read of every key on every node is accepted by the sequential oracle |
+| `standalone_rehome_rebalances_tablets_across_restarts` | `shoal/tests/cluster_fixture.rs` ([C8](rebalancing.md)) | A standalone node at two executors seeded with four hundred rows, half archived by a rotate and half left in its active intent logs. Restarted at three: a rehome from two to three that folded intent logs and copied records, tablets dealt per tablet within one of even over three executors, every row read back. Restarted at one armed to die after the first fold, dead; started again armed to die after the first copy, dead; started clean: the rehome finishes from three to one with two steps redone, every tablet on the survivor, every row read back, and only the survivor's files left |
+| `a_changed_core_count_rehomes_and_reads_back`, `the_same_shard_count_restarts` | `shoal/tests/storage_meta.rs` ([C1](node-identity.md)) | In process through a real server: four hundred rows written at two cores; reopened at three, a rehome from two to three moving tablets and copying records with no step redone and every row read; reopened at three again, no rehome; reopened at one, a rehome from three to one and every row read, with executor zero the only one with files. The same count reopens as it always did |
+| `a_changed_core_count_is_a_pending_rehome`, `slots_are_claimed_once_and_bound_the_cores` | `shoal-core/src/server/meta.rs` ([C1](node-identity.md)) | A directory claimed at four cores reopened at five is a pending rehome from four to five, the marker's `physical` unmoved until the finalize and the same rehome pending on a third claim; finished, five is the ordinary restart and four a rehome back, and a return to the origin count clears the field; a manifest towards two refuses a claim at three by name and resumes one at two. Slots default to the cores; four on two cores is headroom laid out on two; the same slots or none restart; three is `SlotsFixed` naming `Replace`; four cores is a rehome and five `CoresExceedSlots`; two slots on four cores is `SlotsBelowCores` with no marker written; a standalone node's slots are its cores whatever it asks |
+| `the_identity_hosting_is_the_ring`, `hosting_deals_vanished_shards_to_the_least_loaded`, `a_hosting_file_round_trips` | `shoal-core/src/server/hosting.rs` ([C4](tablet-map.md)) | The identity hosting for every count is slot `n` on executor `n` and tablet `t % n`; a standalone shrink deals only the vanished executor's tablets, to within one of even, twice the same; a shrink to one puts everything on zero; a growth moves only donors' tablets onto new executors within one of even with every executor owning something; a cluster shrink deals slots and derives the tablets, a growth back leaves one slot per executor, a count past the slots and a count of zero are refused; three slots on one executor grown to two moves the highest; the file round trips and a table naming an executor the node does not run is refused |
+| `the_plan_orders_fold_archives_log_reclaim_finalize`, `a_manifest_resumes_at_its_step` | `shoal-core/src/server/rehome/manifest.rs` ([C8](rebalancing.md)) | Every fold before any copy, every copy before any reclaim, finalize last, no log on a standalone node and no fold on a cluster one, the moves counted as tablets or slots by kind, a source past the new count vanishing; a manifest with two steps done and a partial archive recorded reads back resuming at the third with its report, every step done is finished, a removed one is gone twice, and another format is refused |
+| `a_redone_archives_step_removes_its_partial_archive`, `a_redone_log_step_skips_a_group_already_moved`, `a_manifest_for_another_target_is_refused` | `shoal-core/src/server/rehome/tests.rs` ([C8](rebalancing.md)) | A step whose manifest names an archive the destination does not removes the partial file, copies every moving record into a fresh archive the destination names and reads each back with the source's bytes, keeps the destination's own record, and begun a third time copies nothing while still counting; a log step moves five entries above a purge point of two, the vote, the commit and the checkpoint of one slot's group and nothing of another slot's, and begun again appends nothing and duplicates no index; a cluster directory at four slots with a manifest towards two refuses three and four by name and resumes two |
+| `a_ring_from_hosting_routes_by_the_table`, `a_placement_hosts_slots_on_executors` | `shoal-core/src/server/ring.rs`, `shoal-core/src/server/map.rs` ([C4](tablet-map.md)) | The ring from the identity hosting is `Ring::new`'s tablet for tablet, and one from four dealt onto three routes every tablet to the executor the table names and none past it; a placement of four slots on two executors beside a peer of three has two local contacts and three remote, every local tablet on the executor hosting its slot and every remote on its slot, every contact owning something, and a placement naming the executors refused; on the map, a node of four slots on two executors serves every local copy from its slot's host, routes every remote primary as before, splits its groups across both executors with `mine` still the slot, and refuses a hosting for another slot count |
+| `the_listener_dispatches_a_slot_to_its_host` | `shoal-core/src/server/peer/tests.rs` ([C2](transport.md)) | Four slots on two executors: slots zero and two reach executor zero, one and three executor one; the identity hosting reaches the executor of the slot's number; slot four is malformed under either |
+| `removing_an_archive_does_not_hold_the_handle_map_across_the_close` | `shoal-core/src/server/tables/storage/fs/map.rs` | Item 111: two archives open, one removed while the other is read through the cache during the close; both complete, the removed one is gone from the cache and the other is still there |
+| `rehome_capture_records_the_move`, `the_rehome_arm_restarts_at_fewer_shards` | `shoal-bench/src/workloads/harness.rs`, `shoal-bench/src/workloads/cluster_rehome.rs` ([C10](performance.md)) | The record carries every count the pool reported and round trips under its own key, and an older cluster record loads without it; the arm restarts its server, at eight shards from twelve, as a cluster of one, at the reference mixture, at smoke scale too |
+
 **Delivers.** Startup executor for vanished-shard files, full log/checkpoint/consensus/dedup recovery,
 atomic rehome manifest, resumable local transfer and correct data configuration/address updates.
 Only then retire `ShardCountMismatch` and update storage/partitioning documentation.
@@ -585,7 +615,15 @@ Only then retire `ShardCountMismatch` and update storage/partitioning documentat
 **Acceptance.** C8 local-rehome crash matrix across several tables, changed core counts and restart.
 
 **Evidence/exit.** No abandoned, duplicated or double-owned data/history; resource and startup costs
-recorded. An archive index alone does not pass this gate.
+recorded. An archive index alone does not pass this gate. *Met:* every key, every group's rows
+and the remembered identity survive six crash points in both directions with the writers'
+history accepted by the oracle, a vanished executor's files are gone and a donor's moved
+entries leave its map, and `ShardCountMismatch` is retired with the storage and partitioning
+pages rewritten. *Met in shape, not in number:* the startup cost is `cluster.rehome.millis` on
+`macro/rehome/shrink`, smoke-run on the development host only - 589 ms for four slots and
+eight groups with nothing archived - and the fixture's report on a node of four slots; the
+benchmark host's capture is what the number is. *Not an index:* the manifest is a plan over the
+files, and every step reads and writes them.
 
 ### M10. Operations and the real cluster
 
@@ -608,7 +646,7 @@ for behavior actually implemented; keep unsupported limits visible.
 Protocol decisions precede irreversible format/API choices. Compaction safety, unknown outcomes
 and resource bounds ship with replication. Read barriers, retry identity and failover form one
 application-correctness gate. Atomic recovery precedes migration; safe migration precedes automatic
-placement policy; local shard rehome is separate. Compatibility is designed with the first transport,
+placement policy; local shard rehome is separate, and was. Compatibility is designed with the first transport,
 admin authorization with its first mutation, and real upgrade/restore exercises gate operational
 readiness. Performance evidence can change an implementation choice, not weaken its safety contract.
 

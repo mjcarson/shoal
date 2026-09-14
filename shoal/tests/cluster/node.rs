@@ -90,6 +90,23 @@ pub struct ChildRequest {
     /// serves under ([F40](../../../docs/src/features/replication.md)).
     #[serde(default)]
     pub durability: Option<String>,
+    /// A rehome crash point the child arms before the pool starts, so the rehome dies there
+    /// ([F47](../../../docs/src/features/local-rehome.md))
+    #[serde(default)]
+    pub rehome_crash_at: Option<String>,
+}
+
+/// What a restart may change about a child beyond its staging
+///
+/// The core count is the allocation's by default; a test of the rehome restarts a node with
+/// fewer or more executors on the same lease, and arms the point the rehome dies at
+/// ([F47](../../../docs/src/features/local-rehome.md)).
+#[derive(Debug, Clone, Default)]
+pub struct ChildOverrides {
+    /// How many cores to run, instead of the allocation's count
+    pub cores: Option<usize>,
+    /// A rehome crash point to arm before the pool starts
+    pub rehome_crash_at: Option<String>,
 }
 
 /// A node's place in a membership cluster the fixture built
@@ -120,6 +137,10 @@ pub struct StagedCluster {
     /// every member is dialled where it advertises itself.
     #[serde(default)]
     pub dial: Vec<(String, String, String)>,
+    /// The slots this node claims, if the test set them apart from its cores
+    /// ([F47](../../../docs/src/features/local-rehome.md))
+    #[serde(default)]
+    pub slots: Option<usize>,
     /// The replication factor the bootstrapper seeds
     pub replication_factor: u32,
     /// The voter policy the bootstrapper seeds
@@ -347,7 +368,7 @@ impl Node {
         allocation: Allocation,
         dir: &Path,
     ) -> Result<Self, FixtureError> {
-        Self::spawn_with(id, kind, allocation, dir, None, None, None, None)
+        Self::spawn_with(id, kind, allocation, dir, None, None, None, None, ChildOverrides::default())
     }
 
     /// Start a child, narrowing the cpus it may run on and staging a marker for it to find
@@ -360,6 +381,9 @@ impl Node {
     /// * `dir` - Its storage directory
     /// * `affinity` - The cpus it may run on, applied before it starts; `None` inherits
     /// * `staged_marker` - A marker to write into its directory before it starts
+    /// * `cluster` - Its place in a membership cluster, if the test built one
+    /// * `durability` - The persistent table's durability, if the test set it
+    /// * `overrides` - A core count or a rehome crash point, if the test set one
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_with(
         id: usize,
@@ -370,6 +394,7 @@ impl Node {
         staged_marker: Option<String>,
         cluster: Option<StagedCluster>,
         durability: Option<String>,
+        overrides: ChildOverrides,
     ) -> Result<Self, FixtureError> {
         let topology = super::Topology::detect();
         // a cluster node's control thread runs on the first cpu of its control core, or shares
@@ -386,13 +411,21 @@ impl Node {
             kind,
             dir: dir.to_path_buf(),
             exclude_cores: super::cores::excluded_for(&allocation, &topology),
-            cores: if allocation.shared { None } else { Some(allocation.data.len()) },
+            // the allocation's count, or the one the test asked for on the same lease: a node
+            // keeps its cores and runs fewer executors on them, and one asking for more than
+            // it leased is refused by the allocator's exclusions rather than run over them
+            cores: match overrides.cores {
+                Some(cores) => Some(cores),
+                None if allocation.shared => None,
+                None => Some(allocation.data.len()),
+            },
             control_cpu,
             control_shared,
             affinity: affinity.clone(),
             staged_marker,
             durability: durability.clone(),
             cluster,
+            rehome_crash_at: overrides.rehome_crash_at,
         };
         let request = serde_json::to_string(&request).expect("a request serializes");
         // the test binary again, running only the child function

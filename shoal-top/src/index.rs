@@ -317,6 +317,41 @@ pub struct ClusterFactsLite {
     /// arm and before F46
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebalance: Option<RebalanceFactsLite>,
+    /// The rehome a restart ran before the measured phase; absent for every other arm and
+    /// before F47
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rehome: Option<RehomeFactsLite>,
+}
+
+/// What a rehome moved when a server restarted at another executor count, and what it cost
+///
+/// A mirror of the artifact's `RehomeFacts`, whole: the counts it was between, what moved, and
+/// how long the start was held, so the cost of changing a node's core count can be drawn on the
+/// capture timeline ([F47](../../docs/src/features/local-rehome.md)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RehomeFactsLite {
+    /// The executor count the files were laid out for
+    pub from: u64,
+    /// The executor count they were laid out for afterwards
+    pub to: u64,
+    /// How many tablets changed executor, on a standalone node
+    pub tablets_moved: u64,
+    /// How many slots changed executor, on a cluster node
+    pub slots_moved: u64,
+    /// How many tablet groups' logs were moved
+    pub groups: u64,
+    /// How many archived records were copied
+    pub records: u64,
+    /// How many bytes of archived records were copied
+    pub bytes: u64,
+    /// How many partitions the folds wrote out of intent logs
+    pub folded: u64,
+    /// How many partial snapshot installs were dropped
+    pub installs_dropped: u64,
+    /// How many steps were begun again by a resumed rehome
+    pub steps_redone: u64,
+    /// How long the rehome held the start, in milliseconds
+    pub millis: u64,
 }
 
 /// A plan run in the background of a measured phase, and what the client saw across it

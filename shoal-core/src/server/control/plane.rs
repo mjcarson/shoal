@@ -561,7 +561,8 @@ impl ControlPlane {
     /// * `identity` - Who this node is
     /// * `conf` - The configuration, which has to carry a `cluster:` block
     /// * `client` - The address clients reach the shards at
-    /// * `shards` - How many shards this node runs
+    /// * `shards` - How many slots this node has: the shard count every peer records for it
+    /// * `physical` - How many executors it runs ([F47](../../../../docs/src/features/local-rehome.md))
     /// * `schema_id` - The structural fingerprint of the schema it serves
     /// * `tables` - The tables it serves, with their stable identities
     ///
@@ -575,6 +576,7 @@ impl ControlPlane {
         conf: &Conf,
         client: String,
         shards: usize,
+        physical: usize,
         schema_id: u64,
         tables: Vec<(String, TableId)>,
     ) -> Result<ControlHandle, ServerError> {
@@ -592,6 +594,7 @@ impl ControlPlane {
             control_core: placement.cpu,
             control_shared: placement.shared,
             shards,
+            physical,
             incarnation: identity.incarnation,
             weight: cluster.weight.unwrap_or(0),
         };

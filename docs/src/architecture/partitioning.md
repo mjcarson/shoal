@@ -60,7 +60,9 @@ pub struct Ring {
 
 `shoal-core/src/server/ring.rs:25-42`
 
-The map is built from the shard count, giving tablet `i` to shard `i % shard_count`:
+The map is built from the shard count, giving tablet `i` to shard `i % shard_count` - since
+[F47](../features/local-rehome.md) through `Ring::from_hosting`, which is this exactly until a
+rehome has dealt some tablets elsewhere:
 
 ```rust
 let shards = (0..shard_count).map(ShardInfo::new).collect();
@@ -229,20 +231,32 @@ starts earning its keep.
 
 ## Limitations
 
-- **Shard count is part of the on-disk format.** Intent logs are named `Shard-N-active` and
+- ~~**Shard count is part of the on-disk format.** Intent logs are named `Shard-N-active` and
   each shard has its own archive map (`maps/Shard-N`), so a partition that moves to another
   shard cannot find the data written under the old one's files. This is now **refused rather
   than silent**: `StorageMeta` (`server/meta.rs`) records the shard count a directory was
   written by and `ShoalPool::start` errors with `ShardCountMismatch` before any shard spawns.
   That is a better failure, not a fix — there is still no migration and no rebalancing. Treat
-  shard count as fixed for the lifetime of a data directory.
+  shard count as fixed for the lifetime of a data directory.~~ **The executor is part of the
+  on-disk format, and the core count is not.** Since [F47](../features/local-rehome.md) the `N`
+  in `Shard-N-active` and `maps/Shard-N` is an executor, and `shoal-hosting.json` beside the
+  marker says which executor owns each tablet. Changing `resources.cores` against an existing
+  directory runs a rehome before any shard starts - the vanished executors' intent logs folded
+  into their archives, their records copied onto the executors that remain, their files
+  reclaimed, the hosting rewritten - under a manifest a crash at any point resumes. What stays
+  fixed on a cluster node is its *slots*, which peers record and the rule hashes; a standalone
+  node has none to keep.
 - **The storage marker only covers the default storage root.** A per-table `storage.tables`
-  override pointing elsewhere is unguarded
+  override pointing elsewhere is unguarded, and a rehome moves its files untested
   ([item 43](../appendix/known-issues.md#43-the-storage-marker-only-guards-the-default-storage-root)).
-- **Tablet assignment is derived, not persisted.** `Ring::new` recomputes it on every start, so
+- ~~**Tablet assignment is derived, not persisted.** `Ring::new` recomputes it on every start, so
   a tablet is movable in principle only; nothing can move one and have it survive a restart.
   Persisting the map is the first half of rebalancing
-  ([TODOs](../appendix/todos.md#rebalancing)).
+  ([TODOs](../appendix/todos.md#rebalancing)).~~ **Tablet assignment is persisted when it
+  differs from the rule.** A standalone node's ring is built from `shoal-hosting.json`
+  ([F47](../features/local-rehome.md)), which is the identity `i % executors` until a rehome
+  deals it otherwise; a cluster node's is the map's rule over its slots, with the hosting
+  choosing the executor.
 - **There is no migration from the old ring.** This mapping is not the one the vnode ring
   produced, and nothing detects a directory written by it. Old data directories are removed.
 - ~~**No replication.** One shard, one copy.~~ **On a standalone node, one shard, one copy.**

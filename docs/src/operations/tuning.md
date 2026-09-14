@@ -140,8 +140,14 @@ mostly stopped being your job at all
 - **`exclude_cores` filters on the physical core id**, so excluding one removes both of its SMT
   threads. The committed `shoal.yml` excludes four cores to leave the benchmark client somewhere to
   run; a production deployment usually should not.
-- Changing the shard count against an existing data directory is **refused** — `StorageMeta::claim`
-  keys a directory to the count that wrote it. Plan the count before the first write, or migrate.
+- ~~Changing the shard count against an existing data directory is **refused** — `StorageMeta::claim`
+  keys a directory to the count that wrote it. Plan the count before the first write, or migrate.~~
+  Changing the core count against an existing data directory **rehomes it at the next start**
+  ([F47](../features/local-rehome.md)): the vanished executors' files are moved onto the ones that
+  remain before a shard starts, and the start is held for as long as that takes -
+  `cluster.rehome.millis` on the `rehome` benchmark group is the hold. On a cluster node the
+  count cannot pass the slots the directory claimed (`cluster.slots`, one per core unless set at
+  the first claim), so a node that may grow claims its headroom then; past it, replace the node.
 
 ## What none of this can tell you
 

@@ -134,8 +134,13 @@ topology epoch — and every one of them makes the format more likely to change,
   joiner was minted without - so three fields move, each on that path, each only forwards.
   ~~`claim` still writes a marker on exactly one path, the one where no marker exists.~~ `claim`
   writes a fresh marker where none exists and rewrites an established one's incarnation.
+  Narrowed once more by [F47](../../features/local-rehome.md): `physical`, the executors the
+  files are laid out on, is rewritten by the rehome's finalize - after the data it describes has
+  moved, which is the rule the next sentence states - so four fields move, and the shard count
+  itself is restated as a cluster node's slots and stays write-once.
   Anything that "upgrades" a marker has to move the data it describes
-  first, and no such migration exists ([items 11, 12](tablet-ring.md)).
+  first, and ~~no such migration exists~~ the one that exists is the rehome
+  ([items 11, 12](tablet-ring.md), [F47](../../features/local-rehome.md)).
 - **`StorageMeta::new` is the only constructor used outside tests**, so every marker written
   carries the current `META_FORMAT`. The test that stages a future marker builds the struct
   literally, which is the only place that is correct.

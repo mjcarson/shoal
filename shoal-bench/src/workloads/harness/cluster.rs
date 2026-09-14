@@ -1226,6 +1226,7 @@ mod tests {
             background: None,
             migration: None,
             rebalance: None,
+            rehome: None,
         };
         let text = serde_json::to_string(&cluster).expect("serializes");
         let back: ClusterFacts = serde_json::from_str(&text).expect("parses");
@@ -1322,6 +1323,7 @@ mod tests {
             background: None,
             migration: None,
             rebalance: None,
+            rehome: None,
         };
         // the record round trips with every replica's debt and the schedule on it
         let text = serde_json::to_string(&facts).expect("serializes");

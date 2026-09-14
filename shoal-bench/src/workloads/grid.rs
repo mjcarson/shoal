@@ -393,6 +393,13 @@ pub enum Sweep {
         /// `durable` for the persistent table, `volatile` for the ephemeral one
         durability: &'static str,
     },
+    /// The reference cell served after a restart at another executor count
+    ///
+    /// Minted by [`cluster_rehome`](super::cluster_rehome): the one node cluster arm seeded at
+    /// one count and measured at another, so the start between the two moves the vanished
+    /// executors' files and the artifact carries what that moved and cost
+    /// ([F47](../../../docs/src/features/local-rehome.md)).
+    Rehome,
 }
 
 /// One arm of the grid
@@ -792,8 +799,12 @@ impl Workload for Grid {
             // against the configuration this repository benchmarks under, so an arm that named a
             // shard count or a memory limit would be holding still something it is not about - the
             // same choice `transport` and `encryption` make. a configuration arm carries exactly
-            // one field here, which is the only difference between the two.
-            server: ServerNeed::Fresh(self.conf.clone()),
+            // one field here, which is the only difference between the two. the rehome arm is
+            // the one that cycles its server, since what it measures is the start between
+            server: match self.sweep {
+                Sweep::Rehome => ServerNeed::RestartAfterSeed(self.conf.clone()),
+                _ => ServerNeed::Fresh(self.conf.clone()),
+            },
             scale: ScaleFacts {
                 scale: scale.as_str().to_string(),
                 rows,
@@ -1016,6 +1027,7 @@ mod tests {
                 Sweep::Replication { durability } => {
                     unreachable!("Grid::all minted a {durability} replication arm")
                 }
+                Sweep::Rehome => unreachable!("Grid::all minted the rehome arm"),
             };
             assert_eq!(arm.id(), expected);
         }

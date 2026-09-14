@@ -503,6 +503,7 @@ pub const IDS: &[&str] = &[
     "macro/cluster/rebalance/decommission",
     "macro/cluster/rebalance/remove",
     "macro/cluster/rebalance/capacity_blocked",
+    "macro/rehome/shrink",
 ];
 
 /// Whether an id names a workload this build knows about

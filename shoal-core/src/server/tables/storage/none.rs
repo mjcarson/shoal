@@ -178,6 +178,38 @@ impl<D: ShoalDatabase> StorageSupport for NoStorage<D> {
         Ok(())
     }
 
+    /// Fold a shard's intent logs of a table into its archives, of which this engine has neither
+    ///
+    /// # Arguments
+    ///
+    /// * `shard_name` - The name of the shard whose logs are folded
+    /// * `shard_table_name` - The table, as the shard's messages name it
+    /// * `conf` - The Shoal config
+    async fn fold_intents<P: IntentReadSupport<R> + 'static, R: PartitionKeySupport + 'static>(
+        _shard_name: &str,
+        _shard_table_name: D::TableNames,
+        _conf: &Conf,
+    ) -> Result<u64, ServerError>
+    where
+        <P as Archive>::Archived: rkyv::Deserialize<P, Strategy<Pool, rkyv::rancor::Error>>,
+        <R as Archive>::Archived: rkyv::Deserialize<R, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <P as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+        for<'a> <P::Intent as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >
+    {
+        // an ephemeral table has nothing on disk to fold
+        Ok(0)
+    }
+
     /// Commit an operation to this storages intent log
     ///
     /// The data is dropped on the floor. The row itself is already being written into the

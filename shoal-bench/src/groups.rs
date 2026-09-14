@@ -268,6 +268,16 @@ pub const GROUPS: &[Group] = &[
         },
     },
     Group {
+        name: "rehome",
+        summary: "what a restart at another executor count costs a node: the vanished executors' files moved before a shard starts",
+        members: Members {
+            layers: &[Layer::Macro],
+            prefixes: &["macro/rehome/"],
+            excluding: &[],
+            exactly: &[],
+        },
+    },
+    Group {
         name: "macro",
         summary: "every workload that runs against a live server",
         members: Members {

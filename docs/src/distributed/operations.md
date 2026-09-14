@@ -173,6 +173,19 @@ arbitrary lag. Client load balancers need a documented readiness probe, not a fi
    Restore to an isolated new cluster identity, verify histories/data, then explicitly cut over.
 10. **Existing single-node data.** Test supported offline conversion or export/import into fresh
     cluster storage, verification, cutover and rollback. Never require destroying the source.
+11. **Changing a node's cores.** *At M9c ([F47](../features/local-rehome.md)):* stop the node,
+    change `resources.cores`, start it. The start is held while the files of the executors that
+    no longer run are moved onto the ones that do - the log says `rehoming the storage directory
+    before any shard starts` with the counts, then `rehomed the storage directory` with what
+    moved and how long it took - and the node joins as itself, since its slots and every address
+    a peer holds for it are unchanged; `Members` shows `physical` moved and `shards` not. A
+    crash during the hold is finished by the next start at the same count; a start at a third
+    count is refused naming the count to start with. On a cluster node the count cannot pass
+    the slots the directory claimed - `cluster.slots`, one per core unless it was set at the
+    first claim - and past it the answer is a `Replace` onto a fresh identity claimed with more.
+    Budget the hold from the `rehome` benchmark group's `millis` at the node's data size, and
+    do not change the count on more than one member of a set at a time: the node is down for
+    the hold.
 
 ### Repair
 

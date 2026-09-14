@@ -205,13 +205,6 @@ where
             .map_or(NodeId::default(), |local| local.borrow().node)
     }
 
-    /// This shard's address
-    pub(super) fn my_addr(&self) -> ShardAddr {
-        // a node runs fewer shards than a u16 holds; the ring refuses more
-        #[allow(clippy::cast_possible_truncation)]
-        ShardAddr::new(self.node_id(), self.shard_id as u16)
-    }
-
     /// Open the WAL and build the network, on a cluster node, then the groups the map names
     ///
     /// # Arguments
@@ -325,6 +318,7 @@ where
         let tx = self.shard_local_tx.clone();
         let map = self.map.get();
         let table_map = &self.table_map;
+        let hosting = self.hosting.clone();
         let Some(replication) = self.replication.as_mut() else {
             return Ok(());
         };
@@ -332,11 +326,12 @@ where
             return Ok(());
         }
         replication.epoch += 1;
-        // the groups this shard hosts under the map, if it is placed at all
+        // the groups this executor hosts under the map, if the node is placed at all: every
+        // group whose slot the hosting puts here ([F47](../../../../docs/src/features/local-rehome.md))
         let specs: Vec<GroupSpec> = if placed {
             map.replica_groups(me)
                 .into_iter()
-                .filter(|spec| usize::from(spec.mine) == shard_id)
+                .filter(|spec| hosting.host_of_slot(spec.mine) == shard_id)
                 .collect()
         } else {
             Vec::new()
@@ -361,11 +356,12 @@ where
         let mut orphaned = Vec::new();
         // a group a published move took from this shard is retired rather than only stopped
         // ([F45](../../../../docs/src/features/replica-migration.md))
-        let my_addr = ShardAddr::new(me, u16::try_from(shard_id).unwrap_or(u16::MAX));
         let mut retiring = Vec::new();
         for id in gone {
             if let Some(mut group) = replication.groups.remove(&id) {
                 orphaned.extend(std::mem::take(&mut group.waiting).into_iter().map(|waiting| (id, waiting)));
+                // the member the move took is the slot that hosted the group here
+                let my_addr = group.spec.me(me);
                 let moved = map
                     .moves
                     .iter()
@@ -1030,6 +1026,7 @@ where
         #[allow(clippy::cast_possible_truncation)]
         let tablet = tablet as u16;
         let cluster = self.conf.cluster.clone().unwrap_or_default();
+        let node = self.node_id();
         let Some(replication) = self.replication.as_mut() else {
             return self
                 .answer_proposal(meta, table, tablet, None, ProposalOutcome::Failed("this node hosts no tablet groups".to_string()), 0)
@@ -1091,7 +1088,9 @@ where
         };
         let raft = group.raft.clone();
         let network = replication.network.clone();
-        let me = self.my_addr();
+        // this node's member of the group: the slot hosting it, not the executor
+        // ([F47](../../../../docs/src/features/local-rehome.md))
+        let me = group.spec.me(node);
         // the write's budget: the proposal deadline, or what is left of the bundle's if that is
         // shorter - a forwarded write counts down from the origin's budget, never up from a
         // fresh one ([C2](../../../../docs/src/distributed/transport.md))
@@ -1242,6 +1241,7 @@ where
         reply: kanal::AsyncSender<ReplicateReply>,
     ) {
         let group = GroupId(head.group);
+        let node = self.node_id();
         let Some(replication) = self.replication.as_ref() else {
             let _ = reply.try_send(ReplicateReply::error(head.id, "this node hosts no tablet groups"));
             return;
@@ -1309,7 +1309,7 @@ where
             return;
         }
         let network = replication.network.clone();
-        let me = self.my_addr();
+        let me = slot.spec.me(node);
         let deadline = Duration::from_millis(u64::from(head.deadline_ms.max(1)));
         let all = self.map.get().write_consistency == crate::server::conf::cluster::Consistency::All;
         let _ = origin;
@@ -1748,7 +1748,7 @@ where
                 ..ShardReplication::default()
             };
         };
-        let me = self.my_addr();
+        let node = self.node_id();
         // the bytes each table's archives hold per tablet, read once for every group of it
         let tablet_bytes: std::collections::HashMap<D::TableNames, Vec<u64>> = replication
             .groups
@@ -1776,7 +1776,7 @@ where
                     tablet_ids: slot.spec.tablets.clone(),
                     members: slot.spec.members.clone(),
                     leader: leader.clone(),
-                    is_leader: leader == Some(me),
+                    is_leader: leader == Some(slot.spec.me(node)),
                     applied: state.applied_index(),
                     committed: metrics
                         .as_ref()
@@ -1890,6 +1890,7 @@ where
         verb: ReplicationVerb,
         reply: &std::sync::mpsc::Sender<Result<serde_json::Value, String>>,
     ) -> Option<Result<serde_json::Value, String>> {
+        let node = self.node_id();
         let Some(replication) = self.replication.as_mut() else {
             return Some(Err("this node hosts no tablet groups".to_string()));
         };
@@ -1948,7 +1949,7 @@ where
                 let state = slot.state.clone();
                 let members = slot.spec.members.clone();
                 let table = slot.spec.table;
-                let me = self.my_addr();
+                let me = slot.spec.me(node);
                 let op = Uuid::new_v4();
                 glommio::spawn_local(async move {
                     let outcome = super::repair::scrub_group(&raft, &network, me, state, table, group, &members, op, FIXTURE_SCRUB_TIMEOUT).await;

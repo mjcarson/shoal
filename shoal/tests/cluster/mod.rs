@@ -42,7 +42,7 @@ use tempfile::TempDir;
 
 pub use cores::{Allocation, ClusterPlan, CoreClaim, Topology};
 pub use link::{Link, LinkState};
-pub use node::{ChildRequest, Endpoints, Node, NodeKind, StagedCluster, CHILD_ENV, FAILED_LINE, READY_LINE, REPLY_LINE};
+pub use node::{ChildOverrides, ChildRequest, Endpoints, Node, NodeKind, StagedCluster, CHILD_ENV, FAILED_LINE, READY_LINE, REPLY_LINE};
 
 /// What can go wrong starting or driving a cluster
 #[derive(Debug)]
@@ -179,9 +179,38 @@ pub struct ClusterBuilder {
     moves_per_node: Option<u32>,
     /// How often the control leader looks at its plans, in milliseconds, if shortened
     plan_interval_ms: Option<u64>,
+    /// The slots particular nodes claim, apart from their cores
+    /// ([F47](../../../docs/src/features/local-rehome.md))
+    slots: Vec<(usize, usize)>,
 }
 
 impl ClusterBuilder {
+    /// Give one node a core claim of its own, after `cluster` gave every node the same
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `cores` - The cores it should own
+    pub fn node_cores(mut self, id: usize, cores: CoreClaim) -> Self {
+        if let Some(spec) = self.nodes.get_mut(id) {
+            spec.cores = cores;
+        }
+        self
+    }
+
+    /// Have one node claim this many slots, which its cores must not exceed
+    /// ([F47](../../../docs/src/features/local-rehome.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `slots` - The slots
+    pub fn slots(mut self, id: usize, slots: usize) -> Self {
+        self.slots.retain(|(node, _)| *node != id);
+        self.slots.push((id, slots));
+        self
+    }
+
     /// Add a real server, bootstrapped as a cluster of one
     ///
     /// # Arguments
@@ -739,6 +768,7 @@ impl ClusterBuilder {
                 spec.staged_marker.clone(),
                 cluster,
                 durability,
+                ChildOverrides::default(),
             )?));
         }
         // hold the port reservations until every child has bound, so nothing else takes them
@@ -852,6 +882,7 @@ impl Cluster {
             disk_reserve: None,
             moves_per_node: None,
             plan_interval_ms: None,
+            slots: Vec::new(),
             snapshot_timeout_ms: None,
             snapshot_chunk_bytes: None,
             bulk_queue_bytes: None,
@@ -1041,10 +1072,34 @@ impl Cluster {
         kind: NodeKind,
         staged: Option<StagedCluster>,
     ) -> Result<(), FixtureError> {
+        self.restart_with_overrides(id, kind, staged, ChildOverrides::default())
+    }
+
+    /// Kill a node and start it again with a changed staging and a changed core count or crash point
+    ///
+    /// The node keeps its core lease and runs `overrides.cores` executors on it, which is how
+    /// a test drives the rehome ([F47](../../../docs/src/features/local-rehome.md)); a rehome
+    /// crash point is armed before the pool starts. A node that dies at the point is left dead
+    /// rather than waited for, so the caller waits for its death and starts it again.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Its id
+    /// * `kind` - What to restart it as
+    /// * `staged` - What to stage it with, or none for a plain server
+    /// * `overrides` - The core count and the crash point
+    pub fn restart_with_overrides(
+        &mut self,
+        id: usize,
+        kind: NodeKind,
+        staged: Option<StagedCluster>,
+        overrides: ChildOverrides,
+    ) -> Result<(), FixtureError> {
         if let Some(node) = self.nodes[id].as_mut() {
             node.kill()?;
         }
         let allocation = self.plan.nodes[id].1.clone();
+        let armed = overrides.rehome_crash_at.is_some();
         let mut node = Node::spawn_with(
             id,
             kind,
@@ -1054,11 +1109,35 @@ impl Cluster {
             None,
             if kind == NodeKind::Server { staged } else { None },
             None,
+            overrides,
         )?;
-        node.wait_ready(self.ready_timeout)?;
-        self.plan.endpoints[id] = node.endpoints.clone();
+        // a node armed to die never reports ready, and is the caller's to wait for
+        if !armed {
+            node.wait_ready(self.ready_timeout)?;
+            self.plan.endpoints[id] = node.endpoints.clone();
+        }
         self.nodes[id] = Some(node);
         Ok(())
+    }
+
+    /// Kill a node and start it again at another core count on the same lease
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Its id
+    /// * `kind` - What to restart it as
+    /// * `cores` - How many executors to run
+    pub fn restart_with_cores(&mut self, id: usize, kind: NodeKind, cores: usize) -> Result<(), FixtureError> {
+        let staged = self.staged.get(id).cloned();
+        self.restart_with_overrides(
+            id,
+            kind,
+            staged,
+            ChildOverrides {
+                cores: Some(cores),
+                rehome_crash_at: None,
+            },
+        )
     }
 
     /// Kill a node and start it again with its seeds pointing somewhere else
@@ -1091,6 +1170,7 @@ impl Cluster {
             None,
             staged,
             None,
+            ChildOverrides::default(),
         )?;
         node.wait_ready(self.ready_timeout)?;
         self.plan.endpoints[id] = node.endpoints.clone();
@@ -1140,7 +1220,7 @@ impl Cluster {
         // the clone runs on the original's allocation, so it runs the shard count the
         // directory was written by; the two share those cores, which a fencing test can afford
         let allocation = self.plan.nodes[id].1.clone();
-        let node = Node::spawn_with(id, NodeKind::Server, allocation, dir, None, None, Some(staged), None)?;
+        let node = Node::spawn_with(id, NodeKind::Server, allocation, dir, None, None, Some(staged), None, ChildOverrides::default())?;
         drop((data_sock, control_sock));
         Ok(node)
     }
@@ -1456,8 +1536,10 @@ fn build_membership_cluster(
     let mut shard_counts = Vec::with_capacity(specs.len());
     for (id, _spec) in specs.iter().enumerate() {
         ids.push(NodeId::mint());
-        // the shard count is the data cores the allocator gave this node
-        let shards = plan.nodes[id].1.data.len().max(1);
+        // the shard count is the data cores the allocator gave this node, or the slots the
+        // test asked it to claim above them ([F47](../../../docs/src/features/local-rehome.md))
+        let cores = plan.nodes[id].1.data.len().max(1);
+        let shards = builder.slots.iter().find(|(node, _)| *node == id).map_or(cores, |(_, slots)| *slots);
         shard_counts.push(shards);
         let (data_sock, data_port) = reserve_port()?;
         let (control_sock, control_port) = reserve_port()?;
@@ -1470,11 +1552,16 @@ fn build_membership_cluster(
     // stage a marker naming each node: node zero's names the cluster, every other's is joining
     let mut per_node = Vec::with_capacity(specs.len());
     for (id, dir) in dirs.iter().enumerate() {
-        let marker = if id == 0 {
+        let mut marker = if id == 0 {
             StorageMeta::new(shard_counts[id], ids[id], Some(cluster))
         } else {
             StorageMeta::joining(shard_counts[id], ids[id])
         };
+        // a node claiming more slots than cores is laid out on its cores
+        let cores = plan.nodes[id].1.data.len().max(1);
+        if shard_counts[id] != cores {
+            marker.physical = Some(cores);
+        }
         std::fs::create_dir_all(dir.path())?;
         std::fs::write(
             StorageMeta::path(dir.path()),
@@ -1493,6 +1580,7 @@ fn build_membership_cluster(
             },
             peers: peers.clone(),
             dial: Vec::new(),
+            slots: builder.slots.iter().find(|(node, _)| *node == id).map(|(_, slots)| *slots),
             replication_factor: builder.replication_factor,
             control_voters: builder.control_voters,
             admins: builder.admins.clone(),

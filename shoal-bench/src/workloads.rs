@@ -27,6 +27,7 @@
 pub mod cluster_background;
 pub mod cluster_migration;
 pub mod cluster_rebalance;
+pub mod cluster_rehome;
 pub mod cluster_catchup;
 pub mod cluster_failover;
 pub mod cluster_hop;
@@ -199,6 +200,14 @@ pub fn all() -> Vec<Box<dyn Workload>> {
     // nowhere to go ([F46](../../docs/src/features/capacity-rebalancing.md))
     built.extend(
         cluster_rebalance::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    // the rehome arm, appended after the rebalance arms: the one node cluster arm seeded at
+    // twelve executors and measured at eight, with what the start between moved
+    // ([F47](../../docs/src/features/local-rehome.md))
+    built.extend(
+        cluster_rehome::all()
             .into_iter()
             .map(|workload| Box::new(workload) as Box<dyn Workload>),
     );

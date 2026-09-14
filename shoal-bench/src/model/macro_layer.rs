@@ -383,6 +383,13 @@ pub struct ClusterFacts {
     /// ([C10](../../../docs/src/distributed/performance.md), Q7, Q8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebalance: Option<RebalanceFacts>,
+    /// What the rehome the restart ran moved, on an arm that restarts at another core count
+    ///
+    /// Absent before [F47](../../../docs/src/features/local-rehome.md) and on every arm whose
+    /// server keeps its count. The counts are the executor's own report, and `millis` is how
+    /// long the start was held for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rehome: Option<RehomeFacts>,
 }
 
 /// A plan run in the background of a measured phase, and what the client saw across it
@@ -425,6 +432,37 @@ pub struct RebalanceFacts {
     /// samples: the two-times budget is `2000` here
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub p99_ratio_permille: Option<u64>,
+}
+
+/// What a rehome moved when a server restarted at another executor count, and what it cost
+///
+/// The report the pool hands out after the start, carried whole: a rehome runs before a shard
+/// starts and is outside every sample, so its cost is `millis` of start rather than a window of
+/// the client's distribution ([F47](../../../docs/src/features/local-rehome.md)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RehomeFacts {
+    /// The executor count the files were laid out for
+    pub from: u64,
+    /// The executor count they were laid out for afterwards
+    pub to: u64,
+    /// How many tablets changed executor, on a standalone node
+    pub tablets_moved: u64,
+    /// How many slots changed executor, on a cluster node
+    pub slots_moved: u64,
+    /// How many tablet groups' logs were moved
+    pub groups: u64,
+    /// How many archived records were copied
+    pub records: u64,
+    /// How many bytes of archived records were copied
+    pub bytes: u64,
+    /// How many partitions the folds wrote out of intent logs
+    pub folded: u64,
+    /// How many partial snapshot installs were dropped
+    pub installs_dropped: u64,
+    /// How many steps were begun again by a resumed rehome; zero on an uninterrupted one
+    pub steps_redone: u64,
+    /// How long the rehome held the start, in milliseconds
+    pub millis: u64,
 }
 
 /// A move run in the background of a measured phase, and what the client saw across it

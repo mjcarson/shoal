@@ -163,8 +163,9 @@ means the memory limit does not bound an ephemeral table — see *Limitations*.
 - **A storage directory is still required.** `ShoalPool::start` claims one with
   `StorageMeta::claim` before any shard is spawned (`shoal-core/src/server.rs:87`), whatever the
   tables are made of. A database of nothing but ephemeral tables still needs a valid, writable
-  `storage.default.filesystem` path, and will still refuse to start if that directory was written
-  by a different shard count.
+  `storage.default.filesystem` path, and ~~will still refuse to start if that directory was written
+  by a different shard count~~ since [F47](local-rehome.md) will still rehome that
+  directory at a changed core count, though an ephemeral table has nothing in it to move.
 - **No `stage-profile` durability phases.** `NoStorage` reports `StageDurability::None` and fills
   in no durability stages, which is correct — the query never touched a log — but it means a stage
   report over an ephemeral workload has fewer phases than one over a persistent workload, rather

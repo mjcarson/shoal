@@ -408,6 +408,20 @@ where
     /// The names of every persistent table, whose storage a configuration can set
     fn persistent_tables() -> Vec<&'static str>;
 
+    /// Fold a shard's intent logs of a table into its archives, with no table built
+    ///
+    /// The rehome's first step on a standalone node
+    /// ([F47](../../../docs/src/features/local-rehome.md)); an ephemeral table folds nothing.
+    /// Returns how many partitions were written.
+    ///
+    /// # Arguments
+    ///
+    /// * `shard_name` - The name of the shard whose logs are folded
+    /// * `table` - The table
+    /// * `conf` - The Shoal config
+    #[allow(async_fn_in_trait)]
+    async fn fold_intents(shard_name: &str, table: Self::TableNames, conf: &Conf) -> Result<u64, ServerError>;
+
     /// Shutdown this table and flush any data to disk if needed
     #[allow(async_fn_in_trait)]
     async fn shutdown(self) -> Result<(), ServerError>;

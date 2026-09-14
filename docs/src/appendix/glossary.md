@@ -228,8 +228,46 @@ is *not* a throughput figure. Contrast **Batch timing**.
 
 **Shard** — One glommio executor pinned to one core, owning a slice of every table, its own
 intent logs, archives, and background tasks. Named `Shard-N`, where N comes from a startup
-counter, not the core id. Shard names become filenames, which is why shard count is part of
-the on-disk format.
+counter, not the core id. Shard names become filenames, ~~which is why shard count is part of
+the on-disk format~~ which is why the *executor* is part of the on-disk format and why changing
+the core count is a rehome rather than a restart ([F47](../features/local-rehome.md)). Since
+F47 the word covers two things a cluster node tells apart: the **executor**, one per core, that
+owns the files, and the **slot**, the shard a peer names, which the executor hosts. On a
+standalone node they are the same thing.
+
+**Slot** — The shard a cluster node's peers know it by: the `shards` in its member record, the
+shard in every `ShardAddr` the placement rule mints for it, and the rule's modulus
+`(t / N) % slots`. Claimed once at the first claim of the directory (`cluster.slots`, one per
+core by default), written into the marker's `shards`, and never moved, since every group
+identity on every peer is hashed from it. Which executor hosts a slot is the **hosting**'s to
+say ([F47](../features/local-rehome.md)).
+
+**Executor** — One glommio thread on one core, `resources.cores` of them; what the files are
+named by and what a slot is hosted on. `physical` in the marker and the member record is how
+many a node runs. Before [F47](../features/local-rehome.md) the word was interchangeable with
+**shard**; it is not now.
+
+**Hosting** — `shoal-hosting.json`, the node-local table saying which executor hosts each slot
+and owns each tablet. Absent it is the identity - slot `n` and tablet `t % n` on executor `n`,
+the ring of old - and a rehome deals it deterministically to the least loaded executor on a
+shrink and from the most loaded on a growth. Read by the rings, the groups and the listener's
+dispatch, and by no peer ([F47](../features/local-rehome.md)).
+
+**Rehome** — Moving a node's files between executor counts: the startup executor that runs when
+`resources.cores` differs from the count the files are laid out on, before any shard starts,
+folding a standalone source's intent logs into its archives, copying the moving archived
+records into a fresh archive on each destination, moving the moving tablet groups' log entries,
+votes, commits, purge points, checkpoints, sidecars and markers, reclaiming the source and
+finalizing the hosting and the marker. Not a migration between nodes, which is a **move**
+([F45](../features/replica-migration.md)); not a change of slots, which is a `Replace`
+([F47](../features/local-rehome.md)).
+
+**Manifest** (rehome) — `shoal-rehome.json`: the plan a rehome runs under - the hosting before
+and after, every step in order, the report so far - written whole before the first file moves
+and rewritten whole after every step is durable, so a crash at any point is resumed at exactly
+one step by the next start at the same count and refused by name by any other. Not the
+snapshot manifest [F43](../features/node-recovery.md) sends with a stream, which names a file's
+boundary and checksum.
 
 **SHQL** — Shoal Query Language. A small `SELECT`-only parser: `SELECT <*|projection> FROM t
 WHERE f = v [AND ...] [LIMIT n]`. Equality and `IN` on any field, plus `<`, `<=`, `>`, `>=` on a sort key;
@@ -306,7 +344,7 @@ than mistaking it for the end of the log. See
 | Node | A machine or process in a cluster | ~~Unbuilt.~~ One Shoal process with a `NodeId` and a storage directory ([C1](../distributed/node-identity.md)); since [F37](../features/node-identity-control-plane.md) every process has one, minted the first time its directory is claimed |
 | Node id | A hostname or an index | A random uuid minted once per storage directory, kept in the marker, never derived from an address ([F37](../features/node-identity-control-plane.md)) |
 | Cluster id | A cluster name | A random uuid minted once, at the one explicit bootstrap, and adopted by every joiner; a directory naming another one is refused ([F37](../features/node-identity-control-plane.md)) |
-| Marker | A lock file | `shoal-meta.json`: format, shard count, node id, cluster id, shard layout, last observed topology version, and since [F39](../features/membership.md) a `mode` - `standalone`, `cluster` or `joining` - and an `incarnation`, at format 3; format 2 is read and rewritten. ~~Only the last field is ever rewritten~~ The topology, the incarnation and a joiner's one-time cluster are the fields that move ([Resolved #45](resolved/storage-marker-format.md), [F37](../features/node-identity-control-plane.md)) |
+| Marker | A lock file | `shoal-meta.json`: format, shard count - a cluster node's slots since [F47](../features/local-rehome.md), beside an optional `physical` for the executors the files are on - node id, cluster id, shard layout, last observed topology version, and since [F39](../features/membership.md) a `mode` - `standalone`, `cluster` or `joining` - and an `incarnation`, at format 3; format 2 is read and rewritten. ~~Only the last field is ever rewritten~~ The topology, the incarnation and a joiner's one-time cluster are the fields that move ([Resolved #45](resolved/storage-marker-format.md), [F37](../features/node-identity-control-plane.md)) |
 | Replica set | The copies of a piece of data | ~~Unbuilt.~~ The `min(RF, N)` shards on distinct nodes holding a tablet - `placement[(t + k) % N]`, each on shard `(t / N) % shards` - derived from the map by one rule rather than stored per tablet ([C4](../distributed/tablet-map.md), [F40](../features/replication.md)) |
 | Tablet group | A Raft group | One `openraft` group per table and distinct replica set, identified by `GroupId::of(table, members)`, hosted by the shard each member names; every tablet whose replicas are that set is served by it, so a placement of `N` nodes of `S` shards has `N × S` groups a table ([F40](../features/replication.md)) |
 | Shard address | A host and port | `ShardAddr { node, shard }`, eighteen bytes: what a group's members are and what its log ids and votes name ([F40](../features/replication.md)) |
@@ -333,7 +371,7 @@ than mistaking it for the end of the log. See
 | Tombstone | — | A removed member's identity in the control state, committed before the member leaves the control group and refused at every door - observe, admit, its report, the join - at any incarnation; the node stops with `ShoalError::Removed` when it learns of it ([F46](../features/capacity-rebalancing.md)) |
 | Disk reserve | — | `cluster.migration.disk_reserve`: the bytes a node keeps free above what a snapshot stream would land, checked by the planner against the reported free bytes and by the receiver against its own before it accepts the begin ([F46](../features/capacity-rebalancing.md)) |
 | Stream budget | — | `cluster.migration.stream_bytes_per_sec`, one token bucket per sending node every stream draws on, and `concurrent_streams`, the most one shard assembles at once, the rest refused at their begin ([F46](../features/capacity-rebalancing.md)) |
-| Weight | — | `cluster.weight`, a node's share of the cluster's bytes against the others', defaulting to its shard count; a rebalance's target is the weighted share water-filled to what a member can hold ([F46](../features/capacity-rebalancing.md)) |
+| Weight | — | `cluster.weight`, a node's share of the cluster's bytes against the others', defaulting to its ~~shard count~~ executor count since [F47](../features/local-rehome.md); a rebalance's target is the weighted share water-filled to what a member can hold ([F46](../features/capacity-rebalancing.md)) |
 | Move | Relocation | The admin operation `Move { tablet, from, to }`: the replica set holding the tablet - every table's group over it - with one member replaced by another in place, driven through learner, catch-up, the joint transition, activation, publication and retirement, every phase committed as `MoveProgress` and readable through `MoveStatus` ([F45](../features/replica-migration.md)) |
 | Retry window | — | `cluster.replication.retry_window`: how long after a write's time-ordered identity was minted a retry of it is still answered its first result; older than that, or older than the newest identity the group has forgotten, is `IdentityExpired` before it is proposed ([F45](../features/replica-migration.md)) |
 | Repair | A fix | The admin operation `Repair { table, tablet, mode, source, release }`: a record whose groups the placement derives, driven by each group's leader - scrub, judge, quarantine, and in repair mode install from the leader's cut past the target's held checkpoint by restarting the target's group, verify and lift - every phase committed as `RepairProgress` and readable through `RepairStatus`; `verify` stops at the judgement, `source` names the trusted copy, and a split no majority can judge stops `Unresolved` with the digests as evidence ([F44](../features/repair.md)) |

@@ -784,8 +784,12 @@ impl ArchiveMap {
     ///
     /// * `id` - The id of the archive we are removing
     pub async fn remove_archive(&self, id: &Uuid) -> Result<(), ServerError> {
-        // remove this archive from our loaded archive file handle map
-        if let Some(removed) = self.loaded_archives.borrow_mut().remove(id) {
+        // take this archive's handle out of the cache first, so the borrow ends before the
+        // close is awaited: a read landing on this executor meanwhile borrows the same cache,
+        // and a borrow held across the await panicked it
+        // ([Resolved #111](../../../../../../docs/src/appendix/resolved/archive-removal-borrow.md))
+        let removed = self.loaded_archives.borrow_mut().remove(id);
+        if let Some(removed) = removed {
             removed.close().await?;
         }
         // its format goes with its handle
@@ -964,6 +968,56 @@ mod tests {
             assert!(!loaded.to_archive.contains_key(&stale.key));
             // and our logged entry should still be there
             assert!(loaded.to_archive.contains_key(&7));
+        });
+    }
+
+    /// Removing an archive does not hold the handle map across the close, so a read that lands
+    /// while the handle is closing is served rather than panicking the shard
+    ///
+    /// Two archives are open. One task removes the first, whose close is an io_uring operation
+    /// that suspends it; a second task reads the other through the handle cache meanwhile.
+    /// Before [item 111](../../../../../../docs/src/appendix/resolved/archive-removal-borrow.md)
+    /// the removal's `borrow_mut` lived across the await and the read's `borrow` panicked with
+    /// "already mutably borrowed", taking the executor with it.
+    #[test]
+    fn removing_an_archive_does_not_hold_the_handle_map_across_the_close() {
+        use super::super::conf::FileSystemTableConf;
+        use super::ArchiveMap;
+        use futures::AsyncWriteExt as _;
+        use std::rc::Rc;
+        LocalExecutor::default().run(async {
+            // a table's map under a directory of its own
+            let temp_dir = test_dir();
+            let conf = FileSystemTableConf::builder()
+                .latency_sensitive(super::super::conf::FileSystemLatencyWriterConf::builder().path(temp_dir.path()))
+                .throughput_sensitive(super::super::conf::FileSystemThroughputWriterConf::builder().path(temp_dir.path()));
+            conf.setup_paths("T").await.expect("paths");
+            let map = Rc::new(ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map"));
+            // two archives, both open in the handle cache
+            let first = *map.active.borrow();
+            let mut writer = map.get_active_writer().await.expect("a writer");
+            writer.write_all(b"first").await.expect("a write");
+            writer.close().await.expect("a close");
+            let second = Uuid::new_v4();
+            *map.active.borrow_mut() = second;
+            let mut writer = map.get_active_writer().await.expect("a writer");
+            writer.write_all(b"second").await.expect("a write");
+            writer.close().await.expect("a close");
+            assert!(map.loaded_archives.borrow().contains_key(&first));
+            assert!(map.loaded_archives.borrow().contains_key(&second));
+            // the removal suspends at the close; the read lands while it is suspended
+            let remover = map.clone();
+            let removing = glommio::spawn_local(async move { remover.remove_archive(&first).await });
+            let reader = map.clone();
+            let reading = glommio::spawn_local(async move { reader.get_archive(&second).await });
+            removing.await.expect("the removal failed");
+            let handle = reading.await.expect("the read failed while an archive was being removed");
+            handle.close().await.expect("a close");
+            // the removed archive is gone from the cache and the other is still there
+            assert!(!map.loaded_archives.borrow().contains_key(&first));
+            assert!(map.loaded_archives.borrow().contains_key(&second));
+            assert!(!map.all_archives.borrow().contains(&first));
+            map.close_all().await.expect("a close");
         });
     }
 }

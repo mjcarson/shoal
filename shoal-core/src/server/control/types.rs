@@ -83,8 +83,16 @@ pub struct MemberRecord {
     pub control_core: usize,
     /// Whether that cpu's physical core is shared with a shard
     pub control_shared: bool,
-    /// How many shards it runs
+    /// How many slots it has: the shard in every address the rule mints for it, and the modulus
+    /// of the rule, claimed once ([F47](../../../../docs/src/features/local-rehome.md))
     pub shards: usize,
+    /// How many executors it runs, if that differs from its slots; zero means the slots
+    ///
+    /// The node's own business as far as placement goes - a slot is what an address names -
+    /// but what its weight defaults to, since the cores are what do the work
+    /// ([F47](../../../../docs/src/features/local-rehome.md)).
+    #[serde(default)]
+    pub physical: usize,
     /// Which start of the node this record was written by
     ///
     /// From the node's storage marker, bumped on every start. The cluster's fencing rule is
@@ -103,13 +111,26 @@ pub struct MemberRecord {
 }
 
 impl MemberRecord {
-    /// The weight the planner uses: the configured one, or the shard count
+    /// The weight the planner uses: the configured one, or the executor count
+    ///
+    /// The executors when the record says how many, else the slots, which is what every record
+    /// before F47 meant by `shards`.
     #[must_use]
     pub fn effective_weight(&self) -> u32 {
         if self.weight > 0 {
             self.weight
         } else {
-            u32::try_from(self.shards).unwrap_or(u32::MAX).max(1)
+            u32::try_from(self.executors()).unwrap_or(u32::MAX).max(1)
+        }
+    }
+
+    /// How many executors this member runs: `physical` when recorded, else its slots
+    #[must_use]
+    pub fn executors(&self) -> usize {
+        if self.physical > 0 {
+            self.physical
+        } else {
+            self.shards
         }
     }
 }
@@ -2327,6 +2348,7 @@ mod tests {
             control_core: 0,
             control_shared: false,
             shards: 2,
+            physical: 0,
             incarnation: 1,
             weight: 0,
         }

@@ -87,8 +87,11 @@ and a `Decommission` with no spare that stays blocked - three moves per member a
 the nine sets fit the run. Each carries `cluster.rebalance`: the kind, the marks, the steps
 and what they moved, the blocked reason, the windows and the series, and `p99_ratio_permille`,
 which is the number M9b's two-times budget is judged on; the remove arm carries `cluster.fault`
-beside it with no restart mark. The open-loop schedule is not built; the arms are closed loops
-at one depth.
+beside it with no restart mark. Since [F47](../features/local-rehome.md) one arm prices a
+node's core count changing: `macro/rehome/shrink`, the one node cluster arm seeded at twelve
+executors and measured at eight, whose `cluster.rehome` is the pool's report of what the start
+between moved and `millis` how long it was held for it. The open-loop schedule is not built; the
+arms are closed loops at one depth.
 
 ## The design
 
@@ -179,6 +182,7 @@ expanded only into feasible combinations, not a Cartesian product that silently 
 | `macro/cluster/failover` | Outage and recovery under a specified fault schedule. `kill` since [F42](../features/primary-failover.md), on the `replication/` placement at a factor of three; a pause and a partition are the fixture's |
 | `macro/cluster/catchup/{log,snapshot}` | Time/bytes to catch up ~~at several foreground mutation rates~~ at the reference mixture. Both since [F43](../features/node-recovery.md), the `failover/kill` arm with the retention at the defaults and shortened past the absence; the mutation rate sweep is filed with the open-loop schedule |
 | `macro/cluster/rebalance/{add,decommission,remove,capacity_blocked}` | Transition progress and supported load envelope |
+| `macro/rehome/shrink` | The startup cost of changing a node's core count. Since [F47](../features/local-rehome.md), the `nodes/1` arm restarted from twelve executors to eight; a growth arm is not built |
 | `macro/cluster/background/{repair,backup}` | Foreground interference, integrity work and restore preparation. `repair` since [F44](../features/repair.md), the `failover/kill` arm with a verify of the table in the background and nothing killed; `backup` is M10's |
 
 Extend ScaleFacts with separate read/write/durability policies, node count, desired/active RF,

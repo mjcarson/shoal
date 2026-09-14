@@ -13,9 +13,9 @@
 //! format 2. A format 1 marker - the shape before any of that existed - is refused rather than
 //! upgraded, with an error naming the format and the fact that no migration tool exists yet;
 //! [C1](../../../docs/src/distributed/node-identity.md) permits that for a development build and
-//! M10 owns the real path. There is deliberately no migration of the shard count either. This
+//! M10 owns the real path. ~~There is deliberately no migration of the shard count either. This
 //! turns a silent loss into a refusal to start; moving data between shard counts needs tablet
-//! migration, which does not exist yet.
+//! migration, which does not exist yet.~~ The shard count moves since F47; see below.
 //!
 //! Since [F39](../../../docs/src/features/membership.md) it is format 3: the same fields plus
 //! the `mode` the directory was claimed in - standalone, a cluster member, or a joiner that has
@@ -28,13 +28,26 @@
 //! and the first rewrite writes it as 3; nothing about it has to be invented, which is why this
 //! is an upgrade where format 1 was a refusal.
 //!
-//! **Three fields are ever rewritten in place: `topology`, `incarnation`, and - once, for a
-//! joiner - `cluster`.** The identities, the shard count and the layout are written once, at
-//! the claim, and never again; a joiner's cluster is filled in exactly once, when the cluster
-//! it dialled proves its identity, and `mode` moves from joining to cluster with it. Every
-//! write of the file - the claim, each start's incarnation bump, each topology observation and
-//! the adoption - goes through the same temp file, fsync, rename and directory fsync, so a crash
-//! at any point leaves either the old marker or the new one and never a torn one.
+//! Since [F47](../../../docs/src/features/local-rehome.md) the shard count is two numbers. ~~A
+//! directory reopened with a different `resources.cores` is refused (`ShardCountMismatch`)~~
+//! `shards` is the count the directory was laid out as - on a cluster node the *slots*, the
+//! shard every peer records for this node and every identity was minted from - and `physical`
+//! is how many executors the files are laid out on now. A reopen at another core count is a
+//! *pending rehome*, not a refusal: the claim reports it and the pool moves the files before a
+//! shard starts ([`super::rehome`]). What is still refused by name is a change to the slots
+//! (`SlotsFixed`), more cores than slots on a cluster node (`CoresExceedSlots`), and a start
+//! under a third count while a rehome to a second is on disk (`RehomeInProgress`). The marker
+//! stays at format 3: `physical` is optional and absent means `shards`, which is what every
+//! marker written before this meant.
+//!
+//! **Four fields are ever rewritten in place: `topology`, `incarnation`, `physical` - by the
+//! rehome's finalize - and, once, for a joiner, `cluster`.** The identities, the shard count and
+//! the layout are written once, at the claim, and never again; a joiner's cluster is filled in
+//! exactly once, when the cluster it dialled proves its identity, and `mode` moves from joining
+//! to cluster with it. Every write of the file - the claim, each start's incarnation bump, each
+//! topology observation, the adoption and the finalize - goes through the same temp file, fsync,
+//! rename and directory fsync, so a crash at any point leaves either the old marker or the new
+//! one and never a torn one.
 
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -71,7 +84,10 @@ pub const SUPPORTED_FORMATS: &[u32] = &[2, META_FORMAT];
 /// shard directories under it, each table with an intent log of its own. ~~A rehome that changed
 /// how tablets map to shards would be layout 2~~ Layout 2 is a cluster node's
 /// ([`CLUSTER_LAYOUT`]), and a marker naming a layout this build does not lay data out in is
-/// refused the same way a format is.
+/// refused the same way a format is. A rehome ([F47](../../../docs/src/features/local-rehome.md))
+/// does not bump the layout: the files are the same files on more or fewer executors, and which
+/// executor owns a tablet is the hosting table's to say ([`super::hosting::Hosting`]), not the
+/// layout's.
 pub const SHARD_LAYOUT: u32 = 1;
 
 /// The version of the shard layout a cluster node's data is under
@@ -113,8 +129,19 @@ const LOCK_FILE: &str = "shoal.lock";
 pub struct StorageMeta {
     /// The version of this metadata file's own format
     pub format: u32,
-    /// The number of shards the data in this directory was written by
+    /// The number of shards the data in this directory was laid out as
+    ///
+    /// On a cluster node this is the slot count: the shard every peer records for this node,
+    /// the modulus of the placement rule and the shard in every address, minted once at the
+    /// claim and never moved ([F47](../../../docs/src/features/local-rehome.md)). On a
+    /// standalone node it is the count of the first claim, kept as the layout's origin.
     pub shards: usize,
+    /// The number of executors the files are laid out on now, if it has ever differed
+    ///
+    /// Absent means `shards`, which is what every marker before F47 meant. Rewritten by the
+    /// rehome's finalize and by nothing else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical: Option<usize>,
     /// The node this directory belongs to, minted when the directory was first claimed
     pub node: NodeId,
     /// The cluster this directory was bootstrapped into, or none for a standalone node
@@ -180,6 +207,18 @@ pub enum ClusterIntent {
     Join,
 }
 
+/// A rehome the claim found waiting: the files are laid out on one count and the node runs another
+///
+/// Reported by [`StorageMeta::claim`] rather than refused; the pool runs the rehome
+/// ([`super::rehome`]) before any shard starts ([F47](../../../docs/src/features/local-rehome.md)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingRehome {
+    /// The executor count the files are laid out on
+    pub from: usize,
+    /// The executor count the node runs
+    pub to: usize,
+}
+
 /// What a storage directory says about who it belongs to
 ///
 /// The part of the marker that never changes while a server runs, read once at the claim and
@@ -189,6 +228,16 @@ pub enum ClusterIntent {
 pub struct Identity {
     /// The node this directory belongs to
     pub node: NodeId,
+    /// How many slots this node has: the shard count every peer records for it
+    ///
+    /// The marker's `shards` on a cluster node. On a standalone node the slots are the
+    /// executors, since nobody records anything for it, and the marker's `shards` is only where
+    /// the layout began ([F47](../../../docs/src/features/local-rehome.md)).
+    pub slots: usize,
+    /// How many executors this node runs: the cores the claim was made with
+    pub physical: usize,
+    /// The rehome the files need before a shard starts, if the executor count changed
+    pub rehome: Option<PendingRehome>,
     /// The cluster it was bootstrapped into, or none for a standalone node
     pub cluster: Option<ClusterId>,
     /// The version of the shard layout the data is under
@@ -319,6 +368,7 @@ impl StorageMeta {
         StorageMeta {
             format: META_FORMAT,
             shards,
+            physical: None,
             node,
             cluster,
             // a cluster member lays its data out under a shared WAL, a standalone node under
@@ -448,33 +498,77 @@ impl StorageMeta {
     /// the incarnation and rewrites the marker before the identity is handed out, so a start
     /// that is fenced by a later one has already recorded that it happened.
     ///
+    /// A directory reopened at another core count is not refused since
+    /// [F47](../../../docs/src/features/local-rehome.md): the claim reports a pending rehome
+    /// and the pool moves the files before a shard starts. What is refused is a change to the
+    /// slots a cluster node was claimed with, more cores than slots, and a start under a third
+    /// count while a rehome towards a second is on disk.
+    ///
     /// # Arguments
     ///
     /// * `root` - The root of the storage directory
-    /// * `shards` - The number of shards about to be started
+    /// * `cores` - The number of executors about to be started
+    /// * `slots` - The slots a cluster node asks to claim, or none for one per core
     /// * `intent` - Whether the server is standalone, a cluster's creator or a joiner
     ///
     /// # Errors
     ///
     /// This will fail if the directory was marked in a format we cannot read, if it was
-    /// written by a different number of shards or under a different layout, if it belongs to a
-    /// cluster and the configuration is standalone or the reverse, if it is a joiner's that was
-    /// never admitted and the configuration is anything but a joiner's, or if the metadata
-    /// cannot be read or written.
+    /// written under a different layout, if it belongs to a cluster and the configuration is
+    /// standalone or the reverse, if it is a joiner's that was never admitted and the
+    /// configuration is anything but a joiner's, if its slots are changed or exceeded, if a
+    /// rehome towards another count is in progress, or if the metadata cannot be read or written.
     #[instrument(name = "StorageMeta::claim", skip_all, err(Debug))]
-    pub fn claim(root: &Path, shards: usize, intent: ClusterIntent) -> Result<Identity, ServerError> {
+    pub fn claim(
+        root: &Path,
+        cores: usize,
+        slots: Option<usize>,
+        intent: ClusterIntent,
+    ) -> Result<Identity, ServerError> {
         // read whatever metadata this directory already carries, format settled first
         match Self::read(root)? {
             // this directory has been written before, so it has a shard count and an identity
             // to honour
             Some(mut found) => {
-                // a different shard count would look for every partition in the wrong place
-                if found.shards != shards {
-                    return Err(ServerError::Shoal(ShoalError::ShardCountMismatch {
-                        found: found.shards,
-                        expected: shards,
-                    }));
+                // a cluster node's slots are claimed once: every peer's identities are keyed by
+                // them, so a configuration naming another count is refused rather than obeyed
+                if intent != ClusterIntent::Standalone {
+                    if let Some(configured) = slots {
+                        if configured != found.shards {
+                            return Err(ServerError::Shoal(ShoalError::SlotsFixed {
+                                claimed: found.shards,
+                                configured,
+                            }));
+                        }
+                    }
+                    // and an executor with no slot to host would own nothing
+                    if cores > found.shards {
+                        return Err(ServerError::Shoal(ShoalError::CoresExceedSlots {
+                            cores,
+                            slots: found.shards,
+                        }));
+                    }
                 }
+                // a rehome on disk is resumed by the count it was planned for and refused by
+                // any other; without one, a changed count is a rehome to plan
+                let rehome = match super::rehome::manifest::Manifest::read(root)? {
+                    Some(manifest) if manifest.to != cores => {
+                        return Err(ServerError::Shoal(ShoalError::RehomeInProgress {
+                            from: manifest.from,
+                            to: manifest.to,
+                            configured: cores,
+                        }));
+                    }
+                    Some(manifest) => Some(PendingRehome {
+                        from: manifest.from,
+                        to: cores,
+                    }),
+                    None if found.physical() != cores => Some(PendingRehome {
+                        from: found.physical(),
+                        to: cores,
+                    }),
+                    None => None,
+                };
                 // the mode the directory was claimed in has to be the mode it is reopened in
                 match (intent, found.mode) {
                     // a standalone directory reopened standalone, the ordinary restart
@@ -527,8 +621,25 @@ impl StorageMeta {
                 // identity is handed out: a start that is later fenced has already been counted
                 found.incarnation += 1;
                 found.write(root)?;
+                if let Some(pending) = &rehome {
+                    event!(
+                        Level::INFO,
+                        msg = "the executor count changed; the files will be rehomed before a shard starts",
+                        from = pending.from,
+                        to = pending.to,
+                        slots = found.shards,
+                    );
+                }
                 Ok(Identity {
                     node: found.node,
+                    // a standalone node's slots are its executors: nobody records them, so
+                    // there is nothing to keep still
+                    slots: match intent {
+                        ClusterIntent::Standalone => cores,
+                        ClusterIntent::Bootstrap | ClusterIntent::Join => found.shards,
+                    },
+                    physical: cores,
+                    rehome,
                     cluster: found.cluster,
                     layout: found.layout,
                     topology_at_claim: found.topology,
@@ -539,15 +650,32 @@ impl StorageMeta {
             }
             // this directory has never been written to, so claim it for this node
             None => {
+                // the slots a cluster node claims: what it asked for, or one per core; a
+                // standalone node's slots are its cores, since nobody records them
+                let shards = match intent {
+                    ClusterIntent::Standalone => cores,
+                    ClusterIntent::Bootstrap | ClusterIntent::Join => slots.unwrap_or(cores),
+                };
+                // every executor hosts at least one slot
+                if shards < cores {
+                    return Err(ServerError::Shoal(ShoalError::SlotsBelowCores {
+                        slots: shards,
+                        cores,
+                    }));
+                }
                 // mint who this directory is going to be, and the cluster it starts if it does
                 let node = NodeId::mint();
-                let meta = match intent {
+                let mut meta = match intent {
                     ClusterIntent::Standalone => StorageMeta::new(shards, node, None),
                     ClusterIntent::Bootstrap => {
                         StorageMeta::new(shards, node, Some(ClusterId::mint()))
                     }
                     ClusterIntent::Join => StorageMeta::joining(shards, node),
                 };
+                // a node claiming headroom is laid out on fewer executors than it has slots
+                if shards != cores {
+                    meta.physical = Some(cores);
+                }
                 // write it before any shard has had the chance to store anything
                 meta.write(root)?;
                 // say what we claimed, since it is what a later start is held to
@@ -556,12 +684,16 @@ impl StorageMeta {
                     msg = "Claimed a new storage directory",
                     path = Self::path(root).display().to_string(),
                     shards,
+                    cores,
                     node = node.to_string(),
                     cluster = meta.cluster.map(|cluster| cluster.to_string()),
                     mode = ?meta.mode,
                 );
                 Ok(Identity {
                     node,
+                    slots: shards,
+                    physical: cores,
+                    rehome: None,
                     cluster: meta.cluster,
                     layout: meta.layout,
                     topology_at_claim: 0,
@@ -571,6 +703,41 @@ impl StorageMeta {
                 })
             }
         }
+    }
+
+    /// How many executors the files are laid out on
+    ///
+    /// The `physical` field, or `shards` for a marker that never recorded one.
+    #[must_use]
+    pub fn physical(&self) -> usize {
+        self.physical.unwrap_or(self.shards)
+    }
+
+    /// Record that the files are laid out on another executor count: the rehome's finalize
+    ///
+    /// The one rewrite `physical` sees. Everything else is carried across unchanged
+    /// ([F47](../../../docs/src/features/local-rehome.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `root` - The root of the storage directory
+    /// * `physical` - The executor count the files are on now
+    ///
+    /// # Errors
+    ///
+    /// Fails if there is no marker, or if the file cannot be written.
+    #[instrument(name = "StorageMeta::finish_rehome", skip_all, err(Debug))]
+    pub fn finish_rehome(root: &Path, physical: usize) -> Result<(), ServerError> {
+        // the marker has to exist already: a rehome is something a claimed node does
+        let Some(mut found) = Self::read(root)? else {
+            return Err(ServerError::IO(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no storage marker to record a rehome in",
+            )));
+        };
+        // the same count as the layout's origin needs no field at all
+        found.physical = (physical != found.shards).then_some(physical);
+        found.write(root)
     }
 
     /// Fill in the cluster a joiner has been admitted to, once
@@ -672,7 +839,7 @@ mod tests {
         // get a directory nothing has written to
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
         // claiming it has to succeed, and mint an identity
-        let identity = StorageMeta::claim(dir.path(), 4, ClusterIntent::Standalone)
+        let identity = StorageMeta::claim(dir.path(), 4, None, ClusterIntent::Standalone)
             .expect("failed to claim a new directory");
         assert!(identity.fresh);
         assert_eq!(identity.cluster, None);
@@ -695,16 +862,16 @@ mod tests {
         // get a directory nothing has written to
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
         // claim it for some number of shards
-        let first = StorageMeta::claim(dir.path(), 4, ClusterIntent::Standalone)
+        let first = StorageMeta::claim(dir.path(), 4, None, ClusterIntent::Standalone)
             .expect("failed to claim a new directory");
         // reopening it with that same count is the ordinary restart, and the node is the same
-        let again = StorageMeta::claim(dir.path(), 4, ClusterIntent::Standalone)
+        let again = StorageMeta::claim(dir.path(), 4, None, ClusterIntent::Standalone)
             .expect("failed to reopen with the same shard count");
         assert_eq!(again.node, first.node);
         assert!(!again.fresh);
         // and each reopen is one more start of the directory, on disk before it is handed out
         assert_eq!(again.incarnation, 2);
-        let third = StorageMeta::claim(dir.path(), 4, ClusterIntent::Standalone)
+        let third = StorageMeta::claim(dir.path(), 4, None, ClusterIntent::Standalone)
             .expect("failed to reopen a third time");
         assert_eq!(third.incarnation, 3);
         let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
@@ -730,7 +897,7 @@ mod tests {
         assert_eq!(found.incarnation, 0);
         assert_eq!(found.format, 3);
         // claimed, it is that member's first counted start, and the file is now format 3
-        let identity = StorageMeta::claim(dir.path(), 4, ClusterIntent::Bootstrap)
+        let identity = StorageMeta::claim(dir.path(), 4, None, ClusterIntent::Bootstrap)
             .expect("a format 2 marker was refused");
         assert_eq!(identity.node, node);
         assert_eq!(identity.cluster, Some(cluster));
@@ -748,7 +915,7 @@ mod tests {
              \"layout\": 1, \"topology\": 0}}"
         );
         std::fs::write(StorageMeta::path(dir.path()), raw).expect("failed to stage our marker");
-        let identity = StorageMeta::claim(dir.path(), 4, ClusterIntent::Standalone)
+        let identity = StorageMeta::claim(dir.path(), 4, None, ClusterIntent::Standalone)
             .expect("a standalone format 2 marker was refused");
         assert_eq!(identity.mode, MarkerMode::Standalone);
         assert_eq!(identity.incarnation, 1);
@@ -759,27 +926,27 @@ mod tests {
     fn a_joiner_adopts_its_cluster_once() {
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
         // the claim mints an identity that belongs to nothing yet
-        let joiner = StorageMeta::claim(dir.path(), 2, ClusterIntent::Join)
+        let joiner = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Join)
             .expect("failed to claim a joiner's directory");
         assert!(joiner.fresh);
         assert_eq!(joiner.cluster, None);
         assert_eq!(joiner.mode, MarkerMode::Joining);
         assert_eq!(joiner.incarnation, 1);
         // a joiner that never finished can be started as a joiner again, as the same node
-        let again = StorageMeta::claim(dir.path(), 2, ClusterIntent::Join)
+        let again = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Join)
             .expect("failed to resume a join");
         assert_eq!(again.node, joiner.node);
         assert_eq!(again.mode, MarkerMode::Joining);
         assert_eq!(again.incarnation, 2);
         // but not as a cluster's creator, and not standalone
-        let error = StorageMeta::claim(dir.path(), 2, ClusterIntent::Bootstrap)
+        let error = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Bootstrap)
             .expect_err("a joiner's directory bootstrapped a cluster");
         assert!(matches!(
             error,
             ServerError::Shoal(ShoalError::JoiningDirectoryBootstrapped { node }) if node == joiner.node
         ));
         assert!(format!("{error}").contains("second cluster"), "{error}");
-        let error = StorageMeta::claim(dir.path(), 2, ClusterIntent::Standalone)
+        let error = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Standalone)
             .expect_err("a joiner's directory started standalone");
         assert!(matches!(
             error,
@@ -797,19 +964,19 @@ mod tests {
             .expect_err("a member adopted a second cluster");
         assert!(matches!(error, ServerError::Shoal(ShoalError::MarkerNotJoining { .. })));
         // and from then on it is a member, restarted with seeds or with bootstrap alike
-        let member = StorageMeta::claim(dir.path(), 2, ClusterIntent::Join)
+        let member = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Join)
             .expect("failed to restart a joined member with its seeds");
         assert_eq!(member.cluster, Some(cluster));
         assert_eq!(member.mode, MarkerMode::Cluster);
         assert_eq!(member.incarnation, 3);
-        StorageMeta::claim(dir.path(), 2, ClusterIntent::Bootstrap)
+        StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Bootstrap)
             .expect("failed to restart a joined member as a bootstrapper");
         // a standalone directory never adopts one either
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
-        StorageMeta::claim(dir.path(), 2, ClusterIntent::Standalone).expect("failed to claim");
+        StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Standalone).expect("failed to claim");
         assert!(StorageMeta::adopt_cluster(dir.path(), cluster).is_err());
         // and a standalone directory refuses a joiner's configuration, naming the migration
-        let error = StorageMeta::claim(dir.path(), 2, ClusterIntent::Join)
+        let error = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Join)
             .expect_err("a standalone directory joined a cluster");
         assert!(matches!(
             error,
@@ -834,7 +1001,7 @@ mod tests {
         )
         .expect("failed to stage our marker");
         // reading it has to refuse, and say which format it could not read and which it can
-        let error = StorageMeta::claim(dir.path(), 4, ClusterIntent::Standalone)
+        let error = StorageMeta::claim(dir.path(), 4, None, ClusterIntent::Standalone)
             .expect_err("a format 1 marker started");
         assert!(matches!(
             error,
@@ -858,7 +1025,7 @@ mod tests {
             serde_json::to_vec_pretty(&future).expect("failed to build our marker"),
         )
         .expect("failed to stage our marker");
-        let error = StorageMeta::claim(dir.path(), 4, ClusterIntent::Standalone)
+        let error = StorageMeta::claim(dir.path(), 4, None, ClusterIntent::Standalone)
             .expect_err("an unknown marker format started");
         assert!(matches!(
             error,
@@ -866,25 +1033,132 @@ mod tests {
         ));
     }
 
-    /// A directory reopened by a different shard count is refused
+    /// A directory reopened by a different core count is a pending rehome, not a refusal
+    ///
+    /// ~~A directory reopened by a different shard count is refused~~ Since F47 the claim
+    /// reports where the files are and where they have to go, and the pool moves them before a
+    /// shard starts. The marker's `physical` moves only when the rehome finalizes, so a claim
+    /// that dies before then finds the same pending rehome again.
     #[test]
-    fn a_different_shard_count_is_refused() {
+    fn a_changed_core_count_is_a_pending_rehome() {
         // get a directory nothing has written to
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
-        // claim it for some number of shards
-        StorageMeta::claim(dir.path(), 4, ClusterIntent::Standalone)
+        // claim it for some number of cores
+        let first = StorageMeta::claim(dir.path(), 4, None, ClusterIntent::Standalone)
             .expect("failed to claim a new directory");
-        // reopening it with another count would look for data in the wrong place
-        let error = StorageMeta::claim(dir.path(), 5, ClusterIntent::Standalone)
-            .expect_err("a shard count change started");
-        // and has to say so rather than start and lose the data
+        assert_eq!(first.slots, 4);
+        assert_eq!(first.physical, 4);
+        assert_eq!(first.rehome, None);
+        // reopening it with another count is a rehome from the old count to the new
+        let again = StorageMeta::claim(dir.path(), 5, None, ClusterIntent::Standalone)
+            .expect("a changed core count was refused");
+        assert_eq!(again.node, first.node);
+        assert_eq!(again.rehome, Some(PendingRehome { from: 4, to: 5 }));
+        assert_eq!(again.physical, 5);
+        assert_eq!(again.slots, 5, "a standalone node's slots are its executors");
+        // nothing moved on disk: the marker still says four until the rehome finalizes
+        let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
+        assert_eq!(found.physical(), 4);
+        assert_eq!(found.physical, None);
+        // and a third claim at five finds the same rehome pending
+        let third = StorageMeta::claim(dir.path(), 5, None, ClusterIntent::Standalone)
+            .expect("a pending rehome was refused");
+        assert_eq!(third.rehome, Some(PendingRehome { from: 4, to: 5 }));
+        // once the rehome finalizes, five is the ordinary restart and four is a rehome back
+        StorageMeta::finish_rehome(dir.path(), 5).expect("failed to finish a rehome");
+        let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
+        assert_eq!(found.physical, Some(5));
+        assert_eq!(found.shards, 4);
+        let settled = StorageMeta::claim(dir.path(), 5, None, ClusterIntent::Standalone)
+            .expect("the finished count was refused");
+        assert_eq!(settled.rehome, None);
+        let back = StorageMeta::claim(dir.path(), 4, None, ClusterIntent::Standalone)
+            .expect("a rehome back was refused");
+        assert_eq!(back.rehome, Some(PendingRehome { from: 5, to: 4 }));
+        // a rehome back to the origin count clears the field rather than recording it
+        StorageMeta::finish_rehome(dir.path(), 4).expect("failed to finish a rehome");
+        let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
+        assert_eq!(found.physical, None);
+        // a manifest towards one count on disk refuses a start under another, by name
+        let hosting = crate::server::hosting::Hosting::identity(4);
+        let after = hosting.plan(2, false).expect("a plan");
+        let manifest = super::super::rehome::manifest::Manifest::plan(&hosting, &after, &[], false);
+        manifest.write(dir.path()).expect("a manifest");
+        let error = StorageMeta::claim(dir.path(), 3, None, ClusterIntent::Standalone)
+            .expect_err("a third count started over a rehome in progress");
         assert!(matches!(
             error,
-            ServerError::Shoal(ShoalError::ShardCountMismatch {
-                found: 4,
-                expected: 5
-            })
+            ServerError::Shoal(ShoalError::RehomeInProgress { from: 4, to: 2, configured: 3 })
         ));
+        // and resumes it under the count it was planned for
+        let resumed = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Standalone)
+            .expect("the planned count was refused");
+        assert_eq!(resumed.rehome, Some(PendingRehome { from: 4, to: 2 }));
+        // an unclaimed directory has no rehome to finish
+        let empty = tempfile::tempdir().expect("failed to build a temp dir");
+        assert!(StorageMeta::finish_rehome(empty.path(), 1).is_err());
+    }
+
+    /// A cluster node's slots are claimed once and bound the cores it may run
+    ///
+    /// The default is one slot per core; `cluster.slots` above the cores reserves headroom;
+    /// below them it is refused, and so is any later change to it and any core count past it.
+    #[test]
+    fn slots_are_claimed_once_and_bound_the_cores() {
+        // one slot per core by default
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let plain = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Bootstrap)
+            .expect("failed to bootstrap");
+        assert_eq!(plain.slots, 2);
+        assert_eq!(plain.physical, 2);
+        let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
+        assert_eq!(found.shards, 2);
+        assert_eq!(found.physical, None);
+        // headroom: four slots on two cores, recorded as laid out on two
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let roomy = StorageMeta::claim(dir.path(), 2, Some(4), ClusterIntent::Bootstrap)
+            .expect("failed to bootstrap with headroom");
+        assert_eq!(roomy.slots, 4);
+        assert_eq!(roomy.physical, 2);
+        assert_eq!(roomy.rehome, None);
+        let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
+        assert_eq!(found.shards, 4);
+        assert_eq!(found.physical, Some(2));
+        // the same slots again is the ordinary restart, and no slots at all is too
+        StorageMeta::claim(dir.path(), 2, Some(4), ClusterIntent::Bootstrap).expect("a restart");
+        StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Bootstrap).expect("a restart");
+        // other slots are refused by name
+        let error = StorageMeta::claim(dir.path(), 2, Some(3), ClusterIntent::Bootstrap)
+            .expect_err("a slot change started");
+        assert!(matches!(
+            error,
+            ServerError::Shoal(ShoalError::SlotsFixed { claimed: 4, configured: 3 })
+        ));
+        assert!(format!("{error}").contains("Replace"), "{error}");
+        // growth up to the slots is a rehome; past them a refusal naming the ceiling
+        let grown = StorageMeta::claim(dir.path(), 4, None, ClusterIntent::Bootstrap)
+            .expect("growth to the slots was refused");
+        assert_eq!(grown.rehome, Some(PendingRehome { from: 2, to: 4 }));
+        let error = StorageMeta::claim(dir.path(), 5, None, ClusterIntent::Bootstrap)
+            .expect_err("growth past the slots started");
+        assert!(matches!(
+            error,
+            ServerError::Shoal(ShoalError::CoresExceedSlots { cores: 5, slots: 4 })
+        ));
+        // fewer slots than cores is refused at the claim
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let error = StorageMeta::claim(dir.path(), 4, Some(2), ClusterIntent::Bootstrap)
+            .expect_err("fewer slots than cores were claimed");
+        assert!(matches!(
+            error,
+            ServerError::Shoal(ShoalError::SlotsBelowCores { slots: 2, cores: 4 })
+        ));
+        assert!(StorageMeta::read(dir.path()).expect("a read").is_none(), "a refused claim wrote a marker");
+        // a standalone node ignores slots: its slots are its cores
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let alone = StorageMeta::claim(dir.path(), 3, Some(8), ClusterIntent::Standalone)
+            .expect("failed to claim standalone");
+        assert_eq!(alone.slots, 3);
     }
 
     /// A bootstrap mints a cluster once, and a restart keeps it rather than minting another
@@ -892,11 +1166,11 @@ mod tests {
     fn a_bootstrap_mints_one_cluster_and_keeps_it() {
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
         // the first bootstrap creates the cluster
-        let first = StorageMeta::claim(dir.path(), 2, ClusterIntent::Bootstrap)
+        let first = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Bootstrap)
             .expect("failed to bootstrap a new directory");
         let cluster = first.cluster.expect("a bootstrap minted no cluster");
         // a restart with bootstrap still set is the same cluster and the same node
-        let again = StorageMeta::claim(dir.path(), 2, ClusterIntent::Bootstrap)
+        let again = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Bootstrap)
             .expect("failed to reopen a bootstrapped directory");
         assert_eq!(again.cluster, Some(cluster));
         assert_eq!(again.node, first.node);
@@ -908,9 +1182,9 @@ mod tests {
     fn a_mode_change_is_refused_both_ways() {
         // a cluster directory opened standalone
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
-        let bootstrapped = StorageMeta::claim(dir.path(), 2, ClusterIntent::Bootstrap)
+        let bootstrapped = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Bootstrap)
             .expect("failed to bootstrap");
-        let error = StorageMeta::claim(dir.path(), 2, ClusterIntent::Standalone)
+        let error = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Standalone)
             .expect_err("a cluster directory started standalone");
         assert!(matches!(
             error,
@@ -919,9 +1193,9 @@ mod tests {
         ));
         // a standalone directory opened as a cluster member, which names the migration path
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
-        let standalone = StorageMeta::claim(dir.path(), 2, ClusterIntent::Standalone)
+        let standalone = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Standalone)
             .expect("failed to claim");
-        let error = StorageMeta::claim(dir.path(), 2, ClusterIntent::Bootstrap)
+        let error = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Bootstrap)
             .expect_err("a standalone directory joined a cluster");
         assert!(matches!(
             error,
@@ -935,7 +1209,7 @@ mod tests {
     #[test]
     fn the_wrong_cluster_is_refused_without_a_write() {
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
-        let identity = StorageMeta::claim(dir.path(), 2, ClusterIntent::Bootstrap)
+        let identity = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Bootstrap)
             .expect("failed to bootstrap");
         let before = std::fs::read(StorageMeta::path(dir.path())).expect("a marker");
         // the right cluster is accepted
@@ -957,7 +1231,7 @@ mod tests {
         assert_eq!(before, after);
         // a standalone directory belongs to no cluster and refuses every peer
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
-        let standalone = StorageMeta::claim(dir.path(), 2, ClusterIntent::Standalone)
+        let standalone = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Standalone)
             .expect("failed to claim");
         assert!(standalone.verify_cluster(other).is_err());
     }
@@ -969,7 +1243,7 @@ mod tests {
     #[test]
     fn a_topology_observation_moves_one_field() {
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
-        let identity = StorageMeta::claim(dir.path(), 2, ClusterIntent::Bootstrap)
+        let identity = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Bootstrap)
             .expect("failed to bootstrap");
         // record a version
         StorageMeta::observe_topology(dir.path(), 3).expect("failed to observe a topology");
@@ -995,7 +1269,7 @@ mod tests {
         // the same version again is a no-op
         StorageMeta::observe_topology(dir.path(), 3).expect("a repeat observation failed");
         // and the claim that follows sees what was recorded
-        let again = StorageMeta::claim(dir.path(), 2, ClusterIntent::Bootstrap)
+        let again = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Bootstrap)
             .expect("failed to reopen");
         assert_eq!(again.topology_at_claim, 3);
         // an unclaimed directory has nothing to observe into

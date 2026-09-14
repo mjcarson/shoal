@@ -225,6 +225,26 @@ where
     for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived:
         CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
 {
+    /// Fold a shard's intent logs of this table into its archives, with no table built
+    ///
+    /// The rehome's first step ([F47](../../../../docs/src/features/local-rehome.md)): what a
+    /// start would replay and then compact, done without the replay, so a vanished executor's
+    /// data is archives and a map before it is copied.
+    ///
+    /// # Arguments
+    ///
+    /// * `shard_name` - The name of the shard whose logs are folded
+    /// * `shard_table_name` - The table, as the shard's messages name it
+    /// * `conf` - The Shoal config
+    pub async fn fold_intents(
+        shard_name: &str,
+        shard_table_name: <S::Database as ShoalDatabase>::TableNames,
+        conf: &Conf,
+    ) -> Result<u64, ServerError> {
+        // the engine does the folding; this only names the partition and row types
+        S::fold_intents::<SortedPartition<R>, R>(shard_name, shard_table_name, conf).await
+    }
+
     /// Create a persistent shoal table
     ///
     /// # Arguments

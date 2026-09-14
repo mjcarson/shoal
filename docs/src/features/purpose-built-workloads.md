@@ -135,7 +135,9 @@ inserts exactly the same rows and reports none of it.
 
 ### One storage directory per workload
 
-`StorageMeta::claim` keys a directory to the shard count that wrote it, and the fanout curve pins
+`StorageMeta::claim` keys a directory to the shard count that wrote it - ~~and refuses another~~
+and since [F47](local-rehome.md) rehomes it under another, which a capture must never pay for
+by accident - and the fanout curve pins
 one shard while everything else takes twelve. Each workload writes to `<root>/<slug(id)>/`, derived
 mechanically from its identifier, so two workloads meeting in one directory is structurally
 impossible rather than something to remember.
@@ -248,7 +250,10 @@ compared against a per-batch one. The two are not comparable in either direction
 in the artifact distinguishes them.
 
 **A workload's storage directory must stay derived from its identifier.** That is what keeps
-`StorageMeta::claim` out of the way when workloads run different shard counts.
+`StorageMeta::claim` out of the way when workloads run different shard counts - since
+[F47](local-rehome.md) a shared directory would be *rehomed* between two arms of different
+counts rather than refused, which is a cost inside a start nobody asked to measure, and the
+one arm that wants it says so (`macro/rehome/shrink`).
 
 **`Workload::seed` must stay untimed.** The moment seeding lands inside the measurement, every read
 workload starts reporting the cost of the write path it was built to exclude.

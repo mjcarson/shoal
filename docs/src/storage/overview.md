@@ -254,8 +254,10 @@ kernel's, and write latency is not distorted by cache flushes. The cost is that 
 alignment-constrained, which is why `StreamWriter` exists at all.
 
 **Per-shard files, no coordination.** Nothing is shared, so no locking, and no shard can
-block another on IO. The cost is that shard count is baked into the layout
-([Partitioning](../architecture/partitioning.md#limitations)).
+block another on IO. ~~The cost is that shard count is baked into the layout~~ The cost is that
+the executor is baked into every filename, so a changed core count is a rehome of files before
+a shard starts rather than a free restart ([F47](../features/local-rehome.md),
+[Partitioning](../architecture/partitioning.md#limitations)).
 
 ## Limitations
 

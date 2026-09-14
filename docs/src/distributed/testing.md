@@ -65,6 +65,14 @@ process and answering the operation the plan was recorded under, `PLAN_STATUS <o
 as free and what its receiver checks against the reserve, so a capacity test fills no disk;
 the builder sets `auto_remove_after`, `weight(node, w)`, `stream_budget(node, bytes_per_sec,
 streams)`, `disk_reserve`, `moves_per_node` and `plan_interval`.
+Since [F47](../features/local-rehome.md) a child answers `REHOME`, the report of the rehome
+its start ran or `null`, `HOSTING`, the slots, the executors, which executor hosts each slot
+and how many tablets each owns, and `SHARD_DIRS`, which executors still have files; the
+command loop runs for a standalone child too, so the rehome is driven on a node with no peers;
+`Cluster::restart_with_cores` and `restart_with_overrides` restart a node on its core lease at
+another count and arm a rehome crash point (`ChildOverrides`) before the pool starts; and the
+builder sets `node_cores(node, claim)` and `slots(node, n)`, staging a marker whose `shards` is
+the slots and whose `physical` is the cores.
 Since [F45](../features/replica-migration.md) a child answers `MOVE <key-hex> <from> <to>`,
 which asks as the process for the set holding the key's tablet to move from one node to
 another and answers the operation, `MOVE_STATUS <op>`, the record, and `MOVE_CRASH_AT <phase>

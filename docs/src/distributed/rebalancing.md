@@ -10,7 +10,11 @@ are delivered ([F45](../features/replica-migration.md),
 
 ## What exists today
 
-Logs and archive maps are per shard and table. `ShardCountMismatch` protects this layout. Archive
+Logs and archive maps are per shard and table. ~~`ShardCountMismatch` protects this layout.~~
+Since [F47](../features/local-rehome.md) the shard in a file's name is an executor, a
+node-local hosting table says which executor hosts each slot and owns each tablet, and a
+changed core count is a rehome run before a shard starts rather than a refusal; what a peer
+records for a node is its slots, which never move. Archive
 entries name partition keys, so a per-tablet index can enumerate data, ~~but existing compaction
 and log retention know nothing about replicated configurations or resumable migration~~ and
 since [F45](../features/replica-migration.md) a replica set moves: a `Move` names a tablet, a
@@ -159,8 +163,19 @@ a manifest describing the in-progress rehome. Transfer to live shards is atomic 
 a crash halfway through cannot double-own or abandon data. If a node is also a tablet voter,
 address/incarnation and group configuration changes must use the same safe transition contract.
 
-Keep the mismatch refusal until this mechanism and its crash tests exist. An index alone cannot
-read/replay a dead shard's files, and the marker does not become informational prematurely.
+~~Keep the mismatch refusal until this mechanism and its crash tests exist. An index alone cannot
+read/replay a dead shard's files, and the marker does not become informational prematurely.~~
+*Delivered at M9c ([F47](../features/local-rehome.md)).* The executor is `Rehome::run`, the
+manifest is `shoal-rehome.json`, and the files it moves are an executor's: a cluster node's
+*slots* - the shard in every address, the rule's modulus, every group's identity - are claimed
+once and never move, so no address or group configuration changes at all; what moves is which
+executor hosts a slot, a table nobody else reads. The WAL half appends the moving groups'
+entries, votes, commits and purge points through the store openraft writes through and moves
+their checkpoint, sidecar, quarantine and retired markers; the archive half copies the moving
+records into a fresh archive on the destination; a vanished executor's files are reclaimed
+whole and a live donor's moved entries leave its map. The crash tests are the two rows below.
+The marker's `shards` is not informational: it is the slots, and a `cluster.slots` that differs
+from it is still refused by name.
 
 ### Adding a node
 
@@ -244,7 +259,8 @@ checkpoint organization will be evaluated separately.
 [C7](failover.md) complete, C13 Q7–Q9, [C4](tablet-map.md), [C5](replication.md).
 ~~M9a migration~~ M9a migration is delivered ([F45](../features/replica-migration.md)),
 ~~M9b planner/removal~~ M9b's planner and removal are delivered
-([F46](../features/capacity-rebalancing.md)), M9c local shard-count changes.
+([F46](../features/capacity-rebalancing.md)), ~~M9c local shard-count changes~~ and M9c's
+local shard-count changes are delivered ([F47](../features/local-rehome.md)).
 
 ## How it would be measured
 
@@ -266,6 +282,7 @@ counts and time/bytes to reach a feasible target. Measure lag and disk reserve d
 | `automatic_removal_and_rejoin_preserve_fencing` | Grace expiry, leader restart and old-node return cannot revive old authority | M9b |
 | `decommission_drains_within_supported_load_envelope` | Healthy migration preserves all operations and finishes without final client errors | M9b |
 | `local_rehome_recovers_after_each_crash_point` | Fewer configured shards preserve full data and consensus metadata across interrupted rehome | M9c |
+| `standalone_rehome_rebalances_tablets_across_restarts` | A standalone node dealt per tablet up and down preserves every row through a crash at the fold and at the copy | M9c |
 
 ## Related and implementation references
 

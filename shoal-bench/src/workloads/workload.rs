@@ -104,6 +104,13 @@ pub struct ConfOverrides {
     /// A workload that names this gets deterministic partition placement, which is what a fanout
     /// curve needs to hold the routing constant while the key count varies.
     pub shards: Option<usize>,
+    /// The number of shards the server restarts with, when the workload cycles it to another count
+    ///
+    /// The rehome arm's axis ([F47](../../../docs/src/features/local-rehome.md)): the seed runs
+    /// at [`ConfOverrides::shards`], the server is stopped, and the one that comes back runs
+    /// this many executors, so its start moves the vanished executors' files first. Read only
+    /// by a [`ServerNeed::RestartAfterSeed`] arm.
+    pub restart_shards: Option<usize>,
     /// The memory limit to hold the shards to
     ///
     /// Set low to force eviction, which is the only way to reach the archived read path from a

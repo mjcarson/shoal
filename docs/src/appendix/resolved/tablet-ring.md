@@ -215,9 +215,15 @@ removed, not upgraded.
 - **`TABLET_COUNT` is a power of two and far larger than any shard count.** The first is what
   makes the id a bit-shift and a split a single extra bit; the second is what keeps `i %
   shard_count` even.
-- **A storage directory is only ever read back by the shard count that wrote it.** Ownership
+- ~~**A storage directory is only ever read back by the shard count that wrote it.** Ownership
   derives from the shard count and a shard's data is stored under its own name, so the two must
-  agree. `StorageMeta::claim` enforces this; there is no migration behind it.
+  agree. `StorageMeta::claim` enforces this; there is no migration behind it.~~ **A storage
+  directory is read back under the hosting that describes it.** Since
+  [F47](../../features/local-rehome.md) ownership derives from `shoal-hosting.json` - the
+  identity `i % executors` until a rehome deals it otherwise - and a directory reopened under
+  another core count is rehomed before a shard starts so the two agree again; `Ring::from_hosting`
+  builds the ring the identity hosting makes byte for byte this one. What is still never read
+  back under another count is a cluster node's slots.
 
 ## Still open
 

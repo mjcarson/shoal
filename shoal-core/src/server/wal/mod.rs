@@ -1463,6 +1463,17 @@ impl ShardWal {
         }
     }
 
+    /// Every group this WAL holds a log, a vote or a marker for
+    ///
+    /// What a rehome moves out of a vanishing executor's WAL
+    /// ([F47](../../../../docs/src/features/local-rehome.md)).
+    #[must_use]
+    pub fn groups(&self) -> Vec<GroupId> {
+        let mut groups: Vec<GroupId> = self.inner.borrow().groups.keys().copied().collect();
+        groups.sort_unstable();
+        groups
+    }
+
     /// The last vote a group granted, for a test
     ///
     /// # Arguments

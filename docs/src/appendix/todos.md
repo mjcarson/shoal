@@ -274,6 +274,38 @@ bounded in bytes with a forced purge behind the groups pinning it, an installing
 tablets refuse reads while the rest of the node serves, and two arms price the catch-up by log
 and by snapshot.
 
+M9c is delivered as [F47](../features/local-rehome.md): a cluster node's slots are claimed
+once and its executors host them through a node-local table, a standalone node hosts per
+tablet, and a changed core count is a rehome run before a shard starts - fold, copy, move,
+reclaim, finalize - under a manifest that is resumed at its step, with one arm pricing the
+start.
+
+**What F47 left undone, deliberately.** Recorded here so the next milestone starts from the
+list rather than from the diff:
+
+- **Per-tablet hosting on a cluster node.** A cluster node deals slots, so twelve slots on
+  eight executors is four executors with two and four with one; a per-tablet deal would be
+  exact but a replication frame names a slot and no tablet, and the listener has no group's
+  tablets to dispatch by. The per-slot balance is the price of dispatch without a map.
+- **Slot growth.** `cluster.slots` is fixed at the first claim and bounds the executors; a
+  node that needs more than it claimed is replaced onto a fresh identity by M9b's `Replace`.
+  Growing the slots in place is re-cutting every set on every peer, which is M9a's move for
+  every set at once and was not built as a local operation.
+- **A byte-weighted deal.** `Hosting::plan` deals by count; the reported archived bytes per
+  tablet that the planner already reads could weight it, so a shrink lands the heavy tablets
+  apart. Deterministic only if the weights are recorded on the manifest, which is the piece
+  that was not built.
+- **A live rehome without a restart.** The rehome runs under the directory's lock before any
+  shard starts; moving a slot between executors while serving is a same-node move under
+  writers, which is M9a's phases on a local lane, and nobody has asked for the start time it
+  would save ([O59](optimizations.md#o59-the-rehome-runs-on-one-core-and-blocks-the-start)).
+- **`storage.tables` roots.** The rehome moves a table's files under the table's own settings,
+  but every crash test runs one root; a second root is [item 43](known-issues.md#43-the-storage-marker-only-guards-the-default-storage-root)'s
+  and stays open.
+- **A growth arm and a standalone arm.** `macro/rehome/shrink` prices a cluster node's shrink;
+  a growth's donor keeps its dead records ([O58](optimizations.md#o58-a-rehomes-moved-records-are-copied-and-a-donors-archives-keep-the-dead-ones))
+  and a standalone node's fold of intent logs is never priced.
+
 **What F46 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
 
@@ -315,7 +347,10 @@ list rather than from the diff:
 - **Same-node moves, replication factor changes and an operator-chosen destination shard.**
   A move is one member replaced by another in place, on the shard the rule gives the set's
   first tablet; a set's shard on a node is not a choice yet, and the factor is the policy's.
-  ~~M9b for the factor~~ the factor stayed the policy's at M9b - see below - M9c for the shard.
+  ~~M9b for the factor~~ the factor stayed the policy's at M9b - see below - ~~M9c for the
+  shard~~ at M9c the shard a peer names is a slot that never moves, and which executor hosts
+  it is the node's own ([F47](../features/local-rehome.md)); a set's slot on a node is still
+  the rule's.
 - **A second forward hop with a relayed answer.** A stale route is refused by the node that
   meets it and sent once more by the origin; a middle node relaying a third node's answer would
   reach the same holder in the same round trips and needs a frame path nothing else does.
@@ -602,29 +637,41 @@ once), which is the number Q2's shared physical WAL has to beat. Both are in the
 
 ### Rebalancing
 
-Today the shard count is part of the on-disk format — intent logs are `Shard-N-active` and
+~~Today the shard count is part of the on-disk format — intent logs are `Shard-N-active` and
 each shard has its own archive map. Changing `resources.cores` between restarts now **refuses to
 start** rather than silently stranding data, since `StorageMeta` records the count a directory was
 written by ([Partitioning](../architecture/partitioning.md#limitations)) — a better failure, but
-not a fix.
+not a fix.~~ Since [F47](../features/local-rehome.md) the files are still named `Shard-N`, but
+`N` is an executor and a node-local table says which executor owns each tablet and hosts each
+slot; changing `resources.cores` between restarts moves the vanished executors' files onto the
+live ones before a shard starts.
 
-Two pieces are needed, in this order.
+~~Two pieces are needed, in this order.~~ Of the two pieces this section asked for, the first
+was built and the second was not needed:
 
-**Persist the tablet assignment.** `Ring::new` recomputes `i % shard_count` on every start, so a
+**Persist the tablet assignment.** ~~`Ring::new` recomputes `i % shard_count` on every start, so a
 tablet is movable in principle only: nothing can move one and have the move survive a restart.
 The map has to become durable state before it can become editable state. It is small — 4096
-entries — and `StorageMeta` is already the file that per-node durable facts belong in.
+entries — and `StorageMeta` is already the file that per-node durable facts belong in.~~ Built
+as `shoal-hosting.json` beside the marker ([F47](../features/local-rehome.md)): 4096 owners
+and one host per slot, the identity when absent, and a standalone node's ring is built from it.
 
-**Key storage by tablet rather than by shard.** This is the larger half and the reason changing
+**Key storage by tablet rather than by shard.** ~~This is the larger half and the reason changing
 `cores` cannot work today. If intent logs and archive maps were named by tablet id instead of by
 `Shard-N`, moving a tablet between cores or nodes would be moving a file and flipping one map
-entry, rather than rehashing everything. It was deliberately not built with the tablet map, for a
+entry, rather than rehashing everything.~~ Not built, on purpose: the hosting gives the same
+indirection in one file, and the rehome moves records between executor maps rather than files
+between directories - a copy the reclaim makes a plain delete
+([O58](optimizations.md#o58-a-rehomes-moved-records-are-copied-and-a-donors-archives-keep-the-dead-ones)).
+It was deliberately not built with the tablet map, for a
 sequencing reason worth recording: what the layout should be depends on how migration streams
-data, and that protocol does not exist yet. Building the layout first risks building the wrong one
-and migrating twice. The tablet id — the name that makes it expressible — now exists either way.
+data, ~~and that protocol does not exist yet~~ and that protocol is [F45](../features/replica-migration.md)'s,
+which moves a set's history through its group rather than its files. The tablet id — the name
+that makes it expressible — exists either way.
 
-Still needed on top of both: a way to discover files belonging to shards that no longer exist,
-and a rebalancer that decides *when* to move a tablet rather than merely how.
+~~Still needed on top of both: a way to discover files belonging to shards that no longer exist,
+and a rebalancer that decides *when* to move a tablet rather than merely how.~~ The first is the
+rehome's manifest; the second is [F46](../features/capacity-rebalancing.md)'s planner.
 
 A third piece appears once the map is editable, and it is on the client side:
 [D7](../direction/shard-aware-routing.md#5-staleness-which-is-what-makes-it-safe) — any client
@@ -642,7 +689,9 @@ remain independent. Tablet-organized immutable files are an explicit option; an 
 alone does not solve recovery of vanished shards. [C7](../distributed/failover.md) defines atomic
 snapshots and retained history; [C4](../distributed/tablet-map.md) separates placement intent from
 data-protocol authority. [M9a/b/c](../distributed/milestones.md#m9-migration-and-the-rebalancer)
-split safe migration, capacity-aware policy and local shard-count changes. All remain unbuilt.
+split safe migration, capacity-aware policy and local shard-count changes. ~~All remain
+unbuilt.~~ All three are delivered: [F45](../features/replica-migration.md),
+[F46](../features/capacity-rebalancing.md), [F47](../features/local-rehome.md).
 
 ### Sort-key range predicates — built
 

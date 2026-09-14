@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 
 use shoal_top::index::{
-    BackgroundFactsLite, Capture, CatchupFactsLite, CatchupSecondFactsLite, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, FaultFactsLite, MigrationFactsLite, RebalanceFactsLite,
+    BackgroundFactsLite, Capture, CatchupFactsLite, CatchupSecondFactsLite, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, FaultFactsLite, MigrationFactsLite, RebalanceFactsLite, RehomeFactsLite,
     INDEX_VERSION, Index, Layer as IndexLayer, HopFactsLite, HopMixLite, MacroPoint, NodeCoresLite,
     NodeReadFactsLite, OfferedLoadLite, OpStats, OutcomeFactsLite, ReadFactsLite, ReplicaFactsLite,
     ScaleFactsLite, SecondFactsLite, Timing, Verdict, WindowFactsLite, Workload,
@@ -696,6 +696,21 @@ pub fn cluster_facts(cluster: &ClusterFacts) -> ClusterFactsLite {
                 })
                 .collect(),
             p99_ratio_permille: rebalance.p99_ratio_permille,
+        }),
+        // the rehome arm's record travels whole: every count, and the start it held
+        // ([F47](../../../docs/src/features/local-rehome.md))
+        rehome: cluster.rehome.as_ref().map(|rehome| RehomeFactsLite {
+            from: rehome.from,
+            to: rehome.to,
+            tablets_moved: rehome.tablets_moved,
+            slots_moved: rehome.slots_moved,
+            groups: rehome.groups,
+            records: rehome.records,
+            bytes: rehome.bytes,
+            folded: rehome.folded,
+            installs_dropped: rehome.installs_dropped,
+            steps_redone: rehome.steps_redone,
+            millis: rehome.millis,
         }),
     }
 }

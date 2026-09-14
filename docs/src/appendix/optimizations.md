@@ -195,6 +195,8 @@ so they get worse by existing longer rather than under load.
 | **B13** | [**O55**](#o55-a-learner-inside-the-retained-log-is-fed-a-snapshot-when-the-leaders-cached-cut-is-newer-than-its-purge-point) — a learner inside the retained log is fed a snapshot when the leader's cached cut is newer than its purge point | Argued — a whole group's archives on the bulk lane where a log tail would do | M | `macro/cluster/migration/move` at full scale, whose `bytes` is zero when the log fed the destination | Contained | no |
 | **B14** | [**O56**](#o56-the-planner-recomputes-every-rule-set-on-every-look) — the planner recomputes every rule set on every look | Argued — four thousand rule derivations per open plan per look, on the control core | S | none; the rebalance arms' windows would carry a control stall as a tail | Contained | no |
 | **B15** | [**O57**](#o57-tablet-bytes-are-rescanned-from-the-whole-archive-map-on-every-report) — tablet bytes are rescanned from the whole archive map on every report | Argued — a pass over every archived partition of a table per report tick, on the shard | S | none; a grid cell on a persistent table under writes is where the pass would show | Contained | no |
+| **B16** | [**O58**](#o58-a-rehomes-moved-records-are-copied-and-a-donors-archives-keep-the-dead-ones) — a rehome's moved records are copied, and a donor's archives keep the dead ones | Argued — a read and a write per moved record at start, and a growth's donor holding dead records until its own compaction | M | `macro/rehome/shrink`, whose `bytes` over `millis` is the copy's pace | Contained | no |
+| **B17** | [**O59**](#o59-the-rehome-runs-on-one-core-and-blocks-the-start) — the rehome runs on one core and blocks the start | Argued — the start held for the whole move while every other core idles | M | `macro/rehome/shrink`, whose `millis` is the hold | Contained | no |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -2753,3 +2755,29 @@ Filed by [F46](../features/capacity-rebalancing.md). `TabletMap::from_state` is 
 | **Benchmark** | none names it; the grid's `r50` cells on the persistent tables would carry a per-tick pass as a shard-core cost, and the kill arm's placement is where a report is built under load |
 
 Filed by [F46](../features/capacity-rebalancing.md).
+
+### O58. A rehome's moved records are copied, and a donor's archives keep the dead ones
+
+| | |
+| --- | --- |
+| **Rank** | **B16** — argued, contained |
+| **Impact** | Argued — an `Archives` step reads every moved record verified through `read_record` and writes it as a fresh record through `write_record` into one new archive on the destination, so a shrink costs a read and a write per record of the vanished executors, linear in what they held; and a growth's donor only drops the moved entries from its map, so its archives hold the dead records - and the space - until its own compaction rewrites them, which `compact_archives` does at fifty percent utilization and not before |
+| **Difficulty** | M — archive files are table-wide and a moved entry could be re-pointed rather than copied, but `all_archives` is per executor and a compactor deletes what it owns, so a shared file needs a reference count or an owner the reclaim respects; and a donor could rewrite its live records into a fresh archive at the reclaim, which is a compaction the rehome would then own |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — the copy is what makes the reclaim a plain delete and the redo a plain re-copy; a shared file would make both conditional on who else names it |
+| **Benchmark** | `macro/rehome/shrink` ([F47](../features/local-rehome.md)), whose `cluster.rehome.bytes` over `millis` is the copy's pace, and whose growth twin - not built - would carry the dead records as a donor's archive size |
+
+Filed by [F47](../features/local-rehome.md).
+
+### O59. The rehome runs on one core and blocks the start
+
+| | |
+| --- | --- |
+| **Rank** | **B17** — argued, contained |
+| **Impact** | Argued — `Rehome::run` builds one executor on the first shard cpu and runs every step of the manifest on it in order, and `ShoalPool::start` waits for it before the shard pool is built, so a node changing its core count holds its start for the whole move while every other core idles; the steps of different tables and different source-destination pairs are independent and could run on every core the node has |
+| **Difficulty** | M — an executor per source, each with its own slice of the manifest, and the manifest's marks written from one place; the crash points and the idempotence argument are per step and survive it, the ordering between a source's copies and its reclaim does not without a barrier |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — one core is what makes the manifest one writer and the crash matrix one sequence; the saving is start time on a node that is already down |
+| **Benchmark** | `macro/rehome/shrink` ([F47](../features/local-rehome.md)), whose `cluster.rehome.millis` is the hold |
+
+Filed by [F47](../features/local-rehome.md).
