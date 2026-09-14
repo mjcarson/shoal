@@ -819,6 +819,7 @@ mod tests {
                 catchup: None,
                 background: None,
                 migration: None,
+                rebalance: None,
             });
         }
         capture

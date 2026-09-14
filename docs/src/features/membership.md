@@ -288,8 +288,10 @@ every shard; a stranger's first question belongs on the lane the control thread 
 - **`Initialize` is applied once.** A second is refused naming ~~M9a~~ the `Move` operation. Adding a node after
   initialization admits it, promotes it under the policy, and places nothing on it ~~.~~ until
   a move brings it into a set ([F45](replica-migration.md)).
-- **`Down` moves nothing.** Grace expiry, `Leaving`, `Removing` and removal are M9b's; the
-  episode is minted and recorded so that they have something to name.
+- ~~**`Down` moves nothing.** Grace expiry, `Leaving`, `Removing` and removal are M9b's; the
+  episode is minted and recorded so that they have something to name.~~ `Down` still moves
+  nothing inside the grace; since [F46](capacity-rebalancing.md) the grace is counted and
+  expires into a removal plan, and the episode is what the grace names.
 - **A certificate is still not bound to a node.** Q11's identity half is answered by the
   incarnation; the `shoal-node://<id>` SAN is written and unread, and `IdentityMismatch` is
   defined and never produced.

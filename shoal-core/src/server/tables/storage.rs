@@ -457,6 +457,25 @@ impl<N: TableNameSupport> FullArchiveMap<N> {
         folded
     }
 
+    /// The bytes a table's archives hold per tablet, indexed by tablet
+    ///
+    /// What a shard's report weighs each group by: one pass over the table's archive map,
+    /// summing every partition's archived size onto its tablet
+    /// ([F46](../../../docs/src/features/capacity-rebalancing.md)). Empty for a table with
+    /// no map.
+    ///
+    /// # Arguments
+    ///
+    /// * `table_name` - The table
+    #[must_use]
+    pub fn tablet_bytes(&self, table_name: N) -> Vec<u64> {
+        let map = self.map.borrow();
+        let Some(ArchiveMapKinds::FileSystem(fs_map)) = map.get(&table_name) else {
+            return Vec::new();
+        };
+        fs_map.tablet_bytes()
+    }
+
     /// Whether a table's archives hold any partition of some tablets
     ///
     /// What says a shard once held a group when its checkpoint is gone with its log

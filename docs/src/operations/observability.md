@@ -393,6 +393,22 @@ and the source logs its retirement at `WARN` and its reclaim at `INFO`. `ReadSta
 replication report counts `stale_served` on a shard that refused a query of a tablet no group
 there serves and `stale_refusals` on the coordinator that met the refusal and sent the query on.
 
+**A plan is a record since [F46](../features/capacity-rebalancing.md).** `PlanStatus { op }`
+reads a plan through any node - its kind, its phase, its steps with each one's move and state,
+its blocked reason with the version it was recorded at, its outcome and how many times it was
+replanned - and `Plans` every plan the state keeps. `Members` carries, per member, `phase` and
+`state_name` (the one name of C3's six states), `grace` with its committed `elapsed_ms`,
+`suspended` and `expired`, `grace_remaining_ms`, `weight`, and the `free_bytes` and
+`held_bytes` the leader last heard, beside `under_replicated_sets`, `auto_remove_after_ms`, the
+open `plans` and the `tombstones`. The leader logs a grace that elapsed at `WARN` (`"a down
+member's grace has elapsed; removing it"`), every plan step at `INFO` (`"plan progress"` with
+the update), a member taken out of the control group at `INFO` (`"a member was removed from
+the cluster"`) and one that could not be yet at `WARN` with the reason. `SnapshotStats` counts
+`refused_budget` and `refused_reserve` on a receiver that refused a stream's begin,
+`peak_streams` for the most it assembled at once, and `budget_wait_ns` for what a sender spent
+waiting on its byte bucket; the `bytes` of a `GroupReport` are the archived bytes its plan
+weighs it by.
+
 **Archives are covered too since [F44](../features/repair.md).** Every record of a format 2
 archive carries a checksum, and a read that meets one that does not hash logs an `ERROR`
 naming the archive and the partition, quarantines the copy the record belongs to (`ERROR`

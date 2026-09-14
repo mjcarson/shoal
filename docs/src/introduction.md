@@ -48,9 +48,12 @@ database") oversell the current state:
   **Replicated, on a cluster node.** Since [F40](features/replication.md) a tablet has
   `min(replication_factor, nodes)` copies on distinct nodes, a write is acknowledged once a
   majority has fsynced it, and a `One` read is served from the local copy's committed state.
-  A standalone node still holds one copy on one disk, and what is not built yet - strong
-  reads, failover that moves leadership, catch-up past the purge point, rebalancing - is the
-  rest of the [milestones](distributed/milestones.md).
+  A standalone node still holds one copy on one disk, and what is not built yet - ~~strong
+  reads, failover that moves leadership, catch-up past the purge point, rebalancing~~ a local
+  shard-count change, rolling upgrades, backup and restore - is the
+  rest of the [milestones](distributed/milestones.md); strong reads, failover, catch-up,
+  repair, migration and rebalancing are built ([F41](features/read-consistency.md) through
+  [F46](features/capacity-rebalancing.md)).
 - **No transactions.** There is no atomicity across queries, no isolation between them, and
   no rollback. A bundle of queries is a batch, not a transaction.
 - **No secondary indexes.** A partition is only ever found by its partition key; there is no
@@ -58,8 +61,10 @@ database") oversell the current state:
   matched or bounded, so a large partition can be paged through
   ([F1](features/sort-key-ranges.md)) — but that narrows what a partition returns, not which
   partitions can be reached ([Query Execution](tables/query-execution.md)).
-- **No rebalancing.** Shard count is baked into the on-disk file layout. Changing it between
+- **No ~~rebalancing~~ local shard-count change.** Shard count is baked into the on-disk file layout. Changing it between
   restarts is refused at startup ([Partitioning and the Tablet Map](architecture/partitioning.md)).
+  Replica sets do move between nodes since [F45](features/replica-migration.md), and a plan
+  moves them by weight and bytes since [F46](features/capacity-rebalancing.md).
 - **Encryption and authentication are both optional and both off by default.** A server can require
   SCRAM-SHA-256 and refuse a client that cannot do it ([F12](features/authentication.md)), and it
   can encrypt its listener with TLS 1.3 ([F14](features/encryption-in-transit.md)). Neither is on
@@ -74,8 +79,9 @@ its nine entries have since been built, in whole ([F10](features/framing-and-pro
 
 Shoal is best understood as a fast single-node partitioned key-value store with a
 persistence layer, on top of which distribution ~~has not yet been built~~ is being built a
-milestone at a time - the transport, membership and replication exist; failover and
-rebalancing do not. How it would be —
+milestone at a time - the transport, membership, replication, failover, recovery, repair,
+migration and rebalancing exist; ~~failover and rebalancing do not~~ a local shard-count change
+and the operations milestone do not. How it would be —
 replication with a primary per tablet, membership under Raft, failover, rebalancing, and the
 tests and benchmarks that would prove each — is designed in
 [Distributed Shoal](distributed/overview.md), which is to the first five bullets above what

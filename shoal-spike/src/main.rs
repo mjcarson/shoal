@@ -911,6 +911,8 @@ fn fanout() {
             shards_failed: Vec::new(),
             reachability: (0..members - 1).map(|_| (NodeId::mint(), 250)).collect(),
             quarantined: Vec::new(),
+            free_bytes: 0,
+            group_bytes: Vec::new(),
         };
         let bytes = shoal::serde_json::to_vec(&report).expect("a report encodes").len();
         let per_second = (members - 1) as f64 * 1000.0 / REPORT_INTERVAL_MS as f64;

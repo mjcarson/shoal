@@ -54,7 +54,9 @@ cargo run -p shoal-model --example regenerate_schedules   # after a model change
 # tests live here; since F40 every tablet is replicated between them and the nine M4 tests too;
 # since F42 the thirteen M6 tests kill, stall, isolate and restart them; since F43 the eight M7
 # tests leave a node behind the purge point, throttle and cut the snapshot streams that feed it,
-# and crash it at every point of an install (CRASH_AT).
+# and crash it at every point of an install (CRASH_AT); since F46 the seven M9b tests drain,
+# expire, block and rebalance them (DECOMMISSION, REMOVE, MAINTENANCE, REBALANCE, PLAN_STATUS,
+# FREE_BYTES).
 # every test allocates whole cores, so the suite is what a loaded machine makes it: a failure
 # that passes alone was a timeout, and the child logs are under SHOAL_CHILD_LOG=<dir> (one file
 # per child, DEBUG, hundreds of MB each - point it under target/, never at a tmpfs). run it at
@@ -234,6 +236,14 @@ matter:
   `cluster.fault` - the marks, the client's first failure and recovery, three windows with a
   distribution each and a per second series - so the outage is never averaged into the run.
   Node zero is the driver's own process and is never the one killed.
+- **The rebalance arms** are four workloads ([F46](docs/src/features/capacity-rebalancing.md)):
+  `macro/cluster/rebalance/{add,decommission,remove,capacity_blocked}`, the kill arm's
+  placement and mixture with a plan the control leader drives from a third of the way through -
+  a `Rebalance` onto a spare, a `Decommission` onto it, an expiry after node one is killed for
+  good (`FaultSpec::restart: false`) under a five second grace, and a `Decommission` with no
+  spare that stays blocked by name. Each carries `cluster.rebalance` with `p99_ratio_permille`,
+  the number M9b's two-times budget is judged on; the blocked arm's `outcome` is `unfinished`
+  by construction.
 - **The background arm** is one workload ([F44](docs/src/features/repair.md)):
   `macro/cluster/background/repair`, the kill arm's placement and mixture with nothing killed
   and a `Repair` of the reference table in verify mode asked for a third of the way through
@@ -452,6 +462,18 @@ go through `shoal`.**
   commits a silent member `Down`. Never hold a `RefCell` borrow across an `.await` on the control
   core, and never retry a proposal on a metrics change without a backoff - both starve the one
   executor RaftCore, the links and the loop share
+- Since [F46](docs/src/features/capacity-rebalancing.md) a member has a `phase` beside its
+  `health` - `Member`, `Leaving`, `Removing`, `Removed` - and `is_placeable` is the one
+  placement check; a `Down` verdict under `auto_remove_after` opens a grace the leader counts
+  in committed eighths (`GraceElapsed`) and expires into a removal plan; `Decommission`,
+  `Remove`, `Maintenance` and `Rebalance` are operations recording plans (`control/plan.rs`)
+  whose steps the pure planner (`control/planner.rs`) derives from the sets as served, the
+  members' weights and the archived bytes and free bytes they report - kept in the leader's
+  memory, never committed - and the leader issues as ordinary moves; a drained member is
+  tombstoned before it leaves the control group and its identity is refused at every door.
+  Every stream a node sends draws on one token bucket (`stream_bytes_per_sec`), a shard
+  installs `concurrent_streams` at once, and `disk_reserve` is checked by the planner and again
+  by the receiver at the begin
 - Since [F41](docs/src/features/read-consistency.md) a read is served at `One` or `Quorum`: a
   `Quorum` read obtains a `ReadIndex` barrier from its group's leader - its own handle when it
   leads, `ReplicateKind::ReadBarrier` over the lane when not - and waits for its own apply

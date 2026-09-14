@@ -84,8 +84,9 @@ grace test produces; the padding covers both.
 
 ## Still open
 
-- The grace itself. A `Down` member keeps its placement, which the fixture test asserts, and
-  nothing removes it: `auto_remove_after` is M9b's.
+- ~~The grace itself. A `Down` member keeps its placement, which the fixture test asserts, and
+  nothing removes it: `auto_remove_after` is M9b's.~~ Delivered by
+  [F46](../../features/capacity-rebalancing.md): the grace is counted and expires into a removal.
 - A member that is called `Down` and comes back inside the same incarnation is judged from its
   next report at the expected pace, which is what the fixture's restart sees; a member that
   comes back under a new incarnation starts over, as before.

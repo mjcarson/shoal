@@ -1188,6 +1188,29 @@ async fn cluster_server_child() {
             if let Some(ms) = staged.migration_timeout_ms {
                 block.migration.timeout = Duration::from_millis(ms).into();
             }
+            // the grace, the weight, the budgets and the plan knobs
+            // ([F46](../../docs/src/features/capacity-rebalancing.md))
+            if let Some(ms) = staged.auto_remove_after_ms {
+                block = block.auto_remove_after((ms > 0).then(|| Duration::from_millis(ms)));
+            }
+            if let Some(weight) = staged.weight {
+                block = block.weight(Some(weight));
+            }
+            if let Some(bytes) = staged.stream_bytes_per_sec {
+                block.migration.stream_bytes_per_sec = bytes;
+            }
+            if let Some(streams) = staged.concurrent_streams {
+                block.migration.concurrent_streams = streams;
+            }
+            if let Some(bytes) = staged.disk_reserve {
+                block.migration.disk_reserve = bytes;
+            }
+            if let Some(moves) = staged.moves_per_node {
+                block.rebalance.moves_per_node = moves;
+            }
+            if let Some(ms) = staged.plan_interval_ms {
+                block.rebalance.plan_interval = Duration::from_millis(ms).into();
+            }
             // the default read level, which every bundle without an override inherits
             // ([F41](../../docs/src/features/read-consistency.md))
             if let Some(level) = &staged.read_consistency {
@@ -1754,6 +1777,49 @@ fn handle_command(
             Some(op) => admin(AdminKind::MoveStatus { op }),
             None => Err("MOVE_STATUS needs an operation id".to_string()),
         },
+        // the placement operations, as the process, answering the operation each was
+        // recorded under, which is its plan's identity
+        // ([F46](../../docs/src/features/capacity-rebalancing.md))
+        "DECOMMISSION" => match node_at(&mut parts) {
+            Some(node) => plan_op(pool, AdminKind::Decommission { node }),
+            None => Err("DECOMMISSION needs a node index".to_string()),
+        },
+        "REMOVE" => match node_at(&mut parts) {
+            Some(node) => {
+                let replacement = node_at(&mut parts);
+                plan_op(pool, AdminKind::Remove { node, replacement })
+            }
+            None => Err("REMOVE needs a node index and an optional replacement index".to_string()),
+        },
+        "MAINTENANCE" => match (node_at(&mut parts), parts.next()) {
+            (Some(node), Some(switch)) => admin(AdminKind::Maintenance {
+                node,
+                suspend: switch == "on",
+            }),
+            _ => Err("MAINTENANCE needs a node index and on or off".to_string()),
+        },
+        "REBALANCE" => plan_op(pool, AdminKind::Rebalance),
+        // the record of a plan, by its operation, and every plan
+        "PLAN_STATUS" => match parts.next().and_then(|text| text.parse::<uuid::Uuid>().ok()) {
+            Some(op) => admin(AdminKind::PlanStatus { op }),
+            None => Err("PLAN_STATUS needs an operation id".to_string()),
+        },
+        "PLANS" => admin(AdminKind::Plans),
+        // override the free bytes this node reports and checks, or lift the override
+        "FREE_BYTES" => match parts.next() {
+            Some("none") => {
+                pool.free_bytes_override(0);
+                Ok(serde_json::json!({ "override": null }))
+            }
+            Some(bytes) => match bytes.parse::<u64>() {
+                Ok(bytes) => {
+                    pool.free_bytes_override(bytes);
+                    Ok(serde_json::json!({ "override": bytes }))
+                }
+                Err(_) => Err("FREE_BYTES needs a byte count or none".to_string()),
+            },
+            None => Err("FREE_BYTES needs a byte count or none".to_string()),
+        },
         // propose a scrub of a group through this node, which has to lead it, and poll every
         // member's digest ([F44](../../docs/src/features/repair.md))
         "SCRUB" => match parts.next().and_then(|hex| u64::from_str_radix(hex, 16).ok()) {
@@ -1825,6 +1891,41 @@ fn handle_command(
         Err(error) => serde_json::json!({ "error": error }),
     };
     format!("{} {}", cluster::REPLY_LINE, json)
+}
+
+/// Ask for a placement operation as the process, answering the operation it was recorded under
+///
+/// The `MOVE` verb's shape: a version that moved between the read and the proposal is retried
+/// a few times, and the answer carries the operation id, which is the plan's
+/// ([F46](../../docs/src/features/capacity-rebalancing.md)).
+///
+/// # Arguments
+///
+/// * `pool` - This node's pool
+/// * `kind` - What is asked
+fn plan_op(pool: &ShoalPool<TestDb>, kind: shoal::server::AdminKind) -> Result<serde_json::Value, String> {
+    use shoal::server::AdminRequest;
+    let op = uuid::Uuid::new_v4();
+    let mut last = String::new();
+    for _ in 0..8 {
+        let version = pool.topology().map(|topology| topology.version).unwrap_or(0);
+        match pool.admin(AdminRequest { op, expected_version: version, kind: kind.clone() }) {
+            Ok(response) => match response.outcome {
+                Ok(shoal::shared::protocol::admin::AdminOutcome::Applied { version })
+                | Ok(shoal::shared::protocol::admin::AdminOutcome::Repeated { version }) => {
+                    return Ok(serde_json::json!({ "op": op.to_string(), "version": version }));
+                }
+                Ok(other) => return Err(format!("{} answered {other:?}", kind.name())),
+                Err(error) if error.code() == shoal::shared::protocol::error::ErrorCode::StaleVersion => {
+                    last = format!("{}: {}", error.code(), error.msg);
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => return Err(format!("{}: {}", error.code(), error.msg)),
+            },
+            Err(error) => return Err(format!("{error:?}")),
+        }
+    }
+    Err(last)
 }
 
 /// Three Shoal processes converge on one cluster and recover its metadata after a restart (C3 M3)
@@ -9247,6 +9348,1075 @@ async fn repair_serializes_with_migration_and_new_commits() -> Result<(), Fixtur
     let integrity = groups_of(&mut cluster, 2)?["integrity"].clone();
     assert_eq!(integrity["checksum_failures"], 0, "the returned copy met a corrupt record: {integrity}");
     for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+// ========================================================================
+// M9b: capacity-aware rebalancing and removal (F46)
+// ========================================================================
+
+/// One member as a node's `MEMBERS` view has it, by fixture index
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `at` - The node to ask
+/// * `member` - The member
+fn member_view(cluster: &mut Cluster, at: usize, member: usize) -> Result<serde_json::Value, FixtureError> {
+    let id = cluster.node_ids()[member].clone();
+    let view = cluster.members(at)?;
+    view["members"]
+        .as_array()
+        .and_then(|members| members.iter().find(|m| m["record"]["node"] == id).cloned())
+        .ok_or_else(|| FixtureError::ChildFailed(format!("node {at} does not know member {member}: {view}")))
+}
+
+/// Wait until a member's one-name state, as a node sees it, is the one wanted
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `at` - The node to ask
+/// * `member` - The member
+/// * `state` - The state's name: `up`, `down`, `leaving`, `removing` or `removed`
+/// * `within` - How long to wait
+fn wait_member_state(cluster: &mut Cluster, at: usize, member: usize, state: &str, within: Duration) -> Result<serde_json::Value, FixtureError> {
+    let deadline = Instant::now() + within;
+    loop {
+        let view = member_view(cluster, at, member)?;
+        if view["state_name"] == state {
+            return Ok(view);
+        }
+        if Instant::now() > deadline {
+            let plans = cluster.node_mut(at).command("PLANS")?;
+            return Err(FixtureError::NotReady(format!("member {member} never became {state} as node {at} sees it: {view}\nplans: {plans}")));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The record of a plan, as one node holds it
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to ask
+/// * `op` - The plan
+fn plan_record_via(cluster: &mut Cluster, via: usize, op: uuid::Uuid) -> Result<serde_json::Value, FixtureError> {
+    let reply = cluster.node_mut(via).command(&format!("PLAN_STATUS {op}"))?;
+    reply
+        .get("ok")
+        .cloned()
+        .ok_or_else(|| FixtureError::ChildFailed(format!("PLAN_STATUS {op} answered {reply}")))
+}
+
+/// Every plan a node holds, done or not, in request order
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to ask
+fn plans_via(cluster: &mut Cluster, via: usize) -> Result<Vec<serde_json::Value>, FixtureError> {
+    let reply = cluster.node_mut(via).command("PLANS")?;
+    Ok(reply["ok"].as_array().cloned().unwrap_or_default())
+}
+
+/// Wait until a plan's record is in a phase, or done
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to ask
+/// * `op` - The plan
+/// * `phase` - The phase's name
+/// * `within` - How long to wait
+fn wait_plan_phase(cluster: &mut Cluster, via: usize, op: uuid::Uuid, phase: &str, within: Duration) -> Result<serde_json::Value, FixtureError> {
+    let deadline = Instant::now() + within;
+    loop {
+        let record = plan_record_via(cluster, via, op)?;
+        if record["phase"] == phase || record["phase"] == "Done" {
+            return Ok(record);
+        }
+        if Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("plan {op} never reached {phase}: {record}")));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Ask a node for a placement operation and answer the plan's identity
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to ask
+/// * `verb` - The command line
+fn plan_as_process(cluster: &mut Cluster, via: usize, verb: &str) -> Result<uuid::Uuid, FixtureError> {
+    let started = Instant::now();
+    loop {
+        let reply = cluster.node_mut(via).command(verb)?;
+        if let Some(op) = reply["ok"]["op"].as_str() {
+            return op.parse().map_err(|error| FixtureError::ChildFailed(format!("{verb} answered {op}: {error}")));
+        }
+        let electing = reply["error"].as_str().is_some_and(|error| error.starts_with("NotLeader"));
+        if !electing || started.elapsed() > Duration::from_secs(30) {
+            return Err(FixtureError::ChildFailed(format!("{verb} answered {reply}")));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// The fixture indices of the voters a node names
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `at` - The node to ask
+fn voter_indices(cluster: &mut Cluster, at: usize) -> Result<Vec<usize>, FixtureError> {
+    let ids = cluster.node_ids();
+    let view = cluster.members(at)?;
+    let mut voters: Vec<usize> = view["voters"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|voter| voter.as_str().and_then(|id| ids.iter().position(|known| known == id)))
+        .collect();
+    voters.sort_unstable();
+    Ok(voters)
+}
+
+/// How many replica sets each node holds, as one node's map serves them, by fixture index
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `at` - The node to ask
+fn sets_held(cluster: &mut Cluster, at: usize) -> Result<Vec<usize>, FixtureError> {
+    let ids = cluster.node_ids();
+    let map = cluster.node_mut(at).command("MAP")?["ok"].clone();
+    let placement: Vec<String> = map["placement"].as_array().into_iter().flatten().filter_map(|node| node.as_str().map(str::to_string)).collect();
+    let shards: std::collections::HashMap<String, u64> = map["members"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(node, member)| (node.clone(), member["shards"].as_u64().unwrap_or(1)))
+        .collect();
+    // the rule's sets: every distinct ordered list the rule derives, over the configurations
+    let n = placement.len();
+    let rf = map["desired_rf"].as_u64().unwrap_or(1).min(n as u64) as usize;
+    let configurations: Vec<serde_json::Value> = map["configurations"].as_array().cloned().unwrap_or_default();
+    let mut counts = vec![0usize; ids.len()];
+    let mut seen: std::collections::HashSet<Vec<(String, u64)>> = std::collections::HashSet::new();
+    for tablet in 0..4096usize {
+        let rule: Vec<(String, u64)> = (0..rf)
+            .map(|k| {
+                let node = placement[(tablet + k) % n].clone();
+                let shard = (tablet / n) as u64 % shards.get(&node).copied().unwrap_or(1).max(1);
+                (node, shard)
+            })
+            .collect();
+        if !seen.insert(rule.clone()) {
+            continue;
+        }
+        // served by the configuration covering the tablet, or the rule
+        let served: Vec<String> = configurations
+            .iter()
+            .find(|configuration| configuration["tablets"].as_array().is_some_and(|tablets| tablets.iter().any(|t| t.as_u64() == Some(tablet as u64))))
+            .map(|configuration| configuration["members"].as_array().into_iter().flatten().filter_map(|member| member["node"].as_str().map(str::to_string)).collect())
+            .unwrap_or_else(|| rule.iter().map(|(node, _)| node.clone()).collect());
+        for node in served {
+            if let Some(index) = ids.iter().position(|known| *known == node) {
+                counts[index] += 1;
+            }
+        }
+    }
+    Ok(counts)
+}
+
+/// Grace expiry moves a dead member's sets to the spare, refills its voter seat and
+/// tombstones it; its return at a higher incarnation, and a clone of it, are refused as a
+/// removed identity with the directory preserved and no group naming it (C8 M9b)
+///
+/// Four nodes, three placed at a factor of three and a spare. Node one is killed and the
+/// leader calls it down; the grace elapses under the leader's count; the member is
+/// `removing` under an expiry plan that moves each of its sets to node three; the plan
+/// finishes with the member out of the control group and tombstoned, and node three takes
+/// its voter seat. Writes and reads go on throughout. Node one started again from its
+/// directory, one incarnation later, is refused as removed and its pool fails so; a clone of
+/// its directory is refused the same way; the directory is still there
+/// ([F46](../../docs/src/features/capacity-rebalancing.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn automatic_removal_and_rejoin_preserve_fencing() -> Result<(), FixtureError> {
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .detector_interval_ms(200)
+            .auto_remove_after(Some(Duration::from_secs(8)))
+            .plan_interval(Duration::from_millis(500))
+            .moves_per_node(3),
+    )
+    .await?;
+    cluster.wait_voters(0, 3)?;
+    // three of the four vote, in node id order; whether node one is among them is the id's
+    let voters_before = voter_indices(&mut cluster, 0)?;
+    assert_eq!(voters_before.len(), 3, "{voters_before:?}");
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let addr3 = cluster.node(3).endpoints.client.to_string();
+    // rows in every set, so every set has something to move: thirty keys over three sets
+    let keys: Vec<u64> = (4000..4030).collect();
+    for key in &keys {
+        write_note(&addr0, *key, &format!("v1-{key}")).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![3, 3, 3, 0]);
+    // node one dies; its directory as it stands is kept for a clone later
+    cluster.kill(1)?;
+    let copy = cluster.clone_dir(1)?;
+    let down = wait_member_state(&mut cluster, 0, 1, "down", Duration::from_secs(30))?;
+    assert!(down["grace"].is_object(), "a down member under the policy has a grace: {down}");
+    assert!(down["grace_remaining_ms"].as_u64().is_some_and(|ms| ms <= 8000), "{down}");
+    // writes go on meanwhile
+    for key in &keys[..4] {
+        write_note_eventually(&addr0, *key, &format!("v2-{key}"), Duration::from_secs(20)).await?;
+    }
+    // the grace elapses and the member is removing under an expiry plan
+    let removing = wait_member_state(&mut cluster, 0, 1, "removing", Duration::from_secs(40))?;
+    assert!(removing["grace"]["expired"].as_bool().unwrap_or(false), "{removing}");
+    let plan: uuid::Uuid = removing["grace"]["plan"].as_str().expect("the expiry names its plan").parse().expect("a uuid");
+    let record = plan_record_via(&mut cluster, 0, plan)?;
+    assert!(record["kind"]["Expiry"].is_object(), "{record}");
+    assert_eq!(record["principal"], "policy");
+    // every set moves to node three and the member is removed and tombstoned
+    let removed = wait_member_state(&mut cluster, 0, 1, "removed", Duration::from_secs(240))?;
+    assert!(removed["grace"].is_null(), "a removed member's grace is gone: {removed}");
+    let record = wait_plan_phase(&mut cluster, 0, plan, "Done", Duration::from_secs(60))?;
+    assert!(record["outcome"]["Completed"].is_object(), "{record}");
+    assert_eq!(record["outcome"]["Completed"]["moved"], 3, "{record}");
+    let steps = record["steps"].as_array().expect("steps");
+    assert!(steps.iter().all(|step| step["state"] == "Moved"), "{record}");
+    let members = cluster.members(0)?;
+    let node1 = cluster.node_ids()[1].clone();
+    assert!(members["tombstones"][&node1].is_object(), "{members}");
+    assert_eq!(members["under_replicated_sets"], 0);
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![3, 0, 3, 3]);
+    // its voter seat, if it had one, is refilled by the spare: three voters, none of them node one
+    cluster.wait_voters(0, 3)?;
+    let voters_after = voter_indices(&mut cluster, 0)?;
+    assert_eq!(voters_after, vec![0, 2, 3], "before: {voters_before:?}");
+    // every note reads through the spare, and the copies agree
+    for key in &keys {
+        wait_note(&addr3, *key, Some(&if keys[..4].contains(key) { format!("v2-{key}") } else { format!("v1-{key}") }), Duration::from_secs(30)).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 2, 3], "Note", Duration::from_secs(60))?;
+    // no group names node one a voter any more
+    let view = groups_of(&mut cluster, 3)?;
+    for shard in view["shards"].as_array().into_iter().flatten() {
+        for group in shard["groups"].as_array().into_iter().flatten() {
+            let voters: Vec<&str> = group["voters"].as_array().into_iter().flatten().filter_map(|voter| voter["node"].as_str()).collect();
+            assert!(!voters.contains(&node1.as_str()), "group {} still names node one a voter", group["group"]);
+        }
+    }
+    // node one back from its directory, one incarnation later: refused as removed, its
+    // pool fails so, and its directory is still there
+    cluster.restart(1, NodeKind::Server)?;
+    let refused = Cluster::wait_failure(cluster.node(1), Duration::from_secs(60)).expect("the removed node kept running");
+    assert!(refused.contains("removed"), "the removed node failed for another reason: {refused}");
+    assert!(cluster.dir(1).join(StorageMeta::path(cluster.dir(1)).file_name().expect("a marker name")).exists(), "the directory was not preserved");
+    // and a clone of the directory it died with, under the same identity, the same way
+    let mut clone = cluster.spawn_clone(1, copy.path())?;
+    clone.wait_ready(Duration::from_secs(60))?;
+    let refused = Cluster::wait_failure(&clone, Duration::from_secs(60)).expect("the clone kept running");
+    assert!(refused.contains("removed"), "the clone failed for another reason: {refused}");
+    drop(clone);
+    // the cluster went on the whole time: a write and a read through node zero
+    write_note_eventually(&addr0, keys[0], "v3", Duration::from_secs(20)).await?;
+    wait_note(&addr3, keys[0], Some("v3"), Duration::from_secs(20)).await?;
+    assert_eq!(voter_indices(&mut cluster, 0)?, vec![0, 2, 3]);
+    for id in [0, 2, 3] {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// Three nodes at a factor of three, one lost past the grace: removing with a blocked plan
+/// naming the missing member, the desired factor still three, two copies serving reads and
+/// quorum writes, no tombstone and no copy dropped; a fourth identity joined rebuilds every
+/// set on it and completes the removal (C8 M9b)
+///
+/// The three-node RF=3 case [C8](../../docs/src/distributed/rebalancing.md) singles out:
+/// there is no fourth distinct node to rebuild on, so expiry cannot finish, and it says so
+/// rather than shrinking the factor or dropping a copy
+/// ([F46](../../docs/src/features/capacity-rebalancing.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn remove_without_replacement_capacity_stays_blocked() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(4, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .initialize(false)
+        .deferred_from(3)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .retire_after(Duration::from_secs(1))
+        .catchup_lag(0)
+        .detector_interval_ms(200)
+        .auto_remove_after(Some(Duration::from_secs(6)))
+        .plan_interval(Duration::from_millis(500))
+        .moves_per_node(3)
+        .start()
+        .await?;
+    cluster.initialize(&[0, 1, 2])?;
+    cluster.wait_voters(0, 3)?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let keys: Vec<u64> = (5000..5030).collect();
+    for key in &keys {
+        write_note(&addr0, *key, &format!("v1-{key}")).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // node two is lost for good; its grace elapses and it is removing
+    cluster.kill(2)?;
+    wait_member_state(&mut cluster, 0, 2, "down", Duration::from_secs(30))?;
+    let removing = wait_member_state(&mut cluster, 0, 2, "removing", Duration::from_secs(40))?;
+    let plan: uuid::Uuid = removing["grace"]["plan"].as_str().expect("a plan").parse().expect("a uuid");
+    // the plan is blocked naming the missing member, and stays so
+    let record = wait_plan_phase(&mut cluster, 0, plan, "Blocked", Duration::from_secs(30))?;
+    assert_eq!(record["phase"], "Blocked", "{record}");
+    let reason = record["blocked"]["reason"].as_str().unwrap_or_default().to_string();
+    assert!(reason.contains("a further member is needed"), "{record}");
+    assert!(record["steps"].as_array().is_some_and(Vec::is_empty), "{record}");
+    // the factor is still three, the shortfall is visible, nothing is tombstoned or dropped
+    let members = cluster.members(0)?;
+    assert_eq!(members["desired_rf"], 3);
+    assert_eq!(members["active_rf"], 3);
+    assert_eq!(members["under_replicated_sets"], 3, "{members}");
+    assert!(members["tombstones"].as_object().is_some_and(|tombstones| tombstones.is_empty()), "{members}");
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![3, 3, 3, 0]);
+    // the two survivors serve reads and quorum writes throughout
+    for key in &keys[..5] {
+        write_note_eventually(&addr0, *key, &format!("v2-{key}"), Duration::from_secs(20)).await?;
+    }
+    let addr1 = cluster.node(1).endpoints.client.to_string();
+    for key in &keys[..5] {
+        wait_note(&addr1, *key, Some(&format!("v2-{key}")), Duration::from_secs(20)).await?;
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    let record = plan_record_via(&mut cluster, 0, plan)?;
+    assert_eq!(record["phase"], "Blocked", "the plan moved on without a member to move to: {record}");
+    assert_eq!(member_view(&mut cluster, 0, 2)?["state_name"], "removing");
+    // a fourth identity joins: the plan runs, every set is rebuilt on it, node two is removed
+    cluster.start_deferred(3)?;
+    cluster.wait_joined(&[3])?;
+    let record = wait_plan_phase(&mut cluster, 0, plan, "Done", Duration::from_secs(240))?;
+    assert!(record["outcome"]["Completed"].is_object(), "{record}");
+    assert_eq!(record["outcome"]["Completed"]["moved"], 3, "{record}");
+    assert!(record["blocked"].is_null(), "{record}");
+    wait_member_state(&mut cluster, 0, 2, "removed", Duration::from_secs(60))?;
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![3, 3, 0, 3]);
+    let members = cluster.members(0)?;
+    assert_eq!(members["under_replicated_sets"], 0, "{members}");
+    assert_eq!(members["desired_rf"], 3);
+    let addr3 = cluster.node(3).endpoints.client.to_string();
+    for key in &keys {
+        let expected = if keys[..5].contains(key) { format!("v2-{key}") } else { format!("v1-{key}") };
+        wait_note(&addr3, *key, Some(&expected), Duration::from_secs(30)).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 3], "Note", Duration::from_secs(60))?;
+    cluster.wait_voters(0, 3)?;
+    assert_eq!(voter_indices(&mut cluster, 0)?, vec![0, 1, 3]);
+    for id in [0, 1, 3] {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// The committed elapsed grace is never lower after a control leader restart, and removal is
+/// neither early nor forgotten (C3 M9b)
+///
+/// Four nodes, three placed and a spare, a twelve second grace. Node one is killed and the
+/// leader counts; half way through, the control leader is killed and started again. The
+/// elapsed time read through the new leader is at least what was committed before, the
+/// member is removing no earlier than the grace after it was called down, and no later than
+/// the grace plus two increments and an election ([F46](../../docs/src/features/capacity-rebalancing.md), Q7).
+#[tokio::test(flavor = "multi_thread")]
+async fn removal_grace_survives_control_leader_restart() -> Result<(), FixtureError> {
+    let grace = Duration::from_secs(12);
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .detector_interval_ms(250)
+            .auto_remove_after(Some(grace))
+            .plan_interval(Duration::from_millis(500)),
+    )
+    .await?;
+    cluster.wait_voters(0, 3)?;
+    // node one dies and is called down; the grace opens
+    cluster.kill(1)?;
+    let down = wait_member_state(&mut cluster, 0, 1, "down", Duration::from_secs(30))?;
+    let called_down = Instant::now();
+    assert_eq!(down["grace"]["elapsed_ms"], 0, "{down}");
+    // half way through, the count has been committed at least once
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let committed_before = loop {
+        let view = member_view(&mut cluster, 0, 1)?;
+        let elapsed = view["grace"]["elapsed_ms"].as_u64().unwrap_or(0);
+        if elapsed >= 4000 {
+            break elapsed;
+        }
+        assert!(Instant::now() < deadline, "the grace was never counted: {view}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(committed_before < 12_000, "{committed_before}");
+    // the control leader is killed and started again
+    let leader = cluster.leader_index(0)?.expect("a leader");
+    assert_ne!(leader, 1);
+    cluster.kill(leader)?;
+    std::thread::sleep(Duration::from_secs(1));
+    cluster.restart(leader, NodeKind::Server)?;
+    cluster.wait_joined(&[leader])?;
+    let via = if leader == 0 { 2 } else { 0 };
+    cluster.wait_leader_among(via, &[0, 2, 3], Duration::from_secs(30))?;
+    // what the new leader holds is at least what was committed before, and never less after
+    let view = member_view(&mut cluster, via, 1)?;
+    let after = view["grace"]["elapsed_ms"].as_u64().unwrap_or(0);
+    assert!(after >= committed_before, "the count went backwards: {committed_before} then {after}: {view}");
+    assert_eq!(view["state_name"], "down", "{view}");
+    let mut last = after;
+    let deadline = Instant::now() + grace + Duration::from_secs(20);
+    let removing_at = loop {
+        let view = member_view(&mut cluster, via, 1)?;
+        let elapsed = view["grace"]["elapsed_ms"].as_u64().unwrap_or(0);
+        assert!(elapsed >= last, "the count went backwards: {last} then {elapsed}: {view}");
+        last = elapsed;
+        if view["state_name"] == "removing" {
+            break Instant::now();
+        }
+        assert!(Instant::now() < deadline, "the member was never removed: {view}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    // neither early nor forgotten: no sooner than the grace, no later than two increments and
+    // an election past it
+    let took = removing_at.saturating_duration_since(called_down);
+    assert!(took >= grace, "removed early: {took:?} of {grace:?}");
+    assert!(took <= grace + Duration::from_secs(3) + Duration::from_secs(8), "removed late: {took:?}");
+    assert_eq!(last, 12_000, "the expiry commits the whole grace");
+    for id in [0, 2, 3] {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// Maintenance holds a down member past its grace with a constant reported remaining deadline,
+/// and resumption removes it at that deadline (C3 M9b)
+#[tokio::test(flavor = "multi_thread")]
+async fn maintenance_suspends_automatic_removal() -> Result<(), FixtureError> {
+    let grace = Duration::from_secs(6);
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .detector_interval_ms(200)
+            .auto_remove_after(Some(grace))
+            .plan_interval(Duration::from_millis(500)),
+    )
+    .await?;
+    cluster.wait_voters(0, 3)?;
+    // maintenance on a member that is up is refused: there is no grace to suspend
+    let refused = cluster.node_mut(0).command("MAINTENANCE 1 on")?;
+    assert!(refused["error"].as_str().is_some_and(|error| error.contains("no grace")), "{refused}");
+    // node one dies; inside the grace, maintenance is switched on
+    cluster.kill(1)?;
+    wait_member_state(&mut cluster, 0, 1, "down", Duration::from_secs(30))?;
+    let reply = cluster.node_mut(0).command("MAINTENANCE 1 on")?;
+    assert!(reply["ok"].is_object(), "{reply}");
+    let suspended_at = Instant::now();
+    // past the grace it is still down, a member, and suspended, with a constant remaining
+    std::thread::sleep(grace + Duration::from_secs(2));
+    let first = member_view(&mut cluster, 0, 1)?;
+    assert_eq!(first["state_name"], "down", "{first}");
+    assert_eq!(first["phase"], "member", "{first}");
+    assert_eq!(first["grace"]["suspended"], true, "{first}");
+    let remaining = first["grace_remaining_ms"].as_u64().expect("a remaining deadline");
+    assert!(remaining > 0 && remaining <= 6000, "{first}");
+    std::thread::sleep(Duration::from_secs(1));
+    let second = member_view(&mut cluster, 0, 1)?;
+    assert_eq!(second["grace_remaining_ms"], first["grace_remaining_ms"], "the deadline moved while suspended: {second}");
+    assert_eq!(second["state_name"], "down");
+    // switched off, the count resumes from where it stood and the member is removing at
+    // about the remaining deadline
+    let reply = cluster.node_mut(0).command("MAINTENANCE 1 off")?;
+    assert!(reply["ok"].is_object(), "{reply}");
+    let resumed_at = Instant::now();
+    let removing = wait_member_state(&mut cluster, 0, 1, "removing", Duration::from_millis(remaining) + Duration::from_secs(6))?;
+    let took = resumed_at.elapsed();
+    assert!(took + Duration::from_millis(500) >= Duration::from_millis(remaining), "removed before the remaining deadline: {took:?} of {remaining}ms");
+    assert!(removing["grace"]["expired"].as_bool().unwrap_or(false), "{removing}");
+    let _ = suspended_at;
+    // and once removing, maintenance cannot bring it back
+    let refused = cluster.node_mut(0).command("MAINTENANCE 1 on")?;
+    assert!(refused["error"].as_str().is_some_and(|error| error.contains("cannot suspend a removal")), "{refused}");
+    for id in [0, 2, 3] {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// Four nodes at three with weights 3:1:1:1 rebalanced to within one set of the feasible
+/// weighted byte share, a second plan moves nothing and no move follows two intervals; three
+/// nodes at three report the full-copy constraint at once (C8 M9b)
+///
+/// The heavy node already holds every set, which is the most any member can hold, so its
+/// target is capped there and the rest is shared by weight over the three light ones: two
+/// sets each, one of them moving off each of the placed light nodes onto the spare
+/// ([F46](../../docs/src/features/capacity-rebalancing.md), Q8).
+#[tokio::test(flavor = "multi_thread")]
+async fn heterogeneous_placement_obeys_feasible_weights() -> Result<(), FixtureError> {
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .detector_interval_ms(200)
+            .plan_interval(Duration::from_millis(500))
+            .moves_per_node(3)
+            .weight(0, 3)
+            .weight(1, 1)
+            .weight(2, 1)
+            .weight(3, 1),
+    )
+    .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    // rows in every set, archived, so the bytes a set is weighed by are real
+    let keys: Vec<u64> = (6000..6090).collect();
+    for key in &keys {
+        write_note(&addr0, *key, &format!("{key}-{}", "x".repeat(200))).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for node in 0..3 {
+        compact_now(&mut cluster, node, "Note")?;
+    }
+    // the weights are reported, and the bytes held with them, once a report has landed
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let view = member_view(&mut cluster, 0, 1)?;
+        if view["held_bytes"].as_u64().is_some_and(|bytes| bytes > 0) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "node one never reported its bytes: {view}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(member_view(&mut cluster, 0, 0)?["weight"], 3);
+    assert_eq!(member_view(&mut cluster, 0, 3)?["weight"], 1);
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![3, 3, 3, 0]);
+    // the rebalance: two sets move onto the spare, one off each light placed node
+    let plan = plan_as_process(&mut cluster, 0, "REBALANCE")?;
+    let record = wait_plan_phase(&mut cluster, 0, plan, "Done", Duration::from_secs(180))?;
+    assert!(record["outcome"]["Completed"].is_object(), "{record}");
+    assert_eq!(record["outcome"]["Completed"]["moved"], 2, "{record}");
+    let steps = record["steps"].as_array().expect("steps");
+    let node0 = cluster.node_ids()[0].clone();
+    let node3 = cluster.node_ids()[3].clone();
+    assert!(steps.iter().all(|step| step["to"] == node3 && step["from"] != node0), "{record}");
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![3, 2, 2, 2]);
+    // held bytes: the heavy node most, the light ones within one set's bytes of each other.
+    // the spare was fed by log and holds its rows resident until it compacts, and what a set
+    // is weighed by is what the archives hold, so every node compacts first
+    for node in 0..4 {
+        compact_now(&mut cluster, node, "Note")?;
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    let held: Vec<u64> = (0..4).map(|node| member_view(&mut cluster, 0, node).map(|view| view["held_bytes"].as_u64().unwrap_or(0))).collect::<Result<_, _>>()?;
+    let set_bytes = held[0] / 3;
+    assert!(held[0] > held[1] && held[0] > held[2] && held[0] > held[3], "{held:?}");
+    for pair in [(1, 2), (2, 3), (1, 3)] {
+        let (a, b) = (held[pair.0], held[pair.1]);
+        assert!(a.abs_diff(b) <= set_bytes, "nodes {} and {} differ by more than a set: {held:?}", pair.0, pair.1);
+    }
+    // a second rebalance is nothing, and no move follows two intervals
+    let moves_before = cluster.node_mut(0).command("MAP")?["ok"]["moves"].as_array().map_or(0, Vec::len);
+    let again = plan_as_process(&mut cluster, 0, "REBALANCE")?;
+    let record = wait_plan_phase(&mut cluster, 0, again, "Done", Duration::from_secs(30))?;
+    assert!(record["outcome"]["Nothing"].is_object(), "{record}");
+    assert!(record["steps"].as_array().is_some_and(Vec::is_empty), "{record}");
+    std::thread::sleep(Duration::from_millis(1200));
+    let moves_after = cluster.node_mut(0).command("MAP")?["ok"]["moves"].as_array().map_or(0, Vec::len);
+    assert_eq!(moves_after, moves_before, "a move followed a rebalance that had nothing to do");
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![3, 2, 2, 2]);
+    for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    drop(cluster);
+    // the N = RF half: three nodes at three hold every set everywhere, and say so at once
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .detector_interval_ms(200)
+        .plan_interval(Duration::from_millis(500))
+        .weight(0, 3)
+        .start()
+        .await?;
+    let plan = plan_as_process(&mut cluster, 0, "REBALANCE")?;
+    let record = wait_plan_phase(&mut cluster, 0, plan, "Done", Duration::from_secs(30))?;
+    let reason = record["outcome"]["Nothing"]["reason"].as_str().unwrap_or_default().to_string();
+    assert!(reason.contains("every member holds every set"), "{record}");
+    assert!(record["steps"].as_array().is_some_and(Vec::is_empty), "{record}");
+    let again = plan_as_process(&mut cluster, 0, "REBALANCE")?;
+    let record = wait_plan_phase(&mut cluster, 0, again, "Done", Duration::from_secs(30))?;
+    assert!(record["outcome"]["Nothing"].is_object(), "{record}");
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// The snapshot counters a node's shards report, folded
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+fn snapshot_stats_of(cluster: &mut Cluster, node: usize) -> Result<serde_json::Value, FixtureError> {
+    let view = groups_of(cluster, node)?;
+    Ok(view["snapshots"].clone())
+}
+
+/// Wait until every group's row count agrees across the nodes hosting it
+///
+/// The digest verb hashes a node's groups together, so nodes holding different sets never
+/// agree on it; at a factor below the node count this compares each group where it is held.
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `nodes` - The nodes
+/// * `table` - The table
+/// * `within` - How long to wait
+fn wait_group_rows_agree(cluster: &mut Cluster, nodes: &[usize], table: &str, within: Duration) -> Result<(), FixtureError> {
+    let deadline = Instant::now() + within;
+    loop {
+        let digests: Vec<serde_json::Value> = nodes.iter().map(|node| digest_of(cluster, *node, table)).collect::<Result<_, _>>()?;
+        let mut rows: std::collections::BTreeMap<String, std::collections::BTreeSet<u64>> = std::collections::BTreeMap::new();
+        for digest in &digests {
+            for (group, count) in digest["groups"].as_object().into_iter().flatten() {
+                rows.entry(group.clone()).or_default().insert(count.as_u64().unwrap_or(0));
+            }
+        }
+        if rows.values().all(|counts| counts.len() == 1) {
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("the groups of {table} never agreed: {digests:?}")));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Several sets rebalanced onto one destination from distinct sources under a stream cap of
+/// one and a byte budget: peak concurrent streams one, bytes per second under the budget,
+/// foreground writes accepted by the oracle throughout, every step moved; a destination under
+/// its disk reserve blocks a drain by name and unblocks when the reserve is met (C8 M9b)
+///
+/// Four placed at a factor of two and a spare of twice their weight, the retention short so a
+/// learner is fed a snapshot, every node sending under one byte budget and the spare
+/// installing one stream at a time. A rebalance under a cap of four moves per node issues
+/// three moves onto the spare at once, from three sources; the spare takes one stream at a
+/// time and refuses the others until it is done, and what it receives never passes the
+/// budget's bound. Then every
+/// member's free bytes are overridden below the reserve: a decommission is planned and
+/// blocked naming the reserve, nothing is fed, and lifting the override lets it run
+/// ([F46](../../docs/src/features/capacity-rebalancing.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn node_transfer_budgets_bound_concurrent_sources() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal_model::event::{ClientOp, MutationOp, OpResult, ReadLevel};
+    use shoal_model::ids::{Attempt, Key, OpId, TabletId, Value};
+    use shoal_model::oracle::{Ledger, Outcome};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    const BUDGET: usize = 512 * 1024;
+    let mut builder = Cluster::builder()
+        .cluster(5, CoreClaim::Count(1))
+        .replication_factor(2)
+        .lane_links(true)
+        .initialize(false)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .retire_after(Duration::from_secs(1))
+        .catchup_lag(0)
+        .detector_interval_ms(250)
+        .checkpoint_entries(8)
+        .retained_entries(16)
+        .snapshot_chunk_bytes(64 * 1024)
+        .plan_interval(Duration::from_millis(500))
+        .moves_per_node(4)
+        .weight(4, 2);
+    for node in 0..5 {
+        builder = builder.stream_budget(node, BUDGET, if node == 4 { 1 } else { 2 });
+    }
+    let mut cluster = builder.start().await?;
+    cluster.initialize(&[0, 1, 2, 3])?;
+    let addrs: Vec<String> = (0..5).map(|node| cluster.node(node).endpoints.client.to_string()).collect();
+    // enough archived bytes in every set that a stream takes seconds under the budget
+    let text = "x".repeat(2048);
+    for batch in 0..20u64 {
+        let keys: Vec<u64> = (7000 + batch * 100..7000 + batch * 100 + 100).collect();
+        write_notes_batch(&addrs[0], &keys, &text).await?;
+    }
+    wait_group_rows_agree(&mut cluster, &[0, 1, 2, 3], "Note", Duration::from_secs(60))?;
+    for node in 0..4 {
+        compact_now(&mut cluster, node, "Note")?;
+    }
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![2, 2, 2, 2, 0]);
+    // writers through node zero under identities with a retry budget, on keys of their own
+    let keys: Vec<u64> = (7900..7906).collect();
+    let ledger = Arc::new(Mutex::new(Ledger::default()));
+    let clock = Arc::new(AtomicU64::new(0));
+    let next_id = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let tablet_id = |key: u64| TabletId {
+        table: shoal_model::ids::TableId(1),
+        range: tablet_of(key) as u16,
+    };
+    for key in &keys {
+        let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+        let attempt = Attempt { id, retry: 0 };
+        let invoke = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().invoke(attempt, tablet_id(*key), ClientOp::Mutate(MutationOp::Insert { key: Key((*key % 251) as u8), value: Value(0) }), invoke);
+        write_note(&addrs[0], *key, "0").await?;
+        let complete = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Applied(true)));
+    }
+    let writer = {
+        let endpoints = addrs.clone();
+        let keys = keys.clone();
+        let (ledger, clock, next_id, stop) = (ledger.clone(), clock.clone(), next_id.clone(), stop.clone());
+        tokio::spawn(async move {
+            let mut round = 0u32;
+            while !stop.load(Ordering::SeqCst) && round < 40 {
+                let Ok(client) = Shoal::<TestDbClient>::builder().endpoints(endpoints.clone()).build().await else {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                };
+                for key in &keys {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let value = Value(round + 1);
+                    let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+                    let attempt = Attempt { id, retry: 0 };
+                    let invoke = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().invoke(attempt, TabletId { table: shoal_model::ids::TableId(1), range: tablet_of(*key) as u16 }, ClientOp::Mutate(MutationOp::Update { key: Key((*key % 251) as u8), value }), invoke);
+                    let options = SendOptions::new().identity(uuid::Uuid::new_v4()).retry(Duration::from_secs(20));
+                    let update = cluster::schema::NoteUpdate { partition_key: *key, text: Some(value.0.to_string()) };
+                    let outcome = match client.send_one_with(update, &options).await {
+                        Ok(_) => Outcome::Ok(OpResult::Applied(true)),
+                        Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Outcome::Ok(OpResult::Applied(false)),
+                        Err(_) => Outcome::Unknown,
+                    };
+                    let complete = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().complete(attempt, complete, outcome);
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+                round += 1;
+            }
+            Ok::<(), shoal::client::Errors>(())
+        })
+    };
+    // the rebalance: three sets onto the spare from three sources, planned at once
+    let before = snapshot_stats_of(&mut cluster, 4)?;
+    let received_before = before["bytes_received"].as_u64().unwrap_or(0);
+    let started = Instant::now();
+    let plan = plan_as_process(&mut cluster, 0, "REBALANCE")?;
+    // sample what the spare has received against the bucket's bound while the plan runs
+    let record = loop {
+        let record = plan_record_via(&mut cluster, 0, plan)?;
+        let stats = snapshot_stats_of(&mut cluster, 4)?;
+        let received = stats["bytes_received"].as_u64().unwrap_or(0).saturating_sub(received_before);
+        let elapsed = started.elapsed().as_secs_f64();
+        // a full bucket to begin with, then the rate, plus a chunk of slack
+        let bound = (BUDGET as f64) * (elapsed + 1.0) + 2.0 * 64.0 * 1024.0;
+        assert!((received as f64) <= bound, "the spare received {received} bytes in {elapsed:.1}s, over the budget's bound of {bound:.0}: {stats}");
+        if record["phase"] == "Done" {
+            break record;
+        }
+        assert!(started.elapsed() < Duration::from_secs(240), "the rebalance never finished: {record}");
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    assert!(record["outcome"]["Completed"].is_object(), "{record}");
+    let steps = record["steps"].as_array().expect("steps");
+    assert_eq!(steps.len(), 3, "{record}");
+    assert!(steps.iter().all(|step| step["state"] == "Moved"), "{record}");
+    let sources: std::collections::BTreeSet<&str> = steps.iter().filter_map(|step| step["from"].as_str()).collect();
+    assert_eq!(sources.len(), 3, "the three sets did not come from three sources: {record}");
+    let node4 = cluster.node_ids()[4].clone();
+    assert!(steps.iter().all(|step| step["to"] == node4), "{record}");
+    // the spare was fed by snapshot, one stream at a time, and the other was refused for it
+    let stats = snapshot_stats_of(&mut cluster, 4)?;
+    assert!(stats["installed"].as_u64().unwrap_or(0) >= 3, "the spare was not fed by snapshot: {stats}");
+    assert_eq!(stats["peak_streams"], 1, "{stats}");
+    assert!(stats["refused_budget"].as_u64().unwrap_or(0) >= 1, "the second stream was never refused: {stats}");
+    let mut senders_waited = 0u64;
+    for node in 0..4 {
+        senders_waited += snapshot_stats_of(&mut cluster, node)?["budget_wait_ns"].as_u64().unwrap_or(0);
+    }
+    assert!(senders_waited > 0, "no sender ever waited on its budget");
+    let held = sets_held(&mut cluster, 0)?;
+    assert_eq!(held[4], 3, "{held:?}");
+    assert_eq!(held.iter().sum::<usize>(), 8, "{held:?}");
+    // then every member is short of its reserve: a decommission is blocked by name and feeds nothing
+    for node in 0..5 {
+        let _ = cluster.node_mut(node).command("FREE_BYTES 1000")?;
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    let fed_before: u64 = (0..5).map(|node| snapshot_stats_of(&mut cluster, node).map(|stats| stats["bytes_received"].as_u64().unwrap_or(0))).sum::<Result<u64, _>>()?;
+    let drain = plan_as_process(&mut cluster, 0, "DECOMMISSION 3")?;
+    let record = wait_plan_phase(&mut cluster, 0, drain, "Blocked", Duration::from_secs(30))?;
+    assert_eq!(record["phase"], "Blocked", "{record}");
+    assert!(record["blocked"]["reason"].as_str().is_some_and(|reason| reason.contains("disk reserve")), "{record}");
+    assert!(record["steps"].as_array().is_some_and(Vec::is_empty), "{record}");
+    assert_eq!(member_view(&mut cluster, 0, 3)?["state_name"], "leaving");
+    std::thread::sleep(Duration::from_secs(2));
+    let fed_after: u64 = (0..5).map(|node| snapshot_stats_of(&mut cluster, node).map(|stats| stats["bytes_received"].as_u64().unwrap_or(0))).sum::<Result<u64, _>>()?;
+    assert_eq!(fed_after, fed_before, "a blocked plan fed bytes");
+    assert_eq!(plan_record_via(&mut cluster, 0, drain)?["phase"], "Blocked");
+    // the reserve met again, the drain runs to the end
+    for node in 0..5 {
+        let _ = cluster.node_mut(node).command("FREE_BYTES none")?;
+    }
+    let record = wait_plan_phase(&mut cluster, 0, drain, "Done", Duration::from_secs(240))?;
+    assert!(record["outcome"]["Completed"].is_object(), "{record}");
+    wait_member_state(&mut cluster, 0, 3, "removed", Duration::from_secs(60))?;
+    // the writers' history, joined by a read of every key on the holders, is sequential
+    stop.store(true, Ordering::SeqCst);
+    writer.await.expect("the writer task panicked")?;
+    let survivors = [0usize, 1, 2, 4];
+    wait_group_rows_agree(&mut cluster, &survivors, "Note", Duration::from_secs(60))?;
+    for node in survivors {
+        let addr = cluster.node(node).endpoints.client.to_string();
+        for key in &keys {
+            let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+            let attempt = Attempt { id, retry: 0 };
+            let invoke = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().invoke(attempt, tablet_id(*key), ClientOp::Read { key: Key((*key % 251) as u8), level: ReadLevel::One }, invoke);
+            let seen = read_note(&addr, *key).await?.map(|text| Value(text.parse().expect("a value")));
+            let complete = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Value(seen)));
+        }
+    }
+    let ledger = ledger.lock().unwrap().clone();
+    shoal_model::oracle::check(&ledger).unwrap_or_else(|error| panic!("the history is not sequential: {error:?}"));
+    for id in survivors {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A live member drained one set at a time while writers through every node continue: zero
+/// final errors under the oracle, the member leaving then removed, every key on the new
+/// holders; the p99 before and during recorded (C8 M9b)
+///
+/// Three placed at a factor of three and a spare, writers through every node under
+/// identities with a retry budget throughout. `DECOMMISSION 1`: every set leaves node one one
+/// at a time under `moves_per_node`, node one is leaving the while - it still serves and
+/// counts - then removed with its voter seat, if it had one, refilled by the spare. Every
+/// write is acknowledged inside its retry budget, the history is sequential, and every key
+/// reads back on the new holders. The p99 before and during the drain are printed and
+/// carried by the arm's capture; the two-times budget is judged there, not here on a shared
+/// machine at smoke scale ([F46](../../docs/src/features/capacity-rebalancing.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn decommission_drains_within_supported_load_envelope() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal_model::event::{ClientOp, MutationOp, OpResult, ReadLevel};
+    use shoal_model::ids::{Attempt, Key, OpId, TabletId, Value};
+    use shoal_model::oracle::{Ledger, Outcome};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .plan_interval(Duration::from_millis(500)),
+    )
+    .await?;
+    cluster.wait_voters(0, 3)?;
+    let voters_before = voter_indices(&mut cluster, 0)?;
+    let addrs: Vec<String> = (0..4).map(|node| cluster.node(node).endpoints.client.to_string()).collect();
+    // six keys per writer, one writer per node, inserted before anything is concurrent
+    let keys: Vec<u64> = (8000..8024).collect();
+    let ledger = Arc::new(Mutex::new(Ledger::default()));
+    let clock = Arc::new(AtomicU64::new(0));
+    let next_id = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let latencies: Arc<Mutex<Vec<(Instant, Duration)>>> = Arc::new(Mutex::new(Vec::new()));
+    let unknown = Arc::new(AtomicU64::new(0));
+    let tablet_id = |key: u64| TabletId {
+        table: shoal_model::ids::TableId(1),
+        range: tablet_of(key) as u16,
+    };
+    for key in &keys {
+        let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+        let attempt = Attempt { id, retry: 0 };
+        let invoke = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().invoke(attempt, tablet_id(*key), ClientOp::Mutate(MutationOp::Insert { key: Key((*key % 251) as u8), value: Value(0) }), invoke);
+        write_note(&addrs[0], *key, "0").await?;
+        let complete = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Applied(true)));
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // the writers go through the placed nodes: the spare coordinates nothing until a set is
+    // on it, and a write sent to it is refused by name rather than forwarded
+    let mut tasks = Vec::new();
+    for node in 0..4 {
+        let endpoints: Vec<String> = addrs[..3].to_vec();
+        let keys: Vec<u64> = keys[node * 6..node * 6 + 6].to_vec();
+        let (ledger, clock, next_id, stop, latencies, unknown) =
+            (ledger.clone(), clock.clone(), next_id.clone(), stop.clone(), latencies.clone(), unknown.clone());
+        tasks.push(tokio::spawn(async move {
+            let mut ordered = endpoints.clone();
+            ordered.rotate_left(node % 3);
+            let mut round = 0u32;
+            while !stop.load(Ordering::SeqCst) && round < 26 {
+                let Ok(client) = Shoal::<TestDbClient>::builder().endpoints(ordered.clone()).build().await else {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                };
+                for (at, key) in keys.iter().enumerate() {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let value = Value(node as u32 * 1000 + round + 1);
+                    let delete = (round as usize + at + node) % 5 == 0;
+                    let op = if delete {
+                        MutationOp::Delete { key: Key((*key % 251) as u8) }
+                    } else {
+                        MutationOp::Update { key: Key((*key % 251) as u8), value }
+                    };
+                    let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+                    let attempt = Attempt { id, retry: 0 };
+                    let invoke = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().invoke(attempt, TabletId { table: shoal_model::ids::TableId(1), range: tablet_of(*key) as u16 }, ClientOp::Mutate(op), invoke);
+                    let options = SendOptions::new().identity(uuid::Uuid::new_v4()).retry(Duration::from_secs(20));
+                    let sent = Instant::now();
+                    let outcome = if delete {
+                        match client.send_one_with(cluster::schema::NoteDelete::new(*key), &options).await {
+                            Ok(_) => Outcome::Ok(OpResult::Applied(true)),
+                            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Outcome::Ok(OpResult::Applied(false)),
+                            Err(_) => Outcome::Unknown,
+                        }
+                    } else {
+                        let update = cluster::schema::NoteUpdate { partition_key: *key, text: Some(value.0.to_string()) };
+                        match client.send_one_with(update, &options).await {
+                            Ok(_) => Outcome::Ok(OpResult::Applied(true)),
+                            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Outcome::Ok(OpResult::Applied(false)),
+                            Err(error) => {
+                                eprintln!("writer {node}: {error:?}");
+                                Outcome::Unknown
+                            }
+                        }
+                    };
+                    if outcome == Outcome::Unknown {
+                        unknown.fetch_add(1, Ordering::SeqCst);
+                        eprintln!("writer {node} round {round} key {key}: unknown after {:?}", sent.elapsed());
+                    }
+                    latencies.lock().unwrap().push((sent, sent.elapsed()));
+                    let complete = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().complete(attempt, complete, outcome);
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                round += 1;
+            }
+            Ok::<(), shoal::client::Errors>(())
+        }));
+    }
+    // a few seconds of the writers alone, then the drain
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let drained_at = Instant::now();
+    let plan = plan_as_process(&mut cluster, 0, "DECOMMISSION 1")?;
+    // leaving throughout: it still serves and counts, and never holds more than one moving step
+    let record = loop {
+        let record = plan_record_via(&mut cluster, 0, plan)?;
+        let moving = record["steps"].as_array().into_iter().flatten().filter(|step| step["state"] == "Moving").count();
+        assert!(moving <= 1, "more than one set moves at a time under a cap of one: {record}");
+        if record["phase"] == "Done" {
+            break record;
+        }
+        // leaving while its sets move; the tombstone lands as the plan finishes
+        let view = member_view(&mut cluster, 0, 1)?;
+        if record["phase"] == "Finishing" {
+            assert!(view["state_name"] == "leaving" || view["state_name"] == "removed", "{view}");
+        } else {
+            assert_eq!(view["state_name"], "leaving", "{view}");
+            assert_eq!(view["health"], "up", "{view}");
+        }
+        assert!(drained_at.elapsed() < Duration::from_secs(300), "the drain never finished: {record}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    let finished_at = Instant::now();
+    assert!(record["outcome"]["Completed"].is_object(), "{record}");
+    assert_eq!(record["outcome"]["Completed"]["moved"], 3, "{record}");
+    wait_member_state(&mut cluster, 0, 1, "removed", Duration::from_secs(60))?;
+    stop.store(true, Ordering::SeqCst);
+    for task in tasks {
+        task.await.expect("a writer task panicked")?;
+    }
+    // zero final errors: every write was acknowledged inside its retry budget
+    assert_eq!(unknown.load(Ordering::SeqCst), 0, "a write was not acknowledged inside its budget");
+    // the p99 before and during, for the record; the budget is the arm's to judge
+    let samples = latencies.lock().unwrap().clone();
+    let p99 = |window: &[Duration]| -> Duration {
+        let mut sorted = window.to_vec();
+        sorted.sort();
+        sorted.get(sorted.len().saturating_sub(1).saturating_mul(99) / 100).copied().unwrap_or_default()
+    };
+    let before: Vec<Duration> = samples.iter().filter(|(at, _)| *at < drained_at).map(|(_, took)| *took).collect();
+    let during: Vec<Duration> = samples.iter().filter(|(at, _)| *at >= drained_at && *at < finished_at).map(|(_, took)| *took).collect();
+    eprintln!(
+        "decommission: {} writes before at p99 {:?}, {} during at p99 {:?}, drained in {:?}",
+        before.len(),
+        p99(&before),
+        during.len(),
+        p99(&during),
+        finished_at.saturating_duration_since(drained_at)
+    );
+    assert!(!before.is_empty() && !during.is_empty());
+    // the voter seat, if node one had one, is refilled by the spare
+    cluster.wait_voters(0, 3)?;
+    assert_eq!(voter_indices(&mut cluster, 0)?, vec![0, 2, 3], "before: {voters_before:?}");
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![3, 0, 3, 3]);
+    // every key on the new holders, and the history joined by those reads is sequential
+    let holders = [0usize, 2, 3];
+    wait_digests_equal(&mut cluster, &holders, "Note", Duration::from_secs(60))?;
+    for node in holders {
+        let addr = cluster.node(node).endpoints.client.to_string();
+        for key in &keys {
+            let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+            let attempt = Attempt { id, retry: 0 };
+            let invoke = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().invoke(attempt, tablet_id(*key), ClientOp::Read { key: Key((*key % 251) as u8), level: ReadLevel::One }, invoke);
+            let seen = read_note(&addr, *key).await?.map(|text| Value(text.parse().expect("a value")));
+            let complete = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Value(seen)));
+        }
+    }
+    let ledger = ledger.lock().unwrap().clone();
+    shoal_model::oracle::check(&ledger).unwrap_or_else(|error| panic!("the history is not sequential: {error:?}"));
+    // the drained member stopped on its own once it learned it was removed
+    let stopped = Cluster::wait_failure(cluster.node(1), Duration::from_secs(30)).expect("the removed node kept running");
+    assert!(stopped.contains("removed"), "node one stopped for another reason: {stopped}");
+    for id in holders {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
     Ok(())

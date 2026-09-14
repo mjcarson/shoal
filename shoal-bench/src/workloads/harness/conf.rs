@@ -151,6 +151,17 @@ pub fn resolve(base: &Path, id: &str, overrides: &ConfOverrides, port: u16) -> R
         if let Some(retire_after) = cluster.retire_after {
             block.migration.retire_after = retire_after.into();
         }
+        // and the rebalance arms the grace and the plan knobs
+        // ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+        if let Some(grace) = cluster.auto_remove_after {
+            block = block.auto_remove_after(Some(grace));
+        }
+        if let Some(interval) = cluster.plan_interval {
+            block.rebalance.plan_interval = interval.into();
+        }
+        if let Some(moves) = cluster.moves_per_node {
+            block.rebalance.moves_per_node = moves;
+        }
         conf.cluster = Some(block);
     }
     Ok(conf)
@@ -229,6 +240,7 @@ pub fn cluster_facts(
         catchup: None,
         background: None,
         migration: None,
+        rebalance: None,
     }))
 }
 

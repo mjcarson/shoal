@@ -274,27 +274,56 @@ bounded in bytes with a forced purge behind the groups pinning it, an installing
 tablets refuse reads while the rest of the node serves, and two arms price the catch-up by log
 and by snapshot.
 
+**What F46 left undone, deliberately.** Recorded here so the next milestone starts from the
+list rather than from the diff:
+
+- **Per-device and per-pair budgets.** `stream_bytes_per_sec` is one bucket per sending node
+  across every stream; a node with two storage devices shares it, and a pair has no budget of
+  its own beyond the destination shard's `concurrent_streams`. The device behind a table's path
+  is not something the configuration names.
+- **A budget that adapts to the foreground.** [C8](../distributed/rebalancing.md#transfer-budgets)
+  asks for background work reduced when the foreground's tail or a replica's lag passes a
+  threshold; the budget is a constant, and the envelope is what the arms measure under it.
+- **A replication factor change**, and with it a decommission from three nodes to two at a
+  factor of three, which stays blocked by name. `SetReplicationFactor` is not an operation.
+- **`SetPolicy` for the grace.** `auto_remove_after` is the bootstrap's; changing it is a
+  bootstrap, and it is not per member.
+- **Cancelling a `Decommission`.** A leaving member goes back to a plain member only when its
+  plan fails; there is no operation that takes it back.
+- **Resident bytes as a weight.** A set is weighed by its archived bytes; a fresh learner's
+  rows and a volatile table's weigh nothing until a compaction, and a volatile group reports
+  zero.
+- **A plan preview.** The record's first steps and blocked reason are the preview; there is no
+  dry run.
+- **The failure domain.** C8's placement priorities name it; a member has no domain and the
+  planner spreads by node alone.
+- **A hotspot threshold**, Q8's last half: a single hot partition is as indivisible as C8 says.
+
 **What F45 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
 
-- **Transfer budgets.** Bytes per second per source, destination and device, a disk reserve for
+- ~~**Transfer budgets.** Bytes per second per source, destination and device, a disk reserve for
   the old and new generations, and a blocked reason when reserves are short
   ([C8](../distributed/rebalancing.md#transfer-budgets)). A move feeds its learner as fast as the
-  bulk lane runs and `catchup_lag` is the only pacing. M9b.
+  bulk lane runs and `catchup_lag` is the only pacing. M9b.~~ Built by
+  [F46](../features/capacity-rebalancing.md): one token bucket per sending node, a stream cap
+  per receiving shard, a disk reserve checked by the planner and the receiver, and a plan
+  blocked by name. Per device and per pair are not built - see below.
 - **A per-tablet snapshot.** A learner is fed the whole group's cut, every tablet the set
   shares, and one inside the retained log is fed a cut anyway when the leader has one newer
   than its purge point ([O55](optimizations.md#o55-a-learner-inside-the-retained-log-is-fed-a-snapshot-when-the-leaders-cached-cut-is-newer-than-its-purge-point)).
 - **Same-node moves, replication factor changes and an operator-chosen destination shard.**
   A move is one member replaced by another in place, on the shard the rule gives the set's
   first tablet; a set's shard on a node is not a choice yet, and the factor is the policy's.
-  M9b for the factor, M9c for the shard.
+  ~~M9b for the factor~~ the factor stayed the policy's at M9b - see below - M9c for the shard.
 - **A second forward hop with a relayed answer.** A stale route is refused by the node that
   meets it and sent once more by the origin; a middle node relaying a third node's answer would
   reach the same holder in the same round trips and needs a frame path nothing else does.
 - **A stream retry.** A move whose snapshot transfer fails inside `cluster.migration.timeout`
   is fed again by openraft's own backoff; past the timeout the move fails and is asked again.
-- **A move of a node's every set at once**, which is the rebalancer's plan rather than an
-  operator's request. M9b.
+- ~~**A move of a node's every set at once**, which is the rebalancer's plan rather than an
+  operator's request. M9b.~~ Built by [F46](../features/capacity-rebalancing.md) as a plan
+  whose steps are moves, one per member at a time under `cluster.rebalance.moves_per_node`.
 - **A cluster-wide retirement grace.** `retire_after` is a node's setting; a stale router's
   window is the source's.
 - **Apply-time expiry.** Expiry is judged on the coordinator's own replica; a replica that has
@@ -486,8 +515,11 @@ rather than from the diff:
   Built by [F45](../features/replica-migration.md): a node admitted after the placement is
   placed by a `Move`, which brings it into a replica set under a data configuration; a second
   `Initialize` is still refused, naming the move.
-- **Grace expiry, `Leaving`, `Removing` and removal.** A `Down` episode is minted and committed
-  so that M9b has something to name; nothing acts on it.
+- ~~**Grace expiry, `Leaving`, `Removing` and removal.** A `Down` episode is minted and committed
+  so that M9b has something to name; nothing acts on it.~~ Built by
+  [F46](../features/capacity-rebalancing.md): the grace is counted in committed increments and
+  expires into a removal plan, `Leaving` and `Removing` are phases beside the health, and a
+  removed identity is tombstoned.
 - **The certificate-to-node binding** the `shoal-node://<id>` SAN is written for. Q11's identity
   half is the incarnation; the certificate half is still unread.
 - **A detector grace that is a setting** rather than five intervals, and the `Detector` view on a

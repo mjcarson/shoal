@@ -216,4 +216,11 @@ pub struct StatusReport {
     /// ([F44](../../../../../docs/src/features/repair.md))
     #[serde(default)]
     pub quarantined: Vec<super::super::admin::QuarantinedMember>,
+    /// The free bytes on the node's storage, as it last read them; zero when it could not
+    /// ([F46](../../../../../docs/src/features/capacity-rebalancing.md))
+    #[serde(default)]
+    pub free_bytes: u64,
+    /// The bytes each tablet group holds on the node, by the group's number, summed over its shards
+    #[serde(default)]
+    pub group_bytes: Vec<(u64, u64)>,
 }

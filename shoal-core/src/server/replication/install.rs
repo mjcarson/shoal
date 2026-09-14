@@ -183,6 +183,15 @@ impl Partial {
             repair: None,
         }
     }
+
+    /// Whether the stream is still being assembled: short of its bytes and not failed
+    ///
+    /// What counts against the node's stream budget
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md)).
+    #[must_use]
+    pub fn is_assembling(&self) -> bool {
+        self.failed.is_none() && self.assembler.next < self.manifest.total
+    }
 }
 
 /// Where an install may be made to die, for the crash matrix

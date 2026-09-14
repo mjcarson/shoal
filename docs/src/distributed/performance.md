@@ -79,7 +79,16 @@ carries `cluster.migration` - the marks, how long each phase took summed over th
 groups, what the destination was fed and the client's distribution before, during and after
 with a per second series - which is the transfer bytes, duration and pauses M9a's exit asks
 for; the harness stages the spare and shortens the source's grace so the move is done inside
-the run. The open-loop schedule is not built; the arms are closed loops at one depth.
+the run. Since [F46](../features/capacity-rebalancing.md) the four rebalance arms run:
+`macro/cluster/rebalance/{add,decommission,remove,capacity_blocked}`, the same placement with a
+plan the control leader drives from a third of the way through - a `Rebalance` onto a spare, a
+`Decommission` onto it, an expiry after node one is killed for good under a five second grace,
+and a `Decommission` with no spare that stays blocked - three moves per member at a time so
+the nine sets fit the run. Each carries `cluster.rebalance`: the kind, the marks, the steps
+and what they moved, the blocked reason, the windows and the series, and `p99_ratio_permille`,
+which is the number M9b's two-times budget is judged on; the remove arm carries `cluster.fault`
+beside it with no restart mark. The open-loop schedule is not built; the arms are closed loops
+at one depth.
 
 ## The design
 
@@ -273,6 +282,7 @@ assign the gates. Generated cluster pages retain the book's scope/comparability 
 | `catchup_capture_records_convergence` | A returning node's record carries its restart and convergence marks, the split by log and by snapshot and the lag series; a run that ends unconverged says so and keeps the series | M7 |
 | `background_capture_records_scrub_interference` | A background repair's record carries its marks, the windows before, during and after it with their own distributions, a bucket per second and what the scrubs read; a run with no repair is all `before`; an older record loads without it | M8 |
 | `migration_capture_records_transfer_and_pauses` | A move's record carries its marks, the time each phase took, what the destination was fed, the windows before, during and after with their own distributions and a bucket per second, and `unfinished` for a run that ended first; an F44 record loads without it | M9a |
+| `rebalance_capture_records_plan_and_windows` | A plan's record carries its kind, its marks, its steps and what they moved, its blocked reason, the windows and the series, and the p99 ratio in thousandths; a blocked plan the run outlasted is `unfinished` with its reason kept; an F45 record loads without it | M9b |
 | `physical_cluster_records_each_node_environment` | Unequal real hardware and primary placement are retained in comparability metadata | M10 |
 
 ## Related

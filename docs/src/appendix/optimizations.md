@@ -193,6 +193,8 @@ so they get worse by existing longer rather than under load.
 | **B11** | [**O53**](#o53-the-assembler-keeps-a-map-of-received-chunks-and-forgets-them-on-a-restart) — the assembler keeps a map of received chunks and forgets them on a restart | Argued — a `BTreeMap` entry per chunk out of order, and a stream started over after the receiver restarts | S | `macro/cluster/catchup/snapshot` with a receiver restart, which no arm does | Contained | no |
 | **B12** | [**O54**](#o54-a-scrub-reads-every-archived-partition-of-a-group-once-per-pass) — a scrub reads every archived partition of a group once per pass | Measured in shape — the background arm's `bytes` is the group's archives whole, per pass | M | `macro/cluster/background/repair` at full scale, where the archives are wider than memory | Contained | no |
 | **B13** | [**O55**](#o55-a-learner-inside-the-retained-log-is-fed-a-snapshot-when-the-leaders-cached-cut-is-newer-than-its-purge-point) — a learner inside the retained log is fed a snapshot when the leader's cached cut is newer than its purge point | Argued — a whole group's archives on the bulk lane where a log tail would do | M | `macro/cluster/migration/move` at full scale, whose `bytes` is zero when the log fed the destination | Contained | no |
+| **B14** | [**O56**](#o56-the-planner-recomputes-every-rule-set-on-every-look) — the planner recomputes every rule set on every look | Argued — four thousand rule derivations per open plan per look, on the control core | S | none; the rebalance arms' windows would carry a control stall as a tail | Contained | no |
+| **B15** | [**O57**](#o57-tablet-bytes-are-rescanned-from-the-whole-archive-map-on-every-report) — tablet bytes are rescanned from the whole archive map on every report | Argued — a pass over every archived partition of a table per report tick, on the shard | S | none; a grid cell on a persistent table under writes is where the pass would show | Contained | no |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -2724,3 +2726,30 @@ digest the compactor computed is not evidence against the compactor.
 
 Filed by [F45](../features/replica-migration.md). The arm was built to price the transfer
 before anything decided how to shape it.
+
+### O56. The planner recomputes every rule set on every look
+
+| | |
+| --- | --- |
+| **Rank** | **B14** — argued, contained |
+| **Impact** | Argued — `drive_plans` builds a `TabletMap` from the state and asks `rule_sets_served` and `groups_of` for every table each time it looks at an open plan, which is `TABLET_COUNT` rule derivations and a configuration scan per tablet, per look: every `plan_interval` and every quarter second the state or the capacity moved while a plan is open, on the control core. At the fixture's scale it is a millisecond; at a thousand groups it is the same loop over the same four thousand tablets, since the sets are a function of the placement and the configurations and both change rarely |
+| **Difficulty** | S — the sets could be cached on the map by its version, or the planner given the `GroupSpec`s the map already derives for `replica_groups`, which are the same sets keyed the same way |
+| **Blocks** | nothing; a plan is looked at seconds apart |
+| **Tradeoff** | Contained — a cache keyed by map version is invalidated by exactly what invalidates the sets |
+| **Benchmark** | none names it; the rebalance arms' `cluster.rebalance` windows would carry a control-core stall as a foreground tail, and the Q13 spike is where a control-plane cost is priced |
+
+Filed by [F46](../features/capacity-rebalancing.md). `TabletMap::from_state` is what
+`under_replicated_sets` and `apply_tombstone` build too, so the same cache would serve three.
+
+### O57. Tablet bytes are rescanned from the whole archive map on every report
+
+| | |
+| --- | --- |
+| **Rank** | **B15** — argued, contained |
+| **Impact** | Argued — `replication_report` asks each table's archive map for its bytes per tablet once per report, which is one pass over `to_archive` - every archived partition of the table on the shard - summing sizes into a vector of four thousand; a report is built on every deadline tick and sent when it differs from the last, and with `bytes` on it a shard under writes differs on most ticks. A shard with a million archived partitions walks a million entries a few times a second on its own core |
+| **Difficulty** | S — a counter per tablet maintained at `set_partition` and `remove_partition` and rebuilt at open, which is what the first plan for this feature sketched; the pass was chosen because it cannot drift from the map, and the drift a counter risks is exactly the compactor's replace-in-place paths |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — a counter is the same figure without the pass, and `tablet_bytes_follow_the_map` is the test that would catch it drifting |
+| **Benchmark** | none names it; the grid's `r50` cells on the persistent tables would carry a per-tick pass as a shard-core cost, and the kill arm's placement is where a report is built under load |
+
+Filed by [F46](../features/capacity-rebalancing.md).

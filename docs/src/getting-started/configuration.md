@@ -391,8 +391,9 @@ cluster:
     window: 100                   # report arrivals the leader keeps per member
     min_samples: 5                # arrivals the leader needs before it will suspect anybody
   primary_failover_after: "5s"    # base data election timeout
-  auto_remove_after: "30m"        # null disables automatic removal of a Down node
+  auto_remove_after: "30m"        # null disables automatic removal of a Down node; counted by the leader in committed eighths and acted on since F46
   admins: []
+  weight: null                    # this node's share of the cluster's bytes against the others' (F46); absent or 0 is its shard count
   transport:                      # the peer lanes (F38); every bound is in bytes
     data_queue_bytes: "64MiB"     # queued to one peer on the data lane; a forward past it is shed
     control_queue_bytes: "8MiB"   # the control lane's queue to one peer
@@ -426,6 +427,13 @@ cluster:
     timeout: "10m"                # one phase of a move; no shorter than replication.snapshot_timeout, since the learner phase is a transfer
     retire_after: "5m"            # how long the source keeps a retired copy's files, refusing every query of them by name, before they are reclaimed
     concurrent: 1                 # group moves one shard drives at a time; at least one
+    stream_bytes_per_sec: "64MiB" # one token bucket every snapshot stream this node sends draws on, across every group (F46); 0 is unlimited; no smaller than replication.snapshot_chunk_bytes
+    concurrent_streams: 2         # snapshot streams one shard installs at a time; the rest refused at their begin and fed again; at least one
+    disk_reserve: "1GiB"          # free bytes kept above what a stream would land, checked by the planner and by the receiver
+  rebalance:                      # the plans the control leader drives (F46), read by this node when it leads
+    moves_per_node: 1             # moves one member may be the source of, and the destination of, at a time; at least one
+    hysteresis: 0.10              # the share of its target a member has to be over before a rebalance moves a set off it; at least 0 and under 1
+    plan_interval: "5s"           # how often the leader looks at its open plans; no shorter than failure_detector.interval_ms
 ```
 
 Two settings have no default and are absent above: `advertise`, the address peers reach this
@@ -452,8 +460,9 @@ they have no default that means anything:
   through a different address from each side. Either half may be left out. The cluster fixture
   uses it to put a fault proxy on each direction of each lane.
 
-**Two halves.** `advertise`, `port`, `control_port`, `client_advertise`, `control_core` and
-`control_core_shared` are this node's. `control_voters`, `replication_factor`, the two
+**Two halves.** `advertise`, `port`, `control_port`, `client_advertise`, `control_core`,
+`control_core_shared` and `weight` are this node's - the weight is recorded on the node's
+member record when it observes itself, so changing it is a restart. `control_voters`, `replication_factor`, the two
 consistencies, `failure_detector`, `primary_failover_after`, `auto_remove_after` and `admins`
 are the cluster's: the bootstrapping node writes them into the control state as its
 `BootstrapPolicy`, and after that a change is an admin operation, not an edit to a file. A

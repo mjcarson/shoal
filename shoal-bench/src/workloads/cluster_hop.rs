@@ -291,6 +291,9 @@ impl Workload for ClusterHop {
                     read: None,
                     retention: None,
                     retire_after: None,
+                    auto_remove_after: None,
+                    plan_interval: None,
+                    moves_per_node: None,
                     spares: Vec::new(),
                 }),
                 ..ConfOverrides::default()

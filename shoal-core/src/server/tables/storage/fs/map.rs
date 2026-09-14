@@ -577,6 +577,21 @@ impl ArchiveMap {
         self.to_archive.borrow_mut().insert(id, entry);
     }
 
+    /// The bytes the archives hold per tablet, indexed by tablet
+    ///
+    /// One pass over the map, so the figure can never drift from what the map names: a
+    /// partition replaced, removed or reloaded is counted as the map has it now
+    /// ([F46](../../../docs/src/features/capacity-rebalancing.md)).
+    #[must_use]
+    pub fn tablet_bytes(&self) -> Vec<u64> {
+        let mut bytes = vec![0u64; crate::server::ring::TABLET_COUNT];
+        for (key, entry) in self.to_archive.borrow().iter() {
+            let tablet = crate::server::ring::Ring::tablet_of(*key);
+            bytes[tablet] += u64::try_from(entry.size).unwrap_or(u64::MAX);
+        }
+        bytes
+    }
+
     /// Drop the location for a partition that no longer has any data
     ///
     /// Without this a pruned partition keeps pointing at its pre-delete copy in

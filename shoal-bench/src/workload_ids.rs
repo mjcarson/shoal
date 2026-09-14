@@ -496,6 +496,13 @@ pub const IDS: &[&str] = &[
     // the migration arm (F45): the kill arm's placement with a spare beside it and one set
     // moved to the spare inside the run. appended after the background arm
     "macro/cluster/migration/move",
+    // the rebalance arms (F46): the kill arm's placement with a plan in the background - a
+    // rebalance onto a spare, a decommission onto it, an expiry after a kill, and a
+    // decommission with nowhere to go. appended after the migration arm
+    "macro/cluster/rebalance/add",
+    "macro/cluster/rebalance/decommission",
+    "macro/cluster/rebalance/remove",
+    "macro/cluster/rebalance/capacity_blocked",
 ];
 
 /// Whether an id names a workload this build knows about

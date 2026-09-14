@@ -142,7 +142,9 @@ current data and are not read-eligible merely because they still exist. C6 deter
 Control-plane snapshots persist placement intent. Each tablet also persists its own configuration,
 term/vote, checkpoint and log matching evidence. Node restart reconciles the two before serving.
 A stale storage marker/topology version does not prove data freshness. Removed nodes cannot
-bootstrap old local files as a new authoritative group.
+bootstrap old local files as a new authoritative group. *At M9b a removed node's identity is
+tombstoned in the control state and refused at every door; its files are never a source
+([F46](../features/capacity-rebalancing.md)).*
 
 Keep `ShardCountMismatch` until M9c implements durable local rehoming of logs, archives and
 metadata, including files of shards that no longer run. A per-tablet index helps discovery; it is

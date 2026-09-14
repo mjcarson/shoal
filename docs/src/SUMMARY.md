@@ -107,6 +107,7 @@
   - [F43. Recovering a node brought back online](features/node-recovery.md)
   - [F44. Repair](features/repair.md)
   - [F45. Safe replica migration](features/replica-migration.md)
+  - [F46. Capacity-aware rebalancing and removal](features/capacity-rebalancing.md)
 
 # Direction
 

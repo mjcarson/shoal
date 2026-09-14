@@ -253,8 +253,9 @@ driver is in process with node zero, as every cluster arm's is, and the record s
 - **A rerouted share is rerouted once.** A second failure is `Unavailable`.
 - ~~**Catch-up past the purge point is M7's.** A returning node behind its leader's purge point is
   still refused by name.~~ Delivered by [F43](node-recovery.md).
-- **A `Down` member is never removed.** `auto_remove_after` is M9b's; the grace test asserts the
-  placement holds and nothing more.
+- ~~**A `Down` member is never removed.** `auto_remove_after` is M9b's; the grace test asserts the
+  placement holds and nothing more.~~ Since [F46](capacity-rebalancing.md) a `Down` member is
+  removed once its grace elapses; the grace test still asserts the placement holds inside it.
 - **The capture is the benchmark host's.** The arm ran at smoke scale on the development host,
   three times; the numbers below are the third run's shape, not a capture.
 - **The wasm explorer was not checked.** The `wasm32-unknown-unknown` target is not installed on

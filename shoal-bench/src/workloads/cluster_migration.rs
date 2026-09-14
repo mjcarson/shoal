@@ -210,7 +210,7 @@ mod tests {
                     assert!((from as usize) < mine_cluster.nodes(), "the source is not a placed node");
                     assert_eq!(to as usize, mine_cluster.members() - 1, "the destination is not the spare");
                 }
-                BackgroundKind::Repair => panic!("the migration arm asks for a repair"),
+                other => panic!("the migration arm asks for {other:?}"),
             }
         }
     }

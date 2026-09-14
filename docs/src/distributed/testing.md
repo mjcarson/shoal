@@ -58,6 +58,13 @@ and `install_hold_ms`; a proxy link can be throttled to a byte rate so a stream 
 would carry in milliseconds takes seconds; `DIGEST` reads archived partitions beside resident
 ones, since after a restart or an install nothing is resident; and the helpers leave a node
 behind the purge point on purpose and wait for it to install and converge.
+Since [F46](../features/capacity-rebalancing.md) a child answers `DECOMMISSION <node>`,
+`REMOVE <node> [<replacement>]`, `MAINTENANCE <node> on|off` and `REBALANCE`, each as the
+process and answering the operation the plan was recorded under, `PLAN_STATUS <op>` and
+`PLANS` for the records, and `FREE_BYTES <bytes>|none`, which overrides what the node reports
+as free and what its receiver checks against the reserve, so a capacity test fills no disk;
+the builder sets `auto_remove_after`, `weight(node, w)`, `stream_budget(node, bytes_per_sec,
+streams)`, `disk_reserve`, `moves_per_node` and `plan_interval`.
 Since [F45](../features/replica-migration.md) a child answers `MOVE <key-hex> <from> <to>`,
 which asks as the process for the set holding the key's tablet to move from one node to
 another and answers the operation, `MOVE_STATUS <op>`, the record, and `MOVE_CRASH_AT <phase>

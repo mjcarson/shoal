@@ -171,6 +171,11 @@ fn schedule(
         }
     }
     marks.killed_at = Some(Instant::now());
+    // a node killed for good stays that way: the remove arm lets the grace take it out
+    // ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+    if !spec.restart {
+        return marks;
+    }
     // leave it dead for as long as the schedule says
     sleep_until(started + spec.at + spec.restart_after);
     // start the same identity again, from the same staged file and the same directory, so it

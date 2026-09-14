@@ -207,6 +207,28 @@ pub struct StagedCluster {
     /// How long a write's identity may be retried within, in milliseconds, if the test shortened it
     #[serde(default)]
     pub retry_window_ms: Option<u64>,
+    /// The grace a down member is removed after, in milliseconds; none for the default, zero
+    /// for never ([F46](../../../docs/src/features/capacity-rebalancing.md))
+    #[serde(default)]
+    pub auto_remove_after_ms: Option<u64>,
+    /// This node's placement weight, if the test set one
+    #[serde(default)]
+    pub weight: Option<u32>,
+    /// The bytes per second this node sends on snapshot streams, if the test bounded it
+    #[serde(default)]
+    pub stream_bytes_per_sec: Option<usize>,
+    /// How many streams one shard of this node installs at a time, if the test bounded it
+    #[serde(default)]
+    pub concurrent_streams: Option<u32>,
+    /// The disk reserve this node keeps, in bytes, if the test set it
+    #[serde(default)]
+    pub disk_reserve: Option<u64>,
+    /// How many moves one member is the source and destination of at a time, if set
+    #[serde(default)]
+    pub moves_per_node: Option<u32>,
+    /// How often the control leader looks at its plans, in milliseconds, if shortened
+    #[serde(default)]
+    pub plan_interval_ms: Option<u64>,
 }
 
 /// The endpoints a child bound, and the identity it reported

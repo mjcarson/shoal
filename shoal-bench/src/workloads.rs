@@ -26,6 +26,7 @@
 
 pub mod cluster_background;
 pub mod cluster_migration;
+pub mod cluster_rebalance;
 pub mod cluster_catchup;
 pub mod cluster_failover;
 pub mod cluster_hop;
@@ -190,6 +191,14 @@ pub fn all() -> Vec<Box<dyn Workload>> {
     // ([F45](../../docs/src/features/replica-migration.md))
     built.extend(
         cluster_migration::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    // the rebalance arms, appended after the migration arm: the same placement with a plan
+    // driven in the background - a spread onto a spare, a drain, an expiry, and a drain with
+    // nowhere to go ([F46](../../docs/src/features/capacity-rebalancing.md))
+    built.extend(
+        cluster_rebalance::all()
             .into_iter()
             .map(|workload| Box::new(workload) as Box<dyn Workload>),
     );

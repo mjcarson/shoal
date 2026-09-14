@@ -389,6 +389,38 @@ where
                 };
             }
         }
+        // the stream budget: as many streams assembling at once as the node allows, another
+        // is refused and the sender's backoff tries again; and the disk reserve: what the
+        // stream would land has to leave the reserve free, judged here where the bytes would
+        // go so a stale report at the planner is caught ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+        let assembling = replication
+            .installs
+            .partials
+            .iter()
+            .filter(|(other, partial)| **other != group && partial.borrow().is_assembling())
+            .count();
+        let (concurrent_streams, disk_reserve) = self
+            .conf
+            .cluster
+            .as_ref()
+            .map_or((u32::MAX, 0), |cluster| (cluster.migration.concurrent_streams, cluster.migration.disk_reserve));
+        if assembling >= concurrent_streams as usize {
+            replication.installs.stats.refused_budget += 1;
+            return SnapshotAnswer::Refused(format!(
+                "stream budget: {assembling} streams installing on this shard, which is as many as it takes at once"
+            ));
+        }
+        let root = &self.conf.storage.default.filesystem.latency_sensitive.path;
+        if let Some(free) = crate::server::control::capacity::free_bytes(root) {
+            let need = manifest.total.saturating_add(disk_reserve);
+            if free < need {
+                replication.installs.stats.refused_reserve += 1;
+                return SnapshotAnswer::Refused(format!(
+                    "disk reserve: free {free}, need {} for the stream plus the {disk_reserve} byte reserve",
+                    manifest.total
+                ));
+            }
+        }
         // the bound on partial bytes, over every other group's partial and this one
         let held: u64 = replication
             .installs
@@ -410,6 +442,9 @@ where
             .installs
             .partials
             .insert(group, Rc::new(RefCell::new(partial)));
+        // the most at once, for the budget test and the capture
+        let assembling = u64::try_from(assembling + 1).unwrap_or(u64::MAX);
+        replication.installs.stats.peak_streams = replication.installs.stats.peak_streams.max(assembling);
         SnapshotAnswer::Resume { from: 0 }
     }
 

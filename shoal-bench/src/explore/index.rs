@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 
 use shoal_top::index::{
-    BackgroundFactsLite, Capture, CatchupFactsLite, CatchupSecondFactsLite, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, FaultFactsLite, MigrationFactsLite,
+    BackgroundFactsLite, Capture, CatchupFactsLite, CatchupSecondFactsLite, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, FaultFactsLite, MigrationFactsLite, RebalanceFactsLite,
     INDEX_VERSION, Index, Layer as IndexLayer, HopFactsLite, HopMixLite, MacroPoint, NodeCoresLite,
     NodeReadFactsLite, OfferedLoadLite, OpStats, OutcomeFactsLite, ReadFactsLite, ReplicaFactsLite,
     ScaleFactsLite, SecondFactsLite, Timing, Verdict, WindowFactsLite, Workload,
@@ -657,6 +657,45 @@ pub fn cluster_facts(cluster: &ClusterFacts) -> ClusterFactsLite {
                     p99_us: second.p99_us,
                 })
                 .collect(),
+        }),
+        // the rebalance arms' record travels whole, steps, windows and series
+        // ([F46](../../../docs/src/features/capacity-rebalancing.md))
+        rebalance: cluster.rebalance.as_ref().map(|rebalance| RebalanceFactsLite {
+            kind: rebalance.kind.clone(),
+            started_ms: rebalance.started_ms,
+            finished_ms: rebalance.finished_ms,
+            seconds: rebalance.seconds,
+            steps: rebalance.steps,
+            moved: rebalance.moved,
+            bytes: rebalance.bytes,
+            blocked: rebalance.blocked.clone(),
+            outcome: rebalance.outcome.clone(),
+            windows: rebalance
+                .windows
+                .iter()
+                .map(|window| WindowFactsLite {
+                    name: window.name.clone(),
+                    from_ms: window.from_ms,
+                    to_ms: window.to_ms,
+                    ops: window.ops,
+                    errors: window.errors,
+                    p50_us: window.p50_us,
+                    p99_us: window.p99_us,
+                    max_us: window.max_us,
+                })
+                .collect(),
+            series: rebalance
+                .series
+                .iter()
+                .map(|second| SecondFactsLite {
+                    second: second.second,
+                    ops: second.ops,
+                    errors: second.errors,
+                    p50_us: second.p50_us,
+                    p99_us: second.p99_us,
+                })
+                .collect(),
+            p99_ratio_permille: rebalance.p99_ratio_permille,
         }),
     }
 }

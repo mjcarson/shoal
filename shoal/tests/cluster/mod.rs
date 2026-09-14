@@ -166,6 +166,19 @@ pub struct ClusterBuilder {
     migration_timeout_ms: Option<u64>,
     /// How long a write's identity may be retried within, in milliseconds, if shortened
     retry_window_ms: Option<u64>,
+    /// The grace a down member is removed after, in milliseconds; none for the default,
+    /// zero for never ([F46](../../../docs/src/features/capacity-rebalancing.md))
+    auto_remove_after_ms: Option<u64>,
+    /// Each node's placement weight, by node index, where a test set one
+    weights: Vec<(usize, u32)>,
+    /// Each node's stream budget, by node index: bytes per second and streams at a time
+    stream_budgets: Vec<(usize, usize, u32)>,
+    /// The disk reserve every node keeps, in bytes, if set
+    disk_reserve: Option<u64>,
+    /// How many moves one member is the source and destination of at a time, if set
+    moves_per_node: Option<u32>,
+    /// How often the control leader looks at its plans, in milliseconds, if shortened
+    plan_interval_ms: Option<u64>,
 }
 
 impl ClusterBuilder {
@@ -429,6 +442,70 @@ impl ClusterBuilder {
     /// * `window` - The window
     pub fn retry_window(mut self, window: Duration) -> Self {
         self.retry_window_ms = Some(window.as_millis() as u64);
+        self
+    }
+
+    /// Set the grace a down member is removed after, or none to never remove one
+    /// ([F46](../../../docs/src/features/capacity-rebalancing.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `grace` - The grace, or none for never
+    pub fn auto_remove_after(mut self, grace: Option<Duration>) -> Self {
+        self.auto_remove_after_ms = Some(grace.map_or(0, |grace| grace.as_millis() as u64));
+        self
+    }
+
+    /// Set one node's placement weight
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `weight` - Its weight
+    pub fn weight(mut self, id: usize, weight: u32) -> Self {
+        self.weights.push((id, weight));
+        self
+    }
+
+    /// Bound one node's snapshot streams: bytes per second sent, and streams installed at a time
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `bytes_per_sec` - The byte budget every stream it sends draws on
+    /// * `streams` - How many streams one of its shards installs at a time
+    pub fn stream_budget(mut self, id: usize, bytes_per_sec: usize, streams: u32) -> Self {
+        self.stream_budgets.push((id, bytes_per_sec, streams));
+        self
+    }
+
+    /// Set the disk reserve every node keeps
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The reserve
+    pub fn disk_reserve(mut self, bytes: u64) -> Self {
+        self.disk_reserve = Some(bytes);
+        self
+    }
+
+    /// Set how many moves one member is the source and destination of at a time
+    ///
+    /// # Arguments
+    ///
+    /// * `moves` - The cap
+    pub fn moves_per_node(mut self, moves: u32) -> Self {
+        self.moves_per_node = Some(moves);
+        self
+    }
+
+    /// Shorten how often the control leader looks at its plans
+    ///
+    /// # Arguments
+    ///
+    /// * `interval` - The interval
+    pub fn plan_interval(mut self, interval: Duration) -> Self {
+        self.plan_interval_ms = Some(interval.as_millis() as u64);
         self
     }
 
@@ -769,6 +846,12 @@ impl Cluster {
             catchup_lag: None,
             migration_timeout_ms: None,
             retry_window_ms: None,
+            auto_remove_after_ms: None,
+            weights: Vec::new(),
+            stream_budgets: Vec::new(),
+            disk_reserve: None,
+            moves_per_node: None,
+            plan_interval_ms: None,
             snapshot_timeout_ms: None,
             snapshot_chunk_bytes: None,
             bulk_queue_bytes: None,
@@ -1439,6 +1522,13 @@ fn build_membership_cluster(
             migration_timeout_ms: builder.migration_timeout_ms,
             retry_window_ms: builder.retry_window_ms,
             move_crash_at: None,
+            auto_remove_after_ms: builder.auto_remove_after_ms,
+            weight: builder.weights.iter().find(|(node, _)| *node == id).map(|(_, weight)| *weight),
+            stream_bytes_per_sec: builder.stream_budgets.iter().find(|(node, _, _)| *node == id).map(|(_, bytes, _)| *bytes),
+            concurrent_streams: builder.stream_budgets.iter().find(|(node, _, _)| *node == id).map(|(_, _, streams)| *streams),
+            disk_reserve: builder.disk_reserve,
+            moves_per_node: builder.moves_per_node,
+            plan_interval_ms: builder.plan_interval_ms,
         });
     }
     Ok(StagedPlan { per_node, reservations })

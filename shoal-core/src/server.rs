@@ -456,6 +456,18 @@ where
         shard::migrate::crash_point::arm(phase, group).map_err(|msg| ServerError::Shoal(ShoalError::InvalidConfig(msg)))
     }
 
+    /// Override the free bytes this node reports and checks, for a capacity test
+    ///
+    /// Process-wide: the report the leader plans from and the receiver's reserve check both
+    /// read it ([F46](../../../docs/src/features/capacity-rebalancing.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The free bytes to report, or zero for the filesystem's figure
+    pub fn free_bytes_override(&self, bytes: u64) {
+        control::capacity::set_override(bytes);
+    }
+
     /// Make every snapshot install on this node pause after its first record, for a test
     ///
     /// # Arguments

@@ -44,7 +44,15 @@ audited like `Repair`, recorded by operation with a phase per group and readable
 node; a move asked for under a repair of the set, or a repair under a move, is recorded queued
 behind it rather than refused, and the record says what it waits behind - and
 `cluster.migration` with the catch-up lag, the phase timeout, the retired copy's grace and how
-many moves a shard drives at once. It has no
+many moves a shard drives at once. Since [F46](../features/capacity-rebalancing.md) it has
+`Decommission`, `Remove` with an optional replacement - which is `Replace` - `Maintenance`
+and `Rebalance`, authorized, versioned, idempotent and audited the same way, each recording a
+plan readable through `PlanStatus` and `Plans` from any node with its steps, its blocked
+reason and its outcome; `Members` reports each member's phase, its one-name state, its
+remaining grace, its weight and the free and held bytes the leader last heard, beside
+`under_replicated_sets` and the tombstones; and `cluster.migration` gained the byte budget,
+the stream cap and the disk reserve, `cluster.rebalance` the move cap, the hysteresis and the
+plan interval, and `cluster.weight` the node's share. It has no
 ~~migration,~~ backup/restore ~~or cluster-admin API~~ and the rest of the admin families are
 their milestones'.
 
@@ -63,9 +71,9 @@ a long migration. Repeating the same operation id is idempotent.
 | Members / Topology | Identities, control voters, data placement, leader hints and committed configuration ids |
 | Lag / Health | Durable, committed, applied and checkpointed positions; eligible/quarantined/installing copies |
 | Detector | Local suspicion, report freshness, incarnation and committed Down episodes |
-| Rebalance / OperationStatus | Transition phases, blockers, remaining bytes, disk reserve and resource budgets |
-| Decommission / Remove / Replace | Capacity-checked state transitions; replacement joins as a learner first |
-| Policy / Maintenance | Versioned RF/default/grace/weight policies; suspend/resume automatic removal |
+| Rebalance / OperationStatus | Transition phases, blockers, remaining bytes, disk reserve and resource budgets. *At M9b `Rebalance`, `PlanStatus` and `Plans`: the steps, each step's move and state, the blocked reason and its version, the outcome with what moved; bytes are the sets' archived bytes as planned* |
+| Decommission / Remove / Replace | Capacity-checked state transitions; replacement joins as a learner first. *At M9b: `Decommission` of a plain member, `Remove` of a down or leaving one with an optional replacement that has to be a placeable member outside every set it would take; the plan is capacity-checked at every look and blocked by name* |
+| Policy / Maintenance | Versioned RF/default/grace/weight policies; suspend/resume automatic removal. *At M9b `Maintenance { node, suspend }` alone: the factor, the grace and a weight are not versioned operations - the first two are the bootstrap's, the weight the node's own file* |
 | Repair / Backup / Restore | Scoped operations with provenance, checksums and explicit recovery boundary |
 
 Authorize every state-changing request, including Repair, through `cluster.admins` from its first
@@ -78,7 +86,11 @@ belongs in M3/M8/M9 as those requests appear, not retrofitted in M10.
 Show desired versus active RF, learners versus voters, leader hints/terms, per-tablet readiness,
 max/histogram replication lag, Down grace remaining, migration phases and blocked reasons.
 Surface “two durable copies, desired three, awaiting replacement node” explicitly. A member count
-of three is not sufficient evidence that every tablet has three ready copies.
+of three is not sufficient evidence that every tablet has three ready copies. *At M9b the
+`Members` read carries what such a tab would draw: `grace_remaining_ms` per member, the open
+plans with their blocked reasons, and `under_replicated_sets` - the sets holding a copy on a
+member the cluster has given up on - which is the "two copies, awaiting a member" figure; the
+tab itself is M10's.*
 
 Actions show a preview naming the affected identity, planned data movement and irreversible
 boundary, then submit the versioned operation. Long operations survive a disconnected TUI and are
@@ -123,17 +135,32 @@ arbitrary lag. Client load balancers need a documented readiness probe, not a fi
    Wait for data configuration/replica readiness, not just Members=Up, before default writes.
 2. **Add.** Join identity, inspect resource/domain capacity, follow learner transfer and safe
    reconfiguration until the feasible target is reached. Report blocked capacity clearly.
+   *At M9b: join, read `Members` for the new member's `free_bytes` and `weight`, then ask for
+   a `Rebalance` - nothing spreads onto it otherwise - and follow `PlanStatus` to `completed`;
+   a `blocked` reason names the set and the reserve or cap it waits on.*
 3. **Replace a dead node.** Start an authenticated replacement as a new identity or use Replace
    to pair it with the old member. At RF=3 on three machines, restoring RF needs that replacement;
    do not wait for removal to complete before supplying the missing capacity.
+   *At M9b: the grace expires into a removal plan on its own, or `Remove { node, replacement }`
+   asks for it now with the replacement taken first; at three on three the plan is blocked
+   naming the missing member and runs on its own the moment a fourth identity joins.*
 4. **Decommission.** Preview feasibility, mark Leaving, follow transition ids, wait for safe data
    and control-voter retirement, then stop. Refuse an impossible RF/domain target without override
+   *At M9b: there is no preview - the first look's steps and blocked reason are the record -
+   and an impossible target is recorded blocked rather than refused; the member is `leaving`
+   and serving until the last step, then tombstoned and taken out of the control group, and
+   its process stops on its own with `ShoalError::Removed`.*
    through a separate explicit policy change.
 5. **Automatic removal and maintenance.** Show the proposed 30m grace, permit null or explicit
    maintenance suspension, persist episode/progress across leader changes, and page on blockers.
+   *At M9b: `Members` shows `grace_remaining_ms` per down member; `Maintenance { node, suspend:
+   true }` holds it and `false` resumes from the committed count; a leader change loses at
+   most one eighth of the grace; the expiry's plan is what to page on when `blocked`.*
 6. **Removed node returns.** Never restore its old authority. Preserve the directory for audit or
    verified import; an explicit replacement/import path may reuse validated checkpoint data as
    learner input. Do not delete the only remaining useful evidence on a count-only health check.
+   *At M9b the return is refused as a removed identity at every door and the process stops with
+   `ShoalError::Removed`; the directory is untouched; the import path is not built.*
 7. **Rolling upgrade.** Validate n/n−1 structural schema and codecs; upgrade one failure domain at
    a time, wait for data readiness/catch-up, then activate new capabilities through control state.
    State the last safe binary/storage rollback point. Changed schema needs its own migration.

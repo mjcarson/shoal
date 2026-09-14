@@ -520,6 +520,39 @@ watermark, and a token that survives a move under the pinned identity.
 
 ### M9b. Capacity-aware rebalancing and removal
 
+**Delivered** on 2026-09-14 as [F46](../features/capacity-rebalancing.md). All seven fixture
+rows below are runnable as `cargo test -p shoal --test cluster_fixture -- --test-threads 6`,
+the C10 rows as `cargo test -p shoal-bench`, with the phase machine, the grace count, the
+planner, the tablet bytes, the rate limiter, the capacity override and the `migration:` and
+`rebalance:` blocks' bounds as unit tests beside them. What was delivered, what was not, and
+the evidence are on the F page; the rest of this section is the gate as it was set. *Not done,
+on purpose:* the leader drains on its own - a decommission, a removal, an elapsed grace - and
+spreads onto a new member only under an explicit `Rebalance`, decided with the user; the
+balance target is measured archived bytes against node weight, water-filled to what a member
+can hold, so a set whose rows are resident weighs nothing until it compacts; the transfer
+budget is one token bucket per node, not per device or per pair, and it does not adapt to the
+foreground's tail; the replication factor does not change and a `Decommission` is not
+cancelled, so three nodes at a factor of three decommissioning to two stay blocked by name until
+a fourth joins; the grace is the policy's and not per member; a plan has no preview; and the
+p99 budget is judged on the arms' capture, not in the fixture, whose drain test asserts zero
+final errors and prints the tails.
+
+| Test | Where | What it asserts |
+| --- | --- | --- |
+| `automatic_removal_and_rejoin_preserve_fencing` | `shoal/tests/cluster_fixture.rs` ([C8](rebalancing.md)) | Four nodes, three placed at a factor of three and a spare. Node one killed: called down with a grace, the grace counted in committed eighths and expiring at the grace, the member removing under an expiry plan recorded by the policy. Every set moves to the spare, the member is tombstoned with its grace gone, its voter seat - if it had one - refilled by the spare, and no group names it. Writes and reads go on throughout. Node one started again from its directory one incarnation later is refused as removed and its pool fails so; a clone of the directory it died with is refused the same way; the directory is still there |
+| `remove_without_replacement_capacity_stays_blocked` | `shoal/tests/cluster_fixture.rs` ([C8](rebalancing.md)) | Three nodes at a factor of three, one lost past the grace: removing under a plan that is blocked naming the missing member with no steps, the desired and active factors still three, three sets reported under-replicated, no tombstone and no copy dropped, reads and quorum writes served by the two survivors, and the plan still blocked two seconds on. A fourth identity started and joined: the plan runs, every set is rebuilt on it, the member is removed, every key reads through the fourth node, the survivors' digests agree and the voter policy refills |
+| `removal_grace_survives_control_leader_restart` | `shoal/tests/cluster_fixture.rs` ([C3](membership.md)) | A twelve second grace on a killed member counted past four seconds; the control leader killed and started again; the elapsed time read through the new leader is at least what was committed before and never lower after; the member is removing no sooner than the grace after it was called down and no later than the grace plus two increments and an election; the expiry commits the whole grace |
+| `maintenance_suspends_automatic_removal` | `shoal/tests/cluster_fixture.rs` ([C3](membership.md)) | Maintenance on an up member is refused for want of a grace. A killed member suspended inside its grace is still down, a plain member and suspended two seconds past the grace, with a remaining deadline that does not move across two reads a second apart; resumed, it is removing no sooner than the remaining deadline; once removing, maintenance is refused by name |
+| `heterogeneous_placement_obeys_feasible_weights` | `shoal/tests/cluster_fixture.rs` ([C8](rebalancing.md)) | Four nodes at three, weights 3:1:1:1, ninety rows archived and every member's bytes reported. A `Rebalance` moves exactly two sets, one off each light placed node onto the spare, and completes; the heavy node holds every set and the most bytes, the three light ones two sets each within one set's bytes of one another after compacting. A second `Rebalance` is `Nothing` with no steps, and no move follows two intervals. Three nodes at three: a `Rebalance` is `Nothing` at once naming the full-copy constraint, and a second the same |
+| `node_transfer_budgets_bound_concurrent_sources` | `shoal/tests/cluster_fixture.rs` ([C8](rebalancing.md)) | Four placed at a factor of two and a spare of twice their weight, the retention short, every node sending under a 512 KiB/s bucket, the spare installing one stream at a time, a cap of four moves per node. A `Rebalance` issues three moves onto the spare from three sources at once: the spare's peak concurrent streams is one, at least one begin is refused for the budget, the senders wait on their bucket, what the spare receives never passes the bucket's bound on any sample, every step is `Moved` and the spare holds three sets. Every member's free bytes overridden below the reserve: a `Decommission` is blocked naming the reserve with no steps, feeds no byte in two seconds, and runs to the end once the override is lifted. Writers under identities with a retry budget through node zero throughout, and the history joined by a read of every key on every survivor is accepted by the sequential oracle |
+| `decommission_drains_within_supported_load_envelope` | `shoal/tests/cluster_fixture.rs` ([C8](rebalancing.md)) | Three placed at a factor of three and a spare, writers through every placed node under identities with a twenty second retry budget. `Decommission 1`: the member is leaving and up while its sets move, never more than one set moving at a time under the cap of one, then removed with its voter seat refilled by the spare and its process stopped on its own once it learned so. Zero writes unanswered inside their budget, every key on the new holders, the digests agreeing, the history accepted by the sequential oracle; the p99 before and during printed - 148 ms against 166 ms on the development host - and never asserted |
+| `a_member_is_decommissioned_removed_and_tombstoned`, `grace_elapsed_is_monotonic_and_expires_once` | `shoal-core/src/server/control/types.rs` ([C3](membership.md)) | The phase machine and every refusal by name, a late `Up` on `Removing`, a replacement inside the set refused, a tombstone refused while a set is held and applied once every set moved, a tombstoned identity refused at observe, admit and health at any incarnation and never re-added by a configuration, a plan's progress and a failed drain's member put back; a grace's count monotonic and of its own episode, suspended counting nothing, resumed continuing, expiring once under the plan named, and none under a `null` policy |
+| `the_planner_drains_balances_and_blocks` | `shoal-core/src/server/control/planner.rs` ([C8](rebalancing.md)) | A drain to the least loaded feasible member with the replacement first and one inside the set passed over; feasibility by reserve, by cap and by an absent report; a blocked reason naming the set and the missing member at N = RF; a busy set skipped and one failed twice blocked by name; the feasible weighted target at 3:1:1:1 met in two moves and nothing after; N = RF nothing naming the constraint; unmeasured sets balanced by count; a permuted input planning the same steps |
+| `tablet_bytes_follow_the_map`, `a_rate_limiter_paces_a_stream`, `free_bytes_reads_the_filesystem_and_the_override` | `shoal-core/src/server/tables/storage/fs/tests.rs`, `shoal-core/src/server/replication/network.rs`, `shoal-core/src/server/control/capacity.rs` | Bytes per tablet follow an insert, a replacement, a removal and a reopen; the bucket admits a second's worth then paces at the rate, holds no more than a second and treats zero as no limit; the override wins over the filesystem and lifting it restores |
+| `the_migration_block_parses_with_its_defaults`, `the_rebalance_block_parses_with_its_defaults`, `validation_refuses_what_is_not_built` | `shoal-core/src/server/conf/cluster.rs` | A 64 MiB/s budget, two streams, a 1 GiB reserve, one move per node, a hysteresis of a tenth and a five second look; a budget under a chunk, no streams, no moves, a hysteresis past one and a look shorter than the reports refused by name; `weight` parsed beside them |
+| `rebalance_capture_records_plan_and_windows` | `shoal-bench/src/workloads/harness/background.rs` ([C10](performance.md)) | A timeline cut at the plan's marks into three windows with the slower middle one, a bucket per second, the kind, the steps, the bytes and the p99 ratio in thousandths; `unfinished` with its blocked reason for a run that ended first; no ratio without a during window; an F45 record loads without the block |
+| `the_rebalance_arms_share_the_kill_arms_placement` | `shoal-bench/src/workloads/cluster_rebalance.rs` ([C10](performance.md)) | The four arms on the kill arm's durable placement and scale, a spare on three of them and none on the blocked one, the grace on the remove arm alone and its kill with no restart at the plan's mark, each asking for its plan inside the run, their ids appended after the migration arm in order |
+
 **Delivers.** Feasible weighted placement, disk reserves, per-node/device transfer budgets,
 Decommission/Remove/Replace workflows, automatic grace expiry and maintenance suspension. Persist
 progress across control leader restart. No silent RF reduction when only two RF=3 nodes remain.
@@ -531,6 +564,17 @@ Add a fourth node, replace a dead member and exercise impossible drain targets e
 **Evidence/exit.** Healthy add/drain meets zero final errors and an initial p99 inflation budget of
 2× within its documented load/deadline envelope. Targets are feasible by bytes/load/capacity, not
 exact tablet count. Capacity-blocked cases stay observable and retain surviving evidence.
+*Met:* a drained member's writers see zero final errors under the oracle; a fourth node is
+added by a `Rebalance` and by the plan a blocked removal was waiting on; a dead member is
+replaced by the spare under an expiry and cannot return; the impossible drain target at N = RF
+is blocked by name with every copy kept and the factor untouched; the target is bytes against
+weight, water-filled to what a member can hold, and settles in one plan. *Met in shape, not in
+number:* the p99 inflation is `p99_ratio_permille` on the four arms, which ran at smoke scale
+on the development host only; the envelope it holds inside is the benchmark host's to measure.
+*Decided:* [Q7 and Q8 at M9b](protocol.md#q7-and-q8-at-m9b) - a thirty minute default counted
+in committed increments with maintenance as suspension, and weights as a byte share capped at
+what a member can hold with a hysteresis of a tenth. Per-device budgets are not built and the
+page says so.
 
 ### M9c. Change local shard count
 
