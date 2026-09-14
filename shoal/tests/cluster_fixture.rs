@@ -421,7 +421,7 @@ async fn node_identity_persists_and_wrong_cluster_is_refused() -> Result<(), Fix
     let refused = cluster.restart(1, NodeKind::Server).expect_err("a standalone directory joined a cluster");
     let reason = format!("{refused:?}");
     assert!(
-        reason.contains("M10") && reason.contains(&standalone_node),
+        reason.contains("export_standalone") && reason.contains(&standalone_node),
         "the refusal did not name the migration and the node: {reason}"
     );
     // a peer from another cluster is refused by the identity, and the marker is untouched
@@ -1496,6 +1496,31 @@ fn handle_command(
             Some(wire) => admin(AdminKind::Activate { wire }),
             None => Err("ACTIVATE needs a wire version".to_string()),
         },
+        // back a table, or every table, up under a directory, as the process, answering the
+        // operation ([F49](../../docs/src/features/backup-and-recovery.md))
+        "BACKUP" => match parts.next() {
+            Some(path) => {
+                let table = parts.next().map(str::to_string);
+                plan_op(pool, AdminKind::Backup { table, path: path.to_string() })
+            }
+            None => Err("BACKUP needs a directory and an optional table".to_string()),
+        },
+        "BACKUP_STATUS" => match parts.next().and_then(|text| text.parse::<uuid::Uuid>().ok()) {
+            Some(op) => admin(AdminKind::BackupStatus { op }),
+            None => Err("BACKUP_STATUS needs an operation id".to_string()),
+        },
+        "BACKUPS" => admin(AdminKind::Backups),
+        // restore a backup from a directory, as the process, answering the operation
+        "RESTORE" => match parts.next() {
+            Some(path) => plan_op(pool, AdminKind::Restore { path: path.to_string() }),
+            None => Err("RESTORE needs a directory".to_string()),
+        },
+        "RESTORE_STATUS" => match parts.next().and_then(|text| text.parse::<uuid::Uuid>().ok()) {
+            Some(op) => admin(AdminKind::RestoreStatus { op }),
+            None => Err("RESTORE_STATUS needs an operation id".to_string()),
+        },
+        // every recovery an operator ran on this cluster
+        "RECOVERIES" => admin(AdminKind::Recoveries),
         // stream bytes at a peer on the bulk lane, for the bounded-lanes test
         "PROBE_BULK" => match node_at(&mut parts) {
             Some(node) => parts
@@ -1590,18 +1615,15 @@ fn handle_command(
                 pool.replication_verb(shoal::server::replication::ReplicationVerb::Digest { table })
                     .map_err(|error| format!("{error:?}"))
                     .and_then(|answers| {
-                        // fold every shard's digest into one, in shard order
+                        // sum every shard's digest into one: a sum of row hashes, so the
+                        // executor count is not in it and an export's digest is its source's
                         let mut rows = 0u64;
                         let mut hash = 0u64;
                         let mut groups = serde_json::Map::new();
                         for answer in answers {
                             let value = answer?;
                             rows += value["rows"].as_u64().unwrap_or(0);
-                            let shard_hash = value["hash"].as_u64().unwrap_or(0);
-                            let mut fold = Vec::with_capacity(16);
-                            fold.extend_from_slice(&hash.to_le_bytes());
-                            fold.extend_from_slice(&shard_hash.to_le_bytes());
-                            hash = shoal::gxhash::gxhash64(&fold, 0);
+                            hash = hash.wrapping_add(value["hash"].as_u64().unwrap_or(0));
                             if let Some(found) = value["groups"].as_object() {
                                 for (group, applied) in found {
                                     groups.insert(group.clone(), applied.clone());
@@ -11310,5 +11332,487 @@ async fn rolling_upgrade_from_previous_binary() -> Result<(), FixtureError> {
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
+    Ok(())
+}
+
+/// The record of a backup, restore or recovery operation as a node answers it
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to ask
+/// * `verb` - `BACKUP_STATUS` or `RESTORE_STATUS`
+/// * `op` - The operation
+fn operation_record(cluster: &mut Cluster, via: usize, verb: &str, op: uuid::Uuid) -> Result<serde_json::Value, FixtureError> {
+    let reply = cluster.node_mut(via).command(&format!("{verb} {op}"))?;
+    reply
+        .get("ok")
+        .cloned()
+        .ok_or_else(|| FixtureError::ChildFailed(format!("node {via} answered {verb} with {reply}")))
+}
+
+/// Wait until every group of a backup or restore record is done, and return the record
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to ask
+/// * `verb` - `BACKUP_STATUS` or `RESTORE_STATUS`
+/// * `op` - The operation
+/// * `within` - How long to wait
+fn wait_operation_done(cluster: &mut Cluster, via: usize, verb: &str, op: uuid::Uuid, within: Duration) -> Result<serde_json::Value, FixtureError> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let record = operation_record(cluster, via, verb, op)?;
+        let done = record["groups"]
+            .as_object()
+            .is_some_and(|groups| !groups.is_empty() && groups.values().all(|group| group["phase"] == "Done"));
+        if done {
+            return Ok(record);
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("{verb} {op} never finished: {record}")));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// A backup restored into a new cluster holds every acknowledged write and retry, and the
+/// old cluster's identities are refused by name (C9 M10)
+///
+/// Three nodes at a factor of three under writers with identities and wire version 5
+/// activated. `BACKUP <dir>`: every persistent group is written to a verified file with a
+/// checksum and a boundary, and every ephemeral group is skipped by name. A key deleted and a
+/// retry identity acknowledged before the backup are in the files. A fresh three-node cluster
+/// with new identities is bootstrapped and `RESTORE <dir/op>` run: every persistent group is
+/// restored and verified, every key acknowledged before its group's boundary reads on every
+/// new node with its last value, the deleted key is absent, the digests agree, the remembered
+/// identity is answered its original result through the new cluster and a fresh identity
+/// applies. A session token minted on the old cluster is `WrongCluster` on the new one, an old
+/// node's directory started against the new cluster is refused as removed and stops, and a
+/// second restore is refused by name ([F49](../../docs/src/features/backup-and-recovery.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn backup_restore_verifies_history_in_new_cluster() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal::shared::protocol::error::ErrorCode;
+    use shoal::shared::protocol::PROTOCOL_VERSION;
+    let backups = utils::test_dir();
+    let mut old = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    old.wait_voters(0, 3)?;
+    let addrs: Vec<String> = (0..3).map(|node| old.node(node).endpoints.client.to_string()).collect();
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    // the backup needs the version whose file header names the cluster: refused before, applied after
+    let refused = old.node_mut(0).command(&format!("BACKUP {}", backups.path().display()))?;
+    assert!(refused["error"].as_str().unwrap_or_default().contains("wire version"), "{refused}");
+    let activated = old.node_mut(0).command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
+    assert!(activated["ok"]["version"].is_number(), "{activated}");
+    for node in 0..3 {
+        wait_activated(&mut old, node, PROTOCOL_VERSION, Duration::from_secs(30))?;
+    }
+    // rows on both tables, through every node; one key deleted, one written twice, and a
+    // retry identity acknowledged, all before the backup
+    let keys: Vec<u64> = (12000..12030).collect();
+    for (at, key) in keys.iter().enumerate() {
+        write_note(&addrs[at % 3], *key, &format!("v1-{key}")).await?;
+    }
+    let client = Shoal::<TestDbClient>::new(&addrs[0]).await.map_err(ok)?;
+    for key in &keys {
+        client.send_one(Row { key: *key, data: format!("row-{key}") }).await.map_err(ok)?;
+    }
+    write_note(&addrs[1], keys[1], &format!("v2-{}", keys[1])).await?;
+    delete_note(&addrs[2], keys[2]).await.map_err(ok)?;
+    let identity = uuid::Uuid::new_v4();
+    let original = delete_note_as(&addrs[0], keys[3], &SendOptions::new().identity(identity)).await.map_err(ok)?;
+    let original_token = original.session_token().expect("a committed delete carries a token");
+    let old_token = write_note_token(&addrs[0], keys[4], &format!("v2-{}", keys[4])).await.map_err(ok)?.expect("a token");
+    wait_digests_equal(&mut old, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    let old_digest = digest_of(&mut old, 0, "Note")?;
+    // the backup: every persistent group written and verified, every ephemeral one skipped
+    let op = plan_as_process(&mut old, 0, &format!("BACKUP {}", backups.path().display()))?;
+    let record = wait_operation_done(&mut old, 0, "BACKUP_STATUS", op, Duration::from_secs(120))?;
+    let groups = record["groups"].as_object().expect("groups");
+    let mut written = 0;
+    let mut skipped = 0;
+    for (group, progress) in groups {
+        let outcome = &progress["outcome"];
+        if outcome["Written"].is_object() {
+            written += 1;
+            let file = outcome["Written"]["file"].as_str().expect("a file");
+            assert!(std::path::Path::new(file).is_file(), "group {group}'s file is missing: {file}");
+            assert!(outcome["Written"]["bytes"].as_u64().unwrap_or(0) > 0, "{progress}");
+            assert!(progress["boundary"].as_u64().unwrap_or(0) > 0, "{progress}");
+            assert!(std::path::Path::new(&format!("{file}.json")).is_file(), "group {group}'s manifest is missing");
+        } else if outcome["Skipped"].is_object() {
+            skipped += 1;
+        } else {
+            panic!("group {group} came to {outcome}: {record}");
+        }
+    }
+    assert!(written > 0 && skipped > 0, "the backup wrote {written} and skipped {skipped}: {record}");
+    let backup_dir = backups.path().join(op.to_string());
+    // the new cluster, with new identities
+    let mut new = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .repair_timeout(Duration::from_secs(20))
+        .start()
+        .await?;
+    new.wait_voters(0, 3)?;
+    let new_addrs: Vec<String> = (0..3).map(|node| new.node(node).endpoints.client.to_string()).collect();
+    assert_ne!(old.node(0).endpoints.cluster, new.node(0).endpoints.cluster);
+    // the restore: every persistent group restored and verified, every ephemeral one skipped
+    let restore = plan_as_process(&mut new, 0, &format!("RESTORE {}", backup_dir.display()))?;
+    let record = wait_operation_done(&mut new, 0, "RESTORE_STATUS", restore, Duration::from_secs(300))?;
+    let mut restored = 0;
+    for (group, progress) in record["groups"].as_object().expect("groups") {
+        let outcome = &progress["outcome"];
+        if outcome["Restored"].is_object() {
+            restored += 1;
+            assert!(outcome["Restored"]["verified"].as_u64().unwrap_or(0) > 0, "{progress}");
+        } else {
+            assert!(outcome["Skipped"].is_object(), "group {group} came to {outcome}: {record}");
+        }
+    }
+    assert_eq!(restored, written, "{record}");
+    assert_eq!(record["source"], old.node(0).endpoints.cluster.clone().expect("a cluster").as_str(), "{record}");
+    // every key acknowledged before the backup reads on every new node with its last value
+    wait_digests_equal(&mut new, &[0, 1, 2], "Note", Duration::from_secs(60))?;
+    for node in 0..3 {
+        for (at, key) in keys.iter().enumerate() {
+            let expected = match at {
+                1 | 4 => Some(format!("v2-{key}")),
+                2 | 3 => None,
+                _ => Some(format!("v1-{key}")),
+            };
+            wait_note(&new_addrs[node], *key, expected.as_deref(), Duration::from_secs(10)).await?;
+        }
+    }
+    let new_digest = digest_of(&mut new, 0, "Note")?;
+    assert_eq!(new_digest["rows"], old_digest["rows"], "the new cluster holds other rows than the old: {new_digest} vs {old_digest}");
+    // the remembered identity is answered its original result through the new cluster, and a
+    // fresh identity applies
+    let again = delete_note_as(&new_addrs[1], keys[3], &SendOptions::new().identity(identity).retry(Duration::from_secs(15)))
+        .await
+        .unwrap_or_else(|error| panic!("the retry under the old identity was not the original result: {error:?}"));
+    assert_eq!(again.bundle(), identity);
+    // the token it answers with is the new cluster's, whose groups are minted from new identities
+    let token = again.session_token().expect("a duplicate answers with a token");
+    assert_ne!(token.group, original_token.group, "the restored cluster reused the old cluster's group identity");
+    assert_eq!(token.cluster.to_string(), new.node(0).endpoints.cluster.clone().expect("a cluster"));
+    let fresh = delete_note_as(&new_addrs[2], keys[5], &SendOptions::new().identity(uuid::Uuid::new_v4())).await.map_err(ok)?;
+    assert!(fresh.session_token().is_some());
+    wait_note(&new_addrs[0], keys[5], None, Duration::from_secs(10)).await?;
+    // a session token minted on the old cluster is the wrong cluster here
+    let stale = read_note_with(&new_addrs[0], keys[4], &SendOptions::new().token(old_token)).await;
+    assert_eq!(failure_code(&stale), Some(ErrorCode::WrongCluster), "{stale:?}");
+    // a second restore is refused by name
+    let second = new.node_mut(0).command(&format!("RESTORE {}", backup_dir.display()))?;
+    assert!(second["error"].as_str().unwrap_or_default().contains("already restored"), "{second}");
+    // an old node's directory started against the new cluster is refused as removed and stops
+    old.kill(1)?;
+    let new_control = new.node(0).endpoints.control.expect("a control endpoint").to_string();
+    let new_data = new.node(0).endpoints.data.expect("a data endpoint").to_string();
+    let mut staged = old.staged(1).clone();
+    staged.seeds = vec![new_control.clone()];
+    staged.dial = staged.peers.iter().map(|peer| (peer.clone(), new_control.clone(), new_data.clone())).collect();
+    let started = old.restart_with(1, NodeKind::Server, Some(staged));
+    let reason = match started {
+        Ok(()) => {
+            let node = old.node(1);
+            Cluster::wait_failure(node, Duration::from_secs(30)).unwrap_or_else(|| panic!("the old node was not refused by the new cluster"))
+        }
+        Err(FixtureError::ChildFailed(reason)) => reason,
+        Err(error) => panic!("the old node's restart failed another way: {error:?}"),
+    };
+    assert!(reason.contains("removed"), "the old node was refused for another reason: {reason}");
+    for id in 0..3 {
+        assert_eq!(new.node(id).failure(), None, "new node {id} died");
+    }
+    Ok(())
+}
+
+/// A permanent majority loss is never repaired by itself: a survivor stays unavailable
+/// without data loss until an operator recovers it, after which it leads alone, the lost
+/// identities are refused, and fresh identities rebuild every set (C9 M10)
+///
+/// Three nodes at a factor of three with rows on every node, and two more identities held
+/// back. Nodes one and two are killed for good: a write through node zero is unknown or
+/// refused for want of a leader, a strong read is refused, and an admin mutation is refused
+/// naming the voters, what this node reaches and `force_recover`. Node zero restarted with
+/// `bootstrap: true` keeps its cluster and still has no leader - no empty bootstrap.
+/// `force_recover` on its stopped directory: it starts leading alone, writes commit, every
+/// key acknowledged before the loss reads back, `Members` shows one and two removing and
+/// tombstoned with the recovery recorded and its boundary, and node one started again from
+/// its directory is refused as removed and stops. The two held-back identities join, the
+/// recovery's plans rebuild every set on them, one and two are removed, and every key reads
+/// through the newcomers ([F49](../../docs/src/features/backup-and-recovery.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn permanent_quorum_loss_requires_explicit_recovery() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal::shared::protocol::error::ErrorCode;
+    use shoal::shared::protocol::read::ReadLevel;
+    let mut cluster = Cluster::builder()
+        .cluster(5, CoreClaim::Count(1))
+        .replication_factor(3)
+        .deferred_from(3)
+        .write_timeout(Duration::from_secs(2))
+        .query_deadline(Duration::from_secs(3))
+        .catchup_lag(0)
+        .plan_interval(Duration::from_millis(500))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let cluster_id = cluster.node(0).endpoints.cluster.clone().expect("a cluster");
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let keys: Vec<u64> = (13000..13024).collect();
+    for key in &keys {
+        write_note(&addr0, *key, &format!("before-{key}")).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // the majority is lost for good
+    cluster.kill(1)?;
+    cluster.kill(2)?;
+    // a write is unknown or refused for want of a leader, never lost or acknowledged alone
+    let unavailable = write_note(&addr0, 13100, "lost").await;
+    let code = failure_code(&unavailable);
+    assert!(
+        matches!(code, Some(ErrorCode::OutcomeUnknown | ErrorCode::NotLeader | ErrorCode::QuorumUnavailable | ErrorCode::Unavailable | ErrorCode::Timeout)),
+        "a write without a majority answered {unavailable:?}"
+    );
+    // a strong read is refused
+    let strong = read_note_with(&addr0, keys[0], &SendOptions::new().read(ReadLevel::Quorum)).await;
+    assert!(strong.is_err(), "a strong read without a majority answered {strong:?}");
+    // an admin mutation is refused naming the voters, what this node reaches, and the way out
+    let refused = cluster.node_mut(0).command("SET_VOTERS 1")?;
+    let reason = refused["error"].as_str().unwrap_or_default().to_string();
+    assert!(reason.contains("force_recover") && reason.contains("voters"), "{refused}");
+    // restarted with bootstrap: true, node zero keeps its cluster and still has no leader
+    cluster.restart(0, NodeKind::Server)?;
+    assert_eq!(cluster.node(0).endpoints.cluster.as_deref(), Some(cluster_id.as_str()), "the restart minted a cluster");
+    std::thread::sleep(Duration::from_secs(3));
+    let members = cluster.members(0)?;
+    assert!(members["leader"].is_null(), "a survivor found a leader without a majority: {members}");
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let unavailable = write_note(&addr0, 13101, "still lost").await;
+    assert!(unavailable.is_err(), "a write committed without a majority: {unavailable:?}");
+    // the recovery, on the stopped directory: refused for a survivor list that is not this
+    // node alone, then run
+    cluster.kill(0)?;
+    let conf = utils::build_crash_config(cluster.dir(0), 0).cluster(shoal::server::conf::Cluster::default().bootstrap(true));
+    let ids = cluster.node_ids();
+    let me: shoal::shared::identity::NodeId = ids[0].parse().map(shoal::shared::identity::NodeId).expect("a node id");
+    let other: shoal::shared::identity::NodeId = ids[1].parse().map(shoal::shared::identity::NodeId).expect("a node id");
+    let refused = shoal::server::recover::force_recover(&conf, &[me, other]).expect_err("a recovery keeping two survivors ran");
+    assert!(format!("{refused}").contains("nothing else"), "{refused}");
+    let report = shoal::server::recover::force_recover(&conf, &[me]).map_err(|error| FixtureError::ChildFailed(format!("{error}")))?;
+    assert_eq!(report.survivor, me);
+    assert_eq!(report.lost.len(), 2, "{report:?}");
+    assert!(!report.groups_rewritten.is_empty(), "{report:?}");
+    // and again is nothing: every step is idempotent by inspection
+    let again = shoal::server::recover::force_recover(&conf, &[me]).map_err(|error| FixtureError::ChildFailed(format!("{error}")))?;
+    assert_eq!(again.recovered_at, report.recovered_at, "a second run wrote a second recovery: {again:?}");
+    assert!(again.groups_rewritten.is_empty(), "{again:?}");
+    assert_eq!(again.groups_kept.len(), report.groups_rewritten.len() + report.groups_kept.len(), "{again:?}");
+    // the survivor leads alone, writes commit, and every key from before the loss reads back
+    cluster.restart(0, NodeKind::Server)?;
+    cluster.wait_joined(&[0])?;
+    cluster.wait_leader_among(0, &[0], Duration::from_secs(30))?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    for key in 13200..13210u64 {
+        write_note_eventually(&addr0, key, &format!("after-{key}"), Duration::from_secs(30)).await?;
+    }
+    for key in &keys {
+        wait_note(&addr0, *key, Some(&format!("before-{key}")), Duration::from_secs(10)).await?;
+    }
+    let members = cluster.members(0)?;
+    assert_eq!(members["voters"].as_array().map(Vec::len), Some(1), "{members}");
+    for lost in 1..3 {
+        let view = member_view(&mut cluster, 0, lost)?;
+        assert_eq!(view["phase"], "removing", "{view}");
+        assert!(members["tombstones"].get(&ids[lost]).is_some(), "node {lost} is not tombstoned: {members}");
+    }
+    let recoveries = cluster.node_mut(0).command("RECOVERIES")?["ok"].clone();
+    assert_eq!(recoveries.as_array().map(Vec::len), Some(1), "{recoveries}");
+    assert_eq!(recoveries[0]["survivors"], serde_json::json!([ids[0]]), "{recoveries}");
+    assert_eq!(recoveries[0]["last_committed"], report.last_committed, "{recoveries}");
+    assert!(recoveries[0]["lost"].as_array().is_some_and(|lost| lost.len() == 2), "{recoveries}");
+    // node one started again from its directory is refused as removed, and stops
+    let started = cluster.restart(1, NodeKind::Server);
+    let reason = match started {
+        Ok(()) => Cluster::wait_failure(cluster.node(1), Duration::from_secs(30)).unwrap_or_else(|| panic!("the lost node was not refused")),
+        Err(FixtureError::ChildFailed(reason)) => reason,
+        Err(error) => panic!("the lost node's restart failed another way: {error:?}"),
+    };
+    assert!(reason.contains("removed"), "the lost node was refused for another reason: {reason}");
+    // two fresh identities join, and the recovery's plans rebuild every set on them
+    cluster.start_deferred(3)?;
+    cluster.start_deferred(4)?;
+    cluster.wait_joined(&[3, 4])?;
+    wait_member_state(&mut cluster, 0, 1, "removed", Duration::from_secs(180))?;
+    wait_member_state(&mut cluster, 0, 2, "removed", Duration::from_secs(180))?;
+    let members = cluster.members(0)?;
+    assert_eq!(members["under_replicated_sets"], 0, "{members}");
+    wait_group_rows_agree(&mut cluster, &[0, 3, 4], "Note", Duration::from_secs(60))?;
+    for node in [3usize, 4] {
+        let addr = cluster.node(node).endpoints.client.to_string();
+        for key in keys.iter().chain((13200..13210u64).collect::<Vec<_>>().iter()) {
+            let expected = if *key < 13200 { format!("before-{key}") } else { format!("after-{key}") };
+            wait_note(&addr, *key, Some(&expected), Duration::from_secs(10)).await?;
+        }
+    }
+    let _ = ok;
+    for id in [0usize, 3, 4] {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// Single node data has a verified path into a cluster: an export in the backup's shape,
+/// restored into a fresh cluster and judged by digest, with the source as the rollback (C10 M10)
+///
+/// A standalone node at two executors is seeded with rows on the persistent table and the
+/// ephemeral one, half of the former archived by a rotate and half left in the active intent
+/// logs. While it runs, an export of its directory is refused as locked. Stopped, an export
+/// into a directory that is not empty is refused by name, and `export_standalone` into a
+/// fresh one folds the intent logs and writes the persistent table's archives as one snapshot
+/// file with a backup manifest beside it, under an identity no cluster has. A fresh cluster
+/// of three at a factor of three restores the export as it would a backup: every group of
+/// the table is restored from the file's records of its tablets and verified, the `DIGEST` on
+/// every node equals the source's, every row reads through every node, and a write commits at
+/// quorum. The source started standalone again serves every row it had with the same digest,
+/// and a cluster member's directory offered as a source is refused
+/// ([F49](../../docs/src/features/backup-and-recovery.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn single_node_data_has_a_verified_cluster_migration_path() -> Result<(), FixtureError> {
+    use shoal::server::export::export_standalone;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    // the configuration an export is run with: the standalone node's own, naming its directory
+    let source_conf = |dir: &std::path::Path| {
+        utils::build_crash_config(dir, 0).resources(Resources::default().cores(2).memory("100MiB").expect("a memory size"))
+    };
+    let mut source = Cluster::builder().standalone(CoreClaim::Count(2)).start().await?;
+    let source_addr = source.node(0).endpoints.client.to_string();
+    let source_node = source.node(0).endpoints.node.clone().expect("a node id");
+    // rows on both tables, half of the persistent ones archived by a rotate and half left in
+    // the active logs
+    let client = Shoal::<TestDbClient>::new(&source_addr).await.map_err(ok)?;
+    let keys: Vec<u64> = (61_000..61_400u64).collect();
+    for key in &keys[..200] {
+        client.send_one(Note { key: *key, text: format!("note-{key}") }).await.map_err(ok)?;
+        client.send_one(Row { key: *key, data: format!("row-{key}") }).await.map_err(ok)?;
+    }
+    let _ = source.node_mut(0).command("ROTATE")?;
+    for key in &keys[200..] {
+        client.send_one(Note { key: *key, text: format!("note-{key}") }).await.map_err(ok)?;
+        client.send_one(Row { key: *key, data: format!("row-{key}") }).await.map_err(ok)?;
+    }
+    drop(client);
+    let source_notes = digest_of(&mut source, 0, "Note")?;
+    assert_eq!(source_notes["rows"], keys.len() as u64, "{source_notes}");
+    // a running source is locked, and refused
+    let scratch = utils::test_dir();
+    let target = scratch.path().join("export");
+    let refused = export_standalone::<TestDb>(&source_conf(source.dir(0)), &target).expect_err("a running source was exported");
+    assert!(
+        matches!(refused, ServerError::Shoal(ShoalError::StorageDirectoryLocked { .. })),
+        "the refusal did not name the lock: {refused:?}"
+    );
+    source.kill(0)?;
+    // a target that is not empty is refused, and nothing of it is touched
+    std::fs::create_dir_all(&target)?;
+    std::fs::write(target.join("stale"), b"not an export")?;
+    let refused = export_standalone::<TestDb>(&source_conf(source.dir(0)), &target).expect_err("a non-empty target was exported into");
+    assert!(format!("{refused}").contains("is not empty"), "the refusal did not say why: {refused}");
+    assert_eq!(std::fs::read_dir(&target)?.count(), 1, "the refused export wrote into the target");
+    // the export: the persistent table as one file with its manifest, the ephemeral one not at all
+    let target = scratch.path().join("export-2");
+    let report = export_standalone::<TestDb>(&source_conf(source.dir(0)), &target)
+        .map_err(|error| FixtureError::ChildFailed(format!("the export failed: {error}")))?;
+    assert_eq!(report.source_node.to_string(), source_node, "{report:?}");
+    assert_eq!(report.executors, 2, "{report:?}");
+    assert!(report.rows_folded > 0, "the export folded no intent logs: {report:?}");
+    assert_eq!(report.tables, vec![("Note".to_string(), keys.len() as u64)], "{report:?}");
+    assert!(report.bytes_written > 0, "{report:?}");
+    let files: Vec<String> = std::fs::read_dir(target.join("Note"))?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<_, _>>()?;
+    assert_eq!(files.len(), 2, "the export wrote {files:?}");
+    assert!(files.iter().any(|name| name.ends_with(".snap")) && files.iter().any(|name| name.ends_with(".snap.json")), "{files:?}");
+    assert!(!target.join("Row").exists(), "the ephemeral table was exported");
+    // a fresh cluster of three at a factor of three, restoring the export as it would a backup
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .repair_timeout(Duration::from_secs(20))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let addrs: Vec<String> = (0..3).map(|node| cluster.node(node).endpoints.client.to_string()).collect();
+    let restore = plan_as_process(&mut cluster, 0, &format!("RESTORE {}", target.display()))?;
+    let record = wait_operation_done(&mut cluster, 0, "RESTORE_STATUS", restore, Duration::from_secs(300))?;
+    // every group the export's one table has, restored and verified; the ephemeral table has
+    // no file, so no group of it is in the record
+    let groups = record["groups"].as_object().expect("groups");
+    assert!(!groups.is_empty(), "{record}");
+    for (group, progress) in groups {
+        let outcome = &progress["outcome"];
+        assert!(outcome["Restored"].is_object(), "group {group} came to {outcome}: {record}");
+        assert!(outcome["Restored"]["verified"].as_u64().unwrap_or(0) > 0, "group {group} was not verified: {progress}");
+        assert_eq!(progress["files"], serde_json::json!([format!("Note/{}", files.iter().find(|name| name.ends_with(".snap")).expect("a snap"))]), "{progress}");
+    }
+    let records: u64 = groups.values().map(|progress| progress["outcome"]["Restored"]["records"].as_u64().unwrap_or(0)).sum();
+    assert_eq!(records, keys.len() as u64, "the groups restored other records than the export holds: {record}");
+    assert_eq!(record["source"], report.export_cluster.to_string(), "{record}");
+    // the same rows on every node, by digest and by reading every one; the ephemeral table
+    // holds nothing, since its rows were the source's memory
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))?;
+    for node in 0..3 {
+        let notes = digest_of(&mut cluster, node, "Note")?;
+        assert_eq!(notes["rows"], source_notes["rows"], "node {node}: {notes} against {source_notes}");
+        assert_eq!(notes["hash"], source_notes["hash"], "node {node}: {notes} against {source_notes}");
+        let rows = digest_of(&mut cluster, node, "Row")?;
+        assert_eq!(rows["rows"], 0, "node {node} holds ephemeral rows from the source: {rows}");
+        for key in keys.iter().step_by(3) {
+            wait_note_routed(&addrs[node], *key, &format!("note-{key}"), Duration::from_secs(10)).await?;
+        }
+    }
+    // and the cluster is a cluster: a write through a follower commits at quorum
+    write_note(&addrs[1], 61_400, "after-export").await.map_err(ok)?;
+    for addr in &addrs {
+        wait_note(addr, 61_400, Some("after-export"), Duration::from_secs(10)).await?;
+    }
+    // the source is the rollback: started standalone again, it serves every row it had
+    source.restart(0, NodeKind::Standalone)?;
+    let rolled_back = source.node(0).endpoints.clone();
+    assert_eq!(rolled_back.node.as_deref(), Some(source_node.as_str()), "the source's identity changed");
+    assert_eq!(rolled_back.cluster, None, "the source became a cluster member");
+    let source_addr = rolled_back.client.to_string();
+    for key in keys.iter().step_by(5) {
+        wait_note_routed(&source_addr, *key, &format!("note-{key}"), Duration::from_secs(10)).await?;
+    }
+    wait_note(&source_addr, 61_400, None, Duration::from_secs(5)).await?;
+    let again = digest_of(&mut source, 0, "Note")?;
+    assert_eq!(again["hash"], source_notes["hash"], "the fold changed the source's rows: {again} against {source_notes}");
+    // a cluster member's directory is not a source: its data is a Backup's, never an export's
+    cluster.kill(2)?;
+    let elsewhere = scratch.path().join("elsewhere");
+    let refused = export_standalone::<TestDb>(&source_conf(cluster.dir(2)), &elsewhere).expect_err("a cluster directory was exported");
+    assert!(format!("{refused}").contains("not a standalone node's directory"), "the refusal did not say why: {refused}");
+    assert!(!elsewhere.exists(), "the refused export created the target");
+    for id in [0usize, 1] {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    assert_eq!(source.node(0).failure(), None, "the source died");
     Ok(())
 }
