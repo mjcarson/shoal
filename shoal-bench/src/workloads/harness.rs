@@ -116,7 +116,7 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // written, cores and ports decided, and node zero's own configuration applied on top of the
     // resolved one ([F38](../../../docs/src/features/inter-node-transport.md)). nothing is started
     // yet - the peers come up below, before node zero does
-    let (conf_facts, addr, conf, staged) = match plan.server.overrides() {
+    let (mut conf_facts, addr, conf, staged) = match plan.server.overrides() {
         None => (None, String::new(), None, None),
         Some(overrides) => {
             // an arm asking for more copies than it places nodes is an availability test the
@@ -241,7 +241,7 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     };
     // put whatever this workload reads into the server. deliberately outside the timing below:
     // a read workload's numbers must describe reading, not the writing that had to happen first.
-    let ctx = Context {
+    let mut ctx = Context {
         addr: addr.clone(),
         seed: request.seed,
         scale: plan.scale.clone(),
@@ -255,9 +255,29 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // cycle the server when the workload needs its data on disk rather than in memory. a shutdown
     // flushes and compacts, and the server that comes back holds nothing, so every read that
     // follows has to find its partition in an archive.
+    //
+    // a rehome arm comes back at another executor count, so the start between moves the vanished
+    // executors' files first, and what that moved is the arm's record
+    // ([F47](../../docs/src/features/local-rehome.md))
     if seeded.is_ok() && plan.server.restarts() {
         stop(pool.take())?;
-        pool = start(conf.clone(), &runtime, &addr)?;
+        let restart_shards = plan.server.overrides().and_then(|overrides| overrides.restart_shards);
+        let restart_conf = match (conf.clone(), restart_shards) {
+            (Some(mut conf), Some(shards)) => {
+                conf.resources.cores = Some(shards);
+                Some(conf)
+            }
+            (conf, _) => conf,
+        };
+        pool = start(restart_conf.clone(), &runtime, &addr)?;
+        // the server measured is the one that came back, so the facts describe it
+        if let Some(restart_conf) = &restart_conf {
+            conf_facts = Some(conf::facts(restart_conf));
+            ctx.conf = conf_facts.clone();
+        }
+        if let (Some(pool), Some(facts)) = (pool.as_ref(), cluster_facts.as_mut()) {
+            facts.rehome = pool.rehome().map(rehome_facts);
+        }
     }
     // throw away everything the seed phase stamped, so the report describes the measured phase
     //
@@ -672,4 +692,66 @@ pub fn write(capture: &MacroCaptureV2, path: &Path) -> Result<()> {
     let body = serde_json::to_vec_pretty(capture).context("failed to serialize the capture")?;
     std::fs::write(path, body).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
+}
+
+/// The rehome record the pool reported, as the artifact carries it
+///
+/// # Arguments
+///
+/// * `report` - What the start moved
+fn rehome_facts(report: &shoal::server::RehomeReport) -> crate::model::macro_layer::RehomeFacts {
+    // every count carried as it was reported, widened to the artifact's integers
+    crate::model::macro_layer::RehomeFacts {
+        from: report.from as u64,
+        to: report.to as u64,
+        tablets_moved: report.tablets_moved as u64,
+        slots_moved: report.slots_moved as u64,
+        groups: report.groups,
+        records: report.records,
+        bytes: report.bytes,
+        folded: report.folded,
+        installs_dropped: report.installs_dropped,
+        steps_redone: report.steps_redone,
+        millis: report.millis,
+    }
+}
+
+#[cfg(test)]
+mod rehome_tests {
+    /// A rehome record carries every count the pool reported, so the artifact says what moved
+    #[test]
+    fn rehome_capture_records_the_move() {
+        let report = shoal::server::RehomeReport {
+            from: 12,
+            to: 8,
+            tablets_moved: 0,
+            slots_moved: 4,
+            groups: 8,
+            records: 4096,
+            bytes: 1 << 20,
+            installs_dropped: 0,
+            folded: 0,
+            millis: 1234,
+            steps_redone: 0,
+        };
+        let facts = super::rehome_facts(&report);
+        assert_eq!((facts.from, facts.to), (12, 8));
+        assert_eq!(facts.slots_moved, 4);
+        assert_eq!(facts.groups, 8);
+        assert_eq!(facts.records, 4096);
+        assert_eq!(facts.bytes, 1 << 20);
+        assert_eq!(facts.millis, 1234);
+        assert_eq!(facts.steps_redone, 0);
+        // and round trips through the artifact's json under its own key
+        let json = serde_json::to_value(&facts).expect("json");
+        assert_eq!(json["millis"], 1234);
+        let back: crate::model::macro_layer::RehomeFacts = serde_json::from_value(json).expect("back");
+        assert_eq!(back, facts);
+        // a capture from before the record reads back with none
+        let older: crate::model::macro_layer::ClusterFacts = serde_json::from_str(
+            r#"{"nodes":1,"desired_rf":1,"active_rf":1,"write_policy":"quorum","read_policy":"one","durability":"fsync","driver":"in-process","cores":[],"tables":1,"tablets":4096,"emulated":true}"#,
+        )
+        .expect("an older record");
+        assert!(older.rehome.is_none());
+    }
 }

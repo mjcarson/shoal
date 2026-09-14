@@ -820,6 +820,7 @@ mod tests {
                 background: None,
                 migration: None,
                 rebalance: None,
+                rehome: None,
             });
         }
         capture

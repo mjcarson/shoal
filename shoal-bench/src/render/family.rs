@@ -882,6 +882,44 @@ pub const FAMILIES: &[Family] = &[
              node zero.",
     },
     Family {
+        name: "rehome",
+        title: "What a restart at another executor count costs: the files a vanished executor left, moved before a shard starts",
+        surface: Surface::AllWorkloads,
+        what_it_measures:
+            "One arm, the one node cluster arm seeded at twelve executors and measured at eight \
+             ([F47](../features/local-rehome.md)). The start between the two runs a rehome: the \
+             four vanished executors' archived records are copied onto the eight that remain, their \
+             tablet groups' logs, votes, checkpoints and sidecars are moved, and their directories \
+             are reclaimed, all before a shard starts. `cluster.rehome` is the pool's own report: the \
+             counts it was between, the slots and groups moved, the records and bytes copied, the \
+             steps a resumed rehome began again, and `millis`, how long the start was held for it. \
+             The mixture after it is the reference mixture on eight executors hosting twelve slots.",
+        how_to_read_it:
+            "`millis` is the number: what an operator pays in start time for changing a node's core \
+             count, at the seed's size. `bytes` over `millis` is the copy's pace, which is the \
+             device's: every record is read verified and written as a fresh record, and the archives \
+             are the bulk of it. `groups` is what the WAL half moved, and is small here - a group's \
+             retained log is entries, not rows. `steps_redone` is zero on a capture; a nonzero one \
+             means the start was interrupted and resumed, which the crash matrix does on purpose and \
+             a capture never should. The mixture's distribution is not read against the reference \
+             cell: eight executors hosting twelve slots is a different server, and the arm exists \
+             for its record.",
+        what_would_make_it_wrong:
+            "A `from` and `to` other than twelve and eight, which means the arm's counts moved and \
+             the capture is of another shrink. A `records` of zero at full scale, which means the seed \
+             was not compacted before the stop and the rehome copied nothing - the mixture's writes \
+             were still in the WAL, whose move is cheap, and `millis` priced the wrong thing. A \
+             `millis` read on the development host: the copy is the device's pace, and this host's \
+             is not the benchmark host's. A `steps_redone` above zero, which is a capture of a resume.",
+        what_it_cannot_say:
+            "What a growth costs, which leaves a donor's archives holding dead records until its own \
+             compaction (O58) and copies less. What a rehome of a node holding a real share of a \
+             large table costs: the seed is the reference cell's rows, and the copy is linear in \
+             them. What the mixture pays afterwards for hosting twelve slots on eight executors \
+             against eight on eight, which needs an arm at eight slots to read it against. What a \
+             standalone node's rehome costs, whose fold of intent logs this arm never runs.",
+    },
+    Family {
         name: "retired",
         title: "The retired blended workload",
         surface: Surface::AllWorkloads,
@@ -959,6 +997,9 @@ pub fn family_for(id: &str) -> Option<&'static Family> {
     } else if id.starts_with("macro/cluster/failover/") {
         // the fault arms, before the wider cluster prefix for the same reason
         "cluster-failover"
+    } else if id.starts_with("macro/rehome/") {
+        // the rehome arm, whose server is a cluster of one under another prefix
+        "rehome"
     } else if id.starts_with("macro/cluster/replication/") || id == "macro/cluster/overhead/nodes/3" {
         // the three node arms are read against each other and not against the one node one,
         // whose shard count they do not share
