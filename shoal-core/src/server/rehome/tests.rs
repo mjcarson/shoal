@@ -134,11 +134,13 @@ fn a_redone_archives_step_removes_its_partial_archive() {
         }
         assert!(dst.find_partition(key_on(2, 9)).is_some(), "the destination's own record was lost");
         dst.close_all().await.expect("a close");
-        // begun a third time, the finished copy is recognized and skipped
+        // begun a third time, the finished copy is recognized and skipped, and its records
+        // still count as moved, since the run that copied them never wrote its count down
         let (records, _) = archives_step(&mut manifest, at, &conf, dir.path(), &slots, 1, 0, "T")
             .await
             .expect("the step");
-        assert_eq!(records, 0, "a finished archives step was copied again");
+        assert_eq!(records, 6, "a finished archives step did not count its records");
+        assert_eq!(manifest.steps[at].archive, Some(recorded), "a skipped step changed its archive");
         // the source is untouched until the reclaim
         let src = ArchiveMap::new("Shard-1", "T", &settings).await.expect("a map");
         assert_eq!(src.to_archive.borrow().len(), 6);

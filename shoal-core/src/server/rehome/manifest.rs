@@ -242,6 +242,7 @@ impl Manifest {
     /// * `root` - The root of the storage directory
     #[must_use]
     pub fn path(root: &Path) -> PathBuf {
+        // beside the marker, where the claim looks for it
         root.join(MANIFEST_FILE)
     }
 
@@ -323,12 +324,14 @@ impl Manifest {
     /// The index of the first step that is not done, if any
     #[must_use]
     pub fn next_step(&self) -> Option<usize> {
+        // the steps run in order, so the first undone one is where a resume begins
         self.steps.iter().position(|step| !step.done)
     }
 
     /// Whether every step is done
     #[must_use]
     pub fn is_done(&self) -> bool {
+        // nothing left to begin
         self.next_step().is_none()
     }
 
@@ -339,6 +342,7 @@ impl Manifest {
     /// * `source` - The source
     #[must_use]
     pub fn dests_of(&self, source: u16) -> Vec<u16> {
+        // every destination of an item leaving this source, once each
         let mut dests: Vec<u16> = self
             .before
             .moves_to(&self.after, self.cluster)
@@ -358,6 +362,7 @@ impl Manifest {
     /// * `source` - The source
     #[must_use]
     pub fn vanishes(&self, source: u16) -> bool {
+        // an executor numbered past the new count runs nothing afterwards
         usize::from(source) >= self.after.physical
     }
 }
@@ -365,6 +370,7 @@ impl Manifest {
 /// Now, in milliseconds since the epoch
 #[must_use]
 pub fn now_ms() -> u64 {
+    // a clock before the epoch reads as zero rather than failing a plan
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))

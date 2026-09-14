@@ -198,6 +198,7 @@ pub mod crash_point {
 /// * `executor` - The executor
 #[must_use]
 pub fn shard_name(executor: u16) -> String {
+    // the name every per executor file has carried since the first shard
     format!("Shard-{executor}")
 }
 
@@ -209,6 +210,7 @@ pub fn shard_name(executor: u16) -> String {
 /// * `table` - The table
 #[must_use]
 pub fn table_settings(conf: &Conf, table: &str) -> FileSystemTableConf {
+    // the table's own settings if the configuration names it, else the default
     match conf.storage.tables.get(table) {
         Some(TableSettings::FS(settings)) => settings.clone(),
         None => conf.storage.default.filesystem.clone(),
@@ -238,8 +240,10 @@ impl Slots {
     /// * `me` - This node
     fn from_map(map: &TabletMap, me: NodeId) -> Self {
         let mut slots = Slots::default();
+        // every group this node is a member of names the slot hosting it
         for spec in map.replica_groups(me) {
             slots.groups.insert(spec.id, spec.mine);
+            // and every tablet the group serves is on that slot too
             for tablet in &spec.tablets {
                 slots.tablets.insert(*tablet, spec.mine);
             }
@@ -331,6 +335,7 @@ impl Rehome {
 /// * `map` - The map, on a cluster node
 /// * `tables` - The persistent tables
 #[allow(clippy::too_many_arguments)]
+#[instrument(name = "rehome::run_steps", skip_all, fields(from, to, cluster), err(Debug))]
 async fn run_steps<S: ShoalDatabase>(
     conf: &Conf,
     root: &Path,
@@ -434,6 +439,7 @@ async fn run_steps<S: ShoalDatabase>(
 /// * `source` - The source the item is on
 /// * `owner` - The executor the hosting after puts the item on, if it names one
 fn target_of(manifest: &Manifest, source: u16, owner: Option<u16>) -> Option<u16> {
+    // the destinations the plan has steps for from this source
     let dests = manifest.dests_of(source);
     match owner {
         // the item stays where it is
@@ -461,7 +467,11 @@ fn target_of(manifest: &Manifest, source: u16, owner: Option<u16>) -> Option<u16
 /// * `source` - The source
 /// * `key` - The record's partition key
 fn record_target(manifest: &Manifest, slots: &Slots, source: u16, key: u64) -> Option<u16> {
+    // the tablet the key names
     let tablet = Ring::tablet_of(key);
+    // the executor the hosting after puts it on: through its slot on a cluster node, directly
+    // on a standalone one
+    //
     // truncation cannot happen: a tablet id is twelve bits
     #[allow(clippy::cast_possible_truncation)]
     let owner = if manifest.cluster {
@@ -485,6 +495,7 @@ fn record_target(manifest: &Manifest, slots: &Slots, source: u16, key: u64) -> O
 /// * `source` - The source
 /// * `group` - The group
 fn group_target(manifest: &Manifest, slots: &Slots, source: u16, group: GroupId) -> Option<u16> {
+    // the executor the hosting after puts the group's slot on, if the map names the group
     let owner = slots
         .groups
         .get(&group)
@@ -499,6 +510,7 @@ fn group_target(manifest: &Manifest, slots: &Slots, source: u16, group: GroupId)
 ///
 /// * `path` - The file
 fn remove_if_exists(path: &Path) -> Result<bool, ServerError> {
+    // a file that is already gone is the outcome wanted
     match std::fs::remove_file(path) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -512,6 +524,7 @@ fn remove_if_exists(path: &Path) -> Result<bool, ServerError> {
 ///
 /// * `path` - The directory
 fn remove_dir_if_exists(path: &Path) -> Result<(), ServerError> {
+    // a directory that is already gone is the outcome wanted
     match std::fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -525,6 +538,7 @@ fn remove_dir_if_exists(path: &Path) -> Result<(), ServerError> {
 ///
 /// * `dir` - The directory
 fn sync_dir(dir: &Path) -> Result<(), ServerError> {
+    // a removal is only durable once the directory entry is
     if dir.exists() {
         std::fs::File::open(dir)?.sync_all()?;
     }
@@ -562,20 +576,6 @@ async fn archives_step(
     // both maps as they lie on disk
     let src = ArchiveMap::new(&shard_name(source), table, &settings).await?;
     let dst = ArchiveMap::new(&shard_name(dest), table, &settings).await?;
-    // a redo: an archive the destination's map names is a copy that finished before the
-    // crash; one it does not is the partial the crash left, and goes before the copy is redone
-    if let Some(archive) = manifest.steps[at].archive {
-        if dst.all_archives.borrow().contains(&archive) {
-            event!(Level::INFO, msg = "an archives step had finished before the crash; skipping it", %archive);
-            src.close_all().await?;
-            dst.close_all().await?;
-            return Ok((0, 0));
-        }
-        let partial = settings.get_archive_path(table).join(archive.to_string());
-        if remove_if_exists(&partial)? {
-            event!(Level::INFO, msg = "removed the partial archive a crashed archives step left", %archive);
-        }
-    }
     // the records that move, in archive order so the reads are sequential
     let mut moving: Vec<ArchiveEntry> = src
         .to_archive
@@ -585,6 +585,23 @@ async fn archives_step(
         .copied()
         .collect();
     moving.sort_by_key(|entry| (entry.archive, entry.offset));
+    let total_bytes: u64 = moving.iter().map(|entry| u64::try_from(entry.size).unwrap_or(u64::MAX)).sum();
+    // a redo: an archive the destination's map names is a copy that finished before the
+    // crash, whose records count as moved since the crashed run never wrote its count down;
+    // one it does not name is the partial the crash left, and goes before the copy is redone
+    if let Some(archive) = manifest.steps[at].archive {
+        if dst.all_archives.borrow().contains(&archive) {
+            event!(Level::INFO, msg = "an archives step had finished before the crash; skipping it", %archive, records = moving.len());
+            src.close_all().await?;
+            dst.close_all().await?;
+            return Ok((u64::try_from(moving.len()).unwrap_or(u64::MAX), total_bytes));
+        }
+        let partial = settings.get_archive_path(table).join(archive.to_string());
+        if remove_if_exists(&partial)? {
+            event!(Level::INFO, msg = "removed the partial archive a crashed archives step left", %archive);
+        }
+    }
+    // nothing to copy leaves the destination untouched
     if moving.is_empty() {
         src.close_all().await?;
         dst.close_all().await?;
@@ -635,9 +652,11 @@ async fn archives_step(
 ///
 /// * `dir` - The marker directory
 fn marker_groups(dir: &Path) -> Vec<GroupId> {
+    // a marker directory that was never made holds no markers
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
+    // every file named by a group's hex identity
     entries
         .flatten()
         .filter_map(|entry| u64::from_str_radix(&entry.file_name().to_string_lossy(), 16).ok().map(GroupId))
@@ -652,7 +671,9 @@ fn marker_groups(dir: &Path) -> Vec<GroupId> {
 /// * `dst_dir` - The destination's WAL directory
 /// * `sub` - The marker directory under each
 /// * `group` - The group
+#[instrument(name = "rehome::move_marker", skip_all, fields(sub, %group), err(Debug))]
 async fn move_marker(src_dir: &Path, dst_dir: &Path, sub: &str, group: GroupId) -> Result<(), ServerError> {
+    // the marker as the source wrote it, if it wrote one
     let from = src_dir.join(sub).join(format!("{group}"));
     let Ok(bytes) = std::fs::read(&from) else {
         return Ok(());
@@ -904,10 +925,12 @@ async fn reclaim_step(
 pub fn table_files_of(conf: &Conf, table: &str, executor: u16) -> Vec<PathBuf> {
     let settings = table_settings(conf, table);
     let name = shard_name(executor);
+    // the map and its intent log, which every executor with data has
     let mut files = vec![
         settings.get_archive_map_path(table).join(&name),
         settings.get_archive_intent_path(table).join(&name),
     ];
+    // and every intent log of the executor's, active or inactive
     if let Ok(entries) = std::fs::read_dir(settings.get_intent_path(table)) {
         files.extend(
             entries
@@ -932,9 +955,11 @@ pub fn table_files_of(conf: &Conf, table: &str, executor: u16) -> Vec<PathBuf> {
 #[must_use]
 pub fn executor_has_files(conf: &Conf, tables: &[&str], executor: u16) -> bool {
     let root = &conf.storage.default.filesystem.latency_sensitive.path;
+    // the WAL directory, on a cluster node
     if root.join(WAL_DIR).join(shard_name(executor)).exists() {
         return true;
     }
+    // or any table's file of the executor's
     tables
         .iter()
         .any(|table| table_files_of(conf, table, executor).iter().any(|path| path.exists()))
@@ -949,6 +974,7 @@ pub fn executor_has_files(conf: &Conf, tables: &[&str], executor: u16) -> bool {
 /// * `upto` - The highest executor to look for
 #[must_use]
 pub fn executors_with_files(conf: &Conf, tables: &[&str], upto: u16) -> Vec<u16> {
+    // every executor up to the bound that has anything left
     (0..=upto).filter(|executor| executor_has_files(conf, tables, *executor)).collect()
 }
 
@@ -975,9 +1001,12 @@ pub struct GroupLogView {
 /// # Errors
 ///
 /// Fails if the WAL cannot be opened.
+#[instrument(name = "rehome::group_log_view", skip_all, fields(%group), err(Debug))]
 pub async fn group_log_view(wal_dir: &Path, group: GroupId) -> Result<GroupLogView, ServerError> {
+    // the WAL recovered and the checkpoint beside it
     let wal = ShardWal::open(wal_dir, 1 << 24, 1 << 20).await.map_err(ServerError::IO)?;
     let checkpoint = Checkpoint::read(wal_dir).await.map_err(ServerError::IO)?;
+    // what they say about the group
     let view = GroupLogView {
         last: wal.last_log_id_of(group).map(|log_id| log_id.index),
         purged: wal.store(group).purged_index(),
@@ -999,10 +1028,13 @@ pub async fn group_log_view(wal_dir: &Path, group: GroupId) -> Result<GroupLogVi
 /// # Errors
 ///
 /// Fails if the map cannot be read.
+#[instrument(name = "rehome::archived_keys_of", skip_all, fields(table, executor), err(Debug))]
 pub async fn archived_keys_of(conf: &Conf, table: &str, executor: u16) -> Result<HashSet<u64>, ServerError> {
+    // the executor's map of the table, as it lies on disk
     let settings = table_settings(conf, table);
     settings.setup_paths(table).await?;
     let map = ArchiveMap::new(&shard_name(executor), table, &settings).await?;
+    // every key it names
     let keys = map.to_archive.borrow().keys().copied().collect();
     map.close_all().await?;
     Ok(keys)

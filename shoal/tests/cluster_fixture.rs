@@ -1128,6 +1128,8 @@ async fn cluster_server_child() {
                 .replication_factor(staged.replication_factor)
                 .control_voters(staged.control_voters);
             block.admins = staged.admins.clone();
+            // the slots this node claims apart from its cores ([F47](../../docs/src/features/local-rehome.md))
+            block = block.slots(staged.slots);
             if let Some(interval) = staged.detector_interval_ms {
                 block = block.detector_interval_ms(interval);
             }
@@ -1253,6 +1255,11 @@ async fn cluster_server_child() {
         std::fs::create_dir_all(&request.dir).expect("the storage directory is made");
         std::fs::write(StorageMeta::path(&request.dir), marker).expect("the marker is staged");
     }
+    // a rehome crash point, armed before the pool starts since the rehome runs inside the
+    // start ([F47](../../docs/src/features/local-rehome.md))
+    if let Some(point) = &request.rehome_crash_at {
+        shoal::server::rehome::crash_point::arm_named(point).expect("a rehome crash point the fixture names exists");
+    }
     let mut pool = match ShoalPool::<TestDb>::start(conf) {
         Ok(pool) => pool,
         Err(error) => {
@@ -1314,16 +1321,24 @@ async fn cluster_server_child() {
         cluster::READY_LINE,
         serde_json::to_string(&endpoints).expect("endpoints serialize")
     ));
-    // a cluster node answers commands on its stdin, for the tests to drive it, while still
-    // watching for a shard death; a standalone node has no peers and just watches
-    if let Some(staged) = request.cluster.clone() {
+    // every server answers commands on its stdin, for the tests to drive it, while still
+    // watching for a shard death; ~~a standalone node has no peers and just watches~~ a
+    // standalone node answers the verbs that need no peer too, since the rehome is tested on
+    // one ([F47](../../docs/src/features/local-rehome.md))
+    {
         use tokio::io::AsyncBufReadExt as _;
         // resolve a node index in a command to the NodeId the fixture minted for it
-        let peers: Vec<shoal::shared::identity::NodeId> = staged
-            .peers
-            .iter()
-            .map(|node| shoal::shared::identity::NodeId(node.parse().expect("a node id")))
-            .collect();
+        let peers: Vec<shoal::shared::identity::NodeId> = request
+            .cluster
+            .as_ref()
+            .map(|staged| {
+                staged
+                    .peers
+                    .iter()
+                    .map(|node| shoal::shared::identity::NodeId(node.parse().expect("a node id")))
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
         let mut watch = tokio::time::interval(Duration::from_millis(50));
         // whether a shard death was asked for, in which case it is logged rather than fatal
@@ -1883,6 +1898,27 @@ fn handle_command(
             }
             Ok(serde_json::json!({ "flushed": true }))
         }
+        // what the rehome this start ran moved, or null when the count had not changed
+        // ([F47](../../docs/src/features/local-rehome.md))
+        "REHOME" => Ok(serde_json::to_value(pool.rehome()).unwrap_or(serde_json::Value::Null)),
+        // which executor hosts each slot, and how many tablets each executor owns
+        "HOSTING" => {
+            let hosting = pool.hosting();
+            Ok(serde_json::json!({
+                "slots": hosting.slots,
+                "physical": hosting.physical,
+                "hosts": hosting.hosts,
+                "tablets_per_executor": hosting.tablets_per_executor(),
+            }))
+        }
+        // which executors still have files in the directory, for the reclaim assertions
+        "SHARD_DIRS" => {
+            let conf = utils::build_crash_config(dir, 0);
+            let tables = <TestDb as shoal::ShoalDatabase>::persistent_tables();
+            Ok(serde_json::json!({
+                "executors": shoal::server::rehome::executors_with_files(&conf, &tables, 16),
+            }))
+        }
         other => Err(format!("unknown command {other:?}")),
     };
     // one reply line per command, an ok or an error object
@@ -2356,6 +2392,9 @@ fn every_child_kind_has_a_child_function() {
     for kind in [NodeKind::Server, NodeKind::Standalone, NodeKind::MockPeer] {
         assert!(!kind.child_fn().is_empty());
     }
+    // a standalone child runs the server function, and so the command loop with it: the
+    // rehome verbs are answered by a node with no peers ([F47](../../docs/src/features/local-rehome.md))
+    assert_eq!(NodeKind::Standalone.child_fn(), NodeKind::Server.child_fn());
 }
 
 /// A get that found nothing, however the client reports it
@@ -10419,5 +10458,360 @@ async fn decommission_drains_within_supported_load_envelope() -> Result<(), Fixt
     for id in holders {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
+    Ok(())
+}
+
+/// A node's file layout survives a change of core count with a crash at every point of the
+/// rehome (C8 M9c)
+///
+/// Three nodes at a factor of three; node two claims four slots on two cores, so from its
+/// first start it hosts two slots per executor. Rows land in every set - some archived on node
+/// two by a rotate and a compaction, some left in its WAL past the checkpoint - and one delete
+/// under an identity is remembered by its retry table. Then, for each of the six points a
+/// rehome on a cluster node can die at, node two is restarted with its core count changed and
+/// the point armed: it dies there, and is started again clean at the new count. Every round
+/// alternates between one executor hosting all four slots and two hosting two each, so the
+/// vanishing executor's path and the live donor's are each crossed at every point. After
+/// every round the rehome reports the step it redid, every key reads through node two, every
+/// group's row counts agree across the three holders, the retry under the remembered identity
+/// is still the original result, the vanished executor's files are gone, the hosting holds
+/// four slots on the new count, and every peer still records four shards for node two. The
+/// ephemeral table's rows, which the rehome moves nothing of, read through node two once its
+/// leaders have fed its groups again. Writers through the other two nodes run throughout under
+/// identities, and their ledger with a read of every key on every node is accepted by the
+/// sequential oracle ([F47](../../docs/src/features/local-rehome.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn local_rehome_recovers_after_each_crash_point() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal_model::event::{ClientOp, MutationOp, OpResult, ReadLevel};
+    use shoal_model::ids::{Attempt, Key, OpId, TabletId, Value};
+    use shoal_model::oracle::{Ledger, Outcome};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .node_cores(2, CoreClaim::Count(2))
+        .slots(2, 4)
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(64)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .retry_window(Duration::from_secs(1800))
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    // node two claimed four slots on two cores from the start: every peer records four
+    let two = cluster.node(2).endpoints.node.clone().expect("node two has an id");
+    let record_of = |members: &serde_json::Value| -> serde_json::Value {
+        members["members"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|member| member["record"]["node"] == serde_json::json!(two))
+            .map(|member| member["record"].clone())
+            .unwrap_or_else(|| panic!("node two is not in {members}"))
+    };
+    let record = record_of(&cluster.members(0)?);
+    assert_eq!(record["shards"], 4, "{record}");
+    assert_eq!(record["physical"], 2, "{record}");
+    let hosting = cluster.node_mut(2).command("HOSTING")?["ok"].clone();
+    assert_eq!(hosting["slots"], 4, "{hosting}");
+    assert_eq!(hosting["physical"], 2, "{hosting}");
+    // rows in every set: a base archived on node two, and a tail left in its WAL
+    let client = Shoal::<TestDbClient>::new(&addrs[0]).await.map_err(ok)?;
+    let fixed: Vec<u64> = (47_000..47_060u64).collect();
+    for key in &fixed[..40] {
+        client.send_one(Note { key: *key, text: format!("note-{key}") }).await.map_err(ok)?;
+        client.send_one(Row { key: *key, data: format!("row-{key}") }).await.map_err(ok)?;
+    }
+    // node two's digest folds over two executors where the others fold over one, so the
+    // hashes never agree by construction; the per group row counts are what is compared
+    wait_group_rows_agree(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    let _ = cluster.node_mut(2).command("ROTATE")?;
+    let _ = cluster.node_mut(2).command("COMPACT")?;
+    wait_checkpointed(&mut cluster, 2, "Note", Duration::from_secs(60))?;
+    for key in &fixed[40..] {
+        client.send_one(Note { key: *key, text: format!("note-{key}") }).await.map_err(ok)?;
+    }
+    // a delete under an identity through node two, remembered by the group's retry table
+    let remembered = uuid::Uuid::new_v4();
+    let deleted_key = fixed[59];
+    let first = delete_note_as(&addrs[2], deleted_key, &SendOptions::new().identity(remembered).retry(Duration::from_secs(15)))
+        .await
+        .map_err(ok)?;
+    assert_eq!(first.bundle(), remembered);
+    wait_group_rows_agree(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // writers through nodes zero and one, on keys of their own, until told to stop
+    let writer_keys: Vec<u64> = (47_100..47_112u64).collect();
+    let ledger = Arc::new(Mutex::new(Ledger::default()));
+    let clock = Arc::new(AtomicU64::new(0));
+    let next_id = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let tablet_id = |key: u64| TabletId {
+        table: shoal_model::ids::TableId(1),
+        range: tablet_of(key) as u16,
+    };
+    for key in &writer_keys {
+        let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+        let attempt = Attempt { id, retry: 0 };
+        let invoke = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().invoke(attempt, tablet_id(*key), ClientOp::Mutate(MutationOp::Insert { key: Key((*key % 251) as u8), value: Value(0) }), invoke);
+        write_note(&addrs[0], *key, "0").await.map_err(ok)?;
+        let complete = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Applied(true)));
+    }
+    let mut tasks = Vec::new();
+    for node in 0..2 {
+        let endpoints = vec![addrs[0].clone(), addrs[1].clone()];
+        let keys: Vec<u64> = writer_keys[node * 6..node * 6 + 6].to_vec();
+        let ledger = ledger.clone();
+        let clock = clock.clone();
+        let next_id = next_id.clone();
+        let stop = stop.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut ordered = endpoints.clone();
+            ordered.rotate_left(node);
+            let mut round = 0u32;
+            while !stop.load(Ordering::SeqCst) && round < 26 {
+                let Ok(client) = Shoal::<TestDbClient>::builder().endpoints(ordered.clone()).build().await else {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                };
+                for (at, key) in keys.iter().enumerate() {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let value = Value(node as u32 * 1000 + round + 1);
+                    let delete = (round as usize + at + node) % 5 == 0;
+                    let op = if delete {
+                        MutationOp::Delete { key: Key((*key % 251) as u8) }
+                    } else {
+                        MutationOp::Update { key: Key((*key % 251) as u8), value }
+                    };
+                    let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+                    let attempt = Attempt { id, retry: 0 };
+                    let invoke = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().invoke(attempt, TabletId {
+                        table: shoal_model::ids::TableId(1),
+                        range: tablet_of(*key) as u16,
+                    }, ClientOp::Mutate(op), invoke);
+                    let options = SendOptions::new().identity(uuid::Uuid::new_v4()).retry(Duration::from_secs(20));
+                    let outcome = if delete {
+                        match client.send_one_with(cluster::schema::NoteDelete::new(*key), &options).await {
+                            Ok(_) => Outcome::Ok(OpResult::Applied(true)),
+                            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Outcome::Ok(OpResult::Applied(false)),
+                            Err(_) => Outcome::Unknown,
+                        }
+                    } else {
+                        let update = cluster::schema::NoteUpdate {
+                            partition_key: *key,
+                            text: Some(value.0.to_string()),
+                        };
+                        match client.send_one_with(update, &options).await {
+                            Ok(_) => Outcome::Ok(OpResult::Applied(true)),
+                            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Outcome::Ok(OpResult::Applied(false)),
+                            Err(_) => Outcome::Unknown,
+                        }
+                    };
+                    let complete = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().complete(attempt, complete, outcome);
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                }
+                round += 1;
+            }
+            Ok::<(), shoal::client::Errors>(())
+        }));
+    }
+    // the matrix: every point a cluster node's rehome can die at, alternating between one
+    // executor hosting every slot and two hosting two each; a fold happens on no cluster node
+    let points = ["planned", "after_archives", "after_log", "after_reclaim", "before_finalize", "after_finalize"];
+    let mut cores = 2usize;
+    for (round, point) in points.iter().enumerate() {
+        let target = if cores == 2 { 1 } else { 2 };
+        eprintln!("--- {point}: node two from {cores} to {target} executors");
+        // more rows into the WAL between rounds, some archived on node two
+        let extra: Vec<u64> = (47_200 + round as u64 * 10..47_210 + round as u64 * 10).collect();
+        for key in &extra {
+            write_note_eventually(&addrs[0], *key, &format!("note-{key}"), Duration::from_secs(20)).await?;
+        }
+        if round % 2 == 0 {
+            let _ = cluster.node_mut(2).command("ROTATE")?;
+            let _ = cluster.node_mut(2).command("COMPACT")?;
+        }
+        // restarted at the new count and armed to die at the point, it dies there
+        let staged = cluster.staged(2).clone();
+        cluster.restart_with_overrides(
+            2,
+            NodeKind::Server,
+            Some(staged),
+            cluster::ChildOverrides {
+                cores: Some(target),
+                rehome_crash_at: Some((*point).to_string()),
+            },
+        )?;
+        wait_dead(&cluster, 2, Duration::from_secs(120)).map_err(|_| FixtureError::NotReady(format!("node two never died at {point}")))?;
+        // started again clean at the new count, the rehome resumes and finishes
+        cluster.restart_with_cores(2, NodeKind::Server, target)?;
+        cluster.wait_joined(&[2])?;
+        let report = cluster.node_mut(2).command("REHOME")?["ok"].clone();
+        assert!(!report.is_null(), "after dying at {point} the restart ran no rehome");
+        assert_eq!(report["from"], cores, "after dying at {point}: {report}");
+        assert_eq!(report["to"], target, "after dying at {point}: {report}");
+        assert!(report["steps_redone"].as_u64().unwrap_or(0) >= 1, "after dying at {point} no step was redone: {report}");
+        assert!(report["slots_moved"].as_u64().unwrap_or(0) >= 1, "after dying at {point} no slot moved: {report}");
+        assert!(report["groups"].as_u64().unwrap_or(0) >= 1, "after dying at {point} no group moved: {report}");
+        // the hosting holds four slots on the new count, and the vanished executor's files are gone
+        let hosting = cluster.node_mut(2).command("HOSTING")?["ok"].clone();
+        assert_eq!(hosting["slots"], 4, "after dying at {point}: {hosting}");
+        assert_eq!(hosting["physical"], target, "after dying at {point}: {hosting}");
+        let dirs = cluster.node_mut(2).command("SHARD_DIRS")?["ok"]["executors"].clone();
+        let expected: Vec<u64> = (0..target as u64).collect();
+        assert_eq!(dirs, serde_json::json!(expected), "after dying at {point} the executors with files are {dirs}");
+        // every peer still records four shards for node two, and the executors it runs
+        let record = record_of(&cluster.members(0)?);
+        assert_eq!(record["shards"], 4, "after dying at {point}: {record}");
+        assert_eq!(record["physical"], target, "after dying at {point}: {record}");
+        // every key reads through node two, and every group's rows agree across the holders
+        let addr2 = cluster.node(2).endpoints.client.to_string();
+        for key in fixed.iter().filter(|key| **key != deleted_key).chain(&extra) {
+            wait_note_routed(&addr2, *key, &format!("note-{key}"), Duration::from_secs(30))
+                .await
+                .map_err(|error| FixtureError::NotReady(format!("after dying at {point}, key {key}: {error:?}")))?;
+        }
+        // the ephemeral table moves nothing: its groups are fed again by their leaders, and
+        // every row reads through node two once they have been
+        let rows = Shoal::<TestDbClient>::new(&addr2).await.map_err(ok)?;
+        for key in &fixed[..40] {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                let found = match rows.send_one(RowGet::new(vec![*key])).await {
+                    Ok(found) => found.access::<Row>().map_err(ok)?.map(|rows| rows.len()).unwrap_or(0),
+                    Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => 0,
+                    Err(error) => return Err(ok(error)),
+                };
+                if found == 1 {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "after dying at {point} row {key} never read through node two");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+        wait_group_rows_agree(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(90))
+            .map_err(|error| FixtureError::NotReady(format!("after dying at {point}: {error:?}")))?;
+        // the remembered identity through node two is still the original result, once
+        let again = delete_note_as(&addr2, deleted_key, &SendOptions::new().identity(remembered).retry(Duration::from_secs(20)))
+            .await
+            .unwrap_or_else(|error| panic!("after dying at {point} the remembered identity was applied as new: {error:?}"));
+        assert_eq!(again.bundle(), remembered);
+        let fresh = delete_note(&addr2, deleted_key).await;
+        assert!(matches!(fresh, Err(shoal::client::Errors::QueryDidNotSucceed { .. })), "after dying at {point}: {fresh:?}");
+        cores = target;
+    }
+    // the writers stop, and a read of every key on every node joins the ledger
+    stop.store(true, Ordering::SeqCst);
+    for task in tasks {
+        task.await.expect("a writer task panicked").map_err(ok)?;
+    }
+    wait_group_rows_agree(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(90))?;
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    for addr in &addrs {
+        for key in &writer_keys {
+            let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+            let attempt = Attempt { id, retry: 0 };
+            let invoke = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().invoke(attempt, tablet_id(*key), ClientOp::Read { key: Key((*key % 251) as u8), level: ReadLevel::One }, invoke);
+            let seen = read_note(addr, *key).await.map_err(ok)?.map(|text| Value(text.parse().expect("a value")));
+            let complete = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Value(seen)));
+        }
+    }
+    let ledger = ledger.lock().unwrap().clone();
+    shoal_model::oracle::check(&ledger).unwrap_or_else(|error| panic!("the history is not sequential: {error:?}"));
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A standalone node deals its tablets across a change of core count, growing and shrinking,
+/// with a crash at the fold and at the copy on the way down (C8 M9c)
+///
+/// A standalone node at two executors is seeded with rows on every tablet, some left in its
+/// active intent logs. Restarted at three, the two donors deal a third of their tablets to
+/// the new executor - the counts within one of even - and every row reads back. Restarted at
+/// one and armed to die after the first fold, it dies; started again armed to die after the
+/// first copy, the resumed rehome dies there too; started clean, it finishes with two steps
+/// redone, every row reads back, and only the survivor's files remain
+/// ([F47](../../docs/src/features/local-rehome.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn standalone_rehome_rebalances_tablets_across_restarts() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder().standalone(CoreClaim::Count(2)).start().await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr = cluster.node(0).endpoints.client.to_string();
+    // rows on every tablet's executor, then a rotate so some are archived and the rest are in
+    // the active logs when the node is restarted
+    let client = Shoal::<TestDbClient>::new(&addr).await.map_err(ok)?;
+    let keys: Vec<u64> = (51_000..51_400u64).collect();
+    for key in &keys[..200] {
+        client.send_one(Note { key: *key, text: format!("note-{key}") }).await.map_err(ok)?;
+    }
+    let _ = cluster.node_mut(0).command("ROTATE")?;
+    for key in &keys[200..] {
+        client.send_one(Note { key: *key, text: format!("note-{key}") }).await.map_err(ok)?;
+    }
+    let hosting = cluster.node_mut(0).command("HOSTING")?["ok"].clone();
+    assert_eq!(hosting["physical"], 2, "{hosting}");
+    assert_eq!(hosting["slots"], 2, "{hosting}");
+    // grown to three: tablets dealt per tablet, within one of even, every row read back
+    cluster.restart_with_cores(0, NodeKind::Standalone, 3)?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let report = cluster.node_mut(0).command("REHOME")?["ok"].clone();
+    assert_eq!(report["from"], 2, "{report}");
+    assert_eq!(report["to"], 3, "{report}");
+    assert!(report["tablets_moved"].as_u64().unwrap_or(0) > 0, "{report}");
+    assert!(report["folded"].as_u64().unwrap_or(0) > 0, "a growth folded no intent logs: {report}");
+    assert!(report["records"].as_u64().unwrap_or(0) > 0, "{report}");
+    assert_eq!(report["steps_redone"], 0, "{report}");
+    let hosting = cluster.node_mut(0).command("HOSTING")?["ok"].clone();
+    assert_eq!(hosting["physical"], 3, "{hosting}");
+    let counts: Vec<u64> = hosting["tablets_per_executor"].as_array().expect("counts").iter().map(|count| count.as_u64().unwrap_or(0)).collect();
+    assert_eq!(counts.len(), 3);
+    assert!(counts.iter().max().unwrap() - counts.iter().min().unwrap() <= 1, "{counts:?}");
+    for key in &keys {
+        wait_note_routed(&addr, *key, &format!("note-{key}"), Duration::from_secs(10)).await?;
+    }
+    // down to one, dying after the first fold, then after the first copy of the resumed rehome
+    for point in ["after_fold", "after_archives"] {
+        cluster.restart_with_overrides(
+            0,
+            NodeKind::Standalone,
+            None,
+            cluster::ChildOverrides {
+                cores: Some(1),
+                rehome_crash_at: Some(point.to_string()),
+            },
+        )?;
+        wait_dead(&cluster, 0, Duration::from_secs(60)).map_err(|_| FixtureError::NotReady(format!("the node never died at {point}")))?;
+    }
+    // started clean, the rehome finishes: two steps redone, every row back, one executor's files
+    cluster.restart_with_cores(0, NodeKind::Standalone, 1)?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let report = cluster.node_mut(0).command("REHOME")?["ok"].clone();
+    assert_eq!(report["from"], 3, "{report}");
+    assert_eq!(report["to"], 1, "{report}");
+    assert_eq!(report["steps_redone"], 2, "{report}");
+    assert!(report["records"].as_u64().unwrap_or(0) > 0, "{report}");
+    let hosting = cluster.node_mut(0).command("HOSTING")?["ok"].clone();
+    assert_eq!(hosting["physical"], 1, "{hosting}");
+    assert_eq!(hosting["tablets_per_executor"], serde_json::json!([4096]), "{hosting}");
+    for key in &keys {
+        wait_note_routed(&addr, *key, &format!("note-{key}"), Duration::from_secs(10)).await?;
+    }
+    let dirs = cluster.node_mut(0).command("SHARD_DIRS")?["ok"]["executors"].clone();
+    assert_eq!(dirs, serde_json::json!([0]), "the vanished executors left files: {dirs}");
+    assert_eq!(cluster.node(0).failure(), None, "the node died");
     Ok(())
 }

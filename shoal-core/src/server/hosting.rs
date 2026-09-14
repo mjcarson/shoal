@@ -169,12 +169,15 @@ impl Hosting {
 
     /// Check the table describes a node: every slot and tablet on an executor the node runs
     fn check(&self) -> Result<(), ServerError> {
+        // every refusal is the same kind of error, naming what is wrong
         let invalid = |what: String| {
             ServerError::IO(std::io::Error::new(std::io::ErrorKind::InvalidData, what))
         };
+        // a node with no executors or no slots hosts nothing
         if self.physical == 0 || self.slots == 0 {
             return Err(invalid("the hosting names no executors or no slots".to_string()));
         }
+        // one host per slot and one owner per tablet
         if self.hosts.len() != self.slots {
             return Err(invalid(format!(
                 "the hosting names {} slots and hosts {}",
@@ -188,6 +191,7 @@ impl Hosting {
                 self.tablets.len()
             )));
         }
+        // each on an executor the node runs
         if let Some(host) = self.hosts.iter().find(|host| usize::from(**host) >= self.physical) {
             return Err(invalid(format!(
                 "the hosting puts a slot on executor {host} and the node runs {}",
@@ -213,6 +217,7 @@ impl Hosting {
     /// * `slot` - The slot
     #[must_use]
     pub fn host_of_slot(&self, slot: u16) -> usize {
+        // the executor the table names, or zero for a slot past the count
         self.hosts.get(usize::from(slot)).map_or(0, |host| usize::from(*host))
     }
 
@@ -223,12 +228,14 @@ impl Hosting {
     /// * `tablet` - The tablet
     #[must_use]
     pub fn owner_of_tablet(&self, tablet: usize) -> usize {
+        // the executor the table names, or zero for a tablet past the count
         self.tablets.get(tablet).map_or(0, |owner| usize::from(*owner))
     }
 
     /// The slots each executor hosts, indexed by executor
     #[must_use]
     pub fn slots_by_executor(&self) -> Vec<Vec<u16>> {
+        // one list per executor, filled in slot order
         let mut by = vec![Vec::new(); self.physical];
         for (slot, host) in self.hosts.iter().enumerate() {
             // truncation cannot happen: a slot is bounded by the u16 that names it
@@ -241,6 +248,7 @@ impl Hosting {
     /// How many tablets each executor owns, indexed by executor
     #[must_use]
     pub fn tablets_per_executor(&self) -> Vec<usize> {
+        // one count per executor
         let mut counts = vec![0usize; self.physical];
         for owner in &self.tablets {
             counts[usize::from(*owner)] += 1;
@@ -251,6 +259,7 @@ impl Hosting {
     /// Whether this table is the identity: slot `n` on executor `n` and the ring's tablets
     #[must_use]
     pub fn is_identity(&self) -> bool {
+        // the same table the ring would build for this many executors
         *self == Self::identity(self.slots) && self.physical == self.slots
     }
 
@@ -318,11 +327,13 @@ impl Hosting {
     /// * `cluster` - Whether to compare slots or tablets
     #[must_use]
     pub fn moves_to(&self, after: &Hosting, cluster: bool) -> Vec<(u16, u16, u16)> {
+        // the half of the table this kind of node deals
         let (before, later) = if cluster {
             (&self.hosts, &after.hosts)
         } else {
             (&self.tablets, &after.tablets)
         };
+        // every item whose executor differs, with where it was and where it goes
         before
             .iter()
             .zip(later)
@@ -342,6 +353,7 @@ impl Hosting {
 /// * `from` - The executor count the items are held on
 /// * `to` - The executor count to deal onto
 fn deal(owners: &[u16], from: usize, to: usize) -> Vec<u16> {
+    // start from where everything is
     let mut after = owners.to_vec();
     // how many items each surviving executor holds
     let mut counts = vec![0usize; to];
