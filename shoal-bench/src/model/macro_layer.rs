@@ -273,7 +273,16 @@ pub struct ClusterFacts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offered_load: Option<OfferedLoad>,
     /// Whether the nodes shared one machine, which is a redundancy experiment and not scale-out
+    ///
+    /// Since [F50](../../../docs/src/features/cluster-operations.md) derived from the nodes'
+    /// hostnames when every node reported its environment: false only when they differ.
     pub emulated: bool,
+    /// Every node's environment, as the process that ran it reported at its ready line
+    ///
+    /// Absent before [F50](../../../docs/src/features/cluster-operations.md) and on a one
+    /// node arm. In node order; what a physical capture is judged comparable by, node by node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<NodeEnvFacts>,
     /// ~~The static placement the nodes routed against~~ The order the arm initialized the
     /// placement in, node by node; empty before
     /// [F38](../../../docs/src/features/inter-node-transport.md), when a cluster was one node
@@ -400,6 +409,123 @@ pub struct ClusterFacts {
     /// foreground ([C10](../../../docs/src/distributed/performance.md), Q12).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<BackupFacts>,
+}
+
+/// The machine one node of a placement ran on, as that node's own process read it
+///
+/// Gathered in the process that becomes the node - on a remote host, that host - and carried
+/// back on the ready line, so a physical capture records every node's hardware rather than
+/// the driver's alone ([F50](../../../docs/src/features/cluster-operations.md),
+/// [C10](../../../docs/src/distributed/performance.md)). `build` is a digest of the binary
+/// that ran, which the driver checks against its own before the run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeEnvFacts {
+    /// The node's position in the placement
+    pub index: u32,
+    /// The host it ran on
+    pub hostname: String,
+    /// The CPU model
+    pub cpu_model: String,
+    /// How many logical CPUs were online
+    pub cpu_online: usize,
+    /// The scaling governor cpu 0 was set to
+    pub governor: String,
+    /// The kernel release
+    pub kernel: String,
+    /// Bytes of memory the host has
+    pub memory_bytes: u64,
+    /// Whether simultaneous multithreading was active
+    pub smt: bool,
+    /// How many NUMA nodes the host has
+    pub numa_nodes: usize,
+    /// The filesystem the node's storage directory is on, and the device under it
+    pub storage_fs: String,
+    /// A digest of the binary that ran the node
+    pub build: String,
+}
+
+impl NodeEnvFacts {
+    /// What differs between this environment and another's, if anything, by field name
+    ///
+    /// The build is left out: a capture is judged by the machines, and the build is the
+    /// driver's to refuse before a run.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The environment to compare against
+    #[must_use]
+    pub fn difference(&self, other: &NodeEnvFacts) -> Vec<&'static str> {
+        let mut fields = Vec::new();
+        if self.hostname != other.hostname {
+            fields.push("host");
+        }
+        if self.cpu_model != other.cpu_model {
+            fields.push("cpu");
+        }
+        if self.cpu_online != other.cpu_online {
+            fields.push("cpus online");
+        }
+        if self.governor != other.governor {
+            fields.push("governor");
+        }
+        if self.kernel != other.kernel {
+            fields.push("kernel");
+        }
+        if self.memory_bytes != other.memory_bytes {
+            fields.push("memory");
+        }
+        if self.smt != other.smt {
+            fields.push("smt");
+        }
+        if self.numa_nodes != other.numa_nodes {
+            fields.push("numa");
+        }
+        if self.storage_fs != other.storage_fs {
+            fields.push("storage");
+        }
+        fields
+    }
+}
+
+/// Whether a set of node environments is one machine, which is what `emulated` means
+///
+/// # Arguments
+///
+/// * `environments` - Every node's environment
+#[must_use]
+pub fn emulated_by(environments: &[NodeEnvFacts]) -> bool {
+    let mut hosts = environments.iter().map(|env| env.hostname.as_str());
+    let Some(first) = hosts.next() else {
+        return true;
+    };
+    hosts.all(|host| host == first)
+}
+
+/// How two placements' environments differ, node by node, if they do
+///
+/// Returns nothing when either side recorded none: a capture from before the record cannot be
+/// judged and is not called different. Otherwise the first node whose environment differs is
+/// named with the fields that differ, or a count that does.
+///
+/// # Arguments
+///
+/// * `run` - The environments of one capture
+/// * `baseline` - The environments of the other
+#[must_use]
+pub fn environments_difference(run: &[NodeEnvFacts], baseline: &[NodeEnvFacts]) -> Option<String> {
+    if run.is_empty() || baseline.is_empty() {
+        return None;
+    }
+    if run.len() != baseline.len() {
+        return Some(format!("{} nodes' environments -> {}", baseline.len(), run.len()));
+    }
+    for (after, before) in run.iter().zip(baseline) {
+        let fields = after.difference(before);
+        if !fields.is_empty() {
+            return Some(format!("node {} environment: {}", after.index, fields.join(", ")));
+        }
+    }
+    None
 }
 
 /// A backup run in the background of a measured phase, and what the client saw across it
@@ -1508,5 +1634,91 @@ impl MacroCaptureV1 {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::{ClusterFacts, NodeEnvFacts, emulated_by, environments_difference};
+
+    /// One node's environment, on a host
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The node
+    /// * `host` - The host it ran on
+    /// * `cpu` - Its CPU model
+    fn environment(index: u32, host: &str, cpu: &str) -> NodeEnvFacts {
+        NodeEnvFacts {
+            index,
+            hostname: host.to_string(),
+            cpu_model: cpu.to_string(),
+            cpu_online: 16,
+            governor: "performance".to_string(),
+            kernel: "6.1".to_string(),
+            memory_bytes: 64 << 30,
+            smt: true,
+            numa_nodes: 1,
+            storage_fs: "ext4 on /dev/nvme0n1".to_string(),
+            build: "abc".to_string(),
+        }
+    }
+
+    /// Three unequal environments round trip under the cluster record in node order, the
+    /// placement is emulated only while every node names one host, a difference names the
+    /// node and the fields, a build difference is not a machine difference, and an F47
+    /// record loads with none (F50)
+    #[test]
+    fn physical_cluster_records_each_node_environment() {
+        let environments = vec![
+            environment(0, "jove", "EPYC"),
+            environment(1, "europa", "Xeon"),
+            environment(2, "io", "EPYC"),
+        ];
+        assert!(!emulated_by(&environments), "three hosts are not an emulation");
+        assert!(emulated_by(&[environment(0, "jove", "EPYC"), environment(1, "jove", "EPYC")]));
+        assert!(emulated_by(&[]), "no record is the one machine every capture before this ran on");
+        let facts = ClusterFacts {
+            emulated: false,
+            environments: environments.clone(),
+            ..serde_json::from_value(serde_json::json!({
+                "nodes": 3, "desired_rf": 3, "active_rf": 3, "write_policy": "quorum",
+                "read_policy": "one", "durability": "durable", "driver": "node", "cores": [],
+                "tables": 1, "tablets": 4096, "emulated": true
+            }))
+            .expect("a record loads")
+        };
+        let json = serde_json::to_value(&facts).expect("the record is json");
+        assert_eq!(json["environments"].as_array().map(Vec::len), Some(3));
+        assert_eq!(json["environments"][1]["hostname"], "europa");
+        let back: ClusterFacts = serde_json::from_value(json).expect("the record loads");
+        assert_eq!(back.environments, environments);
+        assert!(!back.emulated);
+        // the same machines compare equal, and a different one is named with its fields
+        assert_eq!(environments_difference(&environments, &environments), None);
+        let mut moved = environments.clone();
+        moved[1] = environment(1, "callisto", "EPYC");
+        moved[1].governor = "powersave".to_string();
+        let difference = environments_difference(&moved, &environments).expect("a difference");
+        assert!(difference.starts_with("node 1 environment:"), "{difference}");
+        assert!(difference.contains("host") && difference.contains("cpu") && difference.contains("governor"), "{difference}");
+        // a build that differs is the driver's to refuse, not a machine difference
+        let mut rebuilt = environments.clone();
+        rebuilt[2].build = "def".to_string();
+        assert_eq!(environments_difference(&rebuilt, &environments), None);
+        // a count that differs is named as one
+        assert_eq!(environments_difference(&environments[..2], &environments), Some("3 nodes' environments -> 2".to_string()));
+        // a record that carries none is not judged
+        assert_eq!(environments_difference(&[], &environments), None);
+        // an F47 record has no environments and loads emulated
+        let older: ClusterFacts = serde_json::from_value(serde_json::json!({
+            "nodes": 3, "desired_rf": 3, "active_rf": 3, "write_policy": "quorum",
+            "read_policy": "one", "durability": "durable", "driver": "node", "cores": [],
+            "tables": 1, "tablets": 4096, "emulated": true
+        }))
+        .expect("an F47 record loads");
+        assert!(older.environments.is_empty() && older.emulated);
+        let json = serde_json::to_value(&older).expect("json");
+        assert!(json.get("environments").is_none(), "an empty record is not written");
     }
 }

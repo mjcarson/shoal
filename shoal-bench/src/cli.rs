@@ -203,6 +203,18 @@ pub struct RunArgs {
     /// the example silently measures a profiling build.
     #[clap(long)]
     pub no_restore: bool,
+    /// Run a node of every placed arm on another host: `<index>=<user@host>:<dir>`, repeatable
+    ///
+    /// The directory on the host holds a `shoal-workload` of this build and the `shoal.yml` it
+    /// resolves from; the node's staged file is copied there with `scp`, the node started over
+    /// `ssh` and killed by the pid file it writes. Node zero is always the driver's own
+    /// process, and `--driver-address` is how the others reach it
+    /// ([F50](../../docs/src/features/cluster-operations.md)).
+    #[clap(long = "remote", value_name = "INDEX=USER@HOST:DIR")]
+    pub remotes: Vec<String>,
+    /// The address remote nodes reach this machine's node zero at; required with `--remote`
+    #[clap(long, requires = "remotes")]
+    pub driver_address: Option<String>,
 }
 
 /// Arguments to `shoal-bench compare`

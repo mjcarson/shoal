@@ -325,6 +325,37 @@ pub struct ClusterFactsLite {
     /// other arm and before F49
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<BackupFactsLite>,
+    /// Every node's machine, in node order; empty before F50 and on a one node arm
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<NodeEnvFactsLite>,
+}
+
+/// The machine one node ran on, as its own process read it
+///
+/// A mirror of the artifact's `NodeEnvFacts` less the build digest, so a physical capture's
+/// nodes can be told apart on a chart ([F50](../../docs/src/features/cluster-operations.md)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeEnvFactsLite {
+    /// The node's position in the placement
+    pub index: u32,
+    /// The host it ran on
+    pub hostname: String,
+    /// The CPU model
+    pub cpu_model: String,
+    /// How many logical CPUs were online
+    pub cpu_online: usize,
+    /// The scaling governor
+    pub governor: String,
+    /// The kernel release
+    pub kernel: String,
+    /// Bytes of memory
+    pub memory_bytes: u64,
+    /// Whether SMT was active
+    pub smt: bool,
+    /// How many NUMA nodes
+    pub numa_nodes: usize,
+    /// The filesystem and device under the storage
+    pub storage_fs: String,
 }
 
 /// A backup run in the background of a measured phase, and what the client saw across it

@@ -343,7 +343,16 @@ fn cluster_difference(run: &WorkloadCapture, baseline: &WorkloadCapture) -> Opti
             if after.driver != before.driver {
                 return Some(format!("driver {} -> {}", before.driver, after.driver));
             }
-            None
+            // the machines the nodes ran on, node by node, once both sides recorded them
+            // ([F50](../../../docs/src/features/cluster-operations.md))
+            if after.emulated != before.emulated && !after.environments.is_empty() && !before.environments.is_empty() {
+                return Some(format!(
+                    "{} -> {}",
+                    if before.emulated { "one machine" } else { "physical nodes" },
+                    if after.emulated { "one machine" } else { "physical nodes" }
+                ));
+            }
+            crate::model::macro_layer::environments_difference(&after.environments, &before.environments)
         }
     }
 }
@@ -822,6 +831,7 @@ mod tests {
                 rebalance: None,
                 rehome: None,
                 backup: None,
+                environments: Vec::new(),
             });
         }
         capture

@@ -117,7 +117,13 @@ pub fn run_capture(store: &Store, args: &RunArgs) -> Result<i32> {
         storage: storage_dirs.clone(),
         keep_criterion: args.keep_criterion,
         no_restore: args.no_restore,
+        remotes: args.remotes.clone(),
+        driver_address: args.driver_address.clone(),
     };
+    // a remote spec that does not parse is refused before anything is built or wiped
+    for remote in &args.remotes {
+        crate::workloads::harness::cluster::RemoteSpec::parse(remote)?;
+    }
     let plan = plan::build_plan(&inputs);
     // a dry run is the same plan, printed instead of executed
     if args.dry_run {

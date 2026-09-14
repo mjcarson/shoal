@@ -54,6 +54,8 @@ fn a_grid_arm_joins_its_stage_records() {
             // the arm starts its own server, as every capture does
             server: shoal_bench::workloads::harness::ServerSource::InProcess,
             cluster: None,
+            remotes: Vec::new(),
+            driver_address: None,
         },
     )
     .expect("the arm runs");

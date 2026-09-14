@@ -124,8 +124,8 @@ pub fn sample(
     let (Some(node), Some(zero)) = (staged.nodes.get(position), staged.nodes.first()) else {
         bail!("node {index} is not in the placement");
     };
-    let addr = format!("127.0.0.1:{}", node.client_port);
-    let reference = format!("127.0.0.1:{}", zero.client_port);
+    let addr = node.client_addr();
+    let reference = zero.client_addr();
     let mut samples = Vec::new();
     let mut held = 0usize;
     loop {
