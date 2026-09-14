@@ -71,11 +71,20 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ **1,484 tests**, four ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ **1,492 tests**, four ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
-its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ninety-five fail under the load (item 100) and every one of them passes at six;
+its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
 two of `persistent_unsorted_table.rs` fail about one run in five of that binary (item 107).
+[F50](../features/cluster-operations.md) added 8 and took it to 1,492, filing nothing and
+resolving nothing here: the two defects it met - the control leader dialling a moved member at
+the address it was admitted with rather than the one it committed, and a winning clone's
+shorter log stopping the leader's control thread on a debug assertion once the leader did
+reach it - were found by the M3 fencing row and its own address row and designed out before
+the page was written, and are recorded on the F page. Its gate table names items 100, 102,
+106, 107, 109 and 110 as open and not gates. Under the workspace run at six threads three
+fixture tests failed, two of them item 100's, and under the fixture suite on its own two did
+(item 100).
 [F49](../features/backup-and-recovery.md) added 9 and took it to 1,484, filing nothing and
 resolving nothing: the three defects it met - a recovered survivor's state diverging from a
 joiner's replay of the same log, two plans planned in one pass picking the same destination

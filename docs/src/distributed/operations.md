@@ -90,11 +90,20 @@ of three is not sufficient evidence that every tablet has three ready copies. *A
 `Members` read carries what such a tab would draw: `grace_remaining_ms` per member, the open
 plans with their blocked reasons, and `under_replicated_sets` - the sets holding a copy on a
 member the cluster has given up on - which is the "two copies, awaiting a member" figure; the
-tab itself is M10's.*
+tab itself is M10's. At M10c ([F50](../features/cluster-operations.md)) it exists: `Space c`
+in `shoalctl` draws the model from six admin reads a second with that figure as its headline,
+the members' phases, grace, weight, bytes and wire, this node's groups, lag, installs and
+quarantines, every open plan with its blocked reason, the backups, the recoveries and the
+activated wire ([shoalctl](../operations/shoalctl.md#the-cluster-tab)). Per-tablet readiness
+and a lag histogram are not drawn: the frames carry a node's widest lag and its groups' counts.*
 
 Actions show a preview naming the affected identity, planned data movement and irreversible
 boundary, then submit the versioned operation. Long operations survive a disconnected TUI and are
 resumable by id. Record state changes so automated and manual removal are equally auditable.
+*At M10c the tab's command line does exactly this: the first `Enter` previews the identity as
+the model knows it, what moves and the boundary; the second sends the operation under its own
+id against the version previewed at; `status <op>` follows an operation from any connection,
+since the record is the cluster's.*
 
 ### Metrics
 
@@ -130,6 +139,11 @@ without claiming ready quorum data. An installing tablet stays ineligible even i
 arbitrary lag. Client load balancers need a documented readiness probe, not a fixed sleep.
 
 ### Runbooks
+
+Since [F50](../features/cluster-operations.md) each of these is a procedure on the
+[Runbooks](../operations/runbooks.md) page - the operation, the keys, what to wait on, the
+rollback point - and two more beside them: changing a node's address and rotating certificates
+and authorities. What follows is the intent as it was set, with what each milestone made true.
 
 1. **Bootstrap.** Explicitly create the first embedded control group; join the intended nodes.
    Wait for data configuration/replica readiness, not just Members=Up, before default writes.
@@ -320,6 +334,7 @@ deployment instead of conflating replica failover with disaster recovery.
 | `rolling_upgrade_from_previous_binary` | A real previous build's nodes are upgraded in place one at a time and the version activated, when `SHOAL_PREVIOUS_TEST_BINARY` names one ([F48](../features/rolling-compatibility.md)) | M10a |
 | `backup_restore_verifies_history_in_new_cluster` | Restore isolated backups including retry state, validate data, and prohibit old identities joining ([F49](../features/backup-and-recovery.md)) | M10b |
 | `permanent_quorum_loss_requires_explicit_recovery` | No automatic empty bootstrap or destructive choice when durable majority evidence is unavailable; an operator's `force_recover` to one survivor leads, serves every acknowledged key and rebuilds the sets on fresh identities ([F49](../features/backup-and-recovery.md)) | M10b |
+| `the_cluster_model_reads_the_admin_frames`, `an_action_previews_its_boundary_and_follows_its_record` | The operator's view is one model built from the admin frames with the copies-against-factor figure first, and every operation is previewed with the identity it touches, what moves and its irreversible boundary before it is sent, then followed by its record ([F50](../features/cluster-operations.md)) | M10c |
 
 ## Related
 

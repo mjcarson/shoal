@@ -140,6 +140,7 @@ Shortcut mode (`app.rs:402-432`):
 | `q` | Focus the query bar |
 | `w` | Clear the query |
 | `p` | Focus a pane |
+| `c` | Open a cluster tab ([below](#the-cluster-tab)) |
 
 Query box, when the completion menu is open (`TabState::handle_query_input`,
 `shoalctl/src/components/tab.rs`):
@@ -159,6 +160,42 @@ with `AND`/`OR`/`LIMIT`/`;` — there, `Esc` then `Enter` runs it, or accept `;`
 since a terminated query has nothing left to suggest.
 
 Mouse clicks are captured and routed to panes (`app.rs:472`).
+
+## The cluster tab
+
+Since [F50](../features/cluster-operations.md), `Space c` opens a tab that shows the cluster the
+connection reached and takes the operations an operator runs on it (`shoalctl/src/cluster/`).
+It polls six admin reads a second - `Members`, `Readiness`, `Replication`, `Plans`, `Backups`,
+`Recoveries` - and draws one model from them:
+
+```text
+cluster 8e26… via daa5… at version 31
+leader daa5…  voters 3  learners 0  up 3  tombstones 0
+3 of 3 copies; writes admitted
+wire activated 5  members speak 5..=5
+this node: 6 groups, leading 2, lag 0 entries, installing 0, quarantined 0
+
+member                               role    health   phase      inc    grace       free       held wire  client
+daa5325b-…                           voter   up       member       4        -    120.3GiB     1.2MiB    5  127.0.0.1:57715
+…
+open plans
+  875c6a8b-… remove Running 1/2 moved - blocked: tablet 0: every up member holds the set
+```
+
+The third line is the figure to read first: copies against the factor, who is missing, what is
+under-replicated, and whether a default write is admitted right now.
+
+The query bar is a command line on this tab. It takes `decommission <node>`, `remove <node>
+[replacement]`, `maintenance <node> on|off`, `rebalance`, `repair <table> [verify|repair]`,
+`backup [table] <dir>`, `restore <dir>`, `activate <wire>`, `status <op>`, `reload-tls` and
+`help`. The first `Enter` on a mutation draws a **preview** under the model - the identity it
+touches as the model knows it, what will move, and the boundary that cannot be undone - and the
+second `Enter` on the same line sends it against the version the model was built at; `Esc`
+forgets it. `status <op>` is sent at once. An applied operation is followed by its record at the
+poll's cadence, its steps or groups drawn under the model until it is done. A mutation needs
+the connection to have authenticated as a principal `cluster.admins` names; otherwise the
+server refuses it and the refusal is shown where a query error would be. What each operation
+does and refuses is the [runbooks](runbooks.md).
 
 ## Autocompletion
 
@@ -438,8 +475,13 @@ rows.
 - Every query must name a partition key, so there is no way to browse a table.
 - Dead `next`/`prev` methods.
 - The query round trip blocks the UI despite being spawned.
-- No connection retry or reconnect if the server goes away.
-- Effectively untested — the crate itself has one compile-only doctest, though the SHQL parsing
-  it depends on is now covered in `shoal-core` and `shoal/tests/shql.rs`.
+- No connection retry or reconnect if the server goes away; a cluster tab whose poll fails
+  keeps drawing its last model and says the poll failed.
+- The cluster tab shows the node the connection reached: `Replication` is that node's own
+  groups, and a `Members` from a follower is as current as its log.
+- ~~Effectively untested — the crate itself has one compile-only doctest, though the SHQL parsing
+  it depends on is now covered in `shoal-core` and `shoal/tests/shql.rs`.~~ The completion
+  menu has its own tests, and since [F50](../features/cluster-operations.md) the cluster tab's
+  model, parses, previews and follow-ups do; the drawing has none.
 
 [ratatui]: https://ratatui.rs/

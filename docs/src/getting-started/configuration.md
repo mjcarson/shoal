@@ -447,13 +447,19 @@ or `::`; and `client_advertise`, the client address the topology reports if it d
 one bound. ~~`tls` - `cert`, `key`, `ca` - is refused until M2.~~ Two more are absent because
 they have no default that means anything:
 
-- `tls` - `cert`, `key`, `ca` - makes every peer lane mutual TLS 1.3 handed to the kernel,
+- `tls` - `cert`, `key`, `ca`, and since [F50](../features/cluster-operations.md)
+  `bind_identity` (default `true`) - makes every peer lane mutual TLS 1.3 handed to the kernel,
   exactly as `networking.tls` does for clients: the listener requires a certificate chained to
   `ca`, the dialler presents its own. A file it names that cannot be read is refused at startup.
   Absent, the lanes are plaintext and **peer identity is trusted inside whatever boundary the
   deployment draws around them** - which is the honest statement of what a plaintext lane
-  proves, and why C2 asks for it to be written down. The binding of a certificate to one node's
-  identity is not checked yet ([F38, Limitations](../features/inter-node-transport.md#limitations)).
+  proves, and why C2 asks for it to be written down. ~~The binding of a certificate to one node's
+  identity is not checked yet ([F38, Limitations](../features/inter-node-transport.md#limitations)).~~
+  Since [F50](../features/cluster-operations.md) the leaf's `shoal-node://<id>` name is bound to
+  the node on both ends of every lane under `bind_identity` (on by default; off trusts the chain
+  alone, for a deployment sharing one leaf), `ca` may be a bundle during an authority rotation,
+  and `ReloadTls` reads the three files again on a live node
+  ([runbook 14](../operations/runbooks.md#14-rotate-certificates-and-authorities)).
 - ~~`placement` - a list of `{node, data, control, shards}` naming every node of the cluster by
   the identity in its marker.~~ Gone since [F39](../features/membership.md): the cluster's
   membership is what the control group commits, and a file that still carries the block is

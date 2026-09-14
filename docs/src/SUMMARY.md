@@ -40,6 +40,7 @@
 # Operations
 
 - [Observability](operations/observability.md)
+- [Runbooks](operations/runbooks.md)
 - [shoalctl](operations/shoalctl.md)
 - [Tuning](operations/tuning.md)
 
@@ -111,6 +112,7 @@
   - [F47. Changing a node's core count: slots, hosting and the rehome](features/local-rehome.md)
   - [F48. Rolling compatibility and activation](features/rolling-compatibility.md)
   - [F49. Backup, restore, export and permanent quorum loss](features/backup-and-recovery.md)
+  - [F50. Certificate rotation, the cluster tab, the runbooks and the physical cluster](features/cluster-operations.md)
 
 # Direction
 
