@@ -11,7 +11,7 @@ use glommio::net::{TcpListener, TcpStream};
 
 use super::handshake::{self, Admission, Local};
 use super::Lane;
-use crate::server::control::types::{MemberHealth, MemberRole};
+use crate::server::control::types::{MemberHealth, MemberPhase, MemberRole};
 use crate::server::map::{MapCell, MapMember, TabletMap};
 use crate::server::control::runtime::GlommioRuntime;
 use openraft::AsyncRuntime as _;
@@ -50,6 +50,7 @@ fn two_nodes(cluster: ClusterId, a: NodeId, b: NodeId) -> MapCell {
         incarnation: 1,
         shards_failed: Vec::new(),
         quarantined: Vec::new(),
+        phase: MemberPhase::Member,
     };
     let map = TabletMap {
         version: 1,

@@ -51,12 +51,14 @@ use super::detector::Detector;
 use super::listener::{control_acceptor, err, ok, Inbound};
 use super::network::{PeerNetwork, RpcFailure};
 use super::store::{self, ControlStateMachine, CONTROL_DIR};
+use super::plan::{PlanOutcome, PlanPhase, PlanRecord, PlanUpdate, StepState};
+use super::planner::{self, NodeInput, PlanInput, SetInput};
 use super::repair::{QuarantinedCopy, RepairMode};
 use super::types::{
-    ControlCommand, ControlConfig, ControlResponse, ControlState, MemberHealth, MemberRecord,
-    MemberRole, MemberState,
+    ControlCommand, ControlConfig, ControlResponse, ControlState, MemberHealth, MemberPhase,
+    MemberRecord, MemberRole, MemberState, Tombstone,
 };
-use crate::server::conf::cluster::{BootstrapPolicy, DialOverride, PeerTls, Transport};
+use crate::server::conf::cluster::{BootstrapPolicy, DialOverride, Migration, PeerTls, Rebalance, Transport};
 use crate::server::conf::Conf;
 use crate::server::errors::ShoalError;
 use crate::server::map::{QuorumShortfall, TabletMap};
@@ -110,6 +112,15 @@ const CATCHUP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long the pool waits for the thread to answer a request
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The longest the leader goes between two commits of a grace's elapsed time
+///
+/// A grace is committed every eighth of itself or this, whichever is shorter, so a leader
+/// change loses at most one increment ([F46](../../../../docs/src/features/capacity-rebalancing.md), Q7).
+const GRACE_COMMIT_CAP: Duration = Duration::from_secs(60);
+
+/// The shortest the leader goes between two looks at its plans, however often the state moves
+const PLAN_MIN_INTERVAL: Duration = Duration::from_millis(250);
 
 /// What the control plane tells the pool
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,7 +290,7 @@ pub struct TopologyView {
     /// How many committed changes the topology has seen
     pub version: u64,
     /// Every member the group knows, in node order
-    pub members: Vec<MemberState>,
+    pub members: Vec<MemberView>,
     /// The members that vote, in node order
     pub voters: Vec<NodeId>,
     /// The members that only learn, in node order
@@ -302,6 +313,82 @@ pub struct TopologyView {
     pub control_shared: bool,
     /// The policy the cluster runs under
     pub policy: Option<BootstrapPolicy>,
+    /// The plans not yet done, in request order
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+    #[serde(default)]
+    pub plans: Vec<PlanRecord>,
+    /// The identities removed for good, by node
+    #[serde(default)]
+    pub tombstones: BTreeMap<NodeId, Tombstone>,
+    /// How many replica sets hold a copy on a member the cluster has given up on
+    #[serde(default)]
+    pub under_replicated_sets: u32,
+    /// The grace the policy removes a down member after, in milliseconds, if it removes
+    #[serde(default)]
+    pub auto_remove_after_ms: Option<u64>,
+}
+
+/// One member as the topology view reports it: the committed state, and what this node adds
+///
+/// The committed state is flattened, so a reader of the `Members` operation from before
+/// [F46](../../../../docs/src/features/capacity-rebalancing.md) finds every field where it
+/// was; the rest is derived on the node answering - the one name of the six-state machine, the
+/// grace remaining, and the capacity the leader last heard, which is nobody's committed fact.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemberView {
+    /// What the group committed about the member
+    #[serde(flatten)]
+    pub state: MemberState,
+    /// The one name of its state: the phase past plain membership, the health otherwise
+    #[serde(default)]
+    pub state_name: String,
+    /// The weight the planner gives it
+    #[serde(default)]
+    pub weight: u32,
+    /// How much of its grace is left, in milliseconds, while it is under one
+    #[serde(default)]
+    pub grace_remaining_ms: Option<u64>,
+    /// The free bytes it last reported, as the leader heard them
+    #[serde(default)]
+    pub free_bytes: Option<u64>,
+    /// The bytes its groups hold, as the leader last heard them
+    #[serde(default)]
+    pub held_bytes: Option<u64>,
+}
+
+impl std::ops::Deref for MemberView {
+    type Target = MemberState;
+
+    /// The committed state, which is what most readers of a member want
+    fn deref(&self) -> &MemberState {
+        &self.state
+    }
+}
+
+/// What the leader last heard about one member's capacity
+///
+/// Reported, never committed: the plan the leader derives from it is what goes in the log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeCapacity {
+    /// The free bytes on its storage, as it read them
+    pub free_bytes: u64,
+    /// The bytes each of its groups holds, by group number
+    pub group_bytes: BTreeMap<u64, u64>,
+    /// When it was heard
+    pub at: Instant,
+    /// The incarnation it reported at
+    pub incarnation: u64,
+}
+
+/// What the leader has counted of one down member's grace since it last committed it
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GraceLocal {
+    /// The episode being counted
+    episode: Uuid,
+    /// When the count started: the last commit, or the first sight of the episode
+    since: Instant,
+    /// The elapsed time the count started from, as committed
+    committed_ms: u64,
 }
 
 /// Whether the data on this node can be served under the cluster's policy
@@ -449,6 +536,10 @@ struct Startup {
     bind: SocketAddr,
     /// The bounds and timers the peer lanes use
     transport: Transport,
+    /// The migration settings, for the disk reserve a plan respects
+    migration: Migration,
+    /// The rebalance settings, for the caps and the interval a plan is driven at
+    rebalance: Rebalance,
 }
 
 /// The control plane, which is only a namespace for `start`
@@ -499,6 +590,7 @@ impl ControlPlane {
             control_shared: placement.shared,
             shards,
             incarnation: identity.incarnation,
+            weight: cluster.weight.unwrap_or(0),
         };
         // where the control listener binds
         let bind: SocketAddr = format!("{advertise}:{}", cluster.control_port)
@@ -536,6 +628,8 @@ impl ControlPlane {
             tls: cluster.tls.clone(),
             bind,
             transport: cluster.transport.clone(),
+            migration: cluster.migration.clone(),
+            rebalance: cluster.rebalance.clone(),
         };
         // the thread, pinned to its core, running the group until told to stop
         let thread = LocalExecutorBuilder::new(Placement::Fixed(placement.cpu))
@@ -806,6 +900,12 @@ enum Event {
     Pinged(NodeId, Result<Duration, ()>),
     /// A health verdict this leader proposed finished
     HealthProposed(NodeId, Result<ControlResponse, ProposeError>),
+    /// A grace count this leader proposed finished
+    GraceProposed(NodeId, Result<ControlResponse, ProposeError>),
+    /// A plan's progress this leader proposed finished
+    PlanProposed(Uuid, Result<ControlResponse, ProposeError>),
+    /// A drained member's removal from the control group finished, or not
+    Finished(Uuid, NodeId, Result<(), String>),
 }
 
 /// What one ping learned about a member, this node's local view
@@ -892,6 +992,26 @@ struct Core {
     health_in_flight: BTreeSet<NodeId>,
     /// What every shard last reported about its tablet groups, by shard
     replication: BTreeMap<usize, crate::server::replication::ShardReplication>,
+    /// The migration settings, for the disk reserve a plan respects
+    migration: Migration,
+    /// The rebalance settings, for the caps and the interval a plan is driven at
+    rebalance: Rebalance,
+    /// What every member last reported about its capacity, as this leader heard it
+    capacity: BTreeMap<NodeId, NodeCapacity>,
+    /// What this leader has counted of each down member's grace since it last committed it
+    grace_seen: BTreeMap<NodeId, GraceLocal>,
+    /// The members whose grace this leader is committing, so one count is in flight per member
+    grace_in_flight: BTreeSet<NodeId>,
+    /// The plans whose progress this leader is committing, one proposal in flight per plan
+    plan_in_flight: BTreeSet<Uuid>,
+    /// The plans whose member this leader is taking out of the control group
+    finishing: BTreeSet<Uuid>,
+    /// When the plans were last looked at
+    last_plan: Option<Instant>,
+    /// The topology version the plans were last looked at against
+    planned_at: u64,
+    /// How many reports have changed the capacity table since the plans were looked at
+    capacity_moved: bool,
 }
 
 impl Core {
@@ -900,6 +1020,29 @@ impl Core {
         let state = self.machine.state();
         let desired_rf = state.desired_rf();
         let active_rf = state.active_rf();
+        let grace_ms = state
+            .policy
+            .as_ref()
+            .and_then(|policy| policy.auto_remove_after)
+            .map(|grace| u64::try_from(grace.duration().as_millis()).unwrap_or(u64::MAX));
+        let members = state
+            .members
+            .values()
+            .map(|member| {
+                let capacity = self.capacity.get(&member.record.node);
+                MemberView {
+                    state_name: member.state_name().to_string(),
+                    weight: member.record.effective_weight(),
+                    grace_remaining_ms: match (&member.grace, grace_ms) {
+                        (Some(grace), Some(total)) if !grace.expired => Some(total.saturating_sub(grace.elapsed_ms)),
+                        _ => None,
+                    },
+                    free_bytes: capacity.map(|capacity| capacity.free_bytes),
+                    held_bytes: capacity.map(|capacity| capacity.group_bytes.values().sum()),
+                    state: member.clone(),
+                }
+            })
+            .collect();
         TopologyView {
             cluster: state
                 .cluster
@@ -910,7 +1053,7 @@ impl Core {
             control: self.status,
             leader: self.leader,
             version: state.topology_version,
-            members: state.members.values().cloned().collect(),
+            members,
             voters: state.voters(),
             learners: state.learners(),
             joint: state.joint,
@@ -921,6 +1064,10 @@ impl Core {
             up_members: state.up_members(),
             control_core: self.placement.cpu,
             control_shared: self.placement.shared,
+            plans: state.open_plans().into_iter().cloned().collect(),
+            tombstones: state.tombstones.clone(),
+            under_replicated_sets: state.under_replicated_sets(),
+            auto_remove_after_ms: grace_ms,
             policy: state.policy,
         }
     }
@@ -1044,6 +1191,8 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         tls,
         bind,
         transport,
+        migration,
+        rebalance,
     } = startup;
     let node = identity.node;
     // the store, recovered from whatever the directory holds
@@ -1290,6 +1439,16 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         detector: Detector::new(&policy.failure_detector),
         health_in_flight: BTreeSet::new(),
         replication: BTreeMap::new(),
+        migration,
+        rebalance,
+        capacity: BTreeMap::new(),
+        grace_seen: BTreeMap::new(),
+        grace_in_flight: BTreeSet::new(),
+        plan_in_flight: BTreeSet::new(),
+        finishing: BTreeSet::new(),
+        last_plan: None,
+        planned_at: 0,
+        capacity_moved: false,
     };
     core.publish();
     event!(
@@ -1368,11 +1527,16 @@ impl Core {
                 self.drain_joins();
                 self.report();
                 self.judge_members();
+                self.accrue_graces();
+                self.drive_plans(false);
             }
             Event::PingTick => self.ping_members(),
             Event::Reported(outcome) => self.handle_reported(outcome)?,
             Event::Pinged(node, answered) => self.handle_pinged(node, answered),
             Event::HealthProposed(node, outcome) => self.handle_health_proposed(node, outcome),
+            Event::GraceProposed(node, outcome) => self.handle_grace_proposed(node, outcome),
+            Event::PlanProposed(op, outcome) => self.handle_plan_proposed(op, outcome),
+            Event::Finished(op, node, outcome) => self.handle_finished(op, node, outcome),
         }
         Ok(true)
     }
@@ -1556,6 +1720,21 @@ impl Core {
             self.drain_joins();
             return;
         };
+        // a removed identity never comes back, by this door or any other: a replacement
+        // joins as a new identity ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+        let removed = state.tombstones.contains_key(&request.member.node)
+            || state.members.get(&request.member.node).is_some_and(|existing| existing.phase == MemberPhase::Removed);
+        if removed {
+            let _ = inbound.reply.send(ok(&JoinResponse::Refused {
+                reason: format!(
+                    "removed identity: {} was removed from this cluster and cannot rejoin; a replacement joins as a new identity",
+                    request.member.node
+                ),
+                retry: false,
+            }));
+            self.drain_joins();
+            return;
+        }
         // the fencing rule, before the group is told anything: a run the cluster has replaced,
         // or a second run of the same copy, is refused as a duplicate identity
         if let Some(existing) = state.members.get(&request.member.node) {
@@ -1615,6 +1794,10 @@ impl Core {
                         retry: false,
                     },
                     Ok(ControlResponse::Refused { reason }) => JoinResponse::Refused { reason, retry: false },
+                    Ok(ControlResponse::Removed { node }) => JoinResponse::Refused {
+                        reason: format!("removed identity: {node} was removed from this cluster and cannot rejoin"),
+                        retry: false,
+                    },
                     Ok(ControlResponse::Repeated { .. }) => JoinResponse::Refused {
                         reason: "an admission is not an operation".to_string(),
                         retry: false,
@@ -1697,6 +1880,14 @@ impl Core {
         // a report about a run the cluster has replaced is answered as fenced, so the run stops
         let state = self.machine.state();
         if let Some(member) = state.members.get(&report.node) {
+            // a report from a removed identity is answered as such, so the run stops
+            if member.phase == MemberPhase::Removed || state.tombstones.contains_key(&report.node) {
+                let _ = inbound.reply.send(err(format!(
+                    "removed: {} was removed from this cluster and its reports are not taken",
+                    report.node
+                )));
+                return;
+            }
             if report.incarnation < member.record.incarnation {
                 let _ = inbound.reply.send(err(format!(
                     "fenced: the cluster holds incarnation {} of {} and this report is from {}",
@@ -1716,6 +1907,9 @@ impl Core {
             if member.health == MemberHealth::Down {
                 self.propose_health(report.node, MemberHealth::Up, member.record.incarnation, None);
             }
+            // what it says about its capacity is kept in memory for the planner, never committed
+            // ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+            self.note_capacity(report.node, report.incarnation, report.free_bytes, &report.group_bytes);
             // a change in the member's quarantined copies is committed, so every node routes
             // around them ([F44](../../../../docs/src/features/repair.md))
             let copies: Vec<QuarantinedCopy> = report.quarantined.iter().map(QuarantinedCopy::from_member).collect();
@@ -1902,6 +2096,48 @@ impl Core {
                 from: *from,
                 to: *to,
             },
+            // the placement operations, judged whole by the state machine
+            // ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+            AdminKind::Decommission { node } => ControlCommand::Decommission {
+                op: call.request.op,
+                principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                expected_version: call.request.expected_version,
+                node: *node,
+            },
+            AdminKind::Remove { node, replacement } => ControlCommand::Remove {
+                op: call.request.op,
+                principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                expected_version: call.request.expected_version,
+                node: *node,
+                replacement: *replacement,
+            },
+            AdminKind::Maintenance { node, suspend } => ControlCommand::Maintenance {
+                op: call.request.op,
+                principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                expected_version: call.request.expected_version,
+                node: *node,
+                suspend: *suspend,
+            },
+            AdminKind::Rebalance => ControlCommand::Rebalance {
+                op: call.request.op,
+                principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                expected_version: call.request.expected_version,
+            },
+            // the record of a plan, as the applied state holds it
+            AdminKind::PlanStatus { op } => {
+                let outcome = match state.plans.get(op) {
+                    Some(record) => Ok(AdminOutcome::Read(serde_json::to_value(record).unwrap_or_default())),
+                    None => Err(AdminError::new(ErrorCode::Internal, format!("no plan {op} is recorded"))),
+                };
+                let _ = call.reply.send(answer(outcome));
+                return;
+            }
+            AdminKind::Plans => {
+                let mut plans: Vec<&PlanRecord> = state.plans.values().collect();
+                plans.sort_by_key(|record| record.requested_at);
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(serde_json::to_value(plans).unwrap_or_default()))));
+                return;
+            }
         };
         // a mutation needs a principal the committed policy names, unless the process itself asks
         if !call.trusted {
@@ -1988,6 +2224,9 @@ impl Core {
                 Ok(ControlResponse::Fenced { .. }) => {
                     Err(AdminError::new(ErrorCode::Internal, "fenced".to_string()))
                 }
+                Ok(ControlResponse::Removed { node }) => {
+                    Err(AdminError::new(ErrorCode::Internal, format!("{node} is a removed identity")))
+                }
                 Err(ProposeError::NoLeader) => Err(AdminError::new(
                     ErrorCode::NotLeader,
                     "no control leader could be reached; the cluster may lack a quorum".to_string(),
@@ -2007,8 +2246,11 @@ impl Core {
     /// Act on the state machine having applied something
     fn handle_applied(&mut self) -> Result<(), ServerError> {
         let state = self.machine.state();
-        // a run of this node the cluster has replaced stops here
+        // a run of this node the cluster has replaced stops here, and so does a removed one
         if let Some(mine) = state.members.get(&self.node) {
+            if mine.phase == MemberPhase::Removed {
+                return Err(ServerError::Shoal(ShoalError::Removed { node: self.node }));
+            }
             if mine.record.incarnation > self.member.incarnation {
                 return Err(ServerError::Shoal(ShoalError::Fenced {
                     node: self.node,
@@ -2016,6 +2258,9 @@ impl Core {
                     ours: self.member.incarnation,
                 }));
             }
+        }
+        if state.tombstones.contains_key(&self.node) {
+            return Err(ServerError::Shoal(ShoalError::Removed { node: self.node }));
         }
         // a joiner that now sees itself in the state has been replicated to; it observes itself
         if self.status == JoinStatus::Joining && state.members.contains_key(&self.node) {
@@ -2036,6 +2281,7 @@ impl Core {
         self.publish();
         self.maybe_observe();
         self.maybe_promote();
+        self.drive_plans(true);
         Ok(())
     }
 
@@ -2059,9 +2305,17 @@ impl Core {
             self.reachability.clear();
             self.detector.reset();
             self.health_in_flight.clear();
+            // and no count of anybody's grace, no plan in hand: both resume from what is
+            // committed ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+            self.grace_seen.clear();
+            self.grace_in_flight.clear();
+            self.plan_in_flight.clear();
+            self.finishing.clear();
+            self.capacity.clear();
+            self.last_plan = None;
             let now = Instant::now();
             for (node, member) in &self.machine.state().members {
-                if *node != self.node && member.health == MemberHealth::Up {
+                if *node != self.node && member.health == MemberHealth::Up && member.phase != MemberPhase::Removed {
                     self.detector.seed(*node, member.record.incarnation, now);
                 }
             }
@@ -2113,6 +2367,7 @@ impl Core {
                 committed,
                 ours: offered,
             })),
+            Ok(ControlResponse::Removed { node }) => Err(ServerError::Shoal(ShoalError::Removed { node })),
             Ok(ControlResponse::Refused { reason }) => {
                 event!(Level::WARN, msg = "the observation was refused", reason);
                 self.observe_after = Some(Instant::now() + OBSERVE_BACKOFF);
@@ -2191,12 +2446,12 @@ impl Core {
         if voters.len() >= want as usize {
             return;
         }
-        // the first learner that is up, in node order
+        // the first learner that is up and staying, in node order
         let candidate = state
             .members
             .iter()
             .find(|(node, member)| {
-                member.health == MemberHealth::Up
+                member.is_placeable()
                     && !voters.contains(node)
                     && metrics.membership_config.membership().nodes().any(|(id, _)| id == *node)
             })
@@ -2238,8 +2493,11 @@ impl Core {
         if self.status != JoinStatus::Joined {
             return;
         }
-        // the leader keeps its own health; a change in its shards is committed directly
+        // the leader keeps its own health; a change in its shards is committed directly, and
+        // its capacity is noted where a report would have put it
         if self.is_leader {
+            let (free_bytes, group_bytes) = self.own_capacity();
+            self.note_capacity(self.node, self.member.incarnation, free_bytes, &group_bytes);
             if self.reported_quarantine != self.quarantined {
                 self.reported_quarantine = self.quarantined.clone();
                 let raft = self.raft.clone();
@@ -2365,6 +2623,7 @@ impl Core {
                 self.report_seq
             }
         };
+        let (free_bytes, group_bytes) = self.own_capacity();
         let report = StatusReport {
             node: self.node,
             incarnation,
@@ -2379,6 +2638,8 @@ impl Core {
                 .map(|(node, reach)| (*node, reach.rtt_us))
                 .collect(),
             quarantined: self.quarantined.iter().map(QuarantinedCopy::to_member).collect(),
+            free_bytes,
+            group_bytes,
         };
         let payload = serde_json::to_vec(&report).map_err(|error| error.to_string())?;
         let network = self.network.clone();
@@ -2401,6 +2662,10 @@ impl Core {
     fn handle_reported(&mut self, outcome: Result<Vec<u8>, RpcFailure>) -> Result<(), ServerError> {
         match outcome {
             Ok(_) => Ok(()),
+            // a removal is the leader telling this identity it is gone for good
+            Err(RpcFailure::Remote(msg)) if msg.starts_with("removed") => {
+                Err(ServerError::Shoal(ShoalError::Removed { node: self.node }))
+            }
             // a fence is the leader telling this run it has been replaced
             Err(RpcFailure::Remote(msg)) if msg.starts_with("fenced") => {
                 let committed = self
@@ -2429,7 +2694,7 @@ impl Core {
     fn ping_members(&mut self) {
         let state = self.machine.state();
         for (node, member) in &state.members {
-            if *node == self.node {
+            if *node == self.node || member.phase == MemberPhase::Removed {
                 continue;
             }
             let record = member.record.clone();
@@ -2466,6 +2731,586 @@ impl Core {
                 entry.misses = 0;
             }
             Err(()) => entry.misses = entry.misses.saturating_add(1),
+        }
+    }
+
+    /// This node's own capacity: the free bytes on its storage and the bytes its groups hold
+    ///
+    /// Folded from what every shard last reported, so a group hosted on two shards is summed
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md)).
+    fn own_capacity(&self) -> (u64, Vec<(u64, u64)>) {
+        let free_bytes = super::capacity::free_bytes(&self.root).unwrap_or(0);
+        let mut groups: BTreeMap<u64, u64> = BTreeMap::new();
+        for shard in self.replication.values() {
+            for group in &shard.groups {
+                *groups.entry(group.group.0).or_default() += group.bytes;
+            }
+        }
+        (free_bytes, groups.into_iter().collect())
+    }
+
+    /// Note what a member reported about its capacity, for the planner
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member
+    /// * `incarnation` - The incarnation it reported at
+    /// * `free_bytes` - The free bytes on its storage
+    /// * `group_bytes` - The bytes each of its groups holds
+    fn note_capacity(&mut self, node: NodeId, incarnation: u64, free_bytes: u64, group_bytes: &[(u64, u64)]) {
+        let capacity = NodeCapacity {
+            free_bytes,
+            group_bytes: group_bytes.iter().copied().collect(),
+            at: Instant::now(),
+            incarnation,
+        };
+        let moved = self
+            .capacity
+            .get(&node)
+            .is_none_or(|known| known.free_bytes != capacity.free_bytes || known.group_bytes != capacity.group_bytes);
+        if moved {
+            self.capacity_moved = true;
+        }
+        self.capacity.insert(node, capacity);
+    }
+
+    /// Count every down member's grace and commit what has elapsed, if this node leads
+    ///
+    /// The count starts from the committed value at the last commit, or at the first sight
+    /// of the episode after an election, and is committed every eighth of the grace; when it
+    /// reaches the grace the member is removing under a plan minted here. A suspended grace
+    /// is neither counted nor committed, and starts again from its committed value on
+    /// resumption. Nothing is guessed early: a new leader loses at most one increment
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md), Q7).
+    fn accrue_graces(&mut self) {
+        if !self.is_leader {
+            return;
+        }
+        let state = self.machine.state();
+        let Some(grace) = state.policy.as_ref().and_then(|policy| policy.auto_remove_after) else {
+            return;
+        };
+        let grace = grace.duration();
+        let grace_ms = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX);
+        let every = (grace / 8).min(GRACE_COMMIT_CAP).max(Duration::from_millis(10));
+        let now = Instant::now();
+        // forget counts of members no longer under a grace this leader should count
+        self.grace_seen.retain(|node, local| {
+            state.members.get(node).and_then(|member| member.grace.as_ref()).is_some_and(|grace| {
+                grace.episode == local.episode && !grace.suspended && !grace.expired
+            })
+        });
+        for (node, member) in &state.members {
+            if *node == self.node || member.health != MemberHealth::Down || member.phase == MemberPhase::Removed {
+                continue;
+            }
+            let Some(committed) = member.grace.as_ref() else {
+                continue;
+            };
+            if committed.suspended || committed.expired || self.grace_in_flight.contains(node) {
+                continue;
+            }
+            // the count this leader keeps, started at the committed value when first seen
+            let local = self.grace_seen.entry(*node).or_insert(GraceLocal {
+                episode: committed.episode,
+                since: now,
+                committed_ms: committed.elapsed_ms,
+            });
+            // a commit that moved under us - another leader's - restarts the local count from it
+            if local.committed_ms < committed.elapsed_ms {
+                local.committed_ms = committed.elapsed_ms;
+                local.since = now;
+            }
+            let elapsed = now.saturating_duration_since(local.since);
+            let total_ms = local
+                .committed_ms
+                .saturating_add(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
+            let expire = total_ms >= grace_ms;
+            if !expire && elapsed < every {
+                continue;
+            }
+            let command = ControlCommand::GraceElapsed {
+                node: *node,
+                episode: committed.episode,
+                elapsed_ms: total_ms.min(grace_ms),
+                expire: expire.then(Uuid::new_v4),
+            };
+            if expire {
+                event!(Level::WARN, msg = "a down member's grace has elapsed; removing it", %node, elapsed_ms = total_ms, grace_ms);
+            }
+            self.grace_in_flight.insert(*node);
+            let raft = self.raft.clone();
+            let network = self.network.clone();
+            let machine = self.machine.clone();
+            let tx = self.tx.clone();
+            let node = *node;
+            glommio::spawn_local(async move {
+                let outcome = propose(&raft, &network, &machine, command).await;
+                let _ = tx.send(Event::GraceProposed(node, outcome)).await;
+            })
+            .detach();
+        }
+    }
+
+    /// Act on a grace count having finished
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member
+    /// * `outcome` - What the group answered
+    fn handle_grace_proposed(&mut self, node: NodeId, outcome: Result<ControlResponse, ProposeError>) {
+        self.grace_in_flight.remove(&node);
+        match outcome {
+            Ok(ControlResponse::Applied { .. }) => {
+                // the count starts again from what is now committed
+                let committed = self
+                    .machine
+                    .state()
+                    .members
+                    .get(&node)
+                    .and_then(|member| member.grace.as_ref().map(|grace| grace.elapsed_ms));
+                if let (Some(local), Some(committed)) = (self.grace_seen.get_mut(&node), committed) {
+                    local.committed_ms = committed;
+                    local.since = Instant::now();
+                }
+            }
+            Ok(other) => {
+                event!(Level::DEBUG, msg = "a grace count changed nothing", %node, ?other);
+                self.grace_seen.remove(&node);
+            }
+            Err(error) => event!(Level::DEBUG, msg = "a grace count did not commit", %node, %error),
+        }
+    }
+
+    /// Look at every open plan and move it on, if this node leads
+    ///
+    /// Every `plan_interval`, and sooner when the state or the capacity moved: a planned
+    /// plan gets its steps, a running one has its moving steps judged by their moves and its
+    /// pending steps issued under the caps, a blocked one is planned again, and one whose
+    /// every step moved is finished. One proposal per plan is in flight at a time, and a
+    /// leader change resumes from the record ([F46](../../../../docs/src/features/capacity-rebalancing.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `on_change` - Whether this is a state change rather than the interval
+    fn drive_plans(&mut self, on_change: bool) {
+        if !self.is_leader || self.status != JoinStatus::Joined {
+            return;
+        }
+        let state = self.machine.state();
+        if state.open_plans().is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let interval = self.rebalance.plan_interval.duration();
+        let since = self.last_plan.map(|at| now.saturating_duration_since(at));
+        // the interval, or a change since the last look after the floor between looks
+        let due = match since {
+            None => true,
+            Some(since) if since >= interval => true,
+            Some(since) if since >= PLAN_MIN_INTERVAL => {
+                on_change && (state.topology_version != self.planned_at || self.capacity_moved)
+            }
+            Some(_) => false,
+        };
+        if !due {
+            return;
+        }
+        self.last_plan = Some(now);
+        self.planned_at = state.topology_version;
+        self.capacity_moved = false;
+        let map = TabletMap::from_state(&state, self.leader, &self.tables);
+        for record in state.open_plans() {
+            if self.plan_in_flight.contains(&record.op) {
+                continue;
+            }
+            if let Some(update) = self.next_plan_update(&state, &map, record) {
+                self.propose_plan(record.op, update);
+            }
+        }
+    }
+
+    /// What a plan needs next, or nothing while its moves run
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - The applied state
+    /// * `map` - The map it derives
+    /// * `record` - The plan
+    fn next_plan_update(&mut self, state: &ControlState, map: &TabletMap, record: &PlanRecord) -> Option<PlanUpdate> {
+        // a step whose move is done is moved or failed, whichever the move says
+        for step in record.live_steps() {
+            if step.state != StepState::Moving {
+                continue;
+            }
+            let Some(op) = step.op else {
+                continue;
+            };
+            match state.moves.get(&op) {
+                Some(moved) if moved.is_done() => {
+                    let outcome = match &moved.outcome {
+                        Some(super::migrate::MoveOutcome::Failed { reason }) => StepState::Failed { reason: reason.clone() },
+                        _ => StepState::Moved,
+                    };
+                    return Some(PlanUpdate::Step {
+                        tablet: step.tablet,
+                        op: Some(op),
+                        state: outcome,
+                    });
+                }
+                Some(_) => {}
+                // a move the state forgot is a move that will never report
+                None => {
+                    return Some(PlanUpdate::Step {
+                        tablet: step.tablet,
+                        op: Some(op),
+                        state: StepState::Failed {
+                            reason: format!("move {op} is no longer recorded"),
+                        },
+                    });
+                }
+            }
+        }
+        // a pending step under the caps becomes a move
+        let in_flight = self.moves_in_flight(state);
+        let cap = self.rebalance.moves_per_node;
+        for step in record.live_steps() {
+            if step.state != StepState::Pending {
+                continue;
+            }
+            let as_source = in_flight.iter().filter(|(from, _)| *from == step.from).count();
+            let as_destination = in_flight.iter().filter(|(_, to)| *to == step.to).count();
+            if as_source >= cap as usize || as_destination >= cap as usize {
+                continue;
+            }
+            return Some(PlanUpdate::Step {
+                tablet: step.tablet,
+                op: Some(Uuid::new_v4()),
+                state: StepState::Moving,
+            });
+        }
+        // a plan finishing: the member is taken out of the control group, then tombstoned
+        if record.phase == PlanPhase::Finishing {
+            if let Some(node) = record.kind.drains() {
+                self.finish_removal(record.op, node);
+            }
+            return None;
+        }
+        // nothing is moving: plan what is left, from the sets as they are served now
+        if record.live_steps().any(|step| step.state == StepState::Moving) {
+            return None;
+        }
+        let input = self.plan_input(state, map, record, &in_flight);
+        let output = planner::plan(&record.kind, &input);
+        if !output.steps.is_empty() {
+            return Some(PlanUpdate::Steps {
+                steps: output.steps,
+                blocked: output.blocked,
+            });
+        }
+        if let Some(reason) = output.blocked {
+            // blocked, and pending steps that cannot be issued are nothing to wait for
+            let same = record.blocked.as_ref().is_some_and(|blocked| blocked.reason == reason);
+            return if same { None } else { Some(PlanUpdate::Blocked(Some(reason))) };
+        }
+        // nothing to plan: a drain that moved everything finishes, a rebalance is done
+        match record.kind.drains() {
+            Some(_) => Some(PlanUpdate::Finishing),
+            None => Some(PlanUpdate::Done(if record.steps.is_empty() {
+                PlanOutcome::Nothing {
+                    reason: output.nothing.unwrap_or_else(|| "nothing to move".to_string()),
+                }
+            } else {
+                record.completed()
+            })),
+        }
+    }
+
+    /// Every move not done, as source and destination nodes
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - The applied state
+    fn moves_in_flight(&self, state: &ControlState) -> Vec<(NodeId, NodeId)> {
+        state
+            .moves
+            .values()
+            .filter(|record| !record.is_done())
+            .map(|record| (record.from.node, record.to.node))
+            .collect()
+    }
+
+    /// What the planner is given for a plan: the sets as served, the members, the capacity
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - The applied state
+    /// * `map` - The map it derives
+    /// * `record` - The plan
+    /// * `in_flight` - The moves not done
+    fn plan_input(&self, state: &ControlState, map: &TabletMap, record: &PlanRecord, in_flight: &[(NodeId, NodeId)]) -> PlanInput {
+        let draining = record.kind.drains();
+        let nodes: BTreeMap<NodeId, NodeInput> = state
+            .members
+            .iter()
+            .map(|(node, member)| {
+                (
+                    *node,
+                    NodeInput {
+                        eligible: member.is_placeable() && Some(*node) != draining,
+                        weight: member.record.effective_weight(),
+                        free_bytes: self.capacity.get(node).map(|capacity| capacity.free_bytes),
+                    },
+                )
+            })
+            .collect();
+        // the groups of every set, so a member's reported bytes fold onto the set
+        let groups_by_set: BTreeMap<u16, Vec<u64>> = state
+            .tables
+            .iter()
+            .flat_map(|(_, table)| map.groups_of(*table))
+            .fold(BTreeMap::new(), |mut acc, (group, _, tablets)| {
+                acc.entry(tablets[0]).or_default().push(group.0);
+                acc
+            });
+        let busy_tablets: BTreeSet<u16> = record
+            .live_steps()
+            .map(|step| step.tablet)
+            .chain(state.moves.values().filter(|moved| !moved.is_done()).map(|moved| moved.tablets[0]))
+            .collect();
+        let sets = map
+            .rule_sets_served()
+            .into_iter()
+            .map(|(members, tablets)| {
+                let first = tablets[0];
+                let groups = groups_by_set.get(&first).cloned().unwrap_or_default();
+                let bytes = members
+                    .iter()
+                    .map(|member| {
+                        let held = self.capacity.get(&member.node).map_or(0, |capacity| {
+                            groups.iter().map(|group| capacity.group_bytes.get(group).copied().unwrap_or(0)).sum()
+                        });
+                        (member.node, held)
+                    })
+                    .collect();
+                SetInput {
+                    tablet: first,
+                    members: members.iter().map(|member| member.node).collect(),
+                    bytes,
+                    busy: busy_tablets.contains(&first),
+                    failures: record.failures_of(first),
+                }
+            })
+            .collect();
+        PlanInput {
+            nodes,
+            sets,
+            disk_reserve: self.migration.disk_reserve,
+            moves_per_node: self.rebalance.moves_per_node,
+            hysteresis: self.rebalance.hysteresis,
+            in_flight: in_flight.to_vec(),
+        }
+    }
+
+    /// Commit a plan's progress, issuing the move a step names first
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The plan
+    /// * `update` - What changed
+    fn propose_plan(&mut self, op: Uuid, update: PlanUpdate) {
+        if !self.plan_in_flight.insert(op) {
+            return;
+        }
+        let state = self.machine.state();
+        // the move a step becomes: issued under the plan's name against the current version
+        let moving = match &update {
+            PlanUpdate::Step {
+                tablet,
+                op: Some(moved),
+                state: StepState::Moving,
+            } => state.plans.get(&op).and_then(|record| {
+                record
+                    .live_steps()
+                    .find(|step| step.tablet == *tablet && step.state == StepState::Pending)
+                    .map(|step| ControlCommand::Move {
+                        op: *moved,
+                        principal: format!("plan {op}"),
+                        expected_version: state.topology_version,
+                        tablet: step.tablet,
+                        from: step.from,
+                        to: step.to,
+                    })
+            }),
+            _ => None,
+        };
+        event!(Level::INFO, msg = "plan progress", plan = %op, ?update);
+        let raft = self.raft.clone();
+        let network = self.network.clone();
+        let machine = self.machine.clone();
+        let tx = self.tx.clone();
+        let me = self.node;
+        let incarnation = self.member.incarnation;
+        glommio::spawn_local(async move {
+            // the move first; a refusal is the step failing, not a step moving
+            let update = match moving {
+                Some(command) => match propose(&raft, &network, &machine, command).await {
+                    Ok(ControlResponse::Applied { .. } | ControlResponse::Repeated { .. }) => update,
+                    Ok(other) => match update {
+                        PlanUpdate::Step { tablet, op: moved, .. } => PlanUpdate::Step {
+                            tablet,
+                            op: moved,
+                            state: StepState::Failed {
+                                reason: format!("the move was refused: {other:?}"),
+                            },
+                        },
+                        other => other,
+                    },
+                    Err(error) => {
+                        let _ = tx.send(Event::PlanProposed(op, Err(error))).await;
+                        return;
+                    }
+                },
+                None => update,
+            };
+            let command = ControlCommand::PlanProgress {
+                op,
+                node: me,
+                incarnation,
+                progress: update,
+            };
+            let outcome = propose(&raft, &network, &machine, command).await;
+            let _ = tx.send(Event::PlanProposed(op, outcome)).await;
+        })
+        .detach();
+    }
+
+    /// Act on a plan's progress having been committed, or not
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The plan
+    /// * `outcome` - What the group answered
+    fn handle_plan_proposed(&mut self, op: Uuid, outcome: Result<ControlResponse, ProposeError>) {
+        self.plan_in_flight.remove(&op);
+        match outcome {
+            Ok(ControlResponse::Applied { .. }) => {
+                // look again at once: the next step may be issuable now
+                self.last_plan = None;
+                self.drive_plans(true);
+            }
+            Ok(other) => event!(Level::DEBUG, msg = "a plan's progress changed nothing", plan = %op, ?other),
+            Err(error) => event!(Level::DEBUG, msg = "a plan's progress did not commit", plan = %op, %error),
+        }
+    }
+
+    /// Take a drained member out of the control group and tombstone it, once per plan at a time
+    ///
+    /// The tombstone is committed first, while the member still receives the log, so a live
+    /// member learns it is removed and stops; then the member leaves the group's
+    /// configuration - a voter through the joint transition, which openraft refuses while
+    /// the old configuration has no quorum, a learner outright - and the plan is done. A
+    /// leader that is the member itself hands the lead over rather than removing itself
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The plan
+    /// * `node` - The member
+    fn finish_removal(&mut self, op: Uuid, node: NodeId) {
+        if !self.finishing.insert(op) {
+            return;
+        }
+        let Some(metrics) = self.metrics.as_ref() else {
+            self.finishing.remove(&op);
+            return;
+        };
+        // no membership change while one is half way through
+        if metrics.membership_config.membership() != metrics.committed_membership_config.membership() {
+            self.finishing.remove(&op);
+            return;
+        }
+        let membership = metrics.membership_config.membership().clone();
+        let raft = self.raft.clone();
+        let network = self.network.clone();
+        let machine = self.machine.clone();
+        let tx = self.tx.clone();
+        let me = self.node;
+        glommio::spawn_local(async move {
+            let outcome = async {
+                // the leader itself hands the lead to another voter and lets it finish
+                if node == me {
+                    let successor = membership.voter_ids().find(|voter| *voter != me);
+                    let Some(successor) = successor else {
+                        return Err("this node is the member being removed and the only voter".to_string());
+                    };
+                    raft.trigger()
+                        .transfer_leader(successor)
+                        .await
+                        .map_err(|error| format!("handing the lead to {successor}: {error}"))?;
+                    return Err(format!("this node is the member being removed; the lead was handed to {successor}"));
+                }
+                // the tombstone first, while the member still hears the log
+                match propose(&raft, &network, &machine, ControlCommand::Tombstone { node, op: Some(op) }).await {
+                    Ok(ControlResponse::Applied { .. }) => {}
+                    Ok(other) => return Err(format!("the tombstone was refused: {other:?}")),
+                    Err(error) => return Err(format!("the tombstone did not commit: {error}")),
+                }
+                // then out of the configuration: a voter through the joint transition, a learner outright
+                let voters: BTreeSet<NodeId> = membership.voter_ids().collect();
+                let present = membership.nodes().any(|(id, _)| *id == node);
+                if voters.contains(&node) {
+                    let mut ids = BTreeSet::new();
+                    ids.insert(node);
+                    raft.change_membership(ChangeMembers::RemoveVoters(ids), false)
+                        .await
+                        .map_err(|error| format!("removing the voter: {error}"))?;
+                } else if present {
+                    let mut ids = BTreeSet::new();
+                    ids.insert(node);
+                    raft.change_membership(ChangeMembers::RemoveNodes(ids), false)
+                        .await
+                        .map_err(|error| format!("removing the learner: {error}"))?;
+                }
+                Ok(())
+            }
+            .await;
+            let _ = tx.send(Event::Finished(op, node, outcome)).await;
+        })
+        .detach();
+    }
+
+    /// Act on a member's removal from the control group having finished, or not
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The plan
+    /// * `node` - The member
+    /// * `outcome` - Whether it is out, or why not
+    fn handle_finished(&mut self, op: Uuid, node: NodeId, outcome: Result<(), String>) {
+        self.finishing.remove(&op);
+        match outcome {
+            Ok(()) => {
+                event!(Level::INFO, msg = "a member was removed from the cluster", %node, plan = %op);
+                let done = self.machine.state().plans.get(&op).map(PlanRecord::completed);
+                if let Some(done) = done {
+                    self.propose_plan(op, PlanUpdate::Done(done));
+                }
+            }
+            Err(reason) => {
+                event!(Level::WARN, msg = "a member could not be removed from the control group yet", %node, plan = %op, reason);
+                // the reason is visible on the record until the next look succeeds
+                let same = self
+                    .machine
+                    .state()
+                    .plans
+                    .get(&op)
+                    .and_then(|record| record.blocked.as_ref().map(|blocked| blocked.reason == reason))
+                    .unwrap_or(false);
+                if !same {
+                    self.propose_plan(op, PlanUpdate::Blocked(Some(reason)));
+                }
+            }
         }
     }
 }

@@ -135,6 +135,42 @@ pub enum AdminKind {
         /// The operation
         op: Uuid,
     },
+    /// Drain a live member: it is `leaving` from the commit, takes no new placement, and the
+    /// control leader moves every set it holds elsewhere before it is removed and tombstoned
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+    Decommission {
+        /// The member
+        node: NodeId,
+    },
+    /// Remove a down or leaving member: it is `removing` from the commit and the control
+    /// leader rebuilds every set it holds from the surviving copies, the named replacement
+    /// first; `Replace` is this with a replacement named
+    Remove {
+        /// The member
+        node: NodeId,
+        /// The member to take its place first, if one is named
+        #[serde(default)]
+        replacement: Option<NodeId>,
+    },
+    /// Suspend or resume the grace a down member is removed after
+    Maintenance {
+        /// The member
+        node: NodeId,
+        /// Whether to suspend the grace, or resume it
+        suspend: bool,
+    },
+    /// Spread the replica sets over the members by their weights and measured bytes
+    ///
+    /// The one way data spreads onto a member that joined after the placement: nothing moves
+    /// onto a new node until an operator asks
+    Rebalance,
+    /// The record of a plan - a decommission, a removal, an expiry or a rebalance
+    PlanStatus {
+        /// The operation
+        op: Uuid,
+    },
+    /// Every plan the control state holds, done or not
+    Plans,
 }
 
 impl AdminKind {
@@ -148,6 +184,10 @@ impl AdminKind {
                 | AdminKind::SetTableReadPolicy { .. }
                 | AdminKind::Repair { .. }
                 | AdminKind::Move { .. }
+                | AdminKind::Decommission { .. }
+                | AdminKind::Remove { .. }
+                | AdminKind::Maintenance { .. }
+                | AdminKind::Rebalance
         )
     }
 
@@ -166,6 +206,12 @@ impl AdminKind {
             AdminKind::RepairStatus { .. } => "repair_status",
             AdminKind::Move { .. } => "move",
             AdminKind::MoveStatus { .. } => "move_status",
+            AdminKind::Decommission { .. } => "decommission",
+            AdminKind::Remove { .. } => "remove",
+            AdminKind::Maintenance { .. } => "maintenance",
+            AdminKind::Rebalance => "rebalance",
+            AdminKind::PlanStatus { .. } => "plan_status",
+            AdminKind::Plans => "plans",
         }
     }
 }
@@ -248,6 +294,13 @@ pub struct TopologyMember {
     pub role: String,
     /// Whether it is joining, up or down, as the control group has committed it
     pub health: String,
+    /// Whether it is a plain `member`, `leaving`, `removing` or `removed`
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+    #[serde(default = "default_phase")]
+    pub phase: String,
+    /// The one name of its state: the phase past plain membership, the health otherwise
+    #[serde(default)]
+    pub state: String,
     /// Which start of it the cluster has admitted
     pub incarnation: u64,
     /// The shards that have failed on it, by index
@@ -256,6 +309,11 @@ pub struct TopologyMember {
     /// ([F44](../../../../docs/src/features/repair.md))
     #[serde(default)]
     pub quarantined: Vec<QuarantinedMember>,
+}
+
+/// The phase a member frame from before F46 is read with
+fn default_phase() -> String {
+    "member".to_string()
 }
 
 /// One quarantined copy on a member, as a client sees it
@@ -408,6 +466,35 @@ mod tests {
             let json = serde_json::to_vec(&kind).expect("a kind encodes");
             assert_eq!(decode_rest::<AdminKind>(&json).expect("a kind decodes"), kind);
         }
+        // the placement operations are mutations and the plan reads are not, and all round trip (F46)
+        let node = NodeId::mint();
+        let mutations = [
+            AdminKind::Decommission { node },
+            AdminKind::Remove { node, replacement: Some(NodeId::mint()) },
+            AdminKind::Remove { node, replacement: None },
+            AdminKind::Maintenance { node, suspend: true },
+            AdminKind::Rebalance,
+        ];
+        for kind in mutations {
+            assert!(kind.is_mutation(), "{}", kind.name());
+            let json = serde_json::to_vec(&kind).expect("a kind encodes");
+            assert_eq!(decode_rest::<AdminKind>(&json).expect("a kind decodes"), kind);
+        }
+        for kind in [AdminKind::PlanStatus { op: Uuid::new_v4() }, AdminKind::Plans] {
+            assert!(!kind.is_mutation(), "{}", kind.name());
+            let json = serde_json::to_vec(&kind).expect("a kind encodes");
+            assert_eq!(decode_rest::<AdminKind>(&json).expect("a kind decodes"), kind);
+        }
+        // a remove without a replacement decodes from a frame that leaves it out
+        let bare: AdminKind = serde_json::from_value(serde_json::json!({ "Remove": { "node": node } })).expect("decodes");
+        assert_eq!(bare, AdminKind::Remove { node, replacement: None });
+        // a member frame from before F46 reads as a plain member
+        let older: TopologyMember = serde_json::from_value(serde_json::json!({
+            "node": node, "client": "a", "data": "b", "control": "c", "shards": 1,
+            "role": "voter", "health": "up", "incarnation": 1, "shards_failed": []
+        }))
+        .expect("an older member decodes");
+        assert_eq!(older.phase, "member");
         // an answer, applied and refused
         let response = AdminResponse {
             node: NodeId::mint(),
@@ -442,6 +529,8 @@ mod tests {
                 shards: 4,
                 role: "voter".to_string(),
                 health: "up".to_string(),
+                phase: "member".to_string(),
+                state: "up".to_string(),
                 incarnation: 2,
                 shards_failed: vec![1],
                 quarantined: Vec::new(),

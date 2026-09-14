@@ -1188,6 +1188,29 @@ async fn cluster_server_child() {
             if let Some(ms) = staged.migration_timeout_ms {
                 block.migration.timeout = Duration::from_millis(ms).into();
             }
+            // the grace, the weight, the budgets and the plan knobs
+            // ([F46](../../docs/src/features/capacity-rebalancing.md))
+            if let Some(ms) = staged.auto_remove_after_ms {
+                block = block.auto_remove_after((ms > 0).then(|| Duration::from_millis(ms)));
+            }
+            if let Some(weight) = staged.weight {
+                block = block.weight(Some(weight));
+            }
+            if let Some(bytes) = staged.stream_bytes_per_sec {
+                block.migration.stream_bytes_per_sec = bytes;
+            }
+            if let Some(streams) = staged.concurrent_streams {
+                block.migration.concurrent_streams = streams;
+            }
+            if let Some(bytes) = staged.disk_reserve {
+                block.migration.disk_reserve = bytes;
+            }
+            if let Some(moves) = staged.moves_per_node {
+                block.rebalance.moves_per_node = moves;
+            }
+            if let Some(ms) = staged.plan_interval_ms {
+                block.rebalance.plan_interval = Duration::from_millis(ms).into();
+            }
             // the default read level, which every bundle without an override inherits
             // ([F41](../../docs/src/features/read-consistency.md))
             if let Some(level) = &staged.read_consistency {
@@ -1754,6 +1777,49 @@ fn handle_command(
             Some(op) => admin(AdminKind::MoveStatus { op }),
             None => Err("MOVE_STATUS needs an operation id".to_string()),
         },
+        // the placement operations, as the process, answering the operation each was
+        // recorded under, which is its plan's identity
+        // ([F46](../../docs/src/features/capacity-rebalancing.md))
+        "DECOMMISSION" => match node_at(&mut parts) {
+            Some(node) => plan_op(pool, AdminKind::Decommission { node }),
+            None => Err("DECOMMISSION needs a node index".to_string()),
+        },
+        "REMOVE" => match node_at(&mut parts) {
+            Some(node) => {
+                let replacement = node_at(&mut parts);
+                plan_op(pool, AdminKind::Remove { node, replacement })
+            }
+            None => Err("REMOVE needs a node index and an optional replacement index".to_string()),
+        },
+        "MAINTENANCE" => match (node_at(&mut parts), parts.next()) {
+            (Some(node), Some(switch)) => admin(AdminKind::Maintenance {
+                node,
+                suspend: switch == "on",
+            }),
+            _ => Err("MAINTENANCE needs a node index and on or off".to_string()),
+        },
+        "REBALANCE" => plan_op(pool, AdminKind::Rebalance),
+        // the record of a plan, by its operation, and every plan
+        "PLAN_STATUS" => match parts.next().and_then(|text| text.parse::<uuid::Uuid>().ok()) {
+            Some(op) => admin(AdminKind::PlanStatus { op }),
+            None => Err("PLAN_STATUS needs an operation id".to_string()),
+        },
+        "PLANS" => admin(AdminKind::Plans),
+        // override the free bytes this node reports and checks, or lift the override
+        "FREE_BYTES" => match parts.next() {
+            Some("none") => {
+                pool.free_bytes_override(0);
+                Ok(serde_json::json!({ "override": null }))
+            }
+            Some(bytes) => match bytes.parse::<u64>() {
+                Ok(bytes) => {
+                    pool.free_bytes_override(bytes);
+                    Ok(serde_json::json!({ "override": bytes }))
+                }
+                Err(_) => Err("FREE_BYTES needs a byte count or none".to_string()),
+            },
+            None => Err("FREE_BYTES needs a byte count or none".to_string()),
+        },
         // propose a scrub of a group through this node, which has to lead it, and poll every
         // member's digest ([F44](../../docs/src/features/repair.md))
         "SCRUB" => match parts.next().and_then(|hex| u64::from_str_radix(hex, 16).ok()) {
@@ -1825,6 +1891,41 @@ fn handle_command(
         Err(error) => serde_json::json!({ "error": error }),
     };
     format!("{} {}", cluster::REPLY_LINE, json)
+}
+
+/// Ask for a placement operation as the process, answering the operation it was recorded under
+///
+/// The `MOVE` verb's shape: a version that moved between the read and the proposal is retried
+/// a few times, and the answer carries the operation id, which is the plan's
+/// ([F46](../../docs/src/features/capacity-rebalancing.md)).
+///
+/// # Arguments
+///
+/// * `pool` - This node's pool
+/// * `kind` - What is asked
+fn plan_op(pool: &ShoalPool<TestDb>, kind: shoal::server::AdminKind) -> Result<serde_json::Value, String> {
+    use shoal::server::AdminRequest;
+    let op = uuid::Uuid::new_v4();
+    let mut last = String::new();
+    for _ in 0..8 {
+        let version = pool.topology().map(|topology| topology.version).unwrap_or(0);
+        match pool.admin(AdminRequest { op, expected_version: version, kind: kind.clone() }) {
+            Ok(response) => match response.outcome {
+                Ok(shoal::shared::protocol::admin::AdminOutcome::Applied { version })
+                | Ok(shoal::shared::protocol::admin::AdminOutcome::Repeated { version }) => {
+                    return Ok(serde_json::json!({ "op": op.to_string(), "version": version }));
+                }
+                Ok(other) => return Err(format!("{} answered {other:?}", kind.name())),
+                Err(error) if error.code() == shoal::shared::protocol::error::ErrorCode::StaleVersion => {
+                    last = format!("{}: {}", error.code(), error.msg);
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => return Err(format!("{}: {}", error.code(), error.msg)),
+            },
+            Err(error) => return Err(format!("{error:?}")),
+        }
+    }
+    Err(last)
 }
 
 /// Three Shoal processes converge on one cluster and recover its metadata after a restart (C3 M3)
@@ -9247,6 +9348,296 @@ async fn repair_serializes_with_migration_and_new_commits() -> Result<(), Fixtur
     let integrity = groups_of(&mut cluster, 2)?["integrity"].clone();
     assert_eq!(integrity["checksum_failures"], 0, "the returned copy met a corrupt record: {integrity}");
     for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+// ========================================================================
+// M9b: capacity-aware rebalancing and removal (F46)
+// ========================================================================
+
+/// One member as a node's `MEMBERS` view has it, by fixture index
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `at` - The node to ask
+/// * `member` - The member
+fn member_view(cluster: &mut Cluster, at: usize, member: usize) -> Result<serde_json::Value, FixtureError> {
+    let id = cluster.node_ids()[member].clone();
+    let view = cluster.members(at)?;
+    view["members"]
+        .as_array()
+        .and_then(|members| members.iter().find(|m| m["record"]["node"] == id).cloned())
+        .ok_or_else(|| FixtureError::ChildFailed(format!("node {at} does not know member {member}: {view}")))
+}
+
+/// Wait until a member's one-name state, as a node sees it, is the one wanted
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `at` - The node to ask
+/// * `member` - The member
+/// * `state` - The state's name: `up`, `down`, `leaving`, `removing` or `removed`
+/// * `within` - How long to wait
+fn wait_member_state(cluster: &mut Cluster, at: usize, member: usize, state: &str, within: Duration) -> Result<serde_json::Value, FixtureError> {
+    let deadline = Instant::now() + within;
+    loop {
+        let view = member_view(cluster, at, member)?;
+        if view["state_name"] == state {
+            return Ok(view);
+        }
+        if Instant::now() > deadline {
+            let plans = cluster.node_mut(at).command("PLANS")?;
+            return Err(FixtureError::NotReady(format!("member {member} never became {state} as node {at} sees it: {view}\nplans: {plans}")));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The record of a plan, as one node holds it
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to ask
+/// * `op` - The plan
+fn plan_record_via(cluster: &mut Cluster, via: usize, op: uuid::Uuid) -> Result<serde_json::Value, FixtureError> {
+    let reply = cluster.node_mut(via).command(&format!("PLAN_STATUS {op}"))?;
+    reply
+        .get("ok")
+        .cloned()
+        .ok_or_else(|| FixtureError::ChildFailed(format!("PLAN_STATUS {op} answered {reply}")))
+}
+
+/// Every plan a node holds, done or not, in request order
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to ask
+fn plans_via(cluster: &mut Cluster, via: usize) -> Result<Vec<serde_json::Value>, FixtureError> {
+    let reply = cluster.node_mut(via).command("PLANS")?;
+    Ok(reply["ok"].as_array().cloned().unwrap_or_default())
+}
+
+/// Wait until a plan's record is in a phase, or done
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to ask
+/// * `op` - The plan
+/// * `phase` - The phase's name
+/// * `within` - How long to wait
+fn wait_plan_phase(cluster: &mut Cluster, via: usize, op: uuid::Uuid, phase: &str, within: Duration) -> Result<serde_json::Value, FixtureError> {
+    let deadline = Instant::now() + within;
+    loop {
+        let record = plan_record_via(cluster, via, op)?;
+        if record["phase"] == phase || record["phase"] == "Done" {
+            return Ok(record);
+        }
+        if Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("plan {op} never reached {phase}: {record}")));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Ask a node for a placement operation and answer the plan's identity
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to ask
+/// * `verb` - The command line
+fn plan_as_process(cluster: &mut Cluster, via: usize, verb: &str) -> Result<uuid::Uuid, FixtureError> {
+    let started = Instant::now();
+    loop {
+        let reply = cluster.node_mut(via).command(verb)?;
+        if let Some(op) = reply["ok"]["op"].as_str() {
+            return op.parse().map_err(|error| FixtureError::ChildFailed(format!("{verb} answered {op}: {error}")));
+        }
+        let electing = reply["error"].as_str().is_some_and(|error| error.starts_with("NotLeader"));
+        if !electing || started.elapsed() > Duration::from_secs(30) {
+            return Err(FixtureError::ChildFailed(format!("{verb} answered {reply}")));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// The fixture indices of the voters a node names
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `at` - The node to ask
+fn voter_indices(cluster: &mut Cluster, at: usize) -> Result<Vec<usize>, FixtureError> {
+    let ids = cluster.node_ids();
+    let view = cluster.members(at)?;
+    let mut voters: Vec<usize> = view["voters"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|voter| voter.as_str().and_then(|id| ids.iter().position(|known| known == id)))
+        .collect();
+    voters.sort_unstable();
+    Ok(voters)
+}
+
+/// How many replica sets each node holds, as one node's map serves them, by fixture index
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `at` - The node to ask
+fn sets_held(cluster: &mut Cluster, at: usize) -> Result<Vec<usize>, FixtureError> {
+    let ids = cluster.node_ids();
+    let map = cluster.node_mut(at).command("MAP")?["ok"].clone();
+    let placement: Vec<String> = map["placement"].as_array().into_iter().flatten().filter_map(|node| node.as_str().map(str::to_string)).collect();
+    let shards: std::collections::HashMap<String, u64> = map["members"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(node, member)| (node.clone(), member["shards"].as_u64().unwrap_or(1)))
+        .collect();
+    // the rule's sets: every distinct ordered list the rule derives, over the configurations
+    let n = placement.len();
+    let rf = map["desired_rf"].as_u64().unwrap_or(1).min(n as u64) as usize;
+    let configurations: Vec<serde_json::Value> = map["configurations"].as_array().cloned().unwrap_or_default();
+    let mut counts = vec![0usize; ids.len()];
+    let mut seen: std::collections::HashSet<Vec<(String, u64)>> = std::collections::HashSet::new();
+    for tablet in 0..4096usize {
+        let rule: Vec<(String, u64)> = (0..rf)
+            .map(|k| {
+                let node = placement[(tablet + k) % n].clone();
+                let shard = (tablet / n) as u64 % shards.get(&node).copied().unwrap_or(1).max(1);
+                (node, shard)
+            })
+            .collect();
+        if !seen.insert(rule.clone()) {
+            continue;
+        }
+        // served by the configuration covering the tablet, or the rule
+        let served: Vec<String> = configurations
+            .iter()
+            .find(|configuration| configuration["tablets"].as_array().is_some_and(|tablets| tablets.iter().any(|t| t.as_u64() == Some(tablet as u64))))
+            .map(|configuration| configuration["members"].as_array().into_iter().flatten().filter_map(|member| member["node"].as_str().map(str::to_string)).collect())
+            .unwrap_or_else(|| rule.iter().map(|(node, _)| node.clone()).collect());
+        for node in served {
+            if let Some(index) = ids.iter().position(|known| *known == node) {
+                counts[index] += 1;
+            }
+        }
+    }
+    Ok(counts)
+}
+
+/// Grace expiry moves a dead member's sets to the spare, refills its voter seat and
+/// tombstones it; its return at a higher incarnation, and a clone of it, are refused as a
+/// removed identity with the directory preserved and no group naming it (C8 M9b)
+///
+/// Four nodes, three placed at a factor of three and a spare. Node one is killed and the
+/// leader calls it down; the grace elapses under the leader's count; the member is
+/// `removing` under an expiry plan that moves each of its sets to node three; the plan
+/// finishes with the member out of the control group and tombstoned, and node three takes
+/// its voter seat. Writes and reads go on throughout. Node one started again from its
+/// directory, one incarnation later, is refused as removed and its pool fails so; a clone of
+/// its directory is refused the same way; the directory is still there
+/// ([F46](../../docs/src/features/capacity-rebalancing.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn automatic_removal_and_rejoin_preserve_fencing() -> Result<(), FixtureError> {
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .detector_interval_ms(200)
+            .auto_remove_after(Some(Duration::from_secs(8)))
+            .plan_interval(Duration::from_millis(500))
+            .moves_per_node(3),
+    )
+    .await?;
+    cluster.wait_voters(0, 3)?;
+    // three of the four vote, in node id order; whether node one is among them is the id's
+    let voters_before = voter_indices(&mut cluster, 0)?;
+    assert_eq!(voters_before.len(), 3, "{voters_before:?}");
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let addr3 = cluster.node(3).endpoints.client.to_string();
+    // rows in every set, so every set has something to move: thirty keys over three sets
+    let keys: Vec<u64> = (4000..4030).collect();
+    for key in &keys {
+        write_note(&addr0, *key, &format!("v1-{key}")).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![3, 3, 3, 0]);
+    // node one dies; its directory as it stands is kept for a clone later
+    cluster.kill(1)?;
+    let copy = cluster.clone_dir(1)?;
+    let down = wait_member_state(&mut cluster, 0, 1, "down", Duration::from_secs(30))?;
+    assert!(down["grace"].is_object(), "a down member under the policy has a grace: {down}");
+    assert!(down["grace_remaining_ms"].as_u64().is_some_and(|ms| ms <= 8000), "{down}");
+    // writes go on meanwhile
+    for key in &keys[..4] {
+        write_note_eventually(&addr0, *key, &format!("v2-{key}"), Duration::from_secs(20)).await?;
+    }
+    // the grace elapses and the member is removing under an expiry plan
+    let removing = wait_member_state(&mut cluster, 0, 1, "removing", Duration::from_secs(40))?;
+    assert!(removing["grace"]["expired"].as_bool().unwrap_or(false), "{removing}");
+    let plan: uuid::Uuid = removing["grace"]["plan"].as_str().expect("the expiry names its plan").parse().expect("a uuid");
+    let record = plan_record_via(&mut cluster, 0, plan)?;
+    assert!(record["kind"]["Expiry"].is_object(), "{record}");
+    assert_eq!(record["principal"], "policy");
+    // every set moves to node three and the member is removed and tombstoned
+    let removed = wait_member_state(&mut cluster, 0, 1, "removed", Duration::from_secs(240))?;
+    assert!(removed["grace"].is_null(), "a removed member's grace is gone: {removed}");
+    let record = wait_plan_phase(&mut cluster, 0, plan, "Done", Duration::from_secs(60))?;
+    assert!(record["outcome"]["Completed"].is_object(), "{record}");
+    assert_eq!(record["outcome"]["Completed"]["moved"], 3, "{record}");
+    let steps = record["steps"].as_array().expect("steps");
+    assert!(steps.iter().all(|step| step["state"] == "Moved"), "{record}");
+    let members = cluster.members(0)?;
+    let node1 = cluster.node_ids()[1].clone();
+    assert!(members["tombstones"][&node1].is_object(), "{members}");
+    assert_eq!(members["under_replicated_sets"], 0);
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![3, 0, 3, 3]);
+    // its voter seat, if it had one, is refilled by the spare: three voters, none of them node one
+    cluster.wait_voters(0, 3)?;
+    let voters_after = voter_indices(&mut cluster, 0)?;
+    assert_eq!(voters_after, vec![0, 2, 3], "before: {voters_before:?}");
+    // every note reads through the spare, and the copies agree
+    for key in &keys {
+        wait_note(&addr3, *key, Some(&if keys[..4].contains(key) { format!("v2-{key}") } else { format!("v1-{key}") }), Duration::from_secs(30)).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 2, 3], "Note", Duration::from_secs(60))?;
+    // no group names node one a voter any more
+    let view = groups_of(&mut cluster, 3)?;
+    for shard in view["shards"].as_array().into_iter().flatten() {
+        for group in shard["groups"].as_array().into_iter().flatten() {
+            let voters: Vec<&str> = group["voters"].as_array().into_iter().flatten().filter_map(|voter| voter["node"].as_str()).collect();
+            assert!(!voters.contains(&node1.as_str()), "group {} still names node one a voter", group["group"]);
+        }
+    }
+    // node one back from its directory, one incarnation later: refused as removed, its
+    // pool fails so, and its directory is still there
+    cluster.restart(1, NodeKind::Server)?;
+    let refused = Cluster::wait_failure(cluster.node(1), Duration::from_secs(60)).expect("the removed node kept running");
+    assert!(refused.contains("removed"), "the removed node failed for another reason: {refused}");
+    assert!(cluster.dir(1).join(StorageMeta::path(cluster.dir(1)).file_name().expect("a marker name")).exists(), "the directory was not preserved");
+    // and a clone of the directory it died with, under the same identity, the same way
+    let mut clone = cluster.spawn_clone(1, copy.path())?;
+    clone.wait_ready(Duration::from_secs(60))?;
+    let refused = Cluster::wait_failure(&clone, Duration::from_secs(60)).expect("the clone kept running");
+    assert!(refused.contains("removed"), "the clone failed for another reason: {refused}");
+    drop(clone);
+    // the cluster went on the whole time: a write and a read through node zero
+    write_note_eventually(&addr0, keys[0], "v3", Duration::from_secs(20)).await?;
+    wait_note(&addr3, keys[0], Some("v3"), Duration::from_secs(20)).await?;
+    assert_eq!(voter_indices(&mut cluster, 0)?, vec![0, 2, 3]);
+    for id in [0, 2, 3] {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
     Ok(())

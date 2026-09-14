@@ -1749,11 +1749,23 @@ where
             };
         };
         let me = self.my_addr();
+        // the bytes each table's archives hold per tablet, read once for every group of it
+        let tablet_bytes: std::collections::HashMap<D::TableNames, Vec<u64>> = replication
+            .groups
+            .values()
+            .map(|slot| slot.table)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .map(|table| (table, self.table_map.tablet_bytes(table)))
+            .collect();
         let groups = replication
             .groups
             .values()
             .map(|slot| {
                 let state = slot.state.borrow();
+                let bytes = tablet_bytes.get(&slot.table).map_or(0, |per_tablet| {
+                    slot.spec.tablets.iter().map(|tablet| per_tablet.get(usize::from(*tablet)).copied().unwrap_or(0)).sum()
+                });
                 let metrics = slot.raft.as_ref().map(|raft| raft.metrics().borrow_watched().clone());
                 let leader = metrics.as_ref().and_then(|metrics| metrics.current_leader.clone());
                 GroupReport {
@@ -1786,6 +1798,7 @@ where
                         .unwrap_or_default(),
                     learner: slot.spec.learner,
                     quarantined: state.quarantined.map(|quarantine| quarantine.reason),
+                    bytes,
                 }
             })
             .collect::<Vec<_>>();

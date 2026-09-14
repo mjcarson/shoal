@@ -24,6 +24,13 @@
 //! **A membership entry is reflected here too.** openraft's own record of who votes and who
 //! learns is applied through [`ControlState::observe_membership`] beside the commands, so the
 //! roles in this state and the configuration the group runs under never disagree.
+//!
+//! **A member's phase is the operator's and the policy's; its health is the detector's.**
+//! Since [F46](../../../../docs/src/features/capacity-rebalancing.md) a member carries both:
+//! `Leaving`, `Removing` and `Removed` are phases a `Decommission`, a `Remove` or an elapsed
+//! grace commit, and a member in any of them can still be up or down. The six-state machine
+//! [C3](../../../../docs/src/distributed/membership.md) draws is the two read together
+//! ([`MemberState::state_name`]), and every `Up` check in the tree keeps its meaning.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -33,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::migrate::{DataConfiguration, GroupMove, MoveOutcome, MovePhase, MoveRecord, KEPT_MOVES};
+use super::plan::{Blocked, PlanKind, PlanOutcome, PlanPhase, PlanRecord, PlanUpdate, KEPT_PLANS};
 use super::runtime::GlommioRuntime;
 use super::repair::{GroupRepair, QuarantinedCopy, RepairMode, RepairPhase, RepairRecord, KEPT_REPAIRS};
 use crate::server::conf::cluster::{BootstrapPolicy, Consistency};
@@ -85,6 +93,25 @@ pub struct MemberRecord {
     /// ([C1](../../../../docs/src/distributed/node-identity.md), Q11).
     #[serde(default)]
     pub incarnation: u64,
+    /// The share of the cluster's bytes this node is meant to hold, against the others' weights
+    ///
+    /// Zero means the node's shard count, so a cluster of like machines needs no weights at
+    /// all. Set by the node's own `cluster.weight` and recorded when it observes itself, so a
+    /// change is a restart ([F46](../../../../docs/src/features/capacity-rebalancing.md)).
+    #[serde(default)]
+    pub weight: u32,
+}
+
+impl MemberRecord {
+    /// The weight the planner uses: the configured one, or the shard count
+    #[must_use]
+    pub fn effective_weight(&self) -> u32 {
+        if self.weight > 0 {
+            self.weight
+        } else {
+            u32::try_from(self.shards).unwrap_or(u32::MAX).max(1)
+        }
+    }
 }
 
 impl fmt::Display for MemberRecord {
@@ -96,9 +123,9 @@ impl fmt::Display for MemberRecord {
 
 /// Whether a member is being admitted, is up, or has been called down
 ///
-/// The durable half of [C3](../../../../docs/src/distributed/membership.md)'s member state
-/// machine. `Leaving`, `Removing` and `Removed` are M9b's and do not exist yet; `Unreachable`
-/// is a local observation and deliberately not a value here.
+/// The detector's half of [C3](../../../../docs/src/distributed/membership.md)'s member state
+/// machine; the operator's half is [`MemberPhase`], and the two are read together.
+/// `Unreachable` is a local observation and deliberately not a value here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MemberHealth {
@@ -120,6 +147,70 @@ impl MemberHealth {
             MemberHealth::Down => "down",
         }
     }
+}
+
+/// Where a member stands with the cluster, as an operator or the policy decided
+///
+/// The other half of [C3](../../../../docs/src/distributed/membership.md)'s member state
+/// machine ([F46](../../../../docs/src/features/capacity-rebalancing.md)): a plain member is
+/// a placement target; a leaving one still serves and counts but takes no new placement; a
+/// removing one is having its sets rebuilt elsewhere and cannot be reversed by a late
+/// heartbeat; a removed one is tombstoned and never comes back under its identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemberPhase {
+    /// A member like any other
+    #[default]
+    Member,
+    /// An operator asked for it to be drained; no new placement lands on it
+    Leaving,
+    /// Its grace elapsed or an operator asked for its removal; its sets are being rebuilt
+    Removing,
+    /// Tombstoned: out of the control group, its identity refused for good
+    Removed,
+}
+
+impl MemberPhase {
+    /// The name this phase is spelled as on the wire and in a log line
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            MemberPhase::Member => "member",
+            MemberPhase::Leaving => "leaving",
+            MemberPhase::Removing => "removing",
+            MemberPhase::Removed => "removed",
+        }
+    }
+}
+
+/// The grace a down member is under before it is removed on its own
+///
+/// Elapsed time is committed in increments the leader accrues, never a wall-clock deadline,
+/// so a leader change loses at most one increment and never restarts or skips a grace
+/// ([F46](../../../../docs/src/features/capacity-rebalancing.md), Q7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraceState {
+    /// The down episode the grace belongs to
+    pub episode: Uuid,
+    /// How much of the grace has been committed as elapsed, in milliseconds
+    pub elapsed_ms: u64,
+    /// Whether an operator has suspended the count for maintenance
+    pub suspended: bool,
+    /// Whether the grace has elapsed and the member is being removed for it
+    pub expired: bool,
+    /// The plan the expiry recorded, once it did
+    pub plan: Option<Uuid>,
+}
+
+/// A removed member's identity, kept so it can never rejoin as an authority
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tombstone {
+    /// The incarnation the member was last admitted at
+    pub incarnation: u64,
+    /// The topology version it was removed at
+    pub removed_at: u64,
+    /// The plan that removed it
+    pub op: Option<Uuid>,
 }
 
 /// Whether a member votes in the control group or only learns from it
@@ -172,6 +263,54 @@ pub struct MemberState {
     /// (M9b) names the episode it belongs to and a later episode is not mistaken for it.
     #[serde(default)]
     pub episode: Option<Uuid>,
+    /// Where it stands with the cluster: a plain member, leaving, removing or removed
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+    #[serde(default)]
+    pub phase: MemberPhase,
+    /// The grace its current down episode is under, if it is down and the policy removes
+    #[serde(default)]
+    pub grace: Option<GraceState>,
+}
+
+impl MemberState {
+    /// A member as it is first recorded: at a health, with nothing else decided about it
+    ///
+    /// # Arguments
+    ///
+    /// * `record` - What it advertises
+    /// * `health` - Its health
+    /// * `role` - Its role
+    /// * `since` - The topology version it is recorded at
+    #[must_use]
+    pub fn fresh(record: MemberRecord, health: MemberHealth, role: MemberRole, since: u64) -> Self {
+        MemberState {
+            record,
+            health,
+            role,
+            shards_failed: Vec::new(),
+            quarantined: Vec::new(),
+            since,
+            episode: None,
+            phase: MemberPhase::Member,
+            grace: None,
+        }
+    }
+
+    /// The one name C3's six-state machine gives this member: the phase when it has one past
+    /// plain membership, the health otherwise
+    #[must_use]
+    pub const fn state_name(&self) -> &'static str {
+        match self.phase {
+            MemberPhase::Member => self.health.name(),
+            other => other.name(),
+        }
+    }
+
+    /// Whether the member may be placed on: up, and a plain member
+    #[must_use]
+    pub fn is_placeable(&self) -> bool {
+        self.health == MemberHealth::Up && self.phase == MemberPhase::Member
+    }
 }
 
 /// One administrative operation the state has applied, remembered so a repeat is harmless
@@ -359,6 +498,86 @@ pub enum ControlCommand {
         /// Where the group stands now
         progress: GroupMove,
     },
+    /// Drain a live member: mark it leaving and plan every set it holds elsewhere
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+    Decommission {
+        /// The identity of the operation, which is the plan's too
+        op: Uuid,
+        /// Who asked
+        principal: String,
+        /// The topology version the request was written against
+        expected_version: u64,
+        /// The member
+        node: NodeId,
+    },
+    /// Remove a down or leaving member: mark it removing and plan its sets elsewhere
+    Remove {
+        /// The identity of the operation, which is the plan's too
+        op: Uuid,
+        /// Who asked
+        principal: String,
+        /// The topology version the request was written against
+        expected_version: u64,
+        /// The member
+        node: NodeId,
+        /// The member to take its place first, if the operator named one
+        replacement: Option<NodeId>,
+    },
+    /// Suspend or resume a down member's grace
+    Maintenance {
+        /// The identity of the operation
+        op: Uuid,
+        /// Who asked
+        principal: String,
+        /// The topology version the request was written against
+        expected_version: u64,
+        /// The member
+        node: NodeId,
+        /// Whether to suspend the count, or resume it
+        suspend: bool,
+    },
+    /// Spread the sets over the members by their weights and measured bytes
+    Rebalance {
+        /// The identity of the operation, which is the plan's too
+        op: Uuid,
+        /// Who asked
+        principal: String,
+        /// The topology version the request was written against
+        expected_version: u64,
+    },
+    /// The leader's word on how much of a down member's grace has elapsed
+    ///
+    /// A leader's bookkeeping, no operation id: applied only for the episode it names and
+    /// never backwards. With `expire` the grace is over and the member is removing under the
+    /// plan named.
+    GraceElapsed {
+        /// The member
+        node: NodeId,
+        /// The down episode
+        episode: Uuid,
+        /// How much has elapsed, in milliseconds, committed and local together
+        elapsed_ms: u64,
+        /// The plan to record the removal under, when the grace is over
+        expire: Option<Uuid>,
+    },
+    /// The leader's word on where a plan stands
+    PlanProgress {
+        /// The plan
+        op: Uuid,
+        /// The leader
+        node: NodeId,
+        /// The incarnation it leads at
+        incarnation: u64,
+        /// What changed
+        progress: PlanUpdate,
+    },
+    /// A removed member's identity, tombstoned for good
+    Tombstone {
+        /// The member
+        node: NodeId,
+        /// The plan that removed it
+        op: Option<Uuid>,
+    },
 }
 
 impl ControlCommand {
@@ -398,6 +617,29 @@ impl ControlCommand {
                 expected_version,
                 ..
             } => Some((*op, principal, "move", *expected_version)),
+            ControlCommand::Decommission {
+                op,
+                principal,
+                expected_version,
+                ..
+            } => Some((*op, principal, "decommission", *expected_version)),
+            ControlCommand::Remove {
+                op,
+                principal,
+                expected_version,
+                ..
+            } => Some((*op, principal, "remove", *expected_version)),
+            ControlCommand::Maintenance {
+                op,
+                principal,
+                expected_version,
+                ..
+            } => Some((*op, principal, "maintenance", *expected_version)),
+            ControlCommand::Rebalance {
+                op,
+                principal,
+                expected_version,
+            } => Some((*op, principal, "rebalance", *expected_version)),
             _ => None,
         }
     }
@@ -434,6 +676,17 @@ impl fmt::Display for ControlCommand {
             ControlCommand::MoveProgress { op, group, progress, .. } => {
                 write!(f, "MoveProgress({op} {group} {})", progress.phase.name())
             }
+            ControlCommand::Decommission { op, node, .. } => write!(f, "Decommission({op} {node})"),
+            ControlCommand::Remove { op, node, replacement, .. } => {
+                write!(f, "Remove({op} {node} replacement {replacement:?})")
+            }
+            ControlCommand::Maintenance { op, node, suspend, .. } => write!(f, "Maintenance({op} {node} suspend {suspend})"),
+            ControlCommand::Rebalance { op, .. } => write!(f, "Rebalance({op})"),
+            ControlCommand::GraceElapsed { node, elapsed_ms, expire, .. } => {
+                write!(f, "GraceElapsed({node} {elapsed_ms}ms expire {})", expire.is_some())
+            }
+            ControlCommand::PlanProgress { op, progress, .. } => write!(f, "PlanProgress({op} {progress:?})"),
+            ControlCommand::Tombstone { node, .. } => write!(f, "Tombstone({node})"),
         }
     }
 }
@@ -471,6 +724,15 @@ pub enum ControlResponse {
         /// What the first application produced
         first: Box<ControlResponse>,
     },
+    /// Refused because the node's identity is tombstoned
+    ///
+    /// The proposer is a removed member, whatever its incarnation: a run of it, a clone of
+    /// it, or a rejoin under its identity, and it must stop. A replacement joins as a new
+    /// identity ([F46](../../../../docs/src/features/capacity-rebalancing.md)).
+    Removed {
+        /// The node
+        node: NodeId,
+    },
 }
 
 impl ControlResponse {
@@ -480,7 +742,7 @@ impl ControlResponse {
         match self {
             ControlResponse::Applied { topology_version } => Some(*topology_version),
             ControlResponse::Repeated { first } => first.applied_version(),
-            ControlResponse::Refused { .. } | ControlResponse::Fenced { .. } => None,
+            ControlResponse::Refused { .. } | ControlResponse::Fenced { .. } | ControlResponse::Removed { .. } => None,
         }
     }
 }
@@ -538,6 +800,13 @@ pub struct ControlState {
     /// ([F45](../../../../docs/src/features/replica-migration.md))
     #[serde(default)]
     pub moves: BTreeMap<Uuid, MoveRecord>,
+    /// The identities of removed members, which never rejoin
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+    #[serde(default)]
+    pub tombstones: BTreeMap<NodeId, Tombstone>,
+    /// The placement plans, by identity, the newest `KEPT_PLANS` of them
+    #[serde(default)]
+    pub plans: BTreeMap<Uuid, PlanRecord>,
 }
 
 impl ControlState {
@@ -627,15 +896,7 @@ impl ControlState {
                 self.topology_version += 1;
                 self.members.insert(
                     member.node,
-                    MemberState {
-                        record: member.clone(),
-                        health: MemberHealth::Up,
-                        role,
-                        shards_failed: Vec::new(),
-                        quarantined: Vec::new(),
-                        since: self.topology_version,
-                        episode: None,
-                    },
+                    MemberState::fresh(member.clone(), MemberHealth::Up, role, self.topology_version),
                 );
                 self.applied()
             }
@@ -664,9 +925,16 @@ impl ControlState {
                         offered: *incarnation,
                     };
                 }
+                // a removed member has no health to set; it is gone, and a report from it is
+                // answered as such so it stops
+                if state.phase == MemberPhase::Removed {
+                    return ControlResponse::Removed { node: *node };
+                }
                 if state.health == *health {
                     return self.applied();
                 }
+                // a down episode opens a grace where the policy removes a member for it
+                let grace = self.policy.as_ref().and_then(|policy| policy.auto_remove_after);
                 self.topology_version += 1;
                 let version = self.topology_version;
                 let state = self.members.get_mut(node).expect("checked above");
@@ -675,6 +943,19 @@ impl ControlState {
                 state.episode = match health {
                     MemberHealth::Down => *episode,
                     MemberHealth::Up | MemberHealth::Joining => None,
+                };
+                state.grace = match (health, episode, grace) {
+                    (MemberHealth::Down, Some(episode), Some(_)) => Some(GraceState {
+                        episode: *episode,
+                        elapsed_ms: 0,
+                        suspended: false,
+                        expired: false,
+                        plan: None,
+                    }),
+                    // a member back up under a removal keeps the removal: a late heartbeat
+                    // cannot reverse it, and its grace is the record of why
+                    (MemberHealth::Up, _, _) if state.phase == MemberPhase::Removing => state.grace.take(),
+                    _ => None,
                 };
                 self.applied()
             }
@@ -734,12 +1015,12 @@ impl ControlState {
                 let mut seen = std::collections::BTreeSet::new();
                 for node in nodes {
                     match self.members.get(node) {
-                        Some(state) if state.health == MemberHealth::Up => {}
+                        Some(state) if state.is_placeable() => {}
                         Some(state) => {
                             return ControlResponse::Refused {
                                 reason: format!(
                                     "{node} is {}, and only an up member can be placed on",
-                                    state.health.name()
+                                    state.state_name()
                                 ),
                             };
                         }
@@ -1014,7 +1295,485 @@ impl ControlState {
                 incarnation,
                 progress,
             } => self.apply_move_progress(*op, *group, *node, *incarnation, progress),
+            // a member leaving at an operator's word, with its drain planned
+            ControlCommand::Decommission {
+                op,
+                principal,
+                expected_version,
+                node,
+            } => self.apply_decommission(*op, principal, *expected_version, *node),
+            // a member removed at an operator's word, with its rebuild planned
+            ControlCommand::Remove {
+                op,
+                principal,
+                expected_version,
+                node,
+                replacement,
+            } => self.apply_remove(*op, principal, *expected_version, *node, *replacement),
+            // a grace suspended or resumed
+            ControlCommand::Maintenance {
+                expected_version,
+                node,
+                suspend,
+                ..
+            } => self.apply_maintenance(*expected_version, *node, *suspend),
+            // a rebalance planned
+            ControlCommand::Rebalance {
+                op,
+                principal,
+                expected_version,
+            } => self.apply_rebalance(*op, principal, *expected_version),
+            // the leader's count of a grace
+            ControlCommand::GraceElapsed {
+                node,
+                episode,
+                elapsed_ms,
+                expire,
+            } => self.apply_grace_elapsed(*node, *episode, *elapsed_ms, *expire),
+            // the leader's word on a plan
+            ControlCommand::PlanProgress {
+                op,
+                node,
+                incarnation,
+                progress,
+            } => self.apply_plan_progress(*op, *node, *incarnation, progress),
+            // a removed identity, for good
+            ControlCommand::Tombstone { node, op } => self.apply_tombstone(*node, *op),
         }
+    }
+
+    /// Mark a member leaving and record the plan that drains it
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The operation, which is the plan's identity
+    /// * `principal` - Who asked
+    /// * `expected_version` - The topology version the request was written against
+    /// * `node` - The member
+    fn apply_decommission(&mut self, op: Uuid, principal: &str, expected_version: u64, node: NodeId) -> ControlResponse {
+        if self.policy.is_none() || self.initialized.is_none() {
+            return ControlResponse::Refused {
+                reason: "no placement has been initialized to decommission a member of".to_string(),
+            };
+        }
+        let Some(state) = self.members.get(&node) else {
+            return ControlResponse::Refused {
+                reason: format!("{node} is not a member of this cluster"),
+            };
+        };
+        match state.phase {
+            MemberPhase::Member => {}
+            // already leaving is applied and changes nothing: the first plan drains it
+            MemberPhase::Leaving => return self.applied(),
+            other => {
+                return ControlResponse::Refused {
+                    reason: format!("{node} is {}, and only a member can be decommissioned", other.name()),
+                };
+            }
+        }
+        if let Some(refusal) = self.check_version(expected_version) {
+            return refusal;
+        }
+        if let Some(refusal) = self.check_one_plan(Some(node)) {
+            return refusal;
+        }
+        self.topology_version += 1;
+        let version = self.topology_version;
+        let state = self.members.get_mut(&node).expect("checked above");
+        state.phase = MemberPhase::Leaving;
+        state.since = version;
+        self.record_plan(PlanRecord::new(op, PlanKind::Decommission { node }, principal, version));
+        self.applied()
+    }
+
+    /// Mark a member removing and record the plan that rebuilds its sets
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The operation, which is the plan's identity
+    /// * `principal` - Who asked
+    /// * `expected_version` - The topology version the request was written against
+    /// * `node` - The member
+    /// * `replacement` - The member to take its place first, if named
+    fn apply_remove(
+        &mut self,
+        op: Uuid,
+        principal: &str,
+        expected_version: u64,
+        node: NodeId,
+        replacement: Option<NodeId>,
+    ) -> ControlResponse {
+        if self.policy.is_none() || self.initialized.is_none() {
+            return ControlResponse::Refused {
+                reason: "no placement has been initialized to remove a member of".to_string(),
+            };
+        }
+        let Some(state) = self.members.get(&node) else {
+            return ControlResponse::Refused {
+                reason: format!("{node} is not a member of this cluster"),
+            };
+        };
+        // a live member is drained by a decommission, not torn out; a leaving one may be
+        // hurried out, and a down one replaced
+        let removable = state.health == MemberHealth::Down || state.phase == MemberPhase::Leaving;
+        match state.phase {
+            MemberPhase::Removed => {
+                return ControlResponse::Refused {
+                    reason: format!("{node} is already removed"),
+                };
+            }
+            MemberPhase::Removing => return self.applied(),
+            _ if !removable => {
+                return ControlResponse::Refused {
+                    reason: format!(
+                        "{node} is {} and a member; only a down or leaving member can be removed - decommission a live one",
+                        state.health.name()
+                    ),
+                };
+            }
+            _ => {}
+        }
+        // a replacement has to be a placeable member outside every set the member is in
+        if let Some(replacement) = replacement {
+            match self.members.get(&replacement) {
+                Some(state) if state.is_placeable() => {}
+                Some(state) => {
+                    return ControlResponse::Refused {
+                        reason: format!("{replacement} is {}, and only an up member can replace another", state.state_name()),
+                    };
+                }
+                None => {
+                    return ControlResponse::Refused {
+                        reason: format!("{replacement} is not a member of this cluster"),
+                    };
+                }
+            }
+            if replacement == node {
+                return ControlResponse::Refused {
+                    reason: format!("{node} cannot replace itself"),
+                };
+            }
+            let map = crate::server::map::TabletMap::from_state(self, None, &self.tables.clone());
+            let shared = map.rule_sets_served().into_iter().any(|(members, _)| {
+                members.iter().any(|member| member.node == node) && members.iter().any(|member| member.node == replacement)
+            });
+            if shared {
+                return ControlResponse::Refused {
+                    reason: format!("{replacement} already holds a set with {node}; a replacement has to be outside every set it would take"),
+                };
+            }
+        }
+        if let Some(refusal) = self.check_version(expected_version) {
+            return refusal;
+        }
+        if let Some(refusal) = self.check_one_plan(Some(node)) {
+            return refusal;
+        }
+        self.topology_version += 1;
+        let version = self.topology_version;
+        let state = self.members.get_mut(&node).expect("checked above");
+        state.phase = MemberPhase::Removing;
+        state.since = version;
+        // the grace, if one runs, is over: the operator decided
+        if let Some(grace) = state.grace.as_mut() {
+            grace.expired = true;
+            grace.plan = Some(op);
+        }
+        self.record_plan(PlanRecord::new(op, PlanKind::Remove { node, replacement }, principal, version));
+        self.applied()
+    }
+
+    /// Suspend or resume a down member's grace
+    ///
+    /// # Arguments
+    ///
+    /// * `expected_version` - The topology version the request was written against
+    /// * `node` - The member
+    /// * `suspend` - Whether to suspend, or resume
+    fn apply_maintenance(&mut self, expected_version: u64, node: NodeId, suspend: bool) -> ControlResponse {
+        let Some(state) = self.members.get(&node) else {
+            return ControlResponse::Refused {
+                reason: format!("{node} is not a member of this cluster"),
+            };
+        };
+        let Some(grace) = state.grace.as_ref() else {
+            return ControlResponse::Refused {
+                reason: format!("{node} is under no grace to suspend; it is {} and the policy may not remove", state.state_name()),
+            };
+        };
+        if grace.expired {
+            return ControlResponse::Refused {
+                reason: format!("{node}'s grace has elapsed and it is removing; maintenance cannot suspend a removal"),
+            };
+        }
+        if let Some(refusal) = self.check_version(expected_version) {
+            return refusal;
+        }
+        if grace.suspended == suspend {
+            return self.applied();
+        }
+        self.topology_version += 1;
+        let state = self.members.get_mut(&node).expect("checked above");
+        if let Some(grace) = state.grace.as_mut() {
+            grace.suspended = suspend;
+        }
+        self.applied()
+    }
+
+    /// Record a rebalance plan
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The operation, which is the plan's identity
+    /// * `principal` - Who asked
+    /// * `expected_version` - The topology version the request was written against
+    fn apply_rebalance(&mut self, op: Uuid, principal: &str, expected_version: u64) -> ControlResponse {
+        if self.policy.is_none() || self.initialized.is_none() {
+            return ControlResponse::Refused {
+                reason: "no placement has been initialized to rebalance".to_string(),
+            };
+        }
+        if let Some(refusal) = self.check_version(expected_version) {
+            return refusal;
+        }
+        if let Some(refusal) = self.check_one_plan(None) {
+            return refusal;
+        }
+        self.topology_version += 1;
+        let version = self.topology_version;
+        self.record_plan(PlanRecord::new(op, PlanKind::Rebalance, principal, version));
+        self.applied()
+    }
+
+    /// Refuse a second plan on a member, or a second rebalance, while one is not done
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member the plan drains, or none for a rebalance
+    fn check_one_plan(&self, node: Option<NodeId>) -> Option<ControlResponse> {
+        let clash = self
+            .plans
+            .values()
+            .filter(|record| !record.is_done())
+            .find(|record| record.kind.drains() == node);
+        clash.map(|record| ControlResponse::Refused {
+            reason: match node {
+                Some(node) => format!("{node} is already under plan {} ({}), which is {}", record.op, record.kind.name(), record.phase.name()),
+                None => format!("a rebalance is already under way as plan {}, which is {}", record.op, record.phase.name()),
+            },
+        })
+    }
+
+    /// Keep a plan record, forgetting the oldest done ones past the bound
+    ///
+    /// # Arguments
+    ///
+    /// * `record` - The record
+    fn record_plan(&mut self, record: PlanRecord) {
+        self.plans.insert(record.op, record);
+        while self.plans.len() > KEPT_PLANS {
+            let oldest = self
+                .plans
+                .values()
+                .filter(|record| record.is_done())
+                .min_by_key(|record| record.requested_at)
+                .map(|record| record.op);
+            match oldest {
+                Some(op) => {
+                    self.plans.remove(&op);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// Record how much of a grace has elapsed, and the removal when it is over
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member
+    /// * `episode` - The down episode the count is of
+    /// * `elapsed_ms` - How much has elapsed
+    /// * `expire` - The plan to remove under, when the grace is over
+    fn apply_grace_elapsed(&mut self, node: NodeId, episode: Uuid, elapsed_ms: u64, expire: Option<Uuid>) -> ControlResponse {
+        let Some(state) = self.members.get(&node) else {
+            return ControlResponse::Refused {
+                reason: format!("{node} is not a member, so has no grace to count"),
+            };
+        };
+        let Some(grace) = state.grace.as_ref() else {
+            return ControlResponse::Refused {
+                reason: format!("{node} is under no grace"),
+            };
+        };
+        // a count of another episode, a suspended grace or one already over changes nothing
+        if grace.episode != episode {
+            return ControlResponse::Refused {
+                reason: format!("{node}'s grace is of episode {} and the count is of {episode}", grace.episode),
+            };
+        }
+        if grace.suspended || grace.expired {
+            return self.applied();
+        }
+        // elapsed time never goes backwards
+        if elapsed_ms < grace.elapsed_ms {
+            return self.applied();
+        }
+        let unchanged = elapsed_ms == grace.elapsed_ms && expire.is_none();
+        if unchanged {
+            return self.applied();
+        }
+        self.topology_version += 1;
+        let version = self.topology_version;
+        let state = self.members.get_mut(&node).expect("checked above");
+        let grace = state.grace.as_mut().expect("checked above");
+        grace.elapsed_ms = elapsed_ms;
+        if let Some(plan) = expire {
+            grace.expired = true;
+            grace.plan = Some(plan);
+            // the member is removing now, from wherever it stood, and its plan is recorded
+            state.phase = MemberPhase::Removing;
+            state.since = version;
+            self.record_plan(PlanRecord::new(plan, PlanKind::Expiry { node, episode }, "policy", version));
+        }
+        self.applied()
+    }
+
+    /// Record where a plan stands, as the leader says
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The plan
+    /// * `node` - The leader
+    /// * `incarnation` - The incarnation it leads at
+    /// * `progress` - What changed
+    fn apply_plan_progress(&mut self, op: Uuid, node: NodeId, incarnation: u64, progress: &PlanUpdate) -> ControlResponse {
+        let Some(member) = self.members.get(&node) else {
+            return ControlResponse::Refused {
+                reason: format!("{node} is not a member, so cannot drive a plan"),
+            };
+        };
+        if incarnation < member.record.incarnation {
+            return ControlResponse::Fenced {
+                node,
+                committed: member.record.incarnation,
+                offered: incarnation,
+            };
+        }
+        let version = self.topology_version + 1;
+        let Some(record) = self.plans.get_mut(&op) else {
+            return ControlResponse::Refused {
+                reason: format!("no plan {op} is recorded"),
+            };
+        };
+        // a done plan stays done, whatever a late leader says
+        if record.is_done() {
+            return self.applied();
+        }
+        match progress {
+            PlanUpdate::Steps { steps, blocked } => {
+                record.steps.extend(steps.iter().cloned());
+                record.replanned += 1;
+                record.blocked = blocked.as_ref().map(|reason| Blocked {
+                    reason: reason.clone(),
+                    since: version,
+                });
+                record.phase = if record.blocked.is_some() { PlanPhase::Blocked } else { PlanPhase::Running };
+            }
+            PlanUpdate::Step { tablet, op: moved, state } => {
+                // the live step for the set, or nothing to update
+                let Some(step) = record.steps.iter_mut().rev().find(|step| step.tablet == *tablet && step.is_live()) else {
+                    return self.applied();
+                };
+                if step.state == *state && step.op == *moved {
+                    return self.applied();
+                }
+                if moved.is_some() {
+                    step.op = *moved;
+                }
+                step.state = state.clone();
+            }
+            PlanUpdate::Blocked(reason) => {
+                let same = record.blocked.as_ref().map(|blocked| &blocked.reason) == reason.as_ref();
+                if same {
+                    return self.applied();
+                }
+                record.blocked = reason.as_ref().map(|reason| Blocked {
+                    reason: reason.clone(),
+                    since: version,
+                });
+                record.phase = if record.blocked.is_some() { PlanPhase::Blocked } else { PlanPhase::Running };
+            }
+            PlanUpdate::Finishing => {
+                if record.phase == PlanPhase::Finishing {
+                    return self.applied();
+                }
+                record.phase = PlanPhase::Finishing;
+                record.blocked = None;
+            }
+            PlanUpdate::Done(outcome) => {
+                record.phase = PlanPhase::Done;
+                record.blocked = None;
+                record.outcome = Some(outcome.clone());
+                // a drain that did not complete leaves its member where it stood: a leaving
+                // member is a member again, a removing one stays removing under its grace
+                if let (Some(node), false) = (record.kind.drains(), matches!(outcome, PlanOutcome::Completed { .. })) {
+                    if let Some(state) = self.members.get_mut(&node) {
+                        if state.phase == MemberPhase::Leaving {
+                            state.phase = MemberPhase::Member;
+                        }
+                    }
+                }
+            }
+        }
+        self.topology_version += 1;
+        self.applied()
+    }
+
+    /// Tombstone a removed member's identity
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member
+    /// * `op` - The plan that removed it
+    fn apply_tombstone(&mut self, node: NodeId, op: Option<Uuid>) -> ControlResponse {
+        let Some(state) = self.members.get(&node) else {
+            return ControlResponse::Refused {
+                reason: format!("{node} is not a member, so cannot be tombstoned"),
+            };
+        };
+        if state.phase == MemberPhase::Removed {
+            return self.applied();
+        }
+        if !matches!(state.phase, MemberPhase::Leaving | MemberPhase::Removing) {
+            return ControlResponse::Refused {
+                reason: format!("{node} is a plain member; only a leaving or removing member is tombstoned"),
+            };
+        }
+        // a member still holding a set is not out: its plan is what takes it out
+        let map = crate::server::map::TabletMap::from_state(self, None, &self.tables.clone());
+        if map.rule_sets_served().iter().any(|(members, _)| members.iter().any(|member| member.node == node)) {
+            return ControlResponse::Refused {
+                reason: format!("{node} still holds a replica set; its plan has to move every set before it is tombstoned"),
+            };
+        }
+        self.topology_version += 1;
+        let version = self.topology_version;
+        let state = self.members.get_mut(&node).expect("checked above");
+        state.phase = MemberPhase::Removed;
+        state.since = version;
+        state.grace = None;
+        state.episode = None;
+        let incarnation = state.record.incarnation;
+        self.tombstones.insert(
+            node,
+            Tombstone {
+                incarnation,
+                removed_at: version,
+                op,
+            },
+        );
+        self.applied()
     }
 
     /// Record a move of the replica set holding a tablet
@@ -1053,12 +1812,12 @@ impl ControlState {
                 reason: format!("{from} cannot replace itself"),
             };
         }
-        // the destination has to be an up member; the source a member at all
+        // the destination has to be an up member that is staying; the source a member at all
         match self.members.get(&to) {
-            Some(state) if state.health == MemberHealth::Up => {}
+            Some(state) if state.is_placeable() => {}
             Some(state) => {
                 return ControlResponse::Refused {
-                    reason: format!("{to} is {}, and only an up member can be moved to", state.health.name()),
+                    reason: format!("{to} is {}, and only an up member can be moved to", state.state_name()),
                 };
             }
             None => {
@@ -1302,6 +2061,12 @@ impl ControlState {
                 reason: "no cluster has been bootstrapped to observe a member of".to_string(),
             };
         }
+        // a removed identity never comes back, at any incarnation and by any door
+        if self.tombstones.contains_key(&record.node)
+            || self.members.get(&record.node).is_some_and(|state| state.phase == MemberPhase::Removed)
+        {
+            return ControlResponse::Removed { node: record.node };
+        }
         match self.members.get(&record.node) {
             // a node nobody admitted cannot observe itself in; the leader admits it first
             None if !admitting => ControlResponse::Refused {
@@ -1313,15 +2078,7 @@ impl ControlState {
                 let version = self.topology_version;
                 self.members.insert(
                     record.node,
-                    MemberState {
-                        record: record.clone(),
-                        health: MemberHealth::Joining,
-                        role: MemberRole::Learner,
-                        shards_failed: Vec::new(),
-                        quarantined: Vec::new(),
-                        since: version,
-                        episode: None,
-                    },
+                    MemberState::fresh(record.clone(), MemberHealth::Joining, MemberRole::Learner, version),
                 );
                 self.applied()
             }
@@ -1368,6 +2125,10 @@ impl ControlState {
                 if health_moved {
                     state.since = version;
                     state.episode = None;
+                    // back up under a removal keeps the removal; otherwise the grace is over
+                    if state.phase != MemberPhase::Removing {
+                        state.grace = None;
+                    }
                 }
                 self.applied()
             }
@@ -1436,18 +2197,12 @@ impl ControlState {
                         changed = true;
                     }
                 }
+                // a removed identity is never re-admitted by a configuration that still names it
+                None if self.tombstones.contains_key(node) => {}
                 None => {
                     self.members.insert(
                         *node,
-                        MemberState {
-                            record: record.clone(),
-                            health: MemberHealth::Joining,
-                            role,
-                            shards_failed: Vec::new(),
-                            quarantined: Vec::new(),
-                            since: self.topology_version + 1,
-                            episode: None,
-                        },
+                        MemberState::fresh(record.clone(), MemberHealth::Joining, role, self.topology_version + 1),
                     );
                     changed = true;
                 }
@@ -1510,6 +2265,37 @@ impl ControlState {
             .map(|(node, _)| *node)
             .collect()
     }
+
+    /// The plans not yet done, in request order
+    pub fn open_plans(&self) -> Vec<&PlanRecord> {
+        let mut plans: Vec<&PlanRecord> = self.plans.values().filter(|record| !record.is_done()).collect();
+        plans.sort_by_key(|record| record.requested_at);
+        plans
+    }
+
+    /// How many replica sets hold a copy on a member the cluster has given up on
+    ///
+    /// A removing or removed member's copy is one the cluster no longer counts; a set with
+    /// one is under-replicated until its plan rebuilds the copy elsewhere
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md)).
+    pub fn under_replicated_sets(&self) -> u32 {
+        if self.initialized.is_none() {
+            return 0;
+        }
+        let map = crate::server::map::TabletMap::from_state(self, None, &self.tables);
+        let gone: Vec<NodeId> = self
+            .members
+            .iter()
+            .filter(|(_, state)| matches!(state.phase, MemberPhase::Removing | MemberPhase::Removed))
+            .map(|(node, _)| *node)
+            .collect();
+        let short = map
+            .rule_sets_served()
+            .iter()
+            .filter(|(members, _)| members.iter().any(|member| gone.contains(&member.node)))
+            .count();
+        u32::try_from(short).unwrap_or(u32::MAX)
+    }
 }
 
 #[cfg(test)]
@@ -1519,7 +2305,7 @@ mod tests {
         MemberRole,
     };
     use crate::server::conf::Cluster;
-    use crate::shared::identity::{ClusterId, NodeId, TableId};
+    use crate::shared::identity::{ClusterId, GroupId, NodeId, TableId};
     use uuid::Uuid;
 
     /// A member record for tests
@@ -1533,6 +2319,7 @@ mod tests {
             control_shared: false,
             shards: 2,
             incarnation: 1,
+            weight: 0,
         }
     }
 
@@ -2256,6 +3043,314 @@ mod tests {
         // the released move is recorded against the set as the map served it when it was
         // asked, which the earlier move had already moved
         assert!(state.moves[&back].expected.iter().any(|member| member.node == d));
+    }
+
+    /// A member is decommissioned to leaving and removed to removing, a plain up member cannot
+    /// be removed, a second plan on it is refused, a late up on a removing member keeps the
+    /// removal, a tombstone needs its sets gone and then refuses the identity at observe and
+    /// admit at any incarnation, and a plan's progress moves its record
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+    #[test]
+    fn a_member_is_decommissioned_removed_and_tombstoned() {
+        use crate::server::control::plan::{PlanKind, PlanOutcome, PlanPhase, PlanStep, PlanUpdate, StepState};
+        use crate::server::control::types::MemberPhase;
+        let (mut state, _, node) = bootstrapped();
+        let (b, c, d) = (NodeId::mint(), NodeId::mint(), NodeId::mint());
+        for (other, name) in [(b, "b"), (c, "c"), (d, "d")] {
+            state.apply(&ControlCommand::Admit(member(other, name)));
+            state.apply(&ControlCommand::ObserveMember(member(other, name)));
+        }
+        let tables = vec![("Row".to_string(), TableId::of("Row"))];
+        let version = state.topology_version;
+        state.apply(&ControlCommand::Initialize {
+            op: Uuid::new_v4(),
+            principal: "alice".to_string(),
+            expected_version: version,
+            nodes: vec![node, b, c],
+            tables: tables.clone(),
+        });
+        let decommission = |op, expected_version, node| ControlCommand::Decommission {
+            op,
+            principal: "alice".to_string(),
+            expected_version,
+            node,
+        };
+        let remove = |op, expected_version, node, replacement| ControlCommand::Remove {
+            op,
+            principal: "alice".to_string(),
+            expected_version,
+            node,
+            replacement,
+        };
+        // a plain up member cannot be removed, only decommissioned; a stranger neither
+        let version = state.topology_version;
+        assert!(matches!(
+            state.apply(&remove(Uuid::new_v4(), version, b, None)),
+            ControlResponse::Refused { reason } if reason.contains("decommission a live one")
+        ));
+        assert!(matches!(
+            state.apply(&decommission(Uuid::new_v4(), version, NodeId::mint())),
+            ControlResponse::Refused { reason } if reason.contains("not a member")
+        ));
+        // decommissioned: leaving, with a plan recorded under the operation
+        let plan = Uuid::new_v4();
+        assert_eq!(state.apply(&decommission(plan, version, b)), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(state.members[&b].phase, MemberPhase::Leaving);
+        assert_eq!(state.members[&b].state_name(), "leaving");
+        assert!(!state.members[&b].is_placeable());
+        let record = &state.plans[&plan];
+        assert_eq!(record.kind, PlanKind::Decommission { node: b });
+        assert_eq!(record.phase, PlanPhase::Planned);
+        assert_eq!(state.open_plans().len(), 1);
+        // a leaving member cannot be moved to, and a second plan on it is refused by name
+        let version = state.topology_version;
+        assert!(matches!(
+            state.apply(&ControlCommand::Move { op: Uuid::new_v4(), principal: "alice".to_string(), expected_version: version, tablet: 0, from: c, to: b }),
+            ControlResponse::Refused { reason } if reason.contains("leaving")
+        ));
+        assert!(matches!(
+            state.apply(&remove(Uuid::new_v4(), version, b, None)),
+            ControlResponse::Refused { reason } if reason.contains("already under plan")
+        ));
+        // decommissioning it again is applied and changes nothing
+        assert_eq!(state.apply(&decommission(Uuid::new_v4(), version, b)), ControlResponse::Applied { topology_version: version });
+        // a tombstone while it still holds a set is refused
+        assert!(matches!(
+            state.apply(&ControlCommand::Tombstone { node: b, op: Some(plan) }),
+            ControlResponse::Refused { reason } if reason.contains("still holds")
+        ));
+        // the leader's progress: steps, then a step moving, then moved, then finishing
+        let progress = |progress| ControlCommand::PlanProgress { op: plan, node, incarnation: 1, progress };
+        let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
+        let sets: Vec<u16> = map.rule_sets_served().iter().map(|(_, tablets)| tablets[0]).collect();
+        let steps: Vec<PlanStep> = sets.iter().map(|tablet| PlanStep { tablet: *tablet, from: b, to: d, bytes: 5, op: None, state: StepState::Pending }).collect();
+        let version = state.topology_version;
+        assert_eq!(state.apply(&progress(PlanUpdate::Steps { steps: steps.clone(), blocked: None })), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(state.plans[&plan].phase, PlanPhase::Running);
+        assert_eq!(state.plans[&plan].steps.len(), sets.len());
+        assert_eq!(state.plans[&plan].replanned, 1);
+        let moved = Uuid::new_v4();
+        state.apply(&progress(PlanUpdate::Step { tablet: sets[0], op: Some(moved), state: StepState::Moving }));
+        assert_eq!(state.plans[&plan].steps[0].op, Some(moved));
+        assert_eq!(state.plans[&plan].steps[0].state, StepState::Moving);
+        // the same step again moves nothing
+        let version = state.topology_version;
+        assert_eq!(state.apply(&progress(PlanUpdate::Step { tablet: sets[0], op: Some(moved), state: StepState::Moving })), ControlResponse::Applied { topology_version: version });
+        // blocked and unblocked by reason
+        state.apply(&progress(PlanUpdate::Blocked(Some("tablet 1: nowhere".to_string()))));
+        assert_eq!(state.plans[&plan].phase, PlanPhase::Blocked);
+        assert_eq!(state.plans[&plan].blocked.as_ref().map(|blocked| blocked.reason.as_str()), Some("tablet 1: nowhere"));
+        state.apply(&progress(PlanUpdate::Blocked(None)));
+        assert_eq!(state.plans[&plan].phase, PlanPhase::Running);
+        // an old run of the leader is fenced, an unknown plan refused
+        assert!(matches!(
+            state.apply(&ControlCommand::PlanProgress { op: plan, node, incarnation: 0, progress: PlanUpdate::Finishing }),
+            ControlResponse::Fenced { .. }
+        ));
+        assert!(matches!(
+            state.apply(&ControlCommand::PlanProgress { op: Uuid::new_v4(), node, incarnation: 1, progress: PlanUpdate::Finishing }),
+            ControlResponse::Refused { .. }
+        ));
+        // a decommission that fails puts the member back; a fresh one is planned again
+        state.apply(&progress(PlanUpdate::Done(PlanOutcome::Failed { reason: "gave up".to_string() })));
+        assert!(state.plans[&plan].is_done());
+        assert_eq!(state.members[&b].phase, MemberPhase::Member);
+        // a done plan stays done
+        let version = state.topology_version;
+        assert_eq!(state.apply(&progress(PlanUpdate::Finishing)), ControlResponse::Applied { topology_version: version });
+        // now the removal path: b called down under the grace, then removed at an operator's word
+        let episode = Uuid::new_v4();
+        state.apply(&ControlCommand::SetHealth { node: b, health: MemberHealth::Down, incarnation: 1, episode: Some(episode) });
+        assert!(state.members[&b].grace.as_ref().is_some_and(|grace| grace.episode == episode && grace.elapsed_ms == 0));
+        // a replacement has to be a placeable member outside every set of the member
+        let version = state.topology_version;
+        assert!(matches!(
+            state.apply(&remove(Uuid::new_v4(), version, b, Some(c))),
+            ControlResponse::Refused { reason } if reason.contains("already holds a set")
+        ));
+        assert!(matches!(
+            state.apply(&remove(Uuid::new_v4(), version, b, Some(NodeId::mint()))),
+            ControlResponse::Refused { reason } if reason.contains("not a member")
+        ));
+        let removal = Uuid::new_v4();
+        assert_eq!(state.apply(&remove(removal, version, b, Some(d))), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(state.members[&b].phase, MemberPhase::Removing);
+        assert_eq!(state.members[&b].state_name(), "removing");
+        assert!(state.members[&b].grace.as_ref().is_some_and(|grace| grace.expired && grace.plan == Some(removal)));
+        assert_eq!(state.plans[&removal].kind, PlanKind::Remove { node: b, replacement: Some(d) });
+        assert_eq!(state.under_replicated_sets(), u32::try_from(sets.len()).unwrap());
+        // a late up keeps the removal, and its grace with it
+        state.apply(&ControlCommand::ObserveMember(member(b, "b")));
+        assert_eq!(state.members[&b].health, MemberHealth::Up);
+        assert_eq!(state.members[&b].phase, MemberPhase::Removing);
+        assert!(state.members[&b].grace.is_some());
+        // maintenance cannot suspend a removal
+        assert!(matches!(
+            state.apply(&ControlCommand::Maintenance { op: Uuid::new_v4(), principal: "alice".to_string(), expected_version: state.topology_version, node: b, suspend: true }),
+            ControlResponse::Refused { reason } if reason.contains("cannot suspend a removal")
+        ));
+        // every set moved to d through the moves the plan issues; the configurations say so
+        for tablet in &sets {
+            let op = Uuid::new_v4();
+            let version = state.topology_version;
+            assert_eq!(
+                state.apply(&ControlCommand::Move { op, principal: format!("plan {removal}"), expected_version: version, tablet: *tablet, from: b, to: d }),
+                ControlResponse::Applied { topology_version: version + 1 }
+            );
+            let groups: Vec<GroupId> = state.moves[&op].groups.keys().copied().collect();
+            for group in groups {
+                state.apply(&ControlCommand::MoveProgress {
+                    op,
+                    group,
+                    node,
+                    incarnation: 1,
+                    progress: crate::server::control::migrate::GroupMove {
+                        phase: crate::server::control::migrate::MovePhase::Activated,
+                        driver: Some(node),
+                        config: Some(3),
+                        stats: crate::server::control::migrate::MoveStats::default(),
+                        outcome: None,
+                    },
+                });
+            }
+        }
+        let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
+        assert!(map.rule_sets_served().iter().all(|(members, _)| members.iter().all(|member| member.node != b)));
+        assert_eq!(state.under_replicated_sets(), 0);
+        // tombstoned: removed, the grace gone, the identity refused at observe and admit at
+        // any incarnation, and never re-added by a configuration naming it
+        let version = state.topology_version;
+        assert_eq!(state.apply(&ControlCommand::Tombstone { node: b, op: Some(removal) }), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(state.members[&b].phase, MemberPhase::Removed);
+        assert_eq!(state.members[&b].state_name(), "removed");
+        assert!(state.members[&b].grace.is_none());
+        assert_eq!(state.tombstones[&b].op, Some(removal));
+        assert_eq!(state.apply(&ControlCommand::Tombstone { node: b, op: Some(removal) }), ControlResponse::Applied { topology_version: version + 1 });
+        let mut later = member(b, "b");
+        later.incarnation = 9;
+        assert_eq!(state.apply(&ControlCommand::ObserveMember(later.clone())), ControlResponse::Removed { node: b });
+        assert_eq!(state.apply(&ControlCommand::Admit(later)), ControlResponse::Removed { node: b });
+        assert_eq!(state.apply(&ControlCommand::SetHealth { node: b, health: MemberHealth::Up, incarnation: 9, episode: None }), ControlResponse::Removed { node: b });
+        assert!(matches!(
+            state.apply(&remove(Uuid::new_v4(), state.topology_version, b, None)),
+            ControlResponse::Refused { reason } if reason.contains("already removed")
+        ));
+        assert!(matches!(
+            state.apply(&decommission(Uuid::new_v4(), state.topology_version, b)),
+            ControlResponse::Refused { reason } if reason.contains("removed")
+        ));
+        // a membership entry still naming it does not bring it back
+        let mut nodes = std::collections::BTreeMap::new();
+        nodes.insert(node, member(node, "a"));
+        nodes.insert(c, member(c, "c"));
+        state.members.remove(&b);
+        nodes.insert(b, member(b, "b"));
+        let membership = openraft::Membership::new(vec![[node, c].into_iter().collect()], nodes).expect("a membership");
+        state.observe_membership(&membership);
+        assert!(!state.members.contains_key(&b));
+        // a rebalance is one at a time, and done with nothing is done
+        let version = state.topology_version;
+        let rebalance = Uuid::new_v4();
+        assert_eq!(
+            state.apply(&ControlCommand::Rebalance { op: rebalance, principal: "alice".to_string(), expected_version: version }),
+            ControlResponse::Applied { topology_version: version + 1 }
+        );
+        assert!(matches!(
+            state.apply(&ControlCommand::Rebalance { op: Uuid::new_v4(), principal: "alice".to_string(), expected_version: version + 1 }),
+            ControlResponse::Refused { reason } if reason.contains("already under way")
+        ));
+        state.apply(&ControlCommand::PlanProgress { op: rebalance, node, incarnation: 1, progress: PlanUpdate::Done(PlanOutcome::Nothing { reason: "balanced".to_string() }) });
+        assert!(state.plans[&rebalance].is_done());
+        // the removal is the one plan still open until the leader says it is done
+        assert_eq!(state.open_plans().len(), 1);
+        let completed = state.plans[&removal].completed();
+        state.apply(&ControlCommand::PlanProgress { op: removal, node, incarnation: 1, progress: PlanUpdate::Done(completed) });
+        assert!(state.open_plans().is_empty());
+        assert!(state.tombstones.contains_key(&b), "a completed removal leaves the tombstone");
+    }
+
+    /// A grace opens with a down episode, its count is monotonic and of its own episode, a
+    /// suspended one is neither counted nor expired, a resumed one continues, and expiry
+    /// happens once and records the plan ([F46](../../../../docs/src/features/capacity-rebalancing.md), Q7)
+    #[test]
+    fn grace_elapsed_is_monotonic_and_expires_once() {
+        use crate::server::control::plan::PlanKind;
+        use crate::server::control::types::MemberPhase;
+        let (mut state, _, node) = bootstrapped();
+        let b = NodeId::mint();
+        state.apply(&ControlCommand::Admit(member(b, "b")));
+        state.apply(&ControlCommand::ObserveMember(member(b, "b")));
+        let version = state.topology_version;
+        state.apply(&ControlCommand::Initialize {
+            op: Uuid::new_v4(),
+            principal: "alice".to_string(),
+            expected_version: version,
+            nodes: vec![node, b],
+            tables: vec![("Row".to_string(), TableId::of("Row"))],
+        });
+        // no grace on a member that is up
+        assert!(state.members[&b].grace.is_none());
+        let elapsed = |episode, elapsed_ms, expire| ControlCommand::GraceElapsed { node: b, episode, elapsed_ms, expire };
+        assert!(matches!(state.apply(&elapsed(Uuid::new_v4(), 5, None)), ControlResponse::Refused { reason } if reason.contains("no grace")));
+        // down opens one at zero
+        let episode = Uuid::new_v4();
+        state.apply(&ControlCommand::SetHealth { node: b, health: MemberHealth::Down, incarnation: 1, episode: Some(episode) });
+        let grace = state.members[&b].grace.clone().expect("a grace");
+        assert_eq!((grace.episode, grace.elapsed_ms, grace.suspended, grace.expired), (episode, 0, false, false));
+        // a count of another episode is refused; a count moves the version once per change
+        assert!(matches!(state.apply(&elapsed(Uuid::new_v4(), 5, None)), ControlResponse::Refused { .. }));
+        let version = state.topology_version;
+        assert_eq!(state.apply(&elapsed(episode, 1000, None)), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(state.apply(&elapsed(episode, 1000, None)), ControlResponse::Applied { topology_version: version + 1 });
+        // never backwards
+        assert_eq!(state.apply(&elapsed(episode, 500, None)), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(state.members[&b].grace.as_ref().map(|grace| grace.elapsed_ms), Some(1000));
+        // suspended: not counted, and an operator's word alone
+        let maintenance = |suspend, expected_version| ControlCommand::Maintenance { op: Uuid::new_v4(), principal: "alice".to_string(), expected_version, node: b, suspend };
+        assert!(matches!(
+            state.apply(&ControlCommand::Maintenance { op: Uuid::new_v4(), principal: "alice".to_string(), expected_version: state.topology_version, node, suspend: true }),
+            ControlResponse::Refused { reason } if reason.contains("no grace")
+        ));
+        let version = state.topology_version;
+        assert_eq!(state.apply(&maintenance(true, version)), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(state.apply(&maintenance(true, version + 1)), ControlResponse::Applied { topology_version: version + 1 });
+        let version = state.topology_version;
+        assert_eq!(state.apply(&elapsed(episode, 5000, Some(Uuid::new_v4()))), ControlResponse::Applied { topology_version: version });
+        assert_eq!(state.members[&b].grace.as_ref().map(|grace| grace.elapsed_ms), Some(1000));
+        assert_eq!(state.members[&b].phase, MemberPhase::Member);
+        // resumed: continues from the committed count
+        assert_eq!(state.apply(&maintenance(false, version)), ControlResponse::Applied { topology_version: version + 1 });
+        state.apply(&elapsed(episode, 2000, None));
+        assert_eq!(state.members[&b].grace.as_ref().map(|grace| grace.elapsed_ms), Some(2000));
+        // a return clears the grace; a second episode is a fresh one
+        state.apply(&ControlCommand::ObserveMember(member(b, "b")));
+        assert!(state.members[&b].grace.is_none());
+        let second = Uuid::new_v4();
+        state.apply(&ControlCommand::SetHealth { node: b, health: MemberHealth::Down, incarnation: 1, episode: Some(second) });
+        assert_eq!(state.members[&b].grace.as_ref().map(|grace| (grace.episode, grace.elapsed_ms)), Some((second, 0)));
+        assert!(matches!(state.apply(&elapsed(episode, 3000, None)), ControlResponse::Refused { .. }));
+        // expiry: once, removing under the plan named, and a second word changes nothing
+        let plan = Uuid::new_v4();
+        let version = state.topology_version;
+        assert_eq!(state.apply(&elapsed(second, 9000, Some(plan))), ControlResponse::Applied { topology_version: version + 1 });
+        let grace = state.members[&b].grace.clone().expect("a grace");
+        assert!(grace.expired);
+        assert_eq!(grace.plan, Some(plan));
+        assert_eq!(state.members[&b].phase, MemberPhase::Removing);
+        assert_eq!(state.plans[&plan].kind, PlanKind::Expiry { node: b, episode: second });
+        assert_eq!(state.plans[&plan].principal, "policy");
+        assert_eq!(state.apply(&elapsed(second, 9500, Some(Uuid::new_v4()))), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(state.plans.len(), 1);
+        // and a policy that never removes opens no grace at all
+        let mut never = ControlState::default();
+        let mut policy = Cluster::default().policy();
+        policy.auto_remove_after = None;
+        let cluster = ClusterId::mint();
+        never.apply(&ControlCommand::Bootstrap { cluster, policy, member: member(node, "a") });
+        never.apply(&ControlCommand::Admit(member(b, "b")));
+        never.apply(&ControlCommand::ObserveMember(member(b, "b")));
+        never.apply(&ControlCommand::SetHealth { node: b, health: MemberHealth::Down, incarnation: 1, episode: Some(Uuid::new_v4()) });
+        assert!(never.members[&b].grace.is_none());
     }
 
     /// A membership entry sets roles, admits configured strangers as joining, and moves once

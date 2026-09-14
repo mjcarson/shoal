@@ -253,6 +253,74 @@ impl ReplicationLink {
     }
 }
 
+/// A token bucket over bytes, refilled from the clock, that paces every stream a node sends
+///
+/// One per shard network, across every stream and every group, so a node's snapshot traffic
+/// is bounded whatever it is feeding - a move's learner, a returning member, a repair. Zero
+/// is unlimited ([F46](../../../../docs/src/features/capacity-rebalancing.md)). Per device is
+/// not built: a node with two storage devices shares one budget.
+#[derive(Debug)]
+pub struct RateLimiter {
+    /// Bytes per second, or zero for no limit
+    rate: u64,
+    /// Bytes that may be taken now
+    tokens: f64,
+    /// When the bucket was last refilled
+    refilled: Instant,
+    /// The most the bucket holds: one second's worth
+    burst: f64,
+}
+
+impl RateLimiter {
+    /// A bucket at a rate, full
+    ///
+    /// # Arguments
+    ///
+    /// * `rate` - Bytes per second, or zero for no limit
+    #[must_use]
+    pub fn new(rate: u64) -> Self {
+        // precision is not a concern for a byte budget
+        #[allow(clippy::cast_precision_loss)]
+        let burst = rate as f64;
+        RateLimiter {
+            rate,
+            tokens: burst,
+            refilled: Instant::now(),
+            burst,
+        }
+    }
+
+    /// Refill from the clock, and say how long a take of some bytes has to wait
+    ///
+    /// Takes the bytes when they are there - or when the bucket can never hold them at once,
+    /// in which case the debt is carried - and otherwise says how long until they will be.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bytes to take
+    /// * `now` - The time
+    pub fn take(&mut self, bytes: u64, now: Instant) -> Option<Duration> {
+        if self.rate == 0 {
+            return None;
+        }
+        // precision is not a concern for a byte budget
+        #[allow(clippy::cast_precision_loss)]
+        let wanted = bytes as f64;
+        #[allow(clippy::cast_precision_loss)]
+        let rate = self.rate as f64;
+        let elapsed = now.saturating_duration_since(self.refilled).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * rate).min(self.burst);
+        self.refilled = now;
+        if self.tokens >= wanted {
+            self.tokens -= wanted;
+            return None;
+        }
+        // short: the wait until the bucket has them, and the take is charged when it does
+        let short = wanted - self.tokens;
+        Some(Duration::from_secs_f64(short / rate))
+    }
+}
+
 /// The state every `ShardPeer` shares
 struct Shared {
     /// One link per peer node, opened on first use
@@ -271,6 +339,9 @@ struct Shared {
     /// Snapshot bytes sent per group and member, which a move's record is charged with
     /// ([F45](../../../../docs/src/features/replica-migration.md))
     stream_bytes: RefCell<HashMap<(GroupId, ShardAddr), u64>>,
+    /// The byte budget every stream this shard sends draws on
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+    limiter: RefCell<RateLimiter>,
     /// The map this shard holds, which is where every member's address comes from
     map: MapCell,
     /// Where particular members are dialled instead of where they advertise
@@ -305,7 +376,9 @@ impl ShardNetwork {
     /// * `replication` - The groups' bounds
     /// * `on_event` - Where a link delivers what it learns
     /// * `builder` - How to ask the shard loop for a snapshot file
+    /// * `stream_bytes_per_sec` - The byte budget every stream draws on, or zero for none
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         map: MapCell,
         dial: BTreeMap<NodeId, DialOverride>,
@@ -315,6 +388,7 @@ impl ShardNetwork {
         replication: Replication,
         on_event: Rc<dyn Fn(LinkEvent)>,
         builder: SnapshotBuilder,
+        stream_bytes_per_sec: u64,
     ) -> Self {
         ShardNetwork {
             shared: Rc::new(Shared {
@@ -325,6 +399,7 @@ impl ShardNetwork {
                 replication,
                 snapshots: RefCell::new(SnapshotStats::default()),
                 stream_bytes: RefCell::new(HashMap::new()),
+                limiter: RefCell::new(RateLimiter::new(stream_bytes_per_sec)),
                 map,
                 dial,
                 local,
@@ -998,6 +1073,19 @@ impl GroupPeer {
                 while offset < manifest.total {
                     // `usize` from `u64` is lossless on every target this runs on
                     let len = chunk_bytes.min(manifest.total - offset) as usize;
+                    // the byte budget first: a chunk waits for its tokens, and the wait is
+                    // charged to the stats ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+                    loop {
+                        let wait = network.shared.limiter.borrow_mut().take(len as u64, Instant::now());
+                        let Some(wait) = wait else {
+                            break;
+                        };
+                        if started.elapsed() >= deadline {
+                            return Err(SendError::from(unreachable("the snapshot transfer ran out of time waiting on its byte budget".to_string())));
+                        }
+                        network.shared.snapshots.borrow_mut().budget_wait_ns += u64::try_from(wait.as_nanos()).unwrap_or(u64::MAX);
+                        glommio::timer::sleep(wait).await;
+                    }
                     let read = file
                         .read_at(offset, len)
                         .await
@@ -1188,3 +1276,35 @@ impl std::fmt::Display for LinkFailed {
 }
 
 impl std::error::Error for LinkFailed {}
+
+#[cfg(test)]
+mod tests {
+    use super::RateLimiter;
+    use std::time::{Duration, Instant};
+
+    /// The bucket admits a second's worth at once, then paces at the rate; zero is unlimited
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+    #[test]
+    fn a_rate_limiter_paces_a_stream() {
+        let start = Instant::now();
+        let mut bucket = RateLimiter::new(1000);
+        // a full bucket takes a second's worth without waiting
+        assert_eq!(bucket.take(600, start), None);
+        assert_eq!(bucket.take(400, start), None);
+        // empty: the next take waits for its bytes at the rate
+        let wait = bucket.take(500, start).expect("an empty bucket waits");
+        assert!((wait.as_secs_f64() - 0.5).abs() < 0.01, "{wait:?}");
+        // and once the clock has moved that far the take goes through
+        assert_eq!(bucket.take(500, start + Duration::from_millis(500)), None);
+        // the bucket never holds more than a second's worth however long it rests
+        assert_eq!(bucket.take(1000, start + Duration::from_secs(10)), None);
+        assert!(bucket.take(1, start + Duration::from_secs(10)).is_some());
+        // a take larger than the burst waits for the whole of it beyond what is held
+        let mut bucket = RateLimiter::new(100);
+        let wait = bucket.take(1000, start).expect("waits");
+        assert!((wait.as_secs_f64() - 9.0).abs() < 0.01, "{wait:?}");
+        // zero is no limit at all
+        let mut unlimited = RateLimiter::new(0);
+        assert_eq!(unlimited.take(u64::MAX, start), None);
+    }
+}

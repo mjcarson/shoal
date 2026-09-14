@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use super::conf::cluster::{BootstrapPolicy, Consistency, DurationSpec};
 use super::control::migrate::{DataConfiguration, MoveRecord};
 use super::control::repair::{QuarantinedCopy, RepairRecord};
-use super::control::types::{ControlState, MemberHealth, MemberRole};
+use super::control::types::{ControlState, MemberHealth, MemberPhase, MemberRole};
 use super::peer::handshake::{Admission, PeerAddr, Verdict};
 use super::ring::{Ring, TABLET_COUNT};
 use super::shard::ShardContact;
@@ -66,6 +66,21 @@ pub struct MapMember {
     /// ([F44](../../../docs/src/features/repair.md))
     #[serde(default)]
     pub quarantined: Vec<QuarantinedCopy>,
+    /// Whether it is a plain member, leaving, removing or removed
+    /// ([F46](../../../docs/src/features/capacity-rebalancing.md))
+    #[serde(default)]
+    pub phase: MemberPhase,
+}
+
+impl MapMember {
+    /// The one name C3's six-state machine gives this member
+    #[must_use]
+    pub const fn state_name(&self) -> &'static str {
+        match self.phase {
+            MemberPhase::Member => self.health.name(),
+            other => other.name(),
+        }
+    }
 }
 
 /// Why a default write cannot be admitted right now
@@ -233,6 +248,7 @@ impl TabletMap {
                         incarnation: member.record.incarnation,
                         shards_failed: member.shards_failed.clone(),
                         quarantined: member.quarantined.clone(),
+                        phase: member.phase,
                     },
                 )
             })
@@ -587,6 +603,22 @@ impl TabletMap {
         sets
     }
 
+    /// Every replica set as it is served now, with the tablets under it
+    ///
+    /// The rule's sets overlaid by the configurations the moves left: what a plan reads to
+    /// know which members hold which set, and what a tombstone is judged against
+    /// ([F46](../../../docs/src/features/capacity-rebalancing.md)). In first-tablet order.
+    #[must_use]
+    pub fn rule_sets_served(&self) -> Vec<(Vec<ShardAddr>, Vec<u16>)> {
+        let mut sets: Vec<(Vec<ShardAddr>, Vec<u16>)> = self
+            .rule_sets()
+            .into_values()
+            .map(|tablets| (self.replicas_of(usize::from(tablets[0])), tablets))
+            .collect();
+        sets.sort_by_key(|(_, tablets)| tablets[0]);
+        sets
+    }
+
     /// The groups a node hosts, one per table and replica set it holds a member of
     ///
     /// Every node computes the same groups from the same map, and a shard builds only the ones
@@ -802,6 +834,8 @@ impl TabletMap {
                     shards: member.shards,
                     role: member.role.name().to_string(),
                     health: member.health.name().to_string(),
+                    phase: member.phase.name().to_string(),
+                    state: member.state_name().to_string(),
                     incarnation: member.incarnation,
                     shards_failed: member.shards_failed.clone(),
                     quarantined: member
@@ -967,6 +1001,7 @@ mod tests {
             control_shared: false,
             shards,
             incarnation,
+            weight: 0,
         }
     }
 
@@ -1278,6 +1313,7 @@ mod tests {
                 incarnation: 1,
                 shards_failed: Vec::new(),
                 quarantined: Vec::new(),
+                phase: super::MemberPhase::Member,
             },
         );
         assert!(!map.places(fourth));

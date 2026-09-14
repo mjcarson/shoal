@@ -621,6 +621,36 @@ fn default_migration_concurrent() -> u32 {
     1
 }
 
+/// The default bytes per second one node sends on snapshot streams, across every stream
+fn default_stream_bytes_per_sec() -> usize {
+    64 * 1024 * 1024
+}
+
+/// The default number of snapshot streams one shard installs at a time
+fn default_concurrent_streams() -> u32 {
+    2
+}
+
+/// The default bytes a node keeps free on its storage above what a stream would land
+fn default_disk_reserve() -> u64 {
+    1024 * 1024 * 1024
+}
+
+/// The default number of moves one member is the source of, and the destination of, at a time
+fn default_moves_per_node() -> u32 {
+    1
+}
+
+/// The default share of a member's target its load has to be over before a rebalance moves it
+fn default_hysteresis() -> f64 {
+    0.10
+}
+
+/// The default interval the control leader looks at its plans on
+fn default_plan_interval() -> DurationSpec {
+    DurationSpec(Duration::from_secs(5))
+}
+
 /// The migration settings, which are this node's alone
 ///
 /// A move feeds a learner, waits for it to catch up, writes the group's membership transition
@@ -653,6 +683,33 @@ pub struct Migration {
     /// How many group moves one shard drives at a time
     #[serde(default = "default_migration_concurrent")]
     pub concurrent: u32,
+    /// How many bytes per second this node sends on snapshot streams, across every stream
+    /// and every group; zero is unlimited
+    ///
+    /// One bucket per node, not per device: what bounds a move's cost to the foreground on
+    /// the sending side, and a returning member's feed with it
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md)).
+    #[serde(
+        default = "default_stream_bytes_per_sec",
+        deserialize_with = "utils::deserialize_byte_size"
+    )]
+    pub stream_bytes_per_sec: usize,
+    /// How many snapshot streams one shard of this node installs at a time
+    ///
+    /// A stream past the cap is refused at its begin and the sender's backoff tries again;
+    /// what keeps N sources from landing on one destination at once.
+    #[serde(default = "default_concurrent_streams")]
+    pub concurrent_streams: u32,
+    /// The bytes this node keeps free on its storage above what a stream would land
+    ///
+    /// Checked by the receiver before it accepts a stream and by the planner before it
+    /// places a set; independent of `replication.install_bytes`, which bounds partials held
+    /// rather than the disk under them.
+    #[serde(
+        default = "default_disk_reserve",
+        deserialize_with = "utils::deserialize_byte_size_u64"
+    )]
+    pub disk_reserve: u64,
 }
 
 impl Default for Migration {
@@ -663,6 +720,46 @@ impl Default for Migration {
             timeout: default_migration_timeout(),
             retire_after: default_retire_after(),
             concurrent: default_migration_concurrent(),
+            stream_bytes_per_sec: default_stream_bytes_per_sec(),
+            concurrent_streams: default_concurrent_streams(),
+            disk_reserve: default_disk_reserve(),
+        }
+    }
+}
+
+/// The rebalance settings, which are this node's alone and read by it when it leads
+///
+/// A plan is derived by the control leader from the members' weights and reported bytes and
+/// driven as ordinary moves; these bound how many at once and how often it looks, and how far
+/// a member has to be from its target before a rebalance moves anything
+/// ([F46](../../../../docs/src/features/capacity-rebalancing.md), Q8).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Rebalance {
+    /// How many moves one member may be the source of, and the destination of, at a time
+    #[serde(default = "default_moves_per_node")]
+    pub moves_per_node: u32,
+    /// The share of a member's target its load has to be over before it is a source
+    ///
+    /// What keeps a rebalance from chasing the last few bytes: a member within this of its
+    /// target is left alone, and two rebalances in a row derive the same nothing.
+    #[serde(default = "default_hysteresis")]
+    pub hysteresis: f64,
+    /// How often the control leader looks at its open plans
+    ///
+    /// No shorter than the detector's report interval, since the capacity it plans from
+    /// arrives on reports.
+    #[serde(default = "default_plan_interval")]
+    pub plan_interval: DurationSpec,
+}
+
+impl Default for Rebalance {
+    /// The defaults the configuration page writes down
+    fn default() -> Self {
+        Rebalance {
+            moves_per_node: default_moves_per_node(),
+            hysteresis: default_hysteresis(),
+            plan_interval: default_plan_interval(),
         }
     }
 }
@@ -774,6 +871,14 @@ pub struct Cluster {
     /// The principals allowed to change the cluster's policy
     #[serde(default)]
     pub admins: Vec<String>,
+    /// The share of the cluster's bytes this node is meant to hold, against the others' weights
+    ///
+    /// This node's alone, recorded when it observes itself, so a change is a restart. Absent
+    /// or zero is the node's shard count, which is the right weight for a cluster of like
+    /// machines; a node with twice the disk of its peers says `weight: 2` against their `1`
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md), Q8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<u32>,
     /// The certificate this node presents to its peers, and the authority it checks theirs against
     ///
     /// Present, every lane is mutual TLS 1.3 handed to the kernel, exactly as `networking.tls`
@@ -795,6 +900,10 @@ pub struct Cluster {
     /// ([F45](../../../../docs/src/features/replica-migration.md))
     #[serde(default)]
     pub migration: Migration,
+    /// The rebalance settings, which this node reads when it leads the control group
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+    #[serde(default)]
+    pub rebalance: Rebalance,
     /// Where this node dials particular members, keyed by their identity, when not where they advertise
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub dial: std::collections::BTreeMap<NodeId, DialOverride>,
@@ -820,11 +929,13 @@ impl Default for Cluster {
             primary_failover_after: default_primary_failover_after(),
             auto_remove_after: default_auto_remove_after(),
             admins: Vec::new(),
+            weight: None,
             tls: None,
             transport: Transport::default(),
             replication: Replication::default(),
             repair: Repair::default(),
             migration: Migration::default(),
+            rebalance: Rebalance::default(),
             dial: std::collections::BTreeMap::new(),
         }
     }
@@ -924,6 +1035,16 @@ impl Cluster {
     /// Set how long a Down node is kept, or `None` to never remove one
     pub fn auto_remove_after(mut self, grace: Option<Duration>) -> Self {
         self.auto_remove_after = grace.map(DurationSpec::from);
+        self
+    }
+
+    /// Set this node's placement weight ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `weight` - The weight, or none for the shard count
+    pub fn weight(mut self, weight: Option<u32>) -> Self {
+        self.weight = weight;
         self
     }
 
@@ -1154,6 +1275,36 @@ impl Cluster {
         if self.migration.concurrent == 0 {
             return Err(ServerError::Shoal(ShoalError::InvalidConfig(
                 "cluster.migration.concurrent is zero; at least one group move has to be driven at a time".to_string(),
+            )));
+        }
+        // a stream budget under a chunk would never admit one chunk
+        if self.migration.stream_bytes_per_sec > 0 && self.migration.stream_bytes_per_sec < self.replication.snapshot_chunk_bytes {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.migration.stream_bytes_per_sec is under replication.snapshot_chunk_bytes; a budget that cannot admit one chunk admits nothing".to_string(),
+            )));
+        }
+        // no streams at a time is no snapshots at all
+        if self.migration.concurrent_streams == 0 {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.migration.concurrent_streams is zero; at least one stream has to be installed at a time".to_string(),
+            )));
+        }
+        // no moves per node is no plan that can ever step
+        if self.rebalance.moves_per_node == 0 {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.rebalance.moves_per_node is zero; a plan needs at least one move per member at a time".to_string(),
+            )));
+        }
+        // a hysteresis is a share
+        if !(0.0..1.0).contains(&self.rebalance.hysteresis) {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.rebalance.hysteresis has to be at least 0 and under 1".to_string(),
+            )));
+        }
+        // the capacity a plan reads arrives on reports, so it cannot look more often than they come
+        if self.rebalance.plan_interval.duration() < Duration::from_millis(self.failure_detector.interval_ms) {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.rebalance.plan_interval is shorter than failure_detector.interval_ms; the capacity it plans from arrives on reports".to_string(),
             )));
         }
         // the retention budget has to hold the active segment and one sealed one, or every
@@ -1426,18 +1577,73 @@ mod tests {
         assert_eq!(defaults.timeout.duration(), Duration::from_secs(600));
         assert_eq!(defaults.retire_after.duration(), Duration::from_secs(300));
         assert_eq!(defaults.concurrent, 1);
+        // the transfer budgets and the reserve ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+        assert_eq!(defaults.stream_bytes_per_sec, 64 * 1024 * 1024);
+        assert_eq!(defaults.concurrent_streams, 2);
+        assert_eq!(defaults.disk_reserve, 1024 * 1024 * 1024);
         // a block naming every field
-        let parsed: super::Migration =
-            serde_yaml::from_str("catchup_lag: 8\ntimeout: \"20m\"\nretire_after: \"1m\"\nconcurrent: 2\n")
-                .expect("a full migration block parses");
+        let parsed: super::Migration = serde_yaml::from_str(
+            "catchup_lag: 8\ntimeout: \"20m\"\nretire_after: \"1m\"\nconcurrent: 2\nstream_bytes_per_sec: \"8MiB\"\nconcurrent_streams: 1\ndisk_reserve: \"2GiB\"\n",
+        )
+        .expect("a full migration block parses");
         assert_eq!(parsed.catchup_lag, 8);
         assert_eq!(parsed.timeout.duration(), Duration::from_secs(1200));
         assert_eq!(parsed.retire_after.duration(), Duration::from_secs(60));
         assert_eq!(parsed.concurrent, 2);
+        assert_eq!(parsed.stream_bytes_per_sec, 8 * 1024 * 1024);
+        assert_eq!(parsed.concurrent_streams, 1);
+        assert_eq!(parsed.disk_reserve, 2 * 1024 * 1024 * 1024);
+        // zero is an unlimited budget
+        let unlimited: super::Migration = serde_yaml::from_str("stream_bytes_per_sec: 0\n").expect("zero parses");
+        assert_eq!(unlimited.stream_bytes_per_sec, 0);
         // an empty block is the defaults, an unknown field is refused
         let empty: super::Migration = serde_yaml::from_str("{}").expect("an empty block parses");
         assert_eq!(empty, defaults);
         assert!(serde_yaml::from_str::<super::Migration>("budget: 1\n").is_err());
+    }
+
+    /// The rebalance block's defaults are the documented ones, every field parses, and the
+    /// bounds are refused by name ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+    #[test]
+    fn the_rebalance_block_parses_with_its_defaults() {
+        let defaults = super::Rebalance::default();
+        assert_eq!(defaults.moves_per_node, 1);
+        assert!((defaults.hysteresis - 0.10).abs() < f64::EPSILON);
+        assert_eq!(defaults.plan_interval.duration(), Duration::from_secs(5));
+        let parsed: super::Rebalance = serde_yaml::from_str("moves_per_node: 2\nhysteresis: 0.25\nplan_interval: \"2s\"\n")
+            .expect("a full rebalance block parses");
+        assert_eq!(parsed.moves_per_node, 2);
+        assert!((parsed.hysteresis - 0.25).abs() < f64::EPSILON);
+        assert_eq!(parsed.plan_interval.duration(), Duration::from_secs(2));
+        let empty: super::Rebalance = serde_yaml::from_str("{}").expect("an empty block parses");
+        assert_eq!(empty, defaults);
+        assert!(serde_yaml::from_str::<super::Rebalance>("weight: 3\n").is_err());
+        // the bounds: no moves, a hysteresis that is not a share, an interval under the reports
+        let mut none = Cluster::default().bootstrap(true);
+        none.rebalance.moves_per_node = 0;
+        let error = none.validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).expect_err("no moves per node was accepted");
+        assert!(format!("{error}").contains("moves_per_node"), "{error}");
+        let mut wide = Cluster::default().bootstrap(true);
+        wide.rebalance.hysteresis = 1.5;
+        let error = wide.validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).expect_err("a hysteresis over one was accepted");
+        assert!(format!("{error}").contains("hysteresis"), "{error}");
+        let mut eager = Cluster::default().bootstrap(true);
+        eager.rebalance.plan_interval = DurationSpec(Duration::from_millis(100));
+        let error = eager.validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).expect_err("a plan interval under the reports was accepted");
+        assert!(format!("{error}").contains("plan_interval"), "{error}");
+        // and the migration budgets: a budget under a chunk, no streams at a time
+        let mut trickle = Cluster::default().bootstrap(true);
+        trickle.migration.stream_bytes_per_sec = 1024;
+        let error = trickle.validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).expect_err("a budget under a chunk was accepted");
+        assert!(format!("{error}").contains("stream_bytes_per_sec"), "{error}");
+        let mut no_streams = Cluster::default().bootstrap(true);
+        no_streams.migration.concurrent_streams = 0;
+        let error = no_streams.validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).expect_err("no streams at a time was accepted");
+        assert!(format!("{error}").contains("concurrent_streams"), "{error}");
+        // the weight is this node's and parses beside the rest
+        let weighted: Cluster = serde_yaml::from_str("bootstrap: true\nweight: 3\n").expect("a weighted node parses");
+        assert_eq!(weighted.weight, Some(3));
+        assert_eq!(Cluster::default().weight, None);
     }
 
     /// The replication block's defaults are the documented ones, and every field parses

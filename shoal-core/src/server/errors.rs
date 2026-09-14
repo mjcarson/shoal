@@ -427,6 +427,12 @@ pub enum ShoalError {
     /// The fencing rule's other half: a run the cluster has replaced stops serving, since two
     /// runs of one identity cannot both be the replica it names.
     Fenced { node: NodeId, committed: u64, ours: u64 },
+    /// This node's identity has been removed from the cluster and tombstoned
+    ///
+    /// A removed member never rejoins under its identity, at any incarnation and from any
+    /// copy of its directory; the directory is left where it is and a replacement joins as a
+    /// new identity ([F46](../../../docs/src/features/capacity-rebalancing.md)).
+    Removed { node: NodeId },
     /// A command could not be committed because no control leader could be reached
     NoLeader { what: String },
     /// A joiner was refused admission, and why
@@ -569,6 +575,11 @@ impl std::fmt::Display for ShoalError {
                 "this node, {node}, is incarnation {ours} and the cluster has admitted \
                  incarnation {committed} of it; another run of this directory has replaced this \
                  one, so it stops"
+            ),
+            ShoalError::Removed { node } => write!(
+                f,
+                "this node, {node}, was removed from the cluster and its identity is tombstoned; \
+                 it cannot rejoin, and a replacement joins as a new identity"
             ),
             ShoalError::NoLeader { what } => write!(
                 f,

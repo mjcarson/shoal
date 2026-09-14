@@ -16,16 +16,22 @@
 //! - [`network`] is the factory that dials the committed member records over the control lane
 //! - [`listener`] accepts control peers and hands the membership RPCs to the loop
 //! - [`plane`] starts the thread, runs the group, joins, promotes, and answers the pool
+//! - [`capacity`] reads the free bytes a node reports and a receiver checks
+//! - [`plan`] and [`planner`] are the placement plans the leader records and derives
+//!   ([F46](../../../../docs/src/features/capacity-rebalancing.md))
 //!
 //! Standalone mode touches none of this. A server without a `cluster:` block spawns no thread,
 //! opens no group and writes no file under `control/`, and the shard path is unchanged.
 
+pub mod capacity;
 pub mod cores;
 pub mod detector;
 pub mod listener;
 pub mod migrate;
 pub mod network;
+pub mod plan;
 pub mod plane;
+pub mod planner;
 pub mod repair;
 pub mod runtime;
 pub mod store;

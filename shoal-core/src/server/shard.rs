@@ -3407,6 +3407,12 @@ where
         // runs on a task of openraft's ([F43](../../../docs/src/features/node-recovery.md))
         let builder_tx = self.shard_local_tx.clone_sync();
         let replication_conf = self.conf.cluster.as_ref().map(|cluster| cluster.replication.clone()).unwrap_or_default();
+        // the byte budget every stream this shard sends draws on ([F46](../../../docs/src/features/capacity-rebalancing.md))
+        let stream_budget = self
+            .conf
+            .cluster
+            .as_ref()
+            .map_or(0, |cluster| u64::try_from(cluster.migration.stream_bytes_per_sec).unwrap_or(u64::MAX));
         let network = ShardNetwork::new(
             self.map.clone(),
             setup.dial.clone(),
@@ -3423,6 +3429,7 @@ where
                     let _ = error;
                 }
             }),
+            stream_budget,
         );
         // bind the peer listener, every shard on the same port with SO_REUSEPORT
         let listener = peer::bind_reusable(setup.bind)?;

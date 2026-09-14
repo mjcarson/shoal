@@ -60,6 +60,13 @@ pub struct GroupReport {
     /// Why this shard's copy is quarantined, if it is ([F44](../../../../docs/src/features/repair.md))
     #[serde(default)]
     pub quarantined: Option<crate::server::control::repair::QuarantineReason>,
+    /// The bytes the table's archives hold for the group's tablets on this shard
+    ///
+    /// What a plan weighs a set by; a volatile group holds no archives and reports zero,
+    /// which the planner counts as a set of no measured size
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md)).
+    #[serde(default)]
+    pub bytes: u64,
 }
 
 /// What a shard's snapshots have done since it started
@@ -100,6 +107,21 @@ pub struct SnapshotStats {
     /// snapshots and by the rest through the log.
     #[serde(default)]
     pub entries_installed: u64,
+    /// Begins refused because the shard was installing as many streams as it may at once
+    /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+    #[serde(default)]
+    pub refused_budget: u64,
+    /// Begins refused because the storage was short of the disk reserve
+    #[serde(default)]
+    pub refused_reserve: u64,
+    /// The most streams the shard was assembling at once since it started
+    ///
+    /// Folded over a node as the largest of its shards', not their sum
+    #[serde(default)]
+    pub peak_streams: u64,
+    /// Nanoseconds the sender spent waiting on its byte budget, in all
+    #[serde(default)]
+    pub budget_wait_ns: u64,
 }
 
 impl SnapshotStats {
@@ -122,6 +144,10 @@ impl SnapshotStats {
         self.redone += other.redone;
         self.forced += other.forced;
         self.entries_installed += other.entries_installed;
+        self.refused_budget += other.refused_budget;
+        self.refused_reserve += other.refused_reserve;
+        self.peak_streams = self.peak_streams.max(other.peak_streams);
+        self.budget_wait_ns += other.budget_wait_ns;
     }
 }
 

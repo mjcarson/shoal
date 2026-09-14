@@ -775,3 +775,51 @@ fn a_torn_record_is_refused() {
         map.close_all().await.unwrap();
     });
 }
+
+// ========================================================================
+// Tablet bytes (F46)
+// ========================================================================
+
+/// The bytes per tablet follow the map: an insert counts, a replacement recounts, a removal
+/// uncounts, and a map saved and reopened counts the same
+///
+/// What a shard's report weighs a group by
+/// ([F46](../../../../../docs/src/features/capacity-rebalancing.md)).
+#[test]
+fn tablet_bytes_follow_the_map() {
+    use super::map::{ArchiveEntry, SerializedMap};
+    use crate::server::ring::Ring;
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let (conf, map) = archive_map(&temp_dir).await;
+        let archive = Uuid::new_v4();
+        // nothing archived is nothing held
+        let empty = map.tablet_bytes();
+        assert_eq!(empty.len(), crate::server::ring::TABLET_COUNT);
+        assert!(empty.iter().all(|bytes| *bytes == 0));
+        // two partitions of one tablet and one of another
+        let (a, b) = (7u64, 7u64 + (1 << 52));
+        let c = 9u64;
+        assert_eq!(Ring::tablet_of(a), Ring::tablet_of(b));
+        assert_ne!(Ring::tablet_of(a), Ring::tablet_of(c));
+        map.set_partition(a, ArchiveEntry { key: a, archive, offset: 0, size: 100 });
+        map.set_partition(b, ArchiveEntry { key: b, archive, offset: 100, size: 50 });
+        map.set_partition(c, ArchiveEntry { key: c, archive, offset: 150, size: 30 });
+        let bytes = map.tablet_bytes();
+        assert_eq!(bytes[Ring::tablet_of(a)], 150);
+        assert_eq!(bytes[Ring::tablet_of(c)], 30);
+        assert_eq!(bytes.iter().sum::<u64>(), 180);
+        // a replacement recounts, a removal uncounts
+        map.set_partition(a, ArchiveEntry { key: a, archive, offset: 200, size: 10 });
+        map.remove_partition(c);
+        let bytes = map.tablet_bytes();
+        assert_eq!(bytes[Ring::tablet_of(a)], 60);
+        assert_eq!(bytes[Ring::tablet_of(c)], 0);
+        // saved and reopened, the count is the map's
+        SerializedMap::save(&map).await.unwrap();
+        map.close_all().await.unwrap();
+        let reopened = ArchiveMap::new("shard-0", "TestRecord", &conf).await.unwrap();
+        assert_eq!(reopened.tablet_bytes(), bytes);
+        reopened.close_all().await.unwrap();
+    });
+}
