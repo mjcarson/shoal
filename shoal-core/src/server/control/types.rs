@@ -2208,6 +2208,15 @@ impl ControlState {
                 }
             }
         }
+        // a member the configuration no longer names votes in nothing: a removed one, taken
+        // out of the group ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+        let named: std::collections::BTreeSet<NodeId> = membership.nodes().map(|(node, _)| *node).collect();
+        for (node, state) in &mut self.members {
+            if !named.contains(node) && state.role != MemberRole::Learner {
+                state.role = MemberRole::Learner;
+                changed = true;
+            }
+        }
         if changed {
             self.topology_version += 1;
         }
@@ -3248,6 +3257,9 @@ mod tests {
         let membership = openraft::Membership::new(vec![[node, c].into_iter().collect()], nodes).expect("a membership");
         state.observe_membership(&membership);
         assert!(!state.members.contains_key(&b));
+        // a member the configuration no longer names votes in nothing
+        assert_eq!(state.members[&d].role, MemberRole::Learner);
+        assert_eq!(state.voters(), vec![node, c].into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>());
         // a rebalance is one at a time, and done with nothing is done
         let version = state.topology_version;
         let rebalance = Uuid::new_v4();

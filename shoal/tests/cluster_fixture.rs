@@ -9642,3 +9642,340 @@ async fn automatic_removal_and_rejoin_preserve_fencing() -> Result<(), FixtureEr
     }
     Ok(())
 }
+
+/// Three nodes at a factor of three, one lost past the grace: removing with a blocked plan
+/// naming the missing member, the desired factor still three, two copies serving reads and
+/// quorum writes, no tombstone and no copy dropped; a fourth identity joined rebuilds every
+/// set on it and completes the removal (C8 M9b)
+///
+/// The three-node RF=3 case [C8](../../docs/src/distributed/rebalancing.md) singles out:
+/// there is no fourth distinct node to rebuild on, so expiry cannot finish, and it says so
+/// rather than shrinking the factor or dropping a copy
+/// ([F46](../../docs/src/features/capacity-rebalancing.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn remove_without_replacement_capacity_stays_blocked() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(4, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .initialize(false)
+        .deferred_from(3)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .retire_after(Duration::from_secs(1))
+        .catchup_lag(0)
+        .detector_interval_ms(200)
+        .auto_remove_after(Some(Duration::from_secs(6)))
+        .plan_interval(Duration::from_millis(500))
+        .moves_per_node(3)
+        .start()
+        .await?;
+    cluster.initialize(&[0, 1, 2])?;
+    cluster.wait_voters(0, 3)?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let keys: Vec<u64> = (5000..5030).collect();
+    for key in &keys {
+        write_note(&addr0, *key, &format!("v1-{key}")).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // node two is lost for good; its grace elapses and it is removing
+    cluster.kill(2)?;
+    wait_member_state(&mut cluster, 0, 2, "down", Duration::from_secs(30))?;
+    let removing = wait_member_state(&mut cluster, 0, 2, "removing", Duration::from_secs(40))?;
+    let plan: uuid::Uuid = removing["grace"]["plan"].as_str().expect("a plan").parse().expect("a uuid");
+    // the plan is blocked naming the missing member, and stays so
+    let record = wait_plan_phase(&mut cluster, 0, plan, "Blocked", Duration::from_secs(30))?;
+    assert_eq!(record["phase"], "Blocked", "{record}");
+    let reason = record["blocked"]["reason"].as_str().unwrap_or_default().to_string();
+    assert!(reason.contains("a further member is needed"), "{record}");
+    assert!(record["steps"].as_array().is_some_and(Vec::is_empty), "{record}");
+    // the factor is still three, the shortfall is visible, nothing is tombstoned or dropped
+    let members = cluster.members(0)?;
+    assert_eq!(members["desired_rf"], 3);
+    assert_eq!(members["active_rf"], 3);
+    assert_eq!(members["under_replicated_sets"], 3, "{members}");
+    assert!(members["tombstones"].as_object().is_some_and(|tombstones| tombstones.is_empty()), "{members}");
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![3, 3, 3, 0]);
+    // the two survivors serve reads and quorum writes throughout
+    for key in &keys[..5] {
+        write_note_eventually(&addr0, *key, &format!("v2-{key}"), Duration::from_secs(20)).await?;
+    }
+    let addr1 = cluster.node(1).endpoints.client.to_string();
+    for key in &keys[..5] {
+        wait_note(&addr1, *key, Some(&format!("v2-{key}")), Duration::from_secs(20)).await?;
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    let record = plan_record_via(&mut cluster, 0, plan)?;
+    assert_eq!(record["phase"], "Blocked", "the plan moved on without a member to move to: {record}");
+    assert_eq!(member_view(&mut cluster, 0, 2)?["state_name"], "removing");
+    // a fourth identity joins: the plan runs, every set is rebuilt on it, node two is removed
+    cluster.start_deferred(3)?;
+    cluster.wait_joined(&[3])?;
+    let record = wait_plan_phase(&mut cluster, 0, plan, "Done", Duration::from_secs(240))?;
+    assert!(record["outcome"]["Completed"].is_object(), "{record}");
+    assert_eq!(record["outcome"]["Completed"]["moved"], 3, "{record}");
+    assert!(record["blocked"].is_null(), "{record}");
+    wait_member_state(&mut cluster, 0, 2, "removed", Duration::from_secs(60))?;
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![3, 3, 0, 3]);
+    let members = cluster.members(0)?;
+    assert_eq!(members["under_replicated_sets"], 0, "{members}");
+    assert_eq!(members["desired_rf"], 3);
+    let addr3 = cluster.node(3).endpoints.client.to_string();
+    for key in &keys {
+        let expected = if keys[..5].contains(key) { format!("v2-{key}") } else { format!("v1-{key}") };
+        wait_note(&addr3, *key, Some(&expected), Duration::from_secs(30)).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 3], "Note", Duration::from_secs(60))?;
+    cluster.wait_voters(0, 3)?;
+    assert_eq!(voter_indices(&mut cluster, 0)?, vec![0, 1, 3]);
+    for id in [0, 1, 3] {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// The committed elapsed grace is never lower after a control leader restart, and removal is
+/// neither early nor forgotten (C3 M9b)
+///
+/// Four nodes, three placed and a spare, a twelve second grace. Node one is killed and the
+/// leader counts; half way through, the control leader is killed and started again. The
+/// elapsed time read through the new leader is at least what was committed before, the
+/// member is removing no earlier than the grace after it was called down, and no later than
+/// the grace plus two increments and an election ([F46](../../docs/src/features/capacity-rebalancing.md), Q7).
+#[tokio::test(flavor = "multi_thread")]
+async fn removal_grace_survives_control_leader_restart() -> Result<(), FixtureError> {
+    let grace = Duration::from_secs(12);
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .detector_interval_ms(250)
+            .auto_remove_after(Some(grace))
+            .plan_interval(Duration::from_millis(500)),
+    )
+    .await?;
+    cluster.wait_voters(0, 3)?;
+    // node one dies and is called down; the grace opens
+    cluster.kill(1)?;
+    let down = wait_member_state(&mut cluster, 0, 1, "down", Duration::from_secs(30))?;
+    let called_down = Instant::now();
+    assert_eq!(down["grace"]["elapsed_ms"], 0, "{down}");
+    // half way through, the count has been committed at least once
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let committed_before = loop {
+        let view = member_view(&mut cluster, 0, 1)?;
+        let elapsed = view["grace"]["elapsed_ms"].as_u64().unwrap_or(0);
+        if elapsed >= 4000 {
+            break elapsed;
+        }
+        assert!(Instant::now() < deadline, "the grace was never counted: {view}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(committed_before < 12_000, "{committed_before}");
+    // the control leader is killed and started again
+    let leader = cluster.leader_index(0)?.expect("a leader");
+    assert_ne!(leader, 1);
+    cluster.kill(leader)?;
+    std::thread::sleep(Duration::from_secs(1));
+    cluster.restart(leader, NodeKind::Server)?;
+    cluster.wait_joined(&[leader])?;
+    let via = if leader == 0 { 2 } else { 0 };
+    cluster.wait_leader_among(via, &[0, 2, 3], Duration::from_secs(30))?;
+    // what the new leader holds is at least what was committed before, and never less after
+    let view = member_view(&mut cluster, via, 1)?;
+    let after = view["grace"]["elapsed_ms"].as_u64().unwrap_or(0);
+    assert!(after >= committed_before, "the count went backwards: {committed_before} then {after}: {view}");
+    assert_eq!(view["state_name"], "down", "{view}");
+    let mut last = after;
+    let deadline = Instant::now() + grace + Duration::from_secs(20);
+    let removing_at = loop {
+        let view = member_view(&mut cluster, via, 1)?;
+        let elapsed = view["grace"]["elapsed_ms"].as_u64().unwrap_or(0);
+        assert!(elapsed >= last, "the count went backwards: {last} then {elapsed}: {view}");
+        last = elapsed;
+        if view["state_name"] == "removing" {
+            break Instant::now();
+        }
+        assert!(Instant::now() < deadline, "the member was never removed: {view}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    // neither early nor forgotten: no sooner than the grace, no later than two increments and
+    // an election past it
+    let took = removing_at.saturating_duration_since(called_down);
+    assert!(took >= grace, "removed early: {took:?} of {grace:?}");
+    assert!(took <= grace + Duration::from_secs(3) + Duration::from_secs(8), "removed late: {took:?}");
+    assert_eq!(last, 12_000, "the expiry commits the whole grace");
+    for id in [0, 2, 3] {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// Maintenance holds a down member past its grace with a constant reported remaining deadline,
+/// and resumption removes it at that deadline (C3 M9b)
+#[tokio::test(flavor = "multi_thread")]
+async fn maintenance_suspends_automatic_removal() -> Result<(), FixtureError> {
+    let grace = Duration::from_secs(6);
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .detector_interval_ms(200)
+            .auto_remove_after(Some(grace))
+            .plan_interval(Duration::from_millis(500)),
+    )
+    .await?;
+    cluster.wait_voters(0, 3)?;
+    // maintenance on a member that is up is refused: there is no grace to suspend
+    let refused = cluster.node_mut(0).command("MAINTENANCE 1 on")?;
+    assert!(refused["error"].as_str().is_some_and(|error| error.contains("no grace")), "{refused}");
+    // node one dies; inside the grace, maintenance is switched on
+    cluster.kill(1)?;
+    wait_member_state(&mut cluster, 0, 1, "down", Duration::from_secs(30))?;
+    let reply = cluster.node_mut(0).command("MAINTENANCE 1 on")?;
+    assert!(reply["ok"].is_object(), "{reply}");
+    let suspended_at = Instant::now();
+    // past the grace it is still down, a member, and suspended, with a constant remaining
+    std::thread::sleep(grace + Duration::from_secs(2));
+    let first = member_view(&mut cluster, 0, 1)?;
+    assert_eq!(first["state_name"], "down", "{first}");
+    assert_eq!(first["phase"], "member", "{first}");
+    assert_eq!(first["grace"]["suspended"], true, "{first}");
+    let remaining = first["grace_remaining_ms"].as_u64().expect("a remaining deadline");
+    assert!(remaining > 0 && remaining <= 6000, "{first}");
+    std::thread::sleep(Duration::from_secs(1));
+    let second = member_view(&mut cluster, 0, 1)?;
+    assert_eq!(second["grace_remaining_ms"], first["grace_remaining_ms"], "the deadline moved while suspended: {second}");
+    assert_eq!(second["state_name"], "down");
+    // switched off, the count resumes from where it stood and the member is removing at
+    // about the remaining deadline
+    let reply = cluster.node_mut(0).command("MAINTENANCE 1 off")?;
+    assert!(reply["ok"].is_object(), "{reply}");
+    let resumed_at = Instant::now();
+    let removing = wait_member_state(&mut cluster, 0, 1, "removing", Duration::from_millis(remaining) + Duration::from_secs(6))?;
+    let took = resumed_at.elapsed();
+    assert!(took + Duration::from_millis(500) >= Duration::from_millis(remaining), "removed before the remaining deadline: {took:?} of {remaining}ms");
+    assert!(removing["grace"]["expired"].as_bool().unwrap_or(false), "{removing}");
+    let _ = suspended_at;
+    // and once removing, maintenance cannot bring it back
+    let refused = cluster.node_mut(0).command("MAINTENANCE 1 on")?;
+    assert!(refused["error"].as_str().is_some_and(|error| error.contains("cannot suspend a removal")), "{refused}");
+    for id in [0, 2, 3] {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// Four nodes at three with weights 3:1:1:1 rebalanced to within one set of the feasible
+/// weighted byte share, a second plan moves nothing and no move follows two intervals; three
+/// nodes at three report the full-copy constraint at once (C8 M9b)
+///
+/// The heavy node already holds every set, which is the most any member can hold, so its
+/// target is capped there and the rest is shared by weight over the three light ones: two
+/// sets each, one of them moving off each of the placed light nodes onto the spare
+/// ([F46](../../docs/src/features/capacity-rebalancing.md), Q8).
+#[tokio::test(flavor = "multi_thread")]
+async fn heterogeneous_placement_obeys_feasible_weights() -> Result<(), FixtureError> {
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .detector_interval_ms(200)
+            .plan_interval(Duration::from_millis(500))
+            .moves_per_node(3)
+            .weight(0, 3)
+            .weight(1, 1)
+            .weight(2, 1)
+            .weight(3, 1),
+    )
+    .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    // rows in every set, archived, so the bytes a set is weighed by are real
+    let keys: Vec<u64> = (6000..6090).collect();
+    for key in &keys {
+        write_note(&addr0, *key, &format!("{key}-{}", "x".repeat(200))).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for node in 0..3 {
+        compact_now(&mut cluster, node, "Note")?;
+    }
+    // the weights are reported, and the bytes held with them, once a report has landed
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let view = member_view(&mut cluster, 0, 1)?;
+        if view["held_bytes"].as_u64().is_some_and(|bytes| bytes > 0) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "node one never reported its bytes: {view}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(member_view(&mut cluster, 0, 0)?["weight"], 3);
+    assert_eq!(member_view(&mut cluster, 0, 3)?["weight"], 1);
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![3, 3, 3, 0]);
+    // the rebalance: two sets move onto the spare, one off each light placed node
+    let plan = plan_as_process(&mut cluster, 0, "REBALANCE")?;
+    let record = wait_plan_phase(&mut cluster, 0, plan, "Done", Duration::from_secs(180))?;
+    assert!(record["outcome"]["Completed"].is_object(), "{record}");
+    assert_eq!(record["outcome"]["Completed"]["moved"], 2, "{record}");
+    let steps = record["steps"].as_array().expect("steps");
+    let node0 = cluster.node_ids()[0].clone();
+    let node3 = cluster.node_ids()[3].clone();
+    assert!(steps.iter().all(|step| step["to"] == node3 && step["from"] != node0), "{record}");
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![3, 2, 2, 2]);
+    // held bytes: the heavy node most, the light ones within one set's bytes of each other.
+    // the spare was fed by log and holds its rows resident until it compacts, and what a set
+    // is weighed by is what the archives hold, so every node compacts first
+    for node in 0..4 {
+        compact_now(&mut cluster, node, "Note")?;
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    let held: Vec<u64> = (0..4).map(|node| member_view(&mut cluster, 0, node).map(|view| view["held_bytes"].as_u64().unwrap_or(0))).collect::<Result<_, _>>()?;
+    let set_bytes = held[0] / 3;
+    assert!(held[0] > held[1] && held[0] > held[2] && held[0] > held[3], "{held:?}");
+    for pair in [(1, 2), (2, 3), (1, 3)] {
+        let (a, b) = (held[pair.0], held[pair.1]);
+        assert!(a.abs_diff(b) <= set_bytes, "nodes {} and {} differ by more than a set: {held:?}", pair.0, pair.1);
+    }
+    // a second rebalance is nothing, and no move follows two intervals
+    let moves_before = cluster.node_mut(0).command("MAP")?["ok"]["moves"].as_array().map_or(0, Vec::len);
+    let again = plan_as_process(&mut cluster, 0, "REBALANCE")?;
+    let record = wait_plan_phase(&mut cluster, 0, again, "Done", Duration::from_secs(30))?;
+    assert!(record["outcome"]["Nothing"].is_object(), "{record}");
+    assert!(record["steps"].as_array().is_some_and(Vec::is_empty), "{record}");
+    std::thread::sleep(Duration::from_millis(1200));
+    let moves_after = cluster.node_mut(0).command("MAP")?["ok"]["moves"].as_array().map_or(0, Vec::len);
+    assert_eq!(moves_after, moves_before, "a move followed a rebalance that had nothing to do");
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![3, 2, 2, 2]);
+    for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    drop(cluster);
+    // the N = RF half: three nodes at three hold every set everywhere, and say so at once
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .detector_interval_ms(200)
+        .plan_interval(Duration::from_millis(500))
+        .weight(0, 3)
+        .start()
+        .await?;
+    let plan = plan_as_process(&mut cluster, 0, "REBALANCE")?;
+    let record = wait_plan_phase(&mut cluster, 0, plan, "Done", Duration::from_secs(30))?;
+    let reason = record["outcome"]["Nothing"]["reason"].as_str().unwrap_or_default().to_string();
+    assert!(reason.contains("every member holds every set"), "{record}");
+    assert!(record["steps"].as_array().is_some_and(Vec::is_empty), "{record}");
+    let again = plan_as_process(&mut cluster, 0, "REBALANCE")?;
+    let record = wait_plan_phase(&mut cluster, 0, again, "Done", Duration::from_secs(30))?;
+    assert!(record["outcome"]["Nothing"].is_object(), "{record}");
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
