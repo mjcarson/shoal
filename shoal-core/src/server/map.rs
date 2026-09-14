@@ -1000,6 +1000,7 @@ mod tests {
             control_core: 0,
             control_shared: false,
             shards,
+            physical: 0,
             incarnation,
             weight: 0,
         }

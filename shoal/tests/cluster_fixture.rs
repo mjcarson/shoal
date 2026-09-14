@@ -428,7 +428,7 @@ async fn node_identity_persists_and_wrong_cluster_is_refused() -> Result<(), Fix
     //
     // the claim itself counts one more start of the directory and writes that down, so the
     // bytes held to are the ones after it; a refusal is what must not move them
-    let identity = StorageMeta::claim(cluster.dir(0), marker.shards, ClusterIntent::Bootstrap)
+    let identity = StorageMeta::claim(cluster.dir(0), marker.shards, None, ClusterIntent::Bootstrap)
         .expect("the directory reopens under its own mode");
     assert_eq!(identity.node.to_string(), node);
     assert!(identity.incarnation > marker.incarnation, "a reopen did not count a start");

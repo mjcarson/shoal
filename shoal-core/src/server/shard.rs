@@ -51,6 +51,7 @@ use super::peer::{
 };
 use super::request_body::RequestBody;
 use super::database::ShoalDatabase;
+use super::hosting::Hosting;
 use super::map::{MapCell, TabletMap};
 use super::ring::Ring;
 use super::routing::ArchivedShardRouting;
@@ -1341,6 +1342,11 @@ pub(super) struct Shard<D: ShoalDatabase> {
     /// `None` on a standalone node, which replicates nothing
     /// ([F40](../../../docs/src/features/replication.md)).
     replication: Option<groups::Replication<D>>,
+    /// Which executor hosts each slot and each tablet on this node
+    ///
+    /// A frame that names a slot is dispatched to the executor hosting it, and a standalone
+    /// node's ring is built from the tablets ([F47](../../../docs/src/features/local-rehome.md)).
+    hosting: Arc<Hosting>,
 }
 
 impl<D: ShoalDatabase> Shard<D>
@@ -1359,6 +1365,7 @@ where
     /// * `comms` - The channels to the other shards on this node
     /// * `shard_id` - This shards id, minted by the pool so a failure here can still name it
     /// * `shard_count` - The number of shards on this node
+    /// * `hosting` - Which executor hosts each slot and tablet ([F47](../../../docs/src/features/local-rehome.md))
     /// * `peer_setup` - What this shard needs to dial and judge peers, on a cluster node
     /// * `control` - The control thread's request channel, on a cluster node
     #[instrument(name = "Shard::new", skip_all, err(Debug))]
@@ -1367,6 +1374,7 @@ where
         comms: Comms<D>,
         shard_id: usize,
         shard_count: usize,
+        hosting: Arc<Hosting>,
         peer_setup: Option<PeerSetup>,
         control: Option<kanal::Sender<ControlRequest>>,
     ) -> Result<Self, ServerError> {
@@ -1437,7 +1445,9 @@ where
                 }
             }
             None => {
-                let ring = Ring::new(shard_count)?;
+                // a standalone node owns its tablets as the hosting deals them, which is the
+                // ring of old until a rehome moved some ([F47](../../../docs/src/features/local-rehome.md))
+                let ring = Ring::from_hosting(&hosting)?;
                 (ring.clone(), ring, true, MapCell::default(), None)
             }
         };
@@ -1446,6 +1456,7 @@ where
             info,
             shard_id,
             conf: conf.clone(),
+            hosting,
             ring,
             comms,
             tables,
@@ -3870,6 +3881,7 @@ impl<S: ShoalDatabase> ShardSenders<S> {
 pub fn start<S: ShoalDatabase>(
     conf: Conf,
     cpus: CpuSet,
+    hosting: Arc<Hosting>,
     peer_setup: Option<PeerSetup>,
     control_requests: Option<kanal::Sender<crate::server::control::ControlRequest>>,
 ) -> Result<
@@ -3905,7 +3917,7 @@ where
         LocalExecutorPoolBuilder::new(PoolPlacement::MaxSpread(shard_count, Some(cpus)));
     // build and spawn our shards on all of remaining available cores
     let shards = executor_builder.on_all_shards(
-        enclose!((comms, should_shutdown, shard_counter, events, peer_setup, control_requests) move || {
+        enclose!((comms, should_shutdown, shard_counter, events, hosting, peer_setup, control_requests) move || {
             async move {
                 // mint this shards id here rather than in `Shard::new`, so that a failure in
                 // there can still be reported under the id it would have had
@@ -3914,7 +3926,7 @@ where
                 let outcome = async {
                     // build an empty shard
                     let shard: Shard<S> =
-                        Shard::new(&conf, comms, shard_id, shard_count, peer_setup, control_requests.clone()).await?;
+                        Shard::new(&conf, comms, shard_id, shard_count, hosting, peer_setup, control_requests.clone()).await?;
                     // start this shard
                     shard.start(should_shutdown.clone(), &events).await
                 }

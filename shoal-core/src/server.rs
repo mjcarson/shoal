@@ -20,10 +20,12 @@ pub mod conf;
 pub mod control;
 pub mod database;
 pub mod errors;
+pub mod hosting;
 pub mod map;
 pub mod messages;
 pub mod peer;
 pub mod meta;
+pub mod rehome;
 pub mod replication;
 pub mod request_body;
 pub mod ring;
@@ -41,7 +43,9 @@ pub use control::{ControlHandle, ControlPlacement, DataReadiness, JoinStatus, Re
 pub use map::TabletMap;
 pub use crate::shared::protocol::admin::{AdminKind, AdminRequest, AdminResponse};
 pub use errors::ServerError;
-pub use meta::{ClusterIntent, DirectoryLock, Identity, StorageMeta};
+pub use hosting::Hosting;
+pub use meta::{ClusterIntent, DirectoryLock, Identity, PendingRehome, StorageMeta};
+pub use rehome::RehomeReport;
 pub use shard::ShardEvent;
 
 use crate::server::errors::ShoalError;
@@ -110,6 +114,10 @@ pub struct ShoalPool<S: ShoalDatabase> {
     control_tx: kanal::Sender<messages::ServerMsg<S>>,
     /// A sync sender to every shard's mesh channel, for a test to fail one
     shard_txs: Vec<kanal::Sender<messages::ServerMsg<S>>>,
+    /// Which executor hosts each slot and each tablet ([F47](../../docs/src/features/local-rehome.md))
+    hosting: Arc<Hosting>,
+    /// What the rehome this start ran moved, if the executor count had changed
+    rehome: Option<RehomeReport>,
     /// The database this shoal pool is handling
     phantom: PhantomData<S>,
 }
@@ -221,7 +229,12 @@ where
             Some(_) => ClusterIntent::Join,
             None => ClusterIntent::Standalone,
         };
-        let identity = StorageMeta::claim(&root, cpus.len(), intent)?;
+        //
+        // since F47 a changed core count is not a mismatch: the claim reports the rehome the
+        // files need and it runs below, before any shard starts. a cluster node's slots are
+        // claimed here too, once ([F47](../../docs/src/features/local-rehome.md))
+        let slots = conf.cluster.as_ref().and_then(|cluster| cluster.slots);
+        let identity = StorageMeta::claim(&root, cpus.len(), slots, intent)?;
         // remember how many shards readiness has to hear from, and where they run
         let shards = cpus.len();
         let mut shard_cpus: Vec<usize> = cpus.iter().map(|location| location.cpu).collect();
@@ -236,6 +249,7 @@ where
                     identity.clone(),
                     &conf,
                     bound.to_string(),
+                    identity.slots,
                     shards,
                     <S::ClientType as QuerySupport>::SCHEMA_ID,
                     <S::ClientType as QuerySupport>::table_ids()
@@ -248,6 +262,35 @@ where
             }
             None => None,
         };
+        // move the files between executor counts if the claim found that pending, before any
+        // shard can open them: on a cluster node the map says which slot every group is on,
+        // which is why this waits for the control plane ([F47](../../docs/src/features/local-rehome.md))
+        let rehome = match identity.rehome {
+            Some(_) => {
+                let map = match &control {
+                    Some(control) => Some(control.map()?),
+                    None => None,
+                };
+                rehome::Rehome::run::<S>(&conf, &identity, map, shard_cpus[0])?
+            }
+            None => None,
+        };
+        // the hosting the shards run under: what the directory says, or the identity, dealt
+        // onto the cores when a fresh directory claimed more slots than it has cores
+        let hosting = {
+            let mut hosting = Hosting::read_or_identity(&root, identity.slots)?;
+            if hosting.physical != shards {
+                hosting = hosting.plan(shards, conf.cluster.is_some())?;
+                hosting.write(&root)?;
+            }
+            if hosting.slots != identity.slots {
+                return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                    "the hosting file names {} slots and the marker {}",
+                    hosting.slots, identity.slots
+                ))));
+            }
+            Arc::new(hosting)
+        };
         // resolve what the shards need to talk to their peers, on a cluster node: what they say
         // about themselves, the map they start with, and where the listeners bind
         let peer_setup = match (&conf.cluster, &control) {
@@ -256,7 +299,7 @@ where
                 let schema_id = <S::ClientType as QuerySupport>::SCHEMA_ID;
                 let local = peer::Local::new(
                     &identity,
-                    shards,
+                    identity.slots,
                     schema_id,
                     conf.networking.max_frame_bytes,
                 );
@@ -284,6 +327,7 @@ where
         let (shard_handles, should_shutdown, events, senders) = shard::start::<S>(
             conf,
             cpus,
+            hosting.clone(),
             peer_setup,
             control.as_ref().map(ControlHandle::requests),
         )?;
@@ -309,9 +353,24 @@ where
             shard_cpus,
             control_tx,
             shard_txs,
+            hosting,
+            rehome,
             phantom: PhantomData,
         };
         Ok(pool)
+    }
+
+    /// The report of the rehome this start ran, if the executor count had changed
+    ///
+    /// What moved and what it cost ([F47](../../docs/src/features/local-rehome.md)); none when
+    /// the files were already laid out for this many executors.
+    pub fn rehome(&self) -> Option<&RehomeReport> {
+        self.rehome.as_ref()
+    }
+
+    /// Which executor hosts each slot and each tablet on this node
+    pub fn hosting(&self) -> &Hosting {
+        &self.hosting
     }
 
     /// The address the shards bind

@@ -376,13 +376,55 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         Ok(())
     }
 
+    /// Fold intent logs into the archives and stop, for a rehome
+    ///
+    /// Each log is compacted exactly as a job would compact it - read, applied over the
+    /// archived partitions, written as records, its map entries synced, the log deleted - and
+    /// then the compactor shuts down, leaving the shard's data all archives and map. The
+    /// evictable marks it sends go to a channel nothing reads, since no table is resident
+    /// ([F47](../../../../../docs/src/features/local-rehome.md)). Returns how many partitions
+    /// were written.
+    ///
+    /// # Arguments
+    ///
+    /// * `logs` - The intent logs, oldest generation first, the active log last
+    #[instrument(name = "FileSystemCompactor::fold", skip_all, err(Debug))]
+    pub(crate) async fn fold(mut self, logs: Vec<PathBuf>) -> Result<u64, ServerError>
+    where
+        <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+        for<'a> <T::Intent as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >,
+    {
+        // every log in the order it was written, each folded whole before the next
+        let mut folded = 0u64;
+        for (generation, path) in logs.into_iter().enumerate() {
+            // the generation is only what the evictable mark carries, and nothing reads it here
+            folded += self.compact_intent(path, generation as u64 + 1).await?;
+        }
+        // leave the map and the archives consistent on disk
+        self.shutdown().await?;
+        Ok(folded)
+    }
+
     /// Compact an intent log down
+    ///
+    /// Returns how many partitions were written.
     ///
     /// # Arguments
     ///
     /// * `path` - The path to the intent log to compact
     #[instrument(name = "FileSystemCompactor::compact_intent", skip_all, err(Debug))]
-    async fn compact_intent(&mut self, path: PathBuf, generation: u64) -> Result<(), ServerError>
+    async fn compact_intent(&mut self, path: PathBuf, generation: u64) -> Result<u64, ServerError>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
         for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
@@ -436,10 +478,12 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         // above: write_partition syncs everything it wrote before returning, and a log
         // we compacted nothing from has nothing left to make durable
         glommio::io::remove(path).await?;
+        // how many partitions this log wrote, for a fold's count
+        let written = u64::try_from(partitions.len()).unwrap_or(u64::MAX);
         // tell our shard this generation is now durable even if it was empty, since
         // that is what tells our table how far its data has been compacted
         self.send_mark_evictables(generation, partitions).await?;
-        Ok(())
+        Ok(written)
     }
 
     /// Merge this table's frames of a sealed WAL segment into its archives
@@ -1188,7 +1232,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             // handle this job;
             match job.clone() {
                 CompactionJob::IntentLog { path, generation } => {
-                    self.compact_intent(path, generation).await?
+                    let _ = self.compact_intent(path, generation).await?;
                 }
                 CompactionJob::Segment {
                     path,

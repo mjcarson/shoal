@@ -637,6 +637,40 @@ pub trait StorageSupport: Sized {
     /// * `conf` - The shoal config to get settings from
     fn get_settings<T: PartitionKeySupport>(conf: &Conf) -> Result<Self::Settings, ServerError>;
 
+    /// Fold every intent log a shard left for a table into its archives, with no table resident
+    ///
+    /// The rehome's first step on a standalone node
+    /// ([F47](../../../docs/src/features/local-rehome.md)): after it the shard's data for the
+    /// table is archives and a map, which every later step copies as opaque bytes. An engine
+    /// with no logs folds nothing. Returns how many partitions were written.
+    ///
+    /// # Arguments
+    ///
+    /// * `shard_name` - The name of the shard whose logs are folded
+    /// * `shard_table_name` - The table, as the shard's messages name it
+    /// * `conf` - The Shoal config
+    #[allow(async_fn_in_trait)]
+    async fn fold_intents<P: IntentReadSupport<R> + 'static, R: PartitionKeySupport + 'static>(
+        shard_name: &str,
+        shard_table_name: <Self::Database as ShoalDatabase>::TableNames,
+        conf: &Conf,
+    ) -> Result<u64, ServerError>
+    where
+        <P as Archive>::Archived: rkyv::Deserialize<P, Strategy<Pool, rkyv::rancor::Error>>,
+        <R as Archive>::Archived: rkyv::Deserialize<R, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <P as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+        for<'a> <P::Intent as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >;
+
     /// Commit an operation to this storages intent log
     ///
     /// # Arguments

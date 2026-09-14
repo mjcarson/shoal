@@ -879,6 +879,18 @@ pub struct Cluster {
     /// ([F46](../../../../docs/src/features/capacity-rebalancing.md), Q8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<u32>,
+    /// How many slots this node claims, read once at the first claim of its directory
+    ///
+    /// A slot is the shard every peer records for this node: the shard in every address the
+    /// placement rule mints, the modulus of the rule, and so the identity of every replica
+    /// set the node is in. Absent, the node claims one slot per core, which is today's layout
+    /// at today's cost; above the cores it reserves headroom, so the node can later run more
+    /// executors than it starts with; below the cores it is refused. On an established
+    /// directory a value that differs from what was claimed is refused by name, since the
+    /// slots cannot move without re-cutting every set on every peer
+    /// ([F47](../../../../docs/src/features/local-rehome.md)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slots: Option<usize>,
     /// The certificate this node presents to its peers, and the authority it checks theirs against
     ///
     /// Present, every lane is mutual TLS 1.3 handed to the kernel, exactly as `networking.tls`
@@ -930,6 +942,7 @@ impl Default for Cluster {
             auto_remove_after: default_auto_remove_after(),
             admins: Vec::new(),
             weight: None,
+            slots: None,
             tls: None,
             transport: Transport::default(),
             replication: Replication::default(),
@@ -1048,6 +1061,16 @@ impl Cluster {
         self
     }
 
+    /// Set how many slots this node claims at its first claim ([F47](../../../../docs/src/features/local-rehome.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `slots` - The slots, or none for one per core
+    pub fn slots(mut self, slots: Option<usize>) -> Self {
+        self.slots = slots;
+        self
+    }
+
     /// Set the certificate this node presents to its peers
     pub fn tls(mut self, tls: PeerTls) -> Self {
         self.tls = Some(tls);
@@ -1136,6 +1159,16 @@ impl Cluster {
                 "cluster.read_consistency: All is not a read level anything serves; C6 names One                  and Quorum, and Quorum is the strong one"
                     .to_string(),
             )));
+        }
+        // a slot is named by a u16 in every address, and a node with none owns nothing
+        // ([F47](../../../../docs/src/features/local-rehome.md))
+        if let Some(slots) = self.slots {
+            if slots == 0 || slots > usize::from(u16::MAX) {
+                return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                    "cluster.slots is {slots}; a node claims between 1 and {} slots",
+                    u16::MAX
+                ))));
+            }
         }
         // a node bootstraps or joins; one that has a cluster to create has nothing to discover
         if !self.seeds.is_empty() && self.bootstrap {

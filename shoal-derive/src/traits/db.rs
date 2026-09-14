@@ -419,6 +419,14 @@ pub fn add(
             #table_names_ident::#variant_ident => self.#field_ident.install_partitions(tablets, records),
         }
     });
+    // build our fold intents arms, one per table, each naming its own type so the engine is
+    // reached through the table's partition and row types
+    let fold_intents_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
+        let field_type = &field.ty;
+        quote! {
+            #table_names_ident::#variant_ident => <#field_type>::fold_intents(shard_name, #table_names_ident::#variant_ident, conf).await,
+        }
+    });
     // build our table-of-id arms
     let table_of_id_arms = variants.iter().map(|variant_ident| {
         quote! {
@@ -731,6 +739,13 @@ pub fn add(
             /// The names of every persistent table
             fn persistent_tables() -> Vec<&'static str> {
                 vec![#(#persistent_names),*]
+            }
+
+            /// Fold a shard's intent logs of a table into its archives, with no table built
+            async fn fold_intents(shard_name: &str, table: Self::TableNames, conf: &::shoal::server::Conf) -> Result<u64, ::shoal::server::ServerError> {
+                match table {
+                    #(#fold_intents_arms)*
+                }
             }
 
             /// Shutdown this table and flush any data to disk if needed

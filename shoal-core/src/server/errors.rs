@@ -318,12 +318,25 @@ pub enum ShoalError {
     NoShards,
     /// This node has more shards than a tablet can name an owner for
     TooManyShards { shards: usize },
-    /// This storage directory was written by a different number of shards
+    /// A cluster node's slot count is claimed once and cannot be changed by configuration
     ///
-    /// The shard that owns a partition is decided by the shard count, and a shards data
-    /// is stored under its own name, so reading a directory back with a different count
-    /// looks for every partition in the wrong place.
-    ShardCountMismatch { found: usize, expected: usize },
+    /// Every peer's group identities, WAL and checkpoints are keyed by this node's slots, so
+    /// a `cluster.slots` that differs from what the directory was claimed with would re-cut
+    /// every replica set on every peer. Growth past the slots is M9b's `Replace`
+    /// ([F47](../../../docs/src/features/local-rehome.md)).
+    SlotsFixed { claimed: usize, configured: usize },
+    /// A cluster node was configured with more cores than it has slots to host
+    ///
+    /// A slot is what an address names, and an executor with no slot to host would own
+    /// nothing; the ceiling is the slot count the directory was claimed with.
+    CoresExceedSlots { cores: usize, slots: usize },
+    /// A fresh cluster node asked for fewer slots than it has cores
+    SlotsBelowCores { slots: usize, cores: usize },
+    /// A rehome towards one core count is on disk and the configuration names another
+    ///
+    /// The manifest is resumed only by the count it was planned for; a start under a third
+    /// count is refused rather than planned over an unfinished move.
+    RehomeInProgress { from: usize, to: usize, configured: usize },
     /// This storage directorys marker was written in a format we cannot read
     ///
     /// Every other field in the marker only means what we think it means if we agree
@@ -465,9 +478,27 @@ impl std::fmt::Display for ShoalError {
                  no migration between marker formats yet (M10 owns one), so a directory in another \
                  format has to be served by the build that wrote it"
             ),
-            ShoalError::ShardCountMismatch { found, expected } => write!(
+            ShoalError::SlotsFixed { claimed, configured } => write!(
                 f,
-                "the storage directory was written by {found} shards and this server has {expected}"
+                "the storage directory was claimed with {claimed} slots and `cluster.slots` names \
+                 {configured}; a cluster node's slots are fixed at its first claim, and growth past \
+                 them is a `Replace` onto a fresh identity (M9b)"
+            ),
+            ShoalError::CoresExceedSlots { cores, slots } => write!(
+                f,
+                "this cluster node has {slots} slots and `resources.cores` asks for {cores} executors; \
+                 an executor cannot host a slot the node does not have, so grow onto a fresh identity \
+                 with a `Replace` (M9b) or run at most {slots} cores"
+            ),
+            ShoalError::SlotsBelowCores { slots, cores } => write!(
+                f,
+                "`cluster.slots` is {slots} and `resources.cores` is {cores}; every executor hosts at \
+                 least one slot, so the slots cannot be fewer than the cores"
+            ),
+            ShoalError::RehomeInProgress { from, to, configured } => write!(
+                f,
+                "a rehome from {from} to {to} executors is on disk and `resources.cores` is {configured}; \
+                 start with {to} cores to finish it before changing the count again"
             ),
             ShoalError::ShardLayoutMismatch { found, expected } => write!(
                 f,

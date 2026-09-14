@@ -11,6 +11,7 @@
 //! The map is built whole from the shard count before any shard starts, so no shard ever
 //! routes against a partial one.
 
+use super::hosting::Hosting;
 use super::shard::{ShardContact, ShardInfo};
 use super::ServerError;
 use crate::server::errors::ShoalError;
@@ -91,6 +92,33 @@ impl Ring {
             })
             .collect();
         Ok(Ring { tablets, shards })
+    }
+
+    /// Build the tablet map a standalone node routes with from its hosting
+    ///
+    /// One info per executor, and every tablet owned by the executor the hosting deals it to
+    /// ([F47](../../../docs/src/features/local-rehome.md)). The identity hosting builds exactly
+    /// what [`Ring::new`] builds, so a node that never changed its core count routes as it
+    /// always did.
+    ///
+    /// # Arguments
+    ///
+    /// * `hosting` - Which executor owns each tablet
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`Ring::new`] does.
+    pub fn from_hosting(hosting: &Hosting) -> Result<Self, ServerError> {
+        // the executors, checked as a shard count is
+        let mut ring = Ring::new(hosting.physical)?;
+        // and the owners the hosting says
+        for (tablet, owner) in ring.tablets.iter_mut().enumerate() {
+            // truncation cannot happen: the hosting was checked against the executor count
+            #[allow(clippy::cast_possible_truncation)]
+            let host = hosting.owner_of_tablet(tablet) as u16;
+            *owner = host;
+        }
+        Ok(ring)
     }
 
     /// Build the tablet map for a node with a static placement of tablets over nodes
@@ -366,6 +394,28 @@ mod tests {
                 "two rings disagree about who owns {key}",
             );
         }
+    }
+
+    /// A ring from the identity hosting is the ring of old, and one from a dealt hosting
+    /// routes every tablet to the executor the table names
+    #[test]
+    fn a_ring_from_hosting_routes_by_the_table() {
+        for n in [1usize, 3, 8] {
+            let hosted = Ring::from_hosting(&Hosting::identity(n)).expect("a ring");
+            let plain = Ring::new(n).expect("a ring");
+            assert_eq!(hosted.tablets, plain.tablets);
+            assert_eq!(hosted.shards.len(), plain.shards.len());
+        }
+        // four executors dealt down to three: every tablet goes where the hosting says
+        let hosting = Hosting::identity(4).plan(3, false).expect("a plan");
+        let ring = Ring::from_hosting(&hosting).expect("a ring");
+        assert_eq!(ring.shards.len(), 3);
+        for tablet in 0..TABLET_COUNT {
+            let key = (tablet as u64) << (u64::BITS - TABLET_BITS);
+            assert_eq!(ring.find_shard(key).contact, ShardContact::Local(hosting.owner_of_tablet(tablet)), "tablet {tablet}");
+        }
+        // and nothing is routed to an executor that does not exist
+        assert!(ring.tablets.iter().all(|owner| usize::from(*owner) < 3));
     }
 
     /// A placement of one node is the standalone map, tablet for tablet

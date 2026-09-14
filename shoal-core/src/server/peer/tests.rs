@@ -28,6 +28,9 @@ use futures::AsyncWriteExt;
 fn identity(node: NodeId, cluster: ClusterId) -> Identity {
     Identity {
         node,
+        slots: 2,
+        physical: 2,
+        rehome: None,
         cluster: Some(cluster),
         layout: 1,
         topology_at_claim: 0,

@@ -381,6 +381,76 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         }
     }
 
+    /// Fold every intent log a shard left for a table into its archives, with no table resident
+    ///
+    /// The inactive logs in generation order and then the active one, each compacted by a
+    /// compactor built for the purpose over the shard's map and shut down after
+    /// ([F47](../../../docs/src/features/local-rehome.md)). A shard with no logs folds nothing
+    /// and touches nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `shard_name` - The name of the shard whose logs are folded
+    /// * `shard_table_name` - The table, as the shard's messages name it
+    /// * `conf` - The Shoal config
+    #[instrument(name = "FileSystem::fold_intents", skip(shard_table_name, conf), err(Debug))]
+    async fn fold_intents<P: IntentReadSupport<R> + 'static, R: PartitionKeySupport + 'static>(
+        shard_name: &str,
+        shard_table_name: D::TableNames,
+        conf: &Conf,
+    ) -> Result<u64, ServerError>
+    where
+        <P as Archive>::Archived: rkyv::Deserialize<P, Strategy<Pool, rkyv::rancor::Error>>,
+        <R as Archive>::Archived: rkyv::Deserialize<R, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <P as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+        for<'a> <P::Intent as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >
+    {
+        // this table's settings, and so where its logs and archives are
+        let table_conf = Self::get_settings::<R>(conf)?;
+        table_conf.setup_paths(R::name()).await?;
+        let intent_dir = table_conf.get_intent_path(R::name());
+        // every log the shard left, oldest first, the active one last
+        let mut logs: Vec<PathBuf> = find_inactive_intent_logs(&intent_dir, shard_name)
+            .into_iter()
+            .map(|(_, path)| path)
+            .collect();
+        let active = intent_dir.join(format!("{shard_name}-active"));
+        if active.exists() {
+            logs.push(active);
+        }
+        // nothing to fold leaves the map untouched
+        if logs.is_empty() {
+            return Ok(0);
+        }
+        // the shard's map for this table, and a compactor over it whose marks nothing reads
+        let map = Arc::new(ArchiveMap::new(shard_name, R::name(), &table_conf).await?);
+        let (mark_tx, _mark_rx) = kanal::unbounded_async::<ServerMsg<D>>();
+        let (_jobs_tx, jobs_rx) = kanal::unbounded_async::<CompactionJob>();
+        let compactor = FileSystemCompactor::<P, R, D>::with_capacity(
+            shard_table_name,
+            &table_conf,
+            jobs_rx,
+            &mark_tx,
+            &map,
+            1000,
+        )
+        .await?;
+        // fold every log and leave the archives and the map consistent
+        let folded = compactor.fold(logs).await?;
+        map.close_all().await?;
+        Ok(folded)
+    }
+
     /// Commit an operation to this storages intent log
     ///
     /// # Arguments
