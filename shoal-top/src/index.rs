@@ -313,6 +313,48 @@ pub struct ClusterFactsLite {
     /// other arm and before F45
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration: Option<MigrationFactsLite>,
+    /// The plan a rebalance arm ran and what its client saw across it; absent for every other
+    /// arm and before F46
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebalance: Option<RebalanceFactsLite>,
+}
+
+/// A plan run in the background of a measured phase, and what the client saw across it
+///
+/// A mirror of the artifact's `RebalanceFacts`, whole: the kind, the marks, the steps, the
+/// blocked reason, the windows and the series, so a drain or a spread can be drawn as the
+/// plateau it is and its tail read against the run's own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebalanceFactsLite {
+    /// What was asked for: `rebalance`, `decommission`, `expiry` or `capacity_blocked`
+    pub kind: String,
+    /// When the plan was asked for, in milliseconds from the start of the measured phase
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_ms: Option<u64>,
+    /// When its record was done, if inside the run
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_ms: Option<u64>,
+    /// How long that took, in whole seconds
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u64>,
+    /// How many steps the plan derived
+    pub steps: u64,
+    /// How many of them moved
+    pub moved: u64,
+    /// The bytes the moved sets held on their sources
+    pub bytes: u64,
+    /// Why the plan could not go on, if it could not
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<String>,
+    /// What the plan came to
+    pub outcome: String,
+    /// The three windows: `before`, `during` and `after`
+    pub windows: Vec<WindowFactsLite>,
+    /// One bucket per second of the measured phase
+    pub series: Vec<SecondFactsLite>,
+    /// The `during` p99 over the `before` p99, in thousandths
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p99_ratio_permille: Option<u64>,
 }
 
 /// A repair run in the background of a measured phase, and what the client saw across it

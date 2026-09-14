@@ -827,8 +827,58 @@ pub const FAMILIES: &[Family] = &[
         what_it_cannot_say:
             "What a move costs over a network, where the bulk lane's rate is the wire's. What \
              moving a set the client is not writing to costs, or moving one node's every set at \
-             once, which is M9b's rebalancer. What a stale router pays, which the fixture proves \
-             and the arm's single client never meets.",
+             once, which is the rebalance family's. What a stale router pays, which the fixture \
+             proves and the arm's single client never meets.",
+    },
+    Family {
+        name: "cluster-rebalance",
+        title: "What a plan costs the foreground: a spread onto a spare, a drain, an expiry, and one with nowhere to go",
+        surface: Surface::AllWorkloads,
+        what_it_measures:
+            "Four arms on the kill arm's placement, mixture and client, each with a plan the \
+             control leader drives in the background from a third of the way through \
+             ([F46](../features/capacity-rebalancing.md)). `rebalance/add` stages a fourth member \
+             beside the placement and asks for a `Rebalance`, which is the one way data spreads onto \
+             a new node. `rebalance/decommission` stages the same spare and asks for a `Decommission` \
+             of node one, whose every set moves to the spare one at a time while node one keeps \
+             serving. `rebalance/remove` stages the spare, kills node one and never starts it again, \
+             under a five second grace: the leader counts the grace, records the expiry plan, and \
+             rebuilds every set on the spare. `rebalance/capacity_blocked` stages no spare and asks \
+             for a `Decommission` of node one at N = RF, which has nowhere to go. `cluster.rebalance` \
+             is the kind, when the plan was asked for and done, the steps it derived and moved with \
+             their bytes, the blocked reason if one, the client's distribution before, during and \
+             after it with a per second series, and `p99_ratio_permille`: `during` over `before`, \
+             in thousandths.",
+        how_to_read_it:
+            "`p99_ratio_permille` is the number: M9b's exit criterion is a healthy add or drain at \
+             two times or under - `2000` here - with zero final errors, which is `during`'s `errors`. \
+             `seconds` is how long the foreground paid it for, and `moved` over `seconds` is the \
+             drain's pace under `cluster.rebalance.moves_per_node`, which these arms leave at one. \
+             `bytes` is what the sets held on their sources when planned; at full scale a step is \
+             fed a snapshot under `stream_bytes_per_sec`, and the pace is the budget's. The blocked \
+             arm reads differently: its `outcome` is `unfinished`, its `blocked` names the missing \
+             member, its `steps` is zero, and its `during` window runs to the end of the run - what \
+             it says is that a blocked plan costs the foreground nothing and stays visible. The \
+             remove arm carries `cluster.fault` beside its plan, with no restart mark: the `during` \
+             window there begins at the expiry, not at the kill, and the kill's own cost is the fault \
+             record's.",
+        what_would_make_it_wrong:
+            "An `outcome` other than `completed` on the three arms with a spare, or other than \
+             `unfinished` on the blocked one; a `finished_ms` that is absent on the three, which means \
+             the run ended inside the plan and the `after` window is empty. A `p99_ratio_permille` \
+             read without its `before` window's `ops`: a short `before` is a noisy denominator. A \
+             `bytes` of zero at full scale, which means the sets' rows fit the retained log and the \
+             arm priced a log feed alone. Reading a rebalance arm against the kill arm: the plan's \
+             arms share its placement and mixture but stage a fourth member, and the control plane's \
+             report and plan traffic is theirs alone.",
+        what_it_cannot_say:
+            "What a drain costs over a network, where the bulk lane's rate is the wire's and the \
+             budget is the operator's. What a rebalance among many sets over many nodes costs: \
+             three sets over four members is the smallest placement that has a move to make. \
+             Whether the two-times budget holds on the benchmark host's hardware until a capture is \
+             taken there: a smoke run on the development host is the shape, not the number. What a \
+             plan costs a client the drained node is not serving, or a client on another node than \
+             node zero.",
     },
     Family {
         name: "retired",
@@ -902,6 +952,9 @@ pub fn family_for(id: &str) -> Option<&'static Family> {
     } else if id.starts_with("macro/cluster/migration/") {
         // the migration arm, before the wider cluster prefix for the same reason
         "cluster-migration"
+    } else if id.starts_with("macro/cluster/rebalance/") {
+        // the rebalance arms, before the wider cluster prefix for the same reason
+        "cluster-rebalance"
     } else if id.starts_with("macro/cluster/failover/") {
         // the fault arms, before the wider cluster prefix for the same reason
         "cluster-failover"

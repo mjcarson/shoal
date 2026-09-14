@@ -132,7 +132,7 @@ pub fn all() -> Vec<Failover> {
 ///
 /// * `whole` - The duration
 /// * `fraction` - The numerator and denominator
-fn fraction_of(whole: Duration, fraction: (u32, u32)) -> Duration {
+pub fn fraction_of(whole: Duration, fraction: (u32, u32)) -> Duration {
     whole * fraction.0 / fraction.1
 }
 
@@ -222,6 +222,7 @@ impl Workload for Failover {
             node: KILLED_NODE,
             at,
             restart_after: fraction_of(run_for, RESTART_AT).saturating_sub(at),
+            restart: true,
             run_for,
         })
     }

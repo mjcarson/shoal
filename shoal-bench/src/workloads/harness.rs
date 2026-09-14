@@ -287,9 +287,11 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
         _ => None,
     };
     // a background arm's repair is asked for on its schedule and polled until the run ends;
-    // the integrity counters before the run are what its cost is read against
-    let integrity_before = match (&background_spec, pool.as_ref(), conf.as_ref(), staged.as_ref()) {
-        (Some(_), Some(pool), Some(conf), Some(staged)) => Some(cluster::integrity_sum(&cluster::node_reports(staged, pool, conf, &runtime)?)),
+    // the integrity counters before the run are what its cost is read against. Only a repair
+    // reads them: a plan's arm may have killed a node for good, which has no report to give
+    let reads_integrity = matches!(background_spec.as_ref().map(|spec| &spec.kind), Some(crate::workloads::workload::BackgroundKind::Repair));
+    let integrity_before = match (reads_integrity, pool.as_ref(), conf.as_ref(), staged.as_ref()) {
+        (true, Some(pool), Some(conf), Some(staged)) => Some(cluster::integrity_sum(&cluster::node_reports(staged, pool, conf, &runtime)?)),
         _ => None,
     };
     let background_injected = match (&background_spec, pool.as_ref(), seeded.is_ok()) {
@@ -326,8 +328,8 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     let marks = injected.map(fault::Injected::finish).transpose();
     // and the background repair's, which stops its polling
     let background_marks = background_injected.map(background::Injected::finish).transpose();
-    let integrity_after = match (&background_spec, pool.as_ref(), conf.as_ref(), staged.as_ref()) {
-        (Some(_), Some(pool), Some(conf), Some(staged)) => Some(cluster::integrity_sum(&cluster::node_reports(staged, pool, conf, &runtime)?)),
+    let integrity_after = match (reads_integrity, pool.as_ref(), conf.as_ref(), staged.as_ref()) {
+        (true, Some(pool), Some(conf), Some(staged)) => Some(cluster::integrity_sum(&cluster::node_reports(staged, pool, conf, &runtime)?)),
         _ => None,
     };
     // what the links did during the run, and where every replica ended, read before the
@@ -385,6 +387,21 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
             // ([F45](../../docs/src/features/replica-migration.md))
             crate::workloads::workload::BackgroundKind::Move { .. } => {
                 facts.migration = Some(background::migration_facts(started, &marks, &measured.timeline, spec.run_for));
+            }
+            // a rebalance arm records its plan's marks, steps and blocked reason the same way
+            // ([F46](../../docs/src/features/capacity-rebalancing.md))
+            crate::workloads::workload::BackgroundKind::Rebalance
+            | crate::workloads::workload::BackgroundKind::Decommission { .. }
+            | crate::workloads::workload::BackgroundKind::Expire { .. } => {
+                // a decommission with a spare beside the placement is a drain; one without
+                // is the blocked case, which is what the arm was built to show
+                let kind = match &spec.kind {
+                    crate::workloads::workload::BackgroundKind::Rebalance => "rebalance",
+                    crate::workloads::workload::BackgroundKind::Expire { .. } => "expiry",
+                    _ if facts.members.len() > facts.nodes as usize => "decommission",
+                    _ => "capacity_blocked",
+                };
+                facts.rebalance = Some(background::rebalance_facts(kind, started, &marks, &measured.timeline, spec.run_for));
             }
         }
     }

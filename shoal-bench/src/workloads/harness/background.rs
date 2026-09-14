@@ -21,7 +21,7 @@ use shoal::server::control::AdminSender;
 use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest};
 use shoal::shared::protocol::error::ErrorCode;
 
-use crate::model::macro_layer::{BackgroundFacts, MigrationFacts, SecondFacts, WindowFacts};
+use crate::model::macro_layer::{BackgroundFacts, MigrationFacts, RebalanceFacts, SecondFacts, WindowFacts};
 use crate::workloads::workload::{BackgroundKind, BackgroundSpec, TimelineSample};
 
 /// How often the record is polled
@@ -51,6 +51,14 @@ pub struct Marks {
     pub bytes: u64,
     /// Log entries a move fed the destination while it caught up, summed over its groups
     pub entries: u64,
+    /// How many steps a plan derived ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+    pub steps: u64,
+    /// How many of them moved
+    pub moved: u64,
+    /// The bytes the moved sets held on their sources when planned
+    pub plan_bytes: u64,
+    /// Why a plan could not go on, as its record last said
+    pub blocked: Option<String>,
 }
 
 /// A background repair in progress: the thread driving it
@@ -121,6 +129,31 @@ fn schedule(
         marks.error = Some("the run ended before the operation was due".to_string());
         return marks;
     }
+    // an expiry asks for nothing: the fault killed the node, and the plan the leader records
+    // once its grace elapses is what is polled ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+    if let BackgroundKind::Expire { node } = &spec.kind {
+        let Some(node) = nodes.get(usize::try_from(*node).unwrap_or(usize::MAX)) else {
+            marks.error = Some(format!("the expiry names node {node}, and {} are staged", nodes.len()));
+            return marks;
+        };
+        let op = loop {
+            match expiry_plan_of(admin, *node) {
+                Ok(Some(op)) => break op,
+                Ok(None) => {}
+                Err(error) => {
+                    marks.error = Some(error);
+                    return marks;
+                }
+            }
+            if stopped.recv_timeout(POLL_EVERY).is_ok() {
+                marks.error = Some("the run ended before the grace elapsed".to_string());
+                return marks;
+            }
+        };
+        marks.started_at = Some(Instant::now());
+        marks.op = Some(op);
+        return poll_plan(admin, op, stopped, marks);
+    }
     // the request, retried only for a version that moved underneath it
     let op = uuid::Uuid::new_v4();
     let kind = match &spec.kind {
@@ -145,6 +178,15 @@ fn schedule(
                 to: *to,
             }
         }
+        BackgroundKind::Rebalance => AdminKind::Rebalance,
+        BackgroundKind::Decommission { node } => {
+            let Some(node) = nodes.get(usize::try_from(*node).unwrap_or(usize::MAX)) else {
+                marks.error = Some(format!("the decommission names node {node}, and {} are staged", nodes.len()));
+                return marks;
+            };
+            AdminKind::Decommission { node: *node }
+        }
+        BackgroundKind::Expire { .. } => unreachable!("handled above"),
     };
     let mut asked = false;
     for _ in 0..8 {
@@ -187,11 +229,18 @@ fn schedule(
     }
     marks.started_at = Some(Instant::now());
     marks.op = Some(op);
+    // a plan is polled by its own record
+    if spec.kind.is_plan() {
+        return poll_plan(admin, op, stopped, marks);
+    }
     // poll the record until every group is done, or the run ends
     loop {
         let status = match &spec.kind {
             BackgroundKind::Repair => AdminKind::RepairStatus { op },
             BackgroundKind::Move { .. } => AdminKind::MoveStatus { op },
+            BackgroundKind::Rebalance | BackgroundKind::Decommission { .. } | BackgroundKind::Expire { .. } => {
+                unreachable!("a plan is polled by its own record")
+            }
         };
         let record = match admin.admin(AdminRequest {
             op: uuid::Uuid::new_v4(),
@@ -244,8 +293,90 @@ fn schedule(
         let done = match &spec.kind {
             BackgroundKind::Repair => groups.is_some_and(|groups| !groups.is_empty() && groups.values().all(|group| group["phase"] == "Done")),
             BackgroundKind::Move { .. } => record["phase"] == "Done",
+            BackgroundKind::Rebalance | BackgroundKind::Decommission { .. } | BackgroundKind::Expire { .. } => true,
         };
         if done {
+            marks.finished_at = Some(Instant::now());
+            return marks;
+        }
+        if stopped.recv_timeout(POLL_EVERY).is_ok() {
+            return marks;
+        }
+    }
+}
+
+/// The expiry plan a member's grace recorded, if the leader has recorded one yet
+///
+/// # Arguments
+///
+/// * `admin` - How to ask
+/// * `node` - The member
+fn expiry_plan_of(admin: &AdminSender, node: shoal::shared::identity::NodeId) -> Result<Option<uuid::Uuid>, String> {
+    let view = match admin.admin(AdminRequest {
+        op: uuid::Uuid::new_v4(),
+        expected_version: 0,
+        kind: AdminKind::Members,
+    }) {
+        Ok(response) => match response.outcome {
+            Ok(AdminOutcome::Read(view)) => view,
+            other => return Err(format!("reading the members: {other:?}")),
+        },
+        Err(error) => return Err(format!("reading the members: {error:?}")),
+    };
+    let plan = view["members"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|member| member["record"]["node"] == serde_json::json!(node))
+        .and_then(|member| member["grace"]["plan"].as_str())
+        .and_then(|plan| plan.parse().ok());
+    Ok(plan)
+}
+
+/// Poll a plan's record until it is done, or the run ends, and report the marks
+///
+/// # Arguments
+///
+/// * `admin` - How to ask
+/// * `op` - The plan
+/// * `stopped` - Fires when the run is over
+/// * `marks` - The marks so far
+fn poll_plan(admin: &AdminSender, op: uuid::Uuid, stopped: &mpsc::Receiver<()>, mut marks: Marks) -> Marks {
+    loop {
+        let record = match admin.admin(AdminRequest {
+            op: uuid::Uuid::new_v4(),
+            expected_version: 0,
+            kind: AdminKind::PlanStatus { op },
+        }) {
+            Ok(response) => match response.outcome {
+                Ok(AdminOutcome::Read(record)) => record,
+                other => {
+                    marks.error = Some(format!("reading the plan: {other:?}"));
+                    return marks;
+                }
+            },
+            Err(error) => {
+                marks.error = Some(format!("reading the plan: {error:?}"));
+                return marks;
+            }
+        };
+        let steps = record["steps"].as_array();
+        marks.steps = steps.map_or(0, |steps| steps.len() as u64);
+        marks.moved = steps.map_or(0, |steps| steps.iter().filter(|step| step["state"] == "Moved").count() as u64);
+        marks.plan_bytes = steps.map_or(0, |steps| {
+            steps
+                .iter()
+                .filter(|step| step["state"] == "Moved")
+                .map(|step| step["bytes"].as_u64().unwrap_or(0))
+                .sum()
+        });
+        marks.blocked = record["blocked"]["reason"].as_str().map(str::to_string);
+        marks.outcome = match &record["outcome"] {
+            serde_json::Value::String(outcome) => Some(outcome.to_lowercase()),
+            serde_json::Value::Object(outcome) => outcome.keys().next().map(|key| key.to_lowercase()),
+            _ => None,
+        };
+        if record["phase"] == "Done" {
             marks.finished_at = Some(Instant::now());
             return marks;
         }
@@ -404,6 +535,70 @@ pub fn migration_cut(
     }
 }
 
+/// Cuts a timeline at a plan's marks into its record
+///
+/// # Arguments
+///
+/// * `kind` - What the arm asked for, by the record's name
+/// * `started` - When the measured phase started, on the driver's clock
+/// * `marks` - When the thread did what, and what the record said
+/// * `timeline` - Every operation of the run, in the order it was sent
+/// * `run_for` - How long the run was scheduled for
+#[must_use]
+pub fn rebalance_facts(kind: &str, started: Instant, marks: &Marks, timeline: &[TimelineSample], run_for: Duration) -> RebalanceFacts {
+    let started_at = marks.started_at.map(|at| at.saturating_duration_since(started));
+    let finished_at = marks.finished_at.map(|at| at.saturating_duration_since(started));
+    rebalance_cut(kind, started_at, finished_at, marks, timeline, run_for)
+}
+
+/// The pure half of [`rebalance_facts`], on durations from the start of the run
+///
+/// # Arguments
+///
+/// * `kind` - What the arm asked for, by the record's name
+/// * `started_at` - When the plan was asked for, or the grace elapsed, if inside the run
+/// * `finished_at` - When its record was done, if inside the run
+/// * `marks` - What the record said
+/// * `timeline` - Every operation of the run, in the order it was sent
+/// * `run_for` - How long the run was scheduled for
+#[must_use]
+pub fn rebalance_cut(
+    kind: &str,
+    started_at: Option<Duration>,
+    finished_at: Option<Duration>,
+    marks: &Marks,
+    timeline: &[TimelineSample],
+    run_for: Duration,
+) -> RebalanceFacts {
+    // the windows and the series are cut exactly as a repair's are
+    let windows = cut(started_at, finished_at, marks.steps, 0, timeline, run_for, 0, 0);
+    let p99_of = |name: &str| windows.windows.iter().find(|window| window.name == name).filter(|window| window.ops > 0).map(|window| window.p99_us);
+    let p99_ratio_permille = match (p99_of("before"), p99_of("during")) {
+        (Some(before), Some(during)) if before > 0 => Some(during.saturating_mul(1000) / before),
+        _ => None,
+    };
+    RebalanceFacts {
+        kind: kind.to_string(),
+        started_ms: started_at.map(millis),
+        finished_ms: finished_at.map(millis),
+        seconds: match (started_at, finished_at) {
+            (Some(from), Some(to)) => Some(millis(to.saturating_sub(from)) / 1000),
+            _ => None,
+        },
+        steps: marks.steps,
+        moved: marks.moved,
+        bytes: marks.plan_bytes,
+        blocked: marks.blocked.clone(),
+        outcome: match (&marks.outcome, finished_at) {
+            (Some(outcome), Some(_)) => outcome.clone(),
+            _ => "unfinished".to_string(),
+        },
+        windows: windows.windows,
+        series: windows.series,
+        p99_ratio_permille,
+    }
+}
+
 /// A duration in whole milliseconds
 ///
 /// # Arguments
@@ -518,6 +713,10 @@ mod tests {
             phase_ms: vec![("catching_up".to_string(), 4000), ("learner".to_string(), 300)],
             bytes: 12_345,
             entries: 678,
+            steps: 0,
+            moved: 0,
+            plan_bytes: 0,
+            blocked: None,
         };
         let facts = super::migration_cut(Some(Duration::from_secs(10)), Some(Duration::from_secs(20)), &marks, &timeline, Duration::from_secs(30));
         assert_eq!(facts.started_ms, Some(10_000));
@@ -545,5 +744,79 @@ mod tests {
             }))
             .expect("an F44 record loads");
         assert!(older.migration.is_none());
+    }
+
+    /// A plan's record carries its kind, marks, steps, bytes, blocked reason, windows, series
+    /// and the p99 ratio; a run that ended first is `unfinished` with its reason kept; an F45
+    /// record loads without the block (F46)
+    #[test]
+    fn rebalance_capture_records_plan_and_windows() {
+        let timeline: Vec<TimelineSample> = (0..300u64)
+            .map(|index| {
+                let at = Duration::from_millis(index * 100);
+                let slow = (10..20).contains(&(index / 10));
+                TimelineSample {
+                    at,
+                    elapsed: Duration::from_micros(if slow { 900 } else { 300 }),
+                    ok: true,
+                }
+            })
+            .collect();
+        let marks = super::Marks {
+            started_at: None,
+            finished_at: None,
+            groups: 0,
+            clean: 0,
+            op: None,
+            error: None,
+            outcome: Some("completed".to_string()),
+            phase_ms: Vec::new(),
+            bytes: 0,
+            entries: 0,
+            steps: 3,
+            moved: 3,
+            plan_bytes: 9_000,
+            blocked: None,
+        };
+        let facts = super::rebalance_cut("decommission", Some(Duration::from_secs(10)), Some(Duration::from_secs(20)), &marks, &timeline, Duration::from_secs(30));
+        assert_eq!(facts.kind, "decommission");
+        assert_eq!(facts.started_ms, Some(10_000));
+        assert_eq!(facts.finished_ms, Some(20_000));
+        assert_eq!(facts.seconds, Some(10));
+        assert_eq!((facts.steps, facts.moved, facts.bytes), (3, 3, 9_000));
+        assert_eq!(facts.outcome, "completed");
+        assert_eq!(facts.blocked, None);
+        let names: Vec<&str> = facts.windows.iter().map(|window| window.name.as_str()).collect();
+        assert_eq!(names, ["before", "during", "after"]);
+        assert!(facts.windows[1].p99_us > facts.windows[0].p99_us, "{:?}", facts.windows);
+        assert_eq!(facts.series.len(), 30);
+        // the ratio is during over before, in thousandths: 900 over 300
+        assert_eq!(facts.p99_ratio_permille, Some(3000));
+        // a blocked plan the run outlasted is unfinished, and says why
+        let blocked = super::Marks {
+            outcome: None,
+            steps: 0,
+            moved: 0,
+            plan_bytes: 0,
+            blocked: Some("tablet 0: every up member holds the set".to_string()),
+            ..marks.clone()
+        };
+        let unfinished = super::rebalance_cut("capacity_blocked", Some(Duration::from_secs(10)), None, &blocked, &timeline, Duration::from_secs(30));
+        assert_eq!(unfinished.outcome, "unfinished");
+        assert_eq!(unfinished.seconds, None);
+        assert!(unfinished.blocked.as_deref().is_some_and(|reason| reason.contains("every up member")));
+        assert_eq!(unfinished.windows[2].ops, 0);
+        // no ratio without a during window
+        let never = super::rebalance_cut("rebalance", None, None, &marks, &timeline, Duration::from_secs(30));
+        assert_eq!(never.p99_ratio_permille, None);
+        // a record from before the arms carries no rebalance block and loads
+        let older: crate::model::macro_layer::ClusterFacts =
+            serde_json::from_value(serde_json::json!({
+                "nodes": 3, "desired_rf": 3, "active_rf": 3, "write_policy": "quorum",
+                "read_policy": "one", "durability": "durable", "driver": "node", "cores": [],
+                "tables": 1, "tablets": 4096, "emulated": true
+            }))
+            .expect("an F45 record loads");
+        assert!(older.rebalance.is_none());
     }
 }

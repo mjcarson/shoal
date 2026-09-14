@@ -206,6 +206,15 @@ pub struct ClusterOverride {
     /// migration arm stages one as its destination
     /// ([F45](../../../docs/src/features/replica-migration.md)).
     pub spares: Vec<u16>,
+    /// The grace a down member is removed after, when the arm moves it off the default
+    ///
+    /// The remove arm shortens it so the expiry lands inside the run
+    /// ([F46](../../../docs/src/features/capacity-rebalancing.md)).
+    pub auto_remove_after: Option<std::time::Duration>,
+    /// How often the control leader looks at its plans, when the arm shortens it
+    pub plan_interval: Option<std::time::Duration>,
+    /// How many moves one member is the source and destination of at a time, when the arm moves it
+    pub moves_per_node: Option<u32>,
 }
 
 /// The groups' checkpoint and retention counts an arm moves off the defaults
@@ -244,6 +253,9 @@ impl ClusterOverride {
             retention: None,
             retire_after: None,
             spares: Vec::new(),
+            auto_remove_after: None,
+            plan_interval: None,
+            moves_per_node: None,
         }
     }
 
@@ -264,6 +276,9 @@ impl ClusterOverride {
             retention: None,
             retire_after: None,
             spares: Vec::new(),
+            auto_remove_after: None,
+            plan_interval: None,
+            moves_per_node: None,
         }
     }
 
@@ -319,6 +334,9 @@ pub struct FaultSpec {
     pub at: std::time::Duration,
     /// How long after the kill to start it again, from the same staged identity
     pub restart_after: std::time::Duration,
+    /// Whether to start it again at all: the remove arm kills a node for good and lets the
+    /// grace remove it ([F46](../../../docs/src/features/capacity-rebalancing.md))
+    pub restart: bool,
     /// How long the whole run is scheduled for, which bounds anything the harness watches
     /// after the restart ([F43](../../../docs/src/features/node-recovery.md))
     pub run_for: std::time::Duration,
@@ -339,6 +357,28 @@ pub enum BackgroundKind {
         /// The member replacing it, by its position among the staged nodes
         to: u32,
     },
+    /// A `Rebalance`: the sets spread over the members by weight and bytes, which is what
+    /// brings a spare in ([F46](../../../docs/src/features/capacity-rebalancing.md))
+    Rebalance,
+    /// A `Decommission` of a node of the placement, by its position among the staged nodes
+    Decommission {
+        /// The member to drain
+        node: u32,
+    },
+    /// The expiry of a killed node's grace: nothing is asked for; the harness's fault kills
+    /// the node and the plan the leader records for it is polled once it appears
+    Expire {
+        /// The member the fault kills, by its position among the staged nodes
+        node: u32,
+    },
+}
+
+impl BackgroundKind {
+    /// Whether this is a plan - a rebalance, a decommission or an expiry - rather than one operation
+    #[must_use]
+    pub const fn is_plan(&self) -> bool {
+        matches!(self, BackgroundKind::Rebalance | BackgroundKind::Decommission { .. } | BackgroundKind::Expire { .. })
+    }
 }
 
 /// An operation an arm asks the harness to run in the background of its measured phase

@@ -372,6 +372,59 @@ pub struct ClusterFacts {
     /// during and after it ([C10](../../../docs/src/distributed/performance.md)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration: Option<MigrationFacts>,
+    /// The plan the arm ran in the background and what the client saw across it, if it did
+    ///
+    /// Only the rebalance arms carry one; absent before
+    /// [F46](../../../docs/src/features/capacity-rebalancing.md). The kind is what was asked
+    /// for - a rebalance onto a spare, a decommission, an expiry after a kill, or a
+    /// decommission with nowhere to go - the marks are when the plan was asked for and when
+    /// its record was done, the steps are what it moved, the blocked reason is why it could
+    /// not, and the windows are the client's distribution before, during and after it
+    /// ([C10](../../../docs/src/distributed/performance.md), Q7, Q8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebalance: Option<RebalanceFacts>,
+}
+
+/// A plan run in the background of a measured phase, and what the client saw across it
+///
+/// Every time is milliseconds from the start of the measured phase, on the driver's clock.
+/// The windows are cut at the marks: `before` is the client alone, `during` the client under
+/// the plan's moves, `after` the client once the plan was done. `p99_ratio_permille` is `during` over
+/// `before`, which is the number the two-times budget of
+/// [M9b](../../../docs/src/distributed/milestones.md#m9b-capacity-aware-rebalancing-and-removal)
+/// is judged on ([F46](../../../docs/src/features/capacity-rebalancing.md)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebalanceFacts {
+    /// What was asked for: `rebalance`, `decommission`, `expiry` or `capacity_blocked`
+    pub kind: String,
+    /// When the plan was asked for, or the member called down, if inside the run
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_ms: Option<u64>,
+    /// When its record was done, if that was inside the run
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_ms: Option<u64>,
+    /// How long that took, in whole seconds, if it finished
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u64>,
+    /// How many steps the plan derived
+    pub steps: u64,
+    /// How many of them moved
+    pub moved: u64,
+    /// The bytes the moved sets held on their sources when planned
+    pub bytes: u64,
+    /// Why the plan could not go on, if it could not
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<String>,
+    /// What the plan came to: `completed`, `nothing`, `failed`, or `unfinished` when the run ended first
+    pub outcome: String,
+    /// The three windows: `before`, `during` and `after`, each with its own distribution
+    pub windows: Vec<WindowFacts>,
+    /// One bucket per second of the measured phase
+    pub series: Vec<SecondFacts>,
+    /// The `during` window's p99 over the `before` window's, in thousandths, when both have
+    /// samples: the two-times budget is `2000` here
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p99_ratio_permille: Option<u64>,
 }
 
 /// A move run in the background of a measured phase, and what the client saw across it
