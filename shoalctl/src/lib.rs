@@ -55,6 +55,7 @@
 //! ```
 
 pub mod app;
+pub mod cluster;
 pub mod components;
 
 use std::sync::Arc;
@@ -79,6 +80,23 @@ pub enum AppEvent<S: QuerySupport> {
         tab_id: Uuid,
         table_name: S::TableNames,
         result: QueryResult<S>,
+    },
+    /// A cluster tab's frames polled again, or why they could not be
+    /// ([F50](../../docs/src/features/cluster-operations.md))
+    ClusterFrame {
+        /// The tab
+        tab_id: Uuid,
+        /// The model built from the frames
+        model: Result<cluster::ClusterModel, String>,
+    },
+    /// What an operation a cluster tab submitted came to
+    AdminOutcome {
+        /// The tab
+        tab_id: Uuid,
+        /// The lines to show, and whether they are an error
+        outcome: Result<Vec<String>, String>,
+        /// The operation to follow, if the request was applied and its record can be read
+        follow: Option<(Uuid, cluster::Follow)>,
     },
 }
 

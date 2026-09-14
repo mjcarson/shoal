@@ -10,6 +10,6 @@ mod tab;
 pub use help_overlay::HelpOverlay;
 pub use status_bar::StatusBar;
 pub use tab::{
-    CompletionMenu, CompletionState, ErrorBar, QueryError, QueryLayout, QueryRow, Tab, TabContent,
-    TabQueryBar, TabSelector, TabState, layout_query,
+    ClusterState, CompletionMenu, CompletionState, ErrorBar, QueryError, QueryLayout, QueryRow, Tab,
+    TabContent, TabKind, TabQueryBar, TabSelector, TabState, follow_once, layout_query,
 };
