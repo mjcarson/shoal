@@ -1091,7 +1091,7 @@ where
     /// ([F44](../../../../docs/src/features/repair.md)).
     pub(super) fn drive_repairs(&mut self) {
         let map = self.map.get();
-        let me = self.my_addr();
+        let node = self.node_id();
         let Some(control) = self.control.clone() else {
             return;
         };
@@ -1132,7 +1132,9 @@ where
                 let Some(raft) = slot.raft.clone() else {
                     continue;
                 };
-                // only the leader drives, and only once per group at a time
+                // only the leader drives, and only once per group at a time; this node's
+                // member is the slot hosting the group ([F47](../../../../docs/src/features/local-rehome.md))
+                let me = slot.spec.me(node);
                 let leads = raft.metrics().borrow_watched().current_leader == Some(me);
                 if !leads {
                     continue;
@@ -1179,7 +1181,7 @@ where
             return;
         };
         let map = self.map.get();
-        let me = self.my_addr();
+        let node = self.node_id();
         let Some(control) = self.control.clone() else {
             return;
         };
@@ -1192,7 +1194,7 @@ where
             let Some(raft) = slot.raft.as_ref() else {
                 continue;
             };
-            if raft.metrics().borrow_watched().current_leader != Some(me) {
+            if raft.metrics().borrow_watched().current_leader != Some(slot.spec.me(node)) {
                 continue;
             }
             // the first pass is staggered across the interval by the group's identity

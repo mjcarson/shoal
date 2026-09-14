@@ -69,8 +69,11 @@ pub struct ListenerContext<S: ShoalDatabase> {
     pub handshake_timeout: Duration,
     /// The most forwarded bytes one connection may hold unanswered
     pub inflight_bound: usize,
-    /// How many shards this node runs, which every entry's shard is checked against
+    /// How many slots this node has, which every entry's shard is checked against
     pub shard_count: usize,
+    /// Which executor hosts each slot, which every entry's shard is dispatched through
+    /// ([F47](../../../../docs/src/features/local-rehome.md))
+    pub hosting: Arc<crate::server::hosting::Hosting>,
     /// Bytes received on bulk lanes, for the transport view
     pub bulk_received: Rc<std::cell::Cell<u64>>,
 }
@@ -86,6 +89,7 @@ impl<S: ShoalDatabase> Clone for ListenerContext<S> {
             handshake_timeout: self.handshake_timeout,
             inflight_bound: self.inflight_bound,
             shard_count: self.shard_count,
+            hosting: self.hosting.clone(),
             bulk_received: self.bulk_received.clone(),
         }
     }
@@ -153,6 +157,33 @@ impl Future for Room {
         inflight.waker = Some(cx.waker().clone());
         Poll::Pending
     }
+}
+
+/// The executor a frame naming a slot is dispatched to, or a refusal for a slot this node does not have
+///
+/// A peer names slots, since the slots are what the map records for this node; which executor
+/// hosts one is the hosting's to say and never crosses the wire
+/// ([F47](../../../../docs/src/features/local-rehome.md)). A slot past the count is malformed
+/// and ends the connection, as it always did.
+///
+/// # Arguments
+///
+/// * `hosting` - Which executor hosts each slot
+/// * `slot` - The slot the frame names
+/// * `refusal` - What to say when the slot is not one this node has
+///
+/// # Errors
+///
+/// Refuses a slot past the node's count.
+pub fn dispatch_target(
+    hosting: &crate::server::hosting::Hosting,
+    slot: u16,
+    refusal: &'static str,
+) -> Result<crate::server::shard::ShardContact, ServerError> {
+    if usize::from(slot) >= hosting.slots {
+        return Err(ProtocolError::MalformedForward(refusal).into());
+    }
+    Ok(crate::server::shard::ShardContact::Local(hosting.host_of_slot(slot)))
 }
 
 /// Accept peer lanes and serve each one in a task of its own
@@ -317,11 +348,9 @@ async fn peer_rx_relay<S: ShoalDatabase>(
         // the entries, exactly as many bytes as the preamble said
         let entries_raw = codec::read_vec(&mut rx, preamble.entries_len as usize).await?;
         let entries = peer::decode_entries(&entries_raw, preamble.entries)?;
-        // every shard named has to exist here, before the bundle is even read
+        // every slot named has to exist here, before the bundle is even read
         for entry in &entries {
-            if usize::from(entry.shard) >= ctx.shard_count {
-                return Err(ProtocolError::MalformedForward("an entry names a shard this node does not run").into());
-            }
+            dispatch_target(&ctx.hosting, entry.shard, "an entry names a shard this node does not run")?;
         }
         // wait for room under the in-flight bound, which is what makes this node's memory a
         // number rather than the peer's appetite
@@ -559,10 +588,8 @@ async fn serve_replication<S: ShoalDatabase>(
             };
             let raw: [u8; REPLICATE_HEAD_LEN] = codec::read_array(&mut rx).await?;
             let head = ReplicateRequestHead::decode(&raw)?;
-            // the shard named has to exist here, before the payload is read
-            if usize::from(head.target_shard) >= ctx.shard_count {
-                return Err(ProtocolError::MalformedForward("a replication request names a shard this node does not run").into());
-            }
+            // the slot named has to exist here, before the payload is read
+            let host = dispatch_target(&ctx.hosting, head.target_shard, "a replication request names a shard this node does not run")?;
             // wait for room under the in-flight bound, then read the payload
             Room {
                 inflight: inflight.clone(),
@@ -571,7 +598,7 @@ async fn serve_replication<S: ShoalDatabase>(
             .await;
             let payload = codec::read_vec(&mut rx, payload_len).await?;
             inflight.borrow_mut().taken(Uuid::from_u64_pair(head.id, 0), 1, payload_len);
-            // hand it to the shard that hosts the group
+            // hand it to the executor hosting the slot that hosts the group
             let msg = ServerMsg::Replication {
                 origin,
                 head,
@@ -580,7 +607,7 @@ async fn serve_replication<S: ShoalDatabase>(
             };
             if ctx
                 .comms
-                .send(&crate::server::shard::ShardContact::Local(usize::from(head.target_shard)), msg)
+                .send(&host, msg)
                 .await
                 .is_err()
             {
@@ -688,11 +715,9 @@ async fn serve_bulk<S: ShoalDatabase>(
                     let manifest = codec::read_vec(&mut rx, begin.manifest_len as usize).await?;
                     ctx.bulk_received
                         .set(ctx.bulk_received.get() + header.body_len() as u64);
-                    // a route names the shard the stream belongs to, and it has to exist here
+                    // a route names the slot the stream belongs to, and it has to exist here
                     if let Ok(route) = postcard::from_bytes::<crate::server::replication::snapshot::BulkRoute>(&manifest) {
-                        if usize::from(route.target_shard) >= ctx.shard_count {
-                            return Err(ProtocolError::MalformedForward("a snapshot stream names a shard this node does not run").into());
-                        }
+                        dispatch_target(&ctx.hosting, route.target_shard, "a snapshot stream names a shard this node does not run")?;
                         routes.insert(begin.stream, route);
                     }
                 }
@@ -713,7 +738,7 @@ async fn serve_bulk<S: ShoalDatabase>(
                         };
                         if ctx
                             .comms
-                            .send(&crate::server::shard::ShardContact::Local(usize::from(route.target_shard)), msg)
+                            .send(&dispatch_target(&ctx.hosting, route.target_shard, "a snapshot stream names a shard this node does not run")?, msg)
                             .await
                             .is_err()
                         {

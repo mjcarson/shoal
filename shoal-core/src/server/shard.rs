@@ -1430,11 +1430,11 @@ where
                 let map = MapCell::new(setup.initial_map.clone());
                 let mut local = setup.local.clone();
                 local.cluster = local.cluster.or(setup.initial_map.cluster);
-                match setup.initial_map.ring_for(setup.local.node, shard_count)? {
+                match setup.initial_map.ring_for(setup.local.node, &hosting)? {
                     Some(ring) => {
                         let replica_ring = setup
                             .initial_map
-                            .read_ring_for(setup.local.node, shard_count)?
+                            .read_ring_for(setup.local.node, &hosting)?
                             .unwrap_or_else(|| ring.clone());
                         (ring, replica_ring, true, map, Some(Rc::new(RefCell::new(local))))
                     }
@@ -1514,11 +1514,10 @@ where
             }
         }
         // the ring this node routes with under the placement, or none if it is not placed
-        let shards = self.ring.shards.iter().filter(|info| info.contact.local_index().is_some()).count();
-        match map.ring_for(setup.local.node, shards)? {
+        match map.ring_for(setup.local.node, &self.hosting)? {
             Some(ring) => {
                 self.replica_ring = map
-                    .read_ring_for(setup.local.node, shards)?
+                    .read_ring_for(setup.local.node, &self.hosting)?
                     .unwrap_or_else(|| ring.clone());
                 self.ring = ring;
                 self.placed = true;
@@ -3005,9 +3004,10 @@ where
             } else {
                 Some(entry.keys)
             };
-            // hand it to the shard that owns its partitions, over the mesh
+            // hand it to the executor hosting the slot that owns its partitions, over the mesh
+            // ([F47](../../../docs/src/features/local-rehome.md))
             self.comms
-                .send(&ShardContact::Local(usize::from(entry.shard)), ServerMsg::Query {
+                .send(&ShardContact::Local(self.hosting.host_of_slot(entry.shard)), ServerMsg::Query {
                     meta,
                     body: body.clone(),
                     offset: entry.offset as usize,
@@ -3452,7 +3452,10 @@ where
             tls: server_tls,
             handshake_timeout: setup.transport.handshake_timeout.duration(),
             inflight_bound: setup.transport.inflight_bytes,
-            shard_count: self.ring.shards.iter().filter(|info| info.contact.local_index().is_some()).count(),
+            // a frame names a slot, and the slots are what a peer may name; which executor
+            // hosts one is the dispatch's business ([F47](../../../docs/src/features/local-rehome.md))
+            shard_count: self.hosting.slots,
+            hosting: self.hosting.clone(),
             bulk_received: self.bulk_received.clone(),
         };
         let handle = glommio::spawn_local_into(peer::peer_acceptor(listener, ctx), self.high_priority)?;
@@ -3926,7 +3929,7 @@ where
                 let outcome = async {
                     // build an empty shard
                     let shard: Shard<S> =
-                        Shard::new(&conf, comms, shard_id, shard_count, hosting, peer_setup, control_requests.clone()).await?;
+                        Shard::new(&conf, comms, shard_id, shard_count, hosting.clone(), peer_setup, control_requests.clone()).await?;
                     // start this shard
                     shard.start(should_shutdown.clone(), &events).await
                 }
@@ -3939,15 +3942,19 @@ where
                         shard: shard_id,
                         error: format!("{error:?}"),
                     });
-                    // and the control plane, so the cluster hears of it too
-                    // ([F39](../../../docs/src/features/membership.md))
+                    // and the control plane, so the cluster hears of it too: once per slot
+                    // the dead executor hosted, since a slot is what a peer knows this node by
+                    // ([F39](../../../docs/src/features/membership.md), [F47](../../../docs/src/features/local-rehome.md))
                     if let Some(control) = &control_requests {
-                        let _ = control.send(crate::server::control::ControlRequest::ShardHealth(
-                            crate::server::control::ShardHealthEvent {
-                                shard: shard_id,
-                                error: format!("{error:?}"),
-                            },
-                        ));
+                        let hosted = hosting.slots_by_executor().get(shard_id).cloned().unwrap_or_default();
+                        for slot in hosted {
+                            let _ = control.send(crate::server::control::ControlRequest::ShardHealth(
+                                crate::server::control::ShardHealthEvent {
+                                    shard: usize::from(slot),
+                                    error: format!("{error:?}"),
+                                },
+                            ));
+                        }
                     }
                 }
                 outcome

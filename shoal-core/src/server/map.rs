@@ -34,6 +34,7 @@ use super::control::migrate::{DataConfiguration, MoveRecord};
 use super::control::repair::{QuarantinedCopy, RepairRecord};
 use super::control::types::{ControlState, MemberHealth, MemberPhase, MemberRole};
 use super::peer::handshake::{Admission, PeerAddr, Verdict};
+use super::hosting::Hosting;
 use super::ring::{Ring, TABLET_COUNT};
 use super::shard::ShardContact;
 use super::ServerError;
@@ -750,16 +751,16 @@ impl TabletMap {
     /// # Arguments
     ///
     /// * `me` - This node
-    /// * `shards` - How many shards it runs
+    /// * `hosting` - Its slots, executors, and which executor hosts each slot
     ///
     /// # Errors
     ///
-    /// Fails if the placement names this node with another shard count.
-    pub fn ring_for(&self, me: NodeId, shards: usize) -> Result<Option<Ring>, ServerError> {
+    /// Fails if the placement names this node with another slot count.
+    pub fn ring_for(&self, me: NodeId, hosting: &Hosting) -> Result<Option<Ring>, ServerError> {
         if !self.places(me) {
             return Ok(None);
         }
-        Ring::with_placement(shards, &self.routing_counts(), me).map(Some)
+        Ring::with_placement(hosting, &self.routing_counts(), me).map(Some)
     }
 
     /// The ring this node serves queries with: a tablet it holds a replica of is served locally
@@ -772,34 +773,42 @@ impl TabletMap {
     /// ([F40](../../../docs/src/features/replication.md)). At a placement of the desired size
     /// every query is served by a local replica.
     ///
+    /// A local copy is served by the executor hosting its slot
+    /// ([F47](../../../docs/src/features/local-rehome.md)).
+    ///
     /// # Arguments
     ///
     /// * `me` - This node
-    /// * `shards` - How many shards it runs
+    /// * `hosting` - Its slots, executors, and which executor hosts each slot
     ///
     /// # Errors
     ///
     /// Fails as [`TabletMap::ring_for`] does.
-    pub fn read_ring_for(&self, me: NodeId, shards: usize) -> Result<Option<Ring>, ServerError> {
+    pub fn read_ring_for(&self, me: NodeId, hosting: &Hosting) -> Result<Option<Ring>, ServerError> {
         if !self.places(me) {
             return Ok(None);
         }
-        let mut ring = Ring::with_placement(shards, &self.routing_counts(), me)?;
+        let mut ring = Ring::with_placement(hosting, &self.routing_counts(), me)?;
+        // the executor hosting one of this node's slots, as the ring indexes it
+        //
+        // truncation cannot happen: an executor count is bounded by a u16 at the ring
+        #[allow(clippy::cast_possible_truncation)]
+        let host = |slot: u16| hosting.host_of_slot(slot) as u16;
         for tablet in 0..TABLET_COUNT {
             let replicas = self.replicas_of(tablet);
-            // the shard this node's copy is on, if it holds one: the rule's, or the
+            // the slot this node's copy is on, if it holds one: the rule's, or the
             // configuration's ([F45](../../../docs/src/features/replica-migration.md))
             let local = replicas.iter().find(|replica| replica.node == me).map(|replica| replica.shard);
             // a copy this node holds and may serve is read here; a quarantined one is read
             // elsewhere while another holder is up, and here as the backstop, where the
             // refusal names the quarantine ([F44](../../../docs/src/features/repair.md))
             if let Some(local) = local.filter(|_| !self.is_quarantined(me, tablet)) {
-                ring.set_owner(tablet, local);
+                ring.set_owner(tablet, host(local));
             } else if let Some(holder) = self.preferred_holder(tablet, None) {
                 // a tablet this node holds no copy of goes to a holder that is up, which is
                 // the primary until the primary is called down
                 if holder.node == me {
-                    ring.set_owner(tablet, holder.shard);
+                    ring.set_owner(tablet, host(holder.shard));
                     continue;
                 }
                 let contact = ShardContact::Remote {
@@ -810,7 +819,7 @@ impl TabletMap {
                     ring.set_owner(tablet, index);
                 }
             } else if let Some(local) = local {
-                ring.set_owner(tablet, local);
+                ring.set_owner(tablet, host(local));
             }
         }
         Ok(Some(ring))
@@ -1072,8 +1081,8 @@ mod tests {
         state.apply(&ControlCommand::Admit(record(joiner, 3, 1)));
         state.apply(&ControlCommand::ObserveMember(record(joiner, 3, 1)));
         let map = TabletMap::from_state(&state, Some(node), &[]);
-        assert!(map.ring_for(joiner, 3).expect("a ring").is_none());
-        let ring = map.ring_for(node, 2).expect("a ring").expect("the bootstrapper is placed");
+        assert!(map.ring_for(joiner, &Hosting::identity(3)).expect("a ring").is_none());
+        let ring = map.ring_for(node, &Hosting::identity(2)).expect("a ring").expect("the bootstrapper is placed");
         // a one node placement is the standalone ring
         assert_eq!(ring.shards.len(), 2);
         // after initialization both are placed, in the order given
@@ -1087,9 +1096,9 @@ mod tests {
         let map = TabletMap::from_state(&state, Some(node), &[]);
         assert_eq!(map.placement, vec![joiner, node]);
         assert_eq!(map.placement_counts(), vec![(joiner, 3), (node, 2)]);
-        assert!(map.ring_for(joiner, 3).expect("a ring").is_some());
+        assert!(map.ring_for(joiner, &Hosting::identity(3)).expect("a ring").is_some());
         // and a node claiming another shard count than the placement's is refused
-        assert!(map.ring_for(node, 4).is_err());
+        assert!(map.ring_for(node, &Hosting::identity(4)).is_err());
         // the frame carries the client endpoints and the tables
         let frame = map.frame();
         assert_eq!(frame.members.len(), 2);
@@ -1155,6 +1164,59 @@ mod tests {
         (TabletMap::from_state(&state, Some(node), &[]), nodes)
     }
 
+    /// A node hosting four slots on two executors serves every local copy from the executor
+    /// hosting its slot, builds only the groups those executors host, and routes every remote
+    /// copy exactly as it did
+    ///
+    /// Three nodes at a factor of three: the first has four slots on two executors. Its read
+    /// ring names two local contacts and every remote slot; each tablet it holds is served by
+    /// `host_of_slot(slot)`; its groups split between the two executors by the same table, and
+    /// their `mine` is still the slot, so the address a peer sees never moves
+    /// ([F47](../../../docs/src/features/local-rehome.md)).
+    #[test]
+    fn a_placement_hosts_slots_on_executors() {
+        let (map, nodes) = placed(&[4, 2, 2], 3);
+        let me = nodes[0];
+        let hosting = Hosting::identity(4).plan(2, true).expect("a plan");
+        let ring = map.read_ring_for(me, &hosting).expect("a ring").expect("placed");
+        // two local executors and every remote slot
+        assert_eq!(ring.shards.iter().filter(|info| info.contact.local_index().is_some()).count(), 2);
+        assert_eq!(ring.shards.len(), 2 + 2 + 2);
+        for tablet in 0..TABLET_COUNT {
+            let key = (tablet as u64) << (u64::BITS - super::super::ring::TABLET_BITS);
+            let local = map.replicas_of(tablet).into_iter().find(|replica| replica.node == me).expect("a factor of three holds everything");
+            assert_eq!(
+                ring.find_shard(key).contact,
+                ShardContact::Local(hosting.host_of_slot(local.shard)),
+                "tablet {tablet} on slot {}",
+                local.shard
+            );
+        }
+        // the placement ring routes a remote primary to its slot, untouched by the hosting
+        let placement = map.ring_for(me, &hosting).expect("a ring").expect("placed");
+        let identity = map.ring_for(me, &Hosting::identity(4)).expect("a ring").expect("placed");
+        for tablet in 0..TABLET_COUNT {
+            let key = (tablet as u64) << (u64::BITS - super::super::ring::TABLET_BITS);
+            let primary = map.replicas_of(tablet)[0];
+            if primary.node != me {
+                assert_eq!(placement.find_shard(key).contact, identity.find_shard(key).contact, "tablet {tablet}");
+            } else {
+                assert_eq!(placement.find_shard(key).contact, ShardContact::Local(hosting.host_of_slot(primary.shard)));
+            }
+        }
+        // the groups keep their slot as `mine`, and split over the executors by the hosting
+        let groups = map.replica_groups(me);
+        assert!(!groups.is_empty());
+        let by_executor: Vec<usize> = (0..2)
+            .map(|executor| groups.iter().filter(|spec| hosting.host_of_slot(spec.mine) == executor).count())
+            .collect();
+        assert!(by_executor.iter().all(|count| *count > 0), "{by_executor:?}");
+        assert_eq!(by_executor.iter().sum::<usize>(), groups.len());
+        assert!(groups.iter().all(|spec| usize::from(spec.mine) < 4));
+        // a hosting for another slot count is refused
+        assert!(map.ring_for(me, &Hosting::identity(2)).is_err());
+    }
+
     /// A node holding no copy sends to a holder that is up, a never-sent share finds another
     /// holder, and the map carries the failover base
     ///
@@ -1178,7 +1240,7 @@ mod tests {
         let primary = replicas[0];
         // everybody up: the primary, on the ring too
         assert_eq!(map.preferred_holder(tablet, None), Some(primary));
-        let ring = map.read_ring_for(me, 1).expect("a ring").expect("placed");
+        let ring = map.read_ring_for(me, &Hosting::identity(1)).expect("a ring").expect("placed");
         assert_eq!(
             ring.find_shard(key).contact,
             ShardContact::Remote {
@@ -1189,7 +1251,7 @@ mod tests {
         // the primary down: the next replica, on the ring too, and as the alternate for a share
         map.members.get_mut(&primary.node).expect("a member").health = MemberHealth::Down;
         assert_eq!(map.preferred_holder(tablet, None), Some(replicas[1]));
-        let ring = map.read_ring_for(me, 1).expect("a ring").expect("placed");
+        let ring = map.read_ring_for(me, &Hosting::identity(1)).expect("a ring").expect("placed");
         assert_eq!(
             ring.find_shard(key).contact,
             ShardContact::Remote {
@@ -1318,7 +1380,7 @@ mod tests {
             },
         );
         assert!(!map.places(fourth));
-        assert!(map.ring_for(fourth, 2).expect("a ring").is_none());
+        assert!(map.ring_for(fourth, &Hosting::identity(2)).expect("a ring").is_none());
         // the set node two leads, and its tablets, from the groups the rule derives
         let before = map.groups_of(TableId::of("Row"));
         let (id, expected, tablets) = before
@@ -1359,7 +1421,7 @@ mod tests {
         assert_eq!(learners[0].transition, Some(record.op));
         assert!(!learners[0].is_primary(fourth));
         // the rings route: the fourth node is in them, and its learner tablets go to the source
-        let ring = map.read_ring_for(fourth, 2).expect("a ring").expect("placed by the move");
+        let ring = map.read_ring_for(fourth, &Hosting::identity(2)).expect("a ring").expect("placed by the move");
         let key = (u64::from(tablets[0])) << (u64::BITS - super::super::ring::TABLET_BITS);
         assert_eq!(
             ring.find_shard(key).contact,
@@ -1404,9 +1466,9 @@ mod tests {
         assert_eq!(hosted[0].transition, None);
         assert!(map.replica_groups(nodes[2]).iter().all(|spec| spec.id != id));
         // the fourth node reads its copy on its own shard; node two sends there
-        let ring = map.read_ring_for(fourth, 2).expect("a ring").expect("placed");
+        let ring = map.read_ring_for(fourth, &Hosting::identity(2)).expect("a ring").expect("placed");
         assert_eq!(ring.find_shard(key).contact, ShardContact::Local(1));
-        let ring = map.read_ring_for(nodes[2], 1).expect("a ring").expect("placed");
+        let ring = map.read_ring_for(nodes[2], &Hosting::identity(1)).expect("a ring").expect("placed");
         assert_eq!(ring.find_shard(key).contact, ShardContact::Remote { node: fourth, shard: 1 });
         assert_eq!(map.preferred_holder(usize::from(tablets[0]), None), Some(to));
         // and the frame carries the configuration

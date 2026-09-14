@@ -600,7 +600,7 @@ where
     /// of it ([F45](../../../../docs/src/features/replica-migration.md)).
     pub(super) fn drive_moves(&mut self) {
         let map = self.map.get();
-        let me = self.my_addr();
+        let node = self.node_id();
         let Some(control) = self.control.clone() else {
             return;
         };
@@ -644,7 +644,9 @@ where
                 let Some(raft) = slot.raft.clone() else {
                     continue;
                 };
-                // only the leader drives, and only once per group at a time
+                // only the leader drives, and only once per group at a time; this node's
+                // member is the slot hosting the group ([F47](../../../../docs/src/features/local-rehome.md))
+                let me = slot.spec.me(node);
                 if raft.metrics().borrow_watched().current_leader != Some(me) {
                     continue;
                 }

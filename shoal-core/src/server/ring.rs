@@ -123,47 +123,49 @@ impl Ring {
 
     /// Build the tablet map for a node with a static placement of tablets over nodes
     ///
-    /// Tablet `t` belongs to `placement[t % N]`, and on that node to shard `(t / N) % shards`
-    /// ([F38](../../../docs/src/features/inter-node-transport.md)). This node's own shards come
-    /// first in `shards`, at the indices they have on the mesh, and every remote shard follows
-    /// with a `Remote` contact; the map indexes the whole list. A placement of one node builds
-    /// exactly what [`Ring::new`] builds, which is what keeps a one node cluster's routing byte
-    /// for byte what a standalone node's is.
+    /// Tablet `t` belongs to `placement[t % N]`, and on that node to slot `(t / N) % slots`
+    /// ([F38](../../../docs/src/features/inter-node-transport.md)). This node's own executors
+    /// come first in `shards`, at the indices they have on the mesh, and every remote slot
+    /// follows with a `Remote` contact; the map indexes the whole list. A tablet of this node's
+    /// is owned by the executor its slot hosts on ([F47](../../../docs/src/features/local-rehome.md)),
+    /// so with the identity hosting a placement of one node builds exactly what [`Ring::new`]
+    /// builds, which is what keeps a one node cluster's routing byte for byte what a standalone
+    /// node's is.
     ///
     /// # Arguments
     ///
-    /// * `shard_count` - The number of shards on this node
-    /// * `placement` - Every placed node with its shard count, in placement order, this one included
+    /// * `hosting` - This node's slots, executors, and which executor hosts each slot
+    /// * `placement` - Every placed node with its slot count, in placement order, this one included
     /// * `me` - This node's identity
     ///
     /// # Errors
     ///
     /// Fails as [`Ring::new`] does, and when the placement does not name this node with the
-    /// shard count it runs.
+    /// slot count it claimed.
     pub fn with_placement(
-        shard_count: usize,
+        hosting: &Hosting,
         placement: &[(NodeId, u16)],
         me: NodeId,
     ) -> Result<Self, ServerError> {
-        // this node's own map is the local half of the answer, and the check on shard_count
-        let mut ring = Ring::new(shard_count)?;
+        // this node's own executors are the local half of the answer, and the check on them
+        let mut ring = Ring::new(hosting.physical)?;
         // the placement has to be one this node can route against: it names this node, once,
-        // with the shards it runs
+        // with the slots it claimed
         let Some((_, placed_shards)) = placement.iter().find(|(node, _)| *node == me) else {
             return Err(ServerError::Shoal(ShoalError::PlacementMissingSelf { node: me }));
         };
-        if usize::from(*placed_shards) != shard_count {
+        if usize::from(*placed_shards) != hosting.slots {
             return Err(ServerError::Shoal(ShoalError::PlacementShardCount {
                 node: me,
                 entry: *placed_shards,
-                actual: shard_count,
+                actual: hosting.slots,
             }));
         }
-        // append an info for every remote shard, remembering where each node's run starts
+        // append an info for every remote slot, remembering where each node's run starts
         let mut first_index = Vec::with_capacity(placement.len());
         for (node, shards) in placement {
             if *node == me {
-                // this node's shards are already at 0..shard_count
+                // this node's executors are already at 0..physical
                 first_index.push(0usize);
                 continue;
             }
@@ -192,9 +194,15 @@ impl Ring {
         for (tablet, owner) in ring.tablets.iter_mut().enumerate() {
             let which = tablet % nodes;
             let shard = (tablet / nodes) % usize::from(placement[which].1);
-            // truncation cannot happen: the list was bounded above
+            // this node's slot is hosted by an executor; a remote slot is its own contact
+            //
+            // truncation cannot happen: the list was bounded above, and a slot by its hosting
             #[allow(clippy::cast_possible_truncation)]
-            let index = (first_index[which] + shard) as u16;
+            let index = if placement[which].0 == me {
+                hosting.host_of_slot(shard as u16) as u16
+            } else {
+                (first_index[which] + shard) as u16
+            };
             *owner = index;
         }
         Ok(ring)
@@ -424,7 +432,7 @@ mod tests {
         let me = NodeId::mint();
         for shard_count in [1, 2, 7, 16] {
             let placement = vec![(me, shard_count)];
-            let placed = Ring::with_placement(usize::from(shard_count), &placement, me)
+            let placed = Ring::with_placement(&Hosting::identity(usize::from(shard_count)), &placement, me)
                 .expect("a placement of one");
             let alone = Ring::new(usize::from(shard_count)).expect("a ring");
             assert_eq!(placed.tablets, alone.tablets);
@@ -442,7 +450,7 @@ mod tests {
         let shards = [2u16, 3, 1];
         let placement: Vec<(NodeId, u16)> = ids.iter().copied().zip(shards).collect();
         // seen from the second node, which runs three shards
-        let ring = Ring::with_placement(3, &placement, ids[1]).expect("a placement of three");
+        let ring = Ring::with_placement(&Hosting::identity(3), &placement, ids[1]).expect("a placement of three");
         assert_eq!(ring.shards.len(), 6);
         for tablet in 0..TABLET_COUNT {
             let (which, shard) = Ring::owner_of(tablet, &shards);
@@ -466,9 +474,44 @@ mod tests {
             );
         }
         // a node the placement does not name cannot route against it
-        assert!(Ring::with_placement(3, &placement, NodeId::mint()).is_err());
+        assert!(Ring::with_placement(&Hosting::identity(3), &placement, NodeId::mint()).is_err());
         // and neither can one with the wrong shard count
-        assert!(Ring::with_placement(2, &placement, ids[1]).is_err());
+        assert!(Ring::with_placement(&Hosting::identity(2), &placement, ids[1]).is_err());
+    }
+
+    /// A placement hosts this node's slots on its executors and leaves every remote slot alone
+    ///
+    /// Four slots on two executors: the placement still names four, a remote peer's slots are
+    /// still four contacts, and every local tablet is owned by the executor hosting its slot.
+    #[test]
+    fn a_placement_hosts_slots_on_executors() {
+        let ids = [NodeId::mint(), NodeId::mint()];
+        let placement: Vec<(NodeId, u16)> = vec![(ids[0], 4), (ids[1], 3)];
+        let hosting = Hosting::identity(4).plan(2, true).expect("a plan");
+        let ring = Ring::with_placement(&hosting, &placement, ids[0]).expect("a placement");
+        // two local executors and three remote slots
+        assert_eq!(ring.shards.len(), 5);
+        assert_eq!(ring.shards.iter().filter(|info| info.contact.local_index().is_some()).count(), 2);
+        for tablet in 0..TABLET_COUNT {
+            let (which, shard) = Ring::owner_of(tablet, &[4, 3]);
+            let info = &ring.shards[usize::from(ring.tablets[tablet])];
+            let expected = if which == 0 {
+                ShardContact::Local(hosting.host_of_slot(shard))
+            } else {
+                ShardContact::Remote { node: ids[1], shard }
+            };
+            assert_eq!(info.contact, expected, "tablet {tablet}");
+        }
+        // both executors own tablets, and every remote slot is still named
+        for info in &ring.shards {
+            assert!(
+                ring.tablets.iter().any(|owner| ring.shards[usize::from(*owner)].contact == info.contact),
+                "{} owns no tablets",
+                info.name
+            );
+        }
+        // a placement naming the executors rather than the slots is refused
+        assert!(Ring::with_placement(&hosting, &[(ids[0], 2), (ids[1], 3)], ids[0]).is_err());
     }
 
     /// A tablet id has to come from the top of the key, so a split stays incremental

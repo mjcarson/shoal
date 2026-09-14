@@ -249,3 +249,29 @@ fn peer_rejects_wrong_cluster_identity_and_malformed_payload() {
     // preamble's, which `ForwardPreamble::bundle_len` computes from the frame length
     assert_eq!(good.bundle_len(body_len), 32);
 }
+
+/// A frame naming a slot reaches the executor hosting it, and a slot past the count is refused
+///
+/// Four slots on two executors: slots zero and two are executor zero's, one and three are
+/// executor one's, and slot four is not one this node has, whatever the frame kind
+/// ([F47](../../../../docs/src/features/local-rehome.md)).
+#[test]
+fn the_listener_dispatches_a_slot_to_its_host() {
+    use crate::server::hosting::Hosting;
+    use crate::server::peer::listener::dispatch_target;
+    use crate::server::shard::ShardContact;
+    let hosting = Hosting::identity(4).plan(2, true).expect("a plan");
+    for (slot, executor) in [(0u16, 0usize), (1, 1), (2, 0), (3, 1)] {
+        let target = dispatch_target(&hosting, slot, "refused").expect("a slot this node has");
+        assert_eq!(target, ShardContact::Local(executor), "slot {slot}");
+    }
+    // the identity hosting dispatches a slot to the executor of its number, as always
+    let plain = Hosting::identity(4);
+    for slot in 0..4u16 {
+        assert_eq!(dispatch_target(&plain, slot, "refused").expect("a slot"), ShardContact::Local(usize::from(slot)));
+    }
+    // a slot past the count is malformed, under either hosting
+    let error = dispatch_target(&hosting, 4, "a frame names a shard this node does not run").expect_err("a slot past the count");
+    assert!(format!("{error:?}").contains("does not run"), "{error:?}");
+    assert!(dispatch_target(&plain, 4, "refused").is_err());
+}

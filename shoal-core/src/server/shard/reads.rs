@@ -224,6 +224,7 @@ where
         // whatever happens below, this read waits once
         meta.read.ready = true;
         let tx = self.shard_local_tx.clone();
+        let node = self.node_id();
         // the groups the read's tablets are served by on this shard, with the lowest index
         // each has to have applied before the read is served past its tokens
         let Some(replication) = self.replication.as_ref() else {
@@ -278,14 +279,19 @@ where
         // the handles the task needs: one raft per group, and the network for a hop
         let mut rafts = Vec::with_capacity(groups.len());
         for (group, bound) in groups {
-            let Some(raft) = replication.groups.get(&group).and_then(|slot| slot.raft.clone()) else {
+            let Some((raft, me)) = replication
+                .groups
+                .get(&group)
+                .and_then(|slot| slot.raft.clone().map(|raft| (raft, slot.spec.me(node))))
+            else {
                 let outcome = Err(ResponseError::new(ErrorCode::Unavailable, format!("group {group} is still starting")));
                 return self.post_read_ready(meta, query, span, gathered_meta, outcome);
             };
-            rafts.push((group, raft, bound));
+            // this node's member of the group is the slot hosting it, which is this executor's
+            // address as the group knows it ([F47](../../../../docs/src/features/local-rehome.md))
+            rafts.push((group, raft, bound, me));
         }
         let network = replication.network.clone();
-        let me = self.my_addr();
         let level = meta.read.level;
         let session = !meta.read.tokens.is_empty();
         let deadline = meta.read.deadline;
@@ -297,7 +303,7 @@ where
                 ..ReadWaits::default()
             };
             let mut outcome = Ok(());
-            for (group, raft, bound) in rafts {
+            for (group, raft, bound, me) in rafts {
                 match wait_on_group(&raft, &network, group, me, level, bound, deadline, &mut waits).await {
                     Ok(()) => {}
                     Err(error) => {
