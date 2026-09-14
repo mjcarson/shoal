@@ -451,6 +451,90 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         Ok(folded)
     }
 
+    /// Write every archived partition some shards hold of a table as one snapshot file
+    ///
+    /// Every shard's map is opened as it is on disk, every live entry of every map is read
+    /// back verified against its checksum, and the records are written in key order under a
+    /// header at the file format the provenance names, exactly as a compactor cuts a group's
+    /// snapshot ([F49](../../../../docs/src/features/backup-and-recovery.md)). No trailer
+    /// entries: a standalone node remembers no replicated requests.
+    ///
+    /// # Arguments
+    ///
+    /// * `shard_names` - The shards whose archives are exported
+    /// * `conf` - The Shoal config
+    /// * `path` - The file to write
+    /// * `provenance` - Where the export is made and which file format it is written in
+    /// * `group` - The group the file is written under, which a restore ignores
+    /// * `schema_id` - The schema's fingerprint, for the header and the manifest
+    #[instrument(name = "FileSystem::export_archives", skip_all, err(Debug))]
+    async fn export_archives<R: PartitionKeySupport + 'static>(
+        shard_names: &[String],
+        conf: &Conf,
+        path: &std::path::Path,
+        provenance: &crate::server::replication::snapshot::SnapshotProvenance,
+        group: crate::shared::identity::GroupId,
+        schema_id: u64,
+    ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError> {
+        use crate::server::replication::snapshot::{self, SnapshotManifest, SnapshotWriter};
+        use openraft::vote::RaftLeaderId as _;
+        // this table's settings, and so where its archives and maps are
+        let table_conf = Self::get_settings::<R>(conf)?;
+        table_conf.setup_paths(R::name()).await?;
+        // every shard's map, and every live entry in each, in key order across the shards
+        let mut maps = Vec::with_capacity(shard_names.len());
+        let mut entries: Vec<(usize, ArchiveEntry)> = Vec::new();
+        for (at, shard_name) in shard_names.iter().enumerate() {
+            let map = ArchiveMap::new(shard_name, R::name(), &table_conf).await?;
+            entries.extend(map.to_archive.borrow().values().map(|entry| (at, *entry)));
+            maps.push(map);
+        }
+        entries.sort_by_key(|(_, entry)| entry.key);
+        // the header promises the count, so it is known before a record is written
+        let table = crate::shared::identity::TableId::of(R::name());
+        let header = provenance.header(table, group, 0, entries.len() as u64, schema_id);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut writer = SnapshotWriter::create(path, header).await?;
+        for (at, entry) in &entries {
+            // read this partition's archived bytes as they are, verified, and write them as they are
+            let read = maps[*at].read_record(entry).await?;
+            writer.record(entry.key, &read).await?;
+        }
+        let (total, checksum) = writer.finish(&[]).await?;
+        if let Some(dir) = path.parent() {
+            snapshot::sync_dir(dir).await?;
+        }
+        for map in maps {
+            map.close_all().await?;
+        }
+        // every tablet: the file is the whole table
+        //
+        // truncation cannot happen: a tablet id is twelve bits
+        #[allow(clippy::cast_possible_truncation)]
+        let tablets: Vec<u16> = (0..crate::server::ring::TABLET_COUNT).map(|tablet| tablet as u16).collect();
+        let manifest = SnapshotManifest {
+            group,
+            table,
+            schema_id,
+            // index zero under the origin's first slot: an export is before any log
+            boundary: openraft::LogId::new(crate::server::wal::LeaderId::new(0, crate::shared::identity::ShardAddr::new(provenance.origin, 0)), 0),
+            membership: openraft::StoredMembership::default(),
+            tablets,
+            records: entries.len() as u64,
+            total,
+            checksum,
+            retries: 0,
+            expired_before: 0,
+            cluster: crate::shared::identity::ClusterId::default(),
+            origin: crate::shared::identity::NodeId::default(),
+            created_ms: 0,
+        };
+        event!(Level::INFO, msg = "exported a table's archives", table = %R::name(), shards = shard_names.len(), records = manifest.records, bytes = total);
+        Ok(provenance.stamp(manifest, &header))
+    }
+
     /// Commit an operation to this storages intent log
     ///
     /// # Arguments

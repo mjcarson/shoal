@@ -16,7 +16,7 @@
 //! [F48](../../../docs/src/features/rolling-compatibility.md) that is the supported answer,
 //! not a gap: a marker format is never migrated in place, and a directory in a format this
 //! build does not read is served by the build that wrote it or its data brought over into a
-//! new directory by an import or a restore. ~~There is deliberately no migration of the shard count either. This
+//! new directory by a restore of a backup or of an export. ~~There is deliberately no migration of the shard count either. This
 //! turns a silent loss into a refusal to start; moving data between shard counts needs tablet
 //! migration, which does not exist yet.~~ The shard count moves since F47; see below.
 //!
@@ -469,7 +469,7 @@ impl StorageMeta {
     /// # Arguments
     ///
     /// * `root` - The root of the storage directory
-    fn write(&self, root: &Path) -> Result<(), ServerError> {
+    pub fn write(&self, root: &Path) -> Result<(), ServerError> {
         // make sure the directory we are writing into exists
         std::fs::create_dir_all(root)?;
         // stage the new marker beside the old one
@@ -590,8 +590,8 @@ impl StorageMeta {
                             cluster: found.cluster.unwrap_or_default(),
                         }));
                     }
-                    // a standalone directory opened by a cluster config, which is the migration
-                    // M10 owns and nothing here can do
+                    // a standalone directory opened by a cluster config, which an export
+                    // restored into a new cluster is for and nothing here can do
                     (ClusterIntent::Bootstrap | ClusterIntent::Join, MarkerMode::Standalone) => {
                         return Err(ServerError::Shoal(ShoalError::StandaloneDirectoryInCluster {
                             node: found.node,
@@ -1018,7 +1018,7 @@ mod tests {
         // ([F48](../../../docs/src/features/rolling-compatibility.md))
         let rendered = format!("{error}");
         assert!(rendered.contains("format 1"), "{rendered}");
-        assert!(rendered.contains("never migrated") && rendered.contains("import or restore"), "{rendered}");
+        assert!(rendered.contains("never migrated") && rendered.contains("restore a backup or an export"), "{rendered}");
         // a format from the future is refused the same way
         let future = StorageMeta {
             format: META_FORMAT + 1,
@@ -1206,7 +1206,7 @@ mod tests {
             ServerError::Shoal(ShoalError::StandaloneDirectoryInCluster { node })
                 if node == standalone.node
         ));
-        assert!(format!("{error}").contains("M10"), "{error}");
+        assert!(format!("{error}").contains("export_standalone"), "{error}");
     }
 
     /// A peer from another cluster is refused, and the marker is not touched by the refusal

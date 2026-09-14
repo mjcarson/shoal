@@ -237,6 +237,9 @@ pub enum Verdict {
         /// The count the cluster recorded
         expected: u16,
     },
+    /// An identity removed from the cluster, which never returns
+    /// ([F49](../../../../docs/src/features/backup-and-recovery.md))
+    Removed,
 }
 
 /// What a listener judges a peer's identity against
@@ -261,6 +264,10 @@ pub trait Admission {
     /// [`MIN_PEER_VERSION`] until an operator activates a newer one
     /// ([F48](../../../../docs/src/features/rolling-compatibility.md)).
     fn activated_wire(&self) -> u8;
+
+    /// The cluster this one was restored from, if any, whose members are refused by name
+    /// ([F49](../../../../docs/src/features/backup-and-recovery.md))
+    fn restored_from(&self) -> Option<ClusterId>;
 }
 
 /// What the acceptor learned about a peer it let in
@@ -557,7 +564,16 @@ fn judge(
         return (PeerRefusal::Accepted, Ok((true, negotiated)));
     }
     // the cluster, which is what `Identity::verify_cluster` was written to check; a listener
-    // with no cluster yet refuses every member's hello, since it cannot know whose
+    // with no cluster yet refuses every member's hello, since it cannot know whose. A hello
+    // from the cluster this one was restored from is refused as removed rather than as wrong,
+    // since its identities are what a restore retires by name
+    // ([F49](../../../../docs/src/features/backup-and-recovery.md))
+    if admission.restored_from() == Some(cluster) {
+        return (
+            PeerRefusal::Removed,
+            Err(ServerError::Shoal(ShoalError::RestoredFrom { found: cluster, node: found })),
+        );
+    }
     let ours = admission.cluster().or(local.cluster);
     if ours != Some(cluster) {
         return (
@@ -598,6 +614,12 @@ fn judge(
                     placed: expected,
                     claimed: hello.shards,
                 })),
+            );
+        }
+        Verdict::Removed => {
+            return (
+                PeerRefusal::Removed,
+                Err(ServerError::Shoal(ShoalError::Removed { node: found })),
             );
         }
     }

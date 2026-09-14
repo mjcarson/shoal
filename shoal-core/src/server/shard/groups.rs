@@ -188,6 +188,15 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) driven_moves: HashMap<(Uuid, GroupId), crate::server::control::migrate::GroupMove>,
     /// The copies this shard retired under a move, kept for the grace, by group
     pub(super) retired: HashMap<GroupId, super::migrate::RetiredCopy>,
+    /// The group backups this shard is driving right now, by operation and group
+    /// ([F49](../../../../docs/src/features/backup-and-recovery.md))
+    pub(super) driving_backups: HashSet<(Uuid, GroupId)>,
+    /// The phase each backup driver here committed last, which the map may be behind on
+    pub(super) driven_backups: HashMap<(Uuid, GroupId), crate::server::control::backup::BackupPhase>,
+    /// The group restores this shard is driving right now, by operation and group
+    pub(super) driving_restores: HashSet<(Uuid, GroupId)>,
+    /// The phase each restore driver here committed last, which the map may be behind on
+    pub(super) driven_restores: HashMap<(Uuid, GroupId), crate::server::control::backup::RestorePhase>,
 }
 
 impl<D: ShoalDatabase> Shard<D>
@@ -289,6 +298,10 @@ where
             driving_moves: HashSet::new(),
             driven_moves: HashMap::new(),
             retired,
+            driving_backups: HashSet::new(),
+            driven_backups: HashMap::new(),
+            driving_restores: HashSet::new(),
+            driven_restores: HashMap::new(),
         });
         self.rebuild_groups().await?;
         Ok(())
@@ -724,9 +737,12 @@ where
                 for (meta, table, key, payload) in waiting {
                     self.propose_write(meta, table, key, payload).await?;
                 }
-                // a repair or a move waiting on this group is driven once it is led
+                // a repair or a move waiting on this group is driven once it is led, and so
+                // is a backup or a restore
                 self.drive_repairs();
                 self.drive_moves();
+                self.drive_backups();
+                self.drive_restores();
             }
             // a handle built for a group the map has since dropped
             (None, Ok(raft)) => {
@@ -1893,27 +1909,38 @@ where
         reply: &std::sync::mpsc::Sender<Result<serde_json::Value, String>>,
     ) -> Option<Result<serde_json::Value, String>> {
         let node = self.node_id();
+        // a digest is of the table, which a standalone node has too: what an import is
+        // judged by against the cluster that received it
+        // ([F49](../../../../docs/src/features/backup-and-recovery.md))
+        if let ReplicationVerb::Digest { table } = verb {
+            let Some(name) = D::table_of_id(table) else {
+                return Some(Err(format!("no table has identity {table}")));
+            };
+            let (rows, hash) = match self.tables.digest_table(name).await {
+                Ok(digest) => digest,
+                Err(error) => return Some(Err(format!("{error:?}"))),
+            };
+            let groups: BTreeMap<String, u64> = self
+                .replication
+                .as_ref()
+                .map(|replication| {
+                    replication
+                        .groups
+                        .values()
+                        .filter(|slot| slot.spec.table == table)
+                        .map(|slot| (slot.spec.id.to_string(), slot.state.borrow().applied_index()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            return Some(Ok(serde_json::json!({ "rows": rows, "hash": hash, "groups": groups })));
+        }
         let Some(replication) = self.replication.as_mut() else {
             return Some(Err("this node hosts no tablet groups".to_string()));
         };
         let reply = reply.clone();
         let answer: Result<serde_json::Value, String> = match verb {
-            ReplicationVerb::Digest { table } => {
-                let Some(name) = D::table_of_id(table) else {
-                    return Some(Err(format!("no table has identity {table}")));
-                };
-                let (rows, hash) = match self.tables.digest_table(name).await {
-                    Ok(digest) => digest,
-                    Err(error) => return Some(Err(format!("{error:?}"))),
-                };
-                let groups: BTreeMap<String, u64> = replication
-                    .groups
-                    .values()
-                    .filter(|slot| slot.spec.table == table)
-                    .map(|slot| (slot.spec.id.to_string(), slot.state.borrow().applied_index()))
-                    .collect();
-                Ok(serde_json::json!({ "rows": rows, "hash": hash, "groups": groups }))
-            }
+            // answered above, before the groups were needed
+            ReplicationVerb::Digest { .. } => unreachable!("a digest is answered before the groups are looked up"),
             ReplicationVerb::Rotate => {
                 replication.wal.rotate();
                 let _ = replication.wal.flush().await;
@@ -2456,7 +2483,9 @@ async fn start_group<D: ShoalDatabase>(
         Ok(initialized) => initialized,
         Err(error) => return Err((group, format!("asking whether the group is initialized: {error}"))),
     };
-    let members: BTreeMap<ShardAddr, ShardAddr> = spec.members.iter().map(|member| (*member, *member)).collect();
+    // the membership a fresh group starts with: the members that can vote, since one the
+    // cluster tombstoned would be waited on forever
+    let members: BTreeMap<ShardAddr, ShardAddr> = spec.voters.iter().map(|member| (*member, *member)).collect();
     // a learner initializes nothing and elects nobody: the group exists on its members, and
     // the leader's replication is what brings this copy up
     // ([F45](../../../../docs/src/features/replica-migration.md))
@@ -2464,7 +2493,7 @@ async fn start_group<D: ShoalDatabase>(
         event!(Level::INFO, msg = "built a tablet group as its learner", group = %group, members = spec.members.len());
         return Ok((group, raft));
     }
-    if !initialized && (primary || spec.members.len() == 1) {
+    if !initialized && (primary || spec.voters.len() == 1) {
         if let Err(error) = raft.initialize(members.clone()).await {
             event!(Level::DEBUG, msg = "a group was initialized already", group = %group, %error);
         }
@@ -2473,7 +2502,7 @@ async fn start_group<D: ShoalDatabase>(
     // until two election timeouts have passed, so the first leader of a healthy group is the
     // placement primary. After that any member may win, which is what a failover needs - and
     // a group the primary never brought up is initialized by whichever member notices first
-    if spec.members.len() > 1 && !primary {
+    if spec.voters.len() > 1 && !primary {
         raft.runtime_config().elect(false);
         let head_start = Duration::from_millis(raft.config().election_timeout_max * 2);
         let handle = raft.clone();

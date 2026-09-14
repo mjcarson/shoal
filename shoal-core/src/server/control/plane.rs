@@ -51,6 +51,7 @@ use super::detector::Detector;
 use super::listener::{control_acceptor, err, ok, Inbound};
 use super::network::{PeerNetwork, RpcFailure};
 use super::store::{self, ControlStateMachine, CONTROL_DIR};
+use super::backup::BackupRecord;
 use super::plan::{PlanOutcome, PlanPhase, PlanRecord, PlanUpdate, StepState};
 use super::planner::{self, NodeInput, PlanInput, SetInput};
 use super::repair::{QuarantinedCopy, RepairMode};
@@ -1602,6 +1603,11 @@ impl Core {
                 self.drain_joins();
             }
             Event::ReportTick => {
+                // a peer that refused this node's hello as a removed identity has said what
+                // the leader would: this run stops ([F49](../../../../docs/src/features/backup-and-recovery.md))
+                if self.network.refused_as_removed() {
+                    return Err(ServerError::Shoal(ShoalError::Removed { node: self.node }));
+                }
                 // the tick is also when anything that failed for want of a leader is tried
                 // again: this node's own observation, a promotion, a queued admission
                 self.maybe_observe();
@@ -2220,6 +2226,86 @@ impl Core {
                 principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
                 expected_version: call.request.expected_version,
             },
+            // a backup: the table resolved by name here, the rest judged whole by the state
+            // machine ([F49](../../../../docs/src/features/backup-and-recovery.md))
+            AdminKind::Backup { table, path } => {
+                let table = match table {
+                    None => None,
+                    Some(name) => match self.tables.iter().find(|(known, _)| known == name) {
+                        Some((_, id)) => Some(*id),
+                        None => {
+                            let _ = call.reply.send(answer(Err(AdminError::new(
+                                ErrorCode::Internal,
+                                format!("no table is named {name}; the schema serves {:?}", self.tables.iter().map(|(name, _)| name).collect::<Vec<_>>()),
+                            ))));
+                            return;
+                        }
+                    },
+                };
+                ControlCommand::Backup {
+                    op: call.request.op,
+                    principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                    expected_version: call.request.expected_version,
+                    table,
+                    path: path.clone(),
+                }
+            }
+            AdminKind::BackupStatus { op } => {
+                let outcome = match state.backups.get(op) {
+                    Some(record) => Ok(AdminOutcome::Read(serde_json::to_value(record).unwrap_or_default())),
+                    None => Err(AdminError::new(ErrorCode::Internal, format!("no backup operation {op} is recorded"))),
+                };
+                let _ = call.reply.send(answer(outcome));
+                return;
+            }
+            AdminKind::Backups => {
+                let mut backups: Vec<&BackupRecord> = state.backups.values().collect();
+                backups.sort_by_key(|record| record.requested_at);
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(serde_json::to_value(backups).unwrap_or_default()))));
+                return;
+            }
+            // a restore: the manifests read here, on this node, and the schema judged here;
+            // the coverage and the once-per-cluster rule are the state machine's
+            AdminKind::Restore { path } => {
+                let (source, source_schema, files) = match crate::server::control::backup::scan_backup(Path::new(path)) {
+                    Ok(scanned) => scanned,
+                    Err(reason) => {
+                        let _ = call.reply.send(answer(Err(AdminError::new(ErrorCode::Internal, reason))));
+                        return;
+                    }
+                };
+                if source_schema != self.member.schema_id {
+                    let _ = call.reply.send(answer(Err(AdminError::new(
+                        ErrorCode::Internal,
+                        format!(
+                            "the backup was cut from schema {source_schema:#018x} and this cluster serves {:#018x}; a schema change is not a restore",
+                            self.member.schema_id
+                        ),
+                    ))));
+                    return;
+                }
+                ControlCommand::Restore {
+                    op: call.request.op,
+                    principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                    expected_version: call.request.expected_version,
+                    path: path.clone(),
+                    source,
+                    source_schema,
+                    files,
+                }
+            }
+            AdminKind::RestoreStatus { op } => {
+                let outcome = match state.restores.get(op) {
+                    Some(record) => Ok(AdminOutcome::Read(serde_json::to_value(record).unwrap_or_default())),
+                    None => Err(AdminError::new(ErrorCode::Internal, format!("no restore operation {op} is recorded"))),
+                };
+                let _ = call.reply.send(answer(outcome));
+                return;
+            }
+            AdminKind::Recoveries => {
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(serde_json::to_value(&state.recoveries).unwrap_or_default()))));
+                return;
+            }
             // an activation of a version this build cannot speak is refused here, before it is
             // proposed: the state machine judges the members' records, never the build, so a
             // replica on an older build applies exactly what the leader did
@@ -2322,6 +2408,22 @@ impl Core {
         let network = self.network.clone();
         let machine = self.machine.clone();
         let node = self.node;
+        // what a refusal for want of a leader says: which voters there are, which this node
+        // reaches, and the way out when the rest are gone for good
+        // ([F49](../../../../docs/src/features/backup-and-recovery.md))
+        let voters = state.voters();
+        let reachable: Vec<NodeId> = self
+            .reachability
+            .iter()
+            .filter(|(_, reach)| reach.misses == 0)
+            .map(|(peer, _)| *peer)
+            .chain(std::iter::once(node))
+            .collect();
+        let quorum_hint = format!(
+            "no control leader could be reached; the cluster may lack a quorum. the voters are {voters:?} and this node \
+             reaches {reachable:?}; if a majority of the voters is gone for good, stop a survivor and run force_recover \
+             on its directory, which keeps it alone and tombstones the rest"
+        );
         glommio::spawn_local(async move {
             let outcome = match propose(&raft, &network, &machine, mutation).await {
                 Ok(ControlResponse::Applied { topology_version }) => Ok(AdminOutcome::Applied {
@@ -2355,10 +2457,7 @@ impl Core {
                 Ok(ControlResponse::Removed { node }) => {
                     Err(AdminError::new(ErrorCode::Internal, format!("{node} is a removed identity")))
                 }
-                Err(ProposeError::NoLeader) => Err(AdminError::new(
-                    ErrorCode::NotLeader,
-                    "no control leader could be reached; the cluster may lack a quorum".to_string(),
-                )),
+                Err(ProposeError::NoLeader) => Err(AdminError::new(ErrorCode::NotLeader, quorum_hint)),
                 Err(ProposeError::Failed(msg)) => Err(AdminError::new(ErrorCode::Internal, msg)),
             };
             let version = machine.state().topology_version;
@@ -2834,7 +2933,9 @@ impl Core {
     fn ping_members(&mut self) {
         let state = self.machine.state();
         for (node, member) in &state.members {
-            if *node == self.node || member.phase == MemberPhase::Removed {
+            // a removed member is gone, and so is a tombstoned one still draining: an identity
+            // refused at every door is never going to answer
+            if *node == self.node || member.phase == MemberPhase::Removed || state.tombstones.contains_key(node) {
                 continue;
             }
             let record = member.record.clone();
@@ -3109,7 +3210,14 @@ impl Core {
                 continue;
             }
             if let Some(update) = self.next_plan_update(&state, &map, record) {
+                // one plan is planned per pass: a second planned against the same sets would
+                // pick the same destination for the same tablet, since the first's steps are
+                // not committed yet. it plans on the next pass, with those steps in view
+                let planned = matches!(update, PlanUpdate::Steps { .. });
                 self.propose_plan(record.op, update);
+                if planned {
+                    break;
+                }
             }
         }
     }
@@ -3155,11 +3263,16 @@ impl Core {
                 }
             }
         }
-        // a pending step under the caps becomes a move
+        // a pending step under the caps becomes a move, unless its set is already moving
+        // under another plan: two plans draining two members of one set each take a turn
         let in_flight = self.moves_in_flight(state);
+        let busy: BTreeSet<u16> = state.moves.values().filter(|moved| !moved.is_done()).map(|moved| moved.tablets[0]).collect();
         let cap = self.rebalance.moves_per_node;
         for step in record.live_steps() {
             if step.state != StepState::Pending {
+                continue;
+            }
+            if busy.contains(&step.tablet) {
                 continue;
             }
             let as_source = in_flight.iter().filter(|(from, _)| *from == step.from).count();
@@ -3257,10 +3370,19 @@ impl Core {
                 acc.entry(tablets[0]).or_default().push(group.0);
                 acc
             });
+        // a set is busy under this plan's own steps, under any move not done, and under
+        // another open plan's steps: two plans never place the same set at once
         let busy_tablets: BTreeSet<u16> = record
             .live_steps()
             .map(|step| step.tablet)
             .chain(state.moves.values().filter(|moved| !moved.is_done()).map(|moved| moved.tablets[0]))
+            .chain(
+                state
+                    .open_plans()
+                    .into_iter()
+                    .filter(|other| other.op != record.op)
+                    .flat_map(|other| other.live_steps().map(|step| step.tablet)),
+            )
             .collect();
         let sets = map
             .rule_sets_served()

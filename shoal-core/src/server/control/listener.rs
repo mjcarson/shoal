@@ -27,7 +27,7 @@ use tracing::{event, Level};
 
 use super::network::decode_snapshot;
 use super::store::ControlStateMachine;
-use super::types::{ControlConfig, MemberHealth};
+use super::types::{ControlConfig, MemberHealth, MemberPhase};
 use crate::server::peer::codec;
 use crate::server::peer::handshake::{self, Accepted, Admission, Local, Verdict};
 use crate::server::peer::Lane;
@@ -78,6 +78,11 @@ impl Admission for StateAdmission {
         if state.members.is_empty() {
             return Verdict::Member;
         }
+        // a removed identity never comes back, by this door or any other
+        // ([F49](../../../../docs/src/features/backup-and-recovery.md))
+        if state.tombstones.contains_key(&node) || state.members.get(&node).is_some_and(|member| member.phase == MemberPhase::Removed) {
+            return Verdict::Removed;
+        }
         match state.members.get(&node) {
             None => Verdict::Unknown,
             Some(member) if incarnation < member.record.incarnation => Verdict::Fenced {
@@ -107,6 +112,11 @@ impl Admission for StateAdmission {
     /// The wire version the applied state says the cluster activated
     fn activated_wire(&self) -> u8 {
         self.machine.state().activated_wire()
+    }
+
+    /// The cluster the applied state says this one was restored from
+    fn restored_from(&self) -> Option<ClusterId> {
+        self.machine.state().restored_from
     }
 }
 

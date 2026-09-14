@@ -47,6 +47,9 @@ pub struct ScrubOutcome {
     pub op: Uuid,
     /// The index the scrub committed at, which every report is of
     pub boundary: u64,
+    /// The log id the scrub committed at, whole, for a cut that names it
+    /// ([F49](../../../../docs/src/features/backup-and-recovery.md))
+    pub log_id: crate::server::wal::WalLogId,
     /// Every member's report, or why there is none from it
     pub reports: BTreeMap<ShardAddr, Result<DigestReport, String>>,
 }
@@ -84,9 +87,9 @@ pub async fn scrub_group<D: ShoalDatabase>(
     let started = Instant::now();
     // the entry: committed at the boundary every replica cuts at
     let written = glommio::timer::timeout(timeout, async { Ok(raft.client_write(Command::scrub(table, op)).await) }).await;
-    let boundary = match written {
+    let log_id = match written {
         Err(_) => return Err(format!("group {group} did not commit the scrub within {timeout:?}")),
-        Ok(Ok(response)) => response.log_id.index,
+        Ok(Ok(response)) => response.log_id,
         Ok(Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward)))) => {
             return Err(format!(
                 "{NOT_LEADER}group {group}: the leader is {:?}",
@@ -95,6 +98,7 @@ pub async fn scrub_group<D: ShoalDatabase>(
         }
         Ok(Err(error)) => return Err(format!("proposing the scrub of group {group}: {error}")),
     };
+    let boundary = log_id.index;
     // every member's report, polled until it is in or the time is up
     let mut reports: BTreeMap<ShardAddr, Result<DigestReport, String>> = BTreeMap::new();
     let mut last: BTreeMap<ShardAddr, String> = BTreeMap::new();
@@ -144,7 +148,7 @@ pub async fn scrub_group<D: ShoalDatabase>(
         }
         glommio::timer::sleep(DIGEST_POLL).await;
     }
-    Ok(ScrubOutcome { op, boundary, reports })
+    Ok(ScrubOutcome { op, boundary, log_id, reports })
 }
 
 /// The directory under `wal/Shard-N/` a quarantined copy's marker lives in
@@ -396,6 +400,10 @@ mod tests {
         let scrub = |digests: [(u64, u64); 3]| ScrubOutcome {
             op: Uuid::new_v4(),
             boundary: 10,
+            log_id: {
+                use openraft::vote::RaftLeaderId as _;
+                openraft::LogId::new(crate::server::wal::LeaderId::new(1, members[0]), 10)
+            },
             reports: members
                 .iter()
                 .zip(digests)

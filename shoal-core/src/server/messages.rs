@@ -783,6 +783,38 @@ where
         /// The phase it committed last, which the map may not carry yet
         phase: crate::server::control::repair::RepairPhase,
     },
+    /// A backup driver finished with a group, for whatever reason
+    /// ([F49](../../../docs/src/features/backup-and-recovery.md))
+    BackupDone {
+        /// The operation
+        op: Uuid,
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// The phase it committed last, which the map may not carry yet
+        phase: crate::server::control::backup::BackupPhase,
+    },
+    /// A restore driver finished with a group, for whatever reason
+    RestoreDone {
+        /// The operation
+        op: Uuid,
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// The phase it committed last, which the map may not carry yet
+        phase: crate::server::control::backup::RestorePhase,
+    },
+    /// A driver asking for a group's current handle and state, after a restart it caused
+    GroupHandle {
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// Where the handle and the shard's copy of the state go, or none while the group is starting
+        #[allow(clippy::type_complexity)]
+        reply: futures_channel::oneshot::Sender<
+            Option<(
+                openraft::Raft<crate::server::replication::DataConfig, crate::server::replication::GroupMachine<D>>,
+                std::rc::Rc<std::cell::RefCell<crate::server::replication::MachineState>>,
+            )>,
+        >,
+    },
     /// A retired copy's archived partitions are gone, or why they are not
     /// ([F45](../../../docs/src/features/replica-migration.md))
     TabletsDropped {
@@ -940,6 +972,9 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             ServerMsg::Digested { .. } => panic!("A digest is the scrubbing shard's"),
             ServerMsg::Quarantine { .. } => panic!("A quarantine is the holding shard's"),
             ServerMsg::RepairDone { .. } => panic!("A repair driver is one shard's"),
+            ServerMsg::BackupDone { .. } => panic!("A backup driver is one shard's"),
+            ServerMsg::RestoreDone { .. } => panic!("A restore driver is one shard's"),
+            ServerMsg::GroupHandle { .. } => panic!("A group handle is one shard's"),
             ServerMsg::MoveDone { .. } => panic!("A move driver is one shard's"),
             ServerMsg::TabletsDropped { .. } => panic!("A dropped copy is the retiring shard's"),
             ServerMsg::RepairInstall { .. } => panic!("A repair install is the holding shard's"),

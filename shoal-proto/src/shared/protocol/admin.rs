@@ -171,6 +171,39 @@ pub enum AdminKind {
     },
     /// Every plan the control state holds, done or not
     Plans,
+    /// Back a table, or every table, up under a directory: one file per group, each cut at a
+    /// committed boundary of its own and written by the group's leader on its node
+    /// ([F49](../../../../docs/src/features/backup-and-recovery.md))
+    Backup {
+        /// The table, by the name the schema spells it, or none for every table
+        #[serde(default)]
+        table: Option<String>,
+        /// The directory the files go under, on every node that writes one
+        path: String,
+    },
+    /// The record of a backup operation, as the control state holds it
+    BackupStatus {
+        /// The operation
+        op: Uuid,
+    },
+    /// Every backup record the control state holds, done or not
+    Backups,
+    /// Restore a backup into this cluster from a directory every node can read
+    ///
+    /// Once per cluster, into a cluster that is not the one the backup was cut in, and into
+    /// tables that hold nothing; refused by name otherwise. The old cluster's members are
+    /// refused at every door from the commit ([F49](../../../../docs/src/features/backup-and-recovery.md)).
+    Restore {
+        /// The directory the files are read from
+        path: String,
+    },
+    /// The record of a restore operation, as the control state holds it
+    RestoreStatus {
+        /// The operation
+        op: Uuid,
+    },
+    /// Every recovery an operator ran on a survivor, oldest first
+    Recoveries,
     /// Activate a wire version: every member speaks it from the commit, and none rolls back
     /// past it ([F48](../../../../docs/src/features/rolling-compatibility.md))
     ///
@@ -200,6 +233,8 @@ impl AdminKind {
                 | AdminKind::Maintenance { .. }
                 | AdminKind::Rebalance
                 | AdminKind::Activate { .. }
+                | AdminKind::Backup { .. }
+                | AdminKind::Restore { .. }
         )
     }
 
@@ -225,6 +260,12 @@ impl AdminKind {
             AdminKind::PlanStatus { .. } => "plan_status",
             AdminKind::Plans => "plans",
             AdminKind::Activate { .. } => "activate",
+            AdminKind::Backup { .. } => "backup",
+            AdminKind::BackupStatus { .. } => "backup_status",
+            AdminKind::Backups => "backups",
+            AdminKind::Restore { .. } => "restore",
+            AdminKind::RestoreStatus { .. } => "restore_status",
+            AdminKind::Recoveries => "recoveries",
         }
     }
 }
@@ -483,6 +524,8 @@ mod tests {
         let node = NodeId::mint();
         let mutations = [
             AdminKind::Activate { wire: 5 },
+            AdminKind::Backup { table: None, path: "/backups".to_string() },
+            AdminKind::Restore { path: "/backups/x".to_string() },
             AdminKind::Decommission { node },
             AdminKind::Remove { node, replacement: Some(NodeId::mint()) },
             AdminKind::Remove { node, replacement: None },
@@ -494,7 +537,14 @@ mod tests {
             let json = serde_json::to_vec(&kind).expect("a kind encodes");
             assert_eq!(decode_rest::<AdminKind>(&json).expect("a kind decodes"), kind);
         }
-        for kind in [AdminKind::PlanStatus { op: Uuid::new_v4() }, AdminKind::Plans] {
+        for kind in [
+            AdminKind::PlanStatus { op: Uuid::new_v4() },
+            AdminKind::Plans,
+            AdminKind::BackupStatus { op: Uuid::new_v4() },
+            AdminKind::Backups,
+            AdminKind::RestoreStatus { op: Uuid::new_v4() },
+            AdminKind::Recoveries,
+        ] {
             assert!(!kind.is_mutation(), "{}", kind.name());
             let json = serde_json::to_vec(&kind).expect("a kind encodes");
             assert_eq!(decode_rest::<AdminKind>(&json).expect("a kind decodes"), kind);

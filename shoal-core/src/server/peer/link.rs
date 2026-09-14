@@ -188,6 +188,11 @@ pub enum LinkEvent {
         unsent: Vec<FrameKey>,
         /// Why, for the log
         reason: String,
+        /// The refusal the peer answered the hello with, if the dial got that far
+        ///
+        /// A `Removed` here is a verdict on this node's identity, not on the connection, and
+        /// the owner stops on it ([F49](../../../../docs/src/features/backup-and-recovery.md)).
+        refused: Option<crate::shared::protocol::peer::PeerRefusal>,
     },
     /// The peer sent a frame back
     Frame {
@@ -596,11 +601,17 @@ async fn run<F: Fn(LinkEvent) + 'static>(
                     q.drain_keys()
                 };
                 event!(Level::WARN, msg = "a peer link could not be made", %node, %lane, ?error);
+                // a refusal at the hello is the peer's verdict, carried apart from the text
+                let refused = match &error {
+                    ServerError::Shoal(crate::server::errors::ShoalError::PeerRefused { reason, .. }) => Some(*reason),
+                    _ => None,
+                };
                 on_event(LinkEvent::Down {
                     node,
                     lane,
                     unsent,
                     reason: format!("{error:?}"),
+                    refused,
                 });
                 // wait out the backoff, growing it with jitter, and try again if still wanted:
                 // never sooner than the floor, and no later than the first frame that wants
@@ -654,6 +665,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
             lane,
             unsent,
             reason: format!("{outcome:?}"),
+            refused: None,
         });
         if queue.borrow().closed {
             return;

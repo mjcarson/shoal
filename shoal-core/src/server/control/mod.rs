@@ -19,10 +19,13 @@
 //! - [`capacity`] reads the free bytes a node reports and a receiver checks
 //! - [`plan`] and [`planner`] are the placement plans the leader records and derives
 //!   ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+//! - [`backup`] is what a backup, a restore and a recovery record
+//!   ([F49](../../../../docs/src/features/backup-and-recovery.md))
 //!
 //! Standalone mode touches none of this. A server without a `cluster:` block spawns no thread,
 //! opens no group and writes no file under `control/`, and the shard path is unchanged.
 
+pub mod backup;
 pub mod capacity;
 pub mod cores;
 pub mod detector;

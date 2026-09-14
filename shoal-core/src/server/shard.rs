@@ -1,11 +1,13 @@
 //! A single shard in Shoal
 
+pub mod backup;
 mod gather;
 mod groups;
 pub use groups::membership_as_of;
 pub mod migrate;
 mod reads;
 pub mod repair;
+pub mod restore;
 mod snapshots;
 
 use bytes::Bytes;
@@ -1538,9 +1540,12 @@ where
         self.rebuild_groups().await?;
         // a repair the map carries is driven by whoever leads its groups
         // ([F44](../../../docs/src/features/repair.md)), and so is a move
-        // ([F45](../../../docs/src/features/replica-migration.md))
+        // ([F45](../../../docs/src/features/replica-migration.md)), a backup and a restore
+        // ([F49](../../../docs/src/features/backup-and-recovery.md))
         self.drive_repairs();
         self.drive_moves();
+        self.drive_backups();
+        self.drive_restores();
         // every subscribed client hears of it; the relay folds a run of them to the newest
         self.push_topology(&map);
         Ok(())
@@ -3060,9 +3065,11 @@ where
                 self.sweep_deadlines().await?;
                 self.maybe_report_replication();
                 // a repair or a move a group this shard now leads is waiting on, and a scrub
-                // that is due
+                // that is due; a backup or a restore the same
                 self.drive_repairs();
                 self.drive_moves();
+                self.drive_backups();
+                self.drive_restores();
                 self.schedule_scrubs();
                 // a retired copy whose grace is over is reclaimed
                 // ([F45](../../../docs/src/features/replica-migration.md))
@@ -3765,6 +3772,19 @@ where
                 ServerMsg::Digested { group, op, outcome } => self.handle_digested(group, op, outcome),
                 ServerMsg::Quarantine { group, action, reply } => self.handle_quarantine(group, action, reply).await,
                 ServerMsg::RepairDone { op, group, phase } => self.handle_repair_done(op, group, phase),
+                // a backup driver or a restore driver finished with a group
+                // ([F49](../../../docs/src/features/backup-and-recovery.md))
+                ServerMsg::BackupDone { op, group, phase } => self.handle_backup_done(op, group, phase),
+                ServerMsg::RestoreDone { op, group, phase } => self.handle_restore_done(op, group, phase),
+                // a driver asking for a group's current handle, after a restart it caused
+                ServerMsg::GroupHandle { group, reply } => {
+                    let handle = self
+                        .replication
+                        .as_ref()
+                        .and_then(|replication| replication.groups.get(&group))
+                        .and_then(|slot| slot.raft.clone().map(|raft| (raft, slot.state.clone())));
+                    let _ = reply.send(handle);
+                }
                 ServerMsg::MoveDone { op, group, progress } => self.handle_move_done(op, group, progress),
                 ServerMsg::TabletsDropped { group, outcome, .. } => self.handle_tablets_dropped(group, outcome).await?,
                 ServerMsg::RepairInstall { group, path, manifest, reply } => {

@@ -1179,6 +1179,97 @@ mod tests {
     /// A version 5 manifest round trips through its version 4 shape with the new fields
     /// defaulted, a pending marker from before F48 still loads, and a version 2 file header
     /// identifies its cluster ([F48](../../../../docs/src/features/rolling-compatibility.md))
+    /// A file cut past the activation names its cluster in its own header, the manifest
+    /// stamped from it names the origin too, and the backup manifest written beside it
+    /// rebuilds a manifest the file verifies against; a file cut below the activation is a
+    /// version 1 file that names nothing, and a manifest for another cluster does not verify it
+    #[test]
+    fn a_backup_file_identifies_its_cluster() {
+        use super::{SnapshotProvenance, SNAPSHOT_V2_FROM_WIRE};
+        use crate::server::control::backup::BackupManifest;
+        let mut runtime = GlommioRuntime::new(1);
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("failed to build a temp dir");
+            let cluster = ClusterId::mint();
+            let origin = NodeId::mint();
+            let table = TableId::of("Note");
+            let group = GroupId(0xabc);
+            let records: Vec<(u64, Vec<u8>)> = vec![(1, vec![1u8; 10]), (2, vec![2u8; 20])];
+            // one file at each side of the activation, from the same records
+            let mut files = Vec::new();
+            for wire in [SNAPSHOT_V2_FROM_WIRE - 1, SNAPSHOT_V2_FROM_WIRE] {
+                let provenance = SnapshotProvenance::at(cluster, origin, wire);
+                let header = provenance.header(table, group, 7, records.len() as u64, 0x1234);
+                let path = dir.path().join(format!("{group}-{wire}.snap"));
+                let mut writer = SnapshotWriter::create(&path, header).await.expect("failed to create");
+                for (key, bytes) in &records {
+                    writer.record(*key, bytes).await.expect("failed to write a record");
+                }
+                let (total, checksum) = writer.finish(&[]).await.expect("failed to finish");
+                let manifest = provenance.stamp(
+                    SnapshotManifest {
+                        group,
+                        table,
+                        schema_id: 0x1234,
+                        boundary: LogId::new(LeaderId::new(3, ShardAddr::new(origin, 0)), 7),
+                        membership: StoredMembership::default(),
+                        tablets: vec![1, 2],
+                        records: records.len() as u64,
+                        total,
+                        checksum,
+                        retries: 0,
+                        expired_before: 0,
+                        cluster: ClusterId::default(),
+                        origin: NodeId::default(),
+                        created_ms: 0,
+                    },
+                    &header,
+                );
+                files.push((wire, path, header, manifest));
+            }
+            let (_, below, header_below, manifest_below) = &files[0];
+            let (_, past, header_past, manifest_past) = &files[1];
+            // the header past the activation names the cluster and the schema; the one below does not
+            assert_eq!(header_past.version, SNAPSHOT_VERSION_2);
+            assert_eq!(header_past.cluster, cluster);
+            assert_eq!(header_past.schema_id, 0x1234);
+            assert!(header_past.created_ms > 0);
+            assert_eq!(header_below.version, super::SNAPSHOT_VERSION);
+            assert_eq!(header_below.cluster, ClusterId::default());
+            assert_eq!(std::fs::metadata(past).expect("the file").len(), std::fs::metadata(below).expect("the file").len() + (SNAPSHOT_HEADER_LEN_V2 - SNAPSHOT_HEADER_LEN) as u64);
+            // and the file itself says so when opened, with no manifest in hand
+            let reader = SnapshotReader::open(past).await.expect("the file opens");
+            assert_eq!(reader.header().cluster, cluster);
+            assert_eq!(reader.header().created_ms, header_past.created_ms);
+            reader.close().await.expect("close");
+            // both manifests are stamped with the cluster and the origin
+            for manifest in [manifest_below, manifest_past] {
+                assert_eq!(manifest.cluster, cluster);
+                assert_eq!(manifest.origin, origin);
+                assert!(manifest.created_ms > 0);
+            }
+            assert_eq!(manifest_past.created_ms, header_past.created_ms, "the manifest's time is the header's");
+            // the backup manifest beside a file rebuilds one the file verifies against, and
+            // names what a restore judges before a byte is trusted
+            let op = uuid::Uuid::new_v4();
+            let beside = BackupManifest::of(op, "Note", manifest_past);
+            assert_eq!(beside.cluster, cluster);
+            assert_eq!(beside.origin, origin);
+            assert_eq!(beside.schema_id, 0x1234);
+            assert_eq!(beside.boundary, 7);
+            assert_eq!(beside.term, 3);
+            let json = serde_json::to_vec(&beside).expect("a backup manifest is json");
+            let loaded: BackupManifest = serde_json::from_slice(&json).expect("a backup manifest loads");
+            assert_eq!(loaded, beside);
+            verify(past, &loaded.to_snapshot()).await.expect("the file verifies against the manifest beside it");
+            verify(below, &BackupManifest::of(op, "Note", manifest_below).to_snapshot()).await.expect("the version 1 file verifies too");
+            // a manifest naming another cluster does not verify a file cut past the activation
+            let mut foreign = loaded.clone();
+            foreign.cluster = ClusterId::mint();
+            assert!(verify(past, &foreign.to_snapshot()).await.is_err(), "a file was verified under another cluster's manifest");
+        });
+    }
+
     #[test]
     fn a_v4_manifest_round_trips_with_defaults() {
         let cluster = ClusterId::mint();
