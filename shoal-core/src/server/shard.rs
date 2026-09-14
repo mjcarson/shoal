@@ -3397,23 +3397,15 @@ where
         let Some(setup) = self.peer_setup.clone() else {
             return Ok(None);
         };
-        // the configs are built here, per shard, on this shard's executor
-        let (client_tls, server_tls) = match &setup.tls {
-            Some(tls) => {
-                if !crate::shared::tls::ktls::is_available() {
-                    return Err(crate::shared::tls::TlsError::UlpUnavailable(std::io::Error::new(
-                        std::io::ErrorKind::Unsupported,
-                        "the 'tls' kernel module is not loaded",
-                    ))
-                    .into());
-                }
-                (
-                    Some(crate::shared::tls::peer_client_config(tls)?),
-                    Some(crate::shared::tls::peer_server_config(tls)?),
-                )
-            }
-            None => (None, None),
-        };
+        // the material was read by the pool into the holder every executor shares; what a
+        // shard checks is that the kernel can take the keys
+        if setup.tls.is_encrypted() && !crate::shared::tls::ktls::is_available() {
+            return Err(crate::shared::tls::TlsError::UlpUnavailable(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "the 'tls' kernel module is not loaded",
+            ))
+            .into());
+        }
         // what this node says about itself, shared by the listener and the links on this shard
         let local = self
             .local
@@ -3424,7 +3416,7 @@ where
             self.map.clone(),
             setup.dial.clone(),
             local.clone(),
-            client_tls.clone(),
+            setup.tls.clone(),
             setup.transport.clone(),
             self.shard_local_tx.clone_sync(),
         ));
@@ -3444,7 +3436,7 @@ where
             self.map.clone(),
             setup.dial.clone(),
             local.clone(),
-            client_tls,
+            setup.tls.clone(),
             setup.transport.clone(),
             replication_conf,
             Rc::new(move |event| {
@@ -3465,7 +3457,7 @@ where
             node_local_tx: self.shard_local_tx.clone(),
             local,
             map: self.map.clone(),
-            tls: server_tls,
+            tls: setup.tls.clone(),
             handshake_timeout: setup.transport.handshake_timeout.duration(),
             inflight_bound: setup.transport.inflight_bytes,
             // a frame names a slot, and the slots are what a peer may name; which executor

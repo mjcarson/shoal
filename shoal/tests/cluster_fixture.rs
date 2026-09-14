@@ -1230,6 +1230,16 @@ async fn cluster_server_child() {
             if let Some(ms) = staged.query_deadline_ms {
                 conf.networking.query_deadline = Duration::from_millis(ms).into();
             }
+            // the peer lanes' material, if the fixture minted it
+            // ([F50](../../docs/src/features/cluster-operations.md))
+            if let Some(tls) = &staged.tls {
+                block = block.tls(shoal::server::conf::cluster::PeerTls {
+                    cert: tls.cert.clone().into(),
+                    key: tls.key.clone().into(),
+                    ca: tls.ca.clone().into(),
+                    bind_identity: tls.bind_identity,
+                });
+            }
             for (node, control, data) in &staged.dial {
                 let node = NodeId(node.parse().expect("a node id parses"));
                 block = block.dial(node, Some(control.clone()), Some(data.clone()));
@@ -1590,6 +1600,11 @@ fn handle_command(
         }
         // which start of this node this is
         "INCARNATION" => Ok(serde_json::json!({ "incarnation": pool.identity().incarnation })),
+        // read the peer certificate, key and authority again ([F50](../../docs/src/features/cluster-operations.md))
+        "RELOAD_TLS" => pool
+            .reload_tls()
+            .map(|report| serde_json::to_value(report).unwrap_or_default())
+            .map_err(|error| format!("{error}")),
         // how many bytes the control log holds, so a test can see whether an entry was written
         "LOG_LEN" => std::fs::metadata(dir.join("control").join("log"))
             .map(|meta| serde_json::json!({ "bytes": meta.len() }))
@@ -11814,5 +11829,286 @@ async fn single_node_data_has_a_verified_cluster_migration_path() -> Result<(), 
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
     assert_eq!(source.node(0).failure(), None, "the source died");
+    Ok(())
+}
+
+/// Every link of one node to another, as the transport view shows it: lane, state and the
+/// last dial failure
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `from` - The node whose links are read
+/// * `to` - The peer
+fn links_to(cluster: &mut Cluster, from: usize, to: usize) -> Result<Vec<(String, String, Option<String>)>, FixtureError> {
+    let peer = cluster.node_ids()[to].clone();
+    let view = cluster.node_mut(from).command("TRANSPORT")?;
+    let mut links = Vec::new();
+    for shard in view["ok"].as_array().into_iter().flatten() {
+        for link in shard["links"].as_array().into_iter().flatten() {
+            if link["node"].as_str() == Some(peer.as_str()) {
+                links.push((
+                    link["lane"].as_str().unwrap_or_default().to_string(),
+                    link["state"].as_str().unwrap_or_default().to_string(),
+                    link["last_failure"].as_str().map(str::to_string),
+                ));
+            }
+        }
+    }
+    Ok(links)
+}
+
+/// Wait until some link of one node to another has failed its last dial for a reason naming
+/// a phrase, or until every link is up if the phrase is empty
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `from` - The node whose links are read
+/// * `to` - The peer
+/// * `phrase` - What the failure has to say, or empty for every link up
+/// * `within` - How long to wait
+fn wait_link_failure(cluster: &mut Cluster, from: usize, to: usize, phrase: &str, within: Duration) -> Result<Vec<(String, String, Option<String>)>, FixtureError> {
+    let deadline = Instant::now() + within;
+    loop {
+        let links = links_to(cluster, from, to)?;
+        let found = if phrase.is_empty() {
+            !links.is_empty() && links.iter().all(|(_, state, _)| state == "up")
+        } else {
+            links.iter().any(|(_, _, failure)| failure.as_deref().is_some_and(|failure| failure.contains(phrase)))
+        };
+        if found {
+            return Ok(links);
+        }
+        if Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("node {from}'s links to {to} never {}: {links:?}", if phrase.is_empty() { "came up".to_string() } else { format!("failed naming {phrase:?}") })));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Wait until a node sees a member's record at an incarnation and a control address
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `at` - The node asked
+/// * `member` - The member
+/// * `incarnation` - The incarnation wanted
+/// * `control` - The control address wanted
+/// * `within` - How long to wait
+fn wait_member_record(cluster: &mut Cluster, at: usize, member: usize, incarnation: u64, control: &str, within: Duration) -> Result<(), FixtureError> {
+    let deadline = Instant::now() + within;
+    loop {
+        let view = member_view(cluster, at, member)?;
+        if view["record"]["incarnation"].as_u64() == Some(incarnation) && view["record"]["control"].as_str() == Some(control) {
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("node {at} never saw member {member} at incarnation {incarnation} and {control}: {view}")));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// A member's address changes at a restart under its own identity, is observed at a higher
+/// incarnation, and a clone left at the old address is refused (C1 M10)
+///
+/// Three nodes at a factor of three with rows on every node. Node two is stopped, its
+/// directory copied, and started again at fresh peer ports: it joins as the same node one
+/// start later, every member's record of it names the new address at the new incarnation,
+/// its links to the others and theirs to it come up at the new address, and writes through it
+/// commit while every earlier row reads through it. The copy started at the old address is
+/// the same identity at the same incarnation from another address, refused as a duplicate
+/// and stopping on its own, while the restarted node keeps serving and stays on record
+/// ([F50](../../docs/src/features/cluster-operations.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn address_change_is_observed_and_a_stale_clone_is_fenced() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let addrs: Vec<String> = (0..3).map(|node| cluster.node(node).endpoints.client.to_string()).collect();
+    let keys: Vec<u64> = (71_000..71_030).collect();
+    for (at, key) in keys.iter().enumerate() {
+        write_note(&addrs[at % 3], *key, &format!("before-{key}")).await.map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    let before = member_view(&mut cluster, 0, 2)?;
+    let incarnation = before["record"]["incarnation"].as_u64().expect("an incarnation");
+    let old_control = before["record"]["control"].as_str().expect("a control address").to_string();
+    // stopped, copied, and started again at fresh ports: the same node one start later
+    cluster.kill(2)?;
+    let copy = cluster.clone_dir(2)?;
+    let old_ports = cluster.restart_at_new_address(2)?;
+    cluster.wait_joined(&[2])?;
+    assert_eq!(cluster.node(2).endpoints.incarnation, Some(incarnation + 1));
+    let new_control = format!("127.0.0.1:{}", cluster.node(2).endpoints.control.expect("a control endpoint").port());
+    assert_ne!(new_control, old_control, "the restart kept the old address");
+    assert_eq!(old_control, format!("127.0.0.1:{}", old_ports.1), "the staged control port is not the one on record");
+    // every member's record of it moves to the new address at the new incarnation
+    for at in 0..3 {
+        wait_member_record(&mut cluster, at, 2, incarnation + 1, &new_control, Duration::from_secs(60))?;
+    }
+    // the links come up at the new address, in both directions
+    wait_link_failure(&mut cluster, 0, 2, "", Duration::from_secs(60))?;
+    wait_link_failure(&mut cluster, 2, 0, "", Duration::from_secs(60))?;
+    // and it serves: writes through it commit, every earlier row reads through it
+    let moved = cluster.node(2).endpoints.client.to_string();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let written = write_note(&moved, 71_100, "after-move").await;
+        if written.is_ok() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the write through the moved node was never admitted: {written:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    for key in &keys {
+        wait_note(&moved, *key, Some(&format!("before-{key}")), Duration::from_secs(10)).await?;
+    }
+    wait_note(&addrs[0], 71_100, Some("after-move"), Duration::from_secs(10)).await?;
+    // the copy at the old address: the same identity and incarnation from another address,
+    // which is a duplicate the cluster refuses, and it stops on its own
+    let mut stale = cluster.spawn_clone_at(2, copy.path(), old_ports)?;
+    stale.wait_ready(Duration::from_secs(60))?;
+    assert_eq!(stale.endpoints.incarnation, Some(incarnation + 1));
+    let refused = Cluster::wait_failure(&stale, Duration::from_secs(60)).expect("the stale clone kept running");
+    assert!(
+        refused.contains("incarnation") || refused.contains("duplicate") || refused.contains("fenced"),
+        "the stale clone failed for another reason: {refused}"
+    );
+    drop(stale);
+    // the restarted node is untouched by it, on record and serving
+    assert_eq!(cluster.node(2).failure(), None, "the restarted node was fenced by the stale clone");
+    let after = member_view(&mut cluster, 0, 2)?;
+    assert_eq!(after["record"]["control"], new_control, "{after}");
+    assert_eq!(after["record"]["incarnation"], incarnation + 1, "{after}");
+    wait_note(&moved, keys[0], Some(&format!("before-{}", keys[0])), Duration::from_secs(10)).await?;
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A peer's certificate is bound to the node it claims, a leaf and an authority rotate on a
+/// live cluster, and a certificate naming another node or none is refused (C1 M10)
+///
+/// Three nodes at a factor of three on mutual TLS under a fixture authority, every leaf
+/// naming its node, with rows on every node. Node one's leaf is reissued and reloaded: the
+/// report names the node, and node two restarted dials it under the new leaf and is dialled
+/// by it, with writes through both. The authority is rotated through a bundle: every node
+/// trusts old and new, every leaf is reissued under the new one and reloaded, the old is
+/// retired from every bundle, and a restarted node still joins with every link up. Node two's
+/// leaf is then reissued naming node one: node zero restarted refuses node two's hello as an
+/// identity mismatch and its own dials to node two fail naming the certificate; reissued
+/// with no node in it, the same dials fail as unauthorized; reissued as itself and reloaded,
+/// every link comes up and the cluster serves. A reload of material that does not parse is
+/// refused and changes nothing. Skips by name without the kernel's TLS module
+/// ([F50](../../docs/src/features/cluster-operations.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn certificate_rotation_binds_identity() -> Result<(), FixtureError> {
+    skip_without_ktls!("certificate_rotation_binds_identity");
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .peer_tls()
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let addrs: Vec<String> = (0..3).map(|node| cluster.node(node).endpoints.client.to_string()).collect();
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let keys: Vec<u64> = (72_000..72_030).collect();
+    for (at, key) in keys.iter().enumerate() {
+        write_note(&addrs[at % 3], *key, &format!("tls-{key}")).await.map_err(ok)?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // a leaf rotated on a live member: reissued, reloaded, and used by every handshake after
+    let node1 = cluster.minted_node(1).to_string();
+    cluster.reissue_leaf(1, Some(&node1))?;
+    let report = cluster.node_mut(1).command("RELOAD_TLS")?;
+    assert_eq!(report["ok"]["own_identity"], node1, "{report}");
+    assert_eq!(report["ok"]["chain"], 1, "{report}");
+    cluster.restart(2, NodeKind::Server)?;
+    cluster.wait_joined(&[2])?;
+    wait_link_failure(&mut cluster, 2, 1, "", Duration::from_secs(60))?;
+    wait_link_failure(&mut cluster, 1, 2, "", Duration::from_secs(60))?;
+    let addrs: Vec<String> = (0..3).map(|node| cluster.node(node).endpoints.client.to_string()).collect();
+    write_note(&addrs[1], 72_100, "after-leaf").await.map_err(ok)?;
+    write_note(&addrs[2], 72_101, "after-leaf").await.map_err(ok)?;
+    wait_note(&addrs[0], 72_100, Some("after-leaf"), Duration::from_secs(10)).await?;
+    wait_note(&addrs[0], 72_101, Some("after-leaf"), Duration::from_secs(10)).await?;
+    // the authority rotated through a bundle: both trusted, every leaf reissued under the new
+    // one, the old retired, and a restart under the new authority alone joins
+    cluster.rotate_authority()?;
+    for id in 0..3 {
+        cluster.write_authorities(id)?;
+        let report = cluster.node_mut(id).command("RELOAD_TLS")?;
+        assert_eq!(report["ok"]["authorities"], 2, "{report}");
+    }
+    for id in 0..3 {
+        let node = cluster.minted_node(id).to_string();
+        cluster.reissue_leaf(id, Some(&node))?;
+        let report = cluster.node_mut(id).command("RELOAD_TLS")?;
+        assert_eq!(report["ok"]["own_identity"], node, "{report}");
+    }
+    cluster.retire_previous_authority()?;
+    for id in 0..3 {
+        cluster.write_authorities(id)?;
+        let report = cluster.node_mut(id).command("RELOAD_TLS")?;
+        assert_eq!(report["ok"]["authorities"], 1, "{report}");
+    }
+    cluster.restart(0, NodeKind::Server)?;
+    cluster.wait_joined(&[0])?;
+    for (from, to) in [(0usize, 1usize), (0, 2), (1, 0), (2, 0)] {
+        wait_link_failure(&mut cluster, from, to, "", Duration::from_secs(60))?;
+    }
+    let addrs: Vec<String> = (0..3).map(|node| cluster.node(node).endpoints.client.to_string()).collect();
+    write_note(&addrs[0], 72_102, "after-authority").await.map_err(ok)?;
+    wait_note(&addrs[2], 72_102, Some("after-authority"), Duration::from_secs(10)).await?;
+    // a leaf naming another node: refused as a mismatch at both ends of every new handshake
+    cluster.reissue_leaf(2, Some(&node1))?;
+    let report = cluster.node_mut(2).command("RELOAD_TLS")?;
+    assert_eq!(report["ok"]["own_identity"], node1, "{report}");
+    cluster.restart(0, NodeKind::Server)?;
+    cluster.wait_joined(&[0])?;
+    wait_link_failure(&mut cluster, 0, 2, "certificate names node", Duration::from_secs(60))?;
+    wait_link_failure(&mut cluster, 2, 0, "identity does not match", Duration::from_secs(60))?;
+    // a leaf naming no node: unauthorized
+    cluster.reissue_leaf(2, None)?;
+    let report = cluster.node_mut(2).command("RELOAD_TLS")?;
+    assert!(report["ok"]["own_identity"].is_null(), "{report}");
+    cluster.restart(0, NodeKind::Server)?;
+    cluster.wait_joined(&[0])?;
+    wait_link_failure(&mut cluster, 0, 2, "names no node", Duration::from_secs(60))?;
+    wait_link_failure(&mut cluster, 2, 0, "not authorized", Duration::from_secs(60))?;
+    // material that does not parse reloads nothing
+    let paths = cluster.staged_tls(2).expect("node two was staged with tls");
+    std::fs::write(&paths.key, b"not a key")?;
+    let refused = cluster.node_mut(2).command("RELOAD_TLS")?;
+    assert!(refused["error"].as_str().unwrap_or_default().contains("not reloaded"), "{refused}");
+    // reissued as itself and reloaded, every link comes up and the cluster serves
+    let node2 = cluster.minted_node(2).to_string();
+    cluster.reissue_leaf(2, Some(&node2))?;
+    let report = cluster.node_mut(2).command("RELOAD_TLS")?;
+    assert_eq!(report["ok"]["own_identity"], node2, "{report}");
+    for (from, to) in [(0usize, 2usize), (2, 0), (1, 2), (2, 1)] {
+        wait_link_failure(&mut cluster, from, to, "", Duration::from_secs(60))?;
+    }
+    let addrs: Vec<String> = (0..3).map(|node| cluster.node(node).endpoints.client.to_string()).collect();
+    write_note(&addrs[2], 72_103, "after-identity").await.map_err(ok)?;
+    wait_note(&addrs[0], 72_103, Some("after-identity"), Duration::from_secs(10)).await?;
+    for key in keys.iter().step_by(5) {
+        wait_note(&addrs[2], *key, Some(&format!("tls-{key}")), Duration::from_secs(10)).await?;
+    }
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
     Ok(())
 }

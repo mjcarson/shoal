@@ -5602,6 +5602,7 @@ dependencies = [
  "unicode-ident",
  "uuid",
  "winnow 0.7.13",
+ "yasna",
 ]
 
 [[package]]

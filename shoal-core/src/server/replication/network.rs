@@ -22,7 +22,6 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_channel::oneshot;
@@ -34,7 +33,6 @@ use openraft::raft::{
 };
 use openraft::type_config::alias::{SnapshotOf, VoteOf};
 use openraft::{OptionalSend, RaftNetworkFactory, RaftNetworkV2};
-use rustls::ClientConfig;
 use tracing::{event, Level};
 use uuid::Uuid;
 
@@ -52,6 +50,7 @@ use crate::shared::protocol::peer::{
     SnapshotChunk, SnapshotEnd, SnapshotStatus, REPLICATE_RESPONSE_HEAD_LEN,
 };
 use crate::shared::protocol::MessageType;
+use crate::shared::tls::PeerTlsHolder;
 
 /// How long a sender waits before offering a shed chunk to the bulk queue again
 const SNAPSHOT_SHED_BACKOFF: Duration = Duration::from_millis(10);
@@ -123,13 +122,13 @@ impl ReplicationLink {
     /// * `entry` - Where to dial and who to expect there
     /// * `local` - What this node says about itself
     /// * `transport` - The bounds and timers
-    /// * `tls` - What to dial with, if the lanes are encrypted
+    /// * `tls` - What to dial with, read at every dial
     /// * `on_event` - Where the link delivers what it learns
     fn new<F: Fn(LinkEvent) + 'static>(
         entry: PeerAddr,
         local: Rc<RefCell<Local>>,
         transport: &Transport,
-        tls: Option<Arc<ClientConfig>>,
+        tls: PeerTlsHolder,
         on_event: F,
     ) -> Self {
         let max_frame_bytes = local.borrow().max_frame_bytes;
@@ -380,8 +379,8 @@ struct Shared {
     dial: BTreeMap<NodeId, DialOverride>,
     /// What this node says about itself
     local: Rc<RefCell<Local>>,
-    /// What to dial with, if the lanes are encrypted
-    tls: Option<Arc<ClientConfig>>,
+    /// What to dial with, read at every dial so a reload reaches the next one
+    tls: PeerTlsHolder,
     /// The bounds and timers
     transport: Transport,
     /// Where a link delivers what it learns: the shard's own mesh channel
@@ -403,7 +402,7 @@ impl ShardNetwork {
     /// * `map` - The map the shard holds
     /// * `dial` - Where particular members are dialled instead of where they advertise
     /// * `local` - What this node says about itself
-    /// * `tls` - What to dial peers with, if encrypted
+    /// * `tls` - What to dial peers with, read at every dial
     /// * `transport` - The bounds and timers
     /// * `replication` - The groups' bounds
     /// * `on_event` - Where a link delivers what it learns
@@ -415,7 +414,7 @@ impl ShardNetwork {
         map: MapCell,
         dial: BTreeMap<NodeId, DialOverride>,
         local: Rc<RefCell<Local>>,
-        tls: Option<Arc<ClientConfig>>,
+        tls: PeerTlsHolder,
         transport: Transport,
         replication: Replication,
         on_event: Rc<dyn Fn(LinkEvent)>,

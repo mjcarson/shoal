@@ -385,7 +385,242 @@ pub struct PeerTlsOptions {
     /// The PEM file holding the private key for that chain
     pub key: PathBuf,
     /// The PEM file holding the authority every node of the cluster is signed by
+    ///
+    /// May hold more than one: during an authority rotation the old and the new are both
+    /// trusted until every node's leaf has been reissued
+    /// ([F50](../../../docs/src/features/cluster-operations.md)).
     pub ca: PathBuf,
+    /// Whether a peer's certificate has to name the node it claims to be
+    ///
+    /// On, a leaf without a `shoal-node://<id>` URI SAN is refused as unauthorized and one
+    /// naming another node as an identity mismatch, on both ends of every lane. Off, the
+    /// chain alone is what a hello's claim rests on, which is what every build before
+    /// [F50](../../../docs/src/features/cluster-operations.md) checked. On by default.
+    #[serde(default = "default_bind_identity")]
+    pub bind_identity: bool,
+}
+
+/// Whether a peer's certificate is bound to its node identity unless the file says otherwise
+fn default_bind_identity() -> bool {
+    true
+}
+
+/// The scheme of the URI SAN that binds a certificate to a node
+pub const NODE_URI_SCHEME: &str = "shoal-node://";
+
+/// What a peer's certificate said about who it is
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerIdentity {
+    /// No certificate was presented: a plaintext lane, or a client
+    Plaintext,
+    /// A certificate the authority signed, with no node in its names
+    Unnamed,
+    /// A certificate naming this node
+    Node(crate::shared::identity::NodeId),
+}
+
+/// The node a certificate names, if it names one
+///
+/// Walks the DER for the `subjectAltName` extension and the first `uniformResourceIdentifier`
+/// in it of the form `shoal-node://<uuid>`. A certificate with no such extension, or none of
+/// its names of that form, names no node; a certificate that is not a certificate is an error,
+/// since the authority verified it before this was asked and a malformed one is a bug.
+///
+/// # Arguments
+///
+/// * `cert` - The leaf, as DER
+///
+/// # Errors
+///
+/// Fails if the bytes are not an X.509 certificate.
+pub fn node_identity_of(cert: &[u8]) -> Result<Option<crate::shared::identity::NodeId>, TlsError> {
+    // the SAN extension's object identifier: 2.5.29.17
+    let san_oid = yasna::models::ObjectIdentifier::from_slice(&[2, 5, 29, 17]);
+    let uris: Vec<String> = yasna::parse_der(cert, |reader| {
+        reader.read_sequence(|cert| {
+            // the certificate body, whose extensions are the last, tagged, optional field
+            let uris = cert.next().read_sequence(|tbs| {
+                // the version is explicitly tagged and optional
+                let _ = tbs.read_optional(|version| version.read_tagged(yasna::Tag::context(0), |v| v.read_der()))?;
+                // the serial, the signature algorithm, the issuer, the validity, the subject
+                // and the public key are walked as opaque elements
+                for _ in 0..6 {
+                    tbs.next().read_der()?;
+                }
+                // the two unique identifiers, if either is present
+                let _ = tbs.read_optional(|id| id.read_tagged_implicit(yasna::Tag::context(1), |r| r.read_bitvec_bytes()))?;
+                let _ = tbs.read_optional(|id| id.read_tagged_implicit(yasna::Tag::context(2), |r| r.read_bitvec_bytes()))?;
+                // the extensions, each an oid, an optional critical flag and a value
+                let mut found = Vec::new();
+                let extensions = tbs.read_optional(|ext| {
+                    ext.read_tagged(yasna::Tag::context(3), |list| {
+                        list.read_sequence_of(|extension| {
+                            extension.read_sequence(|extension| {
+                                let oid = extension.next().read_oid()?;
+                                let _critical = extension.read_optional(|critical| critical.read_bool())?;
+                                let value = extension.next().read_bytes()?;
+                                if oid == san_oid {
+                                    // the names, each tagged by its kind; a uri is context 6
+                                    let names: Vec<String> = yasna::parse_der(&value, |names| {
+                                        let mut uris = Vec::new();
+                                        names.read_sequence_of(|name| {
+                                            let raw = name.read_tagged_der()?;
+                                            if raw.tag() == yasna::Tag::context(6) {
+                                                uris.push(String::from_utf8_lossy(raw.value()).into_owned());
+                                            }
+                                            Ok(())
+                                        })?;
+                                        Ok(uris)
+                                    })?;
+                                    found.extend(names);
+                                }
+                                Ok(())
+                            })
+                        })
+                    })
+                })?;
+                let _ = extensions;
+                Ok(found)
+            })?;
+            // the signature algorithm and the signature, which the authority already checked
+            cert.next().read_der()?;
+            cert.next().read_bitvec_bytes()?;
+            Ok(uris)
+        })
+    })
+    .map_err(|error| TlsError::Config(rustls::Error::General(format!("the peer certificate does not parse: {error}"))))?;
+    // the first name of the node scheme is the node, if it is a uuid
+    Ok(uris
+        .iter()
+        .filter_map(|uri| uri.strip_prefix(NODE_URI_SCHEME))
+        .find_map(|id| id.parse::<uuid::Uuid>().ok())
+        .map(crate::shared::identity::NodeId))
+}
+
+/// Both halves of a node's peer TLS, swapped whole on a reload
+///
+/// Every executor's listener and links read the current pair at each handshake through the
+/// holder rather than keeping a copy, so a reload - new material read from the same paths,
+/// both configs rebuilt, swapped only if both built - reaches every new handshake at once and
+/// disturbs no established connection, whose keys the kernel holds
+/// ([F50](../../../docs/src/features/cluster-operations.md)).
+#[derive(Debug, Clone)]
+pub struct PeerTlsHolder {
+    /// The pair, or none on plaintext lanes
+    inner: Arc<std::sync::RwLock<Option<PeerTlsPair>>>,
+    /// Where the material is read from, kept for the reload
+    options: Option<PeerTlsOptions>,
+}
+
+/// A node's client and server configs, built from one reading of its material
+#[derive(Debug, Clone)]
+pub struct PeerTlsPair {
+    /// What this node dials with
+    pub client: Arc<ClientConfig>,
+    /// What this node accepts with
+    pub server: Arc<ServerConfig>,
+    /// The node this node's own leaf names, if it names one
+    pub own_identity: Option<crate::shared::identity::NodeId>,
+}
+
+/// What a reload did
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PeerTlsReload {
+    /// How many certificates the chain holds
+    pub chain: usize,
+    /// How many authorities the bundle holds
+    pub authorities: usize,
+    /// The node the new leaf names, if it names one
+    pub own_identity: Option<crate::shared::identity::NodeId>,
+}
+
+impl PeerTlsHolder {
+    /// Build the holder from the options, or an empty one for plaintext lanes
+    ///
+    /// # Arguments
+    ///
+    /// * `options` - The paths, if the lanes are encrypted
+    ///
+    /// # Errors
+    ///
+    /// Fails if the material cannot be read or rustls refuses it.
+    pub fn build(options: Option<&PeerTlsOptions>) -> Result<Self, TlsError> {
+        let pair = options.map(Self::pair_of).transpose()?;
+        Ok(PeerTlsHolder {
+            inner: Arc::new(std::sync::RwLock::new(pair)),
+            options: options.cloned(),
+        })
+    }
+
+    /// Build both configs from one reading of the material
+    ///
+    /// # Arguments
+    ///
+    /// * `options` - The paths
+    fn pair_of(options: &PeerTlsOptions) -> Result<PeerTlsPair, TlsError> {
+        let client = peer_client_config(options)?;
+        let server = peer_server_config(options)?;
+        // what this node's own leaf says, for the report and for an operator to check
+        let own_identity = load_certs(&options.cert)?
+            .first()
+            .map(|leaf| node_identity_of(leaf.as_ref()))
+            .transpose()?
+            .flatten();
+        Ok(PeerTlsPair {
+            client,
+            server,
+            own_identity,
+        })
+    }
+
+    /// Whether the lanes are encrypted at all
+    #[must_use]
+    pub fn is_encrypted(&self) -> bool {
+        self.options.is_some()
+    }
+
+    /// Whether a peer's certificate has to name its node
+    #[must_use]
+    pub fn binds_identity(&self) -> bool {
+        self.options.as_ref().is_some_and(|options| options.bind_identity)
+    }
+
+    /// What this node dials with right now, if encrypted
+    #[must_use]
+    pub fn client(&self) -> Option<Arc<ClientConfig>> {
+        self.inner.read().ok().and_then(|pair| pair.as_ref().map(|pair| pair.client.clone()))
+    }
+
+    /// What this node accepts with right now, if encrypted
+    #[must_use]
+    pub fn server(&self) -> Option<Arc<ServerConfig>> {
+        self.inner.read().ok().and_then(|pair| pair.as_ref().map(|pair| pair.server.clone()))
+    }
+
+    /// Read the material again and swap both configs in, or leave both as they were
+    ///
+    /// # Errors
+    ///
+    /// Fails, swapping nothing, if the lanes are plaintext, the material cannot be read, or
+    /// rustls refuses it.
+    pub fn reload(&self) -> Result<PeerTlsReload, TlsError> {
+        let Some(options) = &self.options else {
+            return Err(TlsError::Config(rustls::Error::General(
+                "the peer lanes are plaintext; there is no certificate to reload".to_owned(),
+            )));
+        };
+        // both halves built before either is swapped, so a bad file changes nothing
+        let pair = Self::pair_of(options)?;
+        let report = PeerTlsReload {
+            chain: load_certs(&options.cert)?.len(),
+            authorities: load_certs(&options.ca)?.len(),
+            own_identity: pair.own_identity,
+        };
+        if let Ok(mut current) = self.inner.write() {
+            *current = Some(pair);
+        }
+        Ok(report)
+    }
 }
 
 /// Build the root store of one authority
@@ -521,6 +756,8 @@ pub struct Established<Data> {
     pub secrets: ExtractedSecrets,
     /// What rustls keeps of the session once the kernel owns the record layer
     pub kernel: rustls::kernel::KernelConnection<Data>,
+    /// Who the peer's certificate said it was ([F50](../../../docs/src/features/cluster-operations.md))
+    pub peer: PeerIdentity,
 }
 
 /// What a handshake wants its caller to do next
@@ -564,6 +801,9 @@ pub trait Handshaker: Sized {
     fn into_kernel(
         self,
     ) -> Result<(ExtractedSecrets, KernelConnection<Self::Data>), rustls::Error>;
+
+    /// The peer's leaf certificate, once the handshake has verified its chain
+    fn peer_leaf(&self) -> Option<CertificateDer<'static>>;
 }
 
 impl Handshaker for UnbufferedClientConnection {
@@ -591,6 +831,11 @@ impl Handshaker for UnbufferedClientConnection {
     ) -> Result<(ExtractedSecrets, KernelConnection<Self::Data>), rustls::Error> {
         self.dangerous_into_kernel_connection()
     }
+
+    /// The server's leaf, which every client handshake verified
+    fn peer_leaf(&self) -> Option<CertificateDer<'static>> {
+        (**self).peer_certificates().and_then(|chain| chain.first().cloned())
+    }
 }
 
 impl Handshaker for UnbufferedServerConnection {
@@ -614,6 +859,11 @@ impl Handshaker for UnbufferedServerConnection {
         self,
     ) -> Result<(ExtractedSecrets, KernelConnection<Self::Data>), rustls::Error> {
         self.dangerous_into_kernel_connection()
+    }
+
+    /// The client's leaf, if the config required one and it was verified
+    fn peer_leaf(&self) -> Option<CertificateDer<'static>> {
+        (**self).peer_certificates().and_then(|chain| chain.first().cloned())
     }
 }
 
@@ -724,9 +974,17 @@ impl<C: Handshaker> TlsHandshake<C> {
 
     /// Take what this handshake negotiated, once it says it is done
     pub fn finish(self) -> Result<Established<C::Data>, TlsError> {
+        // who the peer's leaf names, read before the session is given up
+        let peer = match self.conn.peer_leaf() {
+            Some(leaf) => match node_identity_of(leaf.as_ref())? {
+                Some(node) => PeerIdentity::Node(node),
+                None => PeerIdentity::Unnamed,
+            },
+            None => PeerIdentity::Plaintext,
+        };
         // this is where rustls stops being in the data path and the kernel starts
         let (secrets, kernel) = self.conn.into_kernel().map_err(TlsError::Handshake)?;
-        Ok(Established { secrets, kernel })
+        Ok(Established { secrets, kernel, peer })
     }
 }
 

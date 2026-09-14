@@ -43,14 +43,12 @@ use glommio::net::TcpStream;
 use glommio::task::JoinHandle;
 use rkyv::util::AlignedVec;
 use rustls::pki_types::ServerName;
-use rustls::ClientConfig;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::{pin, Pin};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 use tracing::{event, Level};
@@ -64,6 +62,7 @@ use crate::server::ServerError;
 use crate::shared::identity::NodeId;
 use crate::shared::protocol::peer::{CONTROL_HEAD_LEN, FORWARDED_PREAMBLE_LEN, REPLICATE_RESPONSE_HEAD_LEN};
 use crate::shared::protocol::{Header, MessageType, HEADER_LEN};
+use crate::shared::tls::{PeerIdentity, PeerTlsHolder};
 
 /// What a queued frame carries, so the owner can answer for it if it is never written
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,6 +266,10 @@ pub struct LinkView {
     /// The capabilities both ends act on, if it is up
     #[serde(default)]
     pub capabilities: Option<u64>,
+    /// Why the last dial failed, if one has, kept until a dial succeeds
+    /// ([F50](../../../../docs/src/features/cluster-operations.md))
+    #[serde(default)]
+    pub last_failure: Option<String>,
 }
 
 /// The queue and counters both halves of a link share
@@ -285,6 +288,8 @@ struct Queue {
     peer_incarnation: Option<u64>,
     /// What the hello agreed, while the link is up
     negotiated: Option<Negotiated>,
+    /// Why the last dial failed, if one has, cleared by a dial that succeeds
+    last_failure: Option<String>,
     /// Frames written
     sent_frames: u64,
     /// Bytes written
@@ -332,14 +337,14 @@ impl Link {
     /// * `entry` - Where to dial and who to expect there
     /// * `local` - What this node says about itself, read at every dial
     /// * `transport` - The bounds and timers
-    /// * `tls` - What to dial with, if the lanes are encrypted
+    /// * `tls` - What to dial with, read at every dial so a reload reaches the next one
     /// * `on_event` - Where to deliver what the link learns
     pub fn spawn<F: Fn(LinkEvent) + 'static>(
         lane: Lane,
         entry: PeerAddr,
         local: Rc<RefCell<Local>>,
         transport: &Transport,
-        tls: Option<Arc<ClientConfig>>,
+        tls: PeerTlsHolder,
         on_event: F,
     ) -> Self {
         let bound = match lane {
@@ -356,6 +361,7 @@ impl Link {
             state: LinkState::Idle,
             peer_incarnation: None,
             negotiated: None,
+            last_failure: None,
             sent_frames: 0,
             sent_bytes: 0,
             shed_frames: 0,
@@ -468,6 +474,7 @@ impl Link {
             peer_incarnation: queue.peer_incarnation,
             wire_version: queue.negotiated.map(|negotiated| negotiated.version),
             capabilities: queue.negotiated.map(|negotiated| negotiated.capabilities),
+            last_failure: queue.last_failure.clone(),
         }
     }
 }
@@ -496,8 +503,8 @@ struct Settings {
     entry: PeerAddr,
     /// What this node says about itself, read at every dial since a joiner's cluster changes
     local: Rc<RefCell<Local>>,
-    /// What to dial with, if the lanes are encrypted
-    tls: Option<Arc<ClientConfig>>,
+    /// What to dial with, read at every dial ([F50](../../../../docs/src/features/cluster-operations.md))
+    tls: PeerTlsHolder,
     /// How long a dial and handshake may take
     handshake_timeout: Duration,
     /// The shortest backoff
@@ -594,10 +601,12 @@ async fn run<F: Fn(LinkEvent) + 'static>(
         let (stream, peer_incarnation, negotiated) = match connected {
             Ok(established) => established,
             Err(error) => {
-                // never connected, so everything queued was never written
+                // never connected, so everything queued was never written; the reason is
+                // kept for the transport view until a dial succeeds
                 let unsent = {
                     let mut q = queue.borrow_mut();
                     q.state = LinkState::Backoff;
+                    q.last_failure = Some(format!("{error}"));
                     q.drain_keys()
                 };
                 event!(Level::WARN, msg = "a peer link could not be made", %node, %lane, ?error);
@@ -639,6 +648,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
             q.state = LinkState::Up;
             q.peer_incarnation = Some(peer_incarnation);
             q.negotiated = Some(negotiated);
+            q.last_failure = None;
         }
         on_event(LinkEvent::Up {
             node,
@@ -695,14 +705,18 @@ async fn connect(settings: &Settings) -> Result<(TcpStream, u64, Negotiated), Se
     })?;
     let mut stream = TcpStream::connect(addr).await?;
     stream.set_nodelay(true)?;
-    // take the wire first, if the lanes are encrypted
-    if let Some(config) = &settings.tls {
-        let name = ServerName::from(addr.ip());
-        super::tls::connect(&mut stream, config.clone(), name).await?;
-    }
+    // take the wire first, if the lanes are encrypted, with the material as it is right now
+    let certified = match settings.tls.client() {
+        Some(config) => {
+            let name = ServerName::from(addr.ip());
+            super::tls::connect(&mut stream, config, name).await?.peer
+        }
+        None => PeerIdentity::Plaintext,
+    };
     // then say who we are and check who answered, as we are right now
     let local = settings.local.borrow().clone();
-    let (peer, negotiated) = handshake::dial(&mut stream, &local, settings.lane, &settings.entry).await?;
+    let (peer, negotiated) =
+        handshake::dial(&mut stream, &local, settings.lane, &settings.entry, &certified, settings.tls.binds_identity()).await?;
     Ok((stream, peer.incarnation, negotiated))
 }
 

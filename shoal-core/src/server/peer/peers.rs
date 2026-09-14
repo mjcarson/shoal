@@ -8,11 +8,9 @@
 //! the deadline passes - is an unknown outcome, because a write may have applied.
 
 use bytes::Bytes;
-use rustls::ClientConfig;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
-use std::sync::Arc;
 
 use super::handshake::Local;
 use super::link::{Frame, FrameKey, Link, LinkEvent, LinkView};
@@ -24,6 +22,7 @@ use crate::server::messages::{PeerEvent, ServerMsg};
 use crate::server::stage_profile::{StageStamps, Stamp};
 use crate::shared::identity::NodeId;
 use crate::shared::protocol::peer::ForwardEntry;
+use crate::shared::tls::PeerTlsHolder;
 use kanal::Sender;
 use tracing::Span;
 use uuid::Uuid;
@@ -77,7 +76,7 @@ pub struct Peers<D: ShoalDatabase> {
     /// What this node says about itself in a hello
     local: Rc<RefCell<Local>>,
     /// What to dial peers with, if the lanes are encrypted
-    tls: Option<Arc<ClientConfig>>,
+    tls: PeerTlsHolder,
     /// The bounds and timers
     transport: Transport,
     /// A sync handle on this shard's own mesh channel, for a link to deliver events on
@@ -94,14 +93,14 @@ impl<D: ShoalDatabase> Peers<D> {
     /// * `map` - The map this shard holds
     /// * `dial` - Where particular members are dialled instead of where they advertise
     /// * `local` - What this node says about itself
-    /// * `tls` - What to dial peers with, if encrypted
+    /// * `tls` - What to dial peers with, read at every dial
     /// * `transport` - The bounds and timers
     /// * `events` - This shard's own mesh channel, for links to deliver on
     pub fn new(
         map: MapCell,
         dial: BTreeMap<NodeId, DialOverride>,
         local: Rc<RefCell<Local>>,
-        tls: Option<Arc<ClientConfig>>,
+        tls: PeerTlsHolder,
         transport: Transport,
         events: Sender<ServerMsg<D>>,
     ) -> Self {

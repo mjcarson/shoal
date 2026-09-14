@@ -1549,6 +1549,7 @@ mod tests {
             cert: "/does/not/exist/cert.pem".into(),
             key: "/does/not/exist/key.pem".into(),
             ca: "/does/not/exist/ca.pem".into(),
+            bind_identity: true,
         });
         assert!(
             with_missing_tls.validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).is_err(),

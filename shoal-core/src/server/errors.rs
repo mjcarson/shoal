@@ -426,6 +426,12 @@ pub enum ShoalError {
     NotLocal { node: NodeId, shard: u16 },
     /// A peer refused this node's hello, and why
     PeerRefused { node: NodeId, reason: PeerRefusal },
+    /// A peer's certificate does not name the node its hello claims, or names none
+    ///
+    /// Under `cluster.tls.bind_identity` a leaf carries `shoal-node://<id>` and the hello has
+    /// to agree with it; `certified` is what the leaf said, or none
+    /// ([F50](../../../docs/src/features/cluster-operations.md)).
+    CertificateIdentity { claimed: NodeId, certified: Option<NodeId> },
     /// A peer's hello named an identity other than the one this node dialled or placed
     PeerIdentity { expected: NodeId, found: NodeId },
     /// A peer's hello named a shard count other than the placement's
@@ -602,6 +608,16 @@ impl std::fmt::Display for ShoalError {
             ShoalError::PeerRefused { node, reason } => {
                 write!(f, "{node} refused our hello: {reason}")
             }
+            ShoalError::CertificateIdentity { claimed, certified } => match certified {
+                Some(certified) => write!(
+                    f,
+                    "the peer's certificate names node {certified} and its hello claims {claimed}; a certificate is bound to one node"
+                ),
+                None => write!(
+                    f,
+                    "the peer's certificate names no node and its hello claims {claimed}; cluster.tls.bind_identity requires a shoal-node:// name"
+                ),
+            },
             ShoalError::PeerIdentity { expected, found } => write!(
                 f,
                 "a peer identified itself as {found} where the placement expected {expected}"

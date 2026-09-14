@@ -20,6 +20,10 @@
 //! *claims*; what makes the claim worth anything is the transport underneath. Under
 //! `cluster.tls` the peer holds a certificate the cluster's authority signed, and the claim is a
 //! member's claim; in plaintext it is a claim from inside whatever boundary the deployment drew.
+//! Since [F50](../../../../docs/src/features/cluster-operations.md) the certificate is bound to
+//! the claim: under `cluster.tls.bind_identity` the leaf's `shoal-node://<id>` name has to be
+//! the node the hello claims, on both ends of every lane, so a certificate is one node's and
+//! a member cannot speak as another with a leaf the authority signed for it.
 //!
 //! Since [F48](../../../../docs/src/features/rolling-compatibility.md) the hello is a
 //! negotiation rather than a match: each end advertises the range of wire versions it reads,
@@ -38,6 +42,7 @@ use crate::shared::identity::{ClusterId, NodeId};
 use crate::shared::protocol::peer::{
     Lane, PeerHello, PeerHelloAck, PeerRefusal, CAPABILITIES, PEER_HELLO_BODY_LEN, REQUIRED_CAPABILITIES,
 };
+use crate::shared::tls::PeerIdentity;
 use crate::shared::protocol::{self, MessageType, ProtocolError, HEADER_LEN, MIN_PEER_VERSION};
 
 /// What this node says about itself in every hello
@@ -346,7 +351,13 @@ pub async fn dial(
     local: &Local,
     lane: Lane,
     expected: &PeerAddr,
+    certified: &PeerIdentity,
+    bind: bool,
 ) -> Result<(PeerHello, Negotiated), ServerError> {
+    // the acceptor's certificate has to name the node dialled, before a word is said to it
+    if let Some(node) = expected.node {
+        bound_identity(node, certified, bind)?;
+    }
     // the dialler speaks first
     let hello = local.hello(lane);
     stream.write_all(&hello.frame(local.max_frame_bytes)?).await?;
@@ -362,7 +373,40 @@ pub async fn dial(
     }
     // an acceptance from the wrong node is still the wrong node
     let negotiated = check_peer(&ack.hello, &hello, local, expected)?;
+    // and a dial that named no node takes whoever answered, as its certificate names it
+    if expected.node.is_none() {
+        bound_identity(NodeId(uuid::Uuid::from_bytes(ack.hello.node)), certified, bind)?;
+    }
     Ok((ack.hello, negotiated))
+}
+
+/// Judge a certificate's name against the node a hello claims, when the lanes bind them
+///
+/// A plaintext lane has no certificate and binds nothing; an encrypted lane with the binding
+/// off trusts the chain alone, as every build before F50 did; with it on, a leaf naming
+/// another node is an identity mismatch and one naming none is unauthorized
+/// ([F50](../../../../docs/src/features/cluster-operations.md)).
+///
+/// # Arguments
+///
+/// * `claimed` - The node the hello names
+/// * `certified` - What the peer's certificate said
+/// * `bind` - Whether the lanes bind certificates to identities
+fn bound_identity(claimed: NodeId, certified: &PeerIdentity, bind: bool) -> Result<(), ServerError> {
+    match certified {
+        // no certificate, or a chain the deployment does not bind
+        PeerIdentity::Plaintext => Ok(()),
+        _ if !bind => Ok(()),
+        PeerIdentity::Node(node) if *node == claimed => Ok(()),
+        PeerIdentity::Node(node) => Err(ServerError::Shoal(ShoalError::CertificateIdentity {
+            claimed,
+            certified: Some(*node),
+        })),
+        PeerIdentity::Unnamed => Err(ServerError::Shoal(ShoalError::CertificateIdentity {
+            claimed,
+            certified: None,
+        })),
+    }
 }
 
 /// Check a peer's record against ours and against who we dialled
@@ -447,13 +491,15 @@ pub async fn accept(
     local: &Local,
     served: &[Lane],
     admission: &dyn Admission,
+    certified: &PeerIdentity,
+    bind: bool,
 ) -> Result<Accepted, ServerError> {
     // the peer speaks first
     let body = read_body(stream, MessageType::PeerHello).await?;
     let hello = PeerHello::decode(&body)?;
     // judge it in the order the refusals are documented
     let ours = local.hello(hello.lane);
-    let (verdict, outcome) = judge(&hello, &ours, local, served, admission);
+    let (verdict, outcome) = judge(&hello, &ours, local, served, admission, certified, bind);
     // answer with our record and the verdict, on the lane the peer asked for
     let ack = PeerHelloAck {
         hello: ours,
@@ -485,12 +531,16 @@ pub async fn accept(
 /// * `local` - What this node says about itself
 /// * `served` - The lanes this listener serves
 /// * `admission` - What this listener judges a peer's identity against
+/// * `certified` - What the peer's certificate said about who it is
+/// * `bind` - Whether the lanes bind certificates to identities
 fn judge(
     hello: &PeerHello,
     ours: &PeerHello,
     local: &Local,
     served: &[Lane],
     admission: &dyn Admission,
+    certified: &PeerIdentity,
+    bind: bool,
 ) -> (PeerRefusal, Result<(bool, Negotiated), ServerError>) {
     let found = NodeId(uuid::Uuid::from_bytes(hello.node));
     let cluster = ClusterId(uuid::Uuid::from_bytes(hello.cluster));
@@ -515,6 +565,16 @@ fn judge(
                 reason: PeerRefusal::CapabilityMissing,
             })),
         );
+    }
+    // the certificate, which under the binding has to name the node the hello claims: a leaf
+    // naming another node is a mismatch, one naming none is unauthorized
+    // ([F50](../../../../docs/src/features/cluster-operations.md))
+    if let Err(error) = bound_identity(found, certified, bind) {
+        let refusal = match certified {
+            PeerIdentity::Unnamed => PeerRefusal::Unauthorized,
+            _ => PeerRefusal::IdentityMismatch,
+        };
+        return (refusal, Err(error));
     }
     // the version the cluster activated, which a member has to speak whatever it could
     // negotiate with this one node: an activation is the boundary no member rolls back past
