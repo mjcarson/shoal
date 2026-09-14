@@ -9979,3 +9979,245 @@ async fn heterogeneous_placement_obeys_feasible_weights() -> Result<(), FixtureE
     }
     Ok(())
 }
+
+/// The snapshot counters a node's shards report, folded
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+fn snapshot_stats_of(cluster: &mut Cluster, node: usize) -> Result<serde_json::Value, FixtureError> {
+    let view = groups_of(cluster, node)?;
+    Ok(view["snapshots"].clone())
+}
+
+/// Wait until every group's row count agrees across the nodes hosting it
+///
+/// The digest verb hashes a node's groups together, so nodes holding different sets never
+/// agree on it; at a factor below the node count this compares each group where it is held.
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `nodes` - The nodes
+/// * `table` - The table
+/// * `within` - How long to wait
+fn wait_group_rows_agree(cluster: &mut Cluster, nodes: &[usize], table: &str, within: Duration) -> Result<(), FixtureError> {
+    let deadline = Instant::now() + within;
+    loop {
+        let digests: Vec<serde_json::Value> = nodes.iter().map(|node| digest_of(cluster, *node, table)).collect::<Result<_, _>>()?;
+        let mut rows: std::collections::BTreeMap<String, std::collections::BTreeSet<u64>> = std::collections::BTreeMap::new();
+        for digest in &digests {
+            for (group, count) in digest["groups"].as_object().into_iter().flatten() {
+                rows.entry(group.clone()).or_default().insert(count.as_u64().unwrap_or(0));
+            }
+        }
+        if rows.values().all(|counts| counts.len() == 1) {
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("the groups of {table} never agreed: {digests:?}")));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Several sets rebalanced onto one destination from distinct sources under a stream cap of
+/// one and a byte budget: peak concurrent streams one, bytes per second under the budget,
+/// foreground writes accepted by the oracle throughout, every step moved; a destination under
+/// its disk reserve blocks a drain by name and unblocks when the reserve is met (C8 M9b)
+///
+/// Four placed at a factor of two and a spare of twice their weight, the retention short so a
+/// learner is fed a snapshot, every node sending under one byte budget and the spare
+/// installing one stream at a time. A rebalance under a cap of four moves per node issues
+/// three moves onto the spare at once, from three sources; the spare takes one stream at a
+/// time and refuses the others until it is done, and what it receives never passes the
+/// budget's bound. Then every
+/// member's free bytes are overridden below the reserve: a decommission is planned and
+/// blocked naming the reserve, nothing is fed, and lifting the override lets it run
+/// ([F46](../../docs/src/features/capacity-rebalancing.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn node_transfer_budgets_bound_concurrent_sources() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal_model::event::{ClientOp, MutationOp, OpResult, ReadLevel};
+    use shoal_model::ids::{Attempt, Key, OpId, TabletId, Value};
+    use shoal_model::oracle::{Ledger, Outcome};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    const BUDGET: usize = 512 * 1024;
+    let mut builder = Cluster::builder()
+        .cluster(5, CoreClaim::Count(1))
+        .replication_factor(2)
+        .lane_links(true)
+        .initialize(false)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .retire_after(Duration::from_secs(1))
+        .catchup_lag(0)
+        .detector_interval_ms(250)
+        .checkpoint_entries(8)
+        .retained_entries(16)
+        .snapshot_chunk_bytes(64 * 1024)
+        .plan_interval(Duration::from_millis(500))
+        .moves_per_node(4)
+        .weight(4, 2);
+    for node in 0..5 {
+        builder = builder.stream_budget(node, BUDGET, if node == 4 { 1 } else { 2 });
+    }
+    let mut cluster = builder.start().await?;
+    cluster.initialize(&[0, 1, 2, 3])?;
+    let addrs: Vec<String> = (0..5).map(|node| cluster.node(node).endpoints.client.to_string()).collect();
+    // enough archived bytes in every set that a stream takes seconds under the budget
+    let text = "x".repeat(2048);
+    for batch in 0..20u64 {
+        let keys: Vec<u64> = (7000 + batch * 100..7000 + batch * 100 + 100).collect();
+        write_notes_batch(&addrs[0], &keys, &text).await?;
+    }
+    wait_group_rows_agree(&mut cluster, &[0, 1, 2, 3], "Note", Duration::from_secs(60))?;
+    for node in 0..4 {
+        compact_now(&mut cluster, node, "Note")?;
+    }
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![2, 2, 2, 2, 0]);
+    // writers through node zero under identities with a retry budget, on keys of their own
+    let keys: Vec<u64> = (7900..7906).collect();
+    let ledger = Arc::new(Mutex::new(Ledger::default()));
+    let clock = Arc::new(AtomicU64::new(0));
+    let next_id = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let tablet_id = |key: u64| TabletId {
+        table: shoal_model::ids::TableId(1),
+        range: tablet_of(key) as u16,
+    };
+    for key in &keys {
+        let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+        let attempt = Attempt { id, retry: 0 };
+        let invoke = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().invoke(attempt, tablet_id(*key), ClientOp::Mutate(MutationOp::Insert { key: Key((*key % 251) as u8), value: Value(0) }), invoke);
+        write_note(&addrs[0], *key, "0").await?;
+        let complete = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Applied(true)));
+    }
+    let writer = {
+        let endpoints = addrs.clone();
+        let keys = keys.clone();
+        let (ledger, clock, next_id, stop) = (ledger.clone(), clock.clone(), next_id.clone(), stop.clone());
+        tokio::spawn(async move {
+            let mut round = 0u32;
+            while !stop.load(Ordering::SeqCst) && round < 40 {
+                let Ok(client) = Shoal::<TestDbClient>::builder().endpoints(endpoints.clone()).build().await else {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                };
+                for key in &keys {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let value = Value(round + 1);
+                    let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+                    let attempt = Attempt { id, retry: 0 };
+                    let invoke = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().invoke(attempt, TabletId { table: shoal_model::ids::TableId(1), range: tablet_of(*key) as u16 }, ClientOp::Mutate(MutationOp::Update { key: Key((*key % 251) as u8), value }), invoke);
+                    let options = SendOptions::new().identity(uuid::Uuid::new_v4()).retry(Duration::from_secs(20));
+                    let update = cluster::schema::NoteUpdate { partition_key: *key, text: Some(value.0.to_string()) };
+                    let outcome = match client.send_one_with(update, &options).await {
+                        Ok(_) => Outcome::Ok(OpResult::Applied(true)),
+                        Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Outcome::Ok(OpResult::Applied(false)),
+                        Err(_) => Outcome::Unknown,
+                    };
+                    let complete = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().complete(attempt, complete, outcome);
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+                round += 1;
+            }
+            Ok::<(), shoal::client::Errors>(())
+        })
+    };
+    // the rebalance: three sets onto the spare from three sources, planned at once
+    let before = snapshot_stats_of(&mut cluster, 4)?;
+    let received_before = before["bytes_received"].as_u64().unwrap_or(0);
+    let started = Instant::now();
+    let plan = plan_as_process(&mut cluster, 0, "REBALANCE")?;
+    // sample what the spare has received against the bucket's bound while the plan runs
+    let record = loop {
+        let record = plan_record_via(&mut cluster, 0, plan)?;
+        let stats = snapshot_stats_of(&mut cluster, 4)?;
+        let received = stats["bytes_received"].as_u64().unwrap_or(0).saturating_sub(received_before);
+        let elapsed = started.elapsed().as_secs_f64();
+        // a full bucket to begin with, then the rate, plus a chunk of slack
+        let bound = (BUDGET as f64) * (elapsed + 1.0) + 2.0 * 64.0 * 1024.0;
+        assert!((received as f64) <= bound, "the spare received {received} bytes in {elapsed:.1}s, over the budget's bound of {bound:.0}: {stats}");
+        if record["phase"] == "Done" {
+            break record;
+        }
+        assert!(started.elapsed() < Duration::from_secs(240), "the rebalance never finished: {record}");
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    assert!(record["outcome"]["Completed"].is_object(), "{record}");
+    let steps = record["steps"].as_array().expect("steps");
+    assert_eq!(steps.len(), 3, "{record}");
+    assert!(steps.iter().all(|step| step["state"] == "Moved"), "{record}");
+    let sources: std::collections::BTreeSet<&str> = steps.iter().filter_map(|step| step["from"].as_str()).collect();
+    assert_eq!(sources.len(), 3, "the three sets did not come from three sources: {record}");
+    let node4 = cluster.node_ids()[4].clone();
+    assert!(steps.iter().all(|step| step["to"] == node4), "{record}");
+    // the spare was fed by snapshot, one stream at a time, and the other was refused for it
+    let stats = snapshot_stats_of(&mut cluster, 4)?;
+    assert!(stats["installed"].as_u64().unwrap_or(0) >= 3, "the spare was not fed by snapshot: {stats}");
+    assert_eq!(stats["peak_streams"], 1, "{stats}");
+    assert!(stats["refused_budget"].as_u64().unwrap_or(0) >= 1, "the second stream was never refused: {stats}");
+    let mut senders_waited = 0u64;
+    for node in 0..4 {
+        senders_waited += snapshot_stats_of(&mut cluster, node)?["budget_wait_ns"].as_u64().unwrap_or(0);
+    }
+    assert!(senders_waited > 0, "no sender ever waited on its budget");
+    let held = sets_held(&mut cluster, 0)?;
+    assert_eq!(held[4], 3, "{held:?}");
+    assert_eq!(held.iter().sum::<usize>(), 8, "{held:?}");
+    // then every member is short of its reserve: a decommission is blocked by name and feeds nothing
+    for node in 0..5 {
+        let _ = cluster.node_mut(node).command("FREE_BYTES 1000")?;
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    let fed_before: u64 = (0..5).map(|node| snapshot_stats_of(&mut cluster, node).map(|stats| stats["bytes_received"].as_u64().unwrap_or(0))).sum::<Result<u64, _>>()?;
+    let drain = plan_as_process(&mut cluster, 0, "DECOMMISSION 3")?;
+    let record = wait_plan_phase(&mut cluster, 0, drain, "Blocked", Duration::from_secs(30))?;
+    assert_eq!(record["phase"], "Blocked", "{record}");
+    assert!(record["blocked"]["reason"].as_str().is_some_and(|reason| reason.contains("disk reserve")), "{record}");
+    assert!(record["steps"].as_array().is_some_and(Vec::is_empty), "{record}");
+    assert_eq!(member_view(&mut cluster, 0, 3)?["state_name"], "leaving");
+    std::thread::sleep(Duration::from_secs(2));
+    let fed_after: u64 = (0..5).map(|node| snapshot_stats_of(&mut cluster, node).map(|stats| stats["bytes_received"].as_u64().unwrap_or(0))).sum::<Result<u64, _>>()?;
+    assert_eq!(fed_after, fed_before, "a blocked plan fed bytes");
+    assert_eq!(plan_record_via(&mut cluster, 0, drain)?["phase"], "Blocked");
+    // the reserve met again, the drain runs to the end
+    for node in 0..5 {
+        let _ = cluster.node_mut(node).command("FREE_BYTES none")?;
+    }
+    let record = wait_plan_phase(&mut cluster, 0, drain, "Done", Duration::from_secs(240))?;
+    assert!(record["outcome"]["Completed"].is_object(), "{record}");
+    wait_member_state(&mut cluster, 0, 3, "removed", Duration::from_secs(60))?;
+    // the writers' history, joined by a read of every key on the holders, is sequential
+    stop.store(true, Ordering::SeqCst);
+    writer.await.expect("the writer task panicked")?;
+    let survivors = [0usize, 1, 2, 4];
+    wait_group_rows_agree(&mut cluster, &survivors, "Note", Duration::from_secs(60))?;
+    for node in survivors {
+        let addr = cluster.node(node).endpoints.client.to_string();
+        for key in &keys {
+            let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+            let attempt = Attempt { id, retry: 0 };
+            let invoke = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().invoke(attempt, tablet_id(*key), ClientOp::Read { key: Key((*key % 251) as u8), level: ReadLevel::One }, invoke);
+            let seen = read_note(&addr, *key).await?.map(|text| Value(text.parse().expect("a value")));
+            let complete = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Value(seen)));
+        }
+    }
+    let ledger = ledger.lock().unwrap().clone();
+    shoal_model::oracle::check(&ledger).unwrap_or_else(|error| panic!("the history is not sequential: {error:?}"));
+    for id in survivors {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}

@@ -122,6 +122,9 @@ const GRACE_COMMIT_CAP: Duration = Duration::from_secs(60);
 /// The shortest the leader goes between two looks at its plans, however often the state moves
 const PLAN_MIN_INTERVAL: Duration = Duration::from_millis(250);
 
+/// How many times a plan's move is proposed again after the version moved under it
+const PLAN_MOVE_RETRIES: usize = 8;
+
 /// What the control plane tells the pool
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlEvent {
@@ -3152,25 +3155,49 @@ impl Core {
         let me = self.node;
         let incarnation = self.member.incarnation;
         glommio::spawn_local(async move {
-            // the move first; a refusal is the step failing, not a step moving
+            // the move first; a refusal is the step failing, not a step moving. A version that
+            // moved under the proposal - another commit landing between the read and the
+            // write - is what an operator's tool retries, so this does, against the current one
             let update = match moving {
-                Some(command) => match propose(&raft, &network, &machine, command).await {
-                    Ok(ControlResponse::Applied { .. } | ControlResponse::Repeated { .. }) => update,
-                    Ok(other) => match update {
-                        PlanUpdate::Step { tablet, op: moved, .. } => PlanUpdate::Step {
-                            tablet,
-                            op: moved,
-                            state: StepState::Failed {
-                                reason: format!("the move was refused: {other:?}"),
-                            },
-                        },
-                        other => other,
-                    },
-                    Err(error) => {
-                        let _ = tx.send(Event::PlanProposed(op, Err(error))).await;
-                        return;
+                Some(mut command) => {
+                    let mut answer = None;
+                    for _ in 0..PLAN_MOVE_RETRIES {
+                        if let ControlCommand::Move { expected_version, .. } = &mut command {
+                            *expected_version = machine.state().topology_version;
+                        }
+                        match propose(&raft, &network, &machine, command.clone()).await {
+                            Ok(ControlResponse::Refused { reason }) if reason.contains("stale version") => {
+                                glommio::timer::sleep(LEASE_POLL).await;
+                                answer = Some(Ok(ControlResponse::Refused { reason }));
+                            }
+                            other => {
+                                answer = Some(other);
+                                break;
+                            }
+                        }
                     }
-                },
+                    match answer {
+                        Some(Ok(ControlResponse::Applied { .. } | ControlResponse::Repeated { .. })) => update,
+                        Some(Ok(other)) => match update {
+                            PlanUpdate::Step { tablet, op: moved, .. } => PlanUpdate::Step {
+                                tablet,
+                                op: moved,
+                                state: StepState::Failed {
+                                    reason: format!("the move was refused: {other:?}"),
+                                },
+                            },
+                            other => other,
+                        },
+                        Some(Err(error)) => {
+                            let _ = tx.send(Event::PlanProposed(op, Err(error))).await;
+                            return;
+                        }
+                        None => {
+                            let _ = tx.send(Event::PlanProposed(op, Err(ProposeError::Failed("no move was proposed".to_string())))).await;
+                            return;
+                        }
+                    }
+                }
                 None => update,
             };
             let command = ControlCommand::PlanProgress {
