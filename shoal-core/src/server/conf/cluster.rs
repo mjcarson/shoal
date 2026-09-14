@@ -32,6 +32,7 @@ use std::time::Duration;
 use super::super::errors::ShoalError;
 use super::super::ServerError;
 use crate::shared::identity::NodeId;
+use crate::shared::protocol::{MIN_PEER_VERSION, PROTOCOL_VERSION};
 use crate::utils;
 
 /// The certificate a node presents to its peers and the authority it checks theirs against
@@ -322,6 +323,16 @@ pub struct Transport {
     /// How often the control thread pings every placed peer
     #[serde(default = "default_ping_interval")]
     pub ping_interval: DurationSpec,
+    /// The newest wire version this node advertises to its peers, if held below the build's
+    ///
+    /// The operator's rollback knob for a rolling upgrade
+    /// ([F48](../../../../docs/src/features/rolling-compatibility.md)): a node upgraded with
+    /// the pin at the version the cluster runs speaks nothing its unupgraded peers cannot,
+    /// and the pin is lifted node by node before the new version is activated. Between the
+    /// floor the build reads and the newest it speaks; a pin below the cluster's activated
+    /// version refuses to start.
+    #[serde(default)]
+    pub wire_version: Option<u8>,
 }
 
 /// The default data lane queue bound
@@ -388,6 +399,7 @@ impl Default for Transport {
             reconnect_max: default_reconnect_max(),
             handshake_timeout: default_handshake_timeout(),
             ping_interval: default_ping_interval(),
+            wire_version: None,
         }
     }
 }
@@ -1230,6 +1242,15 @@ impl Cluster {
                 "cluster.transport.reconnect_min is longer than reconnect_max".to_string(),
             )));
         }
+        // a wire pin has to be a version this build reads
+        // ([F48](../../../../docs/src/features/rolling-compatibility.md))
+        if let Some(pin) = self.transport.wire_version {
+            if pin < MIN_PEER_VERSION || pin > PROTOCOL_VERSION {
+                return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                    "cluster.transport.wire_version is {pin}; this build reads {MIN_PEER_VERSION} to {PROTOCOL_VERSION}"
+                ))));
+            }
+        }
         // a control group votes with an odd, small number of members
         if !matches!(self.control_voters, 1 | 3 | 5) {
             return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
@@ -1716,5 +1737,31 @@ mod tests {
         let empty: super::Replication = serde_yaml::from_str("{}").expect("an empty block parses");
         assert_eq!(empty, defaults);
         assert!(serde_yaml::from_str::<super::Replication>("fsync_every: 3\n").is_err());
+    }
+
+    /// A wire pin is accepted inside the range this build reads and refused by name outside it
+    /// ([F48](../../../../docs/src/features/rolling-compatibility.md))
+    #[test]
+    fn the_transport_block_refuses_a_pin_outside_the_range() {
+        use crate::shared::protocol::{DEFAULT_MAX_FRAME_BYTES, MIN_PEER_VERSION, PROTOCOL_VERSION};
+        // no pin is the default, and the newest the build speaks
+        assert_eq!(super::Transport::default().wire_version, None);
+        // a pin anywhere in the range validates
+        for pin in MIN_PEER_VERSION..=PROTOCOL_VERSION {
+            let mut cluster = Cluster::default().bootstrap(true);
+            cluster.transport.wire_version = Some(pin);
+            cluster.validate("127.0.0.1", DEFAULT_MAX_FRAME_BYTES).expect("a pin in the range validates");
+        }
+        // one below the floor or above the newest is refused naming the range
+        for pin in [MIN_PEER_VERSION - 1, PROTOCOL_VERSION + 1, 0, 255] {
+            let mut cluster = Cluster::default().bootstrap(true);
+            cluster.transport.wire_version = Some(pin);
+            let error = cluster.validate("127.0.0.1", DEFAULT_MAX_FRAME_BYTES).expect_err("a pin outside the range is refused");
+            let text = format!("{error}");
+            assert!(text.contains("wire_version") && text.contains(&MIN_PEER_VERSION.to_string()), "{text}");
+        }
+        // and the block parses the pin from yaml
+        let parsed: super::Transport = serde_yaml::from_str(&format!("wire_version: {MIN_PEER_VERSION}\n")).expect("a pin parses");
+        assert_eq!(parsed.wire_version, Some(MIN_PEER_VERSION));
     }
 }

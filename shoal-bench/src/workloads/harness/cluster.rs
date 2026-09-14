@@ -1078,6 +1078,8 @@ pub fn transport_facts(
             dials: link.dials,
             queued_bytes: link.queued_bytes as u64,
             bound: link.bound as u64,
+            wire_version: link.wire_version,
+            capabilities: link.capabilities,
         })
         .collect();
     Ok(TransportFacts {

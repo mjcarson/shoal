@@ -103,6 +103,11 @@ impl Admission for StateAdmission {
     fn cluster(&self) -> Option<ClusterId> {
         self.machine.state().cluster.or(self.local.borrow().cluster)
     }
+
+    /// The wire version the applied state says the cluster activated
+    fn activated_wire(&self) -> u8 {
+        self.machine.state().activated_wire()
+    }
 }
 
 /// Accept control connections and serve each in a task of its own
@@ -207,8 +212,8 @@ async fn serve_control(
 ) -> Result<(), ServerError> {
     let max_frame_bytes = local.borrow().max_frame_bytes;
     loop {
-        // the header, or a clean end between requests
-        let Some(header) = codec::read_header(&mut rx, max_frame_bytes).await? else {
+        // the header, or a clean end between requests, at the version the hello negotiated
+        let Some(header) = codec::read_header(&mut rx, max_frame_bytes, peer.negotiated.version).await? else {
             return Ok(());
         };
         let header = codec::expect(header, MessageType::ControlRequest)?;
@@ -265,10 +270,11 @@ async fn serve_control(
             status,
         }
         .encode();
-        let frame_header = codec::header(
+        let frame_header = codec::header_at(
+            peer.negotiated.version,
             MessageType::ControlResponse,
             response_head.len() + answer.len(),
-            max_frame_bytes,
+            peer.negotiated.max_frame_bytes,
         )?;
         codec::write_frame(&mut tx, &frame_header, &[&response_head, &answer]).await?;
         // a joiner that asked for something else is done here

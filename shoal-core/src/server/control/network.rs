@@ -104,11 +104,13 @@ impl ControlLink {
     /// * `local` - What this node says about itself
     /// * `transport` - The bounds and timers
     /// * `tls` - What to dial with, if the lanes are encrypted
+    /// * `wires` - Where the newest wire version each peer's hello named is recorded
     fn new(
         entry: PeerAddr,
         local: Rc<RefCell<Local>>,
         transport: &Transport,
         tls: Option<Arc<ClientConfig>>,
+        wires: Rc<RefCell<BTreeMap<NodeId, u8>>>,
     ) -> Self {
         let pending: Rc<RefCell<HashMap<u64, oneshot::Sender<ControlOutcome>>>> =
             Rc::new(RefCell::new(HashMap::new()));
@@ -142,7 +144,13 @@ impl ControlLink {
                         let _ = tx.send(ControlOutcome::Unreachable(reason.clone()));
                     }
                 }
-                LinkEvent::Up { .. } => {}
+                // a hello that completed says what the peer's build speaks
+                // ([F48](../../../../docs/src/features/rolling-compatibility.md))
+                LinkEvent::Up { node, negotiated, .. } => {
+                    if node != NodeId::default() {
+                        wires.borrow_mut().insert(node, negotiated.peer_wire_max);
+                    }
+                }
             }
         };
         let link = peer::Link::spawn(Lane::Control, entry, local, transport, tls, on_event);
@@ -224,6 +232,8 @@ struct Shared {
     tls: Option<Arc<ClientConfig>>,
     /// The bounds and timers
     transport: Transport,
+    /// The newest wire version each peer's hello named, as this node's links heard it
+    wires: Rc<RefCell<BTreeMap<NodeId, u8>>>,
 }
 
 /// The control group's network factory
@@ -258,8 +268,18 @@ impl PeerNetwork {
                 dial,
                 tls,
                 transport,
+                wires: Rc::new(RefCell::new(BTreeMap::new())),
             }),
         }
+    }
+
+    /// The newest wire version each peer's hello named, as this node's links heard it
+    ///
+    /// One of the two live sources an activation is judged by; the other is the status
+    /// reports the leader receives ([F48](../../../../docs/src/features/rolling-compatibility.md)).
+    #[must_use]
+    pub fn wires(&self) -> BTreeMap<NodeId, u8> {
+        self.shared.wires.borrow().clone()
     }
 
     /// Where to dial a member, from its committed record and this node's overrides
@@ -308,6 +328,7 @@ impl PeerNetwork {
             self.shared.local.clone(),
             &self.shared.transport,
             self.shared.tls.clone(),
+            self.shared.wires.clone(),
         ));
         self.shared
             .links

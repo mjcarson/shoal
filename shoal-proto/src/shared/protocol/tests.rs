@@ -27,7 +27,8 @@ use super::{
     decode_request, decode_response, decode_server_frame, request_preamble, request_preamble_traced,
     request_preamble_with, response_preamble, server_preamble, Flags, Header, MessageType,
     ProtocolError, RawHeader, RequestHead, HEADER_LEN, MAX_REQUEST_PREAMBLE_LEN,
-    PROTOCOL_VERSION, QUERY_ID_LEN, REQUEST_PREAMBLE_LEN, RESPONSE_PREAMBLE_LEN,
+    CLIENT_WIRE_VERSION, MIN_PEER_VERSION, PROTOCOL_VERSION, QUERY_ID_LEN, REQUEST_PREAMBLE_LEN,
+    RESPONSE_PREAMBLE_LEN,
 };
 
 /// Every message type this build knows, so a test can walk all of them
@@ -97,9 +98,54 @@ fn a_header_round_trips() {
         let decoded = Header::decode(&header.encode(), ROOMY).unwrap();
         assert_eq!(decoded, header);
         assert_eq!(decoded.kind, kind);
-        assert_eq!(decoded.version, PROTOCOL_VERSION);
+        assert_eq!(decoded.version, CLIENT_WIRE_VERSION);
         assert_eq!(decoded.body_len(), 4096);
     }
+}
+
+/// A header below the floor is refused and one anywhere in the range is kept as read
+///
+/// Since [F48](../../../../docs/src/features/rolling-compatibility.md) a header names the
+/// version its body is encoded at and the reader keeps it: the floor is `MIN_PEER_VERSION`,
+/// the ceiling is `PROTOCOL_VERSION` before a negotiation and whatever was negotiated after,
+/// and the client lane's version sits inside that range.
+#[test]
+fn a_header_below_the_floor_is_refused_and_one_in_range_is_kept() {
+    // every version from the floor to the newest decodes, and comes back as written
+    for version in MIN_PEER_VERSION..=PROTOCOL_VERSION {
+        let raw = Header::at(version, MessageType::Queries, Flags::NONE, 8, ROOMY)
+            .unwrap()
+            .encode();
+        assert_eq!(raw[0], version);
+        let decoded = Header::decode(&raw, ROOMY).unwrap();
+        assert_eq!(decoded.version, version);
+    }
+    // one below the floor is refused naming the newest this build reads
+    let mut raw = Header::new(MessageType::Queries, Flags::NONE, 8, ROOMY).unwrap().encode();
+    raw[0] = MIN_PEER_VERSION - 1;
+    assert_eq!(
+        Header::decode(&raw, ROOMY).unwrap_err(),
+        ProtocolError::UnsupportedVersion {
+            got: MIN_PEER_VERSION - 1,
+            ours: PROTOCOL_VERSION,
+        }
+    );
+    // a negotiated ceiling refuses what is above it and keeps what is at it
+    raw[0] = PROTOCOL_VERSION;
+    assert_eq!(
+        RawHeader::decode(&raw).validate_at(MIN_PEER_VERSION, ROOMY).unwrap_err(),
+        ProtocolError::UnsupportedVersion {
+            got: PROTOCOL_VERSION,
+            ours: MIN_PEER_VERSION,
+        }
+    );
+    raw[0] = MIN_PEER_VERSION;
+    assert_eq!(
+        RawHeader::decode(&raw).validate_at(MIN_PEER_VERSION, ROOMY).unwrap().version,
+        MIN_PEER_VERSION
+    );
+    // the client lane writes inside the range
+    assert!(CLIENT_WIRE_VERSION >= MIN_PEER_VERSION && CLIENT_WIRE_VERSION <= PROTOCOL_VERSION);
 }
 
 /// A request preamble round trips

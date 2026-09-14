@@ -24,13 +24,13 @@ use super::conf::FileSystemTableConf;
 use super::map::{write_record, ArchiveEntry, ArchiveFormat, ArchiveMap, MapIntent, MapIntentKinds, ARCHIVE_HEADER_LEN};
 use super::IntentLogReader;
 use crate::server::messages::ServerMsg;
-use crate::server::replication::snapshot::{self, SnapshotHeader, SnapshotManifest, SnapshotReader, SnapshotWriter};
+use crate::server::replication::snapshot::{self, SnapshotManifest, SnapshotProvenance, SnapshotReader, SnapshotWriter};
 use crate::server::ring::Ring;
 use crate::server::wal::WalLogId;
 use crate::server::ServerError;
 use crate::server::database::ShoalDatabase;
 use crate::storage::ArchiveFault;
-use crate::shared::identity::GroupId;
+use crate::shared::identity::{ClusterId, GroupId, NodeId};
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, TableNameSupport as _};
 use crate::storage::{CompactionJob, IntentReadSupport, RecoveryStats, ShouldPrune};
 
@@ -592,6 +592,8 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     /// * `at_least` - The loop's checkpoint for the group
     /// * `memberships` - Every membership the cut could be as of, oldest first
     /// * `retries` - Every remembered request of the group
+    /// * `expired_before` - The newest time-ordered identity the group has forgotten
+    /// * `provenance` - Where the cut is made and which file format it is written in
     /// * `dir` - The directory the file goes in
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "FileSystemCompactor::cut_snapshot", skip_all, err(Debug))]
@@ -604,10 +606,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         memberships: Vec<openraft::type_config::alias::StoredMembershipOf<crate::server::replication::DataConfig>>,
         retries: Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>,
         expired_before: u64,
+        provenance: SnapshotProvenance,
         dir: PathBuf,
     ) -> Result<(), ServerError> {
         let outcome = self
-            .cut_snapshot_file(group, schema_id, tablets, at_least, memberships, retries, expired_before, dir)
+            .cut_snapshot_file(group, schema_id, tablets, at_least, memberships, retries, expired_before, provenance, dir)
             .await
             .map_err(|error| format!("{error:?}"));
         // the shard hears what was built, or why nothing was
@@ -625,6 +628,8 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     /// * `at_least` - The loop's checkpoint for the group
     /// * `memberships` - Every membership the cut could be as of, oldest first
     /// * `retries` - Every remembered request of the group
+    /// * `expired_before` - The newest time-ordered identity the group has forgotten
+    /// * `provenance` - Where the cut is made and which file format it is written in
     /// * `dir` - The directory the file goes in
     #[allow(clippy::too_many_arguments)]
     async fn cut_snapshot_file(
@@ -636,6 +641,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         memberships: Vec<openraft::type_config::alias::StoredMembershipOf<crate::server::replication::DataConfig>>,
         retries: Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>,
         expired_before: u64,
+        provenance: SnapshotProvenance,
         dir: PathBuf,
     ) -> Result<(PathBuf, SnapshotManifest), ServerError> {
         // the boundary: what was merged here, or the loop's checkpoint if that is further
@@ -668,12 +674,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(snapshot::snapshot_name(group, boundary.index));
         let table = self.table_name.table_id();
-        let header = SnapshotHeader {
-            table,
-            group,
-            boundary: boundary.index,
-            records: entries.len() as u64,
-        };
+        // the header at the file format the cluster has activated
+        // ([F48](../../../../../docs/src/features/rolling-compatibility.md))
+        let header = provenance.header(table, group, boundary.index, entries.len() as u64, schema_id);
         let mut writer = SnapshotWriter::create(&path, header).await?;
         for entry in &entries {
             // read this partition's archived bytes as they are, verified against their
@@ -702,7 +705,12 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             checksum,
             retries: u32::try_from(remembered.len()).unwrap_or(u32::MAX),
             expired_before,
+            cluster: ClusterId::default(),
+            origin: NodeId::default(),
+            created_ms: 0,
         };
+        // stamped with where and when it was cut
+        let manifest = provenance.stamp(manifest, &header);
         event!(Level::INFO, msg = "cut a snapshot", group = %group, boundary = manifest.boundary.index, records = manifest.records, bytes = total);
         Ok((path, manifest))
     }
@@ -1248,9 +1256,10 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     memberships,
                     retries,
                     expired_before,
+                    provenance,
                     dir,
                 } => {
-                    self.cut_snapshot(group, schema_id, tablets, at_least, memberships, retries, expired_before, dir)
+                    self.cut_snapshot(group, schema_id, tablets, at_least, memberships, retries, expired_before, provenance, dir)
                         .await?;
                 }
                 CompactionJob::Install { group, tablets, path } => self.install_snapshot(group, tablets, path).await?,

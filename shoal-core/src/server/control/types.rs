@@ -45,6 +45,7 @@ use super::runtime::GlommioRuntime;
 use super::repair::{GroupRepair, QuarantinedCopy, RepairMode, RepairPhase, RepairRecord, KEPT_REPAIRS};
 use crate::server::conf::cluster::{BootstrapPolicy, Consistency};
 use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
+use crate::shared::protocol::MIN_PEER_VERSION;
 
 declare_raft_types!(
     /// The control group's type configuration
@@ -108,6 +109,25 @@ pub struct MemberRecord {
     /// change is a restart ([F46](../../../../docs/src/features/capacity-rebalancing.md)).
     #[serde(default)]
     pub weight: u32,
+    /// The oldest wire version this member reads; zero, from a record before F48, is the floor
+    /// ([F48](../../../../docs/src/features/rolling-compatibility.md))
+    #[serde(default)]
+    pub wire_min: u8,
+    /// The newest wire version this member speaks; zero, from a record before F48, is the floor
+    ///
+    /// Reported at every start, so what a rolling upgrade has reached is a committed fact and an
+    /// activation is judged against records rather than against whoever happens to be dialled.
+    #[serde(default)]
+    pub wire_max: u8,
+    /// What this member can act on, as the hello's capability bits
+    #[serde(default)]
+    pub capabilities: u64,
+    /// The structural fingerprint of the schema this member serves
+    #[serde(default)]
+    pub schema_id: u64,
+    /// The build this member runs, as its package version, for an operator reading `Members`
+    #[serde(default)]
+    pub build: String,
 }
 
 impl MemberRecord {
@@ -132,6 +152,18 @@ impl MemberRecord {
         } else {
             self.shards
         }
+    }
+
+    /// The newest wire version this member speaks, reading a record from before F48 as the floor
+    #[must_use]
+    pub fn wire_max(&self) -> u8 {
+        self.wire_max.max(MIN_PEER_VERSION)
+    }
+
+    /// The oldest wire version this member reads, reading a record from before F48 as the floor
+    #[must_use]
+    pub fn wire_min(&self) -> u8 {
+        self.wire_min.max(MIN_PEER_VERSION)
     }
 }
 
@@ -599,6 +631,28 @@ pub enum ControlCommand {
         /// The plan that removed it
         op: Option<Uuid>,
     },
+    /// Activate a wire version: every member speaks it from here on, and none rolls back past it
+    ///
+    /// The versions every member's running build reports ride in the command, read by the
+    /// leader from the members' status reports, and apply judges those: refused unless every
+    /// member in any phase but `Removed` is named at or above the version, and never lowers
+    /// what is activated. The committed records are not judged, because a build from before
+    /// the field persisted every record without it, so replicas restored on such a build hold
+    /// records that differ from the leader's; the command's claim is the same on every replica,
+    /// and applying it writes the versions into the records, which heals them
+    /// ([F48](../../../../docs/src/features/rolling-compatibility.md)).
+    Activate {
+        /// The identity of the operation
+        op: Uuid,
+        /// Who asked
+        principal: String,
+        /// The topology version the request was written against
+        expected_version: u64,
+        /// The version to activate
+        wire: u8,
+        /// The newest version each member reported, as the leader heard it
+        members: BTreeMap<NodeId, u8>,
+    },
 }
 
 impl ControlCommand {
@@ -661,6 +715,12 @@ impl ControlCommand {
                 principal,
                 expected_version,
             } => Some((*op, principal, "rebalance", *expected_version)),
+            ControlCommand::Activate {
+                op,
+                principal,
+                expected_version,
+                ..
+            } => Some((*op, principal, "activate", *expected_version)),
             _ => None,
         }
     }
@@ -708,6 +768,7 @@ impl fmt::Display for ControlCommand {
             }
             ControlCommand::PlanProgress { op, progress, .. } => write!(f, "PlanProgress({op} {progress:?})"),
             ControlCommand::Tombstone { node, .. } => write!(f, "Tombstone({node})"),
+            ControlCommand::Activate { op, wire, .. } => write!(f, "Activate({op} wire {wire})"),
         }
     }
 }
@@ -828,6 +889,13 @@ pub struct ControlState {
     /// The placement plans, by identity, the newest `KEPT_PLANS` of them
     #[serde(default)]
     pub plans: BTreeMap<Uuid, PlanRecord>,
+    /// The wire version the cluster has activated; zero, from a state before F48, is the floor
+    ///
+    /// Read through [`ControlState::activated_wire`]. Every member speaks it, a member that
+    /// cannot is refused at every door, and it never goes down
+    /// ([F48](../../../../docs/src/features/rolling-compatibility.md)).
+    #[serde(default)]
+    pub activated: u8,
 }
 
 impl ControlState {
@@ -1360,6 +1428,13 @@ impl ControlState {
             } => self.apply_plan_progress(*op, *node, *incarnation, progress),
             // a removed identity, for good
             ControlCommand::Tombstone { node, op } => self.apply_tombstone(*node, *op),
+            // a wire version activated, judged against what every member reported
+            ControlCommand::Activate {
+                expected_version,
+                wire,
+                members,
+                ..
+            } => self.apply_activate(*expected_version, *wire, members),
         }
     }
 
@@ -2088,6 +2163,19 @@ impl ControlState {
         {
             return ControlResponse::Removed { node: record.node };
         }
+        // a member that cannot speak the activated wire version is refused, whatever else it
+        // is: the activation is the boundary no member rolls back past
+        // ([F48](../../../../docs/src/features/rolling-compatibility.md))
+        let activated = self.activated_wire();
+        if record.wire_max() < activated {
+            return ControlResponse::Refused {
+                reason: format!(
+                    "{} speaks wire version {} at most and the cluster has activated {activated}",
+                    record.node,
+                    record.wire_max()
+                ),
+            };
+        }
         match self.members.get(&record.node) {
             // a node nobody admitted cannot observe itself in; the leader admits it first
             None if !admitting => ControlResponse::Refused {
@@ -2154,6 +2242,82 @@ impl ControlState {
                 self.applied()
             }
         }
+    }
+
+    /// Activate a wire version, once every member speaks it
+    ///
+    /// # Arguments
+    ///
+    /// * `expected_version` - The version the request was written against
+    /// * `wire` - The version to activate
+    /// * `members` - The newest version each member reported, as the leader heard it
+    fn apply_activate(&mut self, expected_version: u64, wire: u8, members: &BTreeMap<NodeId, u8>) -> ControlResponse {
+        if self.cluster.is_none() {
+            return ControlResponse::Refused {
+                reason: "no cluster has been bootstrapped to activate a wire version in".to_string(),
+            };
+        }
+        if let Some(refusal) = self.check_version(expected_version) {
+            return refusal;
+        }
+        // an activation never goes down: the boundary is what nobody rolls back past
+        let current = self.activated_wire();
+        if wire < current {
+            return ControlResponse::Refused {
+                reason: format!(
+                    "wire version {wire} is below the activated {current}; an activation never lowers"
+                ),
+            };
+        }
+        // and it never goes below the floor every member reads
+        if wire < MIN_PEER_VERSION {
+            return ControlResponse::Refused {
+                reason: format!("wire version {wire} is below the floor {MIN_PEER_VERSION}"),
+            };
+        }
+        // every member in any phase but removed has to speak it, by what the command says
+        // it reported; one the command does not name is not known to
+        let behind: Vec<String> = self
+            .members
+            .values()
+            .filter(|member| member.phase != MemberPhase::Removed)
+            .map(|member| (member.record.node, members.get(&member.record.node).copied().unwrap_or(0).max(MIN_PEER_VERSION)))
+            .filter(|(_, reported)| *reported < wire)
+            .map(|(node, reported)| format!("{node} at {reported}"))
+            .collect();
+        if !behind.is_empty() {
+            return ControlResponse::Refused {
+                reason: format!(
+                    "wire version {wire} cannot be activated: {} speak{} less; restart {} on a build \
+                     that speaks {wire} first",
+                    behind.join(", "),
+                    if behind.len() == 1 { "s" } else { "" },
+                    if behind.len() == 1 { "it" } else { "them" },
+                ),
+            };
+        }
+        // the same version again is applied without moving anything
+        if wire == current {
+            return self.applied();
+        }
+        self.activated = wire;
+        // and what every member reported is written into its record, which heals a record a
+        // build from before the field persisted without it
+        for (node, reported) in members {
+            if let Some(member) = self.members.get_mut(node) {
+                if member.record.wire_max() < *reported {
+                    member.record.wire_max = *reported;
+                }
+            }
+        }
+        self.topology_version += 1;
+        self.applied()
+    }
+
+    /// The wire version the cluster has activated: what was committed, or the floor
+    #[must_use]
+    pub fn activated_wire(&self) -> u8 {
+        self.activated.max(MIN_PEER_VERSION)
     }
 
     /// Refuse a request written against a version other than the current one
@@ -2351,6 +2515,11 @@ mod tests {
             physical: 0,
             incarnation: 1,
             weight: 0,
+            wire_min: 0,
+            wire_max: 0,
+            capabilities: 0,
+            schema_id: 0,
+            build: String::new(),
         }
     }
 
@@ -3414,5 +3583,116 @@ mod tests {
         both.sort();
         assert_eq!(state.voters(), both);
         assert!(state.learners().is_empty());
+    }
+
+    /// An activation needs every member at the wire as reported, never lowers, ignores a
+    /// removed member, heals a record a build from before the field persisted without it,
+    /// and a member below the activated wire is refused at observe and at admit
+    /// ([F48](../../../../docs/src/features/rolling-compatibility.md))
+    #[test]
+    fn activation_needs_every_member_at_the_wire() {
+        use crate::shared::protocol::{MIN_PEER_VERSION, PROTOCOL_VERSION};
+        let (mut state, _, node) = bootstrapped();
+        // a record from before F48 reads as the floor, and so does the state
+        assert_eq!(state.members[&node].record.wire_max(), MIN_PEER_VERSION);
+        assert_eq!(state.activated_wire(), MIN_PEER_VERSION);
+        // a member speaking a version, by name
+        let speaking = |node: NodeId, client: &str, max: u8| MemberRecord {
+            wire_min: MIN_PEER_VERSION,
+            wire_max: max,
+            ..member(node, client)
+        };
+        // an activation carrying what the members reported, as the leader heard them
+        let activate = |op: Uuid, expected_version: u64, wire: u8, reported: &[(NodeId, u8)]| ControlCommand::Activate {
+            op,
+            principal: "admin".to_string(),
+            expected_version,
+            wire,
+            members: reported.iter().copied().collect(),
+        };
+        // an activation of a version the one member reports less than is refused naming it
+        let version = state.topology_version;
+        match state.apply(&activate(Uuid::new_v4(), version, PROTOCOL_VERSION, &[(node, MIN_PEER_VERSION)])) {
+            ControlResponse::Refused { reason } => {
+                assert!(reason.contains(&node.to_string()) && reason.contains("speaks less"), "{reason}");
+            }
+            other => panic!("an activation above a member's wire applied: {other:?}"),
+        }
+        // and so is one that does not name it at all
+        assert!(matches!(
+            state.apply(&activate(Uuid::new_v4(), version, PROTOCOL_VERSION, &[])),
+            ControlResponse::Refused { .. }
+        ));
+        assert_eq!(state.activated_wire(), MIN_PEER_VERSION);
+        // the floor itself is already activated: applied without moving the version
+        assert_eq!(
+            state.apply(&activate(Uuid::new_v4(), version, MIN_PEER_VERSION, &[(node, MIN_PEER_VERSION)])),
+            ControlResponse::Applied { topology_version: version }
+        );
+        // the member restarts on a build that speaks the newest, and a second member joins
+        // speaking it too; a third is admitted at the floor and then removed
+        let mut upgraded = speaking(node, "a", PROTOCOL_VERSION);
+        upgraded.incarnation = 2;
+        assert!(matches!(state.apply(&ControlCommand::ObserveMember(upgraded)), ControlResponse::Applied { .. }));
+        let second = NodeId::mint();
+        assert!(matches!(state.apply(&ControlCommand::Admit(speaking(second, "b", PROTOCOL_VERSION))), ControlResponse::Applied { .. }));
+        let third = NodeId::mint();
+        assert!(matches!(state.apply(&ControlCommand::Admit(speaking(third, "c", MIN_PEER_VERSION))), ControlResponse::Applied { .. }));
+        // the third holds the activation back, by what it reported
+        let version = state.topology_version;
+        let reported = [(node, PROTOCOL_VERSION), (second, PROTOCOL_VERSION), (third, MIN_PEER_VERSION)];
+        match state.apply(&activate(Uuid::new_v4(), version, PROTOCOL_VERSION, &reported)) {
+            ControlResponse::Refused { reason } => assert!(reason.contains(&third.to_string()), "{reason}"),
+            other => panic!("an activation above a member's wire applied: {other:?}"),
+        }
+        // until it is removed, which takes it out of the judgment; and the second member's
+        // record, persisted by an older build without the field, is healed by the apply
+        state.members.get_mut(&third).expect("the third").phase = super::MemberPhase::Removed;
+        state.members.get_mut(&second).expect("the second").record.wire_max = 0;
+        assert_eq!(state.members[&second].record.wire_max(), MIN_PEER_VERSION);
+        let op = Uuid::new_v4();
+        let version = state.topology_version;
+        let reported = [(node, PROTOCOL_VERSION), (second, PROTOCOL_VERSION)];
+        assert_eq!(
+            state.apply(&activate(op, version, PROTOCOL_VERSION, &reported)),
+            ControlResponse::Applied { topology_version: version + 1 }
+        );
+        assert_eq!(state.activated_wire(), PROTOCOL_VERSION);
+        assert_eq!(state.members[&second].record.wire_max(), PROTOCOL_VERSION);
+        // a repeat of the operation is answered as the first was
+        assert!(matches!(state.apply(&activate(op, version, PROTOCOL_VERSION, &reported)), ControlResponse::Repeated { .. }));
+        // it never lowers
+        let version = state.topology_version;
+        match state.apply(&activate(Uuid::new_v4(), version, MIN_PEER_VERSION, &reported)) {
+            ControlResponse::Refused { reason } => assert!(reason.contains("never lowers"), "{reason}"),
+            other => panic!("an activation lowered: {other:?}"),
+        }
+        // and a stale version is refused before anything is judged
+        assert!(matches!(
+            state.apply(&activate(Uuid::new_v4(), version - 1, PROTOCOL_VERSION, &reported)),
+            ControlResponse::Refused { .. }
+        ));
+        // a member below the activated wire is refused at observe, at any incarnation, and at admit
+        let mut rolled_back = speaking(node, "a", MIN_PEER_VERSION);
+        rolled_back.incarnation = 3;
+        match state.apply(&ControlCommand::ObserveMember(rolled_back)) {
+            ControlResponse::Refused { reason } => assert!(reason.contains("activated"), "{reason}"),
+            other => panic!("a member below the activated wire was observed: {other:?}"),
+        }
+        assert_eq!(state.members[&node].record.incarnation, 2);
+        let fourth = NodeId::mint();
+        assert!(matches!(
+            state.apply(&ControlCommand::Admit(speaking(fourth, "d", MIN_PEER_VERSION))),
+            ControlResponse::Refused { .. }
+        ));
+        assert!(!state.members.contains_key(&fourth));
+        // one at the wire is admitted
+        assert!(matches!(
+            state.apply(&ControlCommand::Admit(speaking(fourth, "d", PROTOCOL_VERSION))),
+            ControlResponse::Applied { .. }
+        ));
+        // the map carries the activation
+        let map = crate::server::map::TabletMap::from_state(&state, None, &[]);
+        assert_eq!(map.activated_wire, PROTOCOL_VERSION);
     }
 }

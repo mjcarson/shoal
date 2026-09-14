@@ -20,6 +20,13 @@
 //! *claims*; what makes the claim worth anything is the transport underneath. Under
 //! `cluster.tls` the peer holds a certificate the cluster's authority signed, and the claim is a
 //! member's claim; in plaintext it is a claim from inside whatever boundary the deployment drew.
+//!
+//! Since [F48](../../../../docs/src/features/rolling-compatibility.md) the hello is a
+//! negotiation rather than a match: each end advertises the range of wire versions it reads,
+//! the two speak the highest both hold ([`Negotiated`]), and every frame after the hello is
+//! written at that version or below it. A peer whose newest version is below the one the
+//! cluster has **activated** is refused at this door too, whatever it could otherwise speak,
+//! which is what makes an activation the boundary past which no member rolls back.
 
 use futures::{AsyncReadExt, AsyncWriteExt};
 use glommio::net::TcpStream;
@@ -29,9 +36,9 @@ use crate::server::meta::Identity;
 use crate::server::ServerError;
 use crate::shared::identity::{ClusterId, NodeId};
 use crate::shared::protocol::peer::{
-    Lane, PeerHello, PeerHelloAck, PeerRefusal, CAPABILITIES, PEER_HELLO_BODY_LEN,
+    Lane, PeerHello, PeerHelloAck, PeerRefusal, CAPABILITIES, PEER_HELLO_BODY_LEN, REQUIRED_CAPABILITIES,
 };
-use crate::shared::protocol::{self, MessageType, ProtocolError, HEADER_LEN, PROTOCOL_VERSION};
+use crate::shared::protocol::{self, MessageType, ProtocolError, HEADER_LEN, MIN_PEER_VERSION};
 
 /// What this node says about itself in every hello
 #[derive(Debug, Clone)]
@@ -51,6 +58,12 @@ pub struct Local {
     /// Carried in every hello, so a peer can tell a restart from a duplicate and the control
     /// plane can fence the lower of two runs of one directory.
     pub incarnation: u64,
+    /// The newest wire version this node advertises
+    ///
+    /// The build's `PROTOCOL_VERSION` unless `cluster.transport.wire_version` pins it lower, which is
+    /// how a node is held at the version it spoke before an upgrade until the operator
+    /// activates the new one ([F48](../../../../docs/src/features/rolling-compatibility.md)).
+    pub wire_max: u8,
 }
 
 impl Local {
@@ -62,8 +75,11 @@ impl Local {
     /// * `shards` - How many shards this node runs
     /// * `schema_id` - The structural fingerprint of the schema it serves
     /// * `max_frame_bytes` - The largest frame it accepts
+    /// * `wire_pin` - The newest wire version to advertise, or none for this build's newest
     #[must_use]
-    pub fn new(identity: &Identity, shards: usize, schema_id: u64, max_frame_bytes: u32) -> Self {
+    pub fn new(identity: &Identity, shards: usize, schema_id: u64, max_frame_bytes: u32, wire_pin: Option<u8>) -> Self {
+        // the range this node advertises, bounded above by the pin
+        let (_, wire_max) = PeerHello::range(wire_pin);
         // a node runs fewer shards than a u16 holds; the ring refuses more
         #[allow(clippy::cast_possible_truncation)]
         Local {
@@ -73,6 +89,7 @@ impl Local {
             schema_id,
             max_frame_bytes,
             incarnation: identity.incarnation,
+            wire_max,
         }
     }
 
@@ -88,13 +105,78 @@ impl Local {
             node: *self.node.0.as_bytes(),
             incarnation: self.incarnation,
             lane,
-            wire_min: PROTOCOL_VERSION,
-            wire_max: PROTOCOL_VERSION,
+            wire_min: MIN_PEER_VERSION,
+            wire_max: self.wire_max,
             capabilities: CAPABILITIES,
             schema_id: self.schema_id,
             shards: self.shards,
             max_frame_bytes: self.max_frame_bytes,
         }
+    }
+}
+
+/// What two ends of a lane agreed at the hello
+///
+/// Every frame after the hello is written at `version` or below it and decoded at the version
+/// its own header names; a frame above `version` is refused by version. `capabilities` is
+/// the intersection of the two words, and is what either end may act on
+/// ([F48](../../../../docs/src/features/rolling-compatibility.md)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Negotiated {
+    /// The highest wire version both ends read
+    pub version: u8,
+    /// The capabilities both ends act on
+    pub capabilities: u64,
+    /// The largest frame the peer accepts
+    pub max_frame_bytes: u32,
+    /// The newest wire version the peer's own build speaks, whatever was negotiated
+    ///
+    /// What a node knows of each member's build from its own hellos, which is one of the two
+    /// live sources an activation is judged by.
+    pub peer_wire_max: u8,
+}
+
+impl Negotiated {
+    /// What was agreed with a peer, given both hellos
+    ///
+    /// # Arguments
+    ///
+    /// * `peer` - The peer's record
+    /// * `ours` - This end's record
+    /// * `version` - The version [`PeerHello::negotiate`] chose
+    #[must_use]
+    pub const fn of(peer: &PeerHello, ours: &PeerHello, version: u8) -> Self {
+        Negotiated {
+            version,
+            capabilities: peer.common_capabilities(ours),
+            max_frame_bytes: peer.max_frame_bytes,
+            peer_wire_max: peer.wire_max,
+        }
+    }
+
+    /// What a link that is not up yet may safely assume: the floor, and nothing acted on
+    ///
+    /// # Arguments
+    ///
+    /// * `max_frame_bytes` - The largest frame to assume the peer accepts
+    #[must_use]
+    pub const fn floor(max_frame_bytes: u32) -> Self {
+        Negotiated {
+            version: MIN_PEER_VERSION,
+            capabilities: 0,
+            max_frame_bytes,
+            peer_wire_max: MIN_PEER_VERSION,
+        }
+    }
+
+    /// Whether the peer acts on a capability
+    ///
+    /// # Arguments
+    ///
+    /// * `capability` - The capability bit
+    #[must_use]
+    pub const fn has(&self, capability: u64) -> bool {
+        self.capabilities & capability == capability
     }
 }
 
@@ -173,6 +255,12 @@ pub trait Admission {
 
     /// The cluster this listener serves, or none for a joiner that has not adopted one
     fn cluster(&self) -> Option<ClusterId>;
+
+    /// The wire version the cluster has activated, which every member has to speak
+    ///
+    /// [`MIN_PEER_VERSION`] until an operator activates a newer one
+    /// ([F48](../../../../docs/src/features/rolling-compatibility.md)).
+    fn activated_wire(&self) -> u8;
 }
 
 /// What the acceptor learned about a peer it let in
@@ -190,7 +278,16 @@ pub struct Accepted {
     ///
     /// Such a connection may ask to join and ping, and nothing else.
     pub joining: bool,
+    /// What the two ends agreed to speak
+    pub negotiated: Negotiated,
 }
+
+/// The most bytes a hello may carry past the ones this build reads
+///
+/// A hello from a build that grew the record is read for the fields this build knows and the
+/// rest drained, so a longer hello is a negotiation rather than a `BodyTooShort`; one longer
+/// than this is not a hello at all.
+const HELLO_GROWTH: usize = 256;
 
 /// Read one hello or ack frame off a stream that has not been split
 ///
@@ -206,18 +303,13 @@ async fn read_body(
     let mut raw = [0u8; HEADER_LEN];
     stream.read_exact(&mut raw).await?;
     let header = protocol::RawHeader::decode(&raw);
-    // a hello of a version we do not read is refused by version, which the header always says
-    if header.version != PROTOCOL_VERSION {
-        return Err(ProtocolError::UnsupportedVersion {
-            got: header.version,
-            ours: PROTOCOL_VERSION,
-        }
-        .into());
-    }
-    let header = header.validate(u32::try_from(PEER_HELLO_BODY_LEN).unwrap_or(u32::MAX))?;
+    // a hello of a version we do not read is refused by version, which the header always
+    // says; the range is the floor up to this build's newest, since nothing is negotiated yet
+    let header = header.validate(u32::try_from(PEER_HELLO_BODY_LEN + HELLO_GROWTH).unwrap_or(u32::MAX))?;
     let header = header.expect(expected)?;
-    // a hello is a fixed size, so one of any other size is not a hello
-    if header.body_len() != PEER_HELLO_BODY_LEN {
+    // a hello is at least the record this build reads; a longer one is read for that record
+    // and the rest drained, a shorter one is not a hello
+    if header.body_len() < PEER_HELLO_BODY_LEN {
         return Err(ProtocolError::BodyTooShort {
             need: PEER_HELLO_BODY_LEN,
             got: header.len,
@@ -226,6 +318,11 @@ async fn read_body(
     }
     let mut body = [0u8; PEER_HELLO_BODY_LEN];
     stream.read_exact(&mut body).await?;
+    let extra = header.body_len() - PEER_HELLO_BODY_LEN;
+    if extra > 0 {
+        let mut rest = vec![0u8; extra];
+        stream.read_exact(&mut rest).await?;
+    }
     Ok(body)
 }
 
@@ -242,7 +339,7 @@ pub async fn dial(
     local: &Local,
     lane: Lane,
     expected: &PeerAddr,
-) -> Result<PeerHello, ServerError> {
+) -> Result<(PeerHello, Negotiated), ServerError> {
     // the dialler speaks first
     let hello = local.hello(lane);
     stream.write_all(&hello.frame(local.max_frame_bytes)?).await?;
@@ -257,8 +354,8 @@ pub async fn dial(
         }));
     }
     // an acceptance from the wrong node is still the wrong node
-    check_peer(&ack.hello, local, expected)?;
-    Ok(ack.hello)
+    let negotiated = check_peer(&ack.hello, &hello, local, expected)?;
+    Ok((ack.hello, negotiated))
 }
 
 /// Check a peer's record against ours and against who we dialled
@@ -270,9 +367,10 @@ pub async fn dial(
 /// # Arguments
 ///
 /// * `peer` - The record the peer sent
+/// * `ours` - The hello this end wrote
 /// * `local` - What this node says about itself
 /// * `expected` - Who was dialled
-fn check_peer(peer: &PeerHello, local: &Local, expected: &PeerAddr) -> Result<(), ServerError> {
+fn check_peer(peer: &PeerHello, ours: &PeerHello, local: &Local, expected: &PeerAddr) -> Result<Negotiated, ServerError> {
     let found = NodeId(uuid::Uuid::from_bytes(peer.node));
     let cluster = ClusterId(uuid::Uuid::from_bytes(peer.cluster));
     // the same cluster, before anything else about the peer is believed
@@ -308,15 +406,23 @@ fn check_peer(peer: &PeerHello, local: &Local, expected: &PeerAddr) -> Result<()
             theirs: peer.schema_id,
         }));
     }
-    // and reading the wire version every frame after this is written at
-    if !peer.speaks_our_version() {
+    // and sharing a wire version, which every frame after this is written at or below
+    let Some(version) = peer.negotiate(ours) else {
         return Err(ProtocolError::UnsupportedVersion {
             got: peer.wire_max,
-            ours: PROTOCOL_VERSION,
+            ours: ours.wire_max,
         }
         .into());
+    };
+    let negotiated = Negotiated::of(peer, ours, version);
+    // and acting on everything a member has to
+    if !negotiated.has(REQUIRED_CAPABILITIES) {
+        return Err(ServerError::Shoal(ShoalError::PeerRefused {
+            node: found,
+            reason: PeerRefusal::CapabilityMissing,
+        }));
     }
-    Ok(())
+    Ok(negotiated)
 }
 
 /// Accept a lane from a peer: read its hello, judge it, and answer with our record and a verdict
@@ -339,52 +445,81 @@ pub async fn accept(
     let body = read_body(stream, MessageType::PeerHello).await?;
     let hello = PeerHello::decode(&body)?;
     // judge it in the order the refusals are documented
-    let (verdict, outcome) = judge(&hello, local, served, admission);
+    let ours = local.hello(hello.lane);
+    let (verdict, outcome) = judge(&hello, &ours, local, served, admission);
     // answer with our record and the verdict, on the lane the peer asked for
     let ack = PeerHelloAck {
-        hello: local.hello(hello.lane),
+        hello: ours,
         reason: verdict,
     };
     stream.write_all(&ack.frame(local.max_frame_bytes)?).await?;
     stream.flush().await?;
     // and only then act on it
-    let joining = outcome?;
+    let (joining, negotiated) = outcome?;
     Ok(Accepted {
         node: NodeId(uuid::Uuid::from_bytes(hello.node)),
         incarnation: hello.incarnation,
         lane: hello.lane,
         max_frame_bytes: hello.max_frame_bytes,
         joining,
+        negotiated,
     })
 }
 
 /// Decide whether a hello is let in, and what to say either way
 ///
-/// Returns the refusal to write and, on the other side, whether the peer is a joiner.
+/// Returns the refusal to write and, on the other side, whether the peer is a joiner and what
+/// the two ends agreed to speak.
 ///
 /// # Arguments
 ///
 /// * `hello` - The peer's record
+/// * `ours` - The record this end answers with
 /// * `local` - What this node says about itself
 /// * `served` - The lanes this listener serves
 /// * `admission` - What this listener judges a peer's identity against
 fn judge(
     hello: &PeerHello,
+    ours: &PeerHello,
     local: &Local,
     served: &[Lane],
     admission: &dyn Admission,
-) -> (PeerRefusal, Result<bool, ServerError>) {
+) -> (PeerRefusal, Result<(bool, Negotiated), ServerError>) {
     let found = NodeId(uuid::Uuid::from_bytes(hello.node));
     let cluster = ClusterId(uuid::Uuid::from_bytes(hello.cluster));
     // the wire version, since nothing after the hello can be read otherwise
-    if !hello.speaks_our_version() {
+    let Some(version) = hello.negotiate(ours) else {
         return (
             PeerRefusal::NoCommonVersion,
             Err(ProtocolError::UnsupportedVersion {
                 got: hello.wire_max,
-                ours: PROTOCOL_VERSION,
+                ours: ours.wire_max,
             }
             .into()),
+        );
+    };
+    let negotiated = Negotiated::of(hello, ours, version);
+    // the capabilities every member acts on, which a peer in the range is never without
+    if !negotiated.has(REQUIRED_CAPABILITIES) {
+        return (
+            PeerRefusal::CapabilityMissing,
+            Err(ServerError::Shoal(ShoalError::PeerRefused {
+                node: found,
+                reason: PeerRefusal::CapabilityMissing,
+            })),
+        );
+    }
+    // the version the cluster activated, which a member has to speak whatever it could
+    // negotiate with this one node: an activation is the boundary no member rolls back past
+    let activated = admission.activated_wire();
+    if hello.wire_max < activated {
+        return (
+            PeerRefusal::BelowActivatedWire,
+            Err(ServerError::Shoal(ShoalError::BelowActivatedWire {
+                node: found,
+                activated,
+                offered: hello.wire_max,
+            })),
         );
     }
     // the lane, which this listener may not serve at all
@@ -419,7 +554,7 @@ fn judge(
                 })),
             );
         }
-        return (PeerRefusal::Accepted, Ok(true));
+        return (PeerRefusal::Accepted, Ok((true, negotiated)));
     }
     // the cluster, which is what `Identity::verify_cluster` was written to check; a listener
     // with no cluster yet refuses every member's hello, since it cannot know whose
@@ -477,5 +612,5 @@ fn judge(
             })),
         );
     }
-    (PeerRefusal::Accepted, Ok(false))
+    (PeerRefusal::Accepted, Ok((false, negotiated)))
 }

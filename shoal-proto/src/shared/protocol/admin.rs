@@ -171,6 +171,17 @@ pub enum AdminKind {
     },
     /// Every plan the control state holds, done or not
     Plans,
+    /// Activate a wire version: every member speaks it from the commit, and none rolls back
+    /// past it ([F48](../../../../docs/src/features/rolling-compatibility.md))
+    ///
+    /// Refused by name while any member not removed reports a newest version below it, and
+    /// never lowers what is activated. `Members` carries `wire` - the activated version, the
+    /// floor and the newest this build speaks, and the lowest and highest a member reports -
+    /// which is what an operator reads first.
+    Activate {
+        /// The version to activate
+        wire: u8,
+    },
 }
 
 impl AdminKind {
@@ -188,6 +199,7 @@ impl AdminKind {
                 | AdminKind::Remove { .. }
                 | AdminKind::Maintenance { .. }
                 | AdminKind::Rebalance
+                | AdminKind::Activate { .. }
         )
     }
 
@@ -212,6 +224,7 @@ impl AdminKind {
             AdminKind::Rebalance => "rebalance",
             AdminKind::PlanStatus { .. } => "plan_status",
             AdminKind::Plans => "plans",
+            AdminKind::Activate { .. } => "activate",
         }
     }
 }
@@ -469,6 +482,7 @@ mod tests {
         // the placement operations are mutations and the plan reads are not, and all round trip (F46)
         let node = NodeId::mint();
         let mutations = [
+            AdminKind::Activate { wire: 5 },
             AdminKind::Decommission { node },
             AdminKind::Remove { node, replacement: Some(NodeId::mint()) },
             AdminKind::Remove { node, replacement: None },

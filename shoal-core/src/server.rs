@@ -302,6 +302,7 @@ where
                     identity.slots,
                     schema_id,
                     conf.networking.max_frame_bytes,
+                    cluster.transport.wire_version,
                 );
                 let bind = format!(
                     "{}:{}",

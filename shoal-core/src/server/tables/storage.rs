@@ -238,6 +238,9 @@ pub enum CompactionJob {
         /// The newest time-ordered identity the group has forgotten, for the manifest
         /// ([F45](../../../docs/src/features/replica-migration.md))
         expired_before: u64,
+        /// Where the cut is made and which file format it is written in
+        /// ([F48](../../../docs/src/features/rolling-compatibility.md))
+        provenance: crate::server::replication::snapshot::SnapshotProvenance,
         /// The directory the file goes in
         dir: PathBuf,
     },

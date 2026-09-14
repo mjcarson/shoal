@@ -856,6 +856,13 @@ pub struct LinkFacts {
     pub queued_bytes: u64,
     /// The queue bound this lane ran under
     pub bound: u64,
+    /// The wire version the link negotiated at its hello, if it was up when read
+    /// ([F48](../../../docs/src/features/rolling-compatibility.md))
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_version: Option<u8>,
+    /// The capabilities both ends acted on, if it was up when read
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<u64>,
 }
 
 /// The cores one node was given

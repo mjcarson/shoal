@@ -9,7 +9,11 @@
 //! is the one place they are all visible at once.
 //!
 //! ```text
+//! version 1:
 //! [magic 8 B "SHOALSNP"][version u8][table u64][group u64][boundary index u64][records u64]
+//! version 2 (F48, written once the cluster has activated wire version 5):
+//! [magic 8 B "SHOALSNP"][version u8][table u64][group u64][boundary index u64][records u64]
+//! [cluster 16 B][schema id u64][created ms u64]
 //! [record]*  : [key u64][len u32][rkyv partition bytes]     - the archive's own record shape
 //! [trailer]  : [len u32][retries postcard: Vec<(RequestId, Remembered)>]
 //! ```
@@ -19,6 +23,14 @@
 //! never read to find out what it is. The checksum is a [`FileHasher`] fold over every byte of
 //! the file in fixed blocks, computed as the file is written and as it is assembled, so a
 //! receiver verifies a stream without reading it back and however the bytes were chunked.
+//!
+//! **The manifest is the one body whose encoding differs between wire versions 4 and 5**
+//! ([F48](../../../../docs/src/features/rolling-compatibility.md)): at 5 it carries the
+//! cluster, the node that cut it and when, which a backup file needs to identify itself; at 4
+//! it is the record every build before F48 reads ([`ManifestV4`]). A begin RPC is encoded at
+//! the version its link negotiated and decoded at the version its frame names, so a build at
+//! 5 feeds a build at 4 and the other way about, and the receiver of a v4 manifest fills the
+//! three fields with what it can - its own cluster, and the sender it heard from.
 //!
 //! **Absence is total.** A snapshot names the tablets it covers, and every partition of those
 //! tablets not in the file is removed on install. That is what lets a delete travel: a row
@@ -33,17 +45,31 @@ use serde::{Deserialize, Serialize};
 
 use super::types::{DataConfig, Remembered};
 use crate::server::wal::{Vote, WalLogId};
-use crate::shared::identity::{GroupId, TableId};
+use crate::shared::identity::{ClusterId, GroupId, NodeId, TableId};
 use crate::shared::protocol::peer::RequestId;
 
 /// The first eight bytes of every snapshot file
 pub const SNAPSHOT_MAGIC: &[u8; 8] = b"SHOALSNP";
 
-/// The file format this build writes and reads
+/// The oldest file format this build reads and writes
 pub const SNAPSHOT_VERSION: u8 = 1;
 
-/// How many bytes the header takes
+/// The file format that identifies its cluster, written once wire version 5 is activated
+///
+/// The header grows by the cluster, the schema id and the cut's time, which is what a backup
+/// file is judged by before its bytes are trusted
+/// ([F48](../../../../docs/src/features/rolling-compatibility.md)). Written only past the
+/// activation, so a member that rolled back before it never meets a file it cannot read.
+pub const SNAPSHOT_VERSION_2: u8 = 2;
+
+/// How many bytes the version 1 header takes
 pub const SNAPSHOT_HEADER_LEN: usize = 8 + 1 + 8 + 8 + 8 + 8;
+
+/// How many bytes the version 2 header takes: the version 1 header and its three new fields
+pub const SNAPSHOT_HEADER_LEN_V2: usize = SNAPSHOT_HEADER_LEN + 16 + 8 + 8;
+
+/// The wire version from which the version 2 file header is written
+pub const SNAPSHOT_V2_FROM_WIRE: u8 = 5;
 
 /// The directory under a shard's WAL directory that built snapshots are written to
 pub const SNAPSHOTS_DIR: &str = "snapshots";
@@ -151,9 +177,228 @@ pub struct SnapshotManifest {
     /// ([F45](../../../../docs/src/features/replica-migration.md))
     #[serde(default)]
     pub expired_before: u64,
+    /// The cluster the snapshot was cut in ([F48](../../../../docs/src/features/rolling-compatibility.md))
+    ///
+    /// The nil id from a manifest that crossed a wire version 4 link or was read from a marker
+    /// written before F48; the receiver treats such a manifest as its own cluster's.
+    #[serde(default)]
+    pub cluster: ClusterId,
+    /// The node that cut it
+    #[serde(default)]
+    pub origin: NodeId,
+    /// When it was cut, in milliseconds since the epoch; zero when not recorded
+    #[serde(default)]
+    pub created_ms: u64,
+}
+
+impl SnapshotManifest {
+    /// Stamp where and when this snapshot was cut
+    ///
+    /// # Arguments
+    ///
+    /// * `cluster` - The cluster it was cut in
+    /// * `origin` - The node that cut it
+    #[must_use]
+    pub fn stamped(mut self, cluster: ClusterId, origin: NodeId) -> Self {
+        self.cluster = cluster;
+        self.origin = origin;
+        self.created_ms = now_ms();
+        self
+    }
+
+    /// Fill what a manifest from a version 4 link could not carry
+    ///
+    /// # Arguments
+    ///
+    /// * `cluster` - The receiver's cluster, which a v4 manifest is taken to belong to
+    /// * `origin` - The sender the receiver heard the manifest from
+    #[must_use]
+    pub fn filled(mut self, cluster: ClusterId, origin: NodeId) -> Self {
+        if self.cluster == ClusterId::default() {
+            self.cluster = cluster;
+        }
+        if self.origin == NodeId::default() {
+            self.origin = origin;
+        }
+        self
+    }
+
+    /// The manifest as a build at wire version 4 reads it
+    #[must_use]
+    pub fn to_v4(&self) -> ManifestV4 {
+        ManifestV4 {
+            group: self.group,
+            table: self.table,
+            schema_id: self.schema_id,
+            boundary: self.boundary.clone(),
+            membership: self.membership.clone(),
+            tablets: self.tablets.clone(),
+            records: self.records,
+            total: self.total,
+            checksum: self.checksum,
+            retries: self.retries,
+            expired_before: self.expired_before,
+        }
+    }
+
+    /// The version 2 file header for this snapshot
+    #[must_use]
+    pub fn header_v2(&self) -> SnapshotHeader {
+        SnapshotHeader {
+            table: self.table,
+            group: self.group,
+            boundary: self.boundary.index,
+            records: self.records,
+            version: SNAPSHOT_VERSION_2,
+            cluster: self.cluster,
+            schema_id: self.schema_id,
+            created_ms: self.created_ms,
+        }
+    }
+}
+
+/// The manifest as every build before F48 reads it, which a wire version 4 link carries
+///
+/// The field order is the wire: a v5 manifest is this with three fields after it, and a
+/// postcard sequence has no way to say a field is missing, so the shape is a type of its own
+/// rather than a default ([F48](../../../../docs/src/features/rolling-compatibility.md)).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ManifestV4 {
+    /// The group
+    pub group: GroupId,
+    /// The table it serves
+    pub table: TableId,
+    /// The structural fingerprint of the schema the sender serves
+    pub schema_id: u64,
+    /// The last log id whose effect the file holds
+    pub boundary: WalLogId,
+    /// The membership as of the boundary
+    pub membership: StoredMembershipOf<DataConfig>,
+    /// The tablets the file covers
+    pub tablets: Vec<u16>,
+    /// How many records the file holds
+    pub records: u64,
+    /// How many bytes the file takes
+    pub total: u64,
+    /// What every byte of the file hashes to
+    pub checksum: u64,
+    /// How many remembered requests the trailer holds
+    pub retries: u32,
+    /// The newest time-ordered identity the sender had forgotten
+    pub expired_before: u64,
+}
+
+impl ManifestV4 {
+    /// The manifest this build works with, with the three newer fields unset
+    #[must_use]
+    pub fn into_manifest(self) -> SnapshotManifest {
+        SnapshotManifest {
+            group: self.group,
+            table: self.table,
+            schema_id: self.schema_id,
+            boundary: self.boundary,
+            membership: self.membership,
+            tablets: self.tablets,
+            records: self.records,
+            total: self.total,
+            checksum: self.checksum,
+            retries: self.retries,
+            expired_before: self.expired_before,
+            cluster: ClusterId::default(),
+            origin: NodeId::default(),
+            created_ms: 0,
+        }
+    }
+}
+
+/// Where a cut is made, and which file format it is written in
+///
+/// Decided on the shard loop from the map it holds: the cluster and the node are its own, and
+/// the file format is version 2 once the cluster has activated wire version 5 and version 1
+/// before, so a member that could still roll back never meets a file it cannot read
+/// ([F48](../../../../docs/src/features/rolling-compatibility.md)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotProvenance {
+    /// The cluster the cut is made in
+    pub cluster: ClusterId,
+    /// The node making it
+    pub origin: NodeId,
+    /// The file format to write, 1 or 2
+    pub file_version: u8,
+}
+
+impl SnapshotProvenance {
+    /// What a node cuts under, given the wire version its cluster has activated
+    ///
+    /// # Arguments
+    ///
+    /// * `cluster` - The cluster
+    /// * `origin` - This node
+    /// * `activated_wire` - The wire version the cluster has activated
+    #[must_use]
+    pub fn at(cluster: ClusterId, origin: NodeId, activated_wire: u8) -> Self {
+        SnapshotProvenance {
+            cluster,
+            origin,
+            file_version: if activated_wire >= SNAPSHOT_V2_FROM_WIRE {
+                SNAPSHOT_VERSION_2
+            } else {
+                SNAPSHOT_VERSION
+            },
+        }
+    }
+
+    /// The header a cut under this provenance writes
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    /// * `group` - The group
+    /// * `boundary` - The boundary's index
+    /// * `records` - How many records follow
+    /// * `schema_id` - The schema's fingerprint, which a version 2 header carries
+    #[must_use]
+    pub fn header(&self, table: TableId, group: GroupId, boundary: u64, records: u64, schema_id: u64) -> SnapshotHeader {
+        let mut header = SnapshotHeader::v1(table, group, boundary, records);
+        if self.file_version == SNAPSHOT_VERSION_2 {
+            header.version = SNAPSHOT_VERSION_2;
+            header.cluster = self.cluster;
+            header.schema_id = schema_id;
+            header.created_ms = now_ms();
+        }
+        header
+    }
+
+    /// Stamp a manifest with this provenance, its time being the header's
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest of the cut
+    /// * `header` - The header the cut was written under
+    #[must_use]
+    pub fn stamp(&self, manifest: SnapshotManifest, header: &SnapshotHeader) -> SnapshotManifest {
+        let mut manifest = manifest.stamped(self.cluster, self.origin);
+        if header.created_ms > 0 {
+            manifest.created_ms = header.created_ms;
+        }
+        manifest
+    }
+}
+
+/// Milliseconds since the epoch, or zero on a clock before it
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 /// The header of a snapshot file
+///
+/// A version 1 header carries the first four fields; a version 2 header carries all of them
+/// ([F48](../../../../docs/src/features/rolling-compatibility.md)). The version decides how
+/// many bytes are written and read, and a build that meets a version it does not read refuses
+/// it by name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotHeader {
     /// The table
@@ -164,45 +409,114 @@ pub struct SnapshotHeader {
     pub boundary: u64,
     /// How many records follow
     pub records: u64,
+    /// Which format the file is in: 1 or 2
+    pub version: u8,
+    /// The cluster the file was cut in; the nil id in a version 1 file
+    pub cluster: ClusterId,
+    /// The structural fingerprint of the schema; zero in a version 1 file
+    pub schema_id: u64,
+    /// When it was cut, in milliseconds since the epoch; zero in a version 1 file
+    pub created_ms: u64,
 }
 
 impl SnapshotHeader {
-    /// Write this header
+    /// A version 1 header
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    /// * `group` - The group
+    /// * `boundary` - The boundary's index
+    /// * `records` - How many records follow
     #[must_use]
-    pub fn encode(&self) -> [u8; SNAPSHOT_HEADER_LEN] {
-        let mut raw = [0u8; SNAPSHOT_HEADER_LEN];
+    pub fn v1(table: TableId, group: GroupId, boundary: u64, records: u64) -> Self {
+        SnapshotHeader {
+            table,
+            group,
+            boundary,
+            records,
+            version: SNAPSHOT_VERSION,
+            cluster: ClusterId::default(),
+            schema_id: 0,
+            created_ms: 0,
+        }
+    }
+
+    /// How many bytes this header takes on disk, by its version
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        if self.version == SNAPSHOT_VERSION_2 {
+            SNAPSHOT_HEADER_LEN_V2
+        } else {
+            SNAPSHOT_HEADER_LEN
+        }
+    }
+
+    /// Whether this header has no bytes, which none does
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// Write this header, at its version's length
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut raw = vec![0u8; self.len()];
         raw[..8].copy_from_slice(SNAPSHOT_MAGIC);
-        raw[8] = SNAPSHOT_VERSION;
+        raw[8] = self.version;
         raw[9..17].copy_from_slice(&self.table.0.to_le_bytes());
         raw[17..25].copy_from_slice(&self.group.0.to_le_bytes());
         raw[25..33].copy_from_slice(&self.boundary.to_le_bytes());
         raw[33..41].copy_from_slice(&self.records.to_le_bytes());
+        // the version 2 fields, after the version 1 header
+        if self.version == SNAPSHOT_VERSION_2 {
+            raw[41..57].copy_from_slice(self.cluster.0.as_bytes());
+            raw[57..65].copy_from_slice(&self.schema_id.to_le_bytes());
+            raw[65..73].copy_from_slice(&self.created_ms.to_le_bytes());
+        }
         raw
     }
 
-    /// Read a header, refusing anything that is not one this build writes
+    /// The length a file's header has, from its first bytes, refusing a version this build does not read
     ///
     /// # Arguments
     ///
-    /// * `raw` - The header bytes
-    pub fn decode(raw: &[u8; SNAPSHOT_HEADER_LEN]) -> io::Result<Self> {
+    /// * `raw` - At least the version 1 header's bytes
+    pub fn len_of(raw: &[u8]) -> io::Result<usize> {
         // the magic and the version first, so a foreign file is refused by name
-        if &raw[..8] != SNAPSHOT_MAGIC {
+        if raw.len() < SNAPSHOT_HEADER_LEN || &raw[..8] != SNAPSHOT_MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "not a snapshot file: the magic is wrong"));
         }
-        if raw[8] != SNAPSHOT_VERSION {
-            return Err(io::Error::new(
+        match raw[8] {
+            SNAPSHOT_VERSION => Ok(SNAPSHOT_HEADER_LEN),
+            SNAPSHOT_VERSION_2 => Ok(SNAPSHOT_HEADER_LEN_V2),
+            other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("snapshot format {} is not one this build reads ({SNAPSHOT_VERSION})", raw[8]),
-            ));
+                format!("snapshot format {other} is not one this build reads ({SNAPSHOT_VERSION} or {SNAPSHOT_VERSION_2})"),
+            )),
+        }
+    }
+
+    /// Read a header of either version, refusing anything that is not one this build reads
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The header bytes, as many as [`SnapshotHeader::len_of`] said
+    pub fn decode(raw: &[u8]) -> io::Result<Self> {
+        let len = Self::len_of(raw)?;
+        if raw.len() < len {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the snapshot header is cut short"));
         }
         let word = |at: usize| u64::from_le_bytes(raw[at..at + 8].try_into().expect("eight bytes"));
-        Ok(SnapshotHeader {
-            table: TableId(word(9)),
-            group: GroupId(word(17)),
-            boundary: word(25),
-            records: word(33),
-        })
+        let mut header = SnapshotHeader::v1(TableId(word(9)), GroupId(word(17)), word(25), word(33));
+        header.version = raw[8];
+        // the version 2 fields, when the file has them
+        if header.version == SNAPSHOT_VERSION_2 {
+            header.cluster = ClusterId(uuid::Uuid::from_bytes(raw[41..57].try_into().expect("sixteen bytes")));
+            header.schema_id = word(57);
+            header.created_ms = word(65);
+        }
+        Ok(header)
     }
 }
 
@@ -404,16 +718,15 @@ impl SnapshotReader {
             buffer: Vec::new(),
             buffer_at: 0,
             pos: 0,
-            header: SnapshotHeader {
-                table: TableId(0),
-                group: GroupId(0),
-                boundary: 0,
-                records: 0,
-            },
+            header: SnapshotHeader::v1(TableId(0), GroupId(0), 0, 0),
             read: 0,
         };
-        let raw = reader.take(SNAPSHOT_HEADER_LEN).await?;
-        let raw: [u8; SNAPSHOT_HEADER_LEN] = raw.as_slice().try_into().expect("the header's length");
+        // the version 1 header first, which says how long the header is, then the rest
+        let mut raw = reader.take(SNAPSHOT_HEADER_LEN).await?;
+        let len = SnapshotHeader::len_of(&raw)?;
+        if len > SNAPSHOT_HEADER_LEN {
+            raw.extend(reader.take(len - SNAPSHOT_HEADER_LEN).await?);
+        }
         reader.header = SnapshotHeader::decode(&raw)?;
         Ok(reader)
     }
@@ -527,8 +840,12 @@ pub async fn verify(path: &Path, manifest: &SnapshotManifest) -> io::Result<()> 
                 let _ = file.close().await;
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "the snapshot file is shorter than a header"));
             }
-            let raw: [u8; SNAPSHOT_HEADER_LEN] = read[..SNAPSHOT_HEADER_LEN].try_into().expect("the header's length");
-            header = Some(SnapshotHeader::decode(&raw)?);
+            let len = SnapshotHeader::len_of(&read)?;
+            if read.len() < len {
+                let _ = file.close().await;
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "the snapshot file is shorter than its header"));
+            }
+            header = Some(SnapshotHeader::decode(&read[..len])?);
         }
         hasher.write(&read);
         pos += read.len() as u64;
@@ -553,6 +870,22 @@ pub async fn verify(path: &Path, manifest: &SnapshotManifest) -> io::Result<()> 
                 header.group, header.table, header.boundary, manifest.group, manifest.table, manifest.boundary.index
             ),
         ));
+    }
+    // a version 2 file names its cluster and schema, which have to be the manifest's when the
+    // manifest names them ([F48](../../../../docs/src/features/rolling-compatibility.md))
+    if header.version == SNAPSHOT_VERSION_2 {
+        if manifest.cluster != ClusterId::default() && header.cluster != manifest.cluster {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("the snapshot file was cut in cluster {} and the manifest says {}", header.cluster, manifest.cluster),
+            ));
+        }
+        if header.schema_id != manifest.schema_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("the snapshot file was cut from schema {:#018x} and the manifest says {:#018x}", header.schema_id, manifest.schema_id),
+            ));
+        }
     }
     Ok(())
 }
@@ -603,6 +936,87 @@ pub enum SnapshotRpc {
     },
 }
 
+/// The begin RPC as a wire version 4 link carries it: the manifest in its version 4 shape
+///
+/// The enum's variants and their order are `SnapshotRpc`'s, so an `End` encodes the same at
+/// either version ([F48](../../../../docs/src/features/rolling-compatibility.md)).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum SnapshotRpcV4 {
+    /// A stream is about to start
+    Begin {
+        /// The sender's vote
+        vote: Vote,
+        /// The stream
+        stream: [u8; 16],
+        /// What is coming, as a version 4 build reads it
+        manifest: ManifestV4,
+        /// The repair operation this stream serves, if it is one
+        repair: Option<uuid::Uuid>,
+    },
+    /// Every byte of a stream was sent
+    End {
+        /// The stream
+        stream: [u8; 16],
+        /// How many bytes
+        total: u64,
+        /// What they hash to
+        checksum: u64,
+    },
+}
+
+impl SnapshotRpc {
+    /// Encode this RPC for a link at a wire version
+    ///
+    /// Below [`SNAPSHOT_V2_FROM_WIRE`] the manifest goes in its version 4 shape; at it or above
+    /// in its own ([F48](../../../../docs/src/features/rolling-compatibility.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `version` - The wire version the frame will name
+    pub fn encode_at(&self, version: u8) -> Result<Vec<u8>, postcard::Error> {
+        if version >= SNAPSHOT_V2_FROM_WIRE {
+            return postcard::to_allocvec(self);
+        }
+        // the version 4 shape, field for field
+        let older = match self {
+            SnapshotRpc::Begin { vote, stream, manifest, repair } => SnapshotRpcV4::Begin {
+                vote: vote.clone(),
+                stream: *stream,
+                manifest: manifest.to_v4(),
+                repair: *repair,
+            },
+            SnapshotRpc::End { stream, total, checksum } => SnapshotRpcV4::End {
+                stream: *stream,
+                total: *total,
+                checksum: *checksum,
+            },
+        };
+        postcard::to_allocvec(&older)
+    }
+
+    /// Decode an RPC a frame at a wire version carried
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The frame's payload
+    /// * `version` - The wire version the frame named
+    pub fn decode_at(bytes: &[u8], version: u8) -> Result<Self, postcard::Error> {
+        if version >= SNAPSHOT_V2_FROM_WIRE {
+            return postcard::from_bytes(bytes);
+        }
+        // the version 4 shape, lifted into this build's with its new fields unset
+        Ok(match postcard::from_bytes::<SnapshotRpcV4>(bytes)? {
+            SnapshotRpcV4::Begin { vote, stream, manifest, repair } => SnapshotRpc::Begin {
+                vote,
+                stream,
+                manifest: manifest.into_manifest(),
+                repair,
+            },
+            SnapshotRpcV4::End { stream, total, checksum } => SnapshotRpc::End { stream, total, checksum },
+        })
+    }
+}
+
 /// What the receiver answers a snapshot RPC with
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SnapshotAnswer {
@@ -642,11 +1056,15 @@ mod tests {
     use openraft::vote::RaftLeaderId as _;
     use openraft::{AsyncRuntime as _, LogId, StoredMembership};
 
-    use super::{verify, SnapshotHeader, SnapshotManifest, SnapshotReader, SnapshotWriter, SNAPSHOT_HEADER_LEN, SNAPSHOT_MAGIC};
+    use super::{
+        verify, ManifestV4, SnapshotHeader, SnapshotManifest, SnapshotReader, SnapshotRpc, SnapshotWriter,
+        SNAPSHOT_HEADER_LEN, SNAPSHOT_HEADER_LEN_V2, SNAPSHOT_MAGIC, SNAPSHOT_VERSION_2,
+    };
+    use crate::server::wal::Vote;
     use crate::server::control::runtime::GlommioRuntime;
     use crate::server::replication::{CommandResult, Remembered, ResultKind};
     use crate::server::wal::LeaderId;
-    use crate::shared::identity::{GroupId, ShardAddr, TableId};
+    use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
     use crate::shared::protocol::peer::RequestId;
 
     /// A snapshot file round trips its records and its trailer, verifies against its manifest,
@@ -657,12 +1075,7 @@ mod tests {
         runtime.block_on(async {
             let dir = tempfile::tempdir().expect("failed to build a temp dir");
             let path = dir.path().join("g-7.snap");
-            let header = SnapshotHeader {
-                table: TableId::of("Note"),
-                group: GroupId(0xabc),
-                boundary: 7,
-                records: 3,
-            };
+            let header = SnapshotHeader::v1(TableId::of("Note"), GroupId(0xabc), 7, 3);
             let retries = vec![(
                 RequestId {
                     bundle: [3u8; 16],
@@ -697,6 +1110,9 @@ mod tests {
                 checksum,
                 retries: 1,
                 expired_before: 0,
+                cluster: ClusterId::default(),
+                origin: NodeId::default(),
+                created_ms: 0,
             };
             verify(&path, &manifest).await.expect("the file does not verify");
             // the checksum is the same however the bytes are chunked
@@ -758,5 +1174,104 @@ mod tests {
             let writer = SnapshotWriter::create(&short, header).await.expect("failed to create");
             assert!(writer.finish(&[]).await.is_err());
         });
+    }
+
+    /// A version 5 manifest round trips through its version 4 shape with the new fields
+    /// defaulted, a pending marker from before F48 still loads, and a version 2 file header
+    /// identifies its cluster ([F48](../../../../docs/src/features/rolling-compatibility.md))
+    #[test]
+    fn a_v4_manifest_round_trips_with_defaults() {
+        let cluster = ClusterId::mint();
+        let origin = NodeId::mint();
+        let manifest = SnapshotManifest {
+            group: GroupId(0xabc),
+            table: TableId::of("Note"),
+            schema_id: 0x1234,
+            boundary: LogId::new(LeaderId::new(1, ShardAddr::from(1)), 7),
+            membership: StoredMembership::default(),
+            tablets: vec![1, 2],
+            records: 3,
+            total: 99,
+            checksum: 0xfeed,
+            retries: 1,
+            expired_before: 5,
+            cluster: ClusterId::default(),
+            origin: NodeId::default(),
+            created_ms: 0,
+        }
+        .stamped(cluster, origin);
+        assert!(manifest.created_ms > 0);
+        // v5 -> v4 -> v5: the three fields are lost on the way and defaulted back
+        let v4 = manifest.to_v4();
+        let bytes = postcard::to_allocvec(&v4).expect("a v4 manifest encodes");
+        let back: ManifestV4 = postcard::from_bytes(&bytes).expect("a v4 manifest decodes");
+        assert_eq!(back, v4);
+        let restored = back.into_manifest();
+        assert_eq!(restored.cluster, ClusterId::default());
+        assert_eq!(restored.origin, NodeId::default());
+        assert_eq!(restored.created_ms, 0);
+        assert_eq!(restored.to_v4(), v4);
+        // the receiver fills what a v4 link could not carry, and leaves a v5 manifest alone
+        let filled = restored.filled(cluster, origin);
+        assert_eq!(filled.cluster, cluster);
+        assert_eq!(filled.origin, origin);
+        let other = manifest.clone().filled(ClusterId::mint(), NodeId::mint());
+        assert_eq!(other.cluster, cluster);
+        assert_eq!(other.origin, origin);
+        // the v5 shape round trips whole
+        let bytes = postcard::to_allocvec(&manifest).expect("a v5 manifest encodes");
+        let back: SnapshotManifest = postcard::from_bytes(&bytes).expect("a v5 manifest decodes");
+        assert_eq!(back, manifest);
+        // a pending marker written before F48 - the v4 shape as json - still loads with defaults
+        let json = serde_json::to_vec(&v4).expect("a v4 manifest as json");
+        let loaded: SnapshotManifest = serde_json::from_slice(&json).expect("an older marker loads");
+        assert_eq!(loaded.cluster, ClusterId::default());
+        assert_eq!(loaded.to_v4(), v4);
+        // a version 2 header carries the cluster, the schema and the time, and round trips
+        let header = manifest.header_v2();
+        assert_eq!(header.version, SNAPSHOT_VERSION_2);
+        let raw = header.encode();
+        assert_eq!(raw.len(), SNAPSHOT_HEADER_LEN_V2);
+        assert_eq!(SnapshotHeader::len_of(&raw).expect("a v2 header's length"), SNAPSHOT_HEADER_LEN_V2);
+        let decoded = SnapshotHeader::decode(&raw).expect("a v2 header decodes");
+        assert_eq!(decoded, header);
+        assert_eq!(decoded.cluster, cluster);
+        assert_eq!(decoded.schema_id, 0x1234);
+        // a version 1 header is shorter and names no cluster
+        let v1 = SnapshotHeader::v1(header.table, header.group, header.boundary, header.records);
+        let raw = v1.encode();
+        assert_eq!(raw.len(), SNAPSHOT_HEADER_LEN);
+        assert_eq!(SnapshotHeader::decode(&raw).expect("a v1 header decodes"), v1);
+        // a v2 header cut short is refused, not read as a v1
+        assert!(SnapshotHeader::decode(&header.encode()[..SNAPSHOT_HEADER_LEN]).is_err());
+        // a begin encoded for a v4 link is the v4 shape and decodes back with defaults; one
+        // encoded at v5 carries everything; an end is the same bytes at either
+        let begin = SnapshotRpc::Begin {
+            vote: Vote::new(1, ShardAddr::from(1)),
+            stream: [7u8; 16],
+            manifest: manifest.clone(),
+            repair: None,
+        };
+        let at_4 = begin.encode_at(4).expect("encodes at 4");
+        let at_5 = begin.encode_at(5).expect("encodes at 5");
+        assert!(at_5.len() > at_4.len());
+        match SnapshotRpc::decode_at(&at_4, 4).expect("decodes at 4") {
+            SnapshotRpc::Begin { manifest: read, .. } => {
+                assert_eq!(read.cluster, ClusterId::default());
+                assert_eq!(read.to_v4(), v4);
+            }
+            SnapshotRpc::End { .. } => panic!("a begin decoded as an end"),
+        }
+        match SnapshotRpc::decode_at(&at_5, 5).expect("decodes at 5") {
+            SnapshotRpc::Begin { manifest: read, .. } => assert_eq!(read, manifest),
+            SnapshotRpc::End { .. } => panic!("a begin decoded as an end"),
+        }
+        // a v5 payload read as v4 does not decode as the wrong thing silently: the repair
+        // field lands in the cluster's bytes, so the decode fails or the begin differs
+        if let Ok(SnapshotRpc::Begin { manifest: read, .. }) = SnapshotRpc::decode_at(&at_5, 4) {
+            assert_ne!(read, manifest);
+        }
+        let end = SnapshotRpc::End { stream: [1u8; 16], total: 5, checksum: 6 };
+        assert_eq!(end.encode_at(4).expect("an end at 4"), end.encode_at(5).expect("an end at 5"));
     }
 }

@@ -454,11 +454,14 @@ impl ShoalConnectionManager {
         // a server speaking a version we do not is refused here, from the header alone
         //
         // this works because the eight header bytes mean the same thing in every version of the
-        // protocol, so a version we cannot speak is still a header we can read
-        if raw.version != protocol::PROTOCOL_VERSION {
+        // protocol, so a version we cannot speak is still a header we can read. the client lane
+        // is served at `CLIENT_WIRE_VERSION`, which is what a build answers a client at whatever
+        // its peers speak, so anything from there to this build's newest is a server we read
+        // ([F48](../../docs/src/features/rolling-compatibility.md))
+        if raw.version < protocol::CLIENT_WIRE_VERSION || raw.version > protocol::PROTOCOL_VERSION {
             return Err(ProtocolError::UnsupportedVersion {
                 got: raw.version,
-                ours: protocol::PROTOCOL_VERSION,
+                ours: protocol::CLIENT_WIRE_VERSION,
             }
             .into());
         }

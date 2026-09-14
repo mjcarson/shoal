@@ -71,7 +71,8 @@ use crate::shared::protocol::admin::{
     AdminError, AdminKind, AdminOutcome, AdminRequest, AdminResponse,
 };
 use crate::shared::protocol::error::ErrorCode;
-use crate::shared::protocol::peer::{ControlKind, StatusReport};
+use crate::shared::protocol::peer::{ControlKind, PeerHello, StatusReport, CAPABILITIES};
+use crate::shared::protocol::{MIN_PEER_VERSION, PROTOCOL_VERSION};
 
 /// How long the control plane waits for a fresh group of one to elect itself
 ///
@@ -329,6 +330,29 @@ pub struct TopologyView {
     /// The grace the policy removes a down member after, in milliseconds, if it removes
     #[serde(default)]
     pub auto_remove_after_ms: Option<u64>,
+    /// Where the cluster stands with its wire versions
+    /// ([F48](../../../../docs/src/features/rolling-compatibility.md))
+    #[serde(default)]
+    pub wire: WireView,
+}
+
+/// The wire versions a cluster's members speak, and the one it has activated
+///
+/// What an operator reads before activating: `max_member` is the version every member could
+/// be activated to, `min_member` the version the cluster is held at while any member speaks
+/// less, and `activated` what has been committed.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WireView {
+    /// The version the cluster has activated
+    pub activated: u8,
+    /// The oldest version this build reads
+    pub floor: u8,
+    /// The newest version this build speaks
+    pub newest: u8,
+    /// The lowest newest-version any member not removed reports
+    pub min_member: u8,
+    /// The highest newest-version any member not removed reports
+    pub max_member: u8,
 }
 
 /// One member as the topology view reports it: the committed state, and what this node adds
@@ -586,6 +610,9 @@ impl ControlPlane {
             .ok_or(ServerError::Shoal(ShoalError::NotClustered))?;
         // what this node tells the group about itself
         let advertise = cluster.advertised(&conf.networking.interface)?;
+        // the wire range this node advertises, which the pin bounds above
+        // ([F48](../../../../docs/src/features/rolling-compatibility.md))
+        let (wire_min, wire_max) = PeerHello::range(cluster.transport.wire_version);
         let member = MemberRecord {
             node: identity.node,
             client: cluster.client_advertise.clone().unwrap_or(client),
@@ -597,6 +624,11 @@ impl ControlPlane {
             physical,
             incarnation: identity.incarnation,
             weight: cluster.weight.unwrap_or(0),
+            wire_min,
+            wire_max,
+            capabilities: CAPABILITIES,
+            schema_id,
+            build: env!("CARGO_PKG_VERSION").to_string(),
         };
         // where the control listener binds
         let bind: SocketAddr = format!("{advertise}:{}", cluster.control_port)
@@ -1004,6 +1036,13 @@ struct Core {
     rebalance: Rebalance,
     /// What every member last reported about its capacity, as this leader heard it
     capacity: BTreeMap<NodeId, NodeCapacity>,
+    /// The newest wire version every member last reported, as this leader heard it
+    ///
+    /// From the running builds, never from the committed records: a build from before the
+    /// field persisted every record without it, so a state restored on such a build reads the
+    /// floor for members that speak more. An activation carries these, so every replica
+    /// judges the same claim ([F48](../../../../docs/src/features/rolling-compatibility.md)).
+    wires: BTreeMap<NodeId, u8>,
     /// What this leader has counted of each down member's grace since it last committed it
     grace_seen: BTreeMap<NodeId, GraceLocal>,
     /// The members whose grace this leader is committing, so one count is in flight per member
@@ -1074,6 +1113,29 @@ impl Core {
             tombstones: state.tombstones.clone(),
             under_replicated_sets: state.under_replicated_sets(),
             auto_remove_after_ms: grace_ms,
+            wire: {
+                // every member not removed, by the newest version it speaks: its committed
+                // record, or the report this node heard while leading if that says more,
+                // since a record persisted by an older build lost the field
+                let reported: Vec<u8> = state
+                    .members
+                    .values()
+                    .filter(|member| member.phase != MemberPhase::Removed)
+                    .map(|member| {
+                        let node = member.record.node;
+                        let reported = self.wires.get(&node).copied().unwrap_or(0);
+                        let heard = self.network.wires().get(&node).copied().unwrap_or(0);
+                        member.record.wire_max().max(reported).max(heard)
+                    })
+                    .collect();
+                WireView {
+                    activated: state.activated_wire(),
+                    floor: MIN_PEER_VERSION,
+                    newest: PROTOCOL_VERSION,
+                    min_member: reported.iter().copied().min().unwrap_or(MIN_PEER_VERSION),
+                    max_member: reported.iter().copied().max().unwrap_or(MIN_PEER_VERSION),
+                }
+            },
             policy: state.policy,
         }
     }
@@ -1230,6 +1292,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         member.shards,
         schema_id,
         max_frame_bytes,
+        transport.wire_version,
     )));
     let (client_tls, server_tls) = match &tls {
         Some(tls) => {
@@ -1319,6 +1382,18 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
     let recovered = machine.state();
     if recovered.topology_version > 0 {
         observe(&root, recovered.topology_version).await?;
+    }
+    // a node whose own log says the cluster activated a wire version it cannot speak stops
+    // here, before it serves anything: every peer would refuse it at the door, and a pin or a
+    // build below the activation is the operator's to lift
+    // ([F48](../../../../docs/src/features/rolling-compatibility.md))
+    let activated = recovered.activated_wire();
+    if member.wire_max < activated {
+        return Err(ServerError::Shoal(ShoalError::WireBelowActivated {
+            node,
+            activated,
+            ours: member.wire_max,
+        }));
     }
     // the store tells the loop about every apply from here on
     {
@@ -1448,6 +1523,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         migration,
         rebalance,
         capacity: BTreeMap::new(),
+        wires: BTreeMap::new(),
         grace_seen: BTreeMap::new(),
         grace_in_flight: BTreeSet::new(),
         plan_in_flight: BTreeSet::new(),
@@ -1844,6 +1920,18 @@ impl Core {
             }));
             return;
         }
+        // an activation is judged by what this leader knows every member's build speaks,
+        // never by the proposer's claim ([F48](../../../../docs/src/features/rolling-compatibility.md))
+        let command = match command {
+            ControlCommand::Activate { op, principal, expected_version, wire, .. } => match self.wires_known(wire) {
+                Ok(members) => ControlCommand::Activate { op, principal, expected_version, wire, members },
+                Err(reason) => {
+                    let _ = inbound.reply.send(err(reason));
+                    return;
+                }
+            },
+            other => other,
+        };
         let raft = self.raft.clone();
         let me = self.node;
         let reply = inbound.reply;
@@ -1916,6 +2004,9 @@ impl Core {
             // what it says about its capacity is kept in memory for the planner, never committed
             // ([F46](../../../../docs/src/features/capacity-rebalancing.md))
             self.note_capacity(report.node, report.incarnation, report.free_bytes, &report.group_bytes);
+            // and the wire version its running build speaks, which an activation is judged by
+            // ([F48](../../../../docs/src/features/rolling-compatibility.md))
+            self.wires.insert(report.node, report.wire_max.max(MIN_PEER_VERSION));
             // a change in the member's quarantined copies is committed, so every node routes
             // around them ([F44](../../../../docs/src/features/repair.md))
             let copies: Vec<QuarantinedCopy> = report.quarantined.iter().map(QuarantinedCopy::from_member).collect();
@@ -2129,6 +2220,37 @@ impl Core {
                 principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
                 expected_version: call.request.expected_version,
             },
+            // an activation of a version this build cannot speak is refused here, before it is
+            // proposed: the state machine judges the members' records, never the build, so a
+            // replica on an older build applies exactly what the leader did
+            // ([F48](../../../../docs/src/features/rolling-compatibility.md))
+            AdminKind::Activate { wire } => {
+                if *wire > PROTOCOL_VERSION || *wire < MIN_PEER_VERSION {
+                    let _ = call.reply.send(answer(Err(AdminError::new(
+                        ErrorCode::Internal,
+                        format!("wire version {wire} is not one this build speaks; it reads {MIN_PEER_VERSION} to {PROTOCOL_VERSION}"),
+                    ))));
+                    return;
+                }
+                // what every member's running build speaks, as this node knows it; the
+                // leader replaces the claim with its own knowledge before the write, so a
+                // member it has not heard from is refused by name there
+                let members = match self.wires_known(*wire) {
+                    Ok(members) => members,
+                    Err(reason) if self.is_leader => {
+                        let _ = call.reply.send(answer(Err(AdminError::new(ErrorCode::Internal, reason))));
+                        return;
+                    }
+                    Err(_) => self.wires_heard(),
+                };
+                ControlCommand::Activate {
+                    op: call.request.op,
+                    principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                    expected_version: call.request.expected_version,
+                    wire: *wire,
+                    members,
+                }
+            }
             // the record of a plan, as the applied state holds it
             AdminKind::PlanStatus { op } => {
                 let outcome = match state.plans.get(op) {
@@ -2267,6 +2389,17 @@ impl Core {
         }
         if state.tombstones.contains_key(&self.node) {
             return Err(ServerError::Shoal(ShoalError::Removed { node: self.node }));
+        }
+        // a node that cannot speak the wire version its own log says the cluster activated
+        // stops too: every peer would refuse it at the door, and a pin or a build below the
+        // activation is the operator's to lift ([F48](../../../../docs/src/features/rolling-compatibility.md))
+        let activated = state.activated_wire();
+        if self.member.wire_max < activated {
+            return Err(ServerError::Shoal(ShoalError::WireBelowActivated {
+                node: self.node,
+                activated,
+                ours: self.member.wire_max,
+            }));
         }
         // a joiner that now sees itself in the state has been replicated to; it observes itself
         if self.status == JoinStatus::Joining && state.members.contains_key(&self.node) {
@@ -2646,6 +2779,7 @@ impl Core {
             quarantined: self.quarantined.iter().map(QuarantinedCopy::to_member).collect(),
             free_bytes,
             group_bytes,
+            wire_max: self.member.wire_max,
         };
         let payload = serde_json::to_vec(&report).map_err(|error| error.to_string())?;
         let network = self.network.clone();
@@ -2753,6 +2887,50 @@ impl Core {
             }
         }
         (free_bytes, groups.into_iter().collect())
+    }
+
+    /// The newest wire version every member's running build speaks, as this node has heard it
+    ///
+    /// From the hellos this node's control links completed and the reports it heard while
+    /// leading, this node's own included; never from the committed records, which a build
+    /// from before the field persisted without it
+    /// ([F48](../../../../docs/src/features/rolling-compatibility.md)).
+    fn wires_heard(&self) -> BTreeMap<NodeId, u8> {
+        let mut members = self.network.wires();
+        for (node, wire) in &self.wires {
+            let known = members.entry(*node).or_insert(*wire);
+            *known = (*known).max(*wire);
+        }
+        members.insert(self.node, self.member.wire_max);
+        members
+    }
+
+    /// What every member speaks, or the refusal to give when one has not been heard from
+    ///
+    /// # Arguments
+    ///
+    /// * `wire` - The version being activated, for the refusal's text
+    fn wires_known(&self, wire: u8) -> Result<BTreeMap<NodeId, u8>, String> {
+        let members = self.wires_heard();
+        let unheard: Vec<String> = self
+            .machine
+            .state()
+            .members
+            .values()
+            .filter(|member| member.phase != MemberPhase::Removed && !members.contains_key(&member.record.node))
+            .map(|member| member.record.node.to_string())
+            .collect();
+        if unheard.is_empty() {
+            Ok(members)
+        } else {
+            Err(format!(
+                "wire version {wire} cannot be activated: {} {} not been heard from by this leader, so what {} speak{} is not known",
+                unheard.join(", "),
+                if unheard.len() == 1 { "has" } else { "have" },
+                if unheard.len() == 1 { "it" } else { "they" },
+                if unheard.len() == 1 { "s" } else { "" },
+            ))
+        }
     }
 
     /// Note what a member reported about its capacity, for the planner

@@ -223,4 +223,12 @@ pub struct StatusReport {
     /// The bytes each tablet group holds on the node, by the group's number, summed over its shards
     #[serde(default)]
     pub group_bytes: Vec<(u64, u64)>,
+    /// The newest wire version the node speaks, from the build that is running
+    ///
+    /// Zero from a build before F48, which reads as the floor. The leader judges an activation
+    /// by these rather than by the committed records, since a record a build from before the
+    /// field persisted in its own state lost it
+    /// ([F48](../../../../../docs/src/features/rolling-compatibility.md)).
+    #[serde(default)]
+    pub wire_max: u8,
 }

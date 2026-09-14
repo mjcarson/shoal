@@ -595,6 +595,9 @@ where
         head: crate::shared::protocol::peer::ReplicateRequestHead,
         /// Its payload
         payload: Vec<u8>,
+        /// The wire version the payload is encoded at, from the frame's header
+        /// ([F48](../../../docs/src/features/rolling-compatibility.md))
+        version: u8,
         /// Where the answer goes: the connection's write relay
         reply: AsyncSender<crate::server::peer::ReplicateReply>,
     },

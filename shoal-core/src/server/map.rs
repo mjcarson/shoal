@@ -186,6 +186,15 @@ pub struct TabletMap {
     /// retires under ([F45](../../../docs/src/features/replica-migration.md))
     #[serde(default)]
     pub moves: Vec<MoveRecord>,
+    /// The wire version the cluster has activated, which every member has to speak
+    /// ([F48](../../../docs/src/features/rolling-compatibility.md))
+    #[serde(default = "default_activated_wire")]
+    pub activated_wire: u8,
+}
+
+/// The activated wire version a map from before F48 is read with: the floor
+fn default_activated_wire() -> u8 {
+    crate::shared::protocol::MIN_PEER_VERSION
 }
 
 impl Default for TabletMap {
@@ -207,6 +216,7 @@ impl Default for TabletMap {
             primary_failover_ms: 0,
             configurations: Vec::new(),
             moves: Vec::new(),
+            activated_wire: crate::shared::protocol::MIN_PEER_VERSION,
         }
     }
 }
@@ -283,6 +293,7 @@ impl TabletMap {
             primary_failover_ms: policy.map_or(0, |policy| policy.primary_failover_after.duration().as_millis() as u64),
             configurations: state.configurations.values().cloned().collect(),
             moves: state.moves.values().filter(|record| !record.is_done()).cloned().collect(),
+            activated_wire: state.activated_wire(),
         }
     }
 
@@ -991,6 +1002,11 @@ impl Admission for MapCell {
     fn cluster(&self) -> Option<ClusterId> {
         self.inner.borrow().cluster
     }
+
+    /// The wire version the installed map says the cluster activated
+    fn activated_wire(&self) -> u8 {
+        self.inner.borrow().activated_wire
+    }
 }
 
 #[cfg(test)]
@@ -1012,6 +1028,11 @@ mod tests {
             physical: 0,
             incarnation,
             weight: 0,
+            wire_min: 0,
+            wire_max: 0,
+            capabilities: 0,
+            schema_id: 0,
+            build: String::new(),
         }
     }
 
