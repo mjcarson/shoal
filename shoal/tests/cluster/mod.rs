@@ -182,6 +182,11 @@ pub struct ClusterBuilder {
     /// The slots particular nodes claim, apart from their cores
     /// ([F47](../../../docs/src/features/local-rehome.md))
     slots: Vec<(usize, usize)>,
+    /// The wire version particular nodes are pinned at, below the build's newest
+    /// ([F48](../../../docs/src/features/rolling-compatibility.md))
+    wire_versions: Vec<(usize, u8)>,
+    /// Another build of the test binary to start every child from, for a real upgrade
+    exe: Option<std::path::PathBuf>,
 }
 
 impl ClusterBuilder {
@@ -208,6 +213,30 @@ impl ClusterBuilder {
     pub fn slots(mut self, id: usize, slots: usize) -> Self {
         self.slots.retain(|(node, _)| *node != id);
         self.slots.push((id, slots));
+        self
+    }
+
+    /// Pin one node at a wire version below the build's newest, as an unupgraded member
+    /// ([F48](../../../docs/src/features/rolling-compatibility.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `version` - The newest version it advertises
+    pub fn wire_version(mut self, id: usize, version: u8) -> Self {
+        self.wire_versions.retain(|(node, _)| *node != id);
+        self.wire_versions.push((id, version));
+        self
+    }
+
+    /// Start every child from another build of the test binary, for a real rolling upgrade
+    /// ([F48](../../../docs/src/features/rolling-compatibility.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `exe` - The binary
+    pub fn exe(mut self, exe: std::path::PathBuf) -> Self {
+        self.exe = Some(exe);
         self
     }
 
@@ -768,7 +797,10 @@ impl ClusterBuilder {
                 spec.staged_marker.clone(),
                 cluster,
                 durability,
-                ChildOverrides::default(),
+                ChildOverrides {
+                    exe: self.exe.clone(),
+                    ..ChildOverrides::default()
+                },
             )?));
         }
         // hold the port reservations until every child has bound, so nothing else takes them
@@ -883,6 +915,8 @@ impl Cluster {
             moves_per_node: None,
             plan_interval_ms: None,
             slots: Vec::new(),
+            wire_versions: Vec::new(),
+            exe: None,
             snapshot_timeout_ms: None,
             snapshot_chunk_bytes: None,
             bulk_queue_bytes: None,
@@ -1135,7 +1169,42 @@ impl Cluster {
             staged,
             ChildOverrides {
                 cores: Some(cores),
-                rehome_crash_at: None,
+                ..ChildOverrides::default()
+            },
+        )
+    }
+
+    /// Kill a node and start it again pinned at a wire version, or with its pin lifted
+    /// ([F48](../../../docs/src/features/rolling-compatibility.md))
+    ///
+    /// The pin is kept in the staging, so a later plain restart keeps it.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Its id
+    /// * `version` - The newest version to advertise, or none for the build's newest
+    pub fn restart_with_wire(&mut self, id: usize, version: Option<u8>) -> Result<(), FixtureError> {
+        self.staged[id].wire_version = version;
+        let staged = self.staged.get(id).cloned();
+        self.restart_with_overrides(id, NodeKind::Server, staged, ChildOverrides::default())
+    }
+
+    /// Kill a node and start it again from another build of the test binary
+    /// ([F48](../../../docs/src/features/rolling-compatibility.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Its id
+    /// * `exe` - The binary, or none for this one
+    pub fn restart_with_binary(&mut self, id: usize, exe: Option<std::path::PathBuf>) -> Result<(), FixtureError> {
+        let staged = self.staged.get(id).cloned();
+        self.restart_with_overrides(
+            id,
+            NodeKind::Server,
+            staged,
+            ChildOverrides {
+                exe,
+                ..ChildOverrides::default()
             },
         )
     }
@@ -1581,6 +1650,7 @@ fn build_membership_cluster(
             peers: peers.clone(),
             dial: Vec::new(),
             slots: builder.slots.iter().find(|(node, _)| *node == id).map(|(_, slots)| *slots),
+            wire_version: builder.wire_versions.iter().find(|(node, _)| *node == id).map(|(_, version)| *version),
             replication_factor: builder.replication_factor,
             control_voters: builder.control_voters,
             admins: builder.admins.clone(),

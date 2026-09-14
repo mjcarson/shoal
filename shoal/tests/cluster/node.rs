@@ -100,13 +100,21 @@ pub struct ChildRequest {
 ///
 /// The core count is the allocation's by default; a test of the rehome restarts a node with
 /// fewer or more executors on the same lease, and arms the point the rehome dies at
-/// ([F47](../../../docs/src/features/local-rehome.md)).
+/// ([F47](../../../docs/src/features/local-rehome.md)). A test of a rolling upgrade restarts
+/// a node pinned at a wire version, or on another build of the test binary
+/// ([F48](../../../docs/src/features/rolling-compatibility.md)).
 #[derive(Debug, Clone, Default)]
 pub struct ChildOverrides {
     /// How many cores to run, instead of the allocation's count
     pub cores: Option<usize>,
     /// A rehome crash point to arm before the pool starts
     pub rehome_crash_at: Option<String>,
+    /// The newest wire version the node advertises: a pin, the build's newest, or as staged
+    ///
+    /// `Some(Some(v))` pins, `Some(None)` lifts the staged pin, `None` keeps the staging.
+    pub wire_version: Option<Option<u8>>,
+    /// Another build of the test binary to run the child from, instead of this one
+    pub exe: Option<std::path::PathBuf>,
 }
 
 /// A node's place in a membership cluster the fixture built
@@ -141,6 +149,10 @@ pub struct StagedCluster {
     /// ([F47](../../../docs/src/features/local-rehome.md))
     #[serde(default)]
     pub slots: Option<usize>,
+    /// The newest wire version this node advertises, if the test pinned it below the build's
+    /// ([F48](../../../docs/src/features/rolling-compatibility.md))
+    #[serde(default)]
+    pub wire_version: Option<u8>,
     /// The replication factor the bootstrapper seeds
     pub replication_factor: u32,
     /// The voter policy the bootstrapper seeds
@@ -407,6 +419,14 @@ impl Node {
             (NodeKind::Server, None) => (Some(0), true),
             _ => (None, false),
         };
+        // a pin the restart set, lifted or changed over what was staged
+        let cluster = match (cluster, overrides.wire_version) {
+            (Some(mut staged), Some(pin)) => {
+                staged.wire_version = pin;
+                Some(staged)
+            }
+            (staged, _) => staged,
+        };
         let request = ChildRequest {
             kind,
             dir: dir.to_path_buf(),
@@ -428,8 +448,14 @@ impl Node {
             rehome_crash_at: overrides.rehome_crash_at,
         };
         let request = serde_json::to_string(&request).expect("a request serializes");
-        // the test binary again, running only the child function
-        let mut command = Command::new(std::env::current_exe()?);
+        // the test binary again, running only the child function - or another build of it,
+        // for a rolling upgrade from a real previous binary
+        // ([F48](../../../docs/src/features/rolling-compatibility.md))
+        let exe = match &overrides.exe {
+            Some(exe) => exe.clone(),
+            None => std::env::current_exe()?,
+        };
+        let mut command = Command::new(exe);
         command
             .args(["--exact", kind.child_fn(), "--ignored", "--nocapture"])
             .env(CHILD_ENV, request)

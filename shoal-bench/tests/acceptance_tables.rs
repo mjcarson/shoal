@@ -32,7 +32,8 @@ struct Row {
 
 /// The milestones a row may name
 const MILESTONES: &[&str] = &[
-    "M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M9a", "M9b", "M9c", "M10",
+    "M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M9a", "M9b", "M9c", "M10", "M10a", "M10b",
+    "M10c",
 ];
 
 /// Every row of every acceptance table under the distributed chapter
@@ -188,8 +189,12 @@ fn acceptance_tables_have_unique_tests_and_valid_milestones() {
             row.milestone
         );
         let section = &sections[&row.milestone];
-        // M9's substages carry M9's gates; the umbrella section defers to them
-        let gate = if row.milestone == "M9" { "M9a" } else { row.milestone.as_str() };
+        // M9's and M10's substages carry their gates; the umbrella sections defer to them
+        let gate = match row.milestone.as_str() {
+            "M9" => "M9a",
+            "M10" => "M10a",
+            other => other,
+        };
         let gated = sections[gate].contains(&row.chapter) || section.contains(&row.chapter);
         assert!(
             gated,
