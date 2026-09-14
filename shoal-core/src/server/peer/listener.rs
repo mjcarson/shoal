@@ -22,7 +22,6 @@ use futures::io::{ReadHalf, WriteHalf};
 use futures::AsyncReadExt;
 use glommio::net::{TcpListener, TcpStream};
 use kanal::{AsyncReceiver, AsyncSender};
-use rustls::ServerConfig;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
@@ -52,6 +51,7 @@ use crate::shared::protocol::peer::{
     SNAPSHOT_END_LEN,
 };
 use crate::shared::protocol::{MessageType, ProtocolError};
+use crate::shared::tls::{PeerIdentity, PeerTlsHolder};
 
 /// What every accepted lane on a shard shares
 pub struct ListenerContext<S: ShoalDatabase> {
@@ -64,7 +64,7 @@ pub struct ListenerContext<S: ShoalDatabase> {
     /// The map this shard holds, which is what a hello is judged against
     pub map: MapCell,
     /// What to take the wire with, if the lanes are encrypted
-    pub tls: Option<Arc<ServerConfig>>,
+    pub tls: PeerTlsHolder,
     /// How long a peer has to finish its handshake
     pub handshake_timeout: Duration,
     /// The most forwarded bytes one connection may hold unanswered
@@ -218,13 +218,24 @@ pub async fn peer_acceptor<S: ShoalDatabase>(
             let _ = stream.set_nodelay(true);
             // take the wire and shake hands under one deadline
             let accepted = glommio::timer::timeout(ctx.handshake_timeout, async {
-                if let Some(config) = &ctx.tls {
-                    if let Err(error) = crate::server::tls::accept(&mut stream, config).await {
-                        return Ok(Err(error));
-                    }
-                }
+                // the material as it is right now, and what the peer's certificate said
+                let certified = match ctx.tls.server() {
+                    Some(config) => match crate::server::tls::accept(&mut stream, &config).await {
+                        Ok(established) => established.peer,
+                        Err(error) => return Ok(Err(error)),
+                    },
+                    None => PeerIdentity::Plaintext,
+                };
                 let local = ctx.local.borrow().clone();
-                Ok(handshake::accept(&mut stream, &local, &[Lane::Data, Lane::Bulk, Lane::Replication], &ctx.map).await)
+                Ok(handshake::accept(
+                    &mut stream,
+                    &local,
+                    &[Lane::Data, Lane::Bulk, Lane::Replication],
+                    &ctx.map,
+                    &certified,
+                    ctx.tls.binds_identity(),
+                )
+                .await)
             })
             .await;
             let accepted = match accepted {

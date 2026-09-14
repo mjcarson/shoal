@@ -45,6 +45,9 @@ rustls = { version = "0.23", default-features = false, features = [
 ] }
 rustls-pki-types = "1"
 rustls-pemfile = "2"
+# the one X.509 field this crate reads for itself: the URI SAN that binds a peer's certificate to
+# the node it claims to be (F50). rcgen already brings it into the graph
+yasna = "0.5"
 libc = "0.2"
 
 [dev-dependencies]

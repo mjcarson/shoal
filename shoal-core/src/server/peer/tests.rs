@@ -22,6 +22,7 @@ use crate::shared::protocol::peer::{
     PeerRefusal, FORWARD_PREAMBLE_LEN, PEER_HELLO_BODY_LEN, PEER_HELLO_FRAME_LEN,
 };
 use crate::shared::protocol::{HEADER_LEN, MIN_PEER_VERSION, PROTOCOL_VERSION};
+use crate::shared::tls::PeerIdentity;
 use futures::AsyncWriteExt;
 
 /// An identity for a node in a placed cluster
@@ -95,9 +96,49 @@ async fn exchange(
         body.copy_from_slice(&frame[HEADER_LEN..]);
         PeerHelloAck::decode(&body).expect("an ack").reason
     });
-    // the server accepts and judges
+    // the server accepts and judges, as a plaintext lane would
     let mut stream = listener.accept().await.expect("accept");
-    let accepted = handshake::accept(&mut stream, local, served, admission).await.is_ok();
+    let accepted = handshake::accept(&mut stream, local, served, admission, &PeerIdentity::Plaintext, true)
+        .await
+        .is_ok();
+    let reason = client.await;
+    (reason, accepted)
+}
+
+/// The same exchange under a certificate that said something about the peer
+///
+/// # Arguments
+///
+/// * `listener` - The bound listener the client dials
+/// * `local` - What the accepting node says about itself
+/// * `admission` - What it judges a hello against
+/// * `served` - The lanes this listener serves
+/// * `hello` - The hello the client sends
+/// * `certified` - What the peer's certificate said
+/// * `bind` - Whether the lanes bind certificates to identities
+async fn exchange_certified(
+    listener: &TcpListener,
+    local: &Local,
+    admission: &dyn Admission,
+    served: &[Lane],
+    hello: PeerHello,
+    certified: &PeerIdentity,
+    bind: bool,
+) -> (PeerRefusal, bool) {
+    let addr = listener.local_addr().expect("a bound address");
+    let max = local.max_frame_bytes;
+    let client = glommio::spawn_local(async move {
+        let mut sock = TcpStream::connect(addr).await.expect("connect");
+        sock.write_all(&hello.frame(max).expect("a hello frame")).await.expect("write");
+        sock.flush().await.expect("flush");
+        let mut frame = [0u8; PEER_HELLO_FRAME_LEN];
+        sock.read_exact(&mut frame).await.expect("read ack");
+        let mut body = [0u8; PEER_HELLO_BODY_LEN];
+        body.copy_from_slice(&frame[HEADER_LEN..]);
+        PeerHelloAck::decode(&body).expect("an ack").reason
+    });
+    let mut stream = listener.accept().await.expect("accept");
+    let accepted = handshake::accept(&mut stream, local, served, admission, certified, bind).await.is_ok();
     let reason = client.await;
     (reason, accepted)
 }
@@ -242,6 +283,32 @@ fn peer_rejects_wrong_cluster_identity_and_malformed_payload() {
             exchange(&listener, &local, &placement, data, a_hello(c, n0, 2, Lane::Data, schema_id)).await;
         assert_eq!(reason, PeerRefusal::Accepted);
         assert!(ok);
+        // the certificate's name against the hello's, under the binding: the same node is
+        // accepted, another node is a mismatch, no name is unauthorized, and with the binding
+        // off the chain alone is trusted ([F50](../../../../docs/src/features/cluster-operations.md))
+        let named = PeerIdentity::Node(NodeId(uuid::Uuid::from_bytes(n0)));
+        let other = PeerIdentity::Node(NodeId::from(77));
+        let hello = a_hello(c, n0, 2, Lane::Data, schema_id);
+        let (reason, ok) = exchange_certified(&listener, &local, &placement, data, hello.clone(), &named, true).await;
+        assert_eq!(reason, PeerRefusal::Accepted);
+        assert!(ok);
+        let (reason, ok) = exchange_certified(&listener, &local, &placement, data, hello.clone(), &other, true).await;
+        assert_eq!(reason, PeerRefusal::IdentityMismatch);
+        assert!(!ok);
+        let (reason, ok) = exchange_certified(&listener, &local, &placement, data, hello.clone(), &PeerIdentity::Unnamed, true).await;
+        assert_eq!(reason, PeerRefusal::Unauthorized);
+        assert!(!ok);
+        let (reason, ok) = exchange_certified(&listener, &local, &placement, data, hello.clone(), &other, false).await;
+        assert_eq!(reason, PeerRefusal::Accepted);
+        assert!(ok);
+        let (reason, ok) = exchange_certified(&listener, &local, &placement, data, hello, &PeerIdentity::Unnamed, false).await;
+        assert_eq!(reason, PeerRefusal::Accepted);
+        assert!(ok);
+        // a joiner's certificate is bound too: its hello names a node before it has a cluster
+        let joining = a_hello([0; 16], [7; 16], 2, Lane::Control, schema_id);
+        let (reason, ok) = exchange_certified(&listener, &local, &placement, control, joining, &other, true).await;
+        assert_eq!(reason, PeerRefusal::IdentityMismatch);
+        assert!(!ok);
     });
 
     // every malformed forward the receiver would decode is refused before an archive is touched:

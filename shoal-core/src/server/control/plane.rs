@@ -59,7 +59,7 @@ use super::types::{
     ControlCommand, ControlConfig, ControlResponse, ControlState, MemberHealth, MemberPhase,
     MemberRecord, MemberRole, MemberState, Tombstone,
 };
-use crate::server::conf::cluster::{BootstrapPolicy, DialOverride, Migration, PeerTls, Rebalance, Transport};
+use crate::server::conf::cluster::{BootstrapPolicy, DialOverride, Migration, Rebalance, Transport};
 use crate::server::conf::Conf;
 use crate::server::errors::ShoalError;
 use crate::server::map::{QuorumShortfall, TabletMap};
@@ -74,6 +74,7 @@ use crate::shared::protocol::admin::{
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::protocol::peer::{ControlKind, PeerHello, StatusReport, CAPABILITIES};
 use crate::shared::protocol::{MIN_PEER_VERSION, PROTOCOL_VERSION};
+use crate::shared::tls::PeerTlsHolder;
 
 /// How long the control plane waits for a fresh group of one to elect itself
 ///
@@ -558,8 +559,8 @@ struct Startup {
     tables: Vec<(String, TableId)>,
     /// The largest frame the peer lanes accept
     max_frame_bytes: u32,
-    /// The certificate and authority the peer lanes use, if encrypted
-    tls: Option<PeerTls>,
+    /// The certificate and authority the peer lanes use, read at every handshake, if encrypted
+    tls: PeerTlsHolder,
     /// Where this node's control listener binds
     bind: SocketAddr,
     /// The bounds and timers the peer lanes use
@@ -604,6 +605,7 @@ impl ControlPlane {
         physical: usize,
         schema_id: u64,
         tables: Vec<(String, TableId)>,
+        tls: PeerTlsHolder,
     ) -> Result<ControlHandle, ServerError> {
         let cluster = conf
             .cluster
@@ -664,7 +666,7 @@ impl ControlPlane {
             schema_id,
             tables,
             max_frame_bytes: conf.networking.max_frame_bytes,
-            tls: cluster.tls.clone(),
+            tls,
             bind,
             transport: cluster.transport.clone(),
             migration: cluster.migration.clone(),
@@ -931,6 +933,8 @@ enum Event {
     Observed(Result<ControlResponse, ProposeError>),
     /// A promotion finished
     Promoted(NodeId, Result<(), String>),
+    /// A rewrite of a moved member's addresses into the membership finished
+    Readdressed(NodeId, Result<(), String>),
     /// An admission finished, and the next queued joiner may be admitted
     Admitted,
     /// A report was answered, or refused
@@ -983,6 +987,9 @@ struct Core {
     machine: ControlStateMachine,
     /// The control network
     network: PeerNetwork,
+    /// The peer lanes' certificate and authority, which `ReloadTls` swaps whole
+    /// ([F50](../../../../docs/src/features/cluster-operations.md))
+    tls: PeerTlsHolder,
     /// What this node says about itself
     local: Rc<RefCell<Local>>,
     /// Where events to the pool go
@@ -1007,6 +1014,9 @@ struct Core {
     observe_after: Option<Instant>,
     /// Whether a promotion is in flight
     promoting: bool,
+    /// Whether a rewrite of a moved member's addresses into the membership is in flight
+    /// ([F50](../../../../docs/src/features/cluster-operations.md))
+    readdressing: bool,
     /// Whether a join is in flight
     joining: bool,
     /// Whether an admission is in flight, since the group takes one membership change at a time
@@ -1197,6 +1207,34 @@ impl Core {
         }
     }
 
+    /// Whether a principal is one the committed policy names as an admin
+    ///
+    /// # Arguments
+    ///
+    /// * `principal` - Who asked, if the connection authenticated
+    /// * `state` - The applied state
+    fn is_admin(&self, principal: &Option<String>, state: &ControlState) -> bool {
+        let admins = state.policy.as_ref().map(|policy| policy.admins.clone()).unwrap_or_default();
+        principal.as_ref().is_some_and(|principal| admins.contains(principal))
+    }
+
+    /// The refusal a principal that is not an admin is answered
+    ///
+    /// # Arguments
+    ///
+    /// * `principal` - Who asked, if the connection authenticated
+    /// * `state` - The applied state
+    fn not_admin(&self, principal: &Option<String>, state: &ControlState) -> AdminError {
+        let admins = state.policy.as_ref().map(|policy| policy.admins.clone()).unwrap_or_default();
+        AdminError::new(
+            ErrorCode::Unauthorized,
+            format!(
+                "{} may not change the cluster; cluster.admins names {admins:?}",
+                principal.as_deref().unwrap_or("an unauthenticated connection")
+            ),
+        )
+    }
+
     /// The committed record of a member, for dialling it
     fn record_of(&self, node: NodeId) -> Option<MemberRecord> {
         self.machine
@@ -1281,6 +1319,14 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
     let config = Config {
         cluster_name,
         enable_leader_restore: Some(false),
+        // a member that wins its identity from a copy of its directory holds a log shorter
+        // than what its earlier run acknowledged - the copy was taken before those entries -
+        // and the leader, which now dials the winner where it is, meets the reversion the
+        // moment it appends: it resets the member's progress and feeds it again rather than
+        // stopping, the same rule the data groups follow
+        // ([F50](../../../../docs/src/features/cluster-operations.md),
+        // [Resolved #99](../../../../docs/src/appendix/resolved/durable-log-reversion.md))
+        allow_log_reversion: Some(true),
         ..Config::default()
     }
     .validate()
@@ -1295,26 +1341,17 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         max_frame_bytes,
         transport.wire_version,
     )));
-    let (client_tls, server_tls) = match &tls {
-        Some(tls) => {
-            // a control node that asked for TLS refuses to start if the kernel cannot do kTLS,
-            // the same as a shard listener
-            if !crate::shared::tls::ktls::is_available() {
-                return Err(crate::shared::tls::TlsError::UlpUnavailable(std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "the 'tls' kernel module is not loaded",
-                ))
-                .into());
-            }
-            (
-                Some(crate::shared::tls::peer_client_config(tls)?),
-                Some(crate::shared::tls::peer_server_config(tls)?),
-            )
-        }
-        None => (None, None),
-    };
+    // a control node that asked for TLS refuses to start if the kernel cannot do kTLS, the
+    // same as a shard listener; the material itself was read by the pool into the holder
+    if tls.is_encrypted() && !crate::shared::tls::ktls::is_available() {
+        return Err(crate::shared::tls::TlsError::UlpUnavailable(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "the 'tls' kernel module is not loaded",
+        ))
+        .into());
+    }
     // the network the group drives its peers with, dialling committed records
-    let network = PeerNetwork::new(local.clone(), dial, client_tls, transport.clone());
+    let network = PeerNetwork::new(local.clone(), dial, tls.clone(), transport.clone());
     let raft = Raft::<ControlConfig, ControlStateMachine>::new(
         node,
         Arc::new(config),
@@ -1413,7 +1450,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         raft.clone(),
         machine.clone(),
         local.clone(),
-        server_tls,
+        tls.clone(),
         inbound_tx,
     ));
     // the relays: the pool's requests, the listener's RPCs, the metrics and the two timers
@@ -1509,6 +1546,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         observing: false,
         observe_after: None,
         promoting: false,
+        readdressing: false,
         joining: false,
         admitting: false,
         join_queue: std::collections::VecDeque::new(),
@@ -1523,6 +1561,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         replication: BTreeMap::new(),
         migration,
         rebalance,
+        tls: tls.clone(),
         capacity: BTreeMap::new(),
         wires: BTreeMap::new(),
         grace_seen: BTreeMap::new(),
@@ -1597,6 +1636,14 @@ impl Core {
                     Err(error) => event!(Level::WARN, msg = "a promotion failed", node = %learner, error),
                 }
                 self.maybe_promote();
+            }
+            Event::Readdressed(node, outcome) => {
+                self.readdressing = false;
+                match outcome {
+                    Ok(()) => event!(Level::INFO, msg = "wrote a member's new addresses into the membership", %node),
+                    Err(error) => event!(Level::WARN, msg = "a member's new addresses were not written into the membership", %node, error),
+                }
+                self.maybe_readdress();
             }
             Event::Admitted => {
                 self.admitting = false;
@@ -2306,6 +2353,24 @@ impl Core {
                 let _ = call.reply.send(answer(Ok(AdminOutcome::Read(serde_json::to_value(&state.recoveries).unwrap_or_default()))));
                 return;
             }
+            // a reload is this node's alone: the material read again and swapped whole, or
+            // refused with nothing changed; a mutation for the principal it needs, and
+            // nothing to commit ([F50](../../../../docs/src/features/cluster-operations.md))
+            AdminKind::ReloadTls => {
+                if !call.trusted && !self.is_admin(&call.principal, &state) {
+                    let _ = call.reply.send(answer(Err(self.not_admin(&call.principal, &state))));
+                    return;
+                }
+                let outcome = match self.tls.reload() {
+                    Ok(report) => {
+                        event!(Level::INFO, msg = "reloaded the peer certificate", chain = report.chain, authorities = report.authorities, own_identity = ?report.own_identity);
+                        Ok(AdminOutcome::Read(serde_json::to_value(report).unwrap_or_default()))
+                    }
+                    Err(error) => Err(AdminError::new(ErrorCode::Internal, format!("the certificate was not reloaded: {error}"))),
+                };
+                let _ = call.reply.send(answer(outcome));
+                return;
+            }
             // an activation of a version this build cannot speak is refused here, before it is
             // proposed: the state machine judges the members' records, never the build, so a
             // replica on an older build applies exactly what the leader did
@@ -2354,22 +2419,9 @@ impl Core {
             }
         };
         // a mutation needs a principal the committed policy names, unless the process itself asks
-        if !call.trusted {
-            let admins = state.policy.as_ref().map(|policy| policy.admins.clone()).unwrap_or_default();
-            let allowed = call
-                .principal
-                .as_ref()
-                .is_some_and(|principal| admins.contains(principal));
-            if !allowed {
-                let _ = call.reply.send(answer(Err(AdminError::new(
-                    ErrorCode::Unauthorized,
-                    format!(
-                        "{} may not change the cluster; cluster.admins names {admins:?}",
-                        call.principal.as_deref().unwrap_or("an unauthenticated connection")
-                    ),
-                ))));
-                return;
-            }
+        if !call.trusted && !self.is_admin(&call.principal, &state) {
+            let _ = call.reply.send(answer(Err(self.not_admin(&call.principal, &state))));
+            return;
         }
         // an operation seen before is answered as it was the first time, before the version
         // is judged: the version moved when it applied, so an identical retry would otherwise
@@ -2516,9 +2568,13 @@ impl Core {
             })
             .detach();
         }
+        // where every member is dialled now, so a member that moved is reached at its new
+        // address from the next RPC on ([F50](../../../../docs/src/features/cluster-operations.md))
+        self.network.note_addresses(state.members.values().map(|member| &member.record));
         self.publish();
         self.maybe_observe();
         self.maybe_promote();
+        self.maybe_readdress();
         self.drive_plans(true);
         Ok(())
     }
@@ -2703,6 +2759,54 @@ impl Core {
         glommio::spawn_local(async move {
             let outcome = promote(&raft, learner, record).await;
             let _ = tx.send(Event::Promoted(learner, outcome)).await;
+        })
+        .detach();
+    }
+
+    /// Write a member's committed addresses into the group's membership when they moved
+    ///
+    /// A member restarted at another address is observed at a higher incarnation and its
+    /// committed record names the new one, but the library dials what the *membership's*
+    /// node data names, which is the record it was admitted or promoted with; the leader
+    /// rewrites that data, without changing the voters, the first time the two differ, so
+    /// replication reaches the member where it is now
+    /// ([F50](../../../../docs/src/features/cluster-operations.md)). One at a time, and never
+    /// while a configuration change is uncommitted.
+    fn maybe_readdress(&mut self) {
+        if !self.is_leader || self.readdressing || self.promoting {
+            return;
+        }
+        let Some(metrics) = &self.metrics else {
+            return;
+        };
+        if metrics.membership_config.membership() != metrics.committed_membership_config.membership() {
+            return;
+        }
+        let state = self.machine.state();
+        // the first member whose committed addresses are not what the membership dials
+        let moved = metrics
+            .membership_config
+            .membership()
+            .nodes()
+            .find_map(|(node, named)| {
+                let member = state.members.get(node)?;
+                let record = &member.record;
+                let differs = record.control != named.control || record.data != named.data || record.client != named.client;
+                (differs && member.phase != MemberPhase::Removed && record.incarnation >= named.incarnation).then(|| (*node, record.clone()))
+            });
+        let Some((node, record)) = moved else {
+            return;
+        };
+        self.readdressing = true;
+        let raft = self.raft.clone();
+        let tx = self.tx.clone();
+        glommio::spawn_local(async move {
+            let outcome = raft
+                .change_membership(ChangeMembers::SetNodes(BTreeMap::from([(node, record)])), false)
+                .await
+                .map(|_| ())
+                .map_err(|error| format!("{error}"));
+            let _ = tx.send(Event::Readdressed(node, outcome)).await;
         })
         .detach();
     }

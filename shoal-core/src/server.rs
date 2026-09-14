@@ -120,6 +120,9 @@ pub struct ShoalPool<S: ShoalDatabase> {
     hosting: Arc<Hosting>,
     /// What the rehome this start ran moved, if the executor count had changed
     rehome: Option<RehomeReport>,
+    /// The peer lanes' certificate and authority, which a reload swaps whole
+    /// ([F50](../../docs/src/features/cluster-operations.md))
+    peer_tls: crate::shared::tls::PeerTlsHolder,
     /// The database this shoal pool is handling
     phantom: PhantomData<S>,
 }
@@ -241,6 +244,10 @@ where
         let shards = cpus.len();
         let mut shard_cpus: Vec<usize> = cpus.iter().map(|location| location.cpu).collect();
         shard_cpus.sort_unstable();
+        // the peer lanes' certificate and authority, read once here and swapped whole by a
+        // reload, which every executor's handshakes read through the one holder
+        // ([F50](../../docs/src/features/cluster-operations.md))
+        let peer_tls = crate::shared::tls::PeerTlsHolder::build(conf.cluster.as_ref().and_then(|cluster| cluster.tls.as_ref()))?;
         // the control plane starts before the shards, so a group that cannot start refuses the
         // node before any shard has bound; and it is waited for here, so the shards start with
         // the map it holds rather than none
@@ -258,6 +265,7 @@ where
                         .into_iter()
                         .map(|(name, id)| (name.to_string(), id))
                         .collect(),
+                    peer_tls.clone(),
                 )?;
                 control.ready(Instant::now() + CONTROL_START_TIMEOUT)?;
                 Some(control)
@@ -319,7 +327,7 @@ where
                     local,
                     dial: cluster.dial.clone(),
                     initial_map,
-                    tls: cluster.tls.clone(),
+                    tls: peer_tls.clone(),
                     transport: cluster.transport.clone(),
                     bind,
                 })
@@ -358,9 +366,28 @@ where
             shard_txs,
             hosting,
             rehome,
+            peer_tls,
             phantom: PhantomData,
         };
         Ok(pool)
+    }
+
+    /// Read the peer lanes' certificate, key and authority again and use them from now on
+    ///
+    /// Both configs are rebuilt from the same paths and swapped only if both built, so a bad
+    /// file changes nothing; every handshake after the swap uses the new material, and every
+    /// established connection keeps its keys, which the kernel holds
+    /// ([F50](../../docs/src/features/cluster-operations.md)). The same thing `ReloadTls` does
+    /// over the admin connection.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a standalone node, on plaintext lanes, or if the material cannot be read.
+    pub fn reload_tls(&self) -> Result<crate::shared::tls::PeerTlsReload, ServerError> {
+        if self.control.is_none() {
+            return Err(ServerError::Shoal(ShoalError::NotClustered));
+        }
+        Ok(self.peer_tls.reload()?)
     }
 
     /// The report of the rehome this start ran, if the executor count had changed

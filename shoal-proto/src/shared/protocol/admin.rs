@@ -204,6 +204,12 @@ pub enum AdminKind {
     },
     /// Every recovery an operator ran on a survivor, oldest first
     Recoveries,
+    /// Read this node's peer certificate, key and authority again and use them from now on
+    ///
+    /// Node-local: the node the connection reached reloads its own material and answers what
+    /// it read; nothing is committed. Needs an admin principal, since it changes what the node
+    /// proves itself with ([F50](../../../../docs/src/features/cluster-operations.md)).
+    ReloadTls,
     /// Activate a wire version: every member speaks it from the commit, and none rolls back
     /// past it ([F48](../../../../docs/src/features/rolling-compatibility.md))
     ///
@@ -235,6 +241,7 @@ impl AdminKind {
                 | AdminKind::Activate { .. }
                 | AdminKind::Backup { .. }
                 | AdminKind::Restore { .. }
+                | AdminKind::ReloadTls
         )
     }
 
@@ -266,6 +273,7 @@ impl AdminKind {
             AdminKind::Restore { .. } => "restore",
             AdminKind::RestoreStatus { .. } => "restore_status",
             AdminKind::Recoveries => "recoveries",
+            AdminKind::ReloadTls => "reload_tls",
         }
     }
 }
@@ -531,6 +539,7 @@ mod tests {
             AdminKind::Remove { node, replacement: None },
             AdminKind::Maintenance { node, suspend: true },
             AdminKind::Rebalance,
+            AdminKind::ReloadTls,
         ];
         for kind in mutations {
             assert!(kind.is_mutation(), "{}", kind.name());

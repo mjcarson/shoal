@@ -1199,7 +1199,12 @@ mod tests {
                 mode: crate::server::meta::MarkerMode::Cluster,
             };
             let local = Rc::new(RefCell::new(Local::new(&identity, 1, 0, 1 << 20, None)));
-            let network = PeerNetwork::new(local, BTreeMap::new(), None, crate::server::conf::cluster::Transport::default());
+            let network = PeerNetwork::new(
+                local,
+                BTreeMap::new(),
+                crate::shared::tls::PeerTlsHolder::build(None).expect("a plaintext holder"),
+                crate::server::conf::cluster::Transport::default(),
+            );
             let config = openraft::Config {
                 cluster_name: "recovered".to_string(),
                 enable_leader_restore: Some(false),

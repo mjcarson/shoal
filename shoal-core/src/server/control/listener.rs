@@ -18,11 +18,9 @@ use futures_channel::oneshot;
 use glommio::net::{TcpListener, TcpStream};
 use openraft::raft::{AppendEntriesRequest, VoteRequest};
 use openraft::Raft;
-use rustls::ServerConfig;
 use serde::Serialize;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 use tracing::{event, Level};
 
 use super::network::decode_snapshot;
@@ -37,6 +35,7 @@ use crate::shared::protocol::peer::{
     self, ControlKind, ControlRequestHead, ControlResponseHead, ControlStatus, CONTROL_HEAD_LEN,
 };
 use crate::shared::protocol::MessageType;
+use crate::shared::tls::{PeerIdentity, PeerTlsHolder};
 
 /// What a ping answers with
 #[derive(Serialize)]
@@ -128,14 +127,14 @@ impl Admission for StateAdmission {
 /// * `raft` - This node's group, which inbound consensus RPCs are driven into
 /// * `machine` - The state machine, for a ping's topology version and the judge
 /// * `local` - What this node says about itself
-/// * `tls` - What to take the wire with, if the lanes are encrypted
+/// * `tls` - What to take the wire with, read at every accept, if the lanes are encrypted
 /// * `inbound` - Where the membership RPCs go, for the control loop to answer
 pub async fn control_acceptor(
     listener: TcpListener,
     raft: Raft<ControlConfig, ControlStateMachine>,
     machine: ControlStateMachine,
     local: Rc<RefCell<Local>>,
-    tls: Option<Arc<ServerConfig>>,
+    tls: PeerTlsHolder,
     inbound: kanal::AsyncSender<Inbound>,
 ) -> Result<(), ServerError> {
     let admission = Rc::new(StateAdmission {
@@ -161,19 +160,26 @@ pub async fn control_acceptor(
         glommio::spawn_local(async move {
             // nodelay's error is this connection's alone, not the listener's
             let _ = stream.set_nodelay(true);
-            // take the wire, then shake hands on the control lane
-            if let Some(config) = &tls {
-                if let Err(error) = crate::server::tls::accept(&mut stream, config).await {
-                    event!(Level::WARN, msg = "refused a control peer at tls", ?error);
-                    return;
-                }
-            }
+            // take the wire with the material as it is right now, then shake hands on the
+            // control lane with what the certificate said
+            let certified = match tls.server() {
+                Some(config) => match crate::server::tls::accept(&mut stream, &config).await {
+                    Ok(established) => established.peer,
+                    Err(error) => {
+                        event!(Level::WARN, msg = "refused a control peer at tls", ?error);
+                        return;
+                    }
+                },
+                None => PeerIdentity::Plaintext,
+            };
             let ours = local.borrow().clone();
             let accepted = match handshake::accept(
                 &mut stream,
                 &ours,
                 &[Lane::Control],
                 admission.as_ref(),
+                &certified,
+                tls.binds_identity(),
             )
             .await
             {

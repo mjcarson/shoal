@@ -39,7 +39,7 @@ pub mod tls;
 mod tests;
 
 
-use crate::server::conf::cluster::{DialOverride, PeerTls, Transport};
+use crate::server::conf::cluster::{DialOverride, Transport};
 use crate::shared::identity::NodeId;
 
 pub use crate::shared::protocol::peer::Lane;
@@ -93,8 +93,8 @@ pub struct PeerSetup {
     pub dial: std::collections::BTreeMap<NodeId, DialOverride>,
     /// The map the control plane held when the shards started; later ones are pushed
     pub initial_map: std::sync::Arc<crate::server::map::TabletMap>,
-    /// The certificate and authority the lanes use, if they are encrypted
-    pub tls: Option<PeerTls>,
+    /// The certificate and authority the lanes use, read at every handshake, if encrypted
+    pub tls: crate::shared::tls::PeerTlsHolder,
     /// The bounds and timers
     pub transport: Transport,
     /// The address the peer listeners bind, `advertise:port`

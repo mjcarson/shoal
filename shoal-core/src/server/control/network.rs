@@ -24,7 +24,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::io::Cursor;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures_channel::oneshot;
@@ -36,7 +35,6 @@ use openraft::raft::{
 use openraft::storage::Snapshot;
 use openraft::type_config::alias::{SnapshotMetaOf, SnapshotOf, VoteOf};
 use openraft::{OptionalSend, RaftNetworkFactory, RaftNetworkV2};
-use rustls::ClientConfig;
 use tracing::{event, Level};
 
 use super::store::SnapshotData;
@@ -49,6 +47,7 @@ use crate::shared::protocol::peer::{
     ControlKind, ControlRequestHead, ControlResponseHead, ControlStatus, PeerRefusal, CONTROL_HEAD_LEN,
 };
 use crate::shared::protocol::MessageType;
+use crate::shared::tls::PeerTlsHolder;
 
 /// What a control RPC's answer resolves to
 enum ControlOutcome {
@@ -103,14 +102,14 @@ impl ControlLink {
     /// * `entry` - Where to dial and who to expect there
     /// * `local` - What this node says about itself
     /// * `transport` - The bounds and timers
-    /// * `tls` - What to dial with, if the lanes are encrypted
+    /// * `tls` - What to dial with, read at every dial
     /// * `wires` - Where the newest wire version each peer's hello named is recorded
     /// * `removed` - Set when a peer refuses this node's hello as a removed identity
     fn new(
         entry: PeerAddr,
         local: Rc<RefCell<Local>>,
         transport: &Transport,
-        tls: Option<Arc<ClientConfig>>,
+        tls: PeerTlsHolder,
         wires: Rc<RefCell<BTreeMap<NodeId, u8>>>,
         removed: Rc<Cell<bool>>,
     ) -> Self {
@@ -235,14 +234,21 @@ struct Shared {
     local: Rc<RefCell<Local>>,
     /// Where particular members are dialled instead of where they advertise
     dial: BTreeMap<NodeId, DialOverride>,
-    /// What to dial with, if the lanes are encrypted
-    tls: Option<Arc<ClientConfig>>,
+    /// What to dial with, read at every dial so a reload reaches the next one
+    tls: PeerTlsHolder,
     /// The bounds and timers
     transport: Transport,
     /// The newest wire version each peer's hello named, as this node's links heard it
     wires: Rc<RefCell<BTreeMap<NodeId, u8>>>,
     /// Whether a peer has refused this node's hello as a removed identity
     removed: Rc<Cell<bool>>,
+    /// Where each member is dialled now, from the committed records as the plane applies them
+    ///
+    /// The library hands a client the record the member was admitted with; a member that
+    /// restarted at another address is observed at a higher incarnation with a new record,
+    /// and every RPC after the plane applies it dials there
+    /// ([F50](../../../../docs/src/features/cluster-operations.md)).
+    addresses: RefCell<BTreeMap<NodeId, PeerAddr>>,
 }
 
 /// The control group's network factory
@@ -262,12 +268,12 @@ impl PeerNetwork {
     ///
     /// * `local` - What this node says about itself
     /// * `dial` - Where particular members are dialled instead of where they advertise
-    /// * `tls` - What to dial peers with, if encrypted
+    /// * `tls` - What to dial peers with, read at every dial
     /// * `transport` - The bounds and timers
     pub fn new(
         local: Rc<RefCell<Local>>,
         dial: BTreeMap<NodeId, DialOverride>,
-        tls: Option<Arc<ClientConfig>>,
+        tls: PeerTlsHolder,
         transport: Transport,
     ) -> Self {
         PeerNetwork {
@@ -279,8 +285,34 @@ impl PeerNetwork {
                 transport,
                 wires: Rc::new(RefCell::new(BTreeMap::new())),
                 removed: Rc::new(Cell::new(false)),
+                addresses: RefCell::new(BTreeMap::new()),
             }),
         }
+    }
+
+    /// Note where every member is dialled now, from the committed records
+    ///
+    /// # Arguments
+    ///
+    /// * `records` - Every member's committed record
+    pub fn note_addresses<'a>(&self, records: impl Iterator<Item = &'a MemberRecord>) {
+        let mut addresses = self.shared.addresses.borrow_mut();
+        for record in records {
+            let mut entry = self.addr_of(record);
+            entry.node = Some(record.node);
+            addresses.insert(record.node, entry);
+        }
+    }
+
+    /// Where a member is dialled now: the committed record if the plane has applied one, else
+    /// what the caller was given
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The member
+    /// * `given` - The address the library or the caller named
+    fn current_address(&self, target: NodeId, given: &PeerAddr) -> PeerAddr {
+        self.shared.addresses.borrow().get(&target).cloned().unwrap_or_else(|| given.clone())
     }
 
     /// Whether a peer has refused this node's hello as a removed identity
@@ -367,7 +399,8 @@ impl PeerNetwork {
     pub fn peer(&self, entry: &PeerAddr) -> ControlPeer {
         ControlPeer {
             target: entry.node_or_nil(),
-            link: self.link(entry),
+            given: entry.clone(),
+            network: self.clone(),
         }
     }
 
@@ -402,20 +435,38 @@ impl RaftNetworkFactory<ControlConfig> for PeerNetwork {
         entry.node = Some(target);
         ControlPeer {
             target,
-            link: self.link(&entry),
+            given: entry,
+            network: self.clone(),
         }
     }
 }
 
 /// The network to one peer
+///
+/// Holds no link of its own: every RPC looks the link up by where the member is dialled
+/// *now*, so a member that moved is reached at its new address as soon as the plane applies
+/// its record, whatever address the library handed this client
+/// ([F50](../../../../docs/src/features/cluster-operations.md)).
 pub struct ControlPeer {
     /// Who it reaches, or the nil id for a seed
     target: NodeId,
-    /// The link
-    link: Rc<ControlLink>,
+    /// The address this client was made for, dialled until a committed record says otherwise
+    given: PeerAddr,
+    /// The factory, whose links and addresses are shared
+    network: PeerNetwork,
 }
 
 impl ControlPeer {
+    /// The link to the peer as it is dialled now
+    fn link(&self) -> Rc<ControlLink> {
+        // a seed named no node, and is dialled where it was given
+        if self.target == NodeId::default() {
+            return self.network.link(&self.given);
+        }
+        let entry = self.network.current_address(self.target, &self.given);
+        self.network.link(&entry)
+    }
+
     /// Turn a link error into openraft's retriable unreachable
     ///
     /// # Arguments
@@ -450,7 +501,7 @@ impl ControlPeer {
         payload: Vec<u8>,
         deadline: Duration,
     ) -> Result<Vec<u8>, RpcFailure> {
-        self.link.rpc(kind, payload, deadline).await
+        self.link().rpc(kind, payload, deadline).await
     }
 
     /// Ping the peer over the control lane, proving its listener answers
@@ -458,7 +509,7 @@ impl ControlPeer {
     /// A liveness probe with no consensus meaning: the peer's control listener answers it with
     /// its incarnation and topology version, which this hands back.
     pub async fn ping(&mut self) -> Result<Vec<u8>, String> {
-        self.link
+        self.link()
             .rpc(ControlKind::Ping, Vec::new(), Duration::from_secs(5))
             .await
             .map_err(|failure| failure.to_string())
@@ -478,7 +529,7 @@ impl RaftNetworkV2<ControlConfig> for ControlPeer {
             Self::unreachable(RpcFailure::Unreachable(format!("encoding append_entries: {error}")))
         })?;
         let answer = self
-            .link
+            .link()
             .rpc(ControlKind::AppendEntries, payload, option.hard_ttl())
             .await
             .map_err(Self::unreachable)?;
@@ -497,7 +548,7 @@ impl RaftNetworkV2<ControlConfig> for ControlPeer {
             Self::unreachable(RpcFailure::Unreachable(format!("encoding vote: {error}")))
         })?;
         let answer = self
-            .link
+            .link()
             .rpc(ControlKind::Vote, payload, option.hard_ttl())
             .await
             .map_err(Self::unreachable)?;
@@ -522,7 +573,7 @@ impl RaftNetworkV2<ControlConfig> for ControlPeer {
             StreamingError::Unreachable(Unreachable::new(&LinkFailed { msg: error }))
         })?;
         let answer = self
-            .link
+            .link()
             .rpc(ControlKind::Snapshot, payload, option.hard_ttl())
             .await
             .map_err(|failure| {

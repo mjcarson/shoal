@@ -262,6 +262,23 @@ pub struct StagedCluster {
     /// How often the control leader looks at its plans, in milliseconds, if shortened
     #[serde(default)]
     pub plan_interval_ms: Option<u64>,
+    /// The peer lanes' certificate, key and authority files, if the lanes are encrypted
+    /// ([F50](../../../docs/src/features/cluster-operations.md))
+    #[serde(default)]
+    pub tls: Option<StagedTls>,
+}
+
+/// Where a node's peer TLS material lives, as the fixture wrote it
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedTls {
+    /// The leaf, PEM
+    pub cert: String,
+    /// Its key, PEM
+    pub key: String,
+    /// The authority bundle, PEM
+    pub ca: String,
+    /// Whether the leaf has to name the node
+    pub bind_identity: bool,
 }
 
 /// The endpoints a child bound, and the identity it reported

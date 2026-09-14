@@ -185,6 +185,9 @@ pub struct ClusterBuilder {
     /// The wire version particular nodes are pinned at, below the build's newest
     /// ([F48](../../../docs/src/features/rolling-compatibility.md))
     wire_versions: Vec<(usize, u8)>,
+    /// Whether the peer lanes are mutual TLS under a fixture authority, every leaf naming its
+    /// node ([F50](../../../docs/src/features/cluster-operations.md))
+    peer_tls: bool,
     /// Another build of the test binary to start every child from, for a real upgrade
     exe: Option<std::path::PathBuf>,
 }
@@ -237,6 +240,17 @@ impl ClusterBuilder {
     /// * `exe` - The binary
     pub fn exe(mut self, exe: std::path::PathBuf) -> Self {
         self.exe = Some(exe);
+        self
+    }
+
+    /// Encrypt the peer lanes under a fixture authority, every node's leaf naming its node
+    /// ([F50](../../../docs/src/features/cluster-operations.md))
+    ///
+    /// The authority and every leaf are minted at start and written under each node's
+    /// directory; the cluster keeps the authority's key so a test can reissue a leaf or
+    /// rotate the authority and ask the node to reload.
+    pub fn peer_tls(mut self) -> Self {
+        self.peer_tls = true;
         self
     }
 
@@ -836,6 +850,7 @@ impl ClusterBuilder {
             data_links,
             control_links,
             plan,
+            pki: staged.as_mut().and_then(|staged| staged.pki.take()),
             staged: staged.map(|staged| staged.per_node).unwrap_or_default(),
             ready_timeout: self.ready_timeout,
             _dirs: dirs,
@@ -872,8 +887,77 @@ pub struct Cluster {
     staged: Vec<StagedCluster>,
     /// How long to wait for a node
     ready_timeout: Duration,
+    /// The fixture authority the peer lanes trust, if they are encrypted
+    pki: Option<Pki>,
     /// The storage directories, dropped last
     _dirs: Vec<TempDir>,
+}
+
+/// The fixture's certificate authority: the one every node trusts, and the one before it
+///
+/// Kept with its key so a test can reissue a node's leaf, mint a second authority and write
+/// a bundle of both, the way an operator rotates one
+/// ([F50](../../../docs/src/features/cluster-operations.md)).
+pub struct Pki {
+    /// The current authority
+    ca: rcgen::Certificate,
+    /// Its key
+    ca_key: rcgen::KeyPair,
+    /// The authority before a rotation, kept while a bundle names both
+    previous: Option<rcgen::Certificate>,
+}
+
+impl Pki {
+    /// Mint an authority
+    fn mint() -> Self {
+        let ca_key = rcgen::KeyPair::generate().expect("a ca key");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("ca params");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.distinguished_name.push(rcgen::DnType::CommonName, "shoal fixture authority");
+        let ca = params.self_signed(&ca_key).expect("a ca certificate");
+        Pki { ca, ca_key, previous: None }
+    }
+
+    /// Issue a leaf for the loopback address, naming a node if one is given
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node the leaf names through its `shoal-node://` URI, or none
+    fn issue(&self, node: Option<&str>) -> (String, String) {
+        let key = rcgen::KeyPair::generate().expect("a node key");
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".to_owned(), "127.0.0.1".to_owned()]).expect("leaf params");
+        if let Some(node) = node {
+            params
+                .subject_alt_names
+                .push(rcgen::SanType::URI(format!("shoal-node://{node}").try_into().expect("a uri san")));
+        }
+        let cert = params.signed_by(&key, &self.ca, &self.ca_key).expect("a node certificate");
+        (cert.pem(), key.serialize_pem())
+    }
+
+    /// The authority bundle: the current one, and the previous one while it is kept
+    fn bundle(&self) -> String {
+        let mut pem = self.ca.pem();
+        if let Some(previous) = &self.previous {
+            pem.push_str(&previous.pem());
+        }
+        pem
+    }
+}
+
+/// Where a node's peer TLS files go under its directory
+///
+/// # Arguments
+///
+/// * `dir` - The node's directory
+fn tls_paths(dir: &std::path::Path) -> node::StagedTls {
+    let tls = dir.join("tls");
+    node::StagedTls {
+        cert: tls.join("node.pem").to_string_lossy().into_owned(),
+        key: tls.join("node.key").to_string_lossy().into_owned(),
+        ca: tls.join("ca.pem").to_string_lossy().into_owned(),
+        bind_identity: true,
+    }
 }
 
 impl Cluster {
@@ -916,6 +1000,7 @@ impl Cluster {
             plan_interval_ms: None,
             slots: Vec::new(),
             wire_versions: Vec::new(),
+            peer_tls: false,
             exe: None,
             snapshot_timeout_ms: None,
             snapshot_chunk_bytes: None,
@@ -1270,6 +1355,115 @@ impl Cluster {
         Ok(copy)
     }
 
+    /// Reissue a node's leaf under the current authority, naming a node or none, and write it
+    /// ([F50](../../../docs/src/features/cluster-operations.md))
+    ///
+    /// The node keeps serving on its old material until it is asked to reload.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node whose files are rewritten
+    /// * `node` - The node the leaf names, or none for a leaf with no node in it
+    pub fn reissue_leaf(&self, id: usize, node: Option<&str>) -> Result<(), FixtureError> {
+        let pki = self.pki.as_ref().ok_or_else(|| FixtureError::ChildFailed("the peer lanes are plaintext".to_string()))?;
+        let paths = self.staged[id]
+            .tls
+            .clone()
+            .ok_or_else(|| FixtureError::ChildFailed(format!("node {id} was staged with no tls")))?;
+        let (cert, key) = pki.issue(node);
+        std::fs::write(&paths.cert, cert)?;
+        std::fs::write(&paths.key, key)?;
+        Ok(())
+    }
+
+    /// Where a node's peer TLS files are, if the lanes are encrypted
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    pub fn staged_tls(&self, id: usize) -> Option<node::StagedTls> {
+        self.staged[id].tls.clone()
+    }
+
+    /// The identity the fixture minted for a node, as its leaf names it
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    pub fn minted_node(&self, id: usize) -> &str {
+        &self.staged[id].node
+    }
+
+    /// Mint a new authority and keep the old one beside it, so a bundle names both
+    /// ([F50](../../../docs/src/features/cluster-operations.md))
+    pub fn rotate_authority(&mut self) -> Result<(), FixtureError> {
+        let pki = self.pki.as_mut().ok_or_else(|| FixtureError::ChildFailed("the peer lanes are plaintext".to_string()))?;
+        let fresh = Pki::mint();
+        let old = std::mem::replace(&mut pki.ca, fresh.ca);
+        pki.ca_key = fresh.ca_key;
+        pki.previous = Some(old);
+        Ok(())
+    }
+
+    /// Forget the previous authority, so the bundle names the current one alone
+    pub fn retire_previous_authority(&mut self) -> Result<(), FixtureError> {
+        let pki = self.pki.as_mut().ok_or_else(|| FixtureError::ChildFailed("the peer lanes are plaintext".to_string()))?;
+        pki.previous = None;
+        Ok(())
+    }
+
+    /// Write the authority bundle as it is now under a node's directory
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    pub fn write_authorities(&self, id: usize) -> Result<(), FixtureError> {
+        let pki = self.pki.as_ref().ok_or_else(|| FixtureError::ChildFailed("the peer lanes are plaintext".to_string()))?;
+        let paths = self.staged[id]
+            .tls
+            .clone()
+            .ok_or_else(|| FixtureError::ChildFailed(format!("node {id} was staged with no tls")))?;
+        std::fs::write(&paths.ca, pki.bundle())?;
+        Ok(())
+    }
+
+    /// Restart a node at fresh peer ports: the same directory and identity at another address
+    /// ([F50](../../../docs/src/features/cluster-operations.md))
+    ///
+    /// Returns the ports it left, so a clone can be started at them.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    pub fn restart_at_new_address(&mut self, id: usize) -> Result<(u16, u16), FixtureError> {
+        let mut staged = self.staged[id].clone();
+        let old = (staged.data_port, staged.control_port);
+        let (data_sock, data_port) = reserve_port()?;
+        let (control_sock, control_port) = reserve_port()?;
+        staged.data_port = data_port;
+        staged.control_port = control_port;
+        self.staged[id] = staged.clone();
+        let restarted = self.restart_with(id, NodeKind::Server, Some(staged));
+        drop((data_sock, control_sock));
+        restarted?;
+        Ok(old)
+    }
+
+    /// Start a second process of a node on a copy of its directory, at the ports given
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node to clone
+    /// * `dir` - The copy of its directory
+    /// * `ports` - The data and control ports the clone binds
+    pub fn spawn_clone_at(&self, id: usize, dir: &std::path::Path, ports: (u16, u16)) -> Result<Node, FixtureError> {
+        let mut staged = self.staged[id].clone();
+        staged.data_port = ports.0;
+        staged.control_port = ports.1;
+        let allocation = self.plan.nodes[id].1.clone();
+        Node::spawn_with(id, NodeKind::Server, allocation, dir, None, None, Some(staged), None, ChildOverrides::default())
+    }
+
     /// Start a second process of a node on a copy of its directory, with fresh ports
     ///
     /// The clone is staged as the original was but binds new peer ports, so both can run at
@@ -1559,6 +1753,8 @@ struct StagedPlan {
     per_node: Vec<StagedCluster>,
     /// The bound-not-listening reservations, dropped once the cluster is up
     reservations: Vec<socket2::Socket>,
+    /// The authority the peer lanes trust, if they are encrypted
+    pki: Option<Pki>,
 }
 
 /// Reserve a port with `SO_REUSEPORT`, bound but never listening
@@ -1618,6 +1814,19 @@ fn build_membership_cluster(
         control_ports.push(control_port);
     }
     let peers: Vec<String> = ids.iter().map(NodeId::to_string).collect();
+    // the peer lanes' authority and every node's leaf, written under each directory
+    // ([F50](../../../docs/src/features/cluster-operations.md))
+    let pki = builder.peer_tls.then(Pki::mint);
+    if let Some(pki) = &pki {
+        for (id, dir) in dirs.iter().enumerate() {
+            let paths = tls_paths(dir.path());
+            std::fs::create_dir_all(dir.path().join("tls"))?;
+            let (cert, key) = pki.issue(Some(&ids[id].to_string()));
+            std::fs::write(&paths.cert, cert)?;
+            std::fs::write(&paths.key, key)?;
+            std::fs::write(&paths.ca, pki.bundle())?;
+        }
+    }
     // stage a marker naming each node: node zero's names the cluster, every other's is joining
     let mut per_node = Vec::with_capacity(specs.len());
     for (id, dir) in dirs.iter().enumerate() {
@@ -1687,7 +1896,8 @@ fn build_membership_cluster(
             disk_reserve: builder.disk_reserve,
             moves_per_node: builder.moves_per_node,
             plan_interval_ms: builder.plan_interval_ms,
+            tls: pki.as_ref().map(|_| tls_paths(dir.path())),
         });
     }
-    Ok(StagedPlan { per_node, reservations })
+    Ok(StagedPlan { per_node, reservations, pki })
 }
