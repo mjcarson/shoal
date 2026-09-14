@@ -4,8 +4,9 @@
 
 A removed node causes rebalancing; a down node retains its assignments during grace. Migration
 must preserve acknowledged operations even when writes continue and a leader changes mid-move.
-The transfer mechanism and the placement policy are separate milestones, M9a and M9b; the
-transfer is delivered ([F45](../features/replica-migration.md)).
+The transfer mechanism and the placement policy are separate milestones, M9a and M9b; both
+are delivered ([F45](../features/replica-migration.md),
+[F46](../features/capacity-rebalancing.md)).
 
 ## What exists today
 
@@ -19,8 +20,18 @@ placement rule for the set's tablets under the identity the rule minted, and the
 retires under a marker for a grace before its archived partitions are dropped through the map
 intent log and its frames in the shared WAL are forgotten without touching another group's.
 Compaction knows exactly that much: a retired group's frames are handed to no compactor, and a
-segment is reclaimed once the groups still in it purge past it. The rebalancer, the budgets and
-removal are still M9b's.
+segment is reclaimed once the groups still in it purge past it. ~~The rebalancer, the budgets and
+removal are still M9b's.~~ Since [F46](../features/capacity-rebalancing.md) the control leader
+plans: a `Decommission`, a `Remove` or an elapsed grace records a plan whose steps are ordinary
+moves the leader issues one per member at a time, each set to the least loaded feasible member
+by weight, and a `Rebalance` spreads the sets to a feasible weighted target - a member's share
+of the bytes held, capped at holding every set - with a hysteresis so a second plan moves
+nothing. Feasible is a reported free byte count above `cluster.migration.disk_reserve` and room
+under `cluster.rebalance.moves_per_node`; a set with no feasible destination leaves the plan
+blocked by name, replanned as the membership and the capacity change. Every stream a node
+sends draws on one token bucket (`stream_bytes_per_sec`) and a shard installs
+`concurrent_streams` at a time, refusing the rest at their begin. A drained member is
+tombstoned before it leaves the control group, and its identity never returns.
 
 ## The design
 
@@ -41,6 +52,11 @@ or a repair asked for under a move, is recorded `Queued { behind }` and released
 group done of the transition ahead, in apply. A scheduled scrub leaves a moving set alone.
 Leadership transfers cooperate: a leader that is a move's source hands the lead to a member of
 the target before the transition. RF changes and same-node moves are not operations yet.*
+*At M9b ([F46](../features/capacity-rebalancing.md)) the leader computes desired transitions
+as a plan record: the planner is pure over the sets as served, the members' phases, weights and
+reported free bytes, and the bytes each holder reported per set; a new leader resumes the
+record and issues the next step from it, never from a lag report. Removal cooperates through
+the same records: a member's every set is a step, and its tombstone waits for the last.*
 
 Placement priorities:
 
@@ -55,7 +71,11 @@ At N=RF every node holds every tablet regardless of capacity weights. Unequal no
 leadership and local shard work differently, but the slowest replica still needs to keep up with
 its full write stream. Do not run a planner forever trying to reach an impossible 2:1 replica-byte
 ratio. With N>RF, weights influence feasible replica placement. A single hot partition remains
-indivisible by range splitting; expose that limit and measure its primary bottleneck.
+indivisible by range splitting; expose that limit and measure its primary bottleneck. *At M9b
+the feasible target is a water fill: a member's weighted share is capped at the bytes of every
+set, and the excess is spread over the members that are not capped by weight; a `Rebalance` at
+N = RF answers `Nothing` naming the constraint, and `heterogeneous_placement_obeys_feasible_weights`
+proves the 3:1:1:1 case settles in one plan.*
 
 ### A move
 
@@ -101,6 +121,16 @@ Adapt/reduce background work when foreground tails or replica lag exceed thresho
 still make progress under a documented supported load envelope. One stream per pair alone does
 not prevent N peers overloading one destination.
 
+*At M9b ([F46](../features/capacity-rebalancing.md)): `cluster.migration.stream_bytes_per_sec`
+is one token bucket per sending node across every stream and group, 64 MiB/s by default and
+zero for none; `concurrent_streams` caps what one shard assembles at once, the rest refused at
+their begin and fed again by the sender's backoff; `disk_reserve` is checked by the planner
+against the reported free bytes and by the receiver against its own before it accepts a
+stream, so a stale report is caught where the bytes would land. Per device and per pair are
+not built - one bucket per node - and nothing adapts to the foreground's tail; the budget is a
+constant and the envelope is what the arms measure under it. A move's `timeout` bounds the
+refusals.*
+
 ### Storage stays keyed by shard
 
 Keep shared physical WAL/group commit as the initial storage choice. Add per-tablet indices and
@@ -138,6 +168,9 @@ Join as a member first, with no tablet voting authority. Then approve/automatica
 capacity-checked plan. At RF=3 adding a fourth node permits storage redistribution; give it
 learners and safely replace old replicas. Serving remains available where healthy quorums and
 capacity permit it. A stalled move pauses visibly without taking unrelated tablets offline.
+*At M9b the plan is approved, never automatic: a member that joined holds nothing until an
+operator's `Rebalance`, decided with the user, and a blocked removal waiting on a further
+member runs on its own once one joins.*
 
 ### Removing a node
 
@@ -151,6 +184,15 @@ For a three-node RF=3 cluster with one dead node, add a replacement (or initiate
 Replace operation) before expecting removal to finish. There are only two surviving distinct
 nodes otherwise. Decommissioning from three nodes to two at RF=3 similarly blocks unless RF is
 explicitly changed through a separate supported policy transition. Never silently reduce RF.
+*At M9b ([F46](../features/capacity-rebalancing.md)): `Decommission` moves a plain member to
+`Leaving`; `Remove` needs a down or leaving member and moves it to `Removing`, its grace
+expired at the operator's word; `Replace` is `Remove` with a replacement named, which has to be
+a placeable member outside every set the member holds and is chosen first. Both record a plan
+the leader drains one set per member at a time; the tombstone is committed once every set has
+moved and before the member leaves the control group, and the voter policy refills from the
+spare. Three at three with one dead is `remove_without_replacement_capacity_stays_blocked`:
+blocked naming the missing member, every copy kept, the factor untouched, and completed by the
+fourth identity that joins. No RF change is an operation.*
 
 ### auto_remove_after
 
@@ -159,6 +201,14 @@ not guarantee capacity to finish. Preserve remaining copies and show blocked und
 if there is no safe target. Persist episode/progress across control-leader restart (C3).
 A partitioned node can be fenced and replaced after grace; its return cannot undo completed
 transitions. Operators see remaining grace, planned bytes and replacement capacity before expiry.
+*At M9b ([F46](../features/capacity-rebalancing.md)) the default is thirty minutes and acted
+on: the leader counts a down member's grace from its last commit and commits every eighth of
+it, so a leader change loses at most one increment; `null` opens no grace; `Maintenance`
+suspends the count and `Members` reports `grace_remaining_ms` throughout; expiry commits the
+whole grace, moves the member to `Removing` and records an `Expiry` plan under the policy's
+name; a removed identity is tombstoned and refused at every door; `under_replicated_sets` and
+each member's `free_bytes` and `held_bytes` are on `Members`
+([decision record](protocol.md#q7-and-q8-at-m9b)).*
 
 ## Alternatives rejected
 
@@ -192,7 +242,9 @@ checkpoint organization will be evaluated separately.
 ## Prerequisites
 
 [C7](failover.md) complete, C13 Q7–Q9, [C4](tablet-map.md), [C5](replication.md).
-~~M9a migration~~ M9a migration is delivered ([F45](../features/replica-migration.md)), M9b planner/removal, M9c local shard-count changes.
+~~M9a migration~~ M9a migration is delivered ([F45](../features/replica-migration.md)),
+~~M9b planner/removal~~ M9b's planner and removal are delivered
+([F46](../features/capacity-rebalancing.md)), M9c local shard-count changes.
 
 ## How it would be measured
 

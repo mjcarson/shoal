@@ -33,7 +33,7 @@ carrying the reasoning and the invariants the fix depends on. Item numbers are s
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
 76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 99, 101, 104, 105 and 108, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ item 109 is the newest entry here and the newest number, and why 17, 33, 78, 79, 80, 82,
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ item 110 is the newest entry here and the newest number, and why 17, 33, 78, 79, 80, 82,
 83, 84, 85, 86, 88, 89, 90, 94, 99, 101, 104, 105 and 108 are on the resolved page. **108 never
 appeared here**: it was found by [F45](../features/replica-migration.md)'s first smoke run and
 fixed in the same change ([Resolved #108](resolved/cluster-arm-overrides-dropped.md)). **99 moved at M8**
@@ -2009,6 +2009,38 @@ member, the way [F44](../features/repair.md)'s `QuarantineAction::Rebuild` resta
 than let two empty members outvote a full one. Either way a fixture test that kills two voters
 of an ephemeral table's group at once and reads through the third afterwards belongs beside the
 M4 tests, and the shard should notice a group whose `RaftCore` is gone and report it.
+
+### 110. The kill arm's client fails a steady share of its operations for as long as node one is dead
+
+`shoal-bench/src/workloads/cluster_failover.rs` (`Failover::run`), `shoal-bench/src/workloads/harness/driver.rs`
+(`drive_mixed_timed`)
+
+The failover arm's client does not retry, by design, so an outage is visible as errors; the
+F42 page's own smoke table shows the outage as one or two seconds of errors and then a clean
+window until node one is started again. On the development host today it is not: from the
+kill at eight seconds to the restart at sixteen the client sees about two hundred errors a
+second against fourteen hundred operations, every second, and the errors stop the second node
+one is placed again. The data groups have failed over inside the first two seconds - the
+p50 is back to a quarter of a millisecond - so what keeps failing is not a write waiting for an
+election. About a seventh of the operations fail, which is close to the share of tablets whose
+placement primary was node one at three nodes of three shards, and the client writes through
+node zero alone; a write whose primary is dead being answered by a refusal rather than proposed
+through node zero's own replica - which holds every tablet at this placement - is the first
+thing to look at, and `F42`'s "route by health" is the rule it would be breaking.
+
+**Established by running it**, twice, at smoke scale on the development host: once against
+the tree at F46 (`m9b-smoke`, the remove arm, where the errors ran on to the end of the run
+because node one never came back) and once against the tree at F45, built in a worktree at
+`862adf0`, running the kill arm itself - the same shape both times, `errors/s` about two
+hundred from second eight to second sixteen, `first_failure_ms` at the kill and `sustained_ms`
+of two thousand. Not this milestone's, and not new with it. The remove arm's `during` window
+begins at the expiry, eight seconds after the kill, and carries these errors as the kill's,
+which is what its family page says to expect.
+
+**Fix direction:** read the error codes the arm's client gets back - the timeline keeps none -
+and, if they are `Unavailable` or `PeerUnavailable` from a forward to the dead primary,
+propose through the local replica when the node holds one, which is what `read_ring_for` does
+for reads. Then a smoke run of the kill arm should show the outage the F42 page shows.
 
 ### 97. `stage_join.rs` had not compiled since F36, and needs `/opt/shoal` to run
 

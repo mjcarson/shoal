@@ -20,8 +20,13 @@ in for the samples it never sent ([Resolved #101](../appendix/resolved/short-liv
 - a `Down` verdict moves no replica and no placement (`down_retains_placement_during_grace`),
 the map carries the policy's `primary_failover_after` so every node's groups elect at the
 cluster's pace, and a node holding no copy of a tablet routes it by health, `Up` first.
-`Leaving`, `Removing`, `Removed`, grace expiry
-and removal are M9b's. Before that: ~~`Shard::join_cluster` broadcasts a local join and `Ring::add`
+~~`Leaving`, `Removing`, `Removed`, grace expiry
+and removal are M9b's.~~ Since M9b ([F46](../features/capacity-rebalancing.md)) a member
+carries a phase beside its health - `member`, `leaving`, `removing`, `removed` - and the one
+state below is the two read together; a `Down` verdict under the policy opens a grace the
+leader counts in committed increments, an elapsed grace or an operator's `Remove` records a
+plan that rebuilds the member's sets elsewhere, a `Decommission` drains a live one, and a
+removed identity is tombstoned and refused at every door. Before that: ~~`Shard::join_cluster` broadcasts a local join and `Ring::add`
 ignores unknown shards.~~ ~~Reserved
 ping/pong frames have no implementation.~~ ~~The pool lacks a dependable readiness/failure handle.~~
 `ShoalPool::ready` and `failure` are that handle since
@@ -80,6 +85,12 @@ changes a data quorum threshold. `Down` does not delete copies or automatically 
 A node can return from Down after identity and shard health checks, while individual tablets
 remain in recovery. Removing cannot be reversed by a late heartbeat; cancellation, if supported,
 is an explicit versioned operation that reconciles all already committed data transitions.
+*At M9b ([F46](../features/capacity-rebalancing.md)) the table is delivered as `phase` beside
+`health`: `Leaving` and `Removing` are phases an operator's `Decommission` or `Remove`, or an
+elapsed grace, commit, and a member in either can be up or down; `Removed` is the tombstone,
+committed before the member leaves the control group so a live one learns it. A late `Up` on a
+`Removing` member keeps the phase and the grace, in apply. Cancellation is not supported: a
+`Decommission` that fails puts the member back, and nothing else does.*
 
 ### Failure detection
 
@@ -121,6 +132,18 @@ Insufficient data quorum, disk space, distinct destination nodes or failure doma
 visible blocked operation. Do not shrink RF, erase the only remaining copy, or mark the node fully
 Removed merely to make the timer complete. A three-node RF=3 cluster needs a replacement node
 to restore three distinct copies after one machine is permanently lost.
+*At M9b ([F46](../features/capacity-rebalancing.md), [Q7](protocol.md#q7-and-q8-at-m9b)) the
+default is thirty minutes and acted on. The leader counts a down member's grace from its last
+commit and commits every eighth of it as `GraceElapsed`; a new leader starts its own count on
+top of the committed value, so a leader change loses at most one increment and never restarts or
+skips a grace; `Maintenance` suspends the count and `Members` reports `grace_remaining_ms`
+throughout; expiry commits the whole grace, moves the member to `Removing` and records an
+`Expiry` plan under the policy's name. The plan's steps are moves to feasible members; with
+none - three at three with one dead - it is blocked naming the missing member, every copy is
+kept and the factor is untouched, and it runs on its own once a fourth joins. The three-node
+case is `remove_without_replacement_capacity_stays_blocked`; the leader change is
+`removal_grace_survives_control_leader_restart`; the suspension is
+`maintenance_suspends_automatic_removal`.*
 
 ### openraft and the runtime
 

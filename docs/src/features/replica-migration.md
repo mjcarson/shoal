@@ -255,11 +255,14 @@ request is recorded and runs when it can, and the record says what it waits behi
 - **A move of a set is every table's group over it**, and `concurrent` serializes the groups on
   a shard: a set of four tables moves its groups one at a time, and the first waits at
   `Activated` for the last. The record's `activated` time is that wait.
-- **The catch-up lag is the only pacing.** There is no transfer budget - bytes per second, per
+- ~~**The catch-up lag is the only pacing.** There is no transfer budget - bytes per second, per
   pair, per device - and no disk reserve; a move feeds the destination as fast as the bulk lane
-  runs. M9b's.
-- **One move per set, and one set per move.** Moving a node's every set is a sequence of
-  operator requests, not a plan. M9b's rebalancer.
+  runs. M9b's.~~ Since [F46](capacity-rebalancing.md) every stream draws on the node's byte
+  bucket, a shard installs a bounded number at once, and a receiver short of its reserve
+  refuses the begin.
+- ~~**One move per set, and one set per move.** Moving a node's every set is a sequence of
+  operator requests, not a plan. M9b's rebalancer.~~ Since [F46](capacity-rebalancing.md) a
+  plan is a sequence of moves the leader issues; a `Move` is still one set.
 - **A same-node move, a replication factor change and a move to a shard chosen by the operator**
   are not operations. The destination's shard is the rule's.
 - **The snapshot fed to a learner is the whole group's**, as it is for a returning member,

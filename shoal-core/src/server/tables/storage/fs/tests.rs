@@ -797,9 +797,9 @@ fn tablet_bytes_follow_the_map() {
         let empty = map.tablet_bytes();
         assert_eq!(empty.len(), crate::server::ring::TABLET_COUNT);
         assert!(empty.iter().all(|bytes| *bytes == 0));
-        // two partitions of one tablet and one of another
-        let (a, b) = (7u64, 7u64 + (1 << 52));
-        let c = 9u64;
+        // two partitions of one tablet and one of another: a tablet is the key's high bits
+        let (a, b) = (7u64, 7u64 + (1 << 20));
+        let c = 9u64 | (1 << 63);
         assert_eq!(Ring::tablet_of(a), Ring::tablet_of(b));
         assert_ne!(Ring::tablet_of(a), Ring::tablet_of(c));
         map.set_partition(a, ArchiveEntry { key: a, archive, offset: 0, size: 100 });
@@ -815,7 +815,9 @@ fn tablet_bytes_follow_the_map() {
         let bytes = map.tablet_bytes();
         assert_eq!(bytes[Ring::tablet_of(a)], 60);
         assert_eq!(bytes[Ring::tablet_of(c)], 0);
-        // saved and reopened, the count is the map's
+        // saved and reopened, the count is the map's; a save truncates the intent log, which
+        // the writer would have opened by now on a live table
+        std::fs::write(&map.intent_path, b"").unwrap();
         SerializedMap::save(&map).await.unwrap();
         map.close_all().await.unwrap();
         let reopened = ArchiveMap::new("shard-0", "TestRecord", &conf).await.unwrap();

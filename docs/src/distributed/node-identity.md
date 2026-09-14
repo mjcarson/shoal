@@ -43,7 +43,10 @@ incarnation and the state machine's `observe` rule: lower refused, equal from an
 refused as a duplicate, higher supersedes, and a superseded run stops
 ([F39](../features/membership.md)).* Address changes are authenticated membership
 updates. A Removed identity remains tombstoned and must use an explicit replacement/import flow
-rather than resume old voting state.
+rather than resume old voting state. *Built at M9b: `ControlState.tombstones` holds a removed
+member's incarnation and the plan that removed it, every door refuses the identity, and a node
+that learns its own identity is removed stops with `ShoalError::Removed`, its directory left
+where it is ([F46](../features/capacity-rebalancing.md)).*
 
 ### The storage marker, format ~~2~~ 3
 
