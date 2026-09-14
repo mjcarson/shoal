@@ -893,6 +893,7 @@ pub fn node_reports(
     pool: &shoal::ShoalPool<crate::workloads::schema::Bench>,
     conf: &Conf,
     runtime: &tokio::runtime::Runtime,
+    dead: Option<u32>,
 ) -> Result<Vec<(String, shoal::server::replication::NodeReplication)>> {
     // a shard reports to its control thread on the forward sweeper's tick, which is a tenth of
     // the forward timeout and never under fifty milliseconds
@@ -904,6 +905,11 @@ pub fn node_reports(
     std::thread::sleep(tick * 2);
     let mut reports = Vec::with_capacity(staged.nodes.len());
     for node in &staged.nodes {
+        // a node the arm killed for good has no report to give, and its absence is the point
+        // ([F46](../../../../docs/src/features/capacity-rebalancing.md))
+        if dead == Some(node.index) {
+            continue;
+        }
         let report = if node.index == 0 {
             pool.replication()
                 .map_err(|error| anyhow::anyhow!("node 0 did not report its replication: {error:?}"))?

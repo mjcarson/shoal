@@ -179,7 +179,7 @@ fn schedule(
             }
         }
         BackgroundKind::Rebalance => AdminKind::Rebalance,
-        BackgroundKind::Decommission { node } => {
+        BackgroundKind::Decommission { node, .. } => {
             let Some(node) = nodes.get(usize::try_from(*node).unwrap_or(usize::MAX)) else {
                 marks.error = Some(format!("the decommission names node {node}, and {} are staged", nodes.len()));
                 return marks;

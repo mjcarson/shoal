@@ -290,8 +290,10 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // the integrity counters before the run are what its cost is read against. Only a repair
     // reads them: a plan's arm may have killed a node for good, which has no report to give
     let reads_integrity = matches!(background_spec.as_ref().map(|spec| &spec.kind), Some(crate::workloads::workload::BackgroundKind::Repair));
+    // a node the arm kills and never starts again is not asked for a report afterwards
+    let dead = fault.as_ref().filter(|spec| !spec.restart).map(|spec| spec.node);
     let integrity_before = match (reads_integrity, pool.as_ref(), conf.as_ref(), staged.as_ref()) {
-        (true, Some(pool), Some(conf), Some(staged)) => Some(cluster::integrity_sum(&cluster::node_reports(staged, pool, conf, &runtime)?)),
+        (true, Some(pool), Some(conf), Some(staged)) => Some(cluster::integrity_sum(&cluster::node_reports(staged, pool, conf, &runtime, None)?)),
         _ => None,
     };
     let background_injected = match (&background_spec, pool.as_ref(), seeded.is_ok()) {
@@ -329,7 +331,7 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // and the background repair's, which stops its polling
     let background_marks = background_injected.map(background::Injected::finish).transpose();
     let integrity_after = match (reads_integrity, pool.as_ref(), conf.as_ref(), staged.as_ref()) {
-        (true, Some(pool), Some(conf), Some(staged)) => Some(cluster::integrity_sum(&cluster::node_reports(staged, pool, conf, &runtime)?)),
+        (true, Some(pool), Some(conf), Some(staged)) => Some(cluster::integrity_sum(&cluster::node_reports(staged, pool, conf, &runtime, dead)?)),
         _ => None,
     };
     // what the links did during the run, and where every replica ended, read before the
@@ -338,7 +340,7 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
         (cluster_facts.as_mut(), pool.as_ref(), conf.as_ref(), staged.as_ref())
     {
         facts.transport = Some(cluster::transport_facts(pool, conf)?);
-        let reports = cluster::node_reports(staged, pool, conf, &runtime)?;
+        let reports = cluster::node_reports(staged, pool, conf, &runtime, dead)?;
         let replicas = cluster::replica_facts(&reports);
         facts.outcomes = Some(cluster::outcome_facts(&replicas));
         facts.replicas = replicas;
@@ -393,13 +395,13 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
             crate::workloads::workload::BackgroundKind::Rebalance
             | crate::workloads::workload::BackgroundKind::Decommission { .. }
             | crate::workloads::workload::BackgroundKind::Expire { .. } => {
-                // a decommission with a spare beside the placement is a drain; one without
-                // is the blocked case, which is what the arm was built to show
+                // a decommission built with nowhere to go is the blocked case, and the record
+                // is named for what the arm was built to show
                 let kind = match &spec.kind {
                     crate::workloads::workload::BackgroundKind::Rebalance => "rebalance",
                     crate::workloads::workload::BackgroundKind::Expire { .. } => "expiry",
-                    _ if facts.members.len() > facts.nodes as usize => "decommission",
-                    _ => "capacity_blocked",
+                    crate::workloads::workload::BackgroundKind::Decommission { blocked: true, .. } => "capacity_blocked",
+                    _ => "decommission",
                 };
                 facts.rebalance = Some(background::rebalance_facts(kind, started, &marks, &measured.timeline, spec.run_for));
             }

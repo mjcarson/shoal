@@ -364,6 +364,9 @@ pub enum BackgroundKind {
     Decommission {
         /// The member to drain
         node: u32,
+        /// Whether the arm was built with nowhere for the member's sets to go, so the record
+        /// is named for the blocked case it shows rather than for a drain
+        blocked: bool,
     },
     /// The expiry of a killed node's grace: nothing is asked for; the harness's fault kills
     /// the node and the plan the leader records for it is polled once it appears

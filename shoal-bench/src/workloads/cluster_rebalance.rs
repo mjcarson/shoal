@@ -65,7 +65,7 @@ pub const PLAN_AT: (u32, u32) = (1, 3);
 pub const DRAINED_NODE: u32 = KILLED_NODE;
 
 /// How long the source keeps its retired copy's files, so a move is done inside the run
-pub const RETIRE_AFTER: Duration = Duration::from_secs(3);
+pub const RETIRE_AFTER: Duration = Duration::from_secs(1);
 
 /// The grace the remove arm removes the killed node after
 ///
@@ -75,6 +75,12 @@ pub const AUTO_REMOVE_AFTER: Duration = Duration::from_secs(5);
 
 /// How often the leader looks at its plans on these arms, so a step follows the last closely
 pub const PLAN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How many moves one member is the source and destination of at a time on these arms
+///
+/// Three, over the default of one: the placement's nine sets drained one at a time would
+/// outlast the run, and three at once is the pace a drain is priced at.
+pub const MOVES_PER_NODE: u32 = 3;
 
 /// What one of the four arms asks for
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,8 +219,10 @@ impl Workload for Rebalance {
                 }
                 // the source's grace, short enough for a move to be done inside the run
                 cluster.retire_after = Some(RETIRE_AFTER);
-                // the leader looks at its plans every second, so a step follows the last closely
+                // the leader looks at its plans every second, so a step follows the last
+                // closely, and moves three sets at a time so a drain fits the run
                 cluster.plan_interval = Some(PLAN_INTERVAL);
+                cluster.moves_per_node = Some(MOVES_PER_NODE);
                 // the remove arm's grace, short enough to elapse inside the run
                 if self.kind == RebalanceKind::Remove {
                     cluster.auto_remove_after = Some(AUTO_REMOVE_AFTER);
@@ -270,7 +278,14 @@ impl Workload for Rebalance {
         let run_for = Failover::run_for(scale);
         let kind = match self.kind {
             RebalanceKind::Add => BackgroundKind::Rebalance,
-            RebalanceKind::Decommission | RebalanceKind::CapacityBlocked => BackgroundKind::Decommission { node: DRAINED_NODE },
+            RebalanceKind::Decommission => BackgroundKind::Decommission {
+                node: DRAINED_NODE,
+                blocked: false,
+            },
+            RebalanceKind::CapacityBlocked => BackgroundKind::Decommission {
+                node: DRAINED_NODE,
+                blocked: true,
+            },
             RebalanceKind::Remove => BackgroundKind::Expire { node: DRAINED_NODE },
         };
         Some(BackgroundSpec {
@@ -329,6 +344,7 @@ mod tests {
                 }
                 assert_eq!(mine_cluster.retire_after, Some(super::RETIRE_AFTER));
                 assert_eq!(mine_cluster.plan_interval, Some(super::PLAN_INTERVAL));
+                assert_eq!(mine_cluster.moves_per_node, Some(super::MOVES_PER_NODE));
                 assert_eq!(
                     mine_cluster.auto_remove_after,
                     (arm.kind() == RebalanceKind::Remove).then_some(super::AUTO_REMOVE_AFTER),
@@ -344,7 +360,8 @@ mod tests {
                 assert!(spec.kind.is_plan());
                 match (arm.kind(), &spec.kind) {
                     (RebalanceKind::Add, BackgroundKind::Rebalance) => {}
-                    (RebalanceKind::Decommission | RebalanceKind::CapacityBlocked, BackgroundKind::Decommission { node }) => {
+                    (RebalanceKind::Decommission, BackgroundKind::Decommission { node, blocked: false })
+                    | (RebalanceKind::CapacityBlocked, BackgroundKind::Decommission { node, blocked: true }) => {
                         assert_eq!(*node, DRAINED_NODE);
                     }
                     (RebalanceKind::Remove, BackgroundKind::Expire { node }) => assert_eq!(*node, DRAINED_NODE),

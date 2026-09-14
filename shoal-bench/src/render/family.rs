@@ -853,7 +853,8 @@ pub const FAMILIES: &[Family] = &[
             "`p99_ratio_permille` is the number: M9b's exit criterion is a healthy add or drain at \
              two times or under - `2000` here - with zero final errors, which is `during`'s `errors`. \
              `seconds` is how long the foreground paid it for, and `moved` over `seconds` is the \
-             drain's pace under `cluster.rebalance.moves_per_node`, which these arms leave at one. \
+             drain's pace under `cluster.rebalance.moves_per_node`, which these arms set to three \
+             so nine sets fit the run. \
              `bytes` is what the sets held on their sources when planned; at full scale a step is \
              fed a snapshot under `stream_bytes_per_sec`, and the pace is the budget's. The blocked \
              arm reads differently: its `outcome` is `unfinished`, its `blocked` names the missing \
