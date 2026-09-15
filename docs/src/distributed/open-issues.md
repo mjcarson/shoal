@@ -15,7 +15,6 @@ a second copy. A new defect goes to known issues at the next free number, never 
 | Item | What | Page |
 | --- | --- | --- |
 | [112](../appendix/known-issues.md#112-certificate_rotation_binds_identity-fails-about-half-its-runs-alone-on-the-development-host) | `certificate_rotation_binds_identity` fails about half its runs alone on the development host, on which member leads when node zero restarts | [C11](testing.md) |
-| [103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait) | A returning leader is refused its own re-election until its old lease lapses, and hops to it wait | [C7](failover.md) |
 | [106](../appendix/known-issues.md#106-a-member-isolated-on-every-lane-long-enough-to-inflate-its-term-trips-an-openraft-debug-assertion-when-healed) | A member isolated on every lane long enough to inflate its term trips an openraft debug assertion when healed | [C3](membership.md) |
 | [109](../appendix/known-issues.md#109-a-volatile-groups-survivor-trips-an-openraft-debug-assertion-when-a-majority-loses-its-memory-log-at-once) | A volatile group's survivor trips an openraft debug assertion when a majority loses its memory log at once | [C5](replication.md) |
 | [113](../appendix/known-issues.md#113-glommios-dmafileopen_at-unwraps-statfs-after-a-successful-open) | glommio's `DmaFile::open_at` unwraps `statfs` after a successful open; fixed in the fork's working tree, uncommitted there | [C11](testing.md) |

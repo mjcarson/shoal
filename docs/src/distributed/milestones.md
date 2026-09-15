@@ -291,7 +291,7 @@ detector's fix and the client's retry loop as unit tests beside them. What was d
 was not, and the evidence are on the F page; the rest of this section is the gate as it was
 set. *Not done at M6, on purpose:* leadership is not moved toward a reader or back to a returning
 node; identity expiry came at M9a, with only the floor recorded here; a returning leader waits
-out its old lease before its groups are led again ([item 103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait));
+out its old lease before its groups are led again ([Resolved #103](../appendix/resolved/returning-leader.md) made that wait a quiet one, with hops onto it refused at once);
 catch-up past the purge point came at M7; streams never retry; no coverage list rides the
 response frame; a `Down` member was never removed until M9b; leases stay unbuilt (Q6); and the
 capture is the benchmark host's - the arm ran at smoke scale on the development host.

@@ -32,9 +32,9 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 104, 105, 107, 108, 110 and 111, and
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 107, 108, 110 and 111, and
 why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ item 113 is the newest entry here and the newest number, and why 17, 33, 43, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 104, 105, 107, 108, 110 and 111 are on the resolved page. **111 never
+83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 107, 108, 110 and 111 are on the resolved page. **111 never
 appeared here**: it was found by [F47](../features/local-rehome.md)'s crash matrix - a read
 landing while an archive closed panicked the executor - reproduced against the map alone and
 fixed in the same change ([Resolved #111](resolved/archive-removal-borrow.md)). **108 never
@@ -1762,36 +1762,6 @@ an error. **Established by reading the source** while writing the golden key tes
 what `Hash for str` writes - `write_str`, which the std hasher contract spells as the bytes then
 `0xff` - and freeze the archived hash beside the live one in `partition_keys.rs` so the two cannot
 drift again.
-
-### 103. A returning leader is refused its own re-election until its old lease lapses, and hops to it wait
-
-`shoal-core/src/server/shard/groups.rs`, `propose_through`, the `Electing` arm; openraft
-`engine_impl.rs`, `handle_vote_req`
-
-A tablet group's leader that is killed and started again before `election_timeout_max` - twice
-the failover base - has passed asks for its old term back, since its persisted vote names
-itself, and every follower refuses it: their lease of that same leader has not expired. It asks
-again at a higher term, is refused again, and its groups are led only once the lease lapses and
-an election runs, which at the default base of five seconds is ten to fifteen seconds after the
-kill however quickly the process came back. Meanwhile a write from another node that still
-names it as leader hops to it, lands on a member that is `Electing`, and waits for a leader
-within the forwarded deadline rather than being refused, so a client sees whole seconds with no
-answer instead of a burst of `NotLeader` it could retry elsewhere.
-
-**Established by running it**: the failover arm's smoke runs on the development host
-([F42](../features/primary-failover.md#performance)) restart node one 8.6 seconds after killing
-it, and the per second series shows zero completed operations for most of the seconds after the
-restart, with the write tail at the forwarded deadline, until the election; the first run's
-child logs show the restarted node's groups asking for term 1 and every follower answering
-`reject vote-request: leader lease has not yet expire`. The fixture's tests restart their
-killed leaders after the lease has lapsed, which is why none of them sees it.
-
-**Fix direction:** two halves. Answer a hop that lands on an `Electing` member `NotLeader` at
-once instead of waiting the election out, so the returning node's window is refusals rather
-than a stall - the client's retry covers it. And on a restart, have a group whose persisted
-vote names itself start as a plain follower rather than a candidate for its old term, so the
-survivors' election is not delayed by refusing it; whether openraft offers that short of
-clearing the vote is the question to answer first.
 
 ### 106. A member isolated on every lane long enough to inflate its term trips an openraft debug assertion when healed
 

@@ -2117,6 +2117,10 @@ where
                     learner: slot.spec.learner,
                     quarantined: state.quarantined.map(|quarantine| quarantine.reason),
                     bytes,
+                    term: metrics
+                        .as_ref()
+                        .map(|metrics| metrics.current_term)
+                        .unwrap_or(0),
                 }
             })
             .collect::<Vec<_>>();
@@ -2878,7 +2882,32 @@ async fn start_group<D: ShoalDatabase>(
     // until two election timeouts have passed, so the first leader of a healthy group is the
     // placement primary. After that any member may win, which is what a failover needs - and
     // a group the primary never brought up is initialized by whichever member notices first
-    if spec.voters.len() > 1 && !primary {
+    // and a member restarted with a vote that names itself as the leader - a leader that died
+    // and came back - does not stand for one lease length: its followers refuse it while their
+    // lease of it has not lapsed, and every ask would bump the term for nothing while the
+    // survivors' own election waits on the same lease
+    // ([Resolved #103](../../../../docs/src/appendix/resolved/returning-leader.md))
+    //
+    // the loaded vote is read rather than `current_leader`: with leader restore off openraft
+    // demotes a self-vote to an uncommitted one at startup, so the metrics name no leader
+    // while the vote still says who it was
+    let returning_leader = initialized && spec.voters.len() > 1 && {
+        let metrics = raft.metrics();
+        let vote = metrics.borrow_watched().vote.clone();
+        vote.leader_id().node_id == me && vote.leader_id().term > 0
+    };
+    if returning_leader {
+        raft.runtime_config().elect(false);
+        let lease = Duration::from_millis(raft.config().election_timeout_max);
+        let handle = raft.clone();
+        glommio::spawn_local(async move {
+            glommio::timer::sleep(lease).await;
+            handle.runtime_config().elect(true);
+        })
+        .detach();
+        event!(Level::INFO, msg = "a returning leader waits out its old lease before standing", group = %group, lease_ms = lease.as_millis() as u64);
+    }
+    if spec.voters.len() > 1 && !primary && !returning_leader {
         raft.runtime_config().elect(false);
         let head_start = Duration::from_millis(raft.config().election_timeout_max * 2);
         let handle = raft.clone();
@@ -3030,6 +3059,18 @@ async fn propose_through<D: ShoalDatabase>(
                         Lease::NotStarted | Lease::Leads | Lease::Elsewhere(_) => {
                             glommio::timer::sleep(LEASE_POLL).await
                         }
+                        // a hop that landed here while nobody leads is refused at once: the
+                        // node that hopped named this member from a stale hint, and waiting
+                        // the election out would hold its client for the whole forwarded
+                        // deadline when a refusal lets it ask again elsewhere
+                        // ([Resolved #103](../../../../docs/src/appendix/resolved/returning-leader.md))
+                        Lease::Electing if !may_hop => {
+                            return ProposalOutcome::NotLeader(format!(
+                                "group {group} is electing on {me}; nobody leads it here yet"
+                            ));
+                        }
+                        // a client's own proposal waits for the election, since the client is
+                        // already at the only node it knows
                         Lease::Electing => {
                             let remaining = deadline.saturating_sub(started.elapsed());
                             let elected = raft

@@ -67,6 +67,13 @@ pub struct GroupReport {
     /// ([F46](../../../../docs/src/features/capacity-rebalancing.md)).
     #[serde(default)]
     pub bytes: u64,
+    /// The term this shard's copy of the group is at
+    ///
+    /// Climbs by one per election; a copy standing for an election nobody grants climbs it
+    /// alone, which is what a test of a returning leader or an isolated member reads
+    /// ([Resolved #103](../../../../docs/src/appendix/resolved/returning-leader.md)).
+    #[serde(default)]
+    pub term: u64,
 }
 
 /// What a shard's snapshots have done since it started

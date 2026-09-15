@@ -26,7 +26,7 @@ ends the refusals, and at the cluster's default failover base of five seconds th
 stand only once their lease of node one lapses - `election_timeout_max`, twice the base - plus
 a timeout of their own: three to four times the base, fifteen to twenty seconds. The smoke
 arm's kill lasts eight and a half. No election could have happened inside it, and node one's
-return before its own lease lapsed is [item 103](../known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait)'s
+return before its own lease lapsed is [item 103](returning-leader.md)'s
 shape on top. The F42 page's smoke table says as much - "until the survivors elect, which at a
 five second base is ten to fifteen seconds after the kill" - and the item read the table's
 `during` p50 as the election.
@@ -111,5 +111,5 @@ about. Filed under C15's measured-at-smoke-scale remainder rather than changed h
 ## Related
 
 [F42. Primary failover](../../features/primary-failover.md), whose rule this is;
-[C7. Failover](../../distributed/failover.md); [item 103](../known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait),
+[C7. Failover](../../distributed/failover.md); [Resolved #103](returning-leader.md),
 the returning leader; [C10](../../distributed/performance.md), the arm's record.

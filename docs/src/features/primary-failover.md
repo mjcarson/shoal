@@ -238,10 +238,11 @@ driver is in process with node zero, as every cluster arm's is, and the record s
   two to three, the default of five in ten to fifteen. The arm's outage number is the policy's
   before it is the code's.
 - **A returning leader waits out its own lease.** A killed leader restarted before its lease
-  lapses asks for its old term back and is refused by the followers' lease of it; its groups
-  are led again only once the lease lapses and an election runs, and writes that hop to it
-  meanwhile wait on that election within their deadline
-  ([item 103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait)).
+  lapses ~~asks for its old term back and is refused by the followers' lease of it~~ does not
+  stand for one lease length, since the followers' lease of it would refuse it; its groups are
+  led again once the survivors elect, ~~and writes that hop to it meanwhile wait on that
+  election within their deadline~~ and a write that hops to it meanwhile is refused
+  `NotLeader` at once ([Resolved #103](../appendix/resolved/returning-leader.md)).
 - **Leadership is not moved toward a reader or back to a returning node.** An election puts it
   where the election puts it; nothing transfers it.
 - ~~**Identity expiry is M9a's.** The floor is recorded; nothing reads it yet. An identity below
@@ -318,7 +319,7 @@ before - the `during` window's p50 of 174 µs is the reads and the surviving gro
 until the survivors elect, which at a five second base is ten to fifteen seconds after the
 kill. The third run's outage is unresolved because the restart at sixteen seconds put the old
 leader back before its lease lapsed, and its re-election is what the rest of the run waited on
-(item 103); the second run, where the election beat the restart, recovered at 19.7 seconds. The
+([Resolved #103](../appendix/resolved/returning-leader.md), since fixed); the second run, where the election beat the restart, recovered at 19.7 seconds. The
 write p50 of about forty milliseconds in `before` is the durable quorum on this host's shared
 disk under `powersave`, the same as the replication arm shows here, and the read p50 of a
 hundred microseconds is the local replica. The control plane lost its leader once per restart

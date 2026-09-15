@@ -4995,6 +4995,122 @@ async fn a_dead_primary_fails_writes_only_until_its_election() -> Result<(), Fix
     Ok(())
 }
 
+/// The term a node's copy of a key's group is at, as that node reports it
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node to ask
+/// * `table` - The table's name
+/// * `key` - The partition key
+fn group_term_on(
+    cluster: &mut Cluster,
+    node: usize,
+    table: &str,
+    key: u64,
+) -> Result<u64, FixtureError> {
+    let tablet = tablet_of(key) as u64;
+    let view = groups_of(cluster, node)?;
+    for shard in view["shards"].as_array().into_iter().flatten() {
+        for group in shard["groups"].as_array().into_iter().flatten() {
+            let serves = group["table_name"] == table
+                && group["tablet_ids"]
+                    .as_array()
+                    .is_some_and(|tablets| tablets.iter().any(|t| t.as_u64() == Some(tablet)));
+            if serves {
+                return Ok(group["term"].as_u64().unwrap_or_default());
+            }
+        }
+    }
+    Err(FixtureError::NotReady(format!(
+        "node {node} hosts no group for key {key} of {table}: {view}"
+    )))
+}
+
+/// A leader restarted inside its own lease stalls no hop and inflates no term (C7 M6)
+///
+/// [Item 103](../../docs/src/appendix/resolved/returning-leader.md): a group's leader killed
+/// and started again before its lease lapsed asked for its old lead back, was refused by every
+/// follower whose lease of it had not lapsed, asked again at a higher term, and meanwhile a
+/// write from another node that still named it as leader hopped to it, landed on a member
+/// that was electing, and waited out the forwarded deadline. Three nodes at a base of one
+/// second and a five second deadline: node one is killed and restarted at once, and a key it
+/// led is written through node zero without a retry every tenth of a second until it lands.
+/// Every failure on the way is `NotLeader` inside a second - never the deadline - and the
+/// term node one's copy reports afterwards is the survivors' one election above what it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leader_restarted_inside_its_lease_stalls_no_hop() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::error::ErrorCode;
+    let base = Duration::from_secs(1);
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .primary_failover_after(base)
+        .write_timeout(Duration::from_secs(5))
+        .query_deadline(Duration::from_secs(5))
+        .start()
+        .await?;
+    let (key, _group) = key_led_by(&mut cluster, "Note", 1, 7000)?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    write_note(&addr, key, "before").await?;
+    let term_before = group_term_on(&mut cluster, 1, "Note", key)?;
+    // the leader dies and is back inside its lease, which is twice the base
+    cluster.kill(1)?;
+    cluster.restart(1, NodeKind::Server)?;
+    let restarted = Instant::now();
+    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    let mut refusals = 0u32;
+    let mut slowest = Duration::ZERO;
+    loop {
+        let sent = Instant::now();
+        let outcome = client
+            .send_one(Note {
+                key,
+                text: "during".to_string(),
+            })
+            .await;
+        let took = sent.elapsed();
+        // answered at once either way: a refusal in milliseconds, or a success once the
+        // survivors elected - never a hop held on the returning leader while it elects
+        assert!(
+            took < Duration::from_millis(1_500),
+            "a write hopping to the returning leader was held for {took:?}: {outcome:?}"
+        );
+        slowest = slowest.max(took);
+        match outcome {
+            Ok(_) => break,
+            Err(shoal::client::Errors::Server { code, .. }) => {
+                assert!(
+                    matches!(code, ErrorCode::NotLeader | ErrorCode::Unavailable),
+                    "a write hopping to the returning leader failed {code:?} after {took:?}"
+                );
+                refusals += 1;
+            }
+            Err(other) => panic!("a write failed off the wire: {other:?}"),
+        }
+        assert!(
+            restarted.elapsed() < base * 6,
+            "the group node one led elected nobody within six bases; {refusals} refusals"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    cluster.wait_joined(&[1])?;
+    let term_after = group_term_on(&mut cluster, 1, "Note", key)?;
+    eprintln!(
+        "the returning leader's group refused {refusals} writes, the slowest in {slowest:?}, \
+         and went from term {term_before} to {term_after} in {:?}",
+        restarted.elapsed()
+    );
+    // one election - the survivors' - and at most one more for a split vote, not one per
+    // refused ask by the returning leader
+    assert!(
+        term_after <= term_before + 2,
+        "the group's term went from {term_before} to {term_after}: the returning leader stood \
+         for its old lead again and again"
+    );
+    Ok(())
+}
+
 /// A quorum success needs distinct durable voters, and nothing releases it early (C5 M4)
 ///
 /// Three nodes at a factor of three, every lane through a proxy. The replication lane from the

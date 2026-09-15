@@ -62,9 +62,10 @@ flowchart LR
 A follower refuses every vote for `election_timeout_max` after it last heard from its leader,
 then a randomized timeout between the base and twice it follows, so a dead leader is replaced
 between two and three times the base later: two to three seconds at the fixture's one second,
-ten to fifteen at the default five. A killed leader that returns inside that lease is refused
-its own term by the same rule and waits it out
-([item 103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait)).
+ten to fifteen at the default five. A killed leader that returns inside that lease would be
+refused its own term by the same rule, so it waits the lease out without standing, and a write
+that hops to it meanwhile is refused `NotLeader` at once
+([Resolved #103](../appendix/resolved/returning-leader.md)).
 Tuning the base moves detection and contention, never safety. The design's objective of "base
 plus two seconds" is not met as set, and the milestones page says so.
 
