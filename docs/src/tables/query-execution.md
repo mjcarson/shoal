@@ -481,5 +481,7 @@ synchronisation mechanism. Simple, and dependent on nothing reordering that queu
   [F11](../features/error-channel.md) it is answered `ResponseAction::Error` with a code saying which
   class of failure it was, and only a partition the compactor *pruned* still answers as empty —
   which is correct, because a query replayed against one has found everything there is to find.
-- `pending_data` and `blocked` are unbounded.
+- `pending_data` and `blocked` are unbounded; what feeds them is bounded at admission by
+  `networking.max_queued_queries` ([Resolved #15](../appendix/resolved/shard-mesh-admission.md))
+  and by nothing else ([item 15](../appendix/known-issues.md#15-no-backpressure-anywhere-the-remainder)).
 - Memory accounting corrupts on the partition-shrinks path.

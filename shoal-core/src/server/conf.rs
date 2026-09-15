@@ -163,6 +163,21 @@ fn default_max_frame_bytes() -> u32 {
     DEFAULT_MAX_FRAME_BYTES
 }
 
+/// The default bound on messages queued to one shard before a query to it is shed
+fn default_max_queued_queries() -> usize {
+    DEFAULT_MAX_QUEUED_QUERIES
+}
+
+/// The bound on messages queued to one shard before a query routed to it is shed
+///
+/// A shard's mesh queue is unbounded, so a shard that falls behind grows it until the process
+/// is killed; this is where a client's query is turned away instead, `Shedding` by name, when
+/// the shard it would go to already has this many messages waiting
+/// ([Resolved #15](../../../docs/src/appendix/resolved/shard-mesh-admission.md)). Sixty-four
+/// thousand at the frame bound is a few gibibytes of queued queries at most, and nothing a
+/// serving shard holds for long.
+pub const DEFAULT_MAX_QUEUED_QUERIES: usize = 65_536;
+
 /// The networking settings for Shoal
 ///
 /// # Invariants
@@ -207,6 +222,15 @@ pub struct Networking {
     /// ([Resolved #33](../../../docs/src/appendix/resolved/gather-expiry.md)).
     #[serde(default = "default_query_deadline")]
     pub query_deadline: DurationSpec,
+    /// How many messages may wait on one shard's queue before a query routed to it is shed
+    ///
+    /// The admission bound on the shard mesh: a client's query bound for a shard whose queue
+    /// already holds this many is answered `Shedding` by the shard that accepted it, at once,
+    /// and never enqueued. The queue itself stays unbounded, since a send between shards that
+    /// blocked would be a deadlock waiting to happen; what this bounds is what clients may put
+    /// on it ([Resolved #15](../../../docs/src/appendix/resolved/shard-mesh-admission.md)).
+    #[serde(default = "default_max_queued_queries")]
+    pub max_queued_queries: usize,
 }
 
 impl Default for Networking {
@@ -218,6 +242,7 @@ impl Default for Networking {
             tls: None,
             max_frame_bytes: default_max_frame_bytes(),
             query_deadline: default_query_deadline(),
+            max_queued_queries: default_max_queued_queries(),
         }
     }
 }
@@ -242,6 +267,16 @@ impl Networking {
     /// Set the port to bind to
     pub fn port(mut self, port: u16) -> Self {
         self.port = port;
+        self
+    }
+
+    /// Set how many messages may wait on one shard's queue before a query to it is shed
+    ///
+    /// # Arguments
+    ///
+    /// * `bound` - The bound
+    pub fn max_queued_queries(mut self, bound: usize) -> Self {
+        self.max_queued_queries = bound;
         self
     }
 
@@ -1205,6 +1240,25 @@ mod tests {
             conf.networking.query_deadline.duration(),
             std::time::Duration::from_secs(2)
         );
+    }
+
+    #[test]
+    /// A config that never mentions the admission bound gets sixty-four thousand, and one that
+    /// does is read
+    ///
+    /// The committed `shoal.yml` predates the bound, so it has to default rather than be
+    /// required ([Resolved #15](../../../docs/src/appendix/resolved/shard-mesh-admission.md)).
+    fn a_config_without_an_admission_bound_gets_the_default() {
+        let (_dir, conf) = load("resources:\n  memory: \"4Gi\"\n");
+        let conf = conf.expect("a config with no networking section failed to load");
+        assert_eq!(conf.networking.max_queued_queries, 65_536);
+        assert_eq!(
+            conf.networking.max_queued_queries,
+            super::DEFAULT_MAX_QUEUED_QUERIES
+        );
+        let (_dir, conf) = load("networking:\n  max_queued_queries: 8\n");
+        let conf = conf.expect("a config naming an admission bound failed to load");
+        assert_eq!(conf.networking.max_queued_queries, 8);
     }
 
     #[test]

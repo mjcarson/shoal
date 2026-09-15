@@ -92,7 +92,9 @@ stream type implements `Drop`
 ([item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client)).
 
 **Nothing is bounded and nothing is measured.** Response channels are `kanal::unbounded_async`
-([item 15](../appendix/known-issues.md#15-no-backpressure-anywhere)), ~~and `client.rs` has no
+([item 15](../appendix/known-issues.md#15-no-backpressure-anywhere-the-remainder); the mesh
+they answer through has an admission bound since [Resolved #15](../appendix/resolved/shard-mesh-admission.md)),
+~~and `client.rs` has no
 `tracing` spans and no `hotpath` scopes at all~~ — it has both since
 [F16](../features/client-builder.md), which is what makes
 [O28](../appendix/optimizations.md#o28-the-client-takes-two-guards-on-its-response-map-for-every-query-it-sends)
@@ -242,11 +244,14 @@ costed in [TODOs](../appendix/todos.md).
 
 ### Bounded channels
 
-[Item 15](../appendix/known-issues.md#15-no-backpressure-anywhere). Bounding requires deciding what
+[Item 15](../appendix/known-issues.md#15-no-backpressure-anywhere-the-remainder). Bounding requires deciding what
 happens when the bound is hit, and every answer — shed, block, reject — has to be expressible to
 the client, ~~which is [D2](framing.md)'s error channel. Sequenced after it for that reason.~~
 **That prerequisite is met**: [F11](../features/error-channel.md) landed the error channel and
-reserved `ErrorCode::Shedding` for exactly this. What is left here is the bound and the policy.
+reserved `ErrorCode::Shedding` for exactly this. ~~What is left here is the bound and the policy.~~
+**The bound and the policy are built**, on the server and not here: the shard mesh sheds at
+admission ([Resolved #15](../appendix/resolved/shard-mesh-admission.md)), which is what the
+paragraph below said it would take.
 
 **Dropped from D6's scope, and it should not have been on this page.** Item 15 names five unbounded
 channels — the shard mesh, the per-client response channel, compaction jobs, and two loaders — and
@@ -345,7 +350,7 @@ repository, and it is the single most valuable test infrastructure this client c
   channel this page spends
 - [D3](authentication.md), [D4](encryption.md) — what goes into the builder
 - [D7. Shard-aware routing](shard-aware-routing.md) — what reshapes this pool later
-- [item 15](../appendix/known-issues.md#15-no-backpressure-anywhere),
+- [item 15](../appendix/known-issues.md#15-no-backpressure-anywhere-the-remainder),
   [item 23](../appendix/known-issues.md#23-client-stream-and-pool-rough-edges),
   [item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client)
   — the open items this page closes

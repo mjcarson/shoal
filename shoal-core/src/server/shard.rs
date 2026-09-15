@@ -1329,6 +1329,9 @@ pub(super) struct Shard<D: ShoalDatabase> {
     local: Option<Rc<RefCell<Local>>>,
     /// Bytes this shard has received on bulk lanes, for the transport view
     bulk_received: Rc<Cell<u64>>,
+    /// Queries this shard turned away at the admission bound, for the transport view
+    /// ([Resolved #15](../../../docs/src/appendix/resolved/shard-mesh-admission.md))
+    shed: u64,
     /// The control thread's request channel, for the admin requests clients send this shard
     ///
     /// None on a standalone node, which answers every admin request by saying so.
@@ -1504,6 +1507,7 @@ where
             placed,
             local,
             bulk_received: Rc::new(Cell::new(0)),
+            shed: 0,
             control,
             subscribed: HashSet::new(),
             replica_ring,
@@ -2111,6 +2115,37 @@ where
                     continue;
                 }
             };
+            // a shard that has fallen behind is not sent more: a share bound for another local
+            // shard whose queue already holds the bound is shed here, the whole query with it,
+            // and the client told by name rather than left to wait on a queue nothing drains.
+            // A share for this shard is never shed: this loop is the one draining that queue,
+            // and what waits on it has waited already
+            // ([Resolved #15](../../../docs/src/appendix/resolved/shard-mesh-admission.md))
+            let bound = self.conf.networking.max_queued_queries;
+            let over = found
+                .iter()
+                .find_map(|(shard_info, _)| match &shard_info.contact {
+                    ShardContact::Local(shard)
+                        if *shard != self.shard_id && self.comms.queued(*shard) >= bound =>
+                    {
+                        Some(*shard)
+                    }
+                    _ => None,
+                });
+            if let Some(shard) = over {
+                // nothing was sent, so the gather that was just recorded is withdrawn
+                self.gathering.forget_query((bundle_id, index));
+                found.clear();
+                self.shed += 1;
+                let error = crate::shared::responses::ResponseError::new(
+                    ErrorCode::Shedding,
+                    format!(
+                        "shard {shard} has {bound} messages waiting and this query was not queued behind them"
+                    ),
+                );
+                refused_reads.push((table, index, end, query_span, stamps, error));
+                continue;
+            }
             // note whether the share each shard carries is a share of a query we split
             //
             // a split query produces one of these per shard plus the one client visible
@@ -3579,6 +3614,7 @@ where
             shard: self.shard_id,
             links,
             bulk_received: self.bulk_received.get(),
+            shed: self.shed,
         }
     }
 
@@ -3910,6 +3946,16 @@ where
                 // report what this shard's peer links look like
                 ServerMsg::Transport(reply) => {
                     let _ = reply.send(self.transport_view());
+                }
+                // hold the loop, so the queue behind it grows: a test of the admission bound
+                ServerMsg::Hold(ms) => {
+                    event!(
+                        Level::WARN,
+                        msg = "holding the shard loop for a test",
+                        shard = self.shard_id,
+                        ms
+                    );
+                    glommio::timer::sleep(Duration::from_millis(ms)).await;
                 }
                 // a tablet group's committed batch, applied here in committed order
                 ServerMsg::Apply {

@@ -603,6 +603,35 @@ where
         replication::crash_point::hold(ms);
     }
 
+    /// Hold one shard's loop for so many milliseconds, for a test of the admission bound
+    ///
+    /// The shard sleeps where it stands and its mesh queue grows behind it, which is what a
+    /// shard that has fallen behind looks like to the shards routing to it
+    /// ([Resolved #15](../../../docs/src/appendix/resolved/shard-mesh-admission.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `shard` - The shard
+    /// * `ms` - How long
+    ///
+    /// # Errors
+    ///
+    /// Fails if the shard is gone or is not one this pool runs.
+    pub fn hold_shard(&self, shard: usize, ms: u64) -> Result<(), ServerError> {
+        let tx = self
+            .shard_txs
+            .get(shard)
+            .ok_or_else(|| ServerError::ShardFailed {
+                shard,
+                error: "this pool runs no such shard".to_string(),
+            })?;
+        tx.send(messages::ServerMsg::Hold(ms))
+            .map_err(|_| ServerError::ShardFailed {
+                shard,
+                error: "its mesh channel is closed".to_string(),
+            })
+    }
+
     /// Send the control leader one report behind the last, as a replay would be, for a test
     ///
     /// # Errors

@@ -203,7 +203,7 @@ both with one check, so the scan methods stay `-> ()`.
 ## Still open
 
 **A shard that dies mid-query leaks its gather entry** and the client waits forever. There are no
-timeouts anywhere ([item 15](../known-issues.md#15-no-backpressure-anywhere)), so this is the
+timeouts anywhere ([item 15](../known-issues.md#15-no-backpressure-anywhere-the-remainder)), so this is the
 existing failure mode rather than a new one, but the gather adds an instance of it.
 
 **`LIMIT 0` is indistinguishable from a miss.** It answers `Get(None)`, which `send_one` reports as

@@ -928,13 +928,14 @@ What this entry still holds:
 
 ### Backpressure
 
-Every channel is unbounded ([Known Issues #15](known-issues.md#15-no-backpressure-anywhere)).
+~~Every channel is unbounded ([Known Issues #15](known-issues.md#15-no-backpressure-anywhere-the-remainder)).
 Bounding them requires deciding what to do when a shard is saturated — shed load, block the
-coordinator, or reject the client — ~~which requires the error channel above~~. **That
-prerequisite is met.** [F11](../features/error-channel.md) made shedding sayable:
-`ErrorCode::Shedding` is defined and a query the server declined can be reported as declined rather
-than as an empty result. What is left is the bound itself and the policy that decides when it is
-hit, in [D6](../direction/connection-pool.md#bounded-channels).
+coordinator, or reject the client — which requires the error channel above.~~ **Built for the
+shard mesh** ([Resolved #15](resolved/shard-mesh-admission.md)): the decision is shed, at
+admission, by the coordinator routing a client's query to a shard whose queue already holds
+`networking.max_queued_queries` messages, answered `Shedding` at once and retried by the client.
+What is left is the remainder the known issues page keeps under the same number - the
+response and pending structures bounded by admitted work alone.
 
 ### Timeouts
 

@@ -116,5 +116,5 @@ measurement of what it costs a disconnect-heavy client.
   failure common
 - [F10](../../features/framing-and-protocol-evolution.md), which made a disconnect end the write
   relay - the change that turned the `?` from a latent into a live defect
-- [Item 15](../known-issues.md#15-no-backpressure-anywhere), the unbounded channel a late answer
+- [Item 15](../known-issues.md#15-no-backpressure-anywhere-the-remainder), the unbounded channel a late answer
   used to be sent into
