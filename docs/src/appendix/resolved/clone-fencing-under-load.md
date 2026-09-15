@@ -121,7 +121,7 @@ came, and no timeout reaches a member that never asks.
   io_uring's limits; it stays at six threads, for that reason rather than for this item.
 - Found on the way and filed: `certificate_rotation_binds_identity` fails about half its runs
   alone on this host, on which of two members leads when node zero restarts refusing one of
-  them ([item 112](../known-issues.md#112-certificate_rotation_binds_identity-fails-about-half-its-runs-alone-on-the-development-host)).
+  them ([Resolved #112](certificate-test-leader.md)).
   And `node_transfer_budgets_bound_concurrent_sources` allowed one full bucket for three
   sources and passed on the margin until this change moved the timing around it; its bound
   now counts a bucket per source that has streamed, which is what the budget is.

@@ -18,6 +18,10 @@ cargo check -p shoal-bench --features stage-profile,hotpath --all-targets
 cargo test -p shoal-bench --features stage-profile --test stage_join
 ```
 
+**[Resolved #112](resolved/certificate-test-leader.md) added none**: the certificate test's
+identity-mismatch step restarts the misnamed node rather than node zero, so its rejoin no
+longer depends on which member leads; eight runs of eight where it had been about half.
+
 **[Resolved #15](resolved/shard-mesh-admission.md) added 2**, and the total went 1,507 → 1,509:
 a `shoal` integration test in the new `backpressure.rs`,
 `a_query_for_a_shard_that_fell_behind_is_shed` - two shards, a bound of eight, one shard held
@@ -28,7 +32,7 @@ test in `conf.rs` that the bound defaults to sixty-four thousand and reads when 
 client's retry test now expects `Shedding` to be tried again. Counted from `--list`, and
 confirmed by the whole workspace run at six threads that closes the C15 defects' work:
 **1,507 passed, 2 failed, four ignored** of the 1,509 listed. The two: the certificate test
-of [item 112](known-issues.md#112-certificate_rotation_binds_identity-fails-about-half-its-runs-alone-on-the-development-host),
+of [item 112](resolved/certificate-test-leader.md), since resolved,
 and `single_node_data_has_a_verified_cluster_migration_path`, which failed under the suite's
 load on a restore finding a table not yet empty and passed alone at once.
 
@@ -97,7 +101,7 @@ back past the control group's election timeout so it stands first, fenced all th
 Counted from `--list`; the fixture suite ran whole at six threads, ninety-seven of ninety-nine
 passing, with `repair_is_authorized_versioned_and_resumable_by_id` passing again at two
 threads and `certificate_rotation_binds_identity` failing about half its runs alone on this
-host on both trees, filed as [item 112](known-issues.md#112-certificate_rotation_binds_identity-fails-about-half-its-runs-alone-on-the-development-host);
+host on both trees, filed as [item 112](resolved/certificate-test-leader.md) and since resolved;
 `node_transfer_budgets_bound_concurrent_sources` allowed one full bucket for three sources
 and passed on the margin until this change moved the timing around it, and its bound now
 counts a bucket per source that has streamed. The suite was also run
