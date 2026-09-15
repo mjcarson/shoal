@@ -380,6 +380,8 @@ only place a bound has been reached.
   [F14](encryption-in-transit.md), the kTLS the lanes reuse
 - [D7](../direction/shard-aware-routing.md), the pure `local_shard` control
 - [Benchmarking](../performance/benchmarking.md), for `serve --staged` and the process model
-- [Items 95, 96 and 97](../appendix/known-issues.md), what the arms and the count found on the
-  way, and [Resolved #94](../appendix/resolved/disconnected-client-cleanup.md), what the transport
-  made reachable and closed
+- [Item 95](../appendix/known-issues.md), what the arms found on the way, with
+  [Resolved #96](../appendix/resolved/ping-interval-consumer.md) and
+  [Resolved #97](../appendix/resolved/stage-join-storage.md), what the count found and what
+  closed it, and [Resolved #94](../appendix/resolved/disconnected-client-cleanup.md), what the
+  transport made reachable and closed

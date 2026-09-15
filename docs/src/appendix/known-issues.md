@@ -32,9 +32,9 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 99, 101, 104, 105, 108 and 111, and
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 97, 99, 101, 104, 105, 108 and 111, and
 why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ item 110 is the newest entry here ~~and the newest number~~ and 111 the newest number, and why 17, 33, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 99, 101, 104, 105, 108 and 111 are on the resolved page. **111 never
+83, 84, 85, 86, 88, 89, 90, 94, 97, 99, 101, 104, 105, 108 and 111 are on the resolved page. **111 never
 appeared here**: it was found by [F47](../features/local-rehome.md)'s crash matrix - a read
 landing while an archive closed panicked the executor - reproduced against the map alone and
 fixed in the same change ([Resolved #111](resolved/archive-removal-borrow.md)). **108 never
@@ -2077,26 +2077,3 @@ which is what its family page says to expect.
 and, if they are `Unavailable` or `PeerUnavailable` from a forward to the dead primary,
 propose through the local replica when the node holds one, which is what `read_ring_for` does
 for reads. Then a smoke run of the kill arm should show the outage the F42 page shows.
-
-### 97. `stage_join.rs` had not compiled since F36, and needs `/opt/shoal` to run
-
-`shoal-bench/tests/stage_join.rs`
-
-The one integration test that starts a server under `--features stage-profile` and reads the
-report it wrote. [F36](../features/cluster-harness.md) added `server` and `cluster` to
-`RunRequest` and did not add them here, so from that commit until
-[F38](../features/inter-node-transport.md) the binary failed to compile - and because it is
-behind a feature no default run enables, nothing said so. F38 fixed the initializer. What it
-found underneath is that the test resolves the **committed** `shoal.yml`, whose storage paths are
-`/opt/shoal`, so on a host without that directory it fails at server start with
-`PermissionDenied` before it can join anything; on the development host it does.
-
-**Established by running it**: `cargo test -p shoal-bench --features stage-profile --test
-stage_join` on `europa`, `the arm runs: failed to start a server: IO(Os { code: 13, kind:
-PermissionDenied })`.
-
-**Fix direction:** two things. The test should write a scratch copy of `shoal.yml` with its
-storage under a `tempfile` directory, the way the F38 smoke runs did by hand, so it runs
-wherever the suite does. And the feature-gated binaries want a place in CI or in the
-[test-coverage](test-coverage.md) runbook that builds them, since a binary that does not compile
-for two features is a gap the count cannot see.

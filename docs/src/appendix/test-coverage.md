@@ -5,9 +5,18 @@ What the test suite reaches, what it does not, and the one place where it ~~is~~
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
 `cargo test --workspace` passes: ~~**1,187 tests**~~ ~~**1,198 tests**~~ ~~**1,238 tests**~~
 ~~**1,265 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ **1,493 tests**, four ignored, plus ~~**13**~~ **14** behind
-`--features stage-profile` that a default run does not reach - and one of those fourteen,
+`--features stage-profile` that a default run does not reach - ~~and one of those fourteen,
 `stage_join.rs`, had not *compiled* since [F36](../features/cluster-harness.md) added two fields
-to `RunRequest` ([item 97](known-issues.md#97-stage_joinrs-had-not-compiled-since-f36-and-needs-optshoal-to-run)).
+to `RunRequest`~~ and one of those fourteen, `stage_join.rs`, ran only on a host with
+`/opt/shoal` until [Resolved #97](resolved/stage-join-storage.md) gave it a scratch copy of the
+committed configuration. The feature-gated binaries are built by the runbook line below, since
+nothing else builds them:
+
+```bash
+# both feature-gated binaries compile, and the one server-starting test behind a feature runs
+cargo check -p shoal-bench --features stage-profile,hotpath --all-targets
+cargo test -p shoal-bench --features stage-profile --test stage_join
+```
 
 **The distributed chapter's rewrite added 1**, and the total went 1,492 → 1,493: a `shoalctl`
 unit test over the cluster tab's new `initialize` verb - its members in the order typed, one
@@ -930,7 +939,7 @@ are in [Optimizations](optimizations.md).
 | `chart_geometry.rs` (`shoal-bench`) | 6 | that no chart drawn from the real artifacts puts two labels on top of each other or draws outside its canvas. plotters is built without a font backend and estimates text extents, so this is the failure that no other test can see. Up 2 with [F19](../features/chart-legends.md): that a series is named exactly once, which is what an end label surviving would break, and that a legend entry's name stays with its own swatch rather than running under the next column — the only check anywhere on the width estimate the columns are laid out from |
 | `stages.rs` (`shoal-bench`) | 8, **feature gated** | the stage report: that a bucket's stage means reconcile with its total, that a bucket is a window rather than one record, that an unreached stage is not reported as an instant one, that a write reports its four durability stages, that every record is accounted for as joined, one-sided or duplicate, that a stage the size of a clock read is marked rather than reported, that a batch level cost is labelled, and that a report from another schema version is refused. **Only built with `--features stage-profile`** — a default `cargo test --workspace` does not run any of them. Run them with `cargo test -p shoal-bench --features stage-profile`. Every one of these passed while three of the layer's four reports were empty, because every one of them fabricates the halves it joins |
 | `stage_log.rs` (`shoal-bench`) | 3, **feature gated** | **new** with [Resolved #76](resolved/stage-join.md): that a query sent and never answered is counted rather than dropped when the driver returns, that two slots' logs pool into one — which every per query driver depends on — and that the streaming path keeps one query in every `--stage-sample`, the same rule the server applies |
-| `stage_join.rs` (`shoal-bench`) | 1, **feature gated** | **new** with [Resolved #76](resolved/stage-join.md), and the one test here that starts a server: one grid arm at smoke scale under `stage-profile`, asserting the report has a join in it, that neither half is one-sided, that both halves of the mixture produced a breakdown, and that a bucket has stages in it. It fails against the tree before the fix with `joined: 0`, which is the whole defect. This is the check the layer never had — that a workload on `STAGED_WORKLOADS` can actually produce a joined record, as opposed to being correctly listed |
+| `stage_join.rs` (`shoal-bench`) | 1, **feature gated** | **new** with [Resolved #76](resolved/stage-join.md), and the one test here that starts a server: one grid arm at smoke scale under `stage-profile`, asserting the report has a join in it, that neither half is one-sided, that both halves of the mixture produced a breakdown, and that a bucket has stages in it. It fails against the tree before the fix with `joined: 0`, which is the whole defect. This is the check the layer never had — that a workload on `STAGED_WORKLOADS` can actually produce a joined record, as opposed to being correctly listed. Since [Resolved #97](resolved/stage-join-storage.md) it runs against a scratch copy of the committed `shoal.yml` with its storage under `CARGO_TARGET_TMPDIR`, and asserts the server wrote there, so it runs on any host rather than only one with `/opt/shoal` |
 
 The restart, eviction, and `SIGKILL` tests are the valuable ones: they are the only tests that
 exercise durability end to end, and they exist because
