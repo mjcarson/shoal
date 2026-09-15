@@ -152,7 +152,9 @@ impl Ring {
         // the placement has to be one this node can route against: it names this node, once,
         // with the slots it claimed
         let Some((_, placed_shards)) = placement.iter().find(|(node, _)| *node == me) else {
-            return Err(ServerError::Shoal(ShoalError::PlacementMissingSelf { node: me }));
+            return Err(ServerError::Shoal(ShoalError::PlacementMissingSelf {
+                node: me,
+            }));
         };
         if usize::from(*placed_shards) != hosting.slots {
             return Err(ServerError::Shoal(ShoalError::PlacementShardCount {
@@ -420,7 +422,11 @@ mod tests {
         assert_eq!(ring.shards.len(), 3);
         for tablet in 0..TABLET_COUNT {
             let key = (tablet as u64) << (u64::BITS - TABLET_BITS);
-            assert_eq!(ring.find_shard(key).contact, ShardContact::Local(hosting.owner_of_tablet(tablet)), "tablet {tablet}");
+            assert_eq!(
+                ring.find_shard(key).contact,
+                ShardContact::Local(hosting.owner_of_tablet(tablet)),
+                "tablet {tablet}"
+            );
         }
         // and nothing is routed to an executor that does not exist
         assert!(ring.tablets.iter().all(|owner| usize::from(*owner) < 3));
@@ -432,8 +438,9 @@ mod tests {
         let me = NodeId::mint();
         for shard_count in [1, 2, 7, 16] {
             let placement = vec![(me, shard_count)];
-            let placed = Ring::with_placement(&Hosting::identity(usize::from(shard_count)), &placement, me)
-                .expect("a placement of one");
+            let placed =
+                Ring::with_placement(&Hosting::identity(usize::from(shard_count)), &placement, me)
+                    .expect("a placement of one");
             let alone = Ring::new(usize::from(shard_count)).expect("a ring");
             assert_eq!(placed.tablets, alone.tablets);
             assert_eq!(placed.shards.len(), alone.shards.len());
@@ -450,7 +457,8 @@ mod tests {
         let shards = [2u16, 3, 1];
         let placement: Vec<(NodeId, u16)> = ids.iter().copied().zip(shards).collect();
         // seen from the second node, which runs three shards
-        let ring = Ring::with_placement(&Hosting::identity(3), &placement, ids[1]).expect("a placement of three");
+        let ring = Ring::with_placement(&Hosting::identity(3), &placement, ids[1])
+            .expect("a placement of three");
         assert_eq!(ring.shards.len(), 6);
         for tablet in 0..TABLET_COUNT {
             let (which, shard) = Ring::owner_of(tablet, &shards);
@@ -468,7 +476,9 @@ mod tests {
         // every remote shard owns something, and so does every local one
         for info in &ring.shards {
             assert!(
-                ring.tablets.iter().any(|owner| ring.shards[usize::from(*owner)].contact == info.contact),
+                ring.tablets
+                    .iter()
+                    .any(|owner| ring.shards[usize::from(*owner)].contact == info.contact),
                 "{} owns no tablets",
                 info.name
             );
@@ -491,21 +501,32 @@ mod tests {
         let ring = Ring::with_placement(&hosting, &placement, ids[0]).expect("a placement");
         // two local executors and three remote slots
         assert_eq!(ring.shards.len(), 5);
-        assert_eq!(ring.shards.iter().filter(|info| info.contact.local_index().is_some()).count(), 2);
+        assert_eq!(
+            ring.shards
+                .iter()
+                .filter(|info| info.contact.local_index().is_some())
+                .count(),
+            2
+        );
         for tablet in 0..TABLET_COUNT {
             let (which, shard) = Ring::owner_of(tablet, &[4, 3]);
             let info = &ring.shards[usize::from(ring.tablets[tablet])];
             let expected = if which == 0 {
                 ShardContact::Local(hosting.host_of_slot(shard))
             } else {
-                ShardContact::Remote { node: ids[1], shard }
+                ShardContact::Remote {
+                    node: ids[1],
+                    shard,
+                }
             };
             assert_eq!(info.contact, expected, "tablet {tablet}");
         }
         // both executors own tablets, and every remote slot is still named
         for info in &ring.shards {
             assert!(
-                ring.tablets.iter().any(|owner| ring.shards[usize::from(*owner)].contact == info.contact),
+                ring.tablets
+                    .iter()
+                    .any(|owner| ring.shards[usize::from(*owner)].contact == info.contact),
                 "{} owns no tablets",
                 info.name
             );

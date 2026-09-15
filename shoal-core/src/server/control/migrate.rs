@@ -277,7 +277,9 @@ mod tests {
     #[test]
     fn move_phases_rank_in_order() {
         let phases = [
-            MovePhase::Queued { behind: Uuid::nil() },
+            MovePhase::Queued {
+                behind: Uuid::nil(),
+            },
             MovePhase::Planned,
             MovePhase::Learner,
             MovePhase::CatchingUp,
@@ -289,7 +291,9 @@ mod tests {
             MovePhase::Done,
         ];
         // strictly ascending, and every name distinct
-        assert!(phases.windows(2).all(|pair| pair[0].rank() < pair[1].rank()));
+        assert!(phases
+            .windows(2)
+            .all(|pair| pair[0].rank() < pair[1].rank()));
         let mut names: Vec<&str> = phases.iter().map(MovePhase::name).collect();
         names.dedup();
         assert_eq!(names.len(), phases.len());

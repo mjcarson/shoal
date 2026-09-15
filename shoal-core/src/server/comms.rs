@@ -2,11 +2,11 @@
 
 use kanal::{AsyncReceiver, AsyncSender};
 
+use crate::server::database::ShoalDatabase;
 use crate::server::errors::ShoalError;
 use crate::server::messages::ServerMsg;
 use crate::server::shard::ShardContact;
 use crate::server::ServerError;
-use crate::server::database::ShoalDatabase;
 
 /// Handles communication between shoal shards
 pub(super) struct Comms<S: ShoalDatabase> {

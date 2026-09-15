@@ -49,12 +49,24 @@ use glommio::{LocalExecutorBuilder, Placement};
 use openraft::entry::RaftEntry as _;
 use openraft::error::{RPCError, ReplicationClosed, StreamingError, Unreachable};
 use openraft::network::RPCOption;
-use openraft::raft::{AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, VoteRequest, VoteResponse};
-use openraft::storage::{EntryResponder, IOFlushed, LogState, RaftLogReader, RaftLogStorage, RaftSnapshotBuilder, RaftStateMachine};
-use openraft::type_config::alias::{EntryOf, LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMembershipOf, VoteOf};
-use openraft::{Config, EntryPayload, OptionalSend, Raft, RaftNetworkFactory, RaftNetworkV2, Snapshot, SnapshotMeta, StoredMembership};
+use openraft::raft::{
+    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, VoteRequest, VoteResponse,
+};
+use openraft::storage::{
+    EntryResponder, IOFlushed, LogState, RaftLogReader, RaftLogStorage, RaftSnapshotBuilder,
+    RaftStateMachine,
+};
+use openraft::type_config::alias::{
+    EntryOf, LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMembershipOf, VoteOf,
+};
+use openraft::{
+    Config, EntryPayload, OptionalSend, Raft, RaftNetworkFactory, RaftNetworkV2, Snapshot,
+    SnapshotMeta, StoredMembership,
+};
 use shoal::server::control::store::{self as durable, SnapshotData};
-use shoal::server::control::types::{ControlCommand, ControlConfig, ControlResponse, ControlState, MemberRecord};
+use shoal::server::control::types::{
+    ControlCommand, ControlConfig, ControlResponse, ControlState, MemberRecord,
+};
 use shoal::server::TabletMap;
 use shoal::shared::identity::{ClusterId, NodeId, TableId};
 use shoal::shared::protocol::peer::StatusReport;
@@ -130,8 +142,8 @@ impl<SM: RaftStateMachine<ControlConfig>> Clone for Loopback<SM> {
     }
 }
 
-impl<SM: RaftStateMachine<ControlConfig, SnapshotData = SnapshotData>> RaftNetworkFactory<ControlConfig>
-    for Loopback<SM>
+impl<SM: RaftStateMachine<ControlConfig, SnapshotData = SnapshotData>>
+    RaftNetworkFactory<ControlConfig> for Loopback<SM>
 {
     type Network = LoopbackPeer<SM>;
 
@@ -218,9 +230,9 @@ impl<SM: RaftStateMachine<ControlConfig, SnapshotData = SnapshotData>> RaftNetwo
         _cancel: impl Future<Output = ReplicationClosed> + OptionalSend + 'static,
         _option: RPCOption,
     ) -> Result<SnapshotResponse<ControlConfig>, StreamingError<ControlConfig>> {
-        let target = self
-            .target()
-            .map_err(|_| StreamingError::Unreachable(Unreachable::new(&NotRegistered(self.target))))?;
+        let target = self.target().map_err(|_| {
+            StreamingError::Unreachable(Unreachable::new(&NotRegistered(self.target)))
+        })?;
         target
             .install_full_snapshot(vote, snapshot)
             .await
@@ -265,7 +277,11 @@ impl RaftLogReader<ControlConfig> for MemLog {
             Bound::Excluded(e) => Bound::Excluded(*e),
             Bound::Unbounded => Bound::Unbounded,
         };
-        Ok(inner.entries.range((start, end)).map(|(_, e)| e.clone()).collect())
+        Ok(inner
+            .entries
+            .range((start, end))
+            .map(|(_, e)| e.clone())
+            .collect())
     }
 
     /// The last vote
@@ -315,7 +331,11 @@ impl RaftLogStorage<ControlConfig> for MemLog {
     }
 
     /// Append, and complete the callback at once
-    async fn append<I>(&mut self, entries: I, callback: IOFlushed<ControlConfig>) -> Result<(), io::Error>
+    async fn append<I>(
+        &mut self,
+        entries: I,
+        callback: IOFlushed<ControlConfig>,
+    ) -> Result<(), io::Error>
     where
         I: IntoIterator<Item = Entry> + OptionalSend,
         I::IntoIter: OptionalSend,
@@ -373,7 +393,9 @@ impl RaftSnapshotBuilder<ControlConfig> for MemMachine {
     type SnapshotData = SnapshotData;
 
     /// A snapshot of the state
-    async fn build_snapshot(&mut self) -> Result<SnapshotOf<ControlConfig, SnapshotData>, io::Error> {
+    async fn build_snapshot(
+        &mut self,
+    ) -> Result<SnapshotOf<ControlConfig, SnapshotData>, io::Error> {
         let mut inner = self.inner.borrow_mut();
         let meta = SnapshotMeta {
             last_log_id: inner.applied.clone(),
@@ -403,7 +425,9 @@ impl RaftStateMachine<ControlConfig> for MemMachine {
     type SnapshotBuilder = MemMachine;
 
     /// What has been applied
-    async fn applied_state(&mut self) -> Result<(Option<LogId>, StoredMembershipOf<ControlConfig>), io::Error> {
+    async fn applied_state(
+        &mut self,
+    ) -> Result<(Option<LogId>, StoredMembershipOf<ControlConfig>), io::Error> {
         let inner = self.inner.borrow();
         Ok((inner.applied.clone(), inner.membership.clone()))
     }
@@ -411,7 +435,8 @@ impl RaftStateMachine<ControlConfig> for MemMachine {
     /// Apply a batch
     async fn apply<Strm>(&mut self, mut entries: Strm) -> Result<(), io::Error>
     where
-        Strm: Stream<Item = Result<EntryResponder<ControlConfig>, io::Error>> + Unpin + OptionalSend,
+        Strm:
+            Stream<Item = Result<EntryResponder<ControlConfig>, io::Error>> + Unpin + OptionalSend,
     {
         while let Some(next) = entries.next().await {
             let (entry, responder) = next?;
@@ -463,7 +488,9 @@ impl RaftStateMachine<ControlConfig> for MemMachine {
     }
 
     /// The last snapshot
-    async fn get_current_snapshot(&mut self) -> Result<Option<SnapshotOf<ControlConfig, SnapshotData>>, io::Error> {
+    async fn get_current_snapshot(
+        &mut self,
+    ) -> Result<Option<SnapshotOf<ControlConfig, SnapshotData>>, io::Error> {
         Ok(self.inner.borrow().snapshot.clone())
     }
 }
@@ -487,8 +514,14 @@ fn cpu_time() -> Duration {
     // SAFETY: a zeroed rusage is a valid out parameter, filled by the call
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
-    let user = Duration::new(usage.ru_utime.tv_sec as u64, (usage.ru_utime.tv_usec * 1000) as u32);
-    let system = Duration::new(usage.ru_stime.tv_sec as u64, (usage.ru_stime.tv_usec * 1000) as u32);
+    let user = Duration::new(
+        usage.ru_utime.tv_sec as u64,
+        (usage.ru_utime.tv_usec * 1000) as u32,
+    );
+    let system = Duration::new(
+        usage.ru_stime.tv_sec as u64,
+        (usage.ru_stime.tv_usec * 1000) as u32,
+    );
     user + system
 }
 
@@ -523,7 +556,11 @@ impl Timers {
         let (heartbeat, min, max) = match self {
             Timers::OpenraftDefault => {
                 let d = Config::default();
-                (d.heartbeat_interval, d.election_timeout_min, d.election_timeout_max)
+                (
+                    d.heartbeat_interval,
+                    d.election_timeout_min,
+                    d.election_timeout_max,
+                )
             }
             Timers::C1Proposal => (500, 1500, 3000),
         };
@@ -595,8 +632,12 @@ where
             first.get_or_insert(raft);
         }
         let first = first.expect("three members");
-        let members: BTreeMap<NodeId, MemberRecord> = ids.iter().map(|id| (*id, member(*id))).collect();
-        first.initialize(members).await.expect("a group initializes");
+        let members: BTreeMap<NodeId, MemberRecord> =
+            ids.iter().map(|id| (*id, member(*id))).collect();
+        first
+            .initialize(members)
+            .await
+            .expect("a group initializes");
         leaders.push(first);
     }
     // every group has an established leader before anything is measured: one that has seen
@@ -609,7 +650,12 @@ where
             .expect("a group elects a leader");
         let leader = metrics.current_leader.expect("a leader");
         // measure through the leader, whoever it turned out to be
-        let leader = registry.rafts.borrow().get(&leader).cloned().expect("the leader is registered");
+        let leader = registry
+            .rafts
+            .borrow()
+            .get(&leader)
+            .cloned()
+            .expect("the leader is registered");
         leader
             .wait(Some(Duration::from_secs(120)))
             .state(openraft::ServerState::Leader, "the leader is established")
@@ -680,11 +726,14 @@ async fn time_appends<SM: RaftStateMachine<ControlConfig>>(
                 .await
             {
                 Ok(_) => break,
-                Err(openraft::error::RaftError::APIError(openraft::error::ClientWriteError::ForwardToLeader(
-                    forward,
-                ))) => {
+                Err(openraft::error::RaftError::APIError(
+                    openraft::error::ClientWriteError::ForwardToLeader(forward),
+                )) => {
                     // follow the leader, or wait for one to be elected
-                    match forward.leader_id.and_then(|id| registry.rafts.borrow().get(&id).cloned()) {
+                    match forward
+                        .leader_id
+                        .and_then(|id| registry.rafts.borrow().get(&id).cloned())
+                    {
                         Some(next) => leader = next,
                         None => {
                             glommio::timer::Timer::new(Duration::from_millis(50)).await;
@@ -713,8 +762,10 @@ async fn idle(count: usize, timers: Timers) -> String {
     });
     let before_rss = resident_bytes();
     let started = Instant::now();
-    let leaders =
-        start_groups(count, timers, &registry, |_| async { (MemLog::default(), MemMachine::default()) }).await;
+    let leaders = start_groups(count, timers, &registry, |_| async {
+        (MemLog::default(), MemMachine::default())
+    })
+    .await;
     let startup = started.elapsed();
     // settle, then measure a window with nothing but heartbeats in it
     glommio::timer::Timer::new(Duration::from_secs(1)).await;
@@ -751,9 +802,7 @@ async fn durable() -> Vec<String> {
     let make = |root: std::path::PathBuf| {
         move |id: NodeId| {
             let path = root.join(id.to_string());
-            async move {
-                durable::open(&path).await.expect("a durable store opens")
-            }
+            async move { durable::open(&path).await.expect("a durable store opens") }
         }
     };
     // one group, alone
@@ -767,11 +816,19 @@ async fn durable() -> Vec<String> {
         us(*alone.last().unwrap_or(&Duration::ZERO)),
     )];
     // many groups, all appending at once: each leader writes `APPENDS` entries in its own task
-    let leaders = start_groups(DURABLE_COUNT, Timers::C1Proposal, &registry, make(root.join("many"))).await;
+    let leaders = start_groups(
+        DURABLE_COUNT,
+        Timers::C1Proposal,
+        &registry,
+        make(root.join("many")),
+    )
+    .await;
     let mut tasks = Vec::with_capacity(leaders.len());
     for leader in leaders {
         let registry = registry.clone();
-        tasks.push(glommio::spawn_local(async move { time_appends(&leader, &registry).await }).detach());
+        tasks.push(
+            glommio::spawn_local(async move { time_appends(&leader, &registry).await }).detach(),
+        );
     }
     let mut all = Vec::with_capacity(DURABLE_COUNT * APPENDS);
     for task in tasks {
@@ -860,10 +917,16 @@ fn median_of<F: FnMut()>(mut f: F) -> Duration {
 /// Price the topology push and the report traffic at every size the sweep names
 fn fanout() {
     println!("shoal-spike fanout: topology fanout and report traffic, Q13 at M3");
-    println!("host {} · governor {} · json bodies as the wire carries them", hostname(), governor());
+    println!(
+        "host {} · governor {} · json bodies as the wire carries them",
+        hostname(),
+        governor()
+    );
     println!();
     // the frame every subscribed client is pushed, per members and tables
-    println!("## Topology frame: encoded bytes and encode time per version (median of {FANOUT_ROUNDS})");
+    println!(
+        "## Topology frame: encoded bytes and encode time per version (median of {FANOUT_ROUNDS})"
+    );
     println!();
     println!("| members | tables | frame bytes | encode µs |");
     println!("| --- | --- | --- | --- |");
@@ -871,7 +934,9 @@ fn fanout() {
         for tables in FANOUT_TABLES {
             let map = map_for(*members, *tables);
             let frame = map.frame();
-            let bytes = shoal::serde_json::to_vec(&frame).expect("a frame encodes").len();
+            let bytes = shoal::serde_json::to_vec(&frame)
+                .expect("a frame encodes")
+                .len();
             let encode = median_of(|| {
                 let _ = shoal::serde_json::to_vec(&frame).expect("a frame encodes");
             });
@@ -887,7 +952,10 @@ fn fanout() {
     let map = map_for(64, 16);
     let frame = map.frame();
     for subscribers in FANOUT_SUBSCRIBERS {
-        let bytes = shoal::serde_json::to_vec(&frame).expect("a frame encodes").len() * subscribers;
+        let bytes = shoal::serde_json::to_vec(&frame)
+            .expect("a frame encodes")
+            .len()
+            * subscribers;
         let push = median_of(|| {
             let json = shoal::serde_json::to_vec(&frame).expect("a frame encodes");
             let copies: Vec<Vec<u8>> = (0..*subscribers).map(|_| json.clone()).collect();
@@ -915,7 +983,9 @@ fn fanout() {
             group_bytes: Vec::new(),
             wire_max: shoal::shared::protocol::PROTOCOL_VERSION,
         };
-        let bytes = shoal::serde_json::to_vec(&report).expect("a report encodes").len();
+        let bytes = shoal::serde_json::to_vec(&report)
+            .expect("a report encodes")
+            .len();
         let per_second = (members - 1) as f64 * 1000.0 / REPORT_INTERVAL_MS as f64;
         println!(
             "| {members} | {bytes} | {per_second:.0} | {:.0} |",
@@ -930,8 +1000,15 @@ fn main() {
         fanout();
         return;
     }
-    println!("shoal-spike: openraft {} on the glommio runtime", "0.10.0-alpha.34");
-    println!("host {} · governor {} · pinned to cpu 1 · three members per group", hostname(), governor());
+    println!(
+        "shoal-spike: openraft {} on the glommio runtime",
+        "0.10.0-alpha.34"
+    );
+    println!(
+        "host {} · governor {} · pinned to cpu 1 · three members per group",
+        hostname(),
+        governor()
+    );
     println!();
     let handle = LocalExecutorBuilder::new(Placement::Fixed(1))
         .name("shoal-spike")

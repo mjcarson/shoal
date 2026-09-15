@@ -16,8 +16,8 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Paragraph},
 };
-use shoal::traits::QuerySupport;
 use shoal::client::ShqlParseError;
+use shoal::traits::QuerySupport;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::Tab;
@@ -43,7 +43,13 @@ fn sanitize(message: &str) -> String {
     // a control character has no width of its own, so anything drawn after it lands short
     let flattened: String = message
         .chars()
-        .map(|character| if character.is_control() { ' ' } else { character })
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
         .collect();
     // collapse the runs of whitespace pretty printing leaves behind
     flattened.split_whitespace().collect::<Vec<_>>().join(" ")

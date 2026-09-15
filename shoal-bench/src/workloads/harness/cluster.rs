@@ -46,8 +46,8 @@ use shoal::shared::identity::{ClusterId, NodeId};
 
 use crate::model::macro_layer::NodeEnvFacts;
 use crate::model::macro_layer::{
-    ClusterFacts, HopFacts, LinkFacts, MemberFacts, NodeCores, OutcomeFacts, PlacedNodeFacts, ReplicaFacts,
-    TransportFacts,
+    ClusterFacts, HopFacts, LinkFacts, MemberFacts, NodeCores, OutcomeFacts, PlacedNodeFacts,
+    ReplicaFacts, TransportFacts,
 };
 use crate::run::plan::cluster_ports;
 use crate::workloads::harness::ready;
@@ -153,19 +153,29 @@ impl RemoteSpec {
     ///
     /// Says what part of it was missing or malformed.
     pub fn parse(spec: &str) -> Result<Self> {
-        let (index, rest) = spec.split_once('=').with_context(|| format!("{spec:?} is not <index>=<user@host>:<dir>"))?;
-        let index: u32 = index.trim().parse().with_context(|| format!("{index:?} is not a node index"))?;
+        let (index, rest) = spec
+            .split_once('=')
+            .with_context(|| format!("{spec:?} is not <index>=<user@host>:<dir>"))?;
+        let index: u32 = index
+            .trim()
+            .parse()
+            .with_context(|| format!("{index:?} is not a node index"))?;
         if index == 0 {
             bail!("node 0 is the driver's own process and cannot be remote");
         }
-        let (target, dir) = rest.rsplit_once(':').with_context(|| format!("{rest:?} names no directory; the form is <user@host>:<dir>"))?;
+        let (target, dir) = rest.rsplit_once(':').with_context(|| {
+            format!("{rest:?} names no directory; the form is <user@host>:<dir>")
+        })?;
         if target.is_empty() || dir.is_empty() {
             bail!("{spec:?} names an empty host or directory");
         }
         if !dir.starts_with('/') {
             bail!("{dir:?} is not an absolute directory");
         }
-        let host = target.rsplit_once('@').map_or(target, |(_, host)| host).to_string();
+        let host = target
+            .rsplit_once('@')
+            .map_or(target, |(_, host)| host)
+            .to_string();
         Ok(RemoteSpec {
             index,
             target: target.to_string(),
@@ -215,7 +225,12 @@ impl RemoteSpec {
             pid = self.pid_path(),
             staged = self.staged_path(),
         );
-        vec!["ssh".to_string(), "-T".to_string(), self.target.clone(), remote]
+        vec![
+            "ssh".to_string(),
+            "-T".to_string(),
+            self.target.clone(),
+            remote,
+        ]
     }
 
     /// The ssh that kills the node by its pid file
@@ -225,7 +240,10 @@ impl RemoteSpec {
             "ssh".to_string(),
             "-T".to_string(),
             self.target.clone(),
-            format!("kill $(cat {pid}) 2>/dev/null; rm -f {pid}", pid = self.pid_path()),
+            format!(
+                "kill $(cat {pid}) 2>/dev/null; rm -f {pid}",
+                pid = self.pid_path()
+            ),
         ]
     }
 }
@@ -234,7 +252,11 @@ impl StagedNode {
     /// Where this node's clients connect: its host when remote, the loopback otherwise
     #[must_use]
     pub fn client_addr(&self) -> String {
-        format!("{}:{}", self.host.as_deref().unwrap_or("127.0.0.1"), self.client_port)
+        format!(
+            "{}:{}",
+            self.host.as_deref().unwrap_or("127.0.0.1"),
+            self.client_port
+        )
     }
 }
 
@@ -310,7 +332,14 @@ pub fn stage(base: &Conf, id: &str, overrides: &ConfOverrides, port: u16) -> Res
 /// * `port` - The client port the runner gave node zero
 /// * `remotes` - The nodes on other hosts
 /// * `driver` - The address remote nodes reach node zero at; required when any node is remote
-pub fn stage_with(base: &Conf, id: &str, overrides: &ConfOverrides, port: u16, remotes: &[RemoteSpec], driver: Option<&str>) -> Result<Staged> {
+pub fn stage_with(
+    base: &Conf,
+    id: &str,
+    overrides: &ConfOverrides,
+    port: u16,
+    remotes: &[RemoteSpec],
+    driver: Option<&str>,
+) -> Result<Staged> {
     // a placement needs a cluster block with peers in it
     let Some(cluster) = &overrides.cluster else {
         bail!("{id} stages a cluster without a cluster override");
@@ -318,7 +347,9 @@ pub fn stage_with(base: &Conf, id: &str, overrides: &ConfOverrides, port: u16, r
     let driver = match (remotes.is_empty(), driver) {
         (true, _) => None,
         (false, Some(driver)) => Some(driver.to_string()),
-        (false, None) => bail!("{id} places nodes on other hosts and needs --driver-address for them to reach node zero"),
+        (false, None) => bail!(
+            "{id} places nodes on other hosts and needs --driver-address for them to reach node zero"
+        ),
     };
     if cluster.peers.is_empty() {
         bail!("{id} stages a cluster with no peers, which the one node path serves");
@@ -346,15 +377,23 @@ pub fn stage_with(base: &Conf, id: &str, overrides: &ConfOverrides, port: u16, r
     // where each node is reached: its host when remote, the driver's address for node zero
     // when anything is remote, and the interface otherwise
     let host_of = |index: usize| -> String {
-        let remote = remotes.iter().find(|remote| usize::try_from(remote.index).ok() == Some(index));
+        let remote = remotes
+            .iter()
+            .find(|remote| usize::try_from(remote.index).ok() == Some(index));
         match (remote, index, &driver) {
             (Some(remote), _, _) => remote.host.clone(),
             (None, 0, Some(driver)) => driver.clone(),
             _ => interface.clone(),
         }
     };
-    if let Some(remote) = remotes.iter().find(|remote| usize::try_from(remote.index).map_or(true, |index| index >= nodes)) {
-        bail!("{id} places {nodes} nodes and --remote names node {}", remote.index);
+    if let Some(remote) = remotes
+        .iter()
+        .find(|remote| usize::try_from(remote.index).map_or(true, |index| index >= nodes))
+    {
+        bail!(
+            "{id} places {nodes} nodes and --remote names node {}",
+            remote.index
+        );
     }
     let placement: Vec<PlacedNodeFacts> = (0..placed_nodes)
         .map(|index| PlacedNodeFacts {
@@ -385,7 +424,11 @@ pub fn stage_with(base: &Conf, id: &str, overrides: &ConfOverrides, port: u16, r
             index: u32::try_from(index).context("too many nodes")?,
             node: ids[index].to_string(),
             cluster: cluster_id.to_string(),
-            client_port: if index == 0 { port } else { ports[index].client },
+            client_port: if index == 0 {
+                port
+            } else {
+                ports[index].client
+            },
             data_port: ports[index].data,
             control_port: ports[index].control,
             shards: counts[index],
@@ -393,7 +436,11 @@ pub fn stage_with(base: &Conf, id: &str, overrides: &ConfOverrides, port: u16, r
             exclude_cores: exclude.into_iter().collect(),
             control_cpu: claim.control.0,
             control_core: claim.control.1,
-            suffix: if index == 0 { String::new() } else { format!("-node{index}") },
+            suffix: if index == 0 {
+                String::new()
+            } else {
+                format!("-node{index}")
+            },
             placement: placement.clone(),
             replication_factor: cluster.replication_factor,
             seeds: if index == 0 {
@@ -402,7 +449,10 @@ pub fn stage_with(base: &Conf, id: &str, overrides: &ConfOverrides, port: u16, r
                 vec![format!("{}:{}", host_of(0), ports[0].control)]
             },
             spare: index >= placed_nodes,
-            host: remotes.iter().find(|remote| usize::try_from(remote.index).ok() == Some(index)).map(|remote| remote.host.clone()),
+            host: remotes
+                .iter()
+                .find(|remote| usize::try_from(remote.index).ok() == Some(index))
+                .map(|remote| remote.host.clone()),
             marker: None,
         };
         // the marker, written before the node can claim the directory for itself: node zero's
@@ -415,7 +465,8 @@ pub fn stage_with(base: &Conf, id: &str, overrides: &ConfOverrides, port: u16, r
         };
         let mut node = node;
         if node.host.is_some() {
-            node.marker = Some(serde_json::to_value(&marker).context("failed to serialize a marker")?);
+            node.marker =
+                Some(serde_json::to_value(&marker).context("failed to serialize a marker")?);
         } else {
             let dir = node_dir(base, &node);
             std::fs::create_dir_all(&dir)
@@ -459,7 +510,8 @@ pub fn apply(mut conf: Conf, node: &StagedNode) -> Result<Conf> {
     // the node's storage, beside the workload's own directory for a peer and that directory
     // itself for node zero
     let filesystem = &mut conf.storage.default.filesystem;
-    filesystem.latency_sensitive.path = with_suffix(&filesystem.latency_sensitive.path, &node.suffix);
+    filesystem.latency_sensitive.path =
+        with_suffix(&filesystem.latency_sensitive.path, &node.suffix);
     filesystem.throughput_sensitive.path =
         with_suffix(&filesystem.throughput_sensitive.path, &node.suffix);
     // its cores: a count, and every core another node took kept out of reach - on this
@@ -476,17 +528,31 @@ pub fn apply(mut conf: Conf, node: &StagedNode) -> Result<Conf> {
     if let Some(host) = &node.host {
         conf.networking.interface = "0.0.0.0".to_string();
         if let Some(marker) = &node.marker {
-            let dir = conf.storage.default.filesystem.latency_sensitive.path.clone();
+            let dir = conf
+                .storage
+                .default
+                .filesystem
+                .latency_sensitive
+                .path
+                .clone();
             // a directory left by an earlier capture names another identity: the driver wipes
             // its own nodes' directories between runs, and this is that wipe for a remote one
-            let stale = StorageMeta::read(&dir).ok().flatten().is_some_and(|found| found.node.to_string() != node.node);
+            let stale = StorageMeta::read(&dir)
+                .ok()
+                .flatten()
+                .is_some_and(|found| found.node.to_string() != node.node);
             if stale {
-                std::fs::remove_dir_all(&dir).with_context(|| format!("failed to wipe {}", dir.display()))?;
+                std::fs::remove_dir_all(&dir)
+                    .with_context(|| format!("failed to wipe {}", dir.display()))?;
             }
-            std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("failed to create {}", dir.display()))?;
             if !StorageMeta::path(&dir).exists() {
-                std::fs::write(StorageMeta::path(&dir), serde_json::to_vec_pretty(marker).context("failed to serialize a marker")?)
-                    .with_context(|| format!("failed to write a marker in {}", dir.display()))?;
+                std::fs::write(
+                    StorageMeta::path(&dir),
+                    serde_json::to_vec_pretty(marker).context("failed to serialize a marker")?,
+                )
+                .with_context(|| format!("failed to write a marker in {}", dir.display()))?;
             }
         }
         let block = conf.cluster.take().unwrap_or_default();
@@ -501,7 +567,11 @@ pub fn apply(mut conf: Conf, node: &StagedNode) -> Result<Conf> {
         block
             .bootstrap(node.index == 0)
             .seeds(node.seeds.clone())
-            .control_core(if node.host.is_some() { 0 } else { node.control_cpu })
+            .control_core(if node.host.is_some() {
+                0
+            } else {
+                node.control_cpu
+            })
             .replication_factor(node.replication_factor)
             .port(node.data_port)
             .control_port(node.control_port),
@@ -519,7 +589,10 @@ pub fn apply(mut conf: Conf, node: &StagedNode) -> Result<Conf> {
 ///
 /// * `staged` - The cluster
 /// * `pool` - Node zero's running pool
-pub fn initialize(staged: &Staged, pool: &shoal::ShoalPool<crate::workloads::schema::Bench>) -> Result<()> {
+pub fn initialize(
+    staged: &Staged,
+    pool: &shoal::ShoalPool<crate::workloads::schema::Bench>,
+) -> Result<()> {
     // a spare joins and is placed on by nothing
     let ids = staged
         .nodes
@@ -567,25 +640,38 @@ pub fn initialize_alone(pool: &shoal::ShoalPool<crate::workloads::schema::Bench>
 ///
 /// * `pool` - Node zero's running pool
 /// * `ids` - The nodes, in placement order
-fn initialize_nodes(pool: &shoal::ShoalPool<crate::workloads::schema::Bench>, ids: Vec<NodeId>) -> Result<()> {
+fn initialize_nodes(
+    pool: &shoal::ShoalPool<crate::workloads::schema::Bench>,
+    ids: Vec<NodeId>,
+) -> Result<()> {
     // every node up, which is every joiner admitted and observed, and the voter policy met as
     // far as the nodes allow with no membership change half way through
     let deadline = std::time::Instant::now() + ready::TIMEOUT;
     let version = loop {
-        let view = pool.topology().map_err(|error| anyhow::anyhow!("the control plane did not answer: {error}"))?;
-        let up = ids
-            .iter()
-            .all(|id| view.members.iter().any(|member| member.record.node == *id && member.health == shoal::server::control::types::MemberHealth::Up));
+        let view = pool
+            .topology()
+            .map_err(|error| anyhow::anyhow!("the control plane did not answer: {error}"))?;
+        let up = ids.iter().all(|id| {
+            view.members.iter().any(|member| {
+                member.record.node == *id
+                    && member.health == shoal::server::control::types::MemberHealth::Up
+            })
+        });
         let wanted = view
             .policy
             .as_ref()
-            .map_or(1, |policy| usize::try_from(policy.control_voters).unwrap_or(usize::MAX))
+            .map_or(1, |policy| {
+                usize::try_from(policy.control_voters).unwrap_or(usize::MAX)
+            })
             .min(ids.len());
         if up && !view.joint && view.voters.len() >= wanted {
             break view.version;
         }
         if std::time::Instant::now() > deadline {
-            bail!("not every node joined and was promoted within {:?}: {view:?}", ready::TIMEOUT);
+            bail!(
+                "not every node joined and was promoted within {:?}: {view:?}",
+                ready::TIMEOUT
+            );
         }
         std::thread::sleep(Duration::from_millis(50));
     };
@@ -603,7 +689,9 @@ fn initialize_nodes(pool: &shoal::ShoalPool<crate::workloads::schema::Bench>, id
             .map_err(|error| anyhow::anyhow!("the initialization was not answered: {error}"))?;
         match response.outcome {
             Ok(shoal::shared::protocol::admin::AdminOutcome::Applied { version })
-            | Ok(shoal::shared::protocol::admin::AdminOutcome::Repeated { version }) => break version,
+            | Ok(shoal::shared::protocol::admin::AdminOutcome::Repeated { version }) => {
+                break version;
+            }
             Err(error)
                 if error.code() == shoal::shared::protocol::error::ErrorCode::StaleVersion
                     && std::time::Instant::now() < deadline =>
@@ -618,7 +706,9 @@ fn initialize_nodes(pool: &shoal::ShoalPool<crate::workloads::schema::Bench>, id
     };
     // and node zero's shards holding the map before anything is measured against them
     loop {
-        let map = pool.map().map_err(|error| anyhow::anyhow!("the control plane did not answer: {error}"))?;
+        let map = pool
+            .map()
+            .map_err(|error| anyhow::anyhow!("the control plane did not answer: {error}"))?;
         if map.version >= placed && map.placement == ids {
             return Ok(());
         }
@@ -686,8 +776,11 @@ pub fn allocate(candidates: &[Candidate], shards: &[u16]) -> Result<Vec<Claim>> 
         .filter(|candidate| seen.insert(candidate.core))
         .copied();
     // every shard's core, plus a control core for every node but zero
-    let needed: usize =
-        shards.iter().map(|count| usize::from(*count)).sum::<usize>() + shards.len().saturating_sub(1);
+    let needed: usize = shards
+        .iter()
+        .map(|count| usize::from(*count))
+        .sum::<usize>()
+        + shards.len().saturating_sub(1);
     let mut claims = Vec::with_capacity(shards.len());
     for (index, count) in shards.iter().enumerate() {
         // node zero's control thread is cpu 0, outside the candidates; every other node's takes
@@ -819,7 +912,11 @@ impl PeerChild {
     pub fn kill(&mut self) -> Result<()> {
         if let Some(remote) = &self.remote {
             let command = remote.kill_command();
-            let _ = Command::new(&command[0]).args(&command[1..]).stdin(Stdio::null()).stdout(Stdio::null()).status();
+            let _ = Command::new(&command[0])
+                .args(&command[1..])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .status();
         }
         // kill, then wait, so the port block is released before anything is started on it
         self.child
@@ -837,7 +934,11 @@ impl Drop for PeerChild {
         // a child that already exited is reaped; one still serving is killed first
         if let Some(remote) = &self.remote {
             let command = remote.kill_command();
-            let _ = Command::new(&command[0]).args(&command[1..]).stdin(Stdio::null()).stdout(Stdio::null()).status();
+            let _ = Command::new(&command[0])
+                .args(&command[1..])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .status();
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -877,7 +978,13 @@ pub fn spawn_peers(staged: &Staged, id: &str, conf: &Path, scale: &str) -> Resul
 /// * `id` - The workload
 /// * `conf` - The base configuration file the child resolves from
 /// * `scale` - The scale it resolves at
-pub fn spawn_peer(staged: &Staged, index: u32, id: &str, conf: &Path, scale: &str) -> Result<PeerChild> {
+pub fn spawn_peer(
+    staged: &Staged,
+    index: u32,
+    id: &str,
+    conf: &Path,
+    scale: &str,
+) -> Result<PeerChild> {
     // the binary this process is, which carries the same workloads
     let exe = std::env::current_exe().context("failed to find this binary")?;
     let position = usize::try_from(index).unwrap_or(usize::MAX);
@@ -887,7 +994,11 @@ pub fn spawn_peer(staged: &Staged, index: u32, id: &str, conf: &Path, scale: &st
     };
     // a remote node: the staged file copied over, the node started over ssh from the binary
     // and configuration on that host ([F50](../../../../docs/src/features/cluster-operations.md))
-    let remote = staged.remotes.iter().find(|remote| remote.index == index).cloned();
+    let remote = staged
+        .remotes
+        .iter()
+        .find(|remote| remote.index == index)
+        .cloned();
     let mut child = match &remote {
         Some(remote) => {
             let copy = remote.copy_command(file);
@@ -895,9 +1006,17 @@ pub fn spawn_peer(staged: &Staged, index: u32, id: &str, conf: &Path, scale: &st
                 .args(&copy[1..])
                 .stdin(Stdio::null())
                 .status()
-                .with_context(|| format!("failed to copy node {index}'s staged file to {}", remote.target))?;
+                .with_context(|| {
+                    format!(
+                        "failed to copy node {index}'s staged file to {}",
+                        remote.target
+                    )
+                })?;
             if !copied.success() {
-                bail!("copying node {index}'s staged file to {} failed with {copied}", remote.target);
+                bail!(
+                    "copying node {index}'s staged file to {} failed with {copied}",
+                    remote.target
+                );
             }
             let serve = remote.serve_command(id, scale);
             Command::new(&serve[0])
@@ -906,7 +1025,9 @@ pub fn spawn_peer(staged: &Staged, index: u32, id: &str, conf: &Path, scale: &st
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
                 .spawn()
-                .with_context(|| format!("failed to start node {index} of {id} on {}", remote.target))?
+                .with_context(|| {
+                    format!("failed to start node {index} of {id} on {}", remote.target)
+                })?
         }
         None => Command::new(&exe)
             .arg("serve")
@@ -924,7 +1045,10 @@ pub fn spawn_peer(staged: &Staged, index: u32, id: &str, conf: &Path, scale: &st
             .spawn()
             .with_context(|| format!("failed to start node {} of {id}", node.index))?,
     };
-    let stdout = child.stdout.take().context("a child's stdout was not piped")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("a child's stdout was not piped")?;
     // a thread reads the child's stdout for the ready line, then keeps draining it so the
     // pipe can never fill and stall the child
     let (tx, rx) = mpsc::channel::<Option<String>>();
@@ -955,12 +1079,17 @@ pub fn spawn_peer(staged: &Staged, index: u32, id: &str, conf: &Path, scale: &st
             // the machine it reported, if the line carried one; a build that is not this one
             // refuses the run, since a capture over two builds measures neither
             peer.environment = environment_of(&line);
-            let theirs = peer.environment.as_ref().map(|environment| environment.build.clone());
+            let theirs = peer
+                .environment
+                .as_ref()
+                .map(|environment| environment.build.clone());
             if let Some(theirs) = theirs {
                 let ours = crate::fingerprint::node_environment(0, Path::new(".")).build;
                 if theirs != ours {
                     let _ = peer.kill();
-                    bail!("node {index} of {id} runs build {theirs} and this driver runs {ours}; a cluster is measured on one build");
+                    bail!(
+                        "node {index} of {id} runs build {theirs} and this driver runs {ours}; a cluster is measured on one build"
+                    );
                 }
             }
         }
@@ -1083,7 +1212,11 @@ pub fn wait_peers_placed(staged: &Staged, runtime: &tokio::runtime::Runtime) -> 
 /// * `staged` - The cluster
 /// * `index` - The peer, by placement position
 /// * `runtime` - The client runtime it is asked on
-pub fn wait_peer_placed(staged: &Staged, index: u32, runtime: &tokio::runtime::Runtime) -> Result<()> {
+pub fn wait_peer_placed(
+    staged: &Staged,
+    index: u32,
+    runtime: &tokio::runtime::Runtime,
+) -> Result<()> {
     let deadline = std::time::Instant::now() + ready::TIMEOUT;
     let position = usize::try_from(index).unwrap_or(usize::MAX);
     let Some(node) = staged.nodes.get(position) else {
@@ -1118,16 +1251,22 @@ pub fn wait_peer_placed(staged: &Staged, index: u32, runtime: &tokio::runtime::R
             .as_array()
             .is_some_and(|shards| {
                 shards.iter().all(|shard| {
-                    shard["groups"]
-                        .as_array()
-                        .is_some_and(|groups| groups.iter().all(|group| group["up"].as_bool().unwrap_or(false)))
+                    shard["groups"].as_array().is_some_and(|groups| {
+                        groups
+                            .iter()
+                            .all(|group| group["up"].as_bool().unwrap_or(false))
+                    })
                 })
             });
         if placed && (groups > 0 || node.spare) && all_up {
             return Ok(());
         }
         if std::time::Instant::now() > deadline {
-            bail!("node {} did not hold the placement within {:?}: {value}", node.index, ready::TIMEOUT);
+            bail!(
+                "node {} did not hold the placement within {:?}: {value}",
+                node.index,
+                ready::TIMEOUT
+            );
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -1155,13 +1294,17 @@ pub fn wait_peer_placed(staged: &Staged, index: u32, runtime: &tokio::runtime::R
 ///
 /// * `reports` - Every node's report
 #[must_use]
-pub fn integrity_sum(reports: &[(String, shoal::server::replication::NodeReplication)]) -> (u64, u64) {
-    reports.iter().fold((0, 0), |(partitions, bytes), (_, report)| {
-        (
-            partitions + report.integrity.scrub_partitions,
-            bytes + report.integrity.scrub_bytes,
-        )
-    })
+pub fn integrity_sum(
+    reports: &[(String, shoal::server::replication::NodeReplication)],
+) -> (u64, u64) {
+    reports
+        .iter()
+        .fold((0, 0), |(partitions, bytes), (_, report)| {
+            (
+                partitions + report.integrity.scrub_partitions,
+                bytes + report.integrity.scrub_bytes,
+            )
+        })
 }
 
 pub fn node_reports(
@@ -1176,7 +1319,9 @@ pub fn node_reports(
     let tick = conf
         .cluster
         .as_ref()
-        .map_or(Duration::from_millis(500), |cluster| cluster.transport.forward_timeout.duration() / 10)
+        .map_or(Duration::from_millis(500), |cluster| {
+            cluster.transport.forward_timeout.duration() / 10
+        })
         .max(Duration::from_millis(50));
     std::thread::sleep(tick * 2);
     let mut reports = Vec::with_capacity(staged.nodes.len());
@@ -1187,8 +1332,9 @@ pub fn node_reports(
             continue;
         }
         let report = if node.index == 0 {
-            pool.replication()
-                .map_err(|error| anyhow::anyhow!("node 0 did not report its replication: {error:?}"))?
+            pool.replication().map_err(|error| {
+                anyhow::anyhow!("node 0 did not report its replication: {error:?}")
+            })?
         } else {
             // the peer's own report, over its client endpoint
             let addr = node.client_addr();
@@ -1203,14 +1349,18 @@ pub fn node_reports(
                         kind: AdminKind::Replication,
                     })
                     .await
-                    .with_context(|| format!("node {} did not answer a replication read", node.index))?;
+                    .with_context(|| {
+                        format!("node {} did not answer a replication read", node.index)
+                    })?;
                 match response.outcome {
                     Ok(shoal::shared::protocol::admin::AdminOutcome::Read(value)) => Ok(value),
                     other => bail!("node {} refused a replication read: {other:?}", node.index),
                 }
             })?;
             serde_json::from_value::<shoal::server::replication::NodeReplication>(value)
-                .with_context(|| format!("node {}'s replication report did not parse", node.index))?
+                .with_context(|| {
+                    format!("node {}'s replication report did not parse", node.index)
+                })?
         };
         reports.push((node.node.clone(), report));
     }
@@ -1223,7 +1373,9 @@ pub fn node_reports(
 ///
 /// * `reports` - Every node's report, node zero first
 #[must_use]
-pub fn replica_facts(reports: &[(String, shoal::server::replication::NodeReplication)]) -> Vec<ReplicaFacts> {
+pub fn replica_facts(
+    reports: &[(String, shoal::server::replication::NodeReplication)],
+) -> Vec<ReplicaFacts> {
     reports
         .iter()
         .map(|(node, report)| ReplicaFacts {
@@ -1270,7 +1422,13 @@ pub fn read_facts(
         });
     }
     // a mean over what happened, and zero when nothing did
-    let mean_us = |total_ns: u64, count: u64| if count == 0 { 0 } else { total_ns / count / 1000 };
+    let mean_us = |total_ns: u64, count: u64| {
+        if count == 0 {
+            0
+        } else {
+            total_ns / count / 1000
+        }
+    };
     let waits = folded.barriers.max(folded.session_waits);
     ReadFacts {
         level: arm.level.clone(),
@@ -1446,7 +1604,10 @@ mod tests {
             stale_refusals: 0,
             stale_served: 0,
         };
-        let reports = vec![("n0".to_string(), busy), ("n1".to_string(), NodeReplication::default())];
+        let reports = vec![
+            ("n0".to_string(), busy),
+            ("n1".to_string(), NodeReplication::default()),
+        ];
         let arm = ReadArm {
             level: "quorum".to_string(),
             session: false,
@@ -1473,7 +1634,10 @@ mod tests {
         assert_eq!(facts.per_node.len(), 2);
         assert_eq!(facts.per_node[0].barrier_hops, 2);
         assert_eq!(facts.per_node[1].barriers, 0);
-        assert_eq!(facts.fanout.as_ref().map(|fanout| fanout.limit), Some(Some(3)));
+        assert_eq!(
+            facts.fanout.as_ref().map(|fanout| fanout.limit),
+            Some(Some(3))
+        );
         // the record round trips on the cluster facts, and a record without it still loads
         let mut cluster = ClusterFacts {
             nodes: 2,
@@ -1569,9 +1733,19 @@ mod tests {
             unknown,
             rejected,
         };
-        let replicas = vec![replica("n0", 0, 1, 0), replica("n1", 3, 0, 2), replica("n2", 1, 0, 0)];
+        let replicas = vec![
+            replica("n0", 0, 1, 0),
+            replica("n1", 3, 0, 2),
+            replica("n2", 1, 0, 0),
+        ];
         // the outcomes are the sum over every node, not the node the client wrote through
-        assert_eq!(outcome_facts(&replicas), OutcomeFacts { unknown: 1, rejected: 2 });
+        assert_eq!(
+            outcome_facts(&replicas),
+            OutcomeFacts {
+                unknown: 1,
+                rejected: 2
+            }
+        );
         let facts = ClusterFacts {
             nodes: 3,
             desired_rf: 3,
@@ -1614,8 +1788,14 @@ mod tests {
         let back: ClusterFacts = serde_json::from_str(&text).expect("parses");
         assert_eq!(back, facts);
         assert_eq!(back.replicas.len(), 3);
-        assert_eq!(back.replicas.iter().map(|replica| replica.lag_end).max(), Some(3));
-        assert_eq!(back.offered_load.as_ref().map(|load| load.outstanding), Some(32));
+        assert_eq!(
+            back.replicas.iter().map(|replica| replica.lag_end).max(),
+            Some(3)
+        );
+        assert_eq!(
+            back.offered_load.as_ref().map(|load| load.outstanding),
+            Some(32)
+        );
         // and a record written before F40 loads with none of it, rather than failing
         let mut older: serde_json::Value = serde_json::from_str(&text).expect("parses");
         let object = older.as_object_mut().expect("an object");
@@ -1633,7 +1813,7 @@ mod tests {
     /// launcher runs; a ready line with an environment yields it and one without yields none (F50)
     #[test]
     fn a_remote_spec_parses_and_builds_its_commands() {
-        use super::{RemoteSpec, environment_of, SERVE_READY_LINE};
+        use super::{RemoteSpec, SERVE_READY_LINE, environment_of};
         let spec = RemoteSpec::parse("2=bench@io:/srv/shoal").expect("parses");
         assert_eq!(spec.index, 2);
         assert_eq!(spec.target, "bench@io");
@@ -1641,21 +1821,62 @@ mod tests {
         assert_eq!(spec.dir, "/srv/shoal");
         let bare = RemoteSpec::parse("1=io:/srv/shoal").expect("parses without a user");
         assert_eq!((bare.target.as_str(), bare.host.as_str()), ("io", "io"));
-        assert!(RemoteSpec::parse("0=io:/srv").unwrap_err().to_string().contains("node 0"));
-        assert!(RemoteSpec::parse("1=io").unwrap_err().to_string().contains("directory"));
-        assert!(RemoteSpec::parse("1=io:srv").unwrap_err().to_string().contains("absolute"));
-        assert!(RemoteSpec::parse("x=io:/srv").unwrap_err().to_string().contains("node index"));
-        assert!(RemoteSpec::parse("1=:/srv").unwrap_err().to_string().contains("empty"));
+        assert!(
+            RemoteSpec::parse("0=io:/srv")
+                .unwrap_err()
+                .to_string()
+                .contains("node 0")
+        );
+        assert!(
+            RemoteSpec::parse("1=io")
+                .unwrap_err()
+                .to_string()
+                .contains("directory")
+        );
+        assert!(
+            RemoteSpec::parse("1=io:srv")
+                .unwrap_err()
+                .to_string()
+                .contains("absolute")
+        );
+        assert!(
+            RemoteSpec::parse("x=io:/srv")
+                .unwrap_err()
+                .to_string()
+                .contains("node index")
+        );
+        assert!(
+            RemoteSpec::parse("1=:/srv")
+                .unwrap_err()
+                .to_string()
+                .contains("empty")
+        );
         // the commands, as argv
         let copy = spec.copy_command(std::path::Path::new("/tmp/node2.json"));
-        assert_eq!(copy, vec!["scp", "-q", "/tmp/node2.json", "bench@io:/srv/shoal/node2.json"]);
+        assert_eq!(
+            copy,
+            vec![
+                "scp",
+                "-q",
+                "/tmp/node2.json",
+                "bench@io:/srv/shoal/node2.json"
+            ]
+        );
         let serve = spec.serve_command("macro/cluster/overhead/nodes/3", "smoke");
         assert_eq!(&serve[..3], &["ssh", "-T", "bench@io"]);
-        assert!(serve[3].contains("echo $$ > /srv/shoal/node2.pid"), "{}", serve[3]);
+        assert!(
+            serve[3].contains("echo $$ > /srv/shoal/node2.pid"),
+            "{}",
+            serve[3]
+        );
         assert!(serve[3].contains("exec /srv/shoal/shoal-workload serve --id macro/cluster/overhead/nodes/3 --conf /srv/shoal/shoal.yml --scale smoke --staged /srv/shoal/node2.json"), "{}", serve[3]);
         let kill = spec.kill_command();
         assert_eq!(&kill[..3], &["ssh", "-T", "bench@io"]);
-        assert!(kill[3].contains("kill $(cat /srv/shoal/node2.pid)"), "{}", kill[3]);
+        assert!(
+            kill[3].contains("kill $(cat /srv/shoal/node2.pid)"),
+            "{}",
+            kill[3]
+        );
         // the ready line, with and without a machine on it
         let environment = crate::model::macro_layer::NodeEnvFacts {
             index: 2,
@@ -1670,9 +1891,15 @@ mod tests {
             storage_fs: "xfs on /dev/nvme1n1".to_string(),
             build: "0123456789abcdef".to_string(),
         };
-        let line = format!("{SERVE_READY_LINE} 127.0.0.1:12000 {}", serde_json::to_string(&environment).expect("json"));
+        let line = format!(
+            "{SERVE_READY_LINE} 127.0.0.1:12000 {}",
+            serde_json::to_string(&environment).expect("json")
+        );
         assert_eq!(environment_of(&line), Some(environment));
-        assert_eq!(environment_of(&format!("{SERVE_READY_LINE} 127.0.0.1:12000")), None);
+        assert_eq!(
+            environment_of(&format!("{SERVE_READY_LINE} 127.0.0.1:12000")),
+            None
+        );
         assert_eq!(environment_of("something else"), None);
     }
 }

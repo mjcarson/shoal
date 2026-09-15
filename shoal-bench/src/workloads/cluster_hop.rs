@@ -117,8 +117,12 @@ impl Hop {
     pub fn summary(self) -> &'static str {
         match self {
             Hop::Same => "a read served by the shard that accepted it, on a two node placement",
-            Hop::Local => "a read that crosses the mesh to another shard of its node, three times in four",
-            Hop::Remote => "a read forwarded over the data lane to the other node and answered back",
+            Hop::Local => {
+                "a read that crosses the mesh to another shard of its node, three times in four"
+            }
+            Hop::Remote => {
+                "a read forwarded over the data lane to the other node and answered back"
+            }
         }
     }
 
@@ -368,7 +372,12 @@ impl Workload for ClusterHop {
             let queries = queries_for(REFERENCE_WIDTH.mean(), Self::scale_of(ctx));
             // the keys are found before the run, so the walk is outside the wall clock
             let keys = self.hop.keys(ctx.scale.rows);
-            let chooser = Keys::new(KeyDistribution::Uniform, ctx.scale.rows, ctx.seed, "hop/reads");
+            let chooser = Keys::new(
+                KeyDistribution::Uniform,
+                ctx.scale.rows,
+                ctx.seed,
+                "hop/reads",
+            );
             let table = Table::UnsortedMem;
             driver::drive_per_query(client, 1, queries, ctx.warmup, "get", move |index| {
                 // every read is a hit on a key the owner node holds
@@ -404,7 +413,10 @@ mod tests {
             // every arm places one peer of one shard, at replication factor one
             assert_eq!(cluster.peers, vec![PEER_SHARDS]);
             assert_eq!(cluster.replication_factor, 1);
-            assert_eq!(cluster.hop.as_ref().map(|hop| hop.target.as_str()), Some(arm.hop.target()));
+            assert_eq!(
+                cluster.hop.as_ref().map(|hop| hop.target.as_str()),
+                Some(arm.hop.target())
+            );
             // node zero's shard count is the one thing the server side moves
             assert_eq!(conf.shards, Some(usize::from(arm.hop.node_zero_shards())));
             let mut rest = conf.clone();
@@ -417,7 +429,11 @@ mod tests {
             assert_eq!(plan.scale.table_kind.as_deref(), Some("ephemeral_unsorted"));
         }
         // the same data at every arm
-        assert!(plans.windows(2).all(|pair| pair[0].scale.rows == pair[1].scale.rows));
+        assert!(
+            plans
+                .windows(2)
+                .all(|pair| pair[0].scale.rows == pair[1].scale.rows)
+        );
         assert_eq!(Hop::Same.node_zero_shards(), 1);
         assert_eq!(Hop::Remote.node_zero_shards(), 1);
         assert_eq!(Hop::Local.node_zero_shards(), LOCAL_SHARDS);
@@ -433,7 +449,12 @@ mod tests {
             for key in &keys {
                 let hash = super::MemItem::get_partition_key_from_values(key);
                 let (node, _shard) = Ring::owner_of(Ring::tablet_of(hash), &hop.shards_per_node());
-                assert_eq!(node, hop.owner_node(), "{} reads key {key} owned by node {node}", hop.id());
+                assert_eq!(
+                    node,
+                    hop.owner_node(),
+                    "{} reads key {key} owned by node {node}",
+                    hop.id()
+                );
             }
             // ascending and distinct, so a chooser's index names one row
             assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
@@ -452,7 +473,13 @@ mod tests {
         }
         assert_eq!(Hop::Same.expected_mix().same, 100);
         assert_eq!(Hop::Remote.expected_mix().remote, 100);
-        assert_eq!(Hop::Local.expected_mix().same, 100 / u32::from(LOCAL_SHARDS));
-        assert_eq!(Hop::Local.expected_mix().local, 100 - 100 / u32::from(LOCAL_SHARDS));
+        assert_eq!(
+            Hop::Local.expected_mix().same,
+            100 / u32::from(LOCAL_SHARDS)
+        );
+        assert_eq!(
+            Hop::Local.expected_mix().local,
+            100 - 100 / u32::from(LOCAL_SHARDS)
+        );
     }
 }

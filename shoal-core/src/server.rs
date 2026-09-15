@@ -20,12 +20,12 @@ pub mod conf;
 pub mod control;
 pub mod database;
 pub mod errors;
-pub mod hosting;
 pub mod export;
+pub mod hosting;
 pub mod map;
 pub mod messages;
-pub mod peer;
 pub mod meta;
+pub mod peer;
 pub mod recover;
 pub mod rehome;
 pub mod replication;
@@ -39,13 +39,15 @@ pub mod tls;
 pub mod trace;
 pub mod wal;
 
+pub use crate::shared::protocol::admin::{AdminKind, AdminRequest, AdminResponse};
 use comms::Comms;
 pub use conf::Conf;
-pub use control::{ControlHandle, ControlPlacement, DataReadiness, JoinStatus, ReadinessView, TopologyView};
-pub use map::TabletMap;
-pub use crate::shared::protocol::admin::{AdminKind, AdminRequest, AdminResponse};
+pub use control::{
+    ControlHandle, ControlPlacement, DataReadiness, JoinStatus, ReadinessView, TopologyView,
+};
 pub use errors::ServerError;
 pub use hosting::Hosting;
+pub use map::TabletMap;
 pub use meta::{ClusterIntent, DirectoryLock, Identity, PendingRehome, StorageMeta};
 pub use rehome::RehomeReport;
 pub use shard::ShardEvent;
@@ -192,7 +194,9 @@ where
                             conf::TableSettings::FS(settings) => settings.clone(),
                         })
                         .unwrap_or_else(|| conf.storage.default.filesystem.clone());
-                    if settings.latency_sensitive.durability == tables::storage::fs::conf::Durability::Async {
+                    if settings.latency_sensitive.durability
+                        == tables::storage::fs::conf::Durability::Async
+                    {
                         return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
                             "table {table} is configured with durability: Async on a cluster node; a durable \
                              quorum cannot be built from an acknowledgement that precedes fdatasync (C5)"
@@ -222,7 +226,13 @@ where
         }
         // hold the storage directory, so a second process on the same path is refused rather
         // than claiming the same identity
-        let root = conf.storage.default.filesystem.latency_sensitive.path.clone();
+        let root = conf
+            .storage
+            .default
+            .filesystem
+            .latency_sensitive
+            .path
+            .clone();
         let lock = DirectoryLock::acquire(&root)?;
         // check this storage directory was written by the shard count and in the mode we are
         // starting with, claiming it with a fresh identity if nothing has
@@ -247,7 +257,11 @@ where
         // the peer lanes' certificate and authority, read once here and swapped whole by a
         // reload, which every executor's handshakes read through the one holder
         // ([F50](../../docs/src/features/cluster-operations.md))
-        let peer_tls = crate::shared::tls::PeerTlsHolder::build(conf.cluster.as_ref().and_then(|cluster| cluster.tls.as_ref()))?;
+        let peer_tls = crate::shared::tls::PeerTlsHolder::build(
+            conf.cluster
+                .as_ref()
+                .and_then(|cluster| cluster.tls.as_ref()),
+        )?;
         // the control plane starts before the shards, so a group that cannot start refuses the
         // node before any shard has bound; and it is waited for here, so the shards start with
         // the map it holds rather than none
@@ -314,15 +328,14 @@ where
                     conf.networking.max_frame_bytes,
                     cluster.transport.wire_version,
                 );
-                let bind = format!(
-                    "{}:{}",
-                    conf.networking.interface, cluster.port
-                )
-                .parse()
-                .map_err(|_| ServerError::Shoal(ShoalError::InvalidConfig(format!(
-                    "the peer listener address {}:{} is not one",
-                    conf.networking.interface, cluster.port
-                ))))?;
+                let bind = format!("{}:{}", conf.networking.interface, cluster.port)
+                    .parse()
+                    .map_err(|_| {
+                        ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                            "the peer listener address {}:{} is not one",
+                            conf.networking.interface, cluster.port
+                        )))
+                    })?;
                 Some(peer::PeerSetup {
                     local,
                     dial: cluster.dial.clone(),
@@ -495,16 +508,18 @@ where
     ///
     /// Fails if there is no such shard or it is already gone.
     pub fn fail_shard(&self, shard: usize) -> Result<(), ServerError> {
-        let tx = self.shard_txs.get(shard).ok_or_else(|| {
-            ServerError::ShardFailed {
+        let tx = self
+            .shard_txs
+            .get(shard)
+            .ok_or_else(|| ServerError::ShardFailed {
                 shard,
                 error: "no such shard".to_string(),
-            }
-        })?;
-        tx.send(messages::ServerMsg::Fail).map_err(|_| ServerError::ShardFailed {
-            shard,
-            error: "the shard is already gone".to_string(),
-        })
+            })?;
+        tx.send(messages::ServerMsg::Fail)
+            .map_err(|_| ServerError::ShardFailed {
+                shard,
+                error: "the shard is already gone".to_string(),
+            })
     }
 
     /// Arm a crash point, so the next snapshot install on this node dies there, for a test
@@ -523,7 +538,9 @@ where
             replication::CrashPoint::None
         } else {
             replication::CrashPoint::from_name(point).ok_or_else(|| {
-                ServerError::Shoal(ShoalError::InvalidConfig(format!("{point} is not a crash point")))
+                ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                    "{point} is not a crash point"
+                )))
             })?
         };
         replication::crash_point::arm(point);
@@ -541,8 +558,13 @@ where
     /// # Errors
     ///
     /// Refuses a name that is not a phase a driver commits.
-    pub fn move_crash_at(&self, phase: &str, group: Option<crate::shared::identity::GroupId>) -> Result<(), ServerError> {
-        shard::migrate::crash_point::arm(phase, group).map_err(|msg| ServerError::Shoal(ShoalError::InvalidConfig(msg)))
+    pub fn move_crash_at(
+        &self,
+        phase: &str,
+        group: Option<crate::shared::identity::GroupId>,
+    ) -> Result<(), ServerError> {
+        shard::migrate::crash_point::arm(phase, group)
+            .map_err(|msg| ServerError::Shoal(ShoalError::InvalidConfig(msg)))
     }
 
     /// Override the free bytes this node reports and checks, for a capacity test
@@ -684,10 +706,15 @@ where
     ) -> Result<Vec<Result<serde_json::Value, String>>, ServerError> {
         // the shards asked: one, or all in order
         let targets: Vec<&kanal::Sender<messages::ServerMsg<S>>> = match shard {
-            Some(shard) => vec![self.shard_txs.get(shard).ok_or_else(|| ServerError::ShardFailed {
-                shard,
-                error: "no such shard".to_string(),
-            })?],
+            Some(shard) => {
+                vec![self
+                    .shard_txs
+                    .get(shard)
+                    .ok_or_else(|| ServerError::ShardFailed {
+                        shard,
+                        error: "no such shard".to_string(),
+                    })?]
+            }
             None => self.shard_txs.iter().collect(),
         };
         let mut answers = Vec::with_capacity(targets.len());
@@ -712,7 +739,11 @@ where
     ///
     /// * `node` - The peer to stream at
     /// * `bytes` - How many payload bytes to stream
-    pub fn probe_bulk(&self, node: shoal_proto::shared::identity::NodeId, bytes: u64) -> Result<(), ServerError> {
+    pub fn probe_bulk(
+        &self,
+        node: shoal_proto::shared::identity::NodeId,
+        bytes: u64,
+    ) -> Result<(), ServerError> {
         self.control_tx
             .send(messages::ServerMsg::BulkProbe { node, bytes })
             .map_err(|_| ServerError::Shoal(ShoalError::NotClustered))

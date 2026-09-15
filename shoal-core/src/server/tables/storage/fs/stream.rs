@@ -9,11 +9,11 @@ use std::rc::Rc;
 use tracing::instrument;
 
 use super::conf::Durability;
+use crate::server::database::ShoalDatabase;
 use crate::server::messages::ServerMsg;
 #[cfg(feature = "stage-profile")]
 use crate::server::stage_profile::{StageStamps, Stamp};
 use crate::server::ServerError;
-use crate::server::database::ShoalDatabase;
 
 /// The sentinel written in place of a size header at the start of a pad region
 ///
@@ -659,10 +659,7 @@ impl<D: ShoalDatabase> StreamWriter<D> {
     /// * `incoming` - The record about to be staged, or zero when nothing is waiting
     fn staging_target(&self, incoming: usize) -> usize {
         // the next buffer has to hold the widest record we know about, several times over
-        let widest = self
-            .widest_staged
-            .max(self.widest_flushed)
-            .max(incoming);
+        let widest = self.widest_staged.max(self.widest_flushed).max(incoming);
         staging_target(widest, self.default_buffer_size, self.max_buffer_size)
     }
 

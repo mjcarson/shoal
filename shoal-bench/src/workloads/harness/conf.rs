@@ -68,7 +68,13 @@ pub fn resolve(base: &Path, id: &str, overrides: &ConfOverrides, port: u16) -> R
     .with_context(|| format!("failed to load {}", base.display()))?;
     // give this workload its own storage, which is what keeps `StorageMeta::claim` out of the way
     let subdir = slug(id);
-    let latency = conf.storage.default.filesystem.latency_sensitive.path.join(&subdir);
+    let latency = conf
+        .storage
+        .default
+        .filesystem
+        .latency_sensitive
+        .path
+        .join(&subdir);
     let throughput = conf
         .storage
         .default
@@ -186,7 +192,9 @@ pub fn cluster_facts(
     let Some(cluster) = &conf.cluster else {
         return Ok(None);
     };
-    let view = pool.topology().map_err(|error| anyhow::anyhow!("{error}"))?;
+    let view = pool
+        .topology()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
     let placement = pool.control_placement();
     // the shards' physical cores, read the way the fixture reads them: from sysfs
     let mut data: Vec<usize> = pool
@@ -241,9 +249,9 @@ pub fn cluster_facts(
         background: None,
         migration: None,
         rebalance: None,
-            rehome: None,
-            backup: None,
-            environments: Vec::new(),
+        rehome: None,
+        backup: None,
+        environments: Vec::new(),
     }))
 }
 
@@ -268,11 +276,9 @@ fn write_certificate(conf: &Conf, subdir: &str) -> Result<TlsServerOptions> {
         .clone();
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create {} for {subdir}", dir.display()))?;
-    let issued = rcgen::generate_simple_self_signed(vec![
-        "localhost".to_owned(),
-        "127.0.0.1".to_owned(),
-    ])
-    .context("failed to generate a certificate")?;
+    let issued =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])
+            .context("failed to generate a certificate")?;
     let cert = dir.join("bench-cert.pem");
     let key = dir.join("bench-key.pem");
     std::fs::write(&cert, issued.cert.pem())
@@ -415,7 +421,12 @@ fn digest(conf: &Conf) -> String {
 pub fn storage_dirs(conf: &Conf) -> Vec<PathBuf> {
     // usually one directory named twice, so dedupe rather than wiping the same path twice
     let mut dirs = vec![
-        conf.storage.default.filesystem.latency_sensitive.path.clone(),
+        conf.storage
+            .default
+            .filesystem
+            .latency_sensitive
+            .path
+            .clone(),
         conf.storage
             .default
             .filesystem
@@ -491,8 +502,13 @@ mod tests {
         )
         .expect("failed to write a config");
         // resolve it the way a workload does
-        let conf = super::resolve(&path, "macro/insert_unsorted", &ConfOverrides::default(), 12000)
-            .expect("failed to resolve a configuration");
+        let conf = super::resolve(
+            &path,
+            "macro/insert_unsorted",
+            &ConfOverrides::default(),
+            12000,
+        )
+        .expect("failed to resolve a configuration");
         // both halves of the tracing section have to survive
         assert!(matches!(conf.tracing.level, TraceLevel::Debug));
         assert!(conf.tracing.remote.is_some());
@@ -507,10 +523,18 @@ mod tests {
         // a config with tracing turned all the way down and no sink, which is the quiet case
         let dir = tempfile::tempdir().expect("failed to make a temp dir");
         let quiet = dir.path().join("quiet.yml");
-        std::fs::write(&quiet, "resources:\n  memory: \"4Gi\"\ntracing:\n  level: Warn\n")
-            .expect("failed to write a config");
-        let conf = super::resolve(&quiet, "macro/insert_unsorted", &ConfOverrides::default(), 12000)
-            .expect("failed to resolve a configuration");
+        std::fs::write(
+            &quiet,
+            "resources:\n  memory: \"4Gi\"\ntracing:\n  level: Warn\n",
+        )
+        .expect("failed to write a config");
+        let conf = super::resolve(
+            &quiet,
+            "macro/insert_unsorted",
+            &ConfOverrides::default(),
+            12000,
+        )
+        .expect("failed to resolve a configuration");
         let facts = super::facts(&conf);
         assert_eq!(facts.trace_level.as_deref(), Some("warn"));
         assert_eq!(facts.trace_remote, Some(false));
@@ -521,8 +545,13 @@ mod tests {
             "resources:\n  memory: \"4Gi\"\ntracing:\n  level: Info\n  remote:\n    Otlp:\n      endpoint: \"http://127.0.0.1:4318/v1/traces\"\n",
         )
         .expect("failed to write a config");
-        let conf = super::resolve(&loud, "macro/insert_unsorted", &ConfOverrides::default(), 12000)
-            .expect("failed to resolve a configuration");
+        let conf = super::resolve(
+            &loud,
+            "macro/insert_unsorted",
+            &ConfOverrides::default(),
+            12000,
+        )
+        .expect("failed to resolve a configuration");
         let loud_facts = super::facts(&conf);
         assert_eq!(loud_facts.trace_level.as_deref(), Some("info"));
         assert_eq!(loud_facts.trace_remote, Some(true));

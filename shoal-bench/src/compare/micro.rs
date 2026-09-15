@@ -54,9 +54,7 @@ pub struct NoiseBand {
 impl Default for NoiseBand {
     /// The tiered band, which is what a comparison uses unless told otherwise
     fn default() -> Self {
-        NoiseBand {
-            override_pct: None,
-        }
+        NoiseBand { override_pct: None }
     }
 }
 

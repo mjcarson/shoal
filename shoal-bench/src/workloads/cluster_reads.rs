@@ -55,7 +55,7 @@ use shoal::shared::protocol::read::SessionToken;
 use shoal::shared::traits::PartitionKeySupport;
 
 use crate::model::macro_layer::{FanoutFacts, ScaleFacts, Timing};
-use crate::workloads::cluster_replication::{NODES, NODE_SHARDS, placement};
+use crate::workloads::cluster_replication::{NODE_SHARDS, NODES, placement};
 use crate::workloads::grid::{
     DEPTH, Payloads, REFERENCE_WIDTH, Table, frame_bytes, queries_for, rows_for, seed_batch,
 };
@@ -134,19 +134,30 @@ impl Arm {
     pub fn summary(self) -> &'static str {
         match self {
             Arm::One => "a One read of the local replica on the three node, factor three placement",
-            Arm::Barrier => "the same read at Quorum: a barrier from the group's leader, then the apply through it",
-            Arm::Session => "the same read at One past the token of the write that seeded its tablet",
-            Arm::FanoutGet => "a six key get split over three nodes at a factor of one, six rows back",
+            Arm::Barrier => {
+                "the same read at Quorum: a barrier from the group's leader, then the apply through it"
+            }
+            Arm::Session => {
+                "the same read at One past the token of the write that seeded its tablet"
+            }
+            Arm::FanoutGet => {
+                "a six key get split over three nodes at a factor of one, six rows back"
+            }
             Arm::FanoutFilter => "the same get with a filter half the rows pass, three rows back",
             Arm::FanoutLimit => "the same get capped at three rows",
-            Arm::FanoutEmpty => "a six key get over keys never written: every share empty, every slot covered",
+            Arm::FanoutEmpty => {
+                "a six key get over keys never written: every share empty, every slot covered"
+            }
         }
     }
 
     /// Whether this is one of the fanout arms
     #[must_use]
     pub fn is_fanout(self) -> bool {
-        matches!(self, Arm::FanoutGet | Arm::FanoutFilter | Arm::FanoutLimit | Arm::FanoutEmpty)
+        matches!(
+            self,
+            Arm::FanoutGet | Arm::FanoutFilter | Arm::FanoutLimit | Arm::FanoutEmpty
+        )
     }
 
     /// The level every read is sent at
@@ -374,8 +385,16 @@ impl Workload for ClusterReads {
                 let mut queries = shoal::shared::queries::Queries::<BenchClient>::default();
                 for _ in 0..batch.min(keys.len() - built) {
                     // a fanout row's bucket alternates, so exactly half pass the filter
-                    let bucket = if fanout { built as u64 % FANOUT_BUCKETS } else { filters.below(16) };
-                    queries.add_mut(table.insert(keys[built], bucket, payloads.at(width, built as u64)));
+                    let bucket = if fanout {
+                        built as u64 % FANOUT_BUCKETS
+                    } else {
+                        filters.below(16)
+                    };
+                    queries.add_mut(table.insert(
+                        keys[built],
+                        bucket,
+                        payloads.at(width, built as u64),
+                    ));
                     built += 1;
                 }
                 Some(Batch { queries })
@@ -400,7 +419,14 @@ impl Workload for ClusterReads {
             match self.arm {
                 // the fanout arms: one six key get at a time, in one of four shapes
                 Arm::FanoutGet | Arm::FanoutFilter | Arm::FanoutLimit | Arm::FanoutEmpty => {
-                    let per_node = Arm::keys_per_node(2, if self.arm == Arm::FanoutEmpty { EMPTY_FROM } else { 0 });
+                    let per_node = Arm::keys_per_node(
+                        2,
+                        if self.arm == Arm::FanoutEmpty {
+                            EMPTY_FROM
+                        } else {
+                            0
+                        },
+                    );
                     let arm = self.arm;
                     let queries = Self::fanout_queries(scale);
                     // an empty answer is what the empty arm reads, so it is not a failure there
@@ -408,26 +434,35 @@ impl Workload for ClusterReads {
                         get: arm != Arm::FanoutEmpty,
                         ..QuerySuceededOpts::default()
                     };
-                    driver::drive_per_query_with(client, 1, queries, ctx.warmup.min(queries / 4), "get", success, move |index| {
-                        let keys = Self::fanout_keys(&per_node, index);
-                        let mut get = ItemGet::new(keys);
-                        if arm == Arm::FanoutFilter {
-                            get = get.filters(ItemFilter {
-                                bucket: Some(vec![FANOUT_BUCKET]),
-                                ..ItemFilter::default()
-                            });
-                        }
-                        if arm == Arm::FanoutLimit {
-                            get = get.limit(FANOUT_LIMIT as usize);
-                        }
-                        (get, SendOptions::default())
-                    })
+                    driver::drive_per_query_with(
+                        client,
+                        1,
+                        queries,
+                        ctx.warmup.min(queries / 4),
+                        "get",
+                        success,
+                        move |index| {
+                            let keys = Self::fanout_keys(&per_node, index);
+                            let mut get = ItemGet::new(keys);
+                            if arm == Arm::FanoutFilter {
+                                get = get.filters(ItemFilter {
+                                    bucket: Some(vec![FANOUT_BUCKET]),
+                                    ..ItemFilter::default()
+                                });
+                            }
+                            if arm == Arm::FanoutLimit {
+                                get = get.limit(FANOUT_LIMIT as usize);
+                            }
+                            (get, SendOptions::default())
+                        },
+                    )
                     .await
                 }
                 // the read arms: one row at a time at the reference depth, each with its options
                 Arm::One | Arm::Barrier | Arm::Session => {
                     let queries = queries_for(REFERENCE_WIDTH.mean(), scale);
-                    let chooser = Keys::new(KeyDistribution::Uniform, ctx.scale.rows, ctx.seed, "reads");
+                    let chooser =
+                        Keys::new(KeyDistribution::Uniform, ctx.scale.rows, ctx.seed, "reads");
                     // the session arm carries, on every read, the token of the last write to
                     // the key's tablet: a write through node zero at the end of the seed, one
                     // per tablet the run reads, so every token names a committed lower bound
@@ -437,14 +472,22 @@ impl Workload for ClusterReads {
                         Arc::new(Vec::new())
                     };
                     let level = self.arm.level();
-                    driver::drive_per_query_with(client, DEPTH, queries, ctx.warmup, "get", QuerySuceededOpts::default(), move |index| {
-                        let key = chooser.at(index);
-                        let mut options = SendOptions::new().read(level);
-                        if let Some(Some(token)) = tokens.get(tablet_of(key)) {
-                            options = options.token(*token);
-                        }
-                        (table.get(key), options)
-                    })
+                    driver::drive_per_query_with(
+                        client,
+                        DEPTH,
+                        queries,
+                        ctx.warmup,
+                        "get",
+                        QuerySuceededOpts::default(),
+                        move |index| {
+                            let key = chooser.at(index);
+                            let mut options = SendOptions::new().read(level);
+                            if let Some(Some(token)) = tokens.get(tablet_of(key)) {
+                                options = options.token(*token);
+                            }
+                            (table.get(key), options)
+                        },
+                    )
                     .await
                 }
             }
@@ -497,7 +540,7 @@ async fn session_tokens(
 #[cfg(test)]
 mod tests {
     use super::{ARMS, Arm, FANOUT_KEYS, all};
-    use crate::workloads::cluster_replication::{NODES, NODE_SHARDS};
+    use crate::workloads::cluster_replication::{NODE_SHARDS, NODES};
     use crate::workloads::workload::{ServerNeed, Workload};
 
     /// Three read arms on the factor three placement at every read, four fanout arms on the
@@ -517,10 +560,15 @@ mod tests {
             assert_eq!(conf.shards, Some(usize::from(NODE_SHARDS)));
             assert_eq!(cluster.peers, vec![NODE_SHARDS; NODES - 1]);
             assert_eq!(cluster.replication_factor, arm.replication_factor());
-            cluster.feasibility().unwrap_or_else(|error| panic!("{}: {error}", workload.id()));
+            cluster
+                .feasibility()
+                .unwrap_or_else(|error| panic!("{}: {error}", workload.id()));
             // every arm reads and nothing else, on the persistent unsorted table
             assert_eq!(plan.scale.read_pct, Some(100));
-            assert_eq!(plan.scale.table_kind.as_deref(), Some("persistent_unsorted"));
+            assert_eq!(
+                plan.scale.table_kind.as_deref(),
+                Some("persistent_unsorted")
+            );
             let read = cluster.read.as_ref().expect("a read record");
             assert_eq!(read.level, arm.level().name());
             assert_eq!(read.session, *arm == Arm::Session);
@@ -529,23 +577,43 @@ mod tests {
         // the read arms at a factor of three and the reference depth, the fanout arms at one
         for arm in [Arm::One, Arm::Barrier, Arm::Session] {
             assert_eq!(arm.replication_factor(), 3);
-            assert_eq!(ClusterReads { arm }.plan(crate::workloads::harness::seed::Scale::Full).scale.concurrency, super::DEPTH);
+            assert_eq!(
+                ClusterReads { arm }
+                    .plan(crate::workloads::harness::seed::Scale::Full)
+                    .scale
+                    .concurrency,
+                super::DEPTH
+            );
         }
-        for arm in [Arm::FanoutGet, Arm::FanoutFilter, Arm::FanoutLimit, Arm::FanoutEmpty] {
+        for arm in [
+            Arm::FanoutGet,
+            Arm::FanoutFilter,
+            Arm::FanoutLimit,
+            Arm::FanoutEmpty,
+        ] {
             assert_eq!(arm.replication_factor(), 1);
             let fanout = arm.fanout().expect("a fanout record");
             assert_eq!(fanout.keys_per_query, FANOUT_KEYS);
             assert_eq!(fanout.nodes, 3);
         }
-        assert!(Arm::FanoutFilter.fanout().is_some_and(|fanout| fanout.filtered));
-        assert_eq!(Arm::FanoutLimit.fanout().and_then(|fanout| fanout.limit), Some(3));
+        assert!(
+            Arm::FanoutFilter
+                .fanout()
+                .is_some_and(|fanout| fanout.filtered)
+        );
+        assert_eq!(
+            Arm::FanoutLimit.fanout().and_then(|fanout| fanout.limit),
+            Some(3)
+        );
         assert!(Arm::FanoutEmpty.fanout().is_some_and(|fanout| fanout.empty));
         // the ids are registered in declaration order
         let ids: Vec<&str> = arms.iter().map(|arm| arm.id()).collect();
         let registered: Vec<&str> = crate::workload_ids::IDS
             .iter()
             .copied()
-            .filter(|id| id.starts_with("macro/cluster/reads/") || id.starts_with("macro/cluster/fanout/"))
+            .filter(|id| {
+                id.starts_with("macro/cluster/reads/") || id.starts_with("macro/cluster/fanout/")
+            })
             .collect();
         assert_eq!(ids, registered);
     }

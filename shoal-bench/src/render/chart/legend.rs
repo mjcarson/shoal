@@ -193,7 +193,12 @@ mod tests {
     /// * `width` - How long each name is
     fn entries(count: usize, width: usize) -> Vec<Entry> {
         (0..count)
-            .map(|index| Entry::new("x".repeat(width) + &index.to_string(), palette::series(index)))
+            .map(|index| {
+                Entry::new(
+                    "x".repeat(width) + &index.to_string(),
+                    palette::series(index),
+                )
+            })
             .collect()
     }
 
@@ -242,7 +247,12 @@ mod tests {
         })
         .expect("it draws");
         for entry in &entries {
-            assert_eq!(svg.matches(entry.name.as_str()).count(), 1, "{}", entry.name);
+            assert_eq!(
+                svg.matches(entry.name.as_str()).count(),
+                1,
+                "{}",
+                entry.name
+            );
         }
         // three swatches in three different sentinels
         for index in 0..3 {
@@ -272,7 +282,10 @@ mod tests {
                     last <= height(&entries) as i32,
                     "{count} names of {width} characters overflow their strip"
                 );
-                assert!(columns * rows as usize >= count, "an entry had nowhere to go");
+                assert!(
+                    columns * rows as usize >= count,
+                    "an entry had nowhere to go"
+                );
             }
         }
     }

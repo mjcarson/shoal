@@ -38,7 +38,9 @@ pub fn draw(points: &[Point], reference: Option<&Point>) -> Result<String> {
     let mut low = f64::MAX;
     let mut high = f64::MIN;
     for point in points {
-        let (from, to) = point.interval_ns.unwrap_or((point.median_ns, point.median_ns));
+        let (from, to) = point
+            .interval_ns
+            .unwrap_or((point.median_ns, point.median_ns));
         low = low.min(from);
         high = high.max(to);
     }

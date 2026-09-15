@@ -16,8 +16,8 @@ use super::handshake::Local;
 use super::link::{Frame, FrameKey, Link, LinkEvent, LinkView};
 use super::Lane;
 use crate::server::conf::cluster::{DialOverride, Transport};
-use crate::server::map::MapCell;
 use crate::server::database::ShoalDatabase;
+use crate::server::map::MapCell;
 use crate::server::messages::{PeerEvent, ServerMsg};
 use crate::server::stage_profile::{StageStamps, Stamp};
 use crate::shared::identity::NodeId;
@@ -170,12 +170,7 @@ impl<D: ShoalDatabase> Peers<D> {
     ///
     /// Hands the frame back with the bound it would have passed, or `None` for a peer that is
     /// not in the placement at all.
-    pub fn enqueue(
-        &mut self,
-        node: NodeId,
-        lane: Lane,
-        frame: Frame,
-    ) -> Result<(), Option<usize>> {
+    pub fn enqueue(&mut self, node: NodeId, lane: Lane, frame: Frame) -> Result<(), Option<usize>> {
         let Some(link) = self.link(node, lane) else {
             return Err(None);
         };
@@ -218,7 +213,10 @@ impl<D: ShoalDatabase> Peers<D> {
         &mut self,
         node: NodeId,
         unsent: &[FrameKey],
-    ) -> (Vec<((Uuid, u64), Pending<D>)>, Vec<((Uuid, u64), Pending<D>)>) {
+    ) -> (
+        Vec<((Uuid, u64), Pending<D>)>,
+        Vec<((Uuid, u64), Pending<D>)>,
+    ) {
         // which (bundle, index) were never written
         let mut never_written = std::collections::HashSet::new();
         for key in unsent {
@@ -238,7 +236,10 @@ impl<D: ShoalDatabase> Peers<D> {
         let mut refused = Vec::new();
         let mut unknown = Vec::new();
         for (bundle, index, owed_node) in owed {
-            let pending = self.pending.remove(&(bundle, index, owed_node)).expect("just listed");
+            let pending = self
+                .pending
+                .remove(&(bundle, index, owed_node))
+                .expect("just listed");
             if never_written.contains(&(bundle, index)) {
                 refused.push(((bundle, index), pending));
             } else {
@@ -277,8 +278,9 @@ impl<D: ShoalDatabase> Peers<D> {
     /// * `index` - The index the answer was owed under
     pub fn forget(&mut self, bundle: Uuid, index: u64) -> usize {
         let before = self.pending.len();
-        self.pending
-            .retain(|(owed_bundle, owed_index, _), _| !(*owed_bundle == bundle && *owed_index == index));
+        self.pending.retain(|(owed_bundle, owed_index, _), _| {
+            !(*owed_bundle == bundle && *owed_index == index)
+        });
         before - self.pending.len()
     }
 

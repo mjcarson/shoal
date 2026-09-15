@@ -271,8 +271,7 @@ async fn one_query_produces_one_trace() -> Result<(), TestError> {
     let parents: HashMap<u64, Option<u64>> =
         spans.iter().map(|span| (span.id, span.parent)).collect();
     // and every span's name, so a failure can say which trace is which
-    let names: HashMap<u64, &'static str> =
-        spans.iter().map(|span| (span.id, span.name)).collect();
+    let names: HashMap<u64, &'static str> = spans.iter().map(|span| (span.id, span.name)).collect();
     // group the query path's spans by the root each of them resolves to
     let mut roots: HashMap<u64, Vec<&'static str>> = HashMap::new();
     for span in spans.iter().filter(|span| QUERY_PATH.contains(&span.name)) {

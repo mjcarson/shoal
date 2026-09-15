@@ -46,8 +46,8 @@ use crate::server::peer::handshake::PeerAddr;
 use crate::server::peer::{self, Frame, FrameKey, Lane, LinkEvent, LinkView, Local};
 use crate::shared::identity::{GroupId, NodeId, ShardAddr};
 use crate::shared::protocol::peer::{
-    checksum, ReplicateKind, ReplicateRequestHead, ReplicateResponseHead, ReplicateStatus, SnapshotBegin,
-    SnapshotChunk, SnapshotEnd, SnapshotStatus, REPLICATE_RESPONSE_HEAD_LEN,
+    checksum, ReplicateKind, ReplicateRequestHead, ReplicateResponseHead, ReplicateStatus,
+    SnapshotBegin, SnapshotChunk, SnapshotEnd, SnapshotStatus, REPLICATE_RESPONSE_HEAD_LEN,
 };
 use crate::shared::protocol::MessageType;
 use crate::shared::tls::PeerTlsHolder;
@@ -151,7 +151,9 @@ impl ReplicationLink {
         if let Some(tx) = self.pending.borrow_mut().remove(&head.id) {
             let outcome = match head.status {
                 ReplicateStatus::Ok => Outcome::Ok(payload),
-                ReplicateStatus::Error => Outcome::Remote(String::from_utf8_lossy(&payload).into_owned()),
+                ReplicateStatus::Error => {
+                    Outcome::Remote(String::from_utf8_lossy(&payload).into_owned())
+                }
             };
             let _ = tx.send(outcome);
         }
@@ -173,7 +175,9 @@ impl ReplicationLink {
         for (id, tx) in self.pending.borrow_mut().drain() {
             // never written is never seen, which is the one thing a caller can act on at once
             let outcome = if unsent.contains(&FrameKey::Replication(id)) {
-                Outcome::NotSent(format!("the replication link went down before the request was written: {reason}"))
+                Outcome::NotSent(format!(
+                    "the replication link went down before the request was written: {reason}"
+                ))
             } else {
                 Outcome::Unreachable(reason.to_string())
             };
@@ -198,7 +202,8 @@ impl ReplicationLink {
         payload: Vec<u8>,
         deadline: Duration,
     ) -> Result<Vec<u8>, RpcFailure> {
-        self.rpc_at(kind, group, target_shard, None, payload, deadline).await
+        self.rpc_at(kind, group, target_shard, None, payload, deadline)
+            .await
     }
 
     /// The wire version this link negotiated, or the floor while it is not up
@@ -247,12 +252,28 @@ impl ReplicationLink {
         .encode();
         // a body encoded at a version of its own names it in the header; the rest go out at
         // whatever the link negotiated ([F48](../../../../docs/src/features/rolling-compatibility.md))
-        let parts = vec![bytes::Bytes::copy_from_slice(&head), bytes::Bytes::from(payload)];
+        let parts = vec![
+            bytes::Bytes::copy_from_slice(&head),
+            bytes::Bytes::from(payload),
+        ];
         let frame = match version {
-            Some(version) => Frame::at(version, MessageType::Replicate, parts, FrameKey::Replication(id), self.max_frame_bytes),
-            None => Frame::new(MessageType::Replicate, parts, FrameKey::Replication(id), self.max_frame_bytes),
+            Some(version) => Frame::at(
+                version,
+                MessageType::Replicate,
+                parts,
+                FrameKey::Replication(id),
+                self.max_frame_bytes,
+            ),
+            None => Frame::new(
+                MessageType::Replicate,
+                parts,
+                FrameKey::Replication(id),
+                self.max_frame_bytes,
+            ),
         }
-        .map_err(|error| RpcFailure::Unreachable(format!("framing a replication request: {error:?}")))?;
+        .map_err(|error| {
+            RpcFailure::Unreachable(format!("framing a replication request: {error:?}"))
+        })?;
         // a queue that is full or a link that is down is a definite non-answer
         if self.link.enqueue(frame).is_err() {
             self.pending.borrow_mut().remove(&id);
@@ -268,11 +289,15 @@ impl ReplicationLink {
             Ok(Ok(Outcome::Unreachable(msg))) => Err(RpcFailure::Unreachable(msg)),
             Ok(Err(_)) => {
                 self.pending.borrow_mut().remove(&id);
-                Err(RpcFailure::Unreachable("the replication rpc was cancelled".to_string()))
+                Err(RpcFailure::Unreachable(
+                    "the replication rpc was cancelled".to_string(),
+                ))
             }
             Err(_) => {
                 self.pending.borrow_mut().remove(&id);
-                Err(RpcFailure::Unreachable("the replication rpc timed out".to_string()))
+                Err(RpcFailure::Unreachable(
+                    "the replication rpc timed out".to_string(),
+                ))
             }
         }
     }
@@ -449,7 +474,12 @@ impl ShardNetwork {
     /// * `target` - The member
     #[must_use]
     pub fn bytes_sent_to(&self, group: GroupId, target: ShardAddr) -> u64 {
-        self.shared.stream_bytes.borrow().get(&(group, target)).copied().unwrap_or(0)
+        self.shared
+            .stream_bytes
+            .borrow()
+            .get(&(group, target))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The move a stream to a member of a group serves, if the map carries one
@@ -508,7 +538,10 @@ impl ShardNetwork {
                 on_event(event);
             },
         ));
-        self.shared.bulk.borrow_mut().insert(node, (id, link.clone()));
+        self.shared
+            .bulk
+            .borrow_mut()
+            .insert(node, (id, link.clone()));
         Some(link)
     }
 
@@ -526,7 +559,8 @@ impl ShardNetwork {
     pub async fn build(&self, group: GroupId) -> Result<Rc<BuiltSnapshot>, String> {
         let (tx, rx) = oneshot::channel();
         (self.shared.builder)(group, tx);
-        rx.await.unwrap_or_else(|_| Err("the shard loop dropped the snapshot request".to_string()))
+        rx.await
+            .unwrap_or_else(|_| Err("the shard loop dropped the snapshot request".to_string()))
     }
 
     /// Where to dial a member, from the map and this node's overrides
@@ -612,7 +646,12 @@ impl ShardNetwork {
     /// What every link looks like from outside
     #[must_use]
     pub fn views(&self) -> Vec<LinkView> {
-        self.shared.links.borrow().values().map(|link| link.view()).collect()
+        self.shared
+            .links
+            .borrow()
+            .values()
+            .map(|link| link.view())
+            .collect()
     }
 
     /// This node's identity
@@ -653,8 +692,14 @@ impl ShardPeer {
     /// # Errors
     ///
     /// Says whether the peer refused it or could not be reached.
-    pub async fn propose(&self, group: GroupId, payload: Vec<u8>, deadline: Duration) -> Result<Vec<u8>, RpcFailure> {
-        self.rpc(ReplicateKind::Propose, group, payload, deadline).await
+    pub async fn propose(
+        &self,
+        group: GroupId,
+        payload: Vec<u8>,
+        deadline: Duration,
+    ) -> Result<Vec<u8>, RpcFailure> {
+        self.rpc(ReplicateKind::Propose, group, payload, deadline)
+            .await
     }
 
     /// Ask the member, which should be the group's leader, for a read barrier
@@ -670,8 +715,13 @@ impl ShardPeer {
     /// # Errors
     ///
     /// Says whether the peer refused it or could not be reached.
-    pub async fn read_barrier(&self, group: GroupId, deadline: Duration) -> Result<Vec<u8>, RpcFailure> {
-        self.rpc(ReplicateKind::ReadBarrier, group, Vec::new(), deadline).await
+    pub async fn read_barrier(
+        &self,
+        group: GroupId,
+        deadline: Duration,
+    ) -> Result<Vec<u8>, RpcFailure> {
+        self.rpc(ReplicateKind::ReadBarrier, group, Vec::new(), deadline)
+            .await
     }
 
     /// Ask the member for its canonical digest of the group at a scrub
@@ -688,8 +738,19 @@ impl ShardPeer {
     /// # Errors
     ///
     /// Says whether the peer refused it or could not be reached.
-    pub async fn digest(&self, group: GroupId, op: uuid::Uuid, deadline: Duration) -> Result<Vec<u8>, RpcFailure> {
-        self.rpc(ReplicateKind::Digest, group, op.into_bytes().to_vec(), deadline).await
+    pub async fn digest(
+        &self,
+        group: GroupId,
+        op: uuid::Uuid,
+        deadline: Duration,
+    ) -> Result<Vec<u8>, RpcFailure> {
+        self.rpc(
+            ReplicateKind::Digest,
+            group,
+            op.into_bytes().to_vec(),
+            deadline,
+        )
+        .await
     }
 
     /// Tell the member what to do with its copy's quarantine
@@ -703,8 +764,14 @@ impl ShardPeer {
     /// # Errors
     ///
     /// Says whether the peer refused it or could not be reached.
-    pub async fn quarantine(&self, group: GroupId, action: Vec<u8>, deadline: Duration) -> Result<Vec<u8>, RpcFailure> {
-        self.rpc(ReplicateKind::Quarantine, group, action, deadline).await
+    pub async fn quarantine(
+        &self,
+        group: GroupId,
+        action: Vec<u8>,
+        deadline: Duration,
+    ) -> Result<Vec<u8>, RpcFailure> {
+        self.rpc(ReplicateKind::Quarantine, group, action, deadline)
+            .await
     }
 
     /// Ask the member how far it has applied a group's log
@@ -722,10 +789,20 @@ impl ShardPeer {
     /// # Errors
     ///
     /// Says whether the peer refused it or could not be reached.
-    pub async fn applied(&self, group: GroupId, op: uuid::Uuid, index: u64, deadline: Duration) -> Result<u64, RpcFailure> {
-        let payload = postcard::to_allocvec(&(op, index)).map_err(|error| RpcFailure::NotSent(error.to_string()))?;
-        let bytes = self.rpc(ReplicateKind::Applied, group, payload, deadline).await?;
-        postcard::from_bytes::<u64>(&bytes).map_err(|error| RpcFailure::Remote(format!("decoding an applied answer: {error}")))
+    pub async fn applied(
+        &self,
+        group: GroupId,
+        op: uuid::Uuid,
+        index: u64,
+        deadline: Duration,
+    ) -> Result<u64, RpcFailure> {
+        let payload = postcard::to_allocvec(&(op, index))
+            .map_err(|error| RpcFailure::NotSent(error.to_string()))?;
+        let bytes = self
+            .rpc(ReplicateKind::Applied, group, payload, deadline)
+            .await?;
+        postcard::from_bytes::<u64>(&bytes)
+            .map_err(|error| RpcFailure::Remote(format!("decoding an applied answer: {error}")))
     }
 
     /// Ask the member whether its retired copy of a group is gone
@@ -739,8 +816,11 @@ impl ShardPeer {
     ///
     /// Says whether the peer refused it or could not be reached.
     pub async fn retired(&self, group: GroupId, deadline: Duration) -> Result<bool, RpcFailure> {
-        let bytes = self.rpc(ReplicateKind::Retired, group, Vec::new(), deadline).await?;
-        postcard::from_bytes::<bool>(&bytes).map_err(|error| RpcFailure::Remote(format!("decoding a retired answer: {error}")))
+        let bytes = self
+            .rpc(ReplicateKind::Retired, group, Vec::new(), deadline)
+            .await?;
+        postcard::from_bytes::<bool>(&bytes)
+            .map_err(|error| RpcFailure::Remote(format!("decoding a retired answer: {error}")))
     }
 
     /// Turn a link error into openraft's retriable unreachable
@@ -778,24 +858,40 @@ impl ShardPeer {
         loop {
             let remaining = deadline.saturating_sub(started.elapsed());
             if remaining.is_zero() {
-                return Err(unreachable("the snapshot transfer ran out of time".to_string()));
+                return Err(unreachable(
+                    "the snapshot transfer ran out of time".to_string(),
+                ));
             }
             // the link may have come back at another version since the last attempt, so the
             // body is encoded at what it speaks now and the frame names that version
             // ([F48](../../../../docs/src/features/rolling-compatibility.md))
             let Some(link) = self.network.link(self.target.node) else {
-                return Err(unreachable(format!("{} is not a member the map knows", self.target.node)));
+                return Err(unreachable(format!(
+                    "{} is not a member the map knows",
+                    self.target.node
+                )));
             };
             let version = link.wire_version();
-            let payload = rpc
-                .encode_at(version)
-                .map_err(|error| unreachable(format!("encoding a snapshot rpc at wire version {version}: {error}")))?;
+            let payload = rpc.encode_at(version).map_err(|error| {
+                unreachable(format!(
+                    "encoding a snapshot rpc at wire version {version}: {error}"
+                ))
+            })?;
             let sent = link
-                .rpc_at(ReplicateKind::Snapshot, group, self.target.shard, Some(version), payload, remaining)
+                .rpc_at(
+                    ReplicateKind::Snapshot,
+                    group,
+                    self.target.shard,
+                    Some(version),
+                    payload,
+                    remaining,
+                )
                 .await;
             match sent {
                 Ok(answer) => return Ok(answer),
-                Err(RpcFailure::Remote(msg)) => return Err(unreachable(format!("the peer refused the rpc: {msg}"))),
+                Err(RpcFailure::Remote(msg)) => {
+                    return Err(unreachable(format!("the peer refused the rpc: {msg}")))
+                }
                 // a lost link: wait for it to come back and ask again
                 Err(RpcFailure::NotSent(_) | RpcFailure::Unreachable(_)) => {
                     glommio::timer::sleep(SNAPSHOT_RPC_RETRY).await;
@@ -825,7 +921,8 @@ impl ShardPeer {
                 self.target.node
             )));
         };
-        link.rpc(kind, group, self.target.shard, payload, deadline).await
+        link.rpc(kind, group, self.target.shard, payload, deadline)
+            .await
     }
 }
 
@@ -874,15 +971,24 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
         option: RPCOption,
     ) -> Result<AppendEntriesResponse<DataConfig>, RPCError<DataConfig>> {
         let payload = postcard::to_allocvec(&rpc).map_err(|error| {
-            ShardPeer::unreachable(RpcFailure::Unreachable(format!("encoding append_entries: {error}")))
+            ShardPeer::unreachable(RpcFailure::Unreachable(format!(
+                "encoding append_entries: {error}"
+            )))
         })?;
         let answer = self
             .peer
-            .rpc(ReplicateKind::AppendEntries, self.group, payload, option.hard_ttl())
+            .rpc(
+                ReplicateKind::AppendEntries,
+                self.group,
+                payload,
+                option.hard_ttl(),
+            )
             .await
             .map_err(ShardPeer::unreachable)?;
         postcard::from_bytes(&answer).map_err(|error| {
-            ShardPeer::unreachable(RpcFailure::Unreachable(format!("decoding append_entries: {error}")))
+            ShardPeer::unreachable(RpcFailure::Unreachable(format!(
+                "decoding append_entries: {error}"
+            )))
         })
     }
 
@@ -915,15 +1021,25 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
         req: openraft::raft::TransferLeaderRequest<DataConfig>,
         option: RPCOption,
     ) -> Result<openraft::raft::TransferLeaderResponse<DataConfig>, RPCError<DataConfig>> {
-        let payload = postcard::to_allocvec(&req)
-            .map_err(|error| ShardPeer::unreachable(RpcFailure::NotSent(format!("encoding transfer_leader: {error}"))))?;
+        let payload = postcard::to_allocvec(&req).map_err(|error| {
+            ShardPeer::unreachable(RpcFailure::NotSent(format!(
+                "encoding transfer_leader: {error}"
+            )))
+        })?;
         let answer = self
             .peer
-            .rpc(ReplicateKind::TransferLeader, self.group, payload, option.hard_ttl())
+            .rpc(
+                ReplicateKind::TransferLeader,
+                self.group,
+                payload,
+                option.hard_ttl(),
+            )
             .await
             .map_err(ShardPeer::unreachable)?;
         postcard::from_bytes(&answer).map_err(|error| {
-            ShardPeer::unreachable(RpcFailure::Unreachable(format!("decoding transfer_leader: {error}")))
+            ShardPeer::unreachable(RpcFailure::Unreachable(format!(
+                "decoding transfer_leader: {error}"
+            )))
         })
     }
 
@@ -948,16 +1064,24 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
         let held;
         let (path, manifest): (PathBuf, SnapshotManifest) = match snapshot.snapshot {
             SnapshotData::Own { .. } => {
-                held = network.build(group).await.map_err(|msg| unreachable(format!("cutting a snapshot: {msg}")))?;
+                held = network
+                    .build(group)
+                    .await
+                    .map_err(|msg| unreachable(format!("cutting a snapshot: {msg}")))?;
                 (held.path.clone(), held.manifest.clone())
             }
             SnapshotData::Received { path, manifest } => (path, manifest),
         };
-        match self.send_snapshot(vote, path, manifest, None, cancel, option.hard_ttl()).await {
+        match self
+            .send_snapshot(vote, path, manifest, None, cancel, option.hard_ttl())
+            .await
+        {
             Ok(response) => Ok(response),
             Err(SendError::Streaming(error)) => Err(error),
             // a stream that is not a repair's is never judged against a checkpoint
-            Err(SendError::Behind(checkpoint)) => Err(unreachable(format!("the receiver answered a checkpoint of {checkpoint} to a plain stream"))),
+            Err(SendError::Behind(checkpoint)) => Err(unreachable(format!(
+                "the receiver answered a checkpoint of {checkpoint} to a plain stream"
+            ))),
         }
     }
 }
@@ -1021,7 +1145,10 @@ impl GroupPeer {
     ) -> Result<RepairSend, String> {
         // nothing cancels a repair transfer but its deadline
         let never = std::future::pending::<ReplicationClosed>();
-        match self.send_snapshot(vote, path, manifest, Some(op), never, deadline).await {
+        match self
+            .send_snapshot(vote, path, manifest, Some(op), never, deadline)
+            .await
+        {
             Ok(_) => Ok(RepairSend::Installed),
             Err(SendError::Behind(checkpoint)) => Ok(RepairSend::Behind { checkpoint }),
             Err(SendError::Streaming(error)) => Err(error.to_string()),
@@ -1059,7 +1186,9 @@ impl GroupPeer {
         let stream = *Uuid::new_v4().as_bytes();
         // the move this stream serves, if the receiver is a move's destination
         // ([F45](../../../../docs/src/features/replica-migration.md))
-        let transition = network.transition_of(group, target).map_or([0u8; 16], |op| *op.as_bytes());
+        let transition = network
+            .transition_of(group, target)
+            .map_or([0u8; 16], |op| *op.as_bytes());
         let mut cancel = Box::pin(cancel);
         // begin: what is coming, and where the receiver wants it from, encoded at the version
         // the link speaks ([F48](../../../../docs/src/features/rolling-compatibility.md))
@@ -1069,7 +1198,12 @@ impl GroupPeer {
             manifest: manifest.clone(),
             repair,
         };
-        let answer: SnapshotAnswer = decode(&self.peer.snapshot_rpc_until(group, &begin, started, deadline).await?)?;
+        let answer: SnapshotAnswer = decode(
+            &self
+                .peer
+                .snapshot_rpc_until(group, &begin, started, deadline)
+                .await?,
+        )?;
         event!(Level::DEBUG, msg = "a snapshot stream begins", group = %group, %target, boundary = manifest.boundary.index, bytes = manifest.total, ?answer);
         let mut from = match answer {
             SnapshotAnswer::Resume { from } => from,
@@ -1081,7 +1215,9 @@ impl GroupPeer {
             SnapshotAnswer::Behind { checkpoint } => return Err(SendError::Behind(checkpoint)),
         };
         let Some(link) = network.bulk_link(target.node) else {
-            return Err(unreachable(format!("{} is not a member the map knows", target.node)).into());
+            return Err(
+                unreachable(format!("{} is not a member the map knows", target.node)).into(),
+            );
         };
         let max = network.shared.local.borrow().max_frame_bytes;
         let chunk_bytes = network.shared.replication.snapshot_chunk_bytes as u64;
@@ -1201,7 +1337,10 @@ impl GroupPeer {
             // a transfer that did not complete is aborted on the lane, so the receiver can
             // drop what it holds if it wants to; a cancellation is not counted as a failure,
             // and neither is a receiver saying the cut has to be taken again
-            if !matches!(error, SendError::Streaming(StreamingError::Closed(_)) | SendError::Behind(_)) {
+            if !matches!(
+                error,
+                SendError::Streaming(StreamingError::Closed(_)) | SendError::Behind(_)
+            ) {
                 network.shared.snapshots.borrow_mut().aborted += 1;
             }
             let end = SnapshotEnd {
@@ -1212,7 +1351,12 @@ impl GroupPeer {
                 resume_from: from,
             }
             .encode();
-            if let Ok(frame) = Frame::new(MessageType::SnapshotEnd, vec![bytes::Bytes::copy_from_slice(&end)], FrameKey::Bulk(0), max) {
+            if let Ok(frame) = Frame::new(
+                MessageType::SnapshotEnd,
+                vec![bytes::Bytes::copy_from_slice(&end)],
+                FrameKey::Bulk(0),
+                max,
+            ) {
                 let _ = link.enqueue(frame);
             }
         }
@@ -1256,7 +1400,9 @@ async fn enqueue_or_wait(
     loop {
         // a link its owner let go writes nothing: fail now, and the retry dials afresh
         if link.is_closed() {
-            return Err(unreachable("the bulk link closed under the transfer".to_string()));
+            return Err(unreachable(
+                "the bulk link closed under the transfer".to_string(),
+            ));
         }
         match link.enqueue(frame) {
             Ok(()) => return Ok(()),
@@ -1267,13 +1413,17 @@ async fn enqueue_or_wait(
             event!(Level::DEBUG, msg = "a snapshot chunk is waiting for room on the bulk queue", waited, link = ?link.view());
         }
         if started.elapsed() >= deadline {
-            return Err(unreachable("the snapshot transfer ran out of time waiting for the bulk queue".to_string()));
+            return Err(unreachable(
+                "the snapshot transfer ran out of time waiting for the bulk queue".to_string(),
+            ));
         }
         // wait for room, or for the cancellation
         let sleep = glommio::timer::sleep(SNAPSHOT_SHED_BACKOFF);
         futures::pin_mut!(sleep);
         match futures::future::select(cancel.as_mut(), sleep).await {
-            futures::future::Either::Left((closed, _)) => return Err(StreamingError::Closed(closed)),
+            futures::future::Either::Left((closed, _)) => {
+                return Err(StreamingError::Closed(closed))
+            }
             futures::future::Either::Right(_) => {}
         }
     }
@@ -1285,7 +1435,8 @@ async fn enqueue_or_wait(
 ///
 /// * `bytes` - The answer
 fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, StreamingError<DataConfig>> {
-    postcard::from_bytes(bytes).map_err(|error| unreachable(format!("decoding a snapshot answer: {error}")))
+    postcard::from_bytes(bytes)
+        .map_err(|error| unreachable(format!("decoding a snapshot answer: {error}")))
 }
 
 /// openraft's retriable failure for a snapshot transfer

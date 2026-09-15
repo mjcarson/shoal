@@ -43,7 +43,9 @@ use crate::server::database::ShoalDatabase;
 use crate::server::messages::ServerMsg;
 use crate::server::peer::ReplicateReply;
 use crate::server::replication::install::{crash_point, CrashPoint, Offer, Partial};
-use crate::server::replication::snapshot::{SnapshotAnswer, SnapshotManifest, SnapshotRpc, INSTALL_DIR};
+use crate::server::replication::snapshot::{
+    SnapshotAnswer, SnapshotManifest, SnapshotRpc, INSTALL_DIR,
+};
 use crate::server::replication::{SnapshotData, SnapshotStats};
 use crate::server::wal::write_atomic;
 use crate::server::ServerError;
@@ -151,7 +153,10 @@ pub(super) async fn scan_pending(
                 // the file is not what the marker says, or the marker says nothing: the old
                 // generation is whole, since the marker precedes every archive write, so the
                 // install is simply forgotten
-                let error = verified.err().map(|error| error.to_string()).unwrap_or_default();
+                let error = verified
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_default();
                 event!(Level::WARN, msg = "a snapshot install's file does not verify; dropping the marker", group = %group, error, decoded = manifest.is_some());
                 let _ = std::fs::remove_file(&marker);
                 let _ = std::fs::remove_file(&part);
@@ -291,19 +296,31 @@ where
         let rpc = match SnapshotRpc::decode_at(&payload, version) {
             Ok(rpc) => rpc,
             Err(error) => {
-                let _ = reply.try_send(ReplicateReply::error(head.id, format!("decoding a snapshot rpc at wire version {version}: {error}")));
+                let _ = reply.try_send(ReplicateReply::error(
+                    head.id,
+                    format!("decoding a snapshot rpc at wire version {version}: {error}"),
+                ));
                 return;
             }
         };
         let answer = match rpc {
             // a manifest from a version 4 link names no cluster: it is this cluster's, from
             // the sender it was heard from
-            SnapshotRpc::Begin { vote, stream, manifest, repair } => {
+            SnapshotRpc::Begin {
+                vote,
+                stream,
+                manifest,
+                repair,
+            } => {
                 let cluster = self.map.get().cluster.unwrap_or_default();
                 let manifest = manifest.filled(cluster, origin);
                 self.begin_snapshot(origin, group, stream, vote, manifest, repair)
             }
-            SnapshotRpc::End { stream, total, checksum } => {
+            SnapshotRpc::End {
+                stream,
+                total,
+                checksum,
+            } => {
                 self.end_snapshot(origin, group, stream, total, checksum, head, reply);
                 return;
             }
@@ -360,17 +377,26 @@ where
         }
         let (applied, installing, checkpoint, quarantined) = {
             let state = slot.state.borrow();
-            (state.applied_index(), state.installing, state.checkpoint_index(), state.quarantined.is_some())
+            (
+                state.applied_index(),
+                state.installing,
+                state.checkpoint_index(),
+                state.quarantined.is_some(),
+            )
         };
         if installing {
-            return SnapshotAnswer::Refused(format!("group {group} is installing a snapshot already"));
+            return SnapshotAnswer::Refused(format!(
+                "group {group} is installing a snapshot already"
+            ));
         }
         // a repair stream replaces a quarantined copy that is live and applied past the
         // boundary: judged against the checkpoint the group will be restarted from, which is
         // held where it is until the restart ([F44](../../../../docs/src/features/repair.md))
         if repair.is_some() {
             if !quarantined {
-                return SnapshotAnswer::Refused(format!("this shard's copy of group {group} is not quarantined"));
+                return SnapshotAnswer::Refused(format!(
+                    "this shard's copy of group {group} is not quarantined"
+                ));
             }
             if manifest.boundary.index <= checkpoint {
                 return SnapshotAnswer::Behind { checkpoint };
@@ -379,11 +405,16 @@ where
                 .conf
                 .cluster
                 .as_ref()
-                .map_or(Duration::from_secs(300), |cluster| cluster.replication.snapshot_timeout.duration());
+                .map_or(Duration::from_secs(300), |cluster| {
+                    cluster.replication.snapshot_timeout.duration()
+                });
             slot.state.borrow_mut().hold_checkpoint_until = Some(Instant::now() + hold);
         } else if manifest.boundary.index <= applied {
             // a boundary already applied here needs nothing: the sender moves on from it
-            let vote = slot.raft.as_ref().map(|raft| raft.metrics().borrow_watched().vote.clone());
+            let vote = slot
+                .raft
+                .as_ref()
+                .map(|raft| raft.metrics().borrow_watched().vote.clone());
             return match vote {
                 Some(vote) => SnapshotAnswer::Installed { vote },
                 None => SnapshotAnswer::Refused(format!("group {group} is still starting")),
@@ -409,11 +440,13 @@ where
             .iter()
             .filter(|(other, partial)| **other != group && partial.borrow().is_assembling())
             .count();
-        let (concurrent_streams, disk_reserve) = self
-            .conf
-            .cluster
-            .as_ref()
-            .map_or((u32::MAX, 0), |cluster| (cluster.migration.concurrent_streams, cluster.migration.disk_reserve));
+        let (concurrent_streams, disk_reserve) =
+            self.conf.cluster.as_ref().map_or((u32::MAX, 0), |cluster| {
+                (
+                    cluster.migration.concurrent_streams,
+                    cluster.migration.disk_reserve,
+                )
+            });
         if assembling >= concurrent_streams as usize {
             replication.installs.stats.refused_budget += 1;
             return SnapshotAnswer::Refused(format!(
@@ -454,7 +487,8 @@ where
             .insert(group, Rc::new(RefCell::new(partial)));
         // the most at once, for the budget test and the capture
         let assembling = u64::try_from(assembling + 1).unwrap_or(u64::MAX);
-        replication.installs.stats.peak_streams = replication.installs.stats.peak_streams.max(assembling);
+        replication.installs.stats.peak_streams =
+            replication.installs.stats.peak_streams.max(assembling);
         SnapshotAnswer::Resume { from: 0 }
     }
 
@@ -466,7 +500,13 @@ where
     /// * `stream` - The stream
     /// * `offset` - Where the bytes go
     /// * `bytes` - The bytes
-    pub(super) fn handle_snapshot_bytes(&mut self, node: NodeId, stream: [u8; 16], offset: u64, bytes: Vec<u8>) {
+    pub(super) fn handle_snapshot_bytes(
+        &mut self,
+        node: NodeId,
+        stream: [u8; 16],
+        offset: u64,
+        bytes: Vec<u8>,
+    ) {
         let Some(replication) = self.replication.as_mut() else {
             return;
         };
@@ -544,14 +584,21 @@ where
         reply: kanal::AsyncSender<ReplicateReply>,
     ) {
         let Some(replication) = self.replication.as_ref() else {
-            let _ = reply.try_send(ReplicateReply::error(head.id, "this node hosts no tablet groups"));
+            let _ = reply.try_send(ReplicateReply::error(
+                head.id,
+                "this node hosts no tablet groups",
+            ));
             return;
         };
         let (partial, raft, path, marker_dir, marker_name) = {
             let Some(partial) = replication.installs.partials.get(&group).cloned() else {
                 // a stream installed already, whose end is asked again because its answer
                 // was lost with the link, is installed; anything else is nothing
-                let installed = replication.installs.installed.get(&group).is_some_and(|last| *last == stream);
+                let installed = replication
+                    .installs
+                    .installed
+                    .get(&group)
+                    .is_some_and(|last| *last == stream);
                 let vote = replication
                     .groups
                     .get(&group)
@@ -559,12 +606,17 @@ where
                     .map(|raft| raft.metrics().borrow_watched().vote.clone());
                 let answer = match (installed, vote) {
                     (true, Some(vote)) => SnapshotAnswer::Installed { vote },
-                    _ => SnapshotAnswer::Refused(format!("no stream of group {group} is being assembled")),
+                    _ => SnapshotAnswer::Refused(format!(
+                        "no stream of group {group} is being assembled"
+                    )),
                 };
                 let _ = reply.try_send(encode_answer(head.id, &answer));
                 return;
             };
-            let raft = replication.groups.get(&group).and_then(|slot| slot.raft.clone());
+            let raft = replication
+                .groups
+                .get(&group)
+                .and_then(|slot| slot.raft.clone());
             (
                 partial,
                 raft,
@@ -574,19 +626,29 @@ where
             )
         };
         let Some(raft) = raft else {
-            let _ = reply.try_send(encode_answer(head.id, &SnapshotAnswer::Refused(format!("group {group} is still starting"))));
+            let _ = reply.try_send(encode_answer(
+                head.id,
+                &SnapshotAnswer::Refused(format!("group {group} is still starting")),
+            ));
             return;
         };
         {
             let partial = partial.borrow();
             if partial.stream != stream || partial.from != origin {
-                let _ = reply.try_send(encode_answer(head.id, &SnapshotAnswer::Refused("the end names a stream that is not being assembled".to_string())));
+                let _ = reply.try_send(encode_answer(
+                    head.id,
+                    &SnapshotAnswer::Refused(
+                        "the end names a stream that is not being assembled".to_string(),
+                    ),
+                ));
                 return;
             }
             if partial.manifest.total != total || partial.manifest.checksum != checksum {
                 let _ = reply.try_send(encode_answer(
                     head.id,
-                    &SnapshotAnswer::Refused("the end does not describe the stream its begin announced".to_string()),
+                    &SnapshotAnswer::Refused(
+                        "the end does not describe the stream its begin announced".to_string(),
+                    ),
                 ));
                 return;
             }
@@ -614,10 +676,21 @@ where
                     )
                 };
                 if let Some(failed) = failed {
-                    break SnapshotAnswer::Refused(format!("the partial could not be written: {failed}"));
+                    break SnapshotAnswer::Refused(format!(
+                        "the partial could not be written: {failed}"
+                    ));
                 }
                 if complete && !writing {
-                    break install_received(&partial, &raft, &path, &marker_dir, &marker_name, vote.clone(), &loop_tx).await;
+                    break install_received(
+                        &partial,
+                        &raft,
+                        &path,
+                        &marker_dir,
+                        &marker_name,
+                        vote.clone(),
+                        &loop_tx,
+                    )
+                    .await;
                 }
                 if next != last_next {
                     last_next = next;
@@ -653,7 +726,10 @@ where
     /// # Arguments
     ///
     /// * `query` - The read
-    pub(super) fn installing_group(&self, query: &<D::ClientType as QuerySupport>::QueryKinds) -> Option<GroupId> {
+    pub(super) fn installing_group(
+        &self,
+        query: &<D::ClientType as QuerySupport>::QueryKinds,
+    ) -> Option<GroupId> {
         use crate::shared::traits::ShoalQuerySupport as _;
         let replication = self.replication.as_ref()?;
         let table = D::ClientType::query_table_name(query).table_id();
@@ -664,7 +740,11 @@ where
             let Some(group) = replication.tablets.get(&(table, tablet)) else {
                 continue;
             };
-            if replication.groups.get(group).is_some_and(|slot| slot.state.borrow().installing) {
+            if replication
+                .groups
+                .get(group)
+                .is_some_and(|slot| slot.state.borrow().installing)
+            {
                 return Some(*group);
             }
         }
@@ -703,7 +783,9 @@ where
             return Ok(());
         };
         if replication.active_installs.contains_key(&group) {
-            let _ = done.send(Err(format!("group {group} is installing a snapshot already")));
+            let _ = done.send(Err(format!(
+                "group {group} is installing a snapshot already"
+            )));
             return Ok(());
         }
         // a redo is one whose file the open found under a marker; a repair's is one the
@@ -711,7 +793,11 @@ where
         let (redone, repair) = {
             let state = slot.state.borrow();
             (
-                state.pending_install.as_ref().is_some_and(|(pending, _)| *pending == path) && !state.repair_pending,
+                state
+                    .pending_install
+                    .as_ref()
+                    .is_some_and(|(pending, _)| *pending == path)
+                    && !state.repair_pending,
                 state.repair_pending,
             )
         };
@@ -749,10 +835,18 @@ where
             .map(|(_, sink)| sink);
         match sink {
             Some(sink) => {
-                sink.send(crate::storage::CompactionJob::Install { group, tablets, path }).await?;
+                sink.send(crate::storage::CompactionJob::Install {
+                    group,
+                    tablets,
+                    path,
+                })
+                .await?;
             }
             None => {
-                self.fail_install(group, format!("{table} has no compactor to install a snapshot with"));
+                self.fail_install(
+                    group,
+                    format!("{table} has no compactor to install a snapshot with"),
+                );
             }
         }
         Ok(())
@@ -767,7 +861,16 @@ where
     pub(super) async fn handle_snapshot_records(
         &mut self,
         group: GroupId,
-        outcome: Result<(Vec<(u64, Vec<u8>)>, Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>), String>,
+        outcome: Result<
+            (
+                Vec<(u64, Vec<u8>)>,
+                Vec<(
+                    crate::shared::protocol::peer::RequestId,
+                    crate::server::replication::Remembered,
+                )>,
+            ),
+            String,
+        >,
     ) -> Result<(), ServerError> {
         let (table, tablets) = {
             let Some(replication) = self.replication.as_ref() else {
@@ -792,7 +895,8 @@ where
             self.fail_install(group, format!("installing the records: {error:?}"));
             return Ok(());
         }
-        self.handle_snapshot_installed(table, group, Ok(trailer)).await
+        self.handle_snapshot_installed(table, group, Ok(trailer))
+            .await
     }
 
     /// Take the archives' word that the records are in, move the group's state, and checkpoint
@@ -811,7 +915,13 @@ where
         &mut self,
         table: D::TableNames,
         group: GroupId,
-        outcome: Result<Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>, String>,
+        outcome: Result<
+            Vec<(
+                crate::shared::protocol::peer::RequestId,
+                crate::server::replication::Remembered,
+            )>,
+            String,
+        >,
     ) -> Result<(), ServerError> {
         let trailer = match outcome {
             Ok(trailer) => trailer,
@@ -824,7 +934,10 @@ where
             let Some(replication) = self.replication.as_ref() else {
                 return Ok(());
             };
-            let (Some(slot), Some(active)) = (replication.groups.get(&group), replication.active_installs.get(&group)) else {
+            let (Some(slot), Some(active)) = (
+                replication.groups.get(&group),
+                replication.active_installs.get(&group),
+            ) else {
                 return Ok(());
             };
             (
@@ -844,7 +957,8 @@ where
         {
             let mut state = slot.state.borrow_mut();
             // what the snapshot covered, for a catch-up split by path
-            replication.snapshots.entries_installed += boundary.index.saturating_sub(state.applied_index());
+            replication.snapshots.entries_installed +=
+                boundary.index.saturating_sub(state.applied_index());
             state.applied = Some(boundary.clone());
             state.checkpoint = Some(boundary.clone());
             state.membership = membership.clone();
@@ -894,7 +1008,11 @@ where
         let carried: Vec<GroupId> = replication
             .active_installs
             .iter()
-            .filter(|(_, active)| active.checkpoint_version.is_some_and(|wanted| wanted <= version))
+            .filter(|(_, active)| {
+                active
+                    .checkpoint_version
+                    .is_some_and(|wanted| wanted <= version)
+            })
             .map(|(group, _)| *group)
             .collect();
         for group in carried {
@@ -1024,7 +1142,13 @@ where
 /// * `path` - The file
 async fn read_records(
     path: &std::path::Path,
-) -> std::io::Result<(Vec<(u64, Vec<u8>)>, Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>)> {
+) -> std::io::Result<(
+    Vec<(u64, Vec<u8>)>,
+    Vec<(
+        crate::shared::protocol::peer::RequestId,
+        crate::server::replication::Remembered,
+    )>,
+)> {
     let mut reader = crate::server::replication::snapshot::SnapshotReader::open(path).await?;
     let mut records = Vec::with_capacity(usize::try_from(reader.header().records).unwrap_or(0));
     while let Some(record) = reader.next_record().await? {
@@ -1048,7 +1172,13 @@ async fn read_records(
 /// * `loop_tx` - The loop, which restarts the group for a repair stream
 async fn install_received<D: ShoalDatabase>(
     partial: &Rc<RefCell<Partial>>,
-    raft: &openraft::Raft<crate::server::replication::DataConfig, impl openraft::storage::RaftStateMachine<crate::server::replication::DataConfig, SnapshotData = SnapshotData>>,
+    raft: &openraft::Raft<
+        crate::server::replication::DataConfig,
+        impl openraft::storage::RaftStateMachine<
+            crate::server::replication::DataConfig,
+            SnapshotData = SnapshotData,
+        >,
+    >,
     path: &std::path::Path,
     marker_dir: &std::path::Path,
     marker_name: &str,
@@ -1057,14 +1187,21 @@ async fn install_received<D: ShoalDatabase>(
 ) -> SnapshotAnswer {
     let (manifest, checksum, group, repair) = {
         let partial = partial.borrow();
-        (partial.manifest.clone(), partial.assembler.checksum(), partial.manifest.group, partial.repair)
+        (
+            partial.manifest.clone(),
+            partial.assembler.checksum(),
+            partial.manifest.group,
+            partial.repair,
+        )
     };
     if checksum != manifest.checksum {
         partial.borrow_mut().failed = Some(format!(
             "the assembled file hashes to {checksum:016x} and the manifest says {:016x}",
             manifest.checksum
         ));
-        return SnapshotAnswer::Refused("the assembled file does not hash to what the manifest says".to_string());
+        return SnapshotAnswer::Refused(
+            "the assembled file does not hash to what the manifest says".to_string(),
+        );
     }
     // the file durable, then the marker that makes the install redoable
     let synced = async {
@@ -1081,10 +1218,14 @@ async fn install_received<D: ShoalDatabase>(
     crash_point::hit(CrashPoint::BeforePending);
     let marker = match postcard::to_allocvec(&manifest) {
         Ok(marker) => marker,
-        Err(error) => return SnapshotAnswer::Refused(format!("encoding the pending marker: {error}")),
+        Err(error) => {
+            return SnapshotAnswer::Refused(format!("encoding the pending marker: {error}"))
+        }
     };
     if let Err(error) = write_atomic(marker_dir, marker_name, marker).await {
-        return SnapshotAnswer::Refused(format!("the pending marker could not be written: {error}"));
+        return SnapshotAnswer::Refused(format!(
+            "the pending marker could not be written: {error}"
+        ));
     }
     crash_point::hit(CrashPoint::PendingWritten);
     event!(Level::INFO, msg = "a snapshot was received whole; installing", group = %group, boundary = manifest.boundary.index, bytes = manifest.total, repair = ?repair);
@@ -1108,7 +1249,9 @@ async fn install_received<D: ShoalDatabase>(
         }
         return match done.await {
             Ok(Ok(())) => SnapshotAnswer::Installed { vote },
-            Ok(Err(error)) => SnapshotAnswer::Refused(format!("the group could not be restarted for the install: {error}")),
+            Ok(Err(error)) => SnapshotAnswer::Refused(format!(
+                "the group could not be restarted for the install: {error}"
+            )),
             Err(_) => SnapshotAnswer::Refused("the shard loop dropped the restart".to_string()),
         };
     }
@@ -1125,8 +1268,12 @@ async fn install_received<D: ShoalDatabase>(
         },
     };
     match raft.install_full_snapshot(vote, snapshot).await {
-        Ok(response) => SnapshotAnswer::Installed { vote: response.vote },
-        Err(error) => SnapshotAnswer::Refused(format!("the snapshot could not be installed: {error}")),
+        Ok(response) => SnapshotAnswer::Installed {
+            vote: response.vote,
+        },
+        Err(error) => {
+            SnapshotAnswer::Refused(format!("the snapshot could not be installed: {error}"))
+        }
     }
 }
 
@@ -1187,7 +1334,8 @@ async fn write_partial(partial: Rc<RefCell<Partial>>, path: PathBuf) {
         match handle.write_at(bytes, offset).await {
             Ok(written) if written == len => {}
             Ok(written) => {
-                partial.borrow_mut().failed = Some(format!("a short write of {written} of {len} bytes"));
+                partial.borrow_mut().failed =
+                    Some(format!("a short write of {written} of {len} bytes"));
                 break;
             }
             Err(error) => {

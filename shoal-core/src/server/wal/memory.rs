@@ -128,8 +128,16 @@ impl MemoryWal {
             return Vec::new();
         };
         match end {
-            Some(end) => log.entries.range(start..=end).map(|(_, entry)| entry.clone()).collect(),
-            None => log.entries.range(start..).map(|(_, entry)| entry.clone()).collect(),
+            Some(end) => log
+                .entries
+                .range(start..=end)
+                .map(|(_, entry)| entry.clone())
+                .collect(),
+            None => log
+                .entries
+                .range(start..)
+                .map(|(_, entry)| entry.clone())
+                .collect(),
         }
     }
 
@@ -139,7 +147,11 @@ impl MemoryWal {
     ///
     /// * `group` - The group
     pub(super) fn vote(&self, group: GroupId) -> Option<Vote> {
-        self.inner.borrow().groups.get(&group).and_then(|log| log.vote.clone())
+        self.inner
+            .borrow()
+            .groups
+            .get(&group)
+            .and_then(|log| log.vote.clone())
     }
 
     /// Record a group's vote
@@ -149,7 +161,12 @@ impl MemoryWal {
     /// * `group` - The group
     /// * `vote` - The vote
     pub(super) fn save_vote(&self, group: GroupId, vote: Vote) {
-        self.inner.borrow_mut().groups.entry(group).or_default().vote = Some(vote);
+        self.inner
+            .borrow_mut()
+            .groups
+            .entry(group)
+            .or_default()
+            .vote = Some(vote);
     }
 
     /// The committed log id a group last recorded
@@ -158,7 +175,11 @@ impl MemoryWal {
     ///
     /// * `group` - The group
     pub(super) fn committed(&self, group: GroupId) -> Option<WalLogId> {
-        self.inner.borrow().groups.get(&group).and_then(|log| log.committed.clone())
+        self.inner
+            .borrow()
+            .groups
+            .get(&group)
+            .and_then(|log| log.committed.clone())
     }
 
     /// Record a group's committed log id
@@ -168,7 +189,12 @@ impl MemoryWal {
     /// * `group` - The group
     /// * `committed` - The log id
     pub(super) fn save_committed(&self, group: GroupId, committed: Option<WalLogId>) {
-        self.inner.borrow_mut().groups.entry(group).or_default().committed = committed;
+        self.inner
+            .borrow_mut()
+            .groups
+            .entry(group)
+            .or_default()
+            .committed = committed;
     }
 
     /// Where a group's log begins and ends
@@ -259,7 +285,11 @@ impl MemoryWal {
                 Some(existing) if existing.index >= upto => Some(existing),
                 _ => Some(log_id),
             };
-            let dropped: Vec<u64> = log.entries.range(..=upto).map(|(index, _)| *index).collect();
+            let dropped: Vec<u64> = log
+                .entries
+                .range(..=upto)
+                .map(|(index, _)| *index)
+                .collect();
             for index in dropped {
                 if let Some(entry) = log.entries.remove(&index) {
                     removed += Self::weight(&entry);

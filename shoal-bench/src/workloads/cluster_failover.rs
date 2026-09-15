@@ -42,11 +42,15 @@ use anyhow::Result;
 
 use crate::model::macro_layer::Timing;
 use crate::workloads::cluster_replication::{REPLICATED, placement};
-use crate::workloads::grid::{DEPTH, Grid, Payloads, REFERENCE_MIX, REFERENCE_WIDTH, Sweep, Table, is_read};
+use crate::workloads::grid::{
+    DEPTH, Grid, Payloads, REFERENCE_MIX, REFERENCE_WIDTH, Sweep, Table, is_read,
+};
 use crate::workloads::harness::driver;
 use crate::workloads::harness::keys::{KeyDistribution, Keys};
 use crate::workloads::harness::seed::{Scale, Seeded};
-use crate::workloads::workload::{BoxFuture, Context, FaultSpec, Measurement, Workload, WorkloadPlan};
+use crate::workloads::workload::{
+    BoxFuture, Context, FaultSpec, Measurement, Workload, WorkloadPlan,
+};
 
 /// The kill arm's identifier
 pub const KILL_ID: &str = "macro/cluster/failover/kill";
@@ -86,7 +90,9 @@ impl Failover {
     pub fn new() -> Self {
         Failover {
             twin: Grid {
-                sweep: Sweep::Replication { durability: "durable" },
+                sweep: Sweep::Replication {
+                    durability: "durable",
+                },
                 table: Table::Unsorted,
                 read_pct: REFERENCE_MIX,
                 rows: REFERENCE_WIDTH,
@@ -195,17 +201,26 @@ impl Workload for Failover {
             let table = self.twin.table;
             let read_pct = self.twin.read_pct;
             let seed = ctx.seed;
-            driver::drive_mixed_timed(&clients, self.twin.depth, run_for, ctx.warmup, move |index| {
-                if is_read(mix_seed, index, read_pct) {
-                    // a read asks for a key inside the seeded range, so every read is a hit
-                    ("read", table.get(reads.at(index)))
-                } else {
-                    // a write lands past the seeded range, as the twin's do
-                    let key = rows + index;
-                    let width = profile.width(seed, key);
-                    ("write", table.insert(key, index % 16, payloads.at(width, index)))
-                }
-            })
+            driver::drive_mixed_timed(
+                &clients,
+                self.twin.depth,
+                run_for,
+                ctx.warmup,
+                move |index| {
+                    if is_read(mix_seed, index, read_pct) {
+                        // a read asks for a key inside the seeded range, so every read is a hit
+                        ("read", table.get(reads.at(index)))
+                    } else {
+                        // a write lands past the seeded range, as the twin's do
+                        let key = rows + index;
+                        let width = profile.width(seed, key);
+                        (
+                            "write",
+                            table.insert(key, index % 16, payloads.at(width, index)),
+                        )
+                    }
+                },
+            )
             .await
         })
     }
@@ -232,7 +247,7 @@ impl Workload for Failover {
 mod tests {
     use std::time::Duration;
 
-    use super::{Failover, KILLED_NODE, KILL_ID, RUN_FOR, SMOKE_RUN_FOR, all};
+    use super::{Failover, KILL_ID, KILLED_NODE, RUN_FOR, SMOKE_RUN_FOR, all};
     use crate::workloads::cluster_replication::{self, DURABLE_ID};
     use crate::workloads::harness::seed::Scale;
     use crate::workloads::workload::Workload;
@@ -265,7 +280,10 @@ mod tests {
             assert!(fault.at + fault.restart_after < run_for, "{scale:?}");
             // and leaves the cluster a while on both sides of it
             assert!(fault.at >= run_for / 4, "{scale:?}");
-            assert!(run_for - (fault.at + fault.restart_after) >= run_for / 4, "{scale:?}");
+            assert!(
+                run_for - (fault.at + fault.restart_after) >= run_for / 4,
+                "{scale:?}"
+            );
         }
         assert_eq!(Failover::run_for(Scale::Full), RUN_FOR);
         assert_eq!(Failover::run_for(Scale::Smoke), SMOKE_RUN_FOR);

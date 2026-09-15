@@ -71,8 +71,9 @@ async fn dead_port() -> Result<u16, TestError> {
 /// # Arguments
 ///
 /// * `temp_dir` - The directory this server should store anything in
-async fn start_server(temp_dir: &tempfile::TempDir) -> Result<(ShoalPool<TestDb>, String), TestError>
-{
+async fn start_server(
+    temp_dir: &tempfile::TempDir,
+) -> Result<(ShoalPool<TestDb>, String), TestError> {
     // build a config on a port nothing else in this binary is using
     let conf = utils::build_config(temp_dir);
     // start the server and wait until its shards are answering
@@ -123,7 +124,10 @@ async fn a_client_the_builder_built_answers_a_query() -> Result<(), TestError> {
     let temp_dir = utils::test_dir();
     let (_pool, addr) = start_server(&temp_dir).await?;
     // build a client the long way round
-    let client = Shoal::<TestDbClient>::builder().endpoint(&addr).build().await?;
+    let client = Shoal::<TestDbClient>::builder()
+        .endpoint(&addr)
+        .build()
+        .await?;
     round_trip(&client, "builder").await
 }
 
@@ -258,8 +262,14 @@ async fn a_shard_that_cannot_bind_is_reported() -> Result<(), TestError> {
     match reported {
         Err(error) => {
             let text = format!("{error:?}");
-            assert!(text.contains("ShardFailed"), "the error names no shard: {text}");
-            assert!(text.contains("in use"), "the error does not say the port was held: {text}");
+            assert!(
+                text.contains("ShardFailed"),
+                "the error names no shard: {text}"
+            );
+            assert!(
+                text.contains("in use"),
+                "the error does not say the port was held: {text}"
+            );
         }
         Ok(addr) => panic!("start reported {addr} ready although no shard could bind port {port}"),
     }
@@ -284,7 +294,10 @@ async fn a_port_of_zero_resolves_to_one_every_shard_binds() -> Result<(), TestEr
     assert_ne!(promised.port(), 0, "start left the port unresolved");
     // and readiness reports the same one
     let addr = pool.ready(utils::READY_TIMEOUT)?;
-    assert_eq!(addr, promised, "ready reported a different address than start promised");
+    assert_eq!(
+        addr, promised,
+        "ready reported a different address than start promised"
+    );
     // nothing has died
     assert_eq!(pool.failure(), None);
     // a client on that address is served

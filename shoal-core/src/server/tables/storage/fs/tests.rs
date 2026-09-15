@@ -24,11 +24,11 @@ use super::compactor::{classify_tail, TailLoss};
 use super::conf::{
     FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
 };
+use super::find_inactive_intent_logs;
 use super::loader::{classify, LoadFailure};
 use super::map::ArchiveMap;
 use super::reader::IntentLogReader;
 use super::stream::PAD_SENTINEL;
-use super::find_inactive_intent_logs;
 use crate::server::{ServerError, ShoalError};
 
 /// The errno for running out of file descriptors
@@ -277,7 +277,12 @@ async fn read_all_truncated(path: &Path) -> bool {
         .await
         .expect("Failed to open log");
     // read every record it will give us
-    while reader.next_buff().await.expect("Failed to read log").is_some() {}
+    while reader
+        .next_buff()
+        .await
+        .expect("Failed to read log")
+        .is_some()
+    {}
     // note whether it stopped on damage before closing it
     let truncated = reader.truncated;
     reader.close().await.expect("Failed to close reader");
@@ -410,7 +415,9 @@ fn find_inactive_intent_logs_finds_and_sorts() {
     // create inactive log files in non-sequential order
     for generation in ["3", "0", "7", "1"] {
         std::fs::write(
-            temp_dir.path().join(format!("shard-1-inactive-{generation}")),
+            temp_dir
+                .path()
+                .join(format!("shard-1-inactive-{generation}")),
             "",
         )
         .unwrap();
@@ -429,7 +436,11 @@ fn find_inactive_intent_logs_finds_and_sorts() {
 /// Files with a non numeric generation are ignored
 fn find_inactive_intent_logs_ignores_non_numeric_gen() {
     let temp_dir = test_dir();
-    for name in ["shard-1-inactive-abc", "shard-1-inactive-", "shard-1-inactive-2"] {
+    for name in [
+        "shard-1-inactive-abc",
+        "shard-1-inactive-",
+        "shard-1-inactive-2",
+    ] {
         std::fs::write(temp_dir.path().join(name), "").unwrap();
     }
     let result = find_inactive_intent_logs(&temp_dir.path().to_path_buf(), "shard-1");
@@ -473,12 +484,8 @@ fn map_corrupt_hash() {
         map.extend_from_slice(b"this is not valid rkyv data but hash check comes first");
         std::fs::write(&map_path, &map).unwrap();
         // loading it should fail on the hash rather than on rkyv validation
-        let result = SerializedMap::new(
-            &map_path.to_path_buf(),
-            &intent_path.to_path_buf(),
-            "test",
-        )
-        .await;
+        let result =
+            SerializedMap::new(&map_path.to_path_buf(), &intent_path.to_path_buf(), "test").await;
         match result {
             Err(crate::server::ServerError::Shoal(ShoalError::MapCorruption { .. })) => (),
             Err(other) => panic!("Expected MapCorruption error, got: {other:?}"),
@@ -486,7 +493,6 @@ fn map_corrupt_hash() {
         }
     });
 }
-
 
 /// A partition pruned out from under a read is absent, not an error
 ///
@@ -578,12 +584,16 @@ fn a_missing_archive_is_reported_not_created() {
         // make the directories an archive map expects to find
         conf.setup_paths("TestRecord").await.unwrap();
         // load an archive map over them, which is empty since nothing has been written
-        let map = ArchiveMap::new("shard-0", "TestRecord", &conf).await.unwrap();
+        let map = ArchiveMap::new("shard-0", "TestRecord", &conf)
+            .await
+            .unwrap();
         // name an archive that was never written, which is what an entry left behind by a
         // compaction that deleted the archive it re-pointed away from looks like
         let missing = Uuid::new_v4();
         // build the path that archive would live at
-        let path = conf.get_archive_path("TestRecord").join(missing.to_string());
+        let path = conf
+            .get_archive_path("TestRecord")
+            .join(missing.to_string());
         // read it, which has to fail
         let error = map
             .get_archive(&missing)
@@ -622,7 +632,9 @@ async fn archive_map(temp_dir: &TempDir) -> (FileSystemTableConf, ArchiveMap) {
     // make the directories an archive map expects to find
     conf.setup_paths("TestRecord").await.unwrap();
     // load an archive map over them, which is empty since nothing has been written
-    let map = ArchiveMap::new("shard-0", "TestRecord", &conf).await.unwrap();
+    let map = ArchiveMap::new("shard-0", "TestRecord", &conf)
+        .await
+        .unwrap();
     (conf, map)
 }
 
@@ -666,7 +678,11 @@ fn archive_records_are_checksummed_and_a_flipped_byte_is_refused() {
         assert_eq!(map.integrity.unverified_reads.get(), 0);
         // the file begins with the header that says what it is
         let path = conf.get_archive_path("TestRecord").join(active.to_string());
-        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
         let mut head = [0u8; ARCHIVE_HEADER_LEN];
         file.read_exact(&mut head).unwrap();
         assert_eq!(ArchiveFormat::detect(&head), ArchiveFormat::Checksummed);
@@ -681,7 +697,10 @@ fn archive_records_are_checksummed_and_a_flipped_byte_is_refused() {
         file.sync_all().unwrap();
         drop(file);
         // the next read of that record is refused by name, and counted
-        let error = map.read_record(&entry).await.expect_err("a flipped byte was read as valid");
+        let error = map
+            .read_record(&entry)
+            .await
+            .expect_err("a flipped byte was read as valid");
         match error {
             ServerError::Shoal(ShoalError::CorruptArchive {
                 archive,
@@ -769,8 +788,14 @@ fn a_torn_record_is_refused() {
         // close the cached handle so the file size is what is on disk
         map.close_all().await.unwrap();
         let _ = conf;
-        let error = map.read_record(&entry).await.expect_err("a short read was served");
-        assert!(matches!(error, ServerError::Shoal(ShoalError::CorruptArchive { .. })), "{error:?}");
+        let error = map
+            .read_record(&entry)
+            .await
+            .expect_err("a short read was served");
+        assert!(
+            matches!(error, ServerError::Shoal(ShoalError::CorruptArchive { .. })),
+            "{error:?}"
+        );
         assert_eq!(map.integrity.checksum_failures.get(), 1);
         map.close_all().await.unwrap();
     });
@@ -802,15 +827,47 @@ fn tablet_bytes_follow_the_map() {
         let c = 9u64 | (1 << 63);
         assert_eq!(Ring::tablet_of(a), Ring::tablet_of(b));
         assert_ne!(Ring::tablet_of(a), Ring::tablet_of(c));
-        map.set_partition(a, ArchiveEntry { key: a, archive, offset: 0, size: 100 });
-        map.set_partition(b, ArchiveEntry { key: b, archive, offset: 100, size: 50 });
-        map.set_partition(c, ArchiveEntry { key: c, archive, offset: 150, size: 30 });
+        map.set_partition(
+            a,
+            ArchiveEntry {
+                key: a,
+                archive,
+                offset: 0,
+                size: 100,
+            },
+        );
+        map.set_partition(
+            b,
+            ArchiveEntry {
+                key: b,
+                archive,
+                offset: 100,
+                size: 50,
+            },
+        );
+        map.set_partition(
+            c,
+            ArchiveEntry {
+                key: c,
+                archive,
+                offset: 150,
+                size: 30,
+            },
+        );
         let bytes = map.tablet_bytes();
         assert_eq!(bytes[Ring::tablet_of(a)], 150);
         assert_eq!(bytes[Ring::tablet_of(c)], 30);
         assert_eq!(bytes.iter().sum::<u64>(), 180);
         // a replacement recounts, a removal uncounts
-        map.set_partition(a, ArchiveEntry { key: a, archive, offset: 200, size: 10 });
+        map.set_partition(
+            a,
+            ArchiveEntry {
+                key: a,
+                archive,
+                offset: 200,
+                size: 10,
+            },
+        );
         map.remove_partition(c);
         let bytes = map.tablet_bytes();
         assert_eq!(bytes[Ring::tablet_of(a)], 60);
@@ -820,7 +877,9 @@ fn tablet_bytes_follow_the_map() {
         std::fs::write(&map.intent_path, b"").unwrap();
         SerializedMap::save(&map).await.unwrap();
         map.close_all().await.unwrap();
-        let reopened = ArchiveMap::new("shard-0", "TestRecord", &conf).await.unwrap();
+        let reopened = ArchiveMap::new("shard-0", "TestRecord", &conf)
+            .await
+            .unwrap();
         assert_eq!(reopened.tablet_bytes(), bytes);
         reopened.close_all().await.unwrap();
     });

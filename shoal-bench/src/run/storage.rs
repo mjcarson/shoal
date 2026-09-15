@@ -287,10 +287,7 @@ mod tests {
         wipe(&target, false).expect("a store is wipeable");
         // emptied, but still there for the server to claim again
         assert!(target.is_dir());
-        assert_eq!(
-            std::fs::read_dir(&target).expect("reading it").count(),
-            0
-        );
+        assert_eq!(std::fs::read_dir(&target).expect("reading it").count(), 0);
     }
 
     /// A directory whose children are stores is a store root, and is wipeable

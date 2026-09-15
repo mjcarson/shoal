@@ -77,7 +77,12 @@ pub fn draw(report: &StageReport, op: &str) -> Result<String> {
             segments.push((name.clone(), cost.mean_ns));
         }
         // drawn in the fixed stage order rather than the order the map happened to hold
-        segments.sort_by_key(|(name, _)| named.iter().position(|known| known == name).unwrap_or(usize::MAX));
+        segments.sort_by_key(|(name, _)| {
+            named
+                .iter()
+                .position(|known| known == name)
+                .unwrap_or(usize::MAX)
+        });
         if other > 0 {
             segments.push(("other".to_string(), other));
         }
@@ -253,8 +258,18 @@ mod tests {
     #[test]
     fn it_draws_a_bar_per_rank() {
         let report = report(&[
-            ("all", 100, 0, &[("durable_write", 60, false), ("execute", 40, false)]),
-            ("p99", 400, 0, &[("durable_write", 300, false), ("execute", 100, false)]),
+            (
+                "all",
+                100,
+                0,
+                &[("durable_write", 60, false), ("execute", 40, false)],
+            ),
+            (
+                "p99",
+                400,
+                0,
+                &[("durable_write", 300, false), ("execute", 100, false)],
+            ),
         ]);
         let svg = draw(&report, "insert").expect("it draws");
         assert!(svg.contains("all"));
@@ -275,7 +290,10 @@ mod tests {
         let svg = draw(&report, "insert").expect("it draws");
         assert!(svg.contains("durable_write"));
         // the floored stage never earns a colour or a legend entry
-        assert!(!svg.contains(">route<"), "a floored stage was drawn as its own segment");
+        assert!(
+            !svg.contains(">route<"),
+            "a floored stage was drawn as its own segment"
+        );
         assert!(svg.contains("other"));
     }
 

@@ -191,7 +191,11 @@ mod tests {
     #[test]
     fn the_finished_element_is_themed_and_responsive() {
         let svg = trivial().expect("it draws");
-        assert!(svg.starts_with(r#"<svg class="shoal-chart" id="chart-test""#), "{}", &svg[..80]);
+        assert!(
+            svg.starts_with(r#"<svg class="shoal-chart" id="chart-test""#),
+            "{}",
+            &svg[..80]
+        );
         assert!(svg.contains(r#"role="img""#));
         assert!(svg.contains(r#"aria-label="a test chart""#));
         assert!(svg.contains(r#"viewBox="0 0 820 200""#));

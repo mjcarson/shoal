@@ -54,4 +54,3 @@ fn dispatch(cli: Cli) -> Result<i32> {
         Command::Explore(args) => shoal_bench::explore::run_explore(&store, &args),
     }
 }
-

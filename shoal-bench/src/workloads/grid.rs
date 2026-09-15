@@ -545,12 +545,7 @@ impl Grid {
     /// * `distribution` - Which keys its reads ask for
     fn skew(table: Table, distribution: KeyDistribution) -> Self {
         let id: &'static str = Box::leak(
-            format!(
-                "macro/skew/{}/{}",
-                distribution.as_str(),
-                table.as_str()
-            )
-            .into_boxed_str(),
+            format!("macro/skew/{}/{}", distribution.as_str(), table.as_str()).into_boxed_str(),
         );
         Grid {
             sweep: Sweep::Skew,
@@ -571,8 +566,7 @@ impl Grid {
     ///
     /// * `depth` - How many queries this rung keeps outstanding
     fn depth(depth: u32) -> Self {
-        let id: &'static str =
-            Box::leak(format!("macro/grid/depth/{depth}").into_boxed_str());
+        let id: &'static str = Box::leak(format!("macro/grid/depth/{depth}").into_boxed_str());
         Grid {
             sweep: Sweep::Depth,
             table: Table::Unsorted,
@@ -871,15 +865,9 @@ impl Workload for Grid {
             // than having none - the harness throws the server's half of them away for the same
             // reason, just before the measured phase starts
             // (`docs/src/appendix/resolved/stage-join.md`)
-            let _seeding = driver::drive_with(
-                &client,
-                batches,
-                "seed",
-                0,
-                StreamMode::Unordered,
-                gate,
-            )
-            .await?;
+            let _seeding =
+                driver::drive_with(&client, batches, "seed", 0, StreamMode::Unordered, gate)
+                    .await?;
             Ok(())
         })
     }
@@ -962,9 +950,9 @@ pub(crate) fn frame_bytes(ctx: &Context) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEPTH, DEPTHS, Grid, INFILL_WIDTHS, MIXES, REFERENCE_MIX, REFERENCE_WIDTH, SKEWS,
-        SKEW_TABLES, STAGED_ARMS, Sweep, TABLES, WIDE_MIXES, WIDTHS, every_width, is_read,
-        queries_for, rows_for, seed_batch,
+        DEPTH, DEPTHS, Grid, INFILL_WIDTHS, MIXES, REFERENCE_MIX, REFERENCE_WIDTH, SKEW_TABLES,
+        SKEWS, STAGED_ARMS, Sweep, TABLES, WIDE_MIXES, WIDTHS, every_width, is_read, queries_for,
+        rows_for, seed_batch,
     };
     use crate::model::macro_layer::Timing;
     use crate::workloads::harness::keys::KeyDistribution;
@@ -1079,7 +1067,13 @@ mod tests {
             for scale in [Scale::Smoke, Scale::Full] {
                 let left = skew.plan(scale);
                 let right = cell.plan(scale);
-                assert_eq!(left.scale, right.scale, "{} against {}", skew.id(), cell.id());
+                assert_eq!(
+                    left.scale,
+                    right.scale,
+                    "{} against {}",
+                    skew.id(),
+                    cell.id()
+                );
                 assert_eq!(left.warmup, right.warmup);
                 assert_eq!(left.server, right.server);
             }
@@ -1239,7 +1233,11 @@ mod tests {
     /// narrows the bound to a megabyte would be seeding into a server that refuses its frames.
     #[test]
     fn a_seed_bundle_fits_inside_a_narrowed_frame() {
-        for frame in [1u64 << 20, 8 << 20, u64::from(shoal::shared::protocol::DEFAULT_MAX_FRAME_BYTES)] {
+        for frame in [
+            1u64 << 20,
+            8 << 20,
+            u64::from(shoal::shared::protocol::DEFAULT_MAX_FRAME_BYTES),
+        ] {
             for profile in every_width() {
                 let widest = profile.widest();
                 let bundle = seed_batch(widest, frame) as u64 * widest;

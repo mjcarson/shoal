@@ -243,7 +243,9 @@ pub fn allocate(
             free.remove(&core);
         }
     }
-    let mut allocations = allocations.into_iter().map(|a| a.expect("every slot allocated"));
+    let mut allocations = allocations
+        .into_iter()
+        .map(|a| a.expect("every slot allocated"));
     let nodes = specs
         .iter()
         .map(|spec| (spec.kind, allocations.next().expect("a node's allocation")))

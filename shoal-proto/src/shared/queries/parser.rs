@@ -188,10 +188,10 @@ mod complete;
 #[cfg(test)]
 mod tests;
 
-pub use complete::{CompletionContext, Expecting, analyze};
+pub use complete::{analyze, CompletionContext, Expecting};
 
 #[cfg(feature = "shql-complete")]
-pub use complete::{Completions, Suggestion, SuggestionKind, suggest};
+pub use complete::{suggest, Completions, Suggestion, SuggestionKind};
 
 /// One literal in a where clause, and the span it occupied in the query
 #[derive(Debug, Clone)]
@@ -1105,7 +1105,13 @@ fn merge_ranges(
     if let Some(lower) = next.lower {
         // a range has one lower bound, so two of them is a query that means one of the pair
         if existing.lower.is_some() {
-            return Err(two_bounds_error(field, "lower", field_start, field_end, original));
+            return Err(two_bounds_error(
+                field,
+                "lower",
+                field_start,
+                field_end,
+                original,
+            ));
         }
         existing.lower = Some(lower);
     }
@@ -1113,7 +1119,13 @@ fn merge_ranges(
     if let Some(upper) = next.upper {
         // a range has one upper bound, so two of them is a query that means one of the pair
         if existing.upper.is_some() {
-            return Err(two_bounds_error(field, "upper", field_start, field_end, original));
+            return Err(two_bounds_error(
+                field,
+                "upper",
+                field_start,
+                field_end,
+                original,
+            ));
         }
         existing.upper = Some(upper);
     }

@@ -221,8 +221,11 @@ impl Explorer {
         // looks like a bug even when it is the only honest answer
         self.note = match dropped {
             0 => None,
-            1 => Some("One workload was dropped: it is not in the units this chart is now drawn \
-                       in.".to_string()),
+            1 => Some(
+                "One workload was dropped: it is not in the units this chart is now drawn \
+                       in."
+                .to_string(),
+            ),
             found => Some(format!(
                 "{found} workloads were dropped: they are not in the units this chart is now \
                  drawn in."
@@ -512,16 +515,18 @@ impl Explorer {
             .captures
             .iter()
             .filter_map(|at| self.index.captures.get(*at as usize))
-            .filter(|capture| capture.code.iter().any(|(_, verdict)| verdict.current == Some(false)))
+            .filter(|capture| {
+                capture
+                    .code
+                    .iter()
+                    .any(|(_, verdict)| verdict.current == Some(false))
+            })
             .map(|capture| capture.label.as_str())
             .collect();
         if !stale.is_empty() {
             ui.colored_label(
                 palette.muted,
-                format!(
-                    "{} no longer describes the current tree.",
-                    stale.join(", ")
-                ),
+                format!("{} no longer describes the current tree.", stale.join(", ")),
             );
         }
         // a filtered capture is missing arms rather than carrying unchanged ones
@@ -609,7 +614,14 @@ pub fn capture_tooltip(capture: &Capture) -> String {
     // everything that decides whether this capture may be read against another one, in one place
     let mut lines = vec![
         format!("taken {}", capture.captured),
-        format!("commit {}", if capture.head_short.is_empty() { "unrecorded" } else { &capture.head_short }),
+        format!(
+            "commit {}",
+            if capture.head_short.is_empty() {
+                "unrecorded"
+            } else {
+                &capture.head_short
+            }
+        ),
         format!("host {}", capture.host),
         format!("governor {}", capture.governor),
         format!("rustc {}", capture.rustc),
@@ -666,13 +678,34 @@ mod tests {
         // one edit each, and every one of them has to be a different framing - a field left out of
         // the comparison is a chart that keeps a frame fitted to numbers no longer on it
         let moved = [
-            Framing { captures: vec![0, 1], ..base.clone() },
-            Framing { workloads: vec![1], ..base.clone() },
-            Framing { metric: Metric::Spread, ..base.clone() },
-            Framing { axis: Axis::Timeline, ..base.clone() },
-            Framing { chart: Chart::Bars, ..base.clone() },
-            Framing { log_y: true, ..base.clone() },
-            Framing { log_x: true, ..base.clone() },
+            Framing {
+                captures: vec![0, 1],
+                ..base.clone()
+            },
+            Framing {
+                workloads: vec![1],
+                ..base.clone()
+            },
+            Framing {
+                metric: Metric::Spread,
+                ..base.clone()
+            },
+            Framing {
+                axis: Axis::Timeline,
+                ..base.clone()
+            },
+            Framing {
+                chart: Chart::Bars,
+                ..base.clone()
+            },
+            Framing {
+                log_y: true,
+                ..base.clone()
+            },
+            Framing {
+                log_x: true,
+                ..base.clone()
+            },
         ];
         for found in moved {
             assert_ne!(found, base);
@@ -688,7 +721,10 @@ mod tests {
         // the first ticked workload sets the units and so decides which half of a mixed selection
         // survives, which makes the same set in another order a different chart
         let base = framing();
-        let reordered = Framing { workloads: vec![2, 1], ..base.clone() };
+        let reordered = Framing {
+            workloads: vec![2, 1],
+            ..base.clone()
+        };
         assert_ne!(reordered, base);
     }
 }

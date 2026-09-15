@@ -669,7 +669,10 @@ mod tests {
             ErrorCode::StorageRead,
             "could not read partition 7",
         ));
-        ours.merge(ResponseAction::Get(Some(GetRows::single(7, vec![1u64, 2, 3]))));
+        ours.merge(ResponseAction::Get(Some(GetRows::single(
+            7,
+            vec![1u64, 2, 3],
+        ))));
         assert!(matches!(ours, ResponseAction::Error(_)));
         // an exists is merged by the same rule, since it is the other query that can be split
         let mut ours = ResponseAction::<u64>::Exists(true);
@@ -702,7 +705,9 @@ mod tests {
         };
         // it still fails, and it fails with what the server said rather than with a kind name
         match response.succeeded(permissive) {
-            Err(Errors::Server { code, msg, index, .. }) => {
+            Err(Errors::Server {
+                code, msg, index, ..
+            }) => {
                 assert_eq!(code, ErrorCode::CorruptArchive);
                 assert!(msg.contains("partition 7"));
                 assert_eq!(index, Some(3));
@@ -740,7 +745,9 @@ mod tests {
     /// * `partition` - The partition these rows came from
     /// * `count` - How many rows it gave
     fn run(partition: u64, count: u64) -> (u64, Vec<Placed>) {
-        let rows = (0..count).map(|offset| Placed { partition, offset }).collect();
+        let rows = (0..count)
+            .map(|offset| Placed { partition, offset })
+            .collect();
         (partition, rows)
     }
 
@@ -920,10 +927,14 @@ mod tests {
                     None => merged = Some(share),
                 }
             }
-            let mut merged = merged.unwrap_or_else(|| GetRows::from_slots(Vec::<(u64, Vec<Placed>)>::new()));
+            let mut merged =
+                merged.unwrap_or_else(|| GetRows::from_slots(Vec::<(u64, Vec<Placed>)>::new()));
             merged.order_by(|partition| order.iter().position(|key| *key == partition));
             merged.truncate(limit);
-            assert!(merged.is_consistent(), "case {case}: the index disagrees with the rows");
+            assert!(
+                merged.is_consistent(),
+                "case {case}: the index disagrees with the rows"
+            );
             assert_eq!(
                 merged.rows, expected,
                 "case {case}: partitions {order:?} with counts {counts:?} over shards {owner:?} at limit {limit}"

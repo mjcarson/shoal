@@ -5,8 +5,8 @@
 
 use anyhow::Result;
 
-use crate::registry::Layer;
 use crate::fmt;
+use crate::registry::Layer;
 use crate::render::arms::{self, Arm};
 use crate::render::chart::sweep::{self, Unit};
 use crate::render::family::Surface;
@@ -30,7 +30,10 @@ pub fn build(page: &Page) -> Result<String> {
          table. The three named mixtures at the end of the axis are declared distributions of \
          widths rather than ranges, so two captures of one measure the same thing.",
     );
-    let Some(capture) = page.current_for(Layer::Macro).and_then(|current| current.macro_layer.as_ref()) else {
+    let Some(capture) = page
+        .current_for(Layer::Macro)
+        .and_then(|current| current.macro_layer.as_ref())
+    else {
         out.push_str(&nothing_measured("a row width sweep"));
         out.push_str(&footer(Surface::RowSize));
         return Ok(out);
@@ -311,7 +314,9 @@ fn by_stage(page: &Page, all: &[Arm<'_>]) -> Result<String> {
         .filter_map(|(workload, report)| {
             let arm = all.iter().find(|arm| arm.id == workload)?;
             // a mixture has no place on a numeric axis here for the same reason it has none above
-            arm.row_profile().is_none().then_some((arm.row_bytes(), report))
+            arm.row_profile()
+                .is_none()
+                .then_some((arm.row_bytes(), report))
         })
         .collect();
     widths.sort_by_key(|(width, _)| *width);
@@ -414,7 +419,9 @@ fn stage_chart(widths: &[(u64, &crate::model::stages::StageReport)]) -> Result<S
         )));
     }
     if out.is_empty() {
-        out.push_str("No stage was measured above the clock's own cost at more than one width.\n\n");
+        out.push_str(
+            "No stage was measured above the clock's own cost at more than one width.\n\n",
+        );
     }
     Ok(out)
 }
@@ -449,7 +456,11 @@ fn by_mixture(ends: &[Arm<'_>], reference: &[Arm<'_>]) -> Result<String> {
     shares.dedup();
     let mut series = Vec::new();
     for share in shares {
-        let source = if share == REFERENCE_MIX { reference } else { ends };
+        let source = if share == REFERENCE_MIX {
+            reference
+        } else {
+            ends
+        };
         let points: Vec<(f64, f64)> = source
             .iter()
             .filter(|arm| arm.table_kind() == Some(TABLE) && arm.read_pct() == Some(share))

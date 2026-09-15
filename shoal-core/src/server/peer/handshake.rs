@@ -40,10 +40,11 @@ use crate::server::meta::Identity;
 use crate::server::ServerError;
 use crate::shared::identity::{ClusterId, NodeId};
 use crate::shared::protocol::peer::{
-    Lane, PeerHello, PeerHelloAck, PeerRefusal, CAPABILITIES, PEER_HELLO_BODY_LEN, REQUIRED_CAPABILITIES,
+    Lane, PeerHello, PeerHelloAck, PeerRefusal, CAPABILITIES, PEER_HELLO_BODY_LEN,
+    REQUIRED_CAPABILITIES,
 };
-use crate::shared::tls::PeerIdentity;
 use crate::shared::protocol::{self, MessageType, ProtocolError, HEADER_LEN, MIN_PEER_VERSION};
+use crate::shared::tls::PeerIdentity;
 
 /// What this node says about itself in every hello
 #[derive(Debug, Clone)]
@@ -82,7 +83,13 @@ impl Local {
     /// * `max_frame_bytes` - The largest frame it accepts
     /// * `wire_pin` - The newest wire version to advertise, or none for this build's newest
     #[must_use]
-    pub fn new(identity: &Identity, shards: usize, schema_id: u64, max_frame_bytes: u32, wire_pin: Option<u8>) -> Self {
+    pub fn new(
+        identity: &Identity,
+        shards: usize,
+        schema_id: u64,
+        max_frame_bytes: u32,
+        wire_pin: Option<u8>,
+    ) -> Self {
         // the range this node advertises, bounded above by the pin
         let (_, wire_max) = PeerHello::range(wire_pin);
         // a node runs fewer shards than a u16 holds; the ring refuses more
@@ -317,7 +324,8 @@ async fn read_body(
     let header = protocol::RawHeader::decode(&raw);
     // a hello of a version we do not read is refused by version, which the header always
     // says; the range is the floor up to this build's newest, since nothing is negotiated yet
-    let header = header.validate(u32::try_from(PEER_HELLO_BODY_LEN + HELLO_GROWTH).unwrap_or(u32::MAX))?;
+    let header =
+        header.validate(u32::try_from(PEER_HELLO_BODY_LEN + HELLO_GROWTH).unwrap_or(u32::MAX))?;
     let header = header.expect(expected)?;
     // a hello is at least the record this build reads; a longer one is read for that record
     // and the rest drained, a shorter one is not a hello
@@ -360,7 +368,9 @@ pub async fn dial(
     }
     // the dialler speaks first
     let hello = local.hello(lane);
-    stream.write_all(&hello.frame(local.max_frame_bytes)?).await?;
+    stream
+        .write_all(&hello.frame(local.max_frame_bytes)?)
+        .await?;
     stream.flush().await?;
     // and reads the verdict, which carries the acceptor's own record
     let body = read_body(stream, MessageType::PeerHelloAck).await?;
@@ -375,7 +385,11 @@ pub async fn dial(
     let negotiated = check_peer(&ack.hello, &hello, local, expected)?;
     // and a dial that named no node takes whoever answered, as its certificate names it
     if expected.node.is_none() {
-        bound_identity(NodeId(uuid::Uuid::from_bytes(ack.hello.node)), certified, bind)?;
+        bound_identity(
+            NodeId(uuid::Uuid::from_bytes(ack.hello.node)),
+            certified,
+            bind,
+        )?;
     }
     Ok((ack.hello, negotiated))
 }
@@ -392,7 +406,11 @@ pub async fn dial(
 /// * `claimed` - The node the hello names
 /// * `certified` - What the peer's certificate said
 /// * `bind` - Whether the lanes bind certificates to identities
-fn bound_identity(claimed: NodeId, certified: &PeerIdentity, bind: bool) -> Result<(), ServerError> {
+fn bound_identity(
+    claimed: NodeId,
+    certified: &PeerIdentity,
+    bind: bool,
+) -> Result<(), ServerError> {
     match certified {
         // no certificate, or a chain the deployment does not bind
         PeerIdentity::Plaintext => Ok(()),
@@ -421,7 +439,12 @@ fn bound_identity(claimed: NodeId, certified: &PeerIdentity, bind: bool) -> Resu
 /// * `ours` - The hello this end wrote
 /// * `local` - What this node says about itself
 /// * `expected` - Who was dialled
-fn check_peer(peer: &PeerHello, ours: &PeerHello, local: &Local, expected: &PeerAddr) -> Result<Negotiated, ServerError> {
+fn check_peer(
+    peer: &PeerHello,
+    ours: &PeerHello,
+    local: &Local,
+    expected: &PeerAddr,
+) -> Result<Negotiated, ServerError> {
     let found = NodeId(uuid::Uuid::from_bytes(peer.node));
     let cluster = ClusterId(uuid::Uuid::from_bytes(peer.cluster));
     // the same cluster, before anything else about the peer is believed
@@ -631,7 +654,10 @@ fn judge(
     if admission.restored_from() == Some(cluster) {
         return (
             PeerRefusal::Removed,
-            Err(ServerError::Shoal(ShoalError::RestoredFrom { found: cluster, node: found })),
+            Err(ServerError::Shoal(ShoalError::RestoredFrom {
+                found: cluster,
+                node: found,
+            })),
         );
     }
     let ours = admission.cluster().or(local.cluster);

@@ -98,12 +98,7 @@ pub fn scaled_interval(value: f64, interval: Option<(f64, f64)>, rate: bool) -> 
     let scale = |v: f64| fixed(v / divisor, places);
     // without an interval the cell is just the measurement
     match interval {
-        Some((low, high)) => format!(
-            "{} [{} - {}] {unit}",
-            scale(value),
-            scale(low),
-            scale(high)
-        ),
+        Some((low, high)) => format!("{} [{} - {}] {unit}", scale(value), scale(low), scale(high)),
         None => format!("{} {unit}", scale(value)),
     }
 }
@@ -309,7 +304,11 @@ pub fn bytes_axis(value: f64) -> String {
     }
     // whole bytes are always whole, and a scaled value keeps one decimal only while it is small
     // enough for that decimal to mean anything
-    let places = if unit == 0 || scaled.abs() >= 100.0 { 0 } else { 1 };
+    let places = if unit == 0 || scaled.abs() >= 100.0 {
+        0
+    } else {
+        1
+    };
     let rendered = fixed(scaled, places);
     // a scaled value that landed on a whole number is written as one, so an axis of powers of two
     // reads `4 KiB` rather than `4.0 KiB`

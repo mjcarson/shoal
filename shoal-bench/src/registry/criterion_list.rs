@@ -181,9 +181,9 @@ fn ask_criterion(store: &Store) -> Result<Vec<String>> {
             // attached, since discovering the list can mean waiting for a release build
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
-        let output = command.output().with_context(|| {
-            format!("running `cargo bench --bench {} -- --list`", target.name)
-        })?;
+        let output = command
+            .output()
+            .with_context(|| format!("running `cargo bench --bench {} -- --list`", target.name))?;
         // a failed listing is not an empty list of benchmarks, and must not be treated as one
         if !output.status.success() {
             bail!(
@@ -193,7 +193,10 @@ fn ask_criterion(store: &Store) -> Result<Vec<String>> {
             );
         }
         let text = String::from_utf8(output.stdout).with_context(|| {
-            format!("`cargo bench --bench {} -- --list` printed something that is not utf-8", target.name)
+            format!(
+                "`cargo bench --bench {} -- --list` printed something that is not utf-8",
+                target.name
+            )
         })?;
         ids.extend(parse_list(&text));
     }
@@ -286,7 +289,12 @@ mod tests {
             // inside a bench stanza, the name is the field we are after
             if in_bench {
                 if let Some(rest) = line.strip_prefix("name") {
-                    declared.push(rest.trim_start_matches([' ', '=']).trim().trim_matches('"').to_string());
+                    declared.push(
+                        rest.trim_start_matches([' ', '='])
+                            .trim()
+                            .trim_matches('"')
+                            .to_string(),
+                    );
                 }
             }
         }

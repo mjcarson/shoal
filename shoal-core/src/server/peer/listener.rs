@@ -37,8 +37,8 @@ use super::codec;
 use super::handshake::{self, Local, Negotiated};
 use super::Lane;
 use crate::server::comms::Comms;
-use crate::server::map::MapCell;
 use crate::server::database::ShoalDatabase;
+use crate::server::map::MapCell;
 use crate::server::messages::{Reply, ReplyKind, ServerMsg};
 use crate::server::request_body::RequestBody;
 use crate::server::stage_profile::{self, Stamp};
@@ -183,7 +183,9 @@ pub fn dispatch_target(
     if usize::from(slot) >= hosting.slots {
         return Err(ProtocolError::MalformedForward(refusal).into());
     }
-    Ok(crate::server::shard::ShardContact::Local(hosting.host_of_slot(slot)))
+    Ok(crate::server::shard::ShardContact::Local(
+        hosting.host_of_slot(slot),
+    ))
 }
 
 /// Accept peer lanes and serve each one in a task of its own
@@ -208,7 +210,11 @@ pub async fn peer_acceptor<S: ShoalDatabase>(
         let mut stream = match listener.accept().await {
             Ok(stream) => stream,
             Err(error) => {
-                event!(Level::WARN, msg = "a peer connection could not be accepted", ?error);
+                event!(
+                    Level::WARN,
+                    msg = "a peer connection could not be accepted",
+                    ?error
+                );
                 continue;
             }
         };
@@ -245,7 +251,11 @@ pub async fn peer_acceptor<S: ShoalDatabase>(
                     return;
                 }
                 Err(error) => {
-                    event!(Level::WARN, msg = "a peer never finished its handshake", ?error);
+                    event!(
+                        Level::WARN,
+                        msg = "a peer never finished its handshake",
+                        ?error
+                    );
                     return;
                 }
             };
@@ -308,12 +318,7 @@ async fn serve_data<S: ShoalDatabase>(
         waker: None,
     }));
     // answers go out on their own task, bounded by what the peer accepts
-    let tx_task = glommio::spawn_local(peer_tx_relay(
-        client_rx,
-        tx,
-        negotiated,
-        inflight.clone(),
-    ));
+    let tx_task = glommio::spawn_local(peer_tx_relay(client_rx, tx, negotiated, inflight.clone()));
     // forwards come in on this one, until the peer goes away or sends something refused
     if let Err(error) = peer_rx_relay(&ctx, origin, conn, negotiated.version, rx, &inflight).await {
         event!(Level::WARN, msg = "a peer lane ended", %origin, ?error);
@@ -363,7 +368,11 @@ async fn peer_rx_relay<S: ShoalDatabase>(
         let entries = peer::decode_entries(&entries_raw, preamble.entries)?;
         // every slot named has to exist here, before the bundle is even read
         for entry in &entries {
-            dispatch_target(&ctx.hosting, entry.shard, "an entry names a shard this node does not run")?;
+            dispatch_target(
+                &ctx.hosting,
+                entry.shard,
+                "an entry names a shard this node does not run",
+            )?;
         }
         // wait for room under the in-flight bound, which is what makes this node's memory a
         // number rather than the peer's appetite
@@ -491,7 +500,10 @@ async fn peer_tx_relay(
                 ) else {
                     break;
                 };
-                if codec::write_frame(&mut tx, &header, &[&preamble, &payload]).await.is_err() {
+                if codec::write_frame(&mut tx, &header, &[&preamble, &payload])
+                    .await
+                    .is_err()
+                {
                     break;
                 }
                 inflight.borrow_mut().answered(id);
@@ -586,11 +598,18 @@ async fn serve_replication<S: ShoalDatabase>(
         waker: None,
     }));
     // answers go out on their own task
-    let tx_task = glommio::spawn_local(replication_tx_relay(reply_rx, tx, negotiated, inflight.clone()));
+    let tx_task = glommio::spawn_local(replication_tx_relay(
+        reply_rx,
+        tx,
+        negotiated,
+        inflight.clone(),
+    ));
     let outcome: Result<(), ServerError> = async {
         loop {
             let max_frame_bytes = ctx.local.borrow().max_frame_bytes;
-            let Some(header) = codec::read_header(&mut rx, max_frame_bytes, negotiated.version).await? else {
+            let Some(header) =
+                codec::read_header(&mut rx, max_frame_bytes, negotiated.version).await?
+            else {
                 return Ok(());
             };
             let header = codec::expect(header, MessageType::Replicate)?;
@@ -605,7 +624,11 @@ async fn serve_replication<S: ShoalDatabase>(
             let raw: [u8; REPLICATE_HEAD_LEN] = codec::read_array(&mut rx).await?;
             let head = ReplicateRequestHead::decode(&raw)?;
             // the slot named has to exist here, before the payload is read
-            let host = dispatch_target(&ctx.hosting, head.target_shard, "a replication request names a shard this node does not run")?;
+            let host = dispatch_target(
+                &ctx.hosting,
+                head.target_shard,
+                "a replication request names a shard this node does not run",
+            )?;
             // wait for room under the in-flight bound, then read the payload
             Room {
                 inflight: inflight.clone(),
@@ -613,7 +636,9 @@ async fn serve_replication<S: ShoalDatabase>(
             }
             .await;
             let payload = codec::read_vec(&mut rx, payload_len).await?;
-            inflight.borrow_mut().taken(Uuid::from_u64_pair(head.id, 0), 1, payload_len);
+            inflight
+                .borrow_mut()
+                .taken(Uuid::from_u64_pair(head.id, 0), 1, payload_len);
             // hand it to the executor hosting the slot that hosts the group, with the version
             // its body is encoded at ([F48](../../../../docs/src/features/rolling-compatibility.md))
             let msg = ServerMsg::Replication {
@@ -623,12 +648,7 @@ async fn serve_replication<S: ShoalDatabase>(
                 version: header.version,
                 reply: reply_tx.clone(),
             };
-            if ctx
-                .comms
-                .send(&host, msg)
-                .await
-                .is_err()
-            {
+            if ctx.comms.send(&host, msg).await.is_err() {
                 return Ok(());
             }
         }
@@ -674,7 +694,10 @@ async fn replication_tx_relay(
             Err(error) => {
                 // an answer too large for the peer is answered as a failure it can carry
                 event!(Level::ERROR, msg = "a replication answer is too large for the peer", id = reply.id, %error);
-                let failure = ReplicateReply::error(reply.id, "the answer is larger than the frame the peer accepts");
+                let failure = ReplicateReply::error(
+                    reply.id,
+                    "the answer is larger than the frame the peer accepts",
+                );
                 let head = ReplicateResponseHead {
                     id: failure.id,
                     status: failure.status,
@@ -688,18 +711,30 @@ async fn replication_tx_relay(
                 ) else {
                     break;
                 };
-                if codec::write_frame(&mut tx, &header, &[&head, &failure.payload]).await.is_err() {
+                if codec::write_frame(&mut tx, &header, &[&head, &failure.payload])
+                    .await
+                    .is_err()
+                {
                     break;
                 }
-                inflight.borrow_mut().answered(Uuid::from_u64_pair(reply.id, 0));
+                inflight
+                    .borrow_mut()
+                    .answered(Uuid::from_u64_pair(reply.id, 0));
                 continue;
             }
         };
         if let Err(error) = codec::write_frame(&mut tx, &header, &[&head, &reply.payload]).await {
-            event!(Level::WARN, msg = "failed to write a replication answer to a peer", id = reply.id, ?error);
+            event!(
+                Level::WARN,
+                msg = "failed to write a replication answer to a peer",
+                id = reply.id,
+                ?error
+            );
             break;
         }
-        inflight.borrow_mut().answered(Uuid::from_u64_pair(reply.id, 0));
+        inflight
+            .borrow_mut()
+            .answered(Uuid::from_u64_pair(reply.id, 0));
     }
 }
 
@@ -724,11 +759,14 @@ async fn serve_bulk<S: ShoalDatabase>(
     mut rx: ReadHalf<TcpStream>,
 ) {
     // where each stream's chunks go, from its begin
-    let mut routes: HashMap<[u8; 16], crate::server::replication::snapshot::BulkRoute> = HashMap::new();
+    let mut routes: HashMap<[u8; 16], crate::server::replication::snapshot::BulkRoute> =
+        HashMap::new();
     let outcome: Result<(), ServerError> = async {
         loop {
             let max_frame_bytes = ctx.local.borrow().max_frame_bytes;
-            let Some(header) = codec::read_header(&mut rx, max_frame_bytes, negotiated.version).await? else {
+            let Some(header) =
+                codec::read_header(&mut rx, max_frame_bytes, negotiated.version).await?
+            else {
                 return Ok(());
             };
             match header.kind {
@@ -739,8 +777,15 @@ async fn serve_bulk<S: ShoalDatabase>(
                     ctx.bulk_received
                         .set(ctx.bulk_received.get() + header.body_len() as u64);
                     // a route names the slot the stream belongs to, and it has to exist here
-                    if let Ok(route) = postcard::from_bytes::<crate::server::replication::snapshot::BulkRoute>(&manifest) {
-                        dispatch_target(&ctx.hosting, route.target_shard, "a snapshot stream names a shard this node does not run")?;
+                    if let Ok(route) = postcard::from_bytes::<
+                        crate::server::replication::snapshot::BulkRoute,
+                    >(&manifest)
+                    {
+                        dispatch_target(
+                            &ctx.hosting,
+                            route.target_shard,
+                            "a snapshot stream names a shard this node does not run",
+                        )?;
                         routes.insert(begin.stream, route);
                     }
                 }
@@ -761,7 +806,14 @@ async fn serve_bulk<S: ShoalDatabase>(
                         };
                         if ctx
                             .comms
-                            .send(&dispatch_target(&ctx.hosting, route.target_shard, "a snapshot stream names a shard this node does not run")?, msg)
+                            .send(
+                                &dispatch_target(
+                                    &ctx.hosting,
+                                    route.target_shard,
+                                    "a snapshot stream names a shard this node does not run",
+                                )?,
+                                msg,
+                            )
                             .await
                             .is_err()
                         {
@@ -793,7 +845,10 @@ async fn serve_bulk<S: ShoalDatabase>(
     // every stream the lane carried is broken; the shards assembling one answer its end
     // with a resume offset rather than waiting for bytes that will not come
     if !routes.is_empty() {
-        let _ = ctx.comms.broadcast(&ServerMsg::BulkLaneEnded { node: origin }).await;
+        let _ = ctx
+            .comms
+            .broadcast(&ServerMsg::BulkLaneEnded { node: origin })
+            .await;
     }
 }
 

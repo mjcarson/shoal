@@ -24,10 +24,12 @@
 use std::collections::BTreeMap;
 
 use shoal_top::index::{
-    BackgroundFactsLite, BackupFactsLite, Capture, NodeEnvFactsLite, CatchupFactsLite, CatchupSecondFactsLite, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, FaultFactsLite, MigrationFactsLite, RebalanceFactsLite, RehomeFactsLite,
-    INDEX_VERSION, Index, Layer as IndexLayer, HopFactsLite, HopMixLite, MacroPoint, NodeCoresLite,
-    NodeReadFactsLite, OfferedLoadLite, OpStats, OutcomeFactsLite, ReadFactsLite, ReplicaFactsLite,
-    ScaleFactsLite, SecondFactsLite, Timing, Verdict, WindowFactsLite, Workload,
+    BackgroundFactsLite, BackupFactsLite, Capture, CatchupFactsLite, CatchupSecondFactsLite,
+    ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, FaultFactsLite, HopFactsLite,
+    HopMixLite, INDEX_VERSION, Index, Layer as IndexLayer, MacroPoint, MigrationFactsLite,
+    NodeCoresLite, NodeEnvFactsLite, NodeReadFactsLite, OfferedLoadLite, OpStats, OutcomeFactsLite,
+    ReadFactsLite, RebalanceFactsLite, RehomeFactsLite, ReplicaFactsLite, ScaleFactsLite,
+    SecondFactsLite, Timing, Verdict, WindowFactsLite, Workload,
 };
 
 use crate::model::macro_layer::{
@@ -173,7 +175,9 @@ fn captures(page: &Page, metas: &BTreeMap<String, CaptureMeta>) -> Vec<Capture> 
         captures.push(Capture {
             label: snapshot.label.clone(),
             captured: snapshot.captured.clone(),
-            head_short: meta.map(|meta| meta.code.head_short.clone()).unwrap_or_default(),
+            head_short: meta
+                .map(|meta| meta.code.head_short.clone())
+                .unwrap_or_default(),
             dirty: meta.is_some_and(|meta| meta.code.dirty),
             layers: snapshot_layers(snapshot),
             complete: snapshot.complete.iter().copied().map(layer).collect(),
@@ -197,10 +201,16 @@ fn captures(page: &Page, metas: &BTreeMap<String, CaptureMeta>) -> Vec<Capture> 
             // empty where a capture recorded nothing, which `Index::incomparable` reads as
             // agreeing with anything - there is no evidence it does not
             env_digest: meta.map(|meta| meta.env.digest.clone()).unwrap_or_default(),
-            host: meta.map(|meta| meta.env.hostname.clone()).unwrap_or_default(),
-            governor: meta.map(|meta| meta.env.governor.clone()).unwrap_or_default(),
+            host: meta
+                .map(|meta| meta.env.hostname.clone())
+                .unwrap_or_default(),
+            governor: meta
+                .map(|meta| meta.env.governor.clone())
+                .unwrap_or_default(),
             rustc: meta.map(|meta| meta.env.rustc.clone()).unwrap_or_default(),
-            cpu_model: meta.map(|meta| meta.env.cpu_model.clone()).unwrap_or_default(),
+            cpu_model: meta
+                .map(|meta| meta.env.cpu_model.clone())
+                .unwrap_or_default(),
         });
     }
     captures
@@ -586,117 +596,126 @@ pub fn cluster_facts(cluster: &ClusterFacts) -> ClusterFactsLite {
         }),
         // the background arm's record travels whole, windows and series
         // ([F44](../../../docs/src/features/repair.md))
-        background: cluster.background.as_ref().map(|background| BackgroundFactsLite {
-            kind: background.kind.clone(),
-            started_ms: background.started_ms,
-            finished_ms: background.finished_ms,
-            seconds: background.seconds,
-            groups: background.groups,
-            clean: background.clean,
-            partitions: background.partitions,
-            bytes: background.bytes,
-            windows: background
-                .windows
-                .iter()
-                .map(|window| WindowFactsLite {
-                    name: window.name.clone(),
-                    from_ms: window.from_ms,
-                    to_ms: window.to_ms,
-                    ops: window.ops,
-                    errors: window.errors,
-                    p50_us: window.p50_us,
-                    p99_us: window.p99_us,
-                    max_us: window.max_us,
-                })
-                .collect(),
-            series: background
-                .series
-                .iter()
-                .map(|second| SecondFactsLite {
-                    second: second.second,
-                    ops: second.ops,
-                    errors: second.errors,
-                    p50_us: second.p50_us,
-                    p99_us: second.p99_us,
-                })
-                .collect(),
-        }),
+        background: cluster
+            .background
+            .as_ref()
+            .map(|background| BackgroundFactsLite {
+                kind: background.kind.clone(),
+                started_ms: background.started_ms,
+                finished_ms: background.finished_ms,
+                seconds: background.seconds,
+                groups: background.groups,
+                clean: background.clean,
+                partitions: background.partitions,
+                bytes: background.bytes,
+                windows: background
+                    .windows
+                    .iter()
+                    .map(|window| WindowFactsLite {
+                        name: window.name.clone(),
+                        from_ms: window.from_ms,
+                        to_ms: window.to_ms,
+                        ops: window.ops,
+                        errors: window.errors,
+                        p50_us: window.p50_us,
+                        p99_us: window.p99_us,
+                        max_us: window.max_us,
+                    })
+                    .collect(),
+                series: background
+                    .series
+                    .iter()
+                    .map(|second| SecondFactsLite {
+                        second: second.second,
+                        ops: second.ops,
+                        errors: second.errors,
+                        p50_us: second.p50_us,
+                        p99_us: second.p99_us,
+                    })
+                    .collect(),
+            }),
         // the migration arm's record travels whole, phases, windows and series
         // ([F45](../../../docs/src/features/replica-migration.md))
-        migration: cluster.migration.as_ref().map(|migration| MigrationFactsLite {
-            started_ms: migration.started_ms,
-            finished_ms: migration.finished_ms,
-            seconds: migration.seconds,
-            groups: migration.groups,
-            outcome: migration.outcome.clone(),
-            phase_ms: migration.phase_ms.clone(),
-            bytes: migration.bytes,
-            entries: migration.entries,
-            windows: migration
-                .windows
-                .iter()
-                .map(|window| WindowFactsLite {
-                    name: window.name.clone(),
-                    from_ms: window.from_ms,
-                    to_ms: window.to_ms,
-                    ops: window.ops,
-                    errors: window.errors,
-                    p50_us: window.p50_us,
-                    p99_us: window.p99_us,
-                    max_us: window.max_us,
-                })
-                .collect(),
-            series: migration
-                .series
-                .iter()
-                .map(|second| SecondFactsLite {
-                    second: second.second,
-                    ops: second.ops,
-                    errors: second.errors,
-                    p50_us: second.p50_us,
-                    p99_us: second.p99_us,
-                })
-                .collect(),
-        }),
+        migration: cluster
+            .migration
+            .as_ref()
+            .map(|migration| MigrationFactsLite {
+                started_ms: migration.started_ms,
+                finished_ms: migration.finished_ms,
+                seconds: migration.seconds,
+                groups: migration.groups,
+                outcome: migration.outcome.clone(),
+                phase_ms: migration.phase_ms.clone(),
+                bytes: migration.bytes,
+                entries: migration.entries,
+                windows: migration
+                    .windows
+                    .iter()
+                    .map(|window| WindowFactsLite {
+                        name: window.name.clone(),
+                        from_ms: window.from_ms,
+                        to_ms: window.to_ms,
+                        ops: window.ops,
+                        errors: window.errors,
+                        p50_us: window.p50_us,
+                        p99_us: window.p99_us,
+                        max_us: window.max_us,
+                    })
+                    .collect(),
+                series: migration
+                    .series
+                    .iter()
+                    .map(|second| SecondFactsLite {
+                        second: second.second,
+                        ops: second.ops,
+                        errors: second.errors,
+                        p50_us: second.p50_us,
+                        p99_us: second.p99_us,
+                    })
+                    .collect(),
+            }),
         // the rebalance arms' record travels whole, steps, windows and series
         // ([F46](../../../docs/src/features/capacity-rebalancing.md))
-        rebalance: cluster.rebalance.as_ref().map(|rebalance| RebalanceFactsLite {
-            kind: rebalance.kind.clone(),
-            started_ms: rebalance.started_ms,
-            finished_ms: rebalance.finished_ms,
-            seconds: rebalance.seconds,
-            steps: rebalance.steps,
-            moved: rebalance.moved,
-            bytes: rebalance.bytes,
-            blocked: rebalance.blocked.clone(),
-            outcome: rebalance.outcome.clone(),
-            windows: rebalance
-                .windows
-                .iter()
-                .map(|window| WindowFactsLite {
-                    name: window.name.clone(),
-                    from_ms: window.from_ms,
-                    to_ms: window.to_ms,
-                    ops: window.ops,
-                    errors: window.errors,
-                    p50_us: window.p50_us,
-                    p99_us: window.p99_us,
-                    max_us: window.max_us,
-                })
-                .collect(),
-            series: rebalance
-                .series
-                .iter()
-                .map(|second| SecondFactsLite {
-                    second: second.second,
-                    ops: second.ops,
-                    errors: second.errors,
-                    p50_us: second.p50_us,
-                    p99_us: second.p99_us,
-                })
-                .collect(),
-            p99_ratio_permille: rebalance.p99_ratio_permille,
-        }),
+        rebalance: cluster
+            .rebalance
+            .as_ref()
+            .map(|rebalance| RebalanceFactsLite {
+                kind: rebalance.kind.clone(),
+                started_ms: rebalance.started_ms,
+                finished_ms: rebalance.finished_ms,
+                seconds: rebalance.seconds,
+                steps: rebalance.steps,
+                moved: rebalance.moved,
+                bytes: rebalance.bytes,
+                blocked: rebalance.blocked.clone(),
+                outcome: rebalance.outcome.clone(),
+                windows: rebalance
+                    .windows
+                    .iter()
+                    .map(|window| WindowFactsLite {
+                        name: window.name.clone(),
+                        from_ms: window.from_ms,
+                        to_ms: window.to_ms,
+                        ops: window.ops,
+                        errors: window.errors,
+                        p50_us: window.p50_us,
+                        p99_us: window.p99_us,
+                        max_us: window.max_us,
+                    })
+                    .collect(),
+                series: rebalance
+                    .series
+                    .iter()
+                    .map(|second| SecondFactsLite {
+                        second: second.second,
+                        ops: second.ops,
+                        errors: second.errors,
+                        p50_us: second.p50_us,
+                        p99_us: second.p99_us,
+                    })
+                    .collect(),
+                p99_ratio_permille: rebalance.p99_ratio_permille,
+            }),
         // the rehome arm's record travels whole: every count, and the start it held
         // ([F47](../../../docs/src/features/local-rehome.md))
         rehome: cluster.rehome.as_ref().map(|rehome| RehomeFactsLite {

@@ -1338,7 +1338,8 @@ impl Cluster {
         }
         // a snapshot transfer that gives up before a write would is one that never completes
         // under load
-        if self.replication.snapshot_timeout.duration() < self.replication.write_timeout.duration() {
+        if self.replication.snapshot_timeout.duration() < self.replication.write_timeout.duration()
+        {
             return Err(ServerError::Shoal(ShoalError::InvalidConfig(
                 "cluster.replication.snapshot_timeout is shorter than write_timeout".to_string(),
             )));
@@ -1372,7 +1373,8 @@ impl Cluster {
         // a move's learner phase is a snapshot transfer, so its deadline cannot be shorter
         if self.migration.timeout.duration() < self.replication.snapshot_timeout.duration() {
             return Err(ServerError::Shoal(ShoalError::InvalidConfig(
-                "cluster.migration.timeout is shorter than replication.snapshot_timeout".to_string(),
+                "cluster.migration.timeout is shorter than replication.snapshot_timeout"
+                    .to_string(),
             )));
         }
         // no moves at a time is no moves at all
@@ -1382,7 +1384,9 @@ impl Cluster {
             )));
         }
         // a stream budget under a chunk would never admit one chunk
-        if self.migration.stream_bytes_per_sec > 0 && self.migration.stream_bytes_per_sec < self.replication.snapshot_chunk_bytes {
+        if self.migration.stream_bytes_per_sec > 0
+            && self.migration.stream_bytes_per_sec < self.replication.snapshot_chunk_bytes
+        {
             return Err(ServerError::Shoal(ShoalError::InvalidConfig(
                 "cluster.migration.stream_bytes_per_sec is under replication.snapshot_chunk_bytes; a budget that cannot admit one chunk admits nothing".to_string(),
             )));
@@ -1406,7 +1410,9 @@ impl Cluster {
             )));
         }
         // the capacity a plan reads arrives on reports, so it cannot look more often than they come
-        if self.rebalance.plan_interval.duration() < Duration::from_millis(self.failure_detector.interval_ms) {
+        if self.rebalance.plan_interval.duration()
+            < Duration::from_millis(self.failure_detector.interval_ms)
+        {
             return Err(ServerError::Shoal(ShoalError::InvalidConfig(
                 "cluster.rebalance.plan_interval is shorter than failure_detector.interval_ms; the capacity it plans from arrives on reports".to_string(),
             )));
@@ -1438,11 +1444,26 @@ mod tests {
     /// A duration parses from each unit and refuses what is not one
     #[test]
     fn a_duration_parses_its_units() {
-        assert_eq!(DurationSpec::parse("500ms").unwrap().duration(), Duration::from_millis(500));
-        assert_eq!(DurationSpec::parse("5s").unwrap().duration(), Duration::from_secs(5));
-        assert_eq!(DurationSpec::parse("30m").unwrap().duration(), Duration::from_secs(1800));
-        assert_eq!(DurationSpec::parse("2h").unwrap().duration(), Duration::from_secs(7200));
-        assert!(DurationSpec::parse("5").is_err(), "a bare number has no unit");
+        assert_eq!(
+            DurationSpec::parse("500ms").unwrap().duration(),
+            Duration::from_millis(500)
+        );
+        assert_eq!(
+            DurationSpec::parse("5s").unwrap().duration(),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            DurationSpec::parse("30m").unwrap().duration(),
+            Duration::from_secs(1800)
+        );
+        assert_eq!(
+            DurationSpec::parse("2h").unwrap().duration(),
+            Duration::from_secs(7200)
+        );
+        assert!(
+            DurationSpec::parse("5").is_err(),
+            "a bare number has no unit"
+        );
         assert!(DurationSpec::parse("5d").is_err(), "days are not a unit");
         assert!(DurationSpec::parse("ms").is_err(), "a unit with no number");
     }
@@ -1475,7 +1496,10 @@ mod tests {
             cluster.auto_remove_after.map(|grace| grace.duration()),
             Some(Duration::from_secs(1800))
         );
-        assert_eq!(cluster.primary_failover_after.duration(), Duration::from_secs(5));
+        assert_eq!(
+            cluster.primary_failover_after.duration(),
+            Duration::from_secs(5)
+        );
         assert_eq!(cluster.failure_detector.interval_ms, 500);
         assert!((cluster.failure_detector.phi_threshold - 8.0).abs() < f64::EPSILON);
         assert_eq!(cluster.failure_detector.window, 100);
@@ -1485,64 +1509,110 @@ mod tests {
         assert_eq!(cluster.transport.data_queue_bytes, 64 * 1024 * 1024);
         assert_eq!(cluster.transport.control_queue_bytes, 8 * 1024 * 1024);
         assert_eq!(cluster.transport.bulk_queue_bytes, 64 * 1024 * 1024);
-        assert_eq!(cluster.transport.forward_timeout.duration(), Duration::from_secs(5));
-        assert_eq!(cluster.transport.reconnect_min.duration(), Duration::from_millis(100));
-        assert_eq!(cluster.transport.reconnect_max.duration(), Duration::from_secs(5));
+        assert_eq!(
+            cluster.transport.forward_timeout.duration(),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            cluster.transport.reconnect_min.duration(),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            cluster.transport.reconnect_max.duration(),
+            Duration::from_secs(5)
+        );
     }
 
     /// What this build does not implement is refused by name, and what it does is accepted
     #[test]
     fn validation_refuses_what_is_not_built() {
         // a bootstrapping node on a real interface is what runs
-        Cluster::default().bootstrap(true).validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).expect("a bootstrap was refused");
+        Cluster::default()
+            .bootstrap(true)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
+            .expect("a bootstrap was refused");
         // a joiner names the control addresses it discovers the cluster through
         Cluster::default()
             .seeds(vec!["10.0.0.1:12002".to_string()])
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect("a joiner was refused");
         // and a seed has to be an address
         let error = Cluster::default()
             .seeds(vec!["seed-one".to_string()])
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect_err("a seed that is not an address was accepted");
         assert!(format!("{error}").contains("host:port"), "{error}");
         // a node creates a cluster or joins one, not both
         let error = Cluster::default()
             .bootstrap(true)
             .seeds(vec!["10.0.0.1:12002".to_string()])
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect_err("a bootstrapper with seeds started");
         assert!(format!("{error}").contains("not both"), "{error}");
         // a node that does neither is nothing
-        assert!(Cluster::default().validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).is_err());
+        assert!(Cluster::default()
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES
+            )
+            .is_err());
         // the strong read level is Quorum; All is refused naming C6 (F41)
         let error = Cluster::default()
             .bootstrap(true)
             .read_consistency(Consistency::All)
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect_err("read_consistency All was accepted");
         assert!(format!("{error}").contains("C6"), "{error}");
         Cluster::default()
             .bootstrap(true)
             .read_consistency(Consistency::Quorum)
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect("read_consistency Quorum was refused");
         // a dial override has to be an address, and one that is parses
         let node = super::NodeId::mint();
         assert!(Cluster::default()
             .bootstrap(true)
             .dial(node, Some("nowhere".to_string()), None)
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES
+            )
             .is_err());
         Cluster::default()
             .bootstrap(true)
             .dial(node, Some("127.0.0.1:1".to_string()), None)
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect("a dial override was refused");
         // the detector needs samples before it can suspect anybody
         let mut no_samples = Cluster::default().bootstrap(true);
         no_samples.failure_detector.min_samples = 0;
-        assert!(no_samples.validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).is_err());
+        assert!(no_samples
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES
+            )
+            .is_err());
         // peer tls is accepted now, but a certificate that cannot be read is refused as it is read
         let mut with_missing_tls = Cluster::default().bootstrap(true);
         with_missing_tls.tls = Some(super::PeerTls {
@@ -1552,13 +1622,28 @@ mod tests {
             bind_identity: true,
         });
         assert!(
-            with_missing_tls.validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).is_err(),
+            with_missing_tls
+                .validate(
+                    "127.0.0.1",
+                    crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES
+                )
+                .is_err(),
             "an unreadable certificate was accepted"
         );
         // an even voter count is not a quorum anyone wants
-        assert!(Cluster::default().bootstrap(true).control_voters(2).validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).is_err());
+        assert!(Cluster::default()
+            .bootstrap(true)
+            .control_voters(2)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES
+            )
+            .is_err());
         // an unspecified interface with nothing advertised is not an address
-        assert!(Cluster::default().bootstrap(true).validate("0.0.0.0", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).is_err());
+        assert!(Cluster::default()
+            .bootstrap(true)
+            .validate("0.0.0.0", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .is_err());
         Cluster::default()
             .bootstrap(true)
             .advertise("10.0.0.2")
@@ -1569,86 +1654,135 @@ mod tests {
         let error = Cluster::default()
             .bootstrap(true)
             .write_consistency(Consistency::One)
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect_err("a One write policy was accepted");
         assert!(format!("{error}").contains("C5"), "{error}");
         // a proposal that outlives the forward deadline answers nobody
         let mut long_write = Cluster::default().bootstrap(true);
         long_write.replication.write_timeout = DurationSpec(Duration::from_secs(6));
-        let error = long_write.validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).expect_err("a write timeout past the forward timeout was accepted");
+        let error = long_write
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
+            .expect_err("a write timeout past the forward timeout was accepted");
         assert!(format!("{error}").contains("forward_timeout"), "{error}");
         // and the groups' timers derive from the failover base, which has to be a timer
         let error = Cluster::default()
             .bootstrap(true)
             .primary_failover_after(Duration::from_millis(50))
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect_err("a failover base under 100ms was accepted");
         assert!(format!("{error}").contains("heartbeat"), "{error}");
         Cluster::default()
             .bootstrap(true)
             .primary_failover_after(Duration::from_millis(100))
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect("a failover base of 100ms was refused");
         // the snapshot settings have bounds of their own ([F43](../../../../docs/src/features/node-recovery.md))
         let mut big_chunk = Cluster::default().bootstrap(true);
         big_chunk.replication.snapshot_chunk_bytes = 1024 * 1024;
-        let error = big_chunk.validate("127.0.0.1", 64 * 1024).expect_err("a chunk larger than a frame was accepted");
-        assert!(format!("{error}").contains("snapshot_chunk_bytes"), "{error}");
+        let error = big_chunk
+            .validate("127.0.0.1", 64 * 1024)
+            .expect_err("a chunk larger than a frame was accepted");
+        assert!(
+            format!("{error}").contains("snapshot_chunk_bytes"),
+            "{error}"
+        );
         let mut short_transfer = Cluster::default().bootstrap(true);
         short_transfer.replication.snapshot_timeout = DurationSpec(Duration::from_secs(1));
         let error = short_transfer
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect_err("a snapshot timeout under the write timeout was accepted");
         assert!(format!("{error}").contains("snapshot_timeout"), "{error}");
         let mut tight_budget = Cluster::default().bootstrap(true);
         tight_budget.replication.retained_bytes = tight_budget.replication.segment_bytes;
         let error = tight_budget
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect_err("a retention budget under two segments was accepted");
         assert!(format!("{error}").contains("retained_bytes"), "{error}");
         // the repair settings have bounds of their own ([F44](../../../../docs/src/features/repair.md))
         let mut short_scrub = Cluster::default().bootstrap(true);
         short_scrub.repair.timeout = DurationSpec(Duration::from_secs(1));
         let error = short_scrub
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect_err("a repair timeout under the write timeout was accepted");
         assert!(format!("{error}").contains("repair.timeout"), "{error}");
         let mut tight_interval = Cluster::default().bootstrap(true);
         tight_interval.repair.scrub_interval = Some(DurationSpec(Duration::from_secs(60)));
         let error = tight_interval
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect_err("a scrub interval under the repair timeout was accepted");
         assert!(format!("{error}").contains("scrub_interval"), "{error}");
         let mut none_at_once = Cluster::default().bootstrap(true);
         none_at_once.repair.concurrent = 0;
         let error = none_at_once
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect_err("no repairs at a time was accepted");
         assert!(format!("{error}").contains("repair.concurrent"), "{error}");
         // a retry window under the write timeout would expire a retry the write itself allows
         let mut short_window = Cluster::default().bootstrap(true);
         short_window.replication.retry_window = DurationSpec(Duration::from_millis(100));
         let error = short_window
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect_err("a retry window under the write timeout was accepted");
         assert!(format!("{error}").contains("retry_window"), "{error}");
         // and so do the migration settings ([F45](../../../../docs/src/features/replica-migration.md))
         let mut short_move = Cluster::default().bootstrap(true);
         short_move.migration.timeout = DurationSpec(Duration::from_secs(1));
         let error = short_move
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect_err("a migration timeout under the snapshot timeout was accepted");
         assert!(format!("{error}").contains("migration.timeout"), "{error}");
         let mut no_moves = Cluster::default().bootstrap(true);
         no_moves.migration.concurrent = 0;
         let error = no_moves
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect_err("no moves at a time was accepted");
-        assert!(format!("{error}").contains("migration.concurrent"), "{error}");
+        assert!(
+            format!("{error}").contains("migration.concurrent"),
+            "{error}"
+        );
         let mut scheduled = Cluster::default().bootstrap(true);
         scheduled.repair.scrub_interval = Some(DurationSpec(Duration::from_secs(3600)));
         scheduled
-            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
             .expect("an hourly scrub was refused");
     }
 
@@ -1656,17 +1790,25 @@ mod tests {
     #[test]
     fn the_repair_block_parses_with_its_defaults() {
         let defaults = super::Repair::default();
-        assert_eq!(defaults.scrub_interval, None, "a scheduled scrub is off by default");
+        assert_eq!(
+            defaults.scrub_interval, None,
+            "a scheduled scrub is off by default"
+        );
         assert_eq!(defaults.timeout.duration(), Duration::from_secs(300));
         assert_eq!(defaults.concurrent, 1);
         // a block naming every field
-        let parsed: super::Repair = serde_yaml::from_str("scrub_interval: \"6h\"\ntimeout: \"2m\"\nconcurrent: 2\n")
-            .expect("a full repair block parses");
-        assert_eq!(parsed.scrub_interval.map(|spec| spec.duration()), Some(Duration::from_secs(6 * 3600)));
+        let parsed: super::Repair =
+            serde_yaml::from_str("scrub_interval: \"6h\"\ntimeout: \"2m\"\nconcurrent: 2\n")
+                .expect("a full repair block parses");
+        assert_eq!(
+            parsed.scrub_interval.map(|spec| spec.duration()),
+            Some(Duration::from_secs(6 * 3600))
+        );
         assert_eq!(parsed.timeout.duration(), Duration::from_secs(120));
         assert_eq!(parsed.concurrent, 2);
         // an explicit null is never, an empty block is the defaults, an unknown field is refused
-        let never: super::Repair = serde_yaml::from_str("scrub_interval: null\n").expect("null parses");
+        let never: super::Repair =
+            serde_yaml::from_str("scrub_interval: null\n").expect("null parses");
         assert_eq!(never.scrub_interval, None);
         let empty: super::Repair = serde_yaml::from_str("{}").expect("an empty block parses");
         assert_eq!(empty, defaults);
@@ -1699,7 +1841,8 @@ mod tests {
         assert_eq!(parsed.concurrent_streams, 1);
         assert_eq!(parsed.disk_reserve, 2 * 1024 * 1024 * 1024);
         // zero is an unlimited budget
-        let unlimited: super::Migration = serde_yaml::from_str("stream_bytes_per_sec: 0\n").expect("zero parses");
+        let unlimited: super::Migration =
+            serde_yaml::from_str("stream_bytes_per_sec: 0\n").expect("zero parses");
         assert_eq!(unlimited.stream_bytes_per_sec, 0);
         // an empty block is the defaults, an unknown field is refused
         let empty: super::Migration = serde_yaml::from_str("{}").expect("an empty block parses");
@@ -1715,8 +1858,9 @@ mod tests {
         assert_eq!(defaults.moves_per_node, 1);
         assert!((defaults.hysteresis - 0.10).abs() < f64::EPSILON);
         assert_eq!(defaults.plan_interval.duration(), Duration::from_secs(5));
-        let parsed: super::Rebalance = serde_yaml::from_str("moves_per_node: 2\nhysteresis: 0.25\nplan_interval: \"2s\"\n")
-            .expect("a full rebalance block parses");
+        let parsed: super::Rebalance =
+            serde_yaml::from_str("moves_per_node: 2\nhysteresis: 0.25\nplan_interval: \"2s\"\n")
+                .expect("a full rebalance block parses");
         assert_eq!(parsed.moves_per_node, 2);
         assert!((parsed.hysteresis - 0.25).abs() < f64::EPSILON);
         assert_eq!(parsed.plan_interval.duration(), Duration::from_secs(2));
@@ -1726,27 +1870,56 @@ mod tests {
         // the bounds: no moves, a hysteresis that is not a share, an interval under the reports
         let mut none = Cluster::default().bootstrap(true);
         none.rebalance.moves_per_node = 0;
-        let error = none.validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).expect_err("no moves per node was accepted");
+        let error = none
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
+            .expect_err("no moves per node was accepted");
         assert!(format!("{error}").contains("moves_per_node"), "{error}");
         let mut wide = Cluster::default().bootstrap(true);
         wide.rebalance.hysteresis = 1.5;
-        let error = wide.validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).expect_err("a hysteresis over one was accepted");
+        let error = wide
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
+            .expect_err("a hysteresis over one was accepted");
         assert!(format!("{error}").contains("hysteresis"), "{error}");
         let mut eager = Cluster::default().bootstrap(true);
         eager.rebalance.plan_interval = DurationSpec(Duration::from_millis(100));
-        let error = eager.validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).expect_err("a plan interval under the reports was accepted");
+        let error = eager
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
+            .expect_err("a plan interval under the reports was accepted");
         assert!(format!("{error}").contains("plan_interval"), "{error}");
         // and the migration budgets: a budget under a chunk, no streams at a time
         let mut trickle = Cluster::default().bootstrap(true);
         trickle.migration.stream_bytes_per_sec = 1024;
-        let error = trickle.validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).expect_err("a budget under a chunk was accepted");
-        assert!(format!("{error}").contains("stream_bytes_per_sec"), "{error}");
+        let error = trickle
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
+            .expect_err("a budget under a chunk was accepted");
+        assert!(
+            format!("{error}").contains("stream_bytes_per_sec"),
+            "{error}"
+        );
         let mut no_streams = Cluster::default().bootstrap(true);
         no_streams.migration.concurrent_streams = 0;
-        let error = no_streams.validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).expect_err("no streams at a time was accepted");
+        let error = no_streams
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
+            .expect_err("no streams at a time was accepted");
         assert!(format!("{error}").contains("concurrent_streams"), "{error}");
         // the weight is this node's and parses beside the rest
-        let weighted: Cluster = serde_yaml::from_str("bootstrap: true\nweight: 3\n").expect("a weighted node parses");
+        let weighted: Cluster =
+            serde_yaml::from_str("bootstrap: true\nweight: 3\n").expect("a weighted node parses");
         assert_eq!(weighted.weight, Some(3));
         assert_eq!(Cluster::default().weight, None);
     }
@@ -1764,7 +1937,10 @@ mod tests {
         assert_eq!(defaults.volatile_log_bytes, 256 * 1024 * 1024);
         // the snapshot and retention settings ([F43](../../../../docs/src/features/node-recovery.md))
         assert_eq!(defaults.snapshot_chunk_bytes, 1024 * 1024);
-        assert_eq!(defaults.snapshot_timeout.duration(), Duration::from_secs(300));
+        assert_eq!(
+            defaults.snapshot_timeout.duration(),
+            Duration::from_secs(300)
+        );
         assert_eq!(defaults.retry_window.duration(), Duration::from_secs(300));
         assert_eq!(defaults.install_bytes, 2 * 1024 * 1024 * 1024);
         assert_eq!(defaults.retained_bytes, 1024 * 1024 * 1024);
@@ -1799,7 +1975,8 @@ mod tests {
         assert_eq!(defaults.concurrent, 1);
         assert_eq!(defaults.timeout.duration(), Duration::from_secs(600));
         // a block naming every field
-        let parsed: super::Backup = serde_yaml::from_str("concurrent: 2\ntimeout: \"20m\"\n").expect("a full backup block parses");
+        let parsed: super::Backup = serde_yaml::from_str("concurrent: 2\ntimeout: \"20m\"\n")
+            .expect("a full backup block parses");
         assert_eq!(parsed.concurrent, 2);
         assert_eq!(parsed.timeout.duration(), Duration::from_secs(1200));
         // an empty block is the defaults, and an unknown field is refused
@@ -1809,11 +1986,15 @@ mod tests {
         // no drivers, and a deadline under a snapshot's, are refused by name
         let mut cluster = Cluster::default().bootstrap(true);
         cluster.backup.concurrent = 0;
-        let error = cluster.validate("127.0.0.1", DEFAULT_MAX_FRAME_BYTES).expect_err("no drivers");
+        let error = cluster
+            .validate("127.0.0.1", DEFAULT_MAX_FRAME_BYTES)
+            .expect_err("no drivers");
         assert!(format!("{error}").contains("backup.concurrent"), "{error}");
         let mut cluster = Cluster::default().bootstrap(true);
         cluster.backup.timeout = DurationSpec(Duration::from_secs(1));
-        let error = cluster.validate("127.0.0.1", DEFAULT_MAX_FRAME_BYTES).expect_err("a short deadline");
+        let error = cluster
+            .validate("127.0.0.1", DEFAULT_MAX_FRAME_BYTES)
+            .expect_err("a short deadline");
         assert!(format!("{error}").contains("backup.timeout"), "{error}");
     }
 
@@ -1821,25 +2002,36 @@ mod tests {
     /// ([F48](../../../../docs/src/features/rolling-compatibility.md))
     #[test]
     fn the_transport_block_refuses_a_pin_outside_the_range() {
-        use crate::shared::protocol::{DEFAULT_MAX_FRAME_BYTES, MIN_PEER_VERSION, PROTOCOL_VERSION};
+        use crate::shared::protocol::{
+            DEFAULT_MAX_FRAME_BYTES, MIN_PEER_VERSION, PROTOCOL_VERSION,
+        };
         // no pin is the default, and the newest the build speaks
         assert_eq!(super::Transport::default().wire_version, None);
         // a pin anywhere in the range validates
         for pin in MIN_PEER_VERSION..=PROTOCOL_VERSION {
             let mut cluster = Cluster::default().bootstrap(true);
             cluster.transport.wire_version = Some(pin);
-            cluster.validate("127.0.0.1", DEFAULT_MAX_FRAME_BYTES).expect("a pin in the range validates");
+            cluster
+                .validate("127.0.0.1", DEFAULT_MAX_FRAME_BYTES)
+                .expect("a pin in the range validates");
         }
         // one below the floor or above the newest is refused naming the range
         for pin in [MIN_PEER_VERSION - 1, PROTOCOL_VERSION + 1, 0, 255] {
             let mut cluster = Cluster::default().bootstrap(true);
             cluster.transport.wire_version = Some(pin);
-            let error = cluster.validate("127.0.0.1", DEFAULT_MAX_FRAME_BYTES).expect_err("a pin outside the range is refused");
+            let error = cluster
+                .validate("127.0.0.1", DEFAULT_MAX_FRAME_BYTES)
+                .expect_err("a pin outside the range is refused");
             let text = format!("{error}");
-            assert!(text.contains("wire_version") && text.contains(&MIN_PEER_VERSION.to_string()), "{text}");
+            assert!(
+                text.contains("wire_version") && text.contains(&MIN_PEER_VERSION.to_string()),
+                "{text}"
+            );
         }
         // and the block parses the pin from yaml
-        let parsed: super::Transport = serde_yaml::from_str(&format!("wire_version: {MIN_PEER_VERSION}\n")).expect("a pin parses");
+        let parsed: super::Transport =
+            serde_yaml::from_str(&format!("wire_version: {MIN_PEER_VERSION}\n"))
+                .expect("a pin parses");
         assert_eq!(parsed.wire_version, Some(MIN_PEER_VERSION));
     }
 }

@@ -38,7 +38,9 @@ pub struct Movie {
 }
 
 /// A sorted table sharing a prefix with the unsorted one so fuzzy matching has work to do
-#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, DeepSizeOf)]
+#[derive(
+    Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, DeepSizeOf,
+)]
 #[rkyv(derive(Debug))]
 #[shoal_table(db = "TestDb")]
 pub struct MovieByKeyword {
@@ -604,8 +606,16 @@ fn scrolls_through_a_long_list() {
 fn takes_the_keys_helix_binds() {
     let mut tab = typed("SELECT * FROM Mov");
     // moving down the menu is bound three ways
-    for down in [key(KeyCode::Tab), key(KeyCode::Down), control(KeyCode::Char('n'))] {
-        assert!(tab.handle_completion_key(down), "{:?} should be taken", down);
+    for down in [
+        key(KeyCode::Tab),
+        key(KeyCode::Down),
+        control(KeyCode::Char('n')),
+    ] {
+        assert!(
+            tab.handle_completion_key(down),
+            "{:?} should be taken",
+            down
+        );
     }
     // three keys down from the top of a two entry menu wraps back to the second
     assert_eq!(
@@ -715,14 +725,12 @@ fn draws_a_wrapped_query() {
     let (rendered, cursor) = render_query(&tab, (22, 10), Rect::new(0, 0, 22, height));
     // the query is split across the two rows between the borders
     assert_eq!(
-        rendered[1],
-        "│SELECT * FROM Movie │",
+        rendered[1], "│SELECT * FROM Movie │",
         "unexpected render: {:#?}",
         rendered
     );
     assert_eq!(
-        rendered[2],
-        "│WHERE id = 5        │",
+        rendered[2], "│WHERE id = 5        │",
         "unexpected render: {:#?}",
         rendered
     );
@@ -827,8 +835,7 @@ fn an_underline_follows_a_wrapped_query_onto_its_next_row() {
     );
     // and the rest of it is at the start of the next one
     assert_eq!(
-        underlined[2],
-        " ~~~",
+        underlined[2], " ~~~",
         "unexpected underline: {underlined:#?}"
     );
 }
@@ -979,8 +986,7 @@ fn a_multi_line_server_error_stays_one_box() {
     let height = ErrorBar::height(Some(&tab), 60);
     let rendered = render_error(&tab, (60, height + 2), Rect::new(0, 0, 60, height));
     assert_eq!(
-        rendered[1],
-        "│Error: Shoalctl( \"the shard\\n was busy\", )                │",
+        rendered[1], "│Error: Shoalctl( \"the shard\\n was busy\", )                │",
         "unexpected render: {rendered:#?}"
     );
     // and nothing was drawn past the row the box closes on

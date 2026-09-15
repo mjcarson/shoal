@@ -290,7 +290,7 @@ fn gcd(a: u64, b: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{gcd, stride_for, KeyedGet, Residency, ROWS, ROW_BYTES};
+    use super::{KeyedGet, ROW_BYTES, ROWS, Residency, gcd, stride_for};
     use crate::model::macro_layer::Timing;
     use crate::workloads::harness::seed::Scale;
     use crate::workloads::workload::{ServerNeed, Workload};

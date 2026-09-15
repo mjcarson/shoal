@@ -10,7 +10,11 @@ use syn::Ident;
 /// * `stream` - The stream to extend
 /// * `name` - The name of the type we are extending
 /// * `all_fields` - All fields in the struct (ident, type)
-pub fn add(stream: &mut proc_macro2::TokenStream, name: &Ident, all_fields: &[(syn::Ident, syn::Type)]) {
+pub fn add(
+    stream: &mut proc_macro2::TokenStream,
+    name: &Ident,
+    all_fields: &[(syn::Ident, syn::Type)],
+) {
     // Build the archived type name
     let archived_name = format_ident!("Archived{}", name);
 

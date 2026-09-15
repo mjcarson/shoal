@@ -112,13 +112,23 @@ impl ClusterModel {
     /// * `backups` - The `Backups` frame
     /// * `recoveries` - The `Recoveries` frame
     #[must_use]
-    pub fn from_frames(members: &Value, readiness: &Value, replication: &Value, plans: &Value, backups: &Value, recoveries: &Value) -> Self {
+    pub fn from_frames(
+        members: &Value,
+        readiness: &Value,
+        replication: &Value,
+        plans: &Value,
+        backups: &Value,
+        recoveries: &Value,
+    ) -> Self {
         let rows = members["members"]
             .as_array()
             .into_iter()
             .flatten()
             .map(|member| MemberRow {
-                node: member["record"]["node"].as_str().unwrap_or_default().to_string(),
+                node: member["record"]["node"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
                 role: member["role"].as_str().unwrap_or_default().to_string(),
                 health: member["health"].as_str().unwrap_or_default().to_string(),
                 phase: member["phase"].as_str().unwrap_or("member").to_string(),
@@ -128,7 +138,10 @@ impl ClusterModel {
                 free_bytes: member["free_bytes"].as_u64(),
                 held_bytes: member["held_bytes"].as_u64(),
                 wire_max: member["record"]["wire_max"].as_u64().unwrap_or(0),
-                client: member["record"]["client"].as_str().unwrap_or_default().to_string(),
+                client: member["record"]["client"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
             })
             .collect();
         let plans = plans
@@ -154,14 +167,30 @@ impl ClusterModel {
             .flatten()
             .map(|record| {
                 let groups = record["groups"].as_object().cloned().unwrap_or_default();
-                let written = groups.values().filter(|group| group["outcome"]["Written"].is_object()).count();
-                let skipped = groups.values().filter(|group| group["outcome"]["Skipped"].is_object()).count();
-                let failed = groups.values().filter(|group| group["outcome"]["Failed"].is_object()).count();
+                let written = groups
+                    .values()
+                    .filter(|group| group["outcome"]["Written"].is_object())
+                    .count();
+                let skipped = groups
+                    .values()
+                    .filter(|group| group["outcome"]["Skipped"].is_object())
+                    .count();
+                let failed = groups
+                    .values()
+                    .filter(|group| group["outcome"]["Failed"].is_object())
+                    .count();
                 let done = groups.values().all(|group| group["phase"] == "Done");
                 (
                     record["op"].as_str().unwrap_or_default().to_string(),
-                    if done { "done".to_string() } else { "running".to_string() },
-                    format!("{written} written, {skipped} skipped, {failed} failed of {}", groups.len()),
+                    if done {
+                        "done".to_string()
+                    } else {
+                        "running".to_string()
+                    },
+                    format!(
+                        "{written} written, {skipped} skipped, {failed} failed of {}",
+                        groups.len()
+                    ),
                 )
             })
             .collect();
@@ -191,7 +220,11 @@ impl ClusterModel {
             default_writes: match &readiness["data"]["default_writes"] {
                 Value::Object(map) if map.contains_key("Ok") => "admitted".to_string(),
                 Value::Object(map) => match map.get("Err") {
-                    Some(err) => format!("refused: have {} need {}", err["have"].as_u64().unwrap_or(0), err["need"].as_u64().unwrap_or(0)),
+                    Some(err) => format!(
+                        "refused: have {} need {}",
+                        err["have"].as_u64().unwrap_or(0),
+                        err["need"].as_u64().unwrap_or(0)
+                    ),
                     None => "unknown".to_string(),
                 },
                 _ => "unknown".to_string(),
@@ -223,10 +256,21 @@ impl ClusterModel {
         let missing = self.desired_rf.saturating_sub(self.active_rf);
         let mut line = format!("{} of {} copies", self.active_rf, self.desired_rf);
         if missing > 0 {
-            line.push_str(&format!(", awaiting {missing} member{}", if missing == 1 { "" } else { "s" }));
+            line.push_str(&format!(
+                ", awaiting {missing} member{}",
+                if missing == 1 { "" } else { "s" }
+            ));
         }
         if self.under_replicated_sets > 0 {
-            line.push_str(&format!(", {} set{} under-replicated", self.under_replicated_sets, if self.under_replicated_sets == 1 { "" } else { "s" }));
+            line.push_str(&format!(
+                ", {} set{} under-replicated",
+                self.under_replicated_sets,
+                if self.under_replicated_sets == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
         }
         line.push_str(&format!("; writes {}", self.default_writes));
         line
@@ -236,7 +280,10 @@ impl ClusterModel {
     #[must_use]
     pub fn render_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
-        lines.push(format!("cluster {} via {} at version {}", self.cluster, self.node, self.version));
+        lines.push(format!(
+            "cluster {} via {} at version {}",
+            self.cluster, self.node, self.version
+        ));
         lines.push(format!(
             "leader {}  voters {}  learners {}  up {}  tombstones {}",
             self.leader.as_deref().unwrap_or("none"),
@@ -267,7 +314,9 @@ impl ClusterModel {
                 member.health,
                 member.phase,
                 member.incarnation,
-                member.grace_remaining_ms.map_or("-".to_string(), |ms| format!("{}s", ms / 1000)),
+                member
+                    .grace_remaining_ms
+                    .map_or("-".to_string(), |ms| format!("{}s", ms / 1000)),
                 member.free_bytes.map_or("-".to_string(), bytes),
                 member.held_bytes.map_or("-".to_string(), bytes),
                 member.wire_max,
@@ -280,7 +329,10 @@ impl ClusterModel {
         } else {
             lines.push("open plans".to_string());
             for plan in &self.plans {
-                let mut line = format!("  {} {} {} {}/{} moved", plan.op, plan.kind, plan.phase, plan.moved, plan.steps);
+                let mut line = format!(
+                    "  {} {} {} {}/{} moved",
+                    plan.op, plan.kind, plan.phase, plan.moved, plan.steps
+                );
                 if let Some(blocked) = &plan.blocked {
                     line.push_str(&format!(" - blocked: {blocked}"));
                 }
@@ -311,7 +363,11 @@ impl ClusterModel {
 fn kind_name(kind: &Value) -> String {
     match kind {
         Value::String(name) => name.to_lowercase(),
-        Value::Object(map) => map.keys().next().map(|key| key.to_lowercase()).unwrap_or_default(),
+        Value::Object(map) => map
+            .keys()
+            .next()
+            .map(|key| key.to_lowercase())
+            .unwrap_or_default(),
         _ => String::new(),
     }
 }
@@ -358,8 +414,10 @@ mod tests {
                 { "record": { "node": "n2", "incarnation": 3, "wire_max": 5, "client": "127.0.0.1:3" }, "role": "learner", "health": "up", "phase": "removing", "weight": 1 }
             ]
         });
-        let readiness = json!({ "data": { "default_writes": { "Err": { "have": 2, "need": 2 } } } });
-        let replication = json!({ "groups": 6, "leading": 2, "lag_max": 3, "installing": 1, "quarantined": 0 });
+        let readiness =
+            json!({ "data": { "default_writes": { "Err": { "have": 2, "need": 2 } } } });
+        let replication =
+            json!({ "groups": 6, "leading": 2, "lag_max": 3, "installing": 1, "quarantined": 0 });
         let plans = json!([
             { "op": "p1", "kind": { "Decommission": { "node": "n2" } }, "phase": "Running", "outcome": null,
               "steps": [ { "state": "Moved" }, { "state": "Pending" } ], "blocked": { "reason": "tablet 0: every up member holds the set" } },
@@ -367,31 +425,98 @@ mod tests {
         ]);
         let backups = json!([ { "op": "b1", "groups": { "g1": { "phase": "Done", "outcome": { "Written": {} } }, "g2": { "phase": "Done", "outcome": { "Skipped": {} } } } } ]);
         let recoveries = json!([ { "at": "n0", "lost": ["n7", "n8"], "last_committed": 40 } ]);
-        let model = ClusterModel::from_frames(&members, &readiness, &replication, &plans, &backups, &recoveries);
-        assert_eq!((model.desired_rf, model.active_rf, model.up_members), (3, 2, 2));
-        assert_eq!(model.headline(), "2 of 3 copies, awaiting 1 member, 4 sets under-replicated; writes refused: have 2 need 2");
+        let model = ClusterModel::from_frames(
+            &members,
+            &readiness,
+            &replication,
+            &plans,
+            &backups,
+            &recoveries,
+        );
+        assert_eq!(
+            (model.desired_rf, model.active_rf, model.up_members),
+            (3, 2, 2)
+        );
+        assert_eq!(
+            model.headline(),
+            "2 of 3 copies, awaiting 1 member, 4 sets under-replicated; writes refused: have 2 need 2"
+        );
         assert_eq!(model.members.len(), 3);
         assert_eq!(model.members[1].grace_remaining_ms, Some(61000));
         assert_eq!(model.members[2].phase, "removing");
         assert_eq!(model.members[0].held_bytes, Some(1024));
         assert_eq!((model.activated_wire, model.wire_range), (5, (4, 5)));
         assert_eq!(model.tombstones, 1);
-        assert_eq!((model.groups, model.leading, model.lag_max, model.installing), (6, 2, 3, 1));
+        assert_eq!(
+            (model.groups, model.leading, model.lag_max, model.installing),
+            (6, 2, 3, 1)
+        );
         // the done plan is not open; the running one is, with its blocked reason and its steps
         assert_eq!(model.plans.len(), 1);
-        assert_eq!((model.plans[0].kind.as_str(), model.plans[0].steps, model.plans[0].moved), ("decommission", 2, 1));
-        assert!(model.plans[0].blocked.as_deref().unwrap_or_default().contains("every up member"));
-        assert_eq!(model.backups[0], ("b1".to_string(), "done".to_string(), "1 written, 1 skipped, 0 failed of 2".to_string()));
-        assert_eq!(model.recoveries, vec!["at n0 lost 2 boundary 40".to_string()]);
+        assert_eq!(
+            (
+                model.plans[0].kind.as_str(),
+                model.plans[0].steps,
+                model.plans[0].moved
+            ),
+            ("decommission", 2, 1)
+        );
+        assert!(
+            model.plans[0]
+                .blocked
+                .as_deref()
+                .unwrap_or_default()
+                .contains("every up member")
+        );
+        assert_eq!(
+            model.backups[0],
+            (
+                "b1".to_string(),
+                "done".to_string(),
+                "1 written, 1 skipped, 0 failed of 2".to_string()
+            )
+        );
+        assert_eq!(
+            model.recoveries,
+            vec!["at n0 lost 2 boundary 40".to_string()]
+        );
         let lines = model.render_lines();
-        assert!(lines.iter().any(|line| line.contains("2 of 3 copies, awaiting 1 member")), "{lines:?}");
-        assert!(lines.iter().any(|line| line.starts_with("n2") && line.contains("removing")), "{lines:?}");
-        assert!(lines.iter().any(|line| line.contains("blocked: tablet 0")), "{lines:?}");
-        assert!(lines.iter().any(|line| line.contains("wire activated 5")), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("2 of 3 copies, awaiting 1 member")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("n2") && line.contains("removing")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("blocked: tablet 0")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("wire activated 5")),
+            "{lines:?}"
+        );
         // frames from before every field: nothing fails and the defaults stand
-        let older = ClusterModel::from_frames(&json!({ "cluster": "c", "members": [] }), &json!({}), &json!({}), &json!([]), &json!([]), &json!([]));
+        let older = ClusterModel::from_frames(
+            &json!({ "cluster": "c", "members": [] }),
+            &json!({}),
+            &json!({}),
+            &json!([]),
+            &json!([]),
+            &json!([]),
+        );
         assert_eq!(older.default_writes, "unknown");
         assert_eq!(older.headline(), "0 of 0 copies; writes unknown");
-        assert!(older.render_lines().iter().any(|line| line == "no open plans"));
+        assert!(
+            older
+                .render_lines()
+                .iter()
+                .any(|line| line == "no open plans")
+        );
     }
 }

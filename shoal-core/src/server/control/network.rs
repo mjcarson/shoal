@@ -44,7 +44,8 @@ use crate::server::peer::handshake::PeerAddr;
 use crate::server::peer::{self, Frame, FrameKey, Lane, LinkEvent, Local};
 use crate::shared::identity::NodeId;
 use crate::shared::protocol::peer::{
-    ControlKind, ControlRequestHead, ControlResponseHead, ControlStatus, PeerRefusal, CONTROL_HEAD_LEN,
+    ControlKind, ControlRequestHead, ControlResponseHead, ControlStatus, PeerRefusal,
+    CONTROL_HEAD_LEN,
 };
 use crate::shared::protocol::MessageType;
 use crate::shared::tls::PeerTlsHolder;
@@ -121,7 +122,12 @@ impl ControlLink {
             let pending = pending.clone();
             move |event: LinkEvent| match event {
                 // a control response completes the RPC that carries its id
-                LinkEvent::Frame { header, head, payload, .. } => {
+                LinkEvent::Frame {
+                    header,
+                    head,
+                    payload,
+                    ..
+                } => {
                     if header.kind != MessageType::ControlResponse {
                         return;
                     }
@@ -132,9 +138,9 @@ impl ControlLink {
                     if let Some(tx) = pending.borrow_mut().remove(&response.id) {
                         let outcome = match response.status {
                             ControlStatus::Ok => ControlOutcome::Ok(payload.to_vec()),
-                            ControlStatus::Error => {
-                                ControlOutcome::Remote(String::from_utf8_lossy(&payload).into_owned())
-                            }
+                            ControlStatus::Error => ControlOutcome::Remote(
+                                String::from_utf8_lossy(&payload).into_owned(),
+                            ),
                         };
                         let _ = tx.send(outcome);
                     }
@@ -142,7 +148,9 @@ impl ControlLink {
                 // a dropped link fails every RPC in flight, unsent or written alike; a hello
                 // refused as removed is a verdict on this node, remembered for the loop
                 // ([F49](../../../../docs/src/features/backup-and-recovery.md))
-                LinkEvent::Down { reason, refused, .. } => {
+                LinkEvent::Down {
+                    reason, refused, ..
+                } => {
                     if refused == Some(PeerRefusal::Removed) {
                         removed.set(true);
                     }
@@ -152,7 +160,9 @@ impl ControlLink {
                 }
                 // a hello that completed says what the peer's build speaks
                 // ([F48](../../../../docs/src/features/rolling-compatibility.md))
-                LinkEvent::Up { node, negotiated, .. } => {
+                LinkEvent::Up {
+                    node, negotiated, ..
+                } => {
                     if node != NodeId::default() {
                         wires.borrow_mut().insert(node, negotiated.peer_wire_max);
                     }
@@ -189,7 +199,12 @@ impl ControlLink {
         // truncation cannot happen for any deadline a control RPC uses
         #[allow(clippy::cast_possible_truncation)]
         let deadline_ms = deadline.as_millis().min(u128::from(u32::MAX)) as u32;
-        let head = ControlRequestHead { id, kind, deadline_ms }.encode();
+        let head = ControlRequestHead {
+            id,
+            kind,
+            deadline_ms,
+        }
+        .encode();
         let frame = Frame::new(
             MessageType::ControlRequest,
             vec![
@@ -199,7 +214,9 @@ impl ControlLink {
             FrameKey::Control(id),
             self.max_frame_bytes,
         )
-        .map_err(|error| RpcFailure::Unreachable(format!("framing a control request: {error:?}")))?;
+        .map_err(|error| {
+            RpcFailure::Unreachable(format!("framing a control request: {error:?}"))
+        })?;
         // a queue that is full or a link that is down is a definite non-answer
         if self.link.enqueue(frame).is_err() {
             self.pending.borrow_mut().remove(&id);
@@ -215,12 +232,16 @@ impl ControlLink {
             // the sender was dropped without answering
             Ok(Err(_)) => {
                 self.pending.borrow_mut().remove(&id);
-                Err(RpcFailure::Unreachable("the control rpc was cancelled".to_string()))
+                Err(RpcFailure::Unreachable(
+                    "the control rpc was cancelled".to_string(),
+                ))
             }
             // the deadline passed
             Err(_) => {
                 self.pending.borrow_mut().remove(&id);
-                Err(RpcFailure::Unreachable("the control rpc timed out".to_string()))
+                Err(RpcFailure::Unreachable(
+                    "the control rpc timed out".to_string(),
+                ))
             }
         }
     }
@@ -312,7 +333,12 @@ impl PeerNetwork {
     /// * `target` - The member
     /// * `given` - The address the library or the caller named
     fn current_address(&self, target: NodeId, given: &PeerAddr) -> PeerAddr {
-        self.shared.addresses.borrow().get(&target).cloned().unwrap_or_else(|| given.clone())
+        self.shared
+            .addresses
+            .borrow()
+            .get(&target)
+            .cloned()
+            .unwrap_or_else(|| given.clone())
     }
 
     /// Whether a peer has refused this node's hello as a removed identity
@@ -526,7 +552,9 @@ impl RaftNetworkV2<ControlConfig> for ControlPeer {
         option: RPCOption,
     ) -> Result<AppendEntriesResponse<ControlConfig>, RPCError<ControlConfig>> {
         let payload = serde_json::to_vec(&rpc).map_err(|error| {
-            Self::unreachable(RpcFailure::Unreachable(format!("encoding append_entries: {error}")))
+            Self::unreachable(RpcFailure::Unreachable(format!(
+                "encoding append_entries: {error}"
+            )))
         })?;
         let answer = self
             .link()
@@ -534,7 +562,9 @@ impl RaftNetworkV2<ControlConfig> for ControlPeer {
             .await
             .map_err(Self::unreachable)?;
         serde_json::from_slice(&answer).map_err(|error| {
-            Self::unreachable(RpcFailure::Unreachable(format!("decoding append_entries: {error}")))
+            Self::unreachable(RpcFailure::Unreachable(format!(
+                "decoding append_entries: {error}"
+            )))
         })
     }
 
@@ -627,7 +657,13 @@ fn encode_snapshot(
 /// * `raw` - The request payload
 pub fn decode_snapshot(
     raw: &[u8],
-) -> Result<(VoteOf<ControlConfig>, SnapshotOf<ControlConfig, SnapshotData>), String> {
+) -> Result<
+    (
+        VoteOf<ControlConfig>,
+        SnapshotOf<ControlConfig, SnapshotData>,
+    ),
+    String,
+> {
     let read_len = |raw: &[u8], at: usize| -> Result<usize, String> {
         raw.get(at..at + 4)
             .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
@@ -635,19 +671,28 @@ pub fn decode_snapshot(
     };
     let vote_len = read_len(raw, 0)?;
     let vote_end = 4 + vote_len;
-    let vote: VoteOf<ControlConfig> = serde_json::from_slice(
-        raw.get(4..vote_end).ok_or("snapshot vote truncated")?,
-    )
-    .map_err(|error| format!("snapshot vote: {error}"))?;
+    let vote: VoteOf<ControlConfig> =
+        serde_json::from_slice(raw.get(4..vote_end).ok_or("snapshot vote truncated")?)
+            .map_err(|error| format!("snapshot vote: {error}"))?;
     let meta_len = read_len(raw, vote_end)?;
     let meta_start = vote_end + 4;
     let meta_end = meta_start + meta_len;
     let meta: SnapshotMetaOf<ControlConfig> = serde_json::from_slice(
-        raw.get(meta_start..meta_end).ok_or("snapshot meta truncated")?,
+        raw.get(meta_start..meta_end)
+            .ok_or("snapshot meta truncated")?,
     )
     .map_err(|error| format!("snapshot meta: {error}"))?;
-    let bytes = raw.get(meta_end..).ok_or("snapshot bytes truncated")?.to_vec();
-    Ok((vote, Snapshot { meta, snapshot: Cursor::new(bytes) }))
+    let bytes = raw
+        .get(meta_end..)
+        .ok_or("snapshot bytes truncated")?
+        .to_vec();
+    Ok((
+        vote,
+        Snapshot {
+            meta,
+            snapshot: Cursor::new(bytes),
+        },
+    ))
 }
 
 /// A control link that could not carry an RPC

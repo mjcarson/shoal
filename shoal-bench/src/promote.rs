@@ -90,9 +90,7 @@ pub fn run_promote(store: &Store, args: &PromoteArgs) -> Result<i32> {
     // the provenance travels with the baseline, so a comparison against it can still say where it
     // came from once the run it was promoted from is long gone
     if let Some(meta) = meta {
-        let meta_target = store
-            .baselines_dir()
-            .join(format!("{}.meta.json", args.to));
+        let meta_target = store.baselines_dir().join(format!("{}.meta.json", args.to));
         crate::store::write_json(&meta_target, &meta)
             .with_context(|| format!("recording the provenance of baseline {}", args.to))?;
     }

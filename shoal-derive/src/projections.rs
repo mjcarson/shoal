@@ -120,16 +120,10 @@ pub(super) fn derive(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
             // every field a projection names is copied out of the row it projects
             all_fields.push((ident.clone(), field_attrs.ty.clone()));
             // and again with whether the field asserted a mirror of its own, for the rearchiver
-            mirror_fields.push((
-                ident.clone(),
-                field_attrs.ty.clone(),
-                field_attrs.rearchive,
-            ));
+            mirror_fields.push((ident.clone(), field_attrs.ty.clone(), field_attrs.rearchive));
             // a sort or filter role belongs to the table, not to the subset of it we return
             if field_attrs.sort || field_attrs.filter || field_attrs.update {
-                panic!(
-                    "A projection field can only be marked as a partition key: {ident}"
-                );
+                panic!("A projection field can only be marked as a partition key: {ident}");
             }
             // a partition field is part of the key naming the partition this row came from
             if field_attrs.partition {
@@ -163,14 +157,8 @@ pub(super) fn derive(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
     // a projection matters to the wire because each one adds a variant to the response kinds
     // enum, and an archived enums discriminants are wire state. only a partition role is legal
     // here, so the other three role lists are empty
-    let schema_fingerprint = traits::fingerprint::row_expr(
-        name,
-        &all_fields,
-        &partition_fields,
-        &[],
-        &[],
-        &[],
-    );
+    let schema_fingerprint =
+        traits::fingerprint::row_expr(name, &all_fields, &partition_fields, &[], &[], &[]);
     // a projection is hashed, formatted and archived exactly the way a row is
     traits::rkyv::add(&mut output, name);
     traits::partition_key::add(&mut output, name, &partition_fields);

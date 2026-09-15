@@ -34,7 +34,9 @@ use crate::model::macro_layer::Timing;
 use crate::workloads::cluster_background::REPAIR_TABLE;
 use crate::workloads::cluster_failover::Failover;
 use crate::workloads::harness::seed::Scale;
-use crate::workloads::workload::{BackgroundKind, BackgroundSpec, BoxFuture, Context, Measurement, Workload, WorkloadPlan};
+use crate::workloads::workload::{
+    BackgroundKind, BackgroundSpec, BoxFuture, Context, Measurement, Workload, WorkloadPlan,
+};
 
 /// The arm's identifier
 pub const BACKUP_ID: &str = "macro/cluster/background/backup";
@@ -55,7 +57,9 @@ impl Backup {
     /// The arm
     #[must_use]
     pub fn new() -> Self {
-        Backup { twin: Failover::new() }
+        Backup {
+            twin: Failover::new(),
+        }
     }
 }
 
@@ -138,7 +142,7 @@ impl Workload for Backup {
 
 #[cfg(test)]
 mod tests {
-    use super::{all, BACKUP_ID, BACKUP_TABLE};
+    use super::{BACKUP_ID, BACKUP_TABLE, all};
     use crate::workloads::cluster_background::REPAIR_ID;
     use crate::workloads::cluster_failover::{self, KILL_ID};
     use crate::workloads::cluster_rehome::ID as SHRINK_ID;
@@ -153,17 +157,35 @@ mod tests {
         assert_eq!(arms.len(), 1);
         assert_eq!(arms[0].id(), BACKUP_ID);
         let ids = crate::workload_ids::IDS;
-        let kill = ids.iter().position(|id| *id == KILL_ID).expect("the kill arm is registered");
-        let repair = ids.iter().position(|id| *id == REPAIR_ID).expect("the repair arm is registered");
-        let rehome = ids.iter().position(|id| *id == SHRINK_ID).expect("the rehome arm is registered");
-        let backup = ids.iter().position(|id| *id == BACKUP_ID).expect("the backup arm is registered");
-        assert!(kill < repair && repair < rehome && rehome < backup, "the backup arm is not appended after the rehome arm");
+        let kill = ids
+            .iter()
+            .position(|id| *id == KILL_ID)
+            .expect("the kill arm is registered");
+        let repair = ids
+            .iter()
+            .position(|id| *id == REPAIR_ID)
+            .expect("the repair arm is registered");
+        let rehome = ids
+            .iter()
+            .position(|id| *id == SHRINK_ID)
+            .expect("the rehome arm is registered");
+        let backup = ids
+            .iter()
+            .position(|id| *id == BACKUP_ID)
+            .expect("the backup arm is registered");
+        assert!(
+            kill < repair && repair < rehome && rehome < backup,
+            "the backup arm is not appended after the rehome arm"
+        );
         assert_eq!(
             crate::render::family::family_for(BACKUP_ID).map(|family| family.name),
             crate::render::family::family_for(REPAIR_ID).map(|family| family.name),
             "the backup arm is not read beside the repair arm"
         );
-        let kill = cluster_failover::all().into_iter().next().expect("the kill arm exists");
+        let kill = cluster_failover::all()
+            .into_iter()
+            .next()
+            .expect("the kill arm exists");
         for scale in [Scale::Smoke, Scale::Full] {
             let mine = arms[0].plan(scale);
             let theirs = kill.plan(scale);
@@ -174,17 +196,25 @@ mod tests {
             assert_eq!(mine_overrides.shards, theirs_overrides.shards);
             let mine_cluster = mine_overrides.cluster.as_ref().expect("a placement");
             let theirs_cluster = theirs_overrides.cluster.as_ref().expect("a placement");
-            assert_eq!(mine_cluster.replication_factor, theirs_cluster.replication_factor);
+            assert_eq!(
+                mine_cluster.replication_factor,
+                theirs_cluster.replication_factor
+            );
             assert_eq!(mine_cluster.peers, theirs_cluster.peers);
             // no fault, no catch-up, and a backup inside the run of the reference table
             assert_eq!(arms[0].fault(scale), None);
             assert!(!arms[0].catchup());
-            let spec = arms[0].background(scale).expect("the arm asks for a backup");
+            let spec = arms[0]
+                .background(scale)
+                .expect("the arm asks for a backup");
             assert_eq!(spec.table, BACKUP_TABLE);
             assert_eq!(spec.kind, BackgroundKind::Backup);
             assert!(!spec.kind.is_plan());
             assert!(spec.at < spec.run_for);
-            assert_eq!(spec.run_for, kill.fault(scale).expect("the kill arm's schedule").run_for);
+            assert_eq!(
+                spec.run_for,
+                kill.fault(scale).expect("the kill arm's schedule").run_for
+            );
         }
         // the table the backup names is one the schema spells, and a persistent one
         let persistent = <crate::workloads::schema::Bench as shoal::server::database::ShoalDatabase>::persistent_tables();

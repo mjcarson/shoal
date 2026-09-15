@@ -30,7 +30,9 @@
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
-use shoal::server::conf::{DefaultStorageSettings, Networking, Resources, Storage, TraceLevel, Tracing, OtlpTracing};
+use shoal::server::conf::{
+    DefaultStorageSettings, Networking, OtlpTracing, Resources, Storage, TraceLevel, Tracing,
+};
 use shoal::server::tables::storage::fs::conf::{
     FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
 };

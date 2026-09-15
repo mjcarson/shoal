@@ -43,7 +43,11 @@ impl Config {
 
     /// Every node, voters and learners, in order
     pub fn all(&self) -> Vec<NodeId> {
-        self.voters.iter().chain(self.learners.iter()).copied().collect()
+        self.voters
+            .iter()
+            .chain(self.learners.iter())
+            .copied()
+            .collect()
     }
 }
 
@@ -441,7 +445,9 @@ impl Group {
                 last_index,
                 last_term,
             } => self.on_request_vote(ctx, from, msg.term, last_index, last_term, out),
-            Body::VoteResponse { granted } => self.on_vote_response(ctx, from, msg.term, granted, out),
+            Body::VoteResponse { granted } => {
+                self.on_vote_response(ctx, from, msg.term, granted, out)
+            }
             Body::AppendEntries {
                 prev_index,
                 prev_term,
@@ -754,7 +760,9 @@ impl Group {
                 // heartbeat round started after that, and applies through the index before it
                 // reads; the unsafe setting trusts what the node believes and answers at once
                 match ctx.policy.barrier {
-                    BarrierRule::CachedLeaderUnconfirmed => self.answer_strong_read(ctx, attempt, key, out),
+                    BarrierRule::CachedLeaderUnconfirmed => {
+                        self.answer_strong_read(ctx, attempt, key, out)
+                    }
                     BarrierRule::QuorumConfirmed => {
                         // the read index is the commit index, or the first entry of this term
                         // until one of them is committed: an earlier term's acknowledgements
@@ -873,8 +881,8 @@ impl Group {
         }
         self.leader_hint = Some(from);
         // log matching: the entry before the new ones must be the one the leader thinks it is
-        let matches = prev_index.0 == 0
-            || self.entry(prev_index).map(|entry| entry.term) == Some(prev_term);
+        let matches =
+            prev_index.0 == 0 || self.entry(prev_index).map(|entry| entry.term) == Some(prev_term);
         if !matches {
             let hint = LogIndex(prev_index.0.min(self.len().0 + 1));
             out.push(Output::Send(self.message(
@@ -1110,7 +1118,9 @@ impl Group {
         if let Role::Leader(state) = &mut self.role {
             if !success {
                 // back up to where the follower says it diverged and try again
-                state.next_index.insert(from, LogIndex(conflict_hint.0.max(1)));
+                state
+                    .next_index
+                    .insert(from, LogIndex(conflict_hint.0.max(1)));
             } else {
                 if counts {
                     // a watermark: a repeated cumulative acknowledgement changes nothing
@@ -1199,7 +1209,12 @@ impl Group {
         let Role::Leader(state) = &self.role else {
             return (Vec::new(), Vec::new());
         };
-        let vouched = |node: &NodeId| state.durable_match.get(node).is_some_and(|mark| *mark >= index);
+        let vouched = |node: &NodeId| {
+            state
+                .durable_match
+                .get(node)
+                .is_some_and(|mark| *mark >= index)
+        };
         // POLICY P3: the contract counts the committed voter configuration; the unsafe setting
         // counts whoever the observer currently lists as up
         let over: Vec<NodeId> = match ctx.policy.quorum {
@@ -1236,7 +1251,9 @@ impl Group {
         let mut index = last;
         while index > self.volatile.commit_index {
             // only an entry of our own term is committed by counting (Raft 5.4.2)
-            let ours = self.entry(index).is_some_and(|entry| entry.term == self.stable.term);
+            let ours = self
+                .entry(index)
+                .is_some_and(|entry| entry.term == self.stable.term);
             if ours {
                 let (evidence, over) = self.quorum_evidence(ctx, index);
                 if evidence.len() * 2 > over.len() {
@@ -1380,10 +1397,20 @@ mod tests {
         let mut b = builder(Policy::safe());
         b.elect(NodeId(1), T);
         assert!(b.world().group(NodeId(1), T).is_leader());
-        b.write(MutationOp::Insert { key: Key(1), value: Value(5) }, T, NodeId(1));
+        b.write(
+            MutationOp::Insert {
+                key: Key(1),
+                value: Value(5),
+            },
+            T,
+            NodeId(1),
+        );
         // appended everywhere, committed nowhere until the fsyncs complete
         b.deliver_all();
-        assert_eq!(b.world().group(NodeId(1), T).volatile.commit_index, LogIndex(1));
+        assert_eq!(
+            b.world().group(NodeId(1), T).volatile.commit_index,
+            LogIndex(1)
+        );
         b.fsync_all();
         b.deliver_all();
         let leader = b.world().group(NodeId(1), T);
@@ -1391,12 +1418,21 @@ mod tests {
         assert_eq!(leader.volatile.applied.rows.get(&Key(1)), Some(&Value(5)));
         // the client heard, with the result derived in committed order
         let record = &b.world().ledger.records[0];
-        assert_eq!(record.outcome, Some(crate::oracle::Outcome::Ok(OpResult::Applied(true))));
+        assert_eq!(
+            record.outcome,
+            Some(crate::oracle::Outcome::Ok(OpResult::Applied(true)))
+        );
         // followers apply once the heartbeat carries the commit index
-        b.event(Event::HeartbeatTick { node: NodeId(1), tablet: T });
+        b.event(Event::HeartbeatTick {
+            node: NodeId(1),
+            tablet: T,
+        });
         b.deliver_all();
         for node in [NodeId(2), NodeId(3)] {
-            assert_eq!(b.world().group(node, T).volatile.applied.rows.get(&Key(1)), Some(&Value(5)));
+            assert_eq!(
+                b.world().group(node, T).volatile.applied.rows.get(&Key(1)),
+                Some(&Value(5))
+            );
         }
         assert!(b.world().violation.is_none());
     }
@@ -1407,7 +1443,14 @@ mod tests {
         let mut b = builder(Policy::safe());
         b.elect(NodeId(1), T);
         // a write that reaches nobody, sitting appended on the leader alone
-        b.write(MutationOp::Insert { key: Key(1), value: Value(1) }, T, NodeId(1));
+        b.write(
+            MutationOp::Insert {
+                key: Key(1),
+                value: Value(1),
+            },
+            T,
+            NodeId(1),
+        );
         b.drop_from_to(Actor::Node(NodeId(1)), Actor::Node(NodeId(2)));
         b.drop_from_to(Actor::Node(NodeId(1)), Actor::Node(NodeId(3)));
         b.fsync(NodeId(1), T);
@@ -1415,7 +1458,14 @@ mod tests {
         // node 1 pauses, node 2 is elected and writes in its term
         b.event(Event::Pause { node: NodeId(1) });
         b.elect(NodeId(2), T);
-        b.write(MutationOp::Insert { key: Key(1), value: Value(2) }, T, NodeId(2));
+        b.write(
+            MutationOp::Insert {
+                key: Key(1),
+                value: Value(2),
+            },
+            T,
+            NodeId(2),
+        );
         b.replicate_fully(NodeId(2), T);
         // node 1 comes back and hears the new leader: its lone entry goes
         b.event(Event::Resume { node: NodeId(1) });
@@ -1426,7 +1476,11 @@ mod tests {
         assert!(!one.is_leader());
         assert_eq!(one.entry(LogIndex(2)).map(|e| e.term), Some(Term(2)));
         assert!(b.world().checker.coverage.truncations >= 1);
-        assert!(b.world().violation.is_none(), "{}", b.world().violation.clone().unwrap());
+        assert!(
+            b.world().violation.is_none(),
+            "{}",
+            b.world().violation.clone().unwrap()
+        );
     }
 
     /// A repeated cumulative acknowledgement moves a watermark and adds no vote
@@ -1434,7 +1488,14 @@ mod tests {
     fn a_heartbeat_re_ack_is_a_watermark() {
         let mut b = builder(Policy::safe());
         b.elect(NodeId(1), T);
-        b.write(MutationOp::Insert { key: Key(1), value: Value(1) }, T, NodeId(1));
+        b.write(
+            MutationOp::Insert {
+                key: Key(1),
+                value: Value(1),
+            },
+            T,
+            NodeId(1),
+        );
         // only node 2 hears and fsyncs; its ack, delivered twice, is one voter
         b.deliver_from_to(Actor::Node(NodeId(1)), Actor::Node(NodeId(2)));
         b.drop_from_to(Actor::Node(NodeId(1)), Actor::Node(NodeId(3)));
@@ -1442,12 +1503,17 @@ mod tests {
         b.deliver_from_to(Actor::Node(NodeId(2)), Actor::Node(NodeId(1)));
         b.redeliver_last(Actor::Node(NodeId(2)), Actor::Node(NodeId(1)));
         let leader = b.world().group(NodeId(1), T);
-        let Role::Leader(state) = &leader.role else { panic!("not leading") };
+        let Role::Leader(state) = &leader.role else {
+            panic!("not leading")
+        };
         assert_eq!(state.durable_match.get(&NodeId(2)), Some(&LogIndex(2)));
         // the leader's own fsync is what makes two, and commits
         assert_eq!(leader.volatile.commit_index, LogIndex(1));
         b.fsync(NodeId(1), T);
-        assert_eq!(b.world().group(NodeId(1), T).volatile.commit_index, LogIndex(2));
+        assert_eq!(
+            b.world().group(NodeId(1), T).volatile.commit_index,
+            LogIndex(2)
+        );
         assert!(b.world().violation.is_none());
     }
 
@@ -1456,22 +1522,50 @@ mod tests {
     fn a_retry_returns_the_stored_result() {
         let mut b = builder(Policy::safe());
         b.elect(NodeId(1), T);
-        b.write(MutationOp::Insert { key: Key(1), value: Value(1) }, T, NodeId(1));
+        b.write(
+            MutationOp::Insert {
+                key: Key(1),
+                value: Value(1),
+            },
+            T,
+            NodeId(1),
+        );
         b.replicate_fully(NodeId(1), T);
         let len = b.world().group(NodeId(1), T).len();
         // the same identity again, after a delete that would let a fresh insert succeed
         b.write(MutationOp::Delete { key: Key(1) }, T, NodeId(1));
         b.replicate_fully(NodeId(1), T);
         b.event(Event::ClientInvoke {
-            attempt: Attempt { id: OpId(0), retry: 1 },
+            attempt: Attempt {
+                id: OpId(0),
+                retry: 1,
+            },
             tablet: T,
-            op: ClientOp::Mutate(MutationOp::Insert { key: Key(1), value: Value(1) }),
+            op: ClientOp::Mutate(MutationOp::Insert {
+                key: Key(1),
+                value: Value(1),
+            }),
             target: NodeId(1),
         });
-        assert_eq!(b.world().group(NodeId(1), T).len(), LogIndex(len.0 + 1), "the retry was appended");
+        assert_eq!(
+            b.world().group(NodeId(1), T).len(),
+            LogIndex(len.0 + 1),
+            "the retry was appended"
+        );
         let retry = b.world().ledger.records.last().unwrap();
-        assert_eq!(retry.outcome, Some(crate::oracle::Outcome::Ok(OpResult::Applied(true))));
-        assert_eq!(b.world().group(NodeId(1), T).volatile.applied.rows.get(&Key(1)), None);
+        assert_eq!(
+            retry.outcome,
+            Some(crate::oracle::Outcome::Ok(OpResult::Applied(true)))
+        );
+        assert_eq!(
+            b.world()
+                .group(NodeId(1), T)
+                .volatile
+                .applied
+                .rows
+                .get(&Key(1)),
+            None
+        );
     }
 
     /// A crash loses the appended suffix and keeps the durable log; a restart is a follower
@@ -1479,7 +1573,14 @@ mod tests {
     fn a_crash_keeps_only_stable_storage() {
         let mut b = builder(Policy::safe());
         b.elect(NodeId(1), T);
-        b.write(MutationOp::Insert { key: Key(1), value: Value(1) }, T, NodeId(1));
+        b.write(
+            MutationOp::Insert {
+                key: Key(1),
+                value: Value(1),
+            },
+            T,
+            NodeId(1),
+        );
         let before = b.world().group(NodeId(1), T).clone();
         assert_eq!(before.volatile.appended.len(), 1);
         b.event(Event::Crash { node: NodeId(1) });

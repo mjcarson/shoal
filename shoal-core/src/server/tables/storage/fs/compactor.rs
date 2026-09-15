@@ -5,7 +5,6 @@ use futures::AsyncWriteExt;
 use glommio::io::{BufferedFile, DmaFile, DmaStreamWriter, OpenOptions};
 use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
-use std::hash::Hasher;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
 use rkyv::rancor::{Error, Strategy};
@@ -14,6 +13,7 @@ use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::Archive;
 use std::collections::HashMap;
+use std::hash::Hasher;
 use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,17 +21,22 @@ use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
 use super::conf::FileSystemTableConf;
-use super::map::{write_record, ArchiveEntry, ArchiveFormat, ArchiveMap, MapIntent, MapIntentKinds, ARCHIVE_HEADER_LEN};
+use super::map::{
+    write_record, ArchiveEntry, ArchiveFormat, ArchiveMap, MapIntent, MapIntentKinds,
+    ARCHIVE_HEADER_LEN,
+};
 use super::IntentLogReader;
+use crate::server::database::ShoalDatabase;
 use crate::server::messages::ServerMsg;
-use crate::server::replication::snapshot::{self, SnapshotManifest, SnapshotProvenance, SnapshotReader, SnapshotWriter};
+use crate::server::replication::snapshot::{
+    self, SnapshotManifest, SnapshotProvenance, SnapshotReader, SnapshotWriter,
+};
 use crate::server::ring::Ring;
 use crate::server::wal::WalLogId;
 use crate::server::ServerError;
-use crate::server::database::ShoalDatabase;
-use crate::storage::ArchiveFault;
 use crate::shared::identity::{ClusterId, GroupId, NodeId};
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, TableNameSupport as _};
+use crate::storage::ArchiveFault;
 use crate::storage::{CompactionJob, IntentReadSupport, RecoveryStats, ShouldPrune};
 
 /// The minimum size an active archive must be in order to be considered for compaction
@@ -542,7 +547,8 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 if command.scrub_op().is_some() {
                     continue;
                 }
-                let (partition_key, intent) = T::partition_key_and_intent_checked(&command.payload)?;
+                let (partition_key, intent) =
+                    T::partition_key_and_intent_checked(&command.payload)?;
                 self.changes.entry(partition_key).or_default().push(intent);
             }
             file.close().await?;
@@ -603,18 +609,37 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         schema_id: u64,
         tablets: Vec<u16>,
         at_least: Option<WalLogId>,
-        memberships: Vec<openraft::type_config::alias::StoredMembershipOf<crate::server::replication::DataConfig>>,
-        retries: Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>,
+        memberships: Vec<
+            openraft::type_config::alias::StoredMembershipOf<
+                crate::server::replication::DataConfig,
+            >,
+        >,
+        retries: Vec<(
+            crate::shared::protocol::peer::RequestId,
+            crate::server::replication::Remembered,
+        )>,
         expired_before: u64,
         provenance: SnapshotProvenance,
         dir: PathBuf,
     ) -> Result<(), ServerError> {
         let outcome = self
-            .cut_snapshot_file(group, schema_id, tablets, at_least, memberships, retries, expired_before, provenance, dir)
+            .cut_snapshot_file(
+                group,
+                schema_id,
+                tablets,
+                at_least,
+                memberships,
+                retries,
+                expired_before,
+                provenance,
+                dir,
+            )
             .await
             .map_err(|error| format!("{error:?}"));
         // the shard hears what was built, or why nothing was
-        self.shard_local_tx.send(ServerMsg::SnapshotBuilt { group, outcome }).await?;
+        self.shard_local_tx
+            .send(ServerMsg::SnapshotBuilt { group, outcome })
+            .await?;
         Ok(())
     }
 
@@ -638,8 +663,15 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         schema_id: u64,
         tablets: Vec<u16>,
         at_least: Option<WalLogId>,
-        memberships: Vec<openraft::type_config::alias::StoredMembershipOf<crate::server::replication::DataConfig>>,
-        retries: Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>,
+        memberships: Vec<
+            openraft::type_config::alias::StoredMembershipOf<
+                crate::server::replication::DataConfig,
+            >,
+        >,
+        retries: Vec<(
+            crate::shared::protocol::peer::RequestId,
+            crate::server::replication::Remembered,
+        )>,
         expired_before: u64,
         provenance: SnapshotProvenance,
         dir: PathBuf,
@@ -676,7 +708,13 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         let table = self.table_name.table_id();
         // the header at the file format the cluster has activated
         // ([F48](../../../../../docs/src/features/rolling-compatibility.md))
-        let header = provenance.header(table, group, boundary.index, entries.len() as u64, schema_id);
+        let header = provenance.header(
+            table,
+            group,
+            boundary.index,
+            entries.len() as u64,
+            schema_id,
+        );
         let mut writer = SnapshotWriter::create(&path, header).await?;
         for entry in &entries {
             // read this partition's archived bytes as they are, verified against their
@@ -732,7 +770,12 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     /// * `tablets` - The tablets the file covers
     /// * `path` - The verified file
     #[instrument(name = "FileSystemCompactor::install_snapshot", skip_all, err(Debug))]
-    async fn install_snapshot(&mut self, group: GroupId, tablets: Vec<u16>, path: PathBuf) -> Result<(), ServerError>
+    async fn install_snapshot(
+        &mut self,
+        group: GroupId,
+        tablets: Vec<u16>,
+        path: PathBuf,
+    ) -> Result<(), ServerError>
     where
         for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
             Strategy<
@@ -744,7 +787,10 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             >,
         >,
     {
-        let outcome = self.install_snapshot_records(&tablets, &path).await.map_err(|error| format!("{error:?}"));
+        let outcome = self
+            .install_snapshot_records(&tablets, &path)
+            .await
+            .map_err(|error| format!("{error:?}"));
         // the loop hears the trailer, or why the archives were not touched
         self.shard_local_tx
             .send(ServerMsg::SnapshotInstalled {
@@ -766,7 +812,13 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         &mut self,
         tablets: &[u16],
         path: &std::path::Path,
-    ) -> Result<Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>, ServerError>
+    ) -> Result<
+        Vec<(
+            crate::shared::protocol::peer::RequestId,
+            crate::server::replication::Remembered,
+        )>,
+        ServerError,
+    >
     where
         for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
             Strategy<
@@ -869,7 +921,10 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     /// * `group` - The group whose copy retired
     /// * `tablets` - The tablets
     async fn drop_tablets(&mut self, group: GroupId, tablets: Vec<u16>) -> Result<(), ServerError> {
-        let outcome = self.drop_tablet_records(&tablets).await.map_err(|error| format!("{error:?}"));
+        let outcome = self
+            .drop_tablet_records(&tablets)
+            .await
+            .map_err(|error| format!("{error:?}"));
         self.shard_local_tx
             .send(ServerMsg::TabletsDropped {
                 table: self.table_name,
@@ -908,7 +963,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         for id in self.removals.drain(..) {
             self.map.remove_partition(id);
         }
-        event!(Level::INFO, msg = "dropped a retired copy's partitions from the archives", removed = absent.len());
+        event!(
+            Level::INFO,
+            msg = "dropped a retired copy's partitions from the archives",
+            removed = absent.len()
+        );
         // a map intent log that grew past its bound is compacted, as after any job
         if self.map_writer.current_flushed_pos() > Byte::MEBIBYTE {
             self.map_writer.close().await?;
@@ -929,8 +988,14 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     ///
     /// * `fault` - The fault
     /// * `key` - The partition
-    async fn inject_fault(&mut self, fault: ArchiveFault, key: u64) -> Result<serde_json::Value, String> {
-        self.inject_fault_inner(fault, key).await.map_err(|error| format!("{error:?}"))
+    async fn inject_fault(
+        &mut self,
+        fault: ArchiveFault,
+        key: u64,
+    ) -> Result<serde_json::Value, String> {
+        self.inject_fault_inner(fault, key)
+            .await
+            .map_err(|error| format!("{error:?}"))
     }
 
     /// The fault itself, with the engine's own errors
@@ -939,26 +1004,42 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     ///
     /// * `fault` - The fault
     /// * `key` - The partition
-    async fn inject_fault_inner(&mut self, fault: ArchiveFault, key: u64) -> Result<serde_json::Value, ServerError> {
+    async fn inject_fault_inner(
+        &mut self,
+        fault: ArchiveFault,
+        key: u64,
+    ) -> Result<serde_json::Value, ServerError> {
         // only a compacted partition has an archived copy to fault
         let Some(entry) = self.map.find_partition(key) else {
-            return Err(ServerError::GlommioGeneric(format!("no archive of {} holds partition {key:016x}", self.table_name)));
+            return Err(ServerError::GlommioGeneric(format!(
+                "no archive of {} holds partition {key:016x}",
+                self.table_name
+            )));
         };
         match fault {
             ArchiveFault::Corrupt => {
                 // flip one byte in the middle of the record's payload, in place
                 let path = self.archive_path.join(entry.archive.to_string());
-                let file = OpenOptions::new().read(true).write(true).buffered_open(&path).await?;
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .buffered_open(&path)
+                    .await?;
                 let at = entry.offset + (entry.size as u64) / 2;
                 let read = file.read_at(at, 1).await?;
                 let Some(byte) = read.first().copied() else {
-                    return Err(ServerError::GlommioGeneric(format!("archive {} is shorter than the record it should hold", entry.archive)));
+                    return Err(ServerError::GlommioGeneric(format!(
+                        "archive {} is shorter than the record it should hold",
+                        entry.archive
+                    )));
                 };
                 file.write_at(vec![byte ^ 0x40], at).await?;
                 file.fdatasync().await?;
                 file.close().await?;
                 event!(Level::WARN, msg = "corrupted a record, as the fixture asked", table = %self.table_name, partition = format!("{key:016x}"), archive = %entry.archive, at);
-                Ok(serde_json::json!({ "fault": "corrupt", "archive": entry.archive.to_string(), "offset": at, "was": byte }))
+                Ok(
+                    serde_json::json!({ "fault": "corrupt", "archive": entry.archive.to_string(), "offset": at, "was": byte }),
+                )
             }
             ArchiveFault::Forget => {
                 // log the removal the way a prune does, then drop the entry
@@ -980,7 +1061,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 self.map_writer.sync().await?;
                 self.map.set_partition(key, entry);
                 event!(Level::WARN, msg = "erased a partition, as the fixture asked", table = %self.table_name, partition = format!("{key:016x}"));
-                Ok(serde_json::json!({ "fault": "erase", "archive": active_id.to_string(), "offset": offset }))
+                Ok(
+                    serde_json::json!({ "fault": "erase", "archive": active_id.to_string(), "offset": offset }),
+                )
             }
         }
     }
@@ -1247,7 +1330,10 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     generation,
                     frames,
                     positions,
-                } => self.compact_segment(path, generation, frames, positions).await?,
+                } => {
+                    self.compact_segment(path, generation, frames, positions)
+                        .await?
+                }
                 CompactionJob::Snapshot {
                     group,
                     schema_id,
@@ -1259,10 +1345,24 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     provenance,
                     dir,
                 } => {
-                    self.cut_snapshot(group, schema_id, tablets, at_least, memberships, retries, expired_before, provenance, dir)
-                        .await?;
+                    self.cut_snapshot(
+                        group,
+                        schema_id,
+                        tablets,
+                        at_least,
+                        memberships,
+                        retries,
+                        expired_before,
+                        provenance,
+                        dir,
+                    )
+                    .await?;
                 }
-                CompactionJob::Install { group, tablets, path } => self.install_snapshot(group, tablets, path).await?,
+                CompactionJob::Install {
+                    group,
+                    tablets,
+                    path,
+                } => self.install_snapshot(group, tablets, path).await?,
                 CompactionJob::Drop { group, tablets } => self.drop_tablets(group, tablets).await?,
                 CompactionJob::Fault { fault, key, reply } => {
                     // a fault the fixture asked for, answered with what was done

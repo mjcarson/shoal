@@ -517,12 +517,20 @@ pub fn environments_difference(run: &[NodeEnvFacts], baseline: &[NodeEnvFacts]) 
         return None;
     }
     if run.len() != baseline.len() {
-        return Some(format!("{} nodes' environments -> {}", baseline.len(), run.len()));
+        return Some(format!(
+            "{} nodes' environments -> {}",
+            baseline.len(),
+            run.len()
+        ));
     }
     for (after, before) in run.iter().zip(baseline) {
         let fields = after.difference(before);
         if !fields.is_empty() {
-            return Some(format!("node {} environment: {}", after.index, fields.join(", ")));
+            return Some(format!(
+                "node {} environment: {}",
+                after.index,
+                fields.join(", ")
+            ));
         }
     }
     None
@@ -1675,9 +1683,18 @@ mod environment_tests {
             environment(1, "europa", "Xeon"),
             environment(2, "io", "EPYC"),
         ];
-        assert!(!emulated_by(&environments), "three hosts are not an emulation");
-        assert!(emulated_by(&[environment(0, "jove", "EPYC"), environment(1, "jove", "EPYC")]));
-        assert!(emulated_by(&[]), "no record is the one machine every capture before this ran on");
+        assert!(
+            !emulated_by(&environments),
+            "three hosts are not an emulation"
+        );
+        assert!(emulated_by(&[
+            environment(0, "jove", "EPYC"),
+            environment(1, "jove", "EPYC")
+        ]));
+        assert!(
+            emulated_by(&[]),
+            "no record is the one machine every capture before this ran on"
+        );
         let facts = ClusterFacts {
             emulated: false,
             environments: environments.clone(),
@@ -1700,14 +1717,25 @@ mod environment_tests {
         moved[1] = environment(1, "callisto", "EPYC");
         moved[1].governor = "powersave".to_string();
         let difference = environments_difference(&moved, &environments).expect("a difference");
-        assert!(difference.starts_with("node 1 environment:"), "{difference}");
-        assert!(difference.contains("host") && difference.contains("cpu") && difference.contains("governor"), "{difference}");
+        assert!(
+            difference.starts_with("node 1 environment:"),
+            "{difference}"
+        );
+        assert!(
+            difference.contains("host")
+                && difference.contains("cpu")
+                && difference.contains("governor"),
+            "{difference}"
+        );
         // a build that differs is the driver's to refuse, not a machine difference
         let mut rebuilt = environments.clone();
         rebuilt[2].build = "def".to_string();
         assert_eq!(environments_difference(&rebuilt, &environments), None);
         // a count that differs is named as one
-        assert_eq!(environments_difference(&environments[..2], &environments), Some("3 nodes' environments -> 2".to_string()));
+        assert_eq!(
+            environments_difference(&environments[..2], &environments),
+            Some("3 nodes' environments -> 2".to_string())
+        );
         // a record that carries none is not judged
         assert_eq!(environments_difference(&[], &environments), None);
         // an F47 record has no environments and loads emulated
@@ -1719,6 +1747,9 @@ mod environment_tests {
         .expect("an F47 record loads");
         assert!(older.environments.is_empty() && older.emulated);
         let json = serde_json::to_value(&older).expect("json");
-        assert!(json.get("environments").is_none(), "an empty record is not written");
+        assert!(
+            json.get("environments").is_none(),
+            "an empty record is not written"
+        );
     }
 }

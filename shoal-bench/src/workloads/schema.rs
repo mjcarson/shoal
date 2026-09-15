@@ -30,7 +30,9 @@ use shoal::{
 /// The write path's subject. One partition key, one filterable field so the filter path is
 /// reachable, one updatable field so the update path is, and a payload whose width is set by the
 /// scale.
-#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, DeepSizeOf)]
+#[derive(
+    Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, DeepSizeOf,
+)]
 #[rkyv(derive(Debug))]
 #[shoal_table(db = "Bench")]
 pub struct Item {
@@ -51,7 +53,9 @@ pub struct Item {
 ///
 /// The read path's subject. A sorted table is what makes a partition hold more than one row, which
 /// is what a range scan, a sort key selection and a fanout curve all need.
-#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, DeepSizeOf)]
+#[derive(
+    Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, DeepSizeOf,
+)]
 #[rkyv(derive(Debug))]
 #[shoal_table(db = "Bench")]
 pub struct Event {
@@ -96,7 +100,9 @@ pub struct ItemKeys {
 /// nothing else - a wider or narrower row here would put the row shape into a gap that is
 /// supposed to be the storage layer alone. A separate row type is needed rather than sharing
 /// `Item` because a row type names the table it belongs to.
-#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, DeepSizeOf)]
+#[derive(
+    Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, DeepSizeOf,
+)]
 #[rkyv(derive(Debug))]
 #[shoal_table(db = "Bench")]
 pub struct MemItem {
@@ -117,7 +123,9 @@ pub struct MemItem {
 ///
 /// Field for field identical to [`Event`], for the reason given on [`MemItem`]. Its sort keys are
 /// built by the same [`sort_key`] and carry the same padding.
-#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, DeepSizeOf)]
+#[derive(
+    Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, DeepSizeOf,
+)]
 #[rkyv(derive(Debug))]
 #[shoal_table(db = "Bench")]
 pub struct MemEvent {
@@ -186,7 +194,7 @@ pub fn sort_key(at: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{sort_key, SORT_KEY_WIDTH};
+    use super::{SORT_KEY_WIDTH, sort_key};
 
     /// Sort keys are all one width, which is what makes them comparable as strings
     #[test]
@@ -202,11 +210,20 @@ mod tests {
     /// `"2"` and a bounded range silently returns the wrong rows.
     #[test]
     fn string_order_matches_numeric_order() {
-        let mut keys: Vec<String> = [100u64, 2, 30, 4, 5_000].iter().map(|at| sort_key(*at)).collect();
+        let mut keys: Vec<String> = [100u64, 2, 30, 4, 5_000]
+            .iter()
+            .map(|at| sort_key(*at))
+            .collect();
         keys.sort();
         assert_eq!(
             keys,
-            vec![sort_key(2), sort_key(4), sort_key(30), sort_key(100), sort_key(5_000)]
+            vec![
+                sort_key(2),
+                sort_key(4),
+                sort_key(30),
+                sort_key(100),
+                sort_key(5_000)
+            ]
         );
     }
 }

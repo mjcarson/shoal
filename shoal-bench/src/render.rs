@@ -52,15 +52,14 @@ pub fn run_render(store: &Store, args: &RenderArgs) -> Result<i32> {
     // set rewritten and the other half describing an older capture
     let mut built: Vec<(PathBuf, String)> = Vec::with_capacity(PAGES.len());
     for spec in PAGES {
-        let rendered = (spec.build)(&page)
-            .with_context(|| format!("rendering {}", spec.surface.title()))?;
+        let rendered =
+            (spec.build)(&page).with_context(|| format!("rendering {}", spec.surface.title()))?;
         built.push((page_path_in(&root, spec.surface), rendered));
     }
     if args.check {
         return check_all(&built);
     }
-    std::fs::create_dir_all(&root)
-        .with_context(|| format!("creating {}", root.display()))?;
+    std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
     let mut bytes = 0;
     for (target, rendered) in &built {
         std::fs::write(target, rendered)

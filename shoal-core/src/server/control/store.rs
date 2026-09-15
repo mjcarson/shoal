@@ -42,9 +42,14 @@ use std::rc::Rc;
 
 use futures::{Stream, StreamExt as _};
 use glommio::io::{BufferedFile, Directory, OpenOptions};
-use openraft::type_config::alias::{EntryOf, LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMembershipOf, VoteOf};
 use openraft::entry::RaftEntry as _;
-use openraft::storage::{EntryResponder, IOFlushed, LogState, RaftLogReader, RaftLogStorage, RaftSnapshotBuilder, RaftStateMachine};
+use openraft::storage::{
+    EntryResponder, IOFlushed, LogState, RaftLogReader, RaftLogStorage, RaftSnapshotBuilder,
+    RaftStateMachine,
+};
+use openraft::type_config::alias::{
+    EntryOf, LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMembershipOf, VoteOf,
+};
 use openraft::{EntryPayload, OptionalSend, Snapshot, SnapshotMeta, StoredMembership};
 use serde::{Deserialize, Serialize};
 
@@ -100,9 +105,14 @@ type Vote = VoteOf<ControlConfig>;
 fn io<T>(error: glommio::GlommioError<T>) -> io::Error {
     match error {
         glommio::GlommioError::IoError(error) => error,
-        glommio::GlommioError::EnhancedIoError { source, op, path, .. } => io::Error::new(
+        glommio::GlommioError::EnhancedIoError {
+            source, op, path, ..
+        } => io::Error::new(
             source.kind(),
-            format!("{op} {}: {source}", path.map(|p| p.display().to_string()).unwrap_or_default()),
+            format!(
+                "{op} {}: {source}",
+                path.map(|p| p.display().to_string()).unwrap_or_default()
+            ),
         ),
         other => io::Error::other(other.to_string()),
     }
@@ -456,7 +466,11 @@ impl RaftLogStorage<ControlConfig> for ControlLog {
     }
 
     /// Append entries, and complete the callback once they are on disk
-    async fn append<I>(&mut self, entries: I, callback: IOFlushed<ControlConfig>) -> Result<(), io::Error>
+    async fn append<I>(
+        &mut self,
+        entries: I,
+        callback: IOFlushed<ControlConfig>,
+    ) -> Result<(), io::Error>
     where
         I: IntoIterator<Item = Entry> + OptionalSend,
         I::IntoIter: OptionalSend,
@@ -477,7 +491,12 @@ impl RaftLogStorage<ControlConfig> for ControlLog {
             }
         }
         // the callback is what openraft's quorum counts, so it fires after the sync and never before
-        callback.io_completed(result.as_ref().map(|_| ()).map_err(|error| io::Error::new(error.kind(), error.to_string())));
+        callback.io_completed(
+            result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|error| io::Error::new(error.kind(), error.to_string())),
+        );
         result
     }
 
@@ -487,7 +506,9 @@ impl RaftLogStorage<ControlConfig> for ControlLog {
             let mut inner = self.inner.borrow_mut();
             // none means everything goes
             let keep_to = last_log_id.as_ref().map(|log_id| log_id.index());
-            inner.entries.retain(|index, _| keep_to.is_some_and(|keep| *index <= keep));
+            inner
+                .entries
+                .retain(|index, _| keep_to.is_some_and(|keep| *index <= keep));
         }
         self.rewrite().await
     }
@@ -668,7 +689,11 @@ impl ControlStateMachine {
             let inner = self.inner.borrow();
             (
                 inner.on_applied.clone(),
-                inner.persisted.applied.as_ref().map_or(0, |log_id| log_id.index()),
+                inner
+                    .persisted
+                    .applied
+                    .as_ref()
+                    .map_or(0, |log_id| log_id.index()),
             )
         };
         if let Some(hook) = hook {
@@ -690,14 +715,20 @@ impl RaftSnapshotBuilder<ControlConfig> for ControlStateMachine {
     type SnapshotData = SnapshotData;
 
     /// Build a snapshot of the applied state, and keep it as the current one
-    async fn build_snapshot(&mut self) -> Result<SnapshotOf<ControlConfig, SnapshotData>, io::Error> {
+    async fn build_snapshot(
+        &mut self,
+    ) -> Result<SnapshotOf<ControlConfig, SnapshotData>, io::Error> {
         let (dir, meta, data) = {
             let inner = self.inner.borrow();
             let meta = SnapshotMeta {
                 last_log_id: inner.persisted.applied.clone(),
                 last_membership: inner.persisted.membership.clone(),
             };
-            (inner.dir.clone(), meta, serde_json::to_vec_pretty(&inner.persisted)?)
+            (
+                inner.dir.clone(),
+                meta,
+                serde_json::to_vec_pretty(&inner.persisted)?,
+            )
         };
         // on disk, so a restart still has it
         write_json(
@@ -727,13 +758,17 @@ impl RaftStateMachine<ControlConfig> for ControlStateMachine {
         &mut self,
     ) -> Result<(Option<LogId>, StoredMembershipOf<ControlConfig>), io::Error> {
         let inner = self.inner.borrow();
-        Ok((inner.persisted.applied.clone(), inner.persisted.membership.clone()))
+        Ok((
+            inner.persisted.applied.clone(),
+            inner.persisted.membership.clone(),
+        ))
     }
 
     /// Apply a batch of entries, persist the result, and then answer each one
     async fn apply<Strm>(&mut self, mut entries: Strm) -> Result<(), io::Error>
     where
-        Strm: Stream<Item = Result<EntryResponder<ControlConfig>, io::Error>> + Unpin + OptionalSend,
+        Strm:
+            Stream<Item = Result<EntryResponder<ControlConfig>, io::Error>> + Unpin + OptionalSend,
     {
         // apply everything in memory first, keeping each responder for after the write
         let mut responders = Vec::new();
@@ -798,7 +833,10 @@ impl RaftStateMachine<ControlConfig> for ControlStateMachine {
             // reflected into the roles as an entry's would be
             inner.persisted.applied = meta.last_log_id.clone();
             inner.persisted.membership = meta.last_membership.clone();
-            inner.persisted.state.observe_membership(meta.last_membership.membership());
+            inner
+                .persisted
+                .state
+                .observe_membership(meta.last_membership.membership());
             inner.snapshot = Some(Snapshot {
                 meta: meta.clone(),
                 snapshot: Cursor::new(data.clone()),
@@ -865,7 +903,9 @@ pub async fn force_recover(
     let state = log.get_log_state().await?;
     let vote = log.read_vote().await?;
     let last = state.last_log_id.clone();
-    let last_index = last.as_ref().map_or_else(|| machine.applied_index(), |log_id| log_id.index());
+    let last_index = last
+        .as_ref()
+        .map_or_else(|| machine.applied_index(), |log_id| log_id.index());
     let last_term = last.as_ref().map_or(0, |log_id| log_id.leader_id.term);
     let vote_term = vote.as_ref().map_or(0, |vote| vote.leader_id().term);
     let term = last_term.max(vote_term) + 1;
@@ -874,8 +914,18 @@ pub async fn force_recover(
     if let Some(last) = &last {
         if let Some(entry) = log.inner.borrow().entries.get(&last.index()) {
             if let (
-                EntryPayload::Normal(super::types::ControlCommand::ForceRecovered { survivors, lost, at, .. }),
-                super::types::ControlCommand::ForceRecovered { survivors: wanted, lost: lost_wanted, at: at_wanted, .. },
+                EntryPayload::Normal(super::types::ControlCommand::ForceRecovered {
+                    survivors,
+                    lost,
+                    at,
+                    ..
+                }),
+                super::types::ControlCommand::ForceRecovered {
+                    survivors: wanted,
+                    lost: lost_wanted,
+                    at: at_wanted,
+                    ..
+                },
             ) = (&entry.payload, &command)
             {
                 if survivors == wanted && lost == lost_wanted && at == at_wanted {
@@ -893,7 +943,9 @@ pub async fn force_recover(
         Entry::new_normal(second.clone(), command.clone()),
     ];
     // the log first: the entries, the vote at the new term, and the commit
-    log.blocking_append(entries).await.map_err(|error| io::Error::other(format!("{error}")))?;
+    log.blocking_append(entries)
+        .await
+        .map_err(|error| io::Error::other(format!("{error}")))?;
     log.save_vote(&vote_at).await?;
     log.save_committed(Some(second.clone())).await?;
     // then the applied state, so the start finds the lost members removed. what the log held
@@ -913,7 +965,8 @@ pub async fn force_recover(
             match &entry.payload {
                 EntryPayload::Membership(named) => {
                     inner.persisted.state.observe_membership(named);
-                    inner.persisted.membership = StoredMembership::new(Some(entry.log_id()), named.clone());
+                    inner.persisted.membership =
+                        StoredMembership::new(Some(entry.log_id()), named.clone());
                 }
                 EntryPayload::Normal(command) => {
                     inner.persisted.state.apply(command);
@@ -962,7 +1015,8 @@ mod tests {
         /// A fresh store, and the directory that has to outlive it
         async fn build(
             &self,
-        ) -> Result<(tempfile::TempDir, ControlLog, ControlStateMachine), StorageError<ControlConfig>> {
+        ) -> Result<(tempfile::TempDir, ControlLog, ControlStateMachine), StorageError<ControlConfig>>
+        {
             let dir = tempfile::tempdir().expect("failed to build a temp dir");
             let (log, machine) = open(&dir.path().join(CONTROL_DIR))
                 .await
@@ -1012,11 +1066,15 @@ mod tests {
             let vote = Vote::new(1, crate::shared::identity::NodeId::from(7));
             {
                 let (mut log, _machine) = open(&control).await.expect("failed to open");
-                log.blocking_append(entries.clone()).await.expect("failed to append");
+                log.blocking_append(entries.clone())
+                    .await
+                    .expect("failed to append");
                 log.save_vote(&vote).await.expect("failed to save a vote");
             }
             // the crash: a frame whose body was cut off, then a frame whose checksum is wrong
-            let whole = std::fs::metadata(control.join(LOG_FILE)).expect("a log").len();
+            let whole = std::fs::metadata(control.join(LOG_FILE))
+                .expect("a log")
+                .len();
             {
                 let torn = encode_frame(&Entry::new_blank(LogId::new(leader.clone(), 4)))
                     .expect("a frame");
@@ -1024,7 +1082,8 @@ mod tests {
                     .append(true)
                     .open(control.join(LOG_FILE))
                     .expect("failed to open the log");
-                file.write_all(&torn[..torn.len() - 5]).expect("failed to tear the log");
+                file.write_all(&torn[..torn.len() - 5])
+                    .expect("failed to tear the log");
             }
             // reopening sees the three whole entries, and the vote
             {
@@ -1034,7 +1093,9 @@ mod tests {
                 assert_eq!(state.last_log_id, Some(LogId::new(leader.clone(), 3)));
                 assert_eq!(log.read_vote().await.expect("a vote"), Some(vote.clone()));
                 // and the file was cut back to the last whole frame
-                let after = std::fs::metadata(control.join(LOG_FILE)).expect("a log").len();
+                let after = std::fs::metadata(control.join(LOG_FILE))
+                    .expect("a log")
+                    .len();
                 assert_eq!(after, whole, "the torn tail was left on disk");
                 // so the next append lands after it, and reads back
                 log.blocking_append([Entry::new_blank(LogId::new(leader.clone(), 4))])
@@ -1057,7 +1118,9 @@ mod tests {
                     .expect("failed to open the log");
                 file.write_all(&bad).expect("failed to corrupt the log");
             }
-            let (log, _machine) = open(&control).await.expect("failed to reopen a corrupt log");
+            let (log, _machine) = open(&control)
+                .await
+                .expect("failed to reopen a corrupt log");
             assert_eq!(log.len(), 4, "a corrupt entry was recovered as whole");
         });
     }
@@ -1102,23 +1165,43 @@ mod tests {
             // a cluster of three voters, bootstrapped and admitted, as the log would hold it
             let cluster = ClusterId::mint();
             let leader = <ControlConfig as openraft::RaftTypeConfig>::LeaderId::new_committed(1, a);
-            let nodes: BTreeMap<NodeId, MemberRecord> = [a, b, c].into_iter().map(|node| (node, record(node))).collect();
-            let three = openraft::Membership::new(vec![BTreeSet::from([a, b, c])], nodes).expect("a membership of three");
+            let nodes: BTreeMap<NodeId, MemberRecord> = [a, b, c]
+                .into_iter()
+                .map(|node| (node, record(node)))
+                .collect();
+            let three = openraft::Membership::new(vec![BTreeSet::from([a, b, c])], nodes)
+                .expect("a membership of three");
             let policy = crate::server::conf::Cluster::default().policy();
             let entries: Vec<Entry> = vec![
                 Entry::new_membership(LogId::new(leader.clone(), 0), three.clone()),
                 Entry::new_normal(
                     LogId::new(leader.clone(), 1),
-                    ControlCommand::Bootstrap { cluster, policy, member: record(a) },
+                    ControlCommand::Bootstrap {
+                        cluster,
+                        policy,
+                        member: record(a),
+                    },
                 ),
-                Entry::new_normal(LogId::new(leader.clone(), 2), ControlCommand::Admit(record(b))),
-                Entry::new_normal(LogId::new(leader.clone(), 3), ControlCommand::Admit(record(c))),
+                Entry::new_normal(
+                    LogId::new(leader.clone(), 2),
+                    ControlCommand::Admit(record(b)),
+                ),
+                Entry::new_normal(
+                    LogId::new(leader.clone(), 3),
+                    ControlCommand::Admit(record(c)),
+                ),
             ];
             {
                 let (mut log, machine) = open(&control).await.expect("failed to open");
-                log.blocking_append(entries.clone()).await.expect("failed to append");
-                log.save_vote(&Vote::new(1, a)).await.expect("failed to save a vote");
-                log.save_committed(Some(LogId::new(leader.clone(), 3))).await.expect("failed to save the commit");
+                log.blocking_append(entries.clone())
+                    .await
+                    .expect("failed to append");
+                log.save_vote(&Vote::new(1, a))
+                    .await
+                    .expect("failed to save a vote");
+                log.save_committed(Some(LogId::new(leader.clone(), 3)))
+                    .await
+                    .expect("failed to save the commit");
                 // applied, the way a running node would have
                 {
                     let mut inner = machine.inner.borrow_mut();
@@ -1126,7 +1209,8 @@ mod tests {
                         match &entry.payload {
                             EntryPayload::Membership(membership) => {
                                 inner.persisted.state.observe_membership(membership);
-                                inner.persisted.membership = StoredMembership::new(Some(entry.log_id()), membership.clone());
+                                inner.persisted.membership =
+                                    StoredMembership::new(Some(entry.log_id()), membership.clone());
                             }
                             EntryPayload::Normal(command) => {
                                 inner.persisted.state.apply(command);
@@ -1141,11 +1225,28 @@ mod tests {
                 // and one more appended, never committed and never applied: the leader lost
                 // its quorum with it in flight
                 let version = machine.state().topology_version;
-                let pending = ControlCommand::SetControlVoters { op: uuid::Uuid::new_v4(), principal: "test".to_string(), expected_version: version, count: 1 };
-                log.blocking_append(vec![Entry::new_normal(LogId::new(leader.clone(), 4), pending)])
-                    .await
-                    .expect("failed to append the pending entry");
-                assert_eq!(machine.state().policy.as_ref().expect("a policy").control_voters, 3, "the pending entry is not applied");
+                let pending = ControlCommand::SetControlVoters {
+                    op: uuid::Uuid::new_v4(),
+                    principal: "test".to_string(),
+                    expected_version: version,
+                    count: 1,
+                };
+                log.blocking_append(vec![Entry::new_normal(
+                    LogId::new(leader.clone(), 4),
+                    pending,
+                )])
+                .await
+                .expect("failed to append the pending entry");
+                assert_eq!(
+                    machine
+                        .state()
+                        .policy
+                        .as_ref()
+                        .expect("a policy")
+                        .control_voters,
+                    3,
+                    "the pending entry is not applied"
+                );
             }
             // the recovery: a alone, b and c lost
             let command = ControlCommand::ForceRecovered {
@@ -1156,36 +1257,72 @@ mod tests {
                 last_committed: 3,
                 recovered_ms: 1,
             };
-            let alone = openraft::Membership::new(vec![BTreeSet::from([a])], BTreeMap::from([(a, record(a))])).expect("a membership of one");
+            let alone = openraft::Membership::new(
+                vec![BTreeSet::from([a])],
+                BTreeMap::from([(a, record(a))]),
+            )
+            .expect("a membership of one");
             let recovered_at = {
                 let (mut log, machine) = open(&control).await.expect("failed to reopen");
-                let at = force_recover(&mut log, &machine, a, alone.clone(), command.clone()).await.expect("the recovery failed");
+                let at = force_recover(&mut log, &machine, a, alone.clone(), command.clone())
+                    .await
+                    .expect("the recovery failed");
                 assert_eq!(at, 6, "the recovery lands past the five entries");
                 // the applied state: the pending entry applied, b and c removed and
                 // tombstoned, the recovery recorded
                 let state = machine.state();
-                assert_eq!(state.policy.as_ref().expect("a policy").control_voters, 1, "the entry the log held unapplied is applied by the recovery");
+                assert_eq!(
+                    state.policy.as_ref().expect("a policy").control_voters,
+                    1,
+                    "the entry the log held unapplied is applied by the recovery"
+                );
                 assert_eq!(state.members[&b].phase, MemberPhase::Removing);
                 assert_eq!(state.members[&c].phase, MemberPhase::Removing);
                 assert!(state.tombstones.contains_key(&b) && state.tombstones.contains_key(&c));
-                assert_eq!(state.open_plans().len(), 2, "a removal plan per lost member");
+                assert_eq!(
+                    state.open_plans().len(),
+                    2,
+                    "a removal plan per lost member"
+                );
                 assert_eq!(state.members[&a].phase, MemberPhase::Member);
                 assert_eq!(state.recoveries.len(), 1);
                 assert_eq!(state.recoveries[0].lost, vec![b, c]);
                 assert_eq!(state.recoveries[0].last_committed, 3);
                 // the log: a membership of one at term 2, then the command, both committed
                 let log_state = log.get_log_state().await.expect("a log state");
-                assert_eq!(log_state.last_log_id.as_ref().map(|id| (id.leader_id.term, id.index)), Some((2, 6)));
-                assert_eq!(log.read_committed().await.expect("a commit").map(|id| id.index), Some(6));
-                assert_eq!(log.read_vote().await.expect("a vote").map(|vote| vote.leader_id().term), Some(2));
+                assert_eq!(
+                    log_state
+                        .last_log_id
+                        .as_ref()
+                        .map(|id| (id.leader_id.term, id.index)),
+                    Some((2, 6))
+                );
+                assert_eq!(
+                    log.read_committed()
+                        .await
+                        .expect("a commit")
+                        .map(|id| id.index),
+                    Some(6)
+                );
+                assert_eq!(
+                    log.read_vote()
+                        .await
+                        .expect("a vote")
+                        .map(|vote| vote.leader_id().term),
+                    Some(2)
+                );
                 // and again is nothing: the same recovery is not written twice
-                let again = force_recover(&mut log, &machine, a, alone.clone(), command.clone()).await.expect("the second run failed");
+                let again = force_recover(&mut log, &machine, a, alone.clone(), command.clone())
+                    .await
+                    .expect("the second run failed");
                 assert_eq!(again, 6);
                 assert_eq!(log.len(), 7);
                 at
             };
             // a group opened over the recovered store elects itself, reaching nobody
-            let (log, machine) = open(&control).await.expect("failed to reopen for the group");
+            let (log, machine) = open(&control)
+                .await
+                .expect("failed to reopen for the group");
             let identity = Identity {
                 node: a,
                 cluster: Some(cluster),
@@ -1215,20 +1352,39 @@ mod tests {
             }
             .validate()
             .expect("a config");
-            let raft = openraft::Raft::<ControlConfig, ControlStateMachine>::new(a, std::sync::Arc::new(config), network, log, machine.clone())
-                .await
-                .expect("the group starts");
+            let raft = openraft::Raft::<ControlConfig, ControlStateMachine>::new(
+                a,
+                std::sync::Arc::new(config),
+                network,
+                log,
+                machine.clone(),
+            )
+            .await
+            .expect("the group starts");
             raft.wait(Some(std::time::Duration::from_secs(10)))
                 .current_leader(a, "the sole voter leads")
                 .await
                 .expect("the survivor never led");
             // and commits on its own
             let written = raft
-                .client_write(ControlCommand::SetControlVoters { op: uuid::Uuid::new_v4(), principal: "test".to_string(), expected_version: machine.state().topology_version, count: 1 })
+                .client_write(ControlCommand::SetControlVoters {
+                    op: uuid::Uuid::new_v4(),
+                    principal: "test".to_string(),
+                    expected_version: machine.state().topology_version,
+                    count: 1,
+                })
                 .await
                 .expect("a write through the sole voter");
             assert!(written.log_id.index > recovered_at);
-            assert_eq!(raft.metrics().borrow_watched().membership_config.membership().voter_ids().collect::<Vec<_>>(), vec![a]);
+            assert_eq!(
+                raft.metrics()
+                    .borrow_watched()
+                    .membership_config
+                    .membership()
+                    .voter_ids()
+                    .collect::<Vec<_>>(),
+                vec![a]
+            );
             raft.shutdown().await.expect("shutdown");
         });
     }

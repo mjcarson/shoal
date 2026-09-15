@@ -32,8 +32,8 @@ struct Row {
 
 /// The milestones a row may name
 const MILESTONES: &[&str] = &[
-    "M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M9a", "M9b", "M9c", "M10", "M10a", "M10b",
-    "M10c",
+    "M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M9a", "M9b", "M9c", "M10", "M10a",
+    "M10b", "M10c",
 ];
 
 /// Every row of every acceptance table under the distributed chapter
@@ -62,7 +62,9 @@ fn rows() -> Vec<Row> {
         let mut in_table = false;
         for line in text.lines() {
             if line.starts_with("## ") {
-                in_table = line.trim_start_matches("## ").starts_with("Acceptance tests");
+                in_table = line
+                    .trim_start_matches("## ")
+                    .starts_with("Acceptance tests");
                 continue;
             }
             if !in_table || !line.starts_with('|') {
@@ -96,8 +98,14 @@ fn milestone_sections() -> BTreeMap<String, String> {
                 sections.insert(id, body);
             }
             // `### M9a. Safe replica migration` names M9a; `### Before M0: ...` names nothing
-            let id = heading.split(['.', ':', ' ']).next().unwrap_or_default().to_string();
-            current = MILESTONES.contains(&id.as_str()).then(|| (id, String::new()));
+            let id = heading
+                .split(['.', ':', ' '])
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            current = MILESTONES
+                .contains(&id.as_str())
+                .then(|| (id, String::new()));
             continue;
         }
         if let Some((_, body)) = &mut current {
@@ -161,7 +169,11 @@ fn defined_functions() -> BTreeSet<String> {
 #[test]
 fn acceptance_tables_have_unique_tests_and_valid_milestones() {
     let rows = rows();
-    assert!(rows.len() > 50, "only {} acceptance rows were found", rows.len());
+    assert!(
+        rows.len() > 50,
+        "only {} acceptance rows were found",
+        rows.len()
+    );
     // unique across pages
     let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
     for row in &rows {
@@ -169,7 +181,9 @@ fn acceptance_tables_have_unique_tests_and_valid_milestones() {
             panic!("`{}` is named on both {} and {}", row.name, other, row.page);
         }
         assert!(
-            row.name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+            row.name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
             "`{}` on {} is not a test name",
             row.name,
             row.page
@@ -178,7 +192,10 @@ fn acceptance_tables_have_unique_tests_and_valid_milestones() {
     // a valid milestone, with a section on the milestones page that names the owning chapter
     let sections = milestone_sections();
     for milestone in MILESTONES {
-        assert!(sections.contains_key(*milestone), "milestones.md has no `### {milestone}.` section");
+        assert!(
+            sections.contains_key(*milestone),
+            "milestones.md has no `### {milestone}.` section"
+        );
     }
     for row in &rows {
         assert!(
@@ -199,10 +216,7 @@ fn acceptance_tables_have_unique_tests_and_valid_milestones() {
         assert!(
             gated,
             "`{}` gates {} but the {} section on milestones.md never names {}",
-            row.name,
-            row.milestone,
-            row.milestone,
-            row.chapter
+            row.name, row.milestone, row.milestone, row.chapter
         );
     }
     // a delivered milestone's tests exist
@@ -211,9 +225,15 @@ fn acceptance_tables_have_unique_tests_and_valid_milestones() {
         .filter(|(_, body)| body.trim_start().starts_with("**Delivered"))
         .map(|(id, _)| id.as_str())
         .collect();
-    assert!(delivered.contains(&"M0"), "M0 is delivered and its section should say so first");
+    assert!(
+        delivered.contains(&"M0"),
+        "M0 is delivered and its section should say so first"
+    );
     let functions = defined_functions();
-    for row in rows.iter().filter(|row| delivered.contains(&row.milestone.as_str())) {
+    for row in rows
+        .iter()
+        .filter(|row| delivered.contains(&row.milestone.as_str()))
+    {
         assert!(
             functions.contains(&row.name),
             "`{}` gates delivered milestone {} but no `fn {}` exists in the workspace",

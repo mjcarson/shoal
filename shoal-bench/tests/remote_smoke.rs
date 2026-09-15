@@ -14,7 +14,9 @@ use std::process::Command;
 #[test]
 fn a_remote_node_serves_a_smoke_capture() {
     let Ok(spec) = std::env::var("SHOAL_REMOTE_SMOKE") else {
-        eprintln!("SKIPPING a_remote_node_serves_a_smoke_capture: SHOAL_REMOTE_SMOKE names no <user@host>:<dir>");
+        eprintln!(
+            "SKIPPING a_remote_node_serves_a_smoke_capture: SHOAL_REMOTE_SMOKE names no <user@host>:<dir>"
+        );
         return;
     };
     let out = tempfile::tempdir().expect("a temp dir");
@@ -43,19 +45,38 @@ fn a_remote_node_serves_a_smoke_capture() {
         ])
         .status()
         .expect("shoal-bench runs");
-    assert!(status.success(), "the remote smoke capture failed: {status}");
+    assert!(
+        status.success(),
+        "the remote smoke capture failed: {status}"
+    );
     // the capture records node one's machine as the host reported it
     let macro_path = out.path().join("remote-smoke.macro.json");
     let text = std::fs::read_to_string(&macro_path).expect("the macro artifact was written");
     let capture: serde_json::Value = serde_json::from_str(&text).expect("the artifact is json");
     let cluster = &capture["workloads"]["macro/cluster/overhead/nodes/3"]["cluster"];
-    let environments = cluster["environments"].as_array().expect("every node's environment");
+    let environments = cluster["environments"]
+        .as_array()
+        .expect("every node's environment");
     assert_eq!(environments.len(), 3, "{cluster}");
-    let hosts: Vec<&str> = environments.iter().filter_map(|env| env["hostname"].as_str()).collect();
-    let remote_host = spec.rsplit_once(':').map(|(target, _)| target.rsplit_once('@').map_or(target, |(_, host)| host)).unwrap_or_default();
-    let same_machine = remote_host == "localhost" || remote_host == "127.0.0.1" || hosts[0] == hosts[1];
-    assert_eq!(cluster["emulated"].as_bool(), Some(same_machine), "{cluster}");
+    let hosts: Vec<&str> = environments
+        .iter()
+        .filter_map(|env| env["hostname"].as_str())
+        .collect();
+    let remote_host = spec
+        .rsplit_once(':')
+        .map(|(target, _)| target.rsplit_once('@').map_or(target, |(_, host)| host))
+        .unwrap_or_default();
+    let same_machine =
+        remote_host == "localhost" || remote_host == "127.0.0.1" || hosts[0] == hosts[1];
+    assert_eq!(
+        cluster["emulated"].as_bool(),
+        Some(same_machine),
+        "{cluster}"
+    );
     if !same_machine {
-        assert_ne!(hosts[0], hosts[1], "node one ran on the driver's machine: {hosts:?}");
+        assert_ne!(
+            hosts[0], hosts[1],
+            "node one ran on the driver's machine: {hosts:?}"
+        );
     }
 }

@@ -55,42 +55,48 @@ pub(crate) fn add(
         }
     });
     // write each field's out of line data, reading it out of the archive rather than a row
-    let serialize_fields = fields.iter().zip(&shapes).map(|((ident, ty, _), shape)| match shape {
-        FieldShape::PortableVec => quote! {
-            #ident: ::shoal::shared::rearchive::serialize_portable_vec(
-                &archived.#ident,
-                serializer,
-            )?,
-        },
-        FieldShape::Mirrored => quote! {
-            #ident: <#ty as ::shoal::shared::rearchive::Rearchive>::serialize_archived(
-                &archived.#ident,
-                serializer,
-            )?,
-        },
-        FieldShape::Opaque => quote! {
-            #ident: ::shoal::shared::rearchive::serialize_via_owned::<#ty, S>(
-                &archived.#ident,
-                serializer,
-            )?,
-        },
-    });
+    let serialize_fields = fields
+        .iter()
+        .zip(&shapes)
+        .map(|((ident, ty, _), shape)| match shape {
+            FieldShape::PortableVec => quote! {
+                #ident: ::shoal::shared::rearchive::serialize_portable_vec(
+                    &archived.#ident,
+                    serializer,
+                )?,
+            },
+            FieldShape::Mirrored => quote! {
+                #ident: <#ty as ::shoal::shared::rearchive::Rearchive>::serialize_archived(
+                    &archived.#ident,
+                    serializer,
+                )?,
+            },
+            FieldShape::Opaque => quote! {
+                #ident: ::shoal::shared::rearchive::serialize_via_owned::<#ty, S>(
+                    &archived.#ident,
+                    serializer,
+                )?,
+            },
+        });
     // then write each field's fixed size part on top of what was serialized for it
-    let resolve_fields = fields.iter().zip(&shapes).map(|((ident, ty, _), shape)| match shape {
-        FieldShape::PortableVec => quote! {
-            ::shoal::shared::rearchive::resolve_vec(&archived.#ident, resolver.#ident, #ident);
-        },
-        FieldShape::Mirrored => quote! {
-            <#ty as ::shoal::shared::rearchive::Rearchive>::resolve_archived(
-                &archived.#ident,
-                resolver.#ident,
-                #ident,
-            );
-        },
-        FieldShape::Opaque => quote! {
-            ::shoal::shared::rearchive::resolve_via_owned::<#ty>(resolver.#ident, #ident);
-        },
-    });
+    let resolve_fields = fields
+        .iter()
+        .zip(&shapes)
+        .map(|((ident, ty, _), shape)| match shape {
+            FieldShape::PortableVec => quote! {
+                ::shoal::shared::rearchive::resolve_vec(&archived.#ident, resolver.#ident, #ident);
+            },
+            FieldShape::Mirrored => quote! {
+                <#ty as ::shoal::shared::rearchive::Rearchive>::resolve_archived(
+                    &archived.#ident,
+                    resolver.#ident,
+                    #ident,
+                );
+            },
+            FieldShape::Opaque => quote! {
+                ::shoal::shared::rearchive::resolve_via_owned::<#ty>(resolver.#ident, #ident);
+            },
+        });
     // the fields to munge the out place into, which is one per field in declaration order
     let field_idents: Vec<&syn::Ident> = fields.iter().map(|(ident, _, _)| ident).collect();
     let resolver_doc = format!(

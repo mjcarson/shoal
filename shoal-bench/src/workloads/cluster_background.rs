@@ -32,7 +32,9 @@ use anyhow::Result;
 use crate::model::macro_layer::Timing;
 use crate::workloads::cluster_failover::Failover;
 use crate::workloads::harness::seed::Scale;
-use crate::workloads::workload::{BackgroundKind, BackgroundSpec, BoxFuture, Context, Measurement, Workload, WorkloadPlan};
+use crate::workloads::workload::{
+    BackgroundKind, BackgroundSpec, BoxFuture, Context, Measurement, Workload, WorkloadPlan,
+};
 
 /// The arm's identifier
 pub const REPAIR_ID: &str = "macro/cluster/background/repair";
@@ -53,7 +55,9 @@ impl Background {
     /// The arm
     #[must_use]
     pub fn new() -> Self {
-        Background { twin: Failover::new() }
+        Background {
+            twin: Failover::new(),
+        }
     }
 }
 
@@ -136,7 +140,7 @@ impl Workload for Background {
 
 #[cfg(test)]
 mod tests {
-    use super::{all, REPAIR_ID, REPAIR_TABLE};
+    use super::{REPAIR_ID, REPAIR_TABLE, all};
     use crate::workloads::cluster_catchup::SNAPSHOT_ID;
     use crate::workloads::cluster_failover::{self, KILL_ID};
     use crate::workloads::harness::seed::Scale;
@@ -150,11 +154,26 @@ mod tests {
         assert_eq!(arms.len(), 1);
         assert_eq!(arms[0].id(), REPAIR_ID);
         let ids = crate::workload_ids::IDS;
-        let kill = ids.iter().position(|id| *id == KILL_ID).expect("the kill arm is registered");
-        let snapshot = ids.iter().position(|id| *id == SNAPSHOT_ID).expect("the snapshot arm is registered");
-        let background = ids.iter().position(|id| *id == REPAIR_ID).expect("the background arm is registered");
-        assert!(kill < snapshot && snapshot < background, "the background arm is not appended after the catch-up arms");
-        let kill = cluster_failover::all().into_iter().next().expect("the kill arm exists");
+        let kill = ids
+            .iter()
+            .position(|id| *id == KILL_ID)
+            .expect("the kill arm is registered");
+        let snapshot = ids
+            .iter()
+            .position(|id| *id == SNAPSHOT_ID)
+            .expect("the snapshot arm is registered");
+        let background = ids
+            .iter()
+            .position(|id| *id == REPAIR_ID)
+            .expect("the background arm is registered");
+        assert!(
+            kill < snapshot && snapshot < background,
+            "the background arm is not appended after the catch-up arms"
+        );
+        let kill = cluster_failover::all()
+            .into_iter()
+            .next()
+            .expect("the kill arm exists");
         for scale in [Scale::Smoke, Scale::Full] {
             let mine = arms[0].plan(scale);
             let theirs = kill.plan(scale);
@@ -165,15 +184,23 @@ mod tests {
             assert_eq!(mine_overrides.shards, theirs_overrides.shards);
             let mine_cluster = mine_overrides.cluster.as_ref().expect("a placement");
             let theirs_cluster = theirs_overrides.cluster.as_ref().expect("a placement");
-            assert_eq!(mine_cluster.replication_factor, theirs_cluster.replication_factor);
+            assert_eq!(
+                mine_cluster.replication_factor,
+                theirs_cluster.replication_factor
+            );
             assert_eq!(mine_cluster.peers, theirs_cluster.peers);
             // no fault, no catch-up, and a repair inside the run of the reference table
             assert_eq!(arms[0].fault(scale), None);
             assert!(!arms[0].catchup());
-            let spec = arms[0].background(scale).expect("the arm asks for a repair");
+            let spec = arms[0]
+                .background(scale)
+                .expect("the arm asks for a repair");
             assert_eq!(spec.table, REPAIR_TABLE);
             assert!(spec.at < spec.run_for);
-            assert_eq!(spec.run_for, kill.fault(scale).expect("the kill arm's schedule").run_for);
+            assert_eq!(
+                spec.run_for,
+                kill.fault(scale).expect("the kill arm's schedule").run_for
+            );
             assert_eq!(kill.background(scale), None);
         }
         // the table the repair names is one the schema spells, and a persistent one

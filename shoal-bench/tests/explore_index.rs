@@ -70,7 +70,10 @@ fn reproduces(preset: &Preset, expected: &[Arm<'_>]) {
     selected.sort_unstable();
     wanted.sort_unstable();
     assert!(!wanted.is_empty(), "the page this reproduces draws nothing");
-    assert_eq!(selected, wanted, "the preset does not select the page's arms");
+    assert_eq!(
+        selected, wanted,
+        "the preset does not select the page's arms"
+    );
     // and draws them as the page draws them: one curve per table, not one line through all four
     let selection = Selection {
         captures: vec![capture],
@@ -84,7 +87,10 @@ fn reproduces(preset: &Preset, expected: &[Arm<'_>]) {
         series.len(),
         kinds.len(),
         "expected one curve per table, got {:?}",
-        series.iter().map(|line| line.name.as_str()).collect::<Vec<_>>()
+        series
+            .iter()
+            .map(|line| line.name.as_str())
+            .collect::<Vec<_>>()
     );
     for kind in &kinds {
         // every curve is named after the one thing that separates it from the others
@@ -103,10 +109,16 @@ fn reproduces(preset: &Preset, expected: &[Arm<'_>]) {
             .iter()
             .position(|known| known == kind)
             .unwrap_or_else(|| panic!("{kind} is not a table the explorer reserves a colour for"));
-        assert_eq!(drawn.hue as usize, slot, "{kind} was not drawn in its own colour");
+        assert_eq!(
+            drawn.hue as usize, slot,
+            "{kind} was not drawn in its own colour"
+        );
         // one curve per table, so nothing carries a marker: a chart making no second distinction
         // must not look as though it is
-        assert_eq!(drawn.mark, 0, "{kind} was marked for a distinction nothing is making");
+        assert_eq!(
+            drawn.mark, 0,
+            "{kind} was marked for a distinction nothing is making"
+        );
     }
 }
 
@@ -127,7 +139,11 @@ fn two_workloads_the_facts_cannot_tell_apart_are_two_lines() {
         })
         .filter(|at| index.macro_point(capture, *at).is_some())
         .collect();
-    assert_eq!(pair.len(), 2, "the corpus no longer carries both keyed gets");
+    assert_eq!(
+        pair.len(),
+        2,
+        "the corpus no longer carries both keyed gets"
+    );
     // and the facts really do agree, which is the premise of everything below
     let facts: Vec<&shoal_top::index::ScaleFactsLite> = pair
         .iter()
@@ -136,7 +152,10 @@ fn two_workloads_the_facts_cannot_tell_apart_are_two_lines() {
             &index.scales[point.scale as usize]
         })
         .collect();
-    assert_eq!(facts[0], facts[1], "the two no longer record the same facts");
+    assert_eq!(
+        facts[0], facts[1],
+        "the two no longer record the same facts"
+    );
     let series = index.series(&Selection {
         captures: vec![capture],
         // a latency, because neither of these counts queries and so neither answers a rate
@@ -153,7 +172,10 @@ fn two_workloads_the_facts_cannot_tell_apart_are_two_lines() {
         series.len(),
         2,
         "the two were folded into one line: {:?}",
-        series.iter().map(|line| line.name.as_str()).collect::<Vec<_>>()
+        series
+            .iter()
+            .map(|line| line.name.as_str())
+            .collect::<Vec<_>>()
     );
     for line in &series {
         assert!(
@@ -306,8 +328,20 @@ fn the_layer_mirror_is_total() {
 fn formatters_agree() {
     // every branch of each of the five copied functions, over inputs chosen to land in each band
     let durations = [
-        0.0, 1.5, 999.4, 1_000.0, 12_345.6, 999_999.0, 1_000_000.0, 5_500_000.0,
-        999_999_999.0, 1_000_000_000.0, 2_500_000_000.0, -0.001, f64::NAN, f64::INFINITY,
+        0.0,
+        1.5,
+        999.4,
+        1_000.0,
+        12_345.6,
+        999_999.0,
+        1_000_000.0,
+        5_500_000.0,
+        999_999_999.0,
+        1_000_000_000.0,
+        2_500_000_000.0,
+        -0.001,
+        f64::NAN,
+        f64::INFINITY,
     ];
     for value in durations {
         assert_eq!(
@@ -325,8 +359,16 @@ fn formatters_agree() {
         );
     }
     let sizes = [
-        0.0, 1.0, 1023.0, 1024.0, 4096.0, 102_400.0, 1_048_576.0, 1_073_741_824.0,
-        5_000_000_000.0, f64::NAN,
+        0.0,
+        1.0,
+        1023.0,
+        1024.0,
+        4096.0,
+        102_400.0,
+        1_048_576.0,
+        1_073_741_824.0,
+        5_000_000_000.0,
+        f64::NAN,
     ];
     for value in sizes {
         assert_eq!(
@@ -378,7 +420,10 @@ fn the_grid_preset_reproduces_chart_grid_throughput() {
         .filter(|arm| arm.row_bytes() == 1024 && arm.row_profile().is_none())
         .collect();
     let preset = Preset::all().remove(0);
-    assert_eq!(preset.axis, Axis::Sweep(shoal_top::index::SweepAxis::ReadShare));
+    assert_eq!(
+        preset.axis,
+        Axis::Sweep(shoal_top::index::SweepAxis::ReadShare)
+    );
     reproduces(&preset, &expected);
 }
 
@@ -394,7 +439,10 @@ fn the_row_width_preset_reproduces_chart_row_size_ops() {
         .filter(|arm| arm.read_pct() == Some(50) && arm.row_profile().is_none())
         .collect();
     let preset = Preset::all().remove(1);
-    assert_eq!(preset.axis, Axis::Sweep(shoal_top::index::SweepAxis::RowBytes));
+    assert_eq!(
+        preset.axis,
+        Axis::Sweep(shoal_top::index::SweepAxis::RowBytes)
+    );
     reproduces(&preset, &expected);
 }
 
@@ -525,15 +573,18 @@ fn a_metric_list_narrows_to_what_the_whole_selection_answers() {
     // the intersection exists for. `macro/encryption/*` counts no queries at all
     let mixed = (0..index.workloads.len() as u32)
         .find(|at| {
-            index.workload_metrics(*at).contains(&shoal_top::index::Metric::Latency {
-                op: "write".to_string(),
-                percentile: shoal_top::index::Percentile::P99,
-            })
+            index
+                .workload_metrics(*at)
+                .contains(&shoal_top::index::Metric::Latency {
+                    op: "write".to_string(),
+                    percentile: shoal_top::index::Percentile::P99,
+                })
         })
         .expect("the corpus holds an arm that recorded a write");
     let counted_none = (0..index.workloads.len() as u32)
         .find(|at| {
-            index.measured(*at) && !index.workload_answers(*at, &shoal_top::index::Metric::OpsPerSec)
+            index.measured(*at)
+                && !index.workload_answers(*at, &shoal_top::index::Metric::OpsPerSec)
         })
         .expect("the corpus holds an arm that counted no queries");
     // together they can answer only what both carry, which is neither the write percentiles nor
@@ -544,8 +595,9 @@ fn a_metric_list_narrows_to_what_the_whole_selection_answers() {
         "a metric only one of the two carries survived the intersection"
     );
     assert!(
-        both.iter().all(|metric| index.workload_answers(mixed, metric)
-            && index.workload_answers(counted_none, metric)),
+        both.iter()
+            .all(|metric| index.workload_answers(mixed, metric)
+                && index.workload_answers(counted_none, metric)),
         "the intersection offered something one of the two cannot answer"
     );
     // and it is not empty: the wall clock is recorded by everything, so there is always a chart
@@ -588,8 +640,9 @@ fn the_presets_pick_arms_that_answer_their_own_metric() {
 #[test]
 fn the_facts_mirrors_are_total() {
     use shoal_bench::model::macro_layer::{
-        BackgroundFacts, CatchupFacts, CatchupSecondFacts, ClusterFacts, ConfFacts, FanoutFacts, FaultFacts, HopFacts, HopMix, NodeCores,
-        NodeReadFacts, OfferedLoad, OutcomeFacts, ReadFacts, ReplicaFacts, ScaleFacts, SecondFacts, WindowFacts,
+        BackgroundFacts, CatchupFacts, CatchupSecondFacts, ClusterFacts, ConfFacts, FanoutFacts,
+        FaultFacts, HopFacts, HopMix, NodeCores, NodeReadFacts, OfferedLoad, OutcomeFacts,
+        ReadFacts, ReplicaFacts, ScaleFacts, SecondFacts, WindowFacts,
     };
     let keys = |value: serde_json::Value| -> Vec<String> {
         value
@@ -613,7 +666,10 @@ fn the_facts_mirrors_are_total() {
         table_kind: Some("unsorted".to_string()),
     };
     let mirrored = explore::index::scale_facts(&scale);
-    assert_eq!(keys(serde_json::to_value(&scale).unwrap()), keys(serde_json::to_value(&mirrored).unwrap()));
+    assert_eq!(
+        keys(serde_json::to_value(&scale).unwrap()),
+        keys(serde_json::to_value(&mirrored).unwrap())
+    );
     let conf = ConfFacts {
         shards: 1,
         memory: "1Gi".to_string(),
@@ -666,7 +722,11 @@ fn the_facts_mirrors_are_total() {
         hop: Some(HopFacts {
             target: "remote".to_string(),
             owner_node: 1,
-            expected_mix: HopMix { same: 0, local: 0, remote: 100 },
+            expected_mix: HopMix {
+                same: 0,
+                local: 0,
+                remote: 100,
+            },
         }),
         transport: None,
         // the replicas' debt and the outcomes travel whole (F40)
@@ -812,14 +872,33 @@ fn the_facts_mirrors_are_total() {
         keys(serde_json::to_value(&cluster.catchup.as_ref().unwrap().series[0]).unwrap()),
         keys(serde_json::to_value(&mirrored.catchup.as_ref().unwrap().series[0]).unwrap())
     );
-    assert_eq!(keys(serde_json::to_value(&cluster).unwrap()), keys(serde_json::to_value(&mirrored).unwrap()));
+    assert_eq!(
+        keys(serde_json::to_value(&cluster).unwrap()),
+        keys(serde_json::to_value(&mirrored).unwrap())
+    );
     assert_eq!(
         keys(serde_json::to_value(&cluster.reads).unwrap()),
         keys(serde_json::to_value(&mirrored.reads).unwrap())
     );
     assert_eq!(
-        keys(serde_json::to_value(cluster.reads.as_ref().and_then(|reads| reads.fanout.as_ref())).unwrap()),
-        keys(serde_json::to_value(mirrored.reads.as_ref().and_then(|reads| reads.fanout.as_ref())).unwrap())
+        keys(
+            serde_json::to_value(
+                cluster
+                    .reads
+                    .as_ref()
+                    .and_then(|reads| reads.fanout.as_ref())
+            )
+            .unwrap()
+        ),
+        keys(
+            serde_json::to_value(
+                mirrored
+                    .reads
+                    .as_ref()
+                    .and_then(|reads| reads.fanout.as_ref())
+            )
+            .unwrap()
+        )
     );
     assert_eq!(
         keys(serde_json::to_value(&cluster.reads.as_ref().unwrap().per_node[0]).unwrap()),

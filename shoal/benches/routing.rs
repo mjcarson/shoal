@@ -131,9 +131,13 @@ fn bench_ring_new(c: &mut Criterion) {
     let mut group = c.benchmark_group("routing/ring_new");
     // measure construction at each shard count
     for shards in SHARDS {
-        group.bench_with_input(BenchmarkId::from_parameter(shards), &shards, |b, &shards| {
-            b.iter(|| black_box(Ring::new(black_box(shards)).expect("placeable")));
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(shards),
+            &shards,
+            |b, &shards| {
+                b.iter(|| black_box(Ring::new(black_box(shards)).expect("placeable")));
+            },
+        );
     }
     group.finish();
 }

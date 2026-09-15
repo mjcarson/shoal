@@ -130,7 +130,9 @@ impl<T: Rearchive> Archive for RowRef<'_, T> {
     fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
         match (self, resolver) {
             // the row resolves itself - this type adds nothing to the bytes and must not
-            (RowRef::Resident(row), RowRefResolver::Resident(resolver)) => row.resolve(resolver, out),
+            (RowRef::Resident(row), RowRefResolver::Resident(resolver)) => {
+                row.resolve(resolver, out)
+            }
             // and an archived row is written back out of the archive it was read from
             (RowRef::InArchive(archived), RowRefResolver::InArchive(resolver)) => {
                 T::resolve_archived(archived, resolver, out);
@@ -160,9 +162,9 @@ where
             // forward to the row, so its out of line data lands where it always did
             RowRef::Resident(row) => Ok(RowRefResolver::Resident(row.serialize(serializer)?)),
             // or copy the out of line data straight across from the archive holding it
-            RowRef::InArchive(archived) => Ok(RowRefResolver::InArchive(
-                T::serialize_archived(archived, serializer)?,
-            )),
+            RowRef::InArchive(archived) => Ok(RowRefResolver::InArchive(T::serialize_archived(
+                archived, serializer,
+            )?)),
         }
     }
 }
@@ -299,13 +301,18 @@ mod tests {
             },
         ];
         let scalars = vec![
-            Scalars { id: 7, runtime: 116 },
+            Scalars {
+                id: 7,
+                runtime: 116,
+            },
             Scalars { id: 9, runtime: 77 },
         ];
         // check each shape by serializing the rows and then borrows of the same rows
         assert_eq!(
             rkyv::to_bytes::<Error>(&strings).unwrap().as_slice(),
-            rkyv::to_bytes::<Error>(&borrow(&strings)).unwrap().as_slice(),
+            rkyv::to_bytes::<Error>(&borrow(&strings))
+                .unwrap()
+                .as_slice(),
             "a row of out of line fields archived differently when it was borrowed"
         );
         assert_eq!(
@@ -317,7 +324,9 @@ mod tests {
         );
         assert_eq!(
             rkyv::to_bytes::<Error>(&scalars).unwrap().as_slice(),
-            rkyv::to_bytes::<Error>(&borrow(&scalars)).unwrap().as_slice(),
+            rkyv::to_bytes::<Error>(&borrow(&scalars))
+                .unwrap()
+                .as_slice(),
             "a row rkyv can memcpy archived differently when it was borrowed"
         );
     }
@@ -353,12 +362,10 @@ mod tests {
     /// reachable through `Archived<T>` rather than through some `ArchivedRowRef`, which is what
     /// lets `FromShoal::retrieve` keep its return type across this change.
     fn a_borrowed_row_reads_back_as_the_row_itself() {
-        let rows = vec![
-            Strings {
-                title: "Solaris".to_owned(),
-                overview: "A station above an ocean".to_owned(),
-            },
-        ];
+        let rows = vec![Strings {
+            title: "Solaris".to_owned(),
+            overview: "A station above an ocean".to_owned(),
+        }];
         // serialize the borrows, and read them back as though they had been owned all along
         let bytes = rkyv::to_bytes::<Error>(&borrow(&rows)).unwrap();
         let archived = rkyv::access::<rkyv::vec::ArchivedVec<ArchivedStrings>, Error>(&bytes)

@@ -177,7 +177,13 @@ impl Frame {
 /// * `flag` - The kind's flag byte
 /// * `group` - The group
 /// * `log_id` - The log id the header carries, or the default for a frame that carries none
-fn put_header(out: &mut Vec<u8>, kind: FrameKind, flag: u8, group: GroupId, log_id: Option<&WalLogId>) {
+fn put_header(
+    out: &mut Vec<u8>,
+    kind: FrameKind,
+    flag: u8,
+    group: GroupId,
+    log_id: Option<&WalLogId>,
+) {
     out.push(kind as u8);
     out.push(FRAME_VERSION);
     out.push(flag);
@@ -221,17 +227,31 @@ fn seal(hashed: Vec<u8>) -> io::Result<Vec<u8>> {
 pub fn encode_entry(group: GroupId, entry: &Entry) -> io::Result<Vec<u8>> {
     let mut hashed = Vec::with_capacity(FRAME_HEADER + 64);
     match &entry.payload {
-        EntryPayload::Blank => put_header(&mut hashed, FrameKind::Blank, 0, group, Some(&entry.log_id)),
+        EntryPayload::Blank => {
+            put_header(&mut hashed, FrameKind::Blank, 0, group, Some(&entry.log_id))
+        }
         EntryPayload::Normal(command) => {
-            put_header(&mut hashed, FrameKind::Normal, 0, group, Some(&entry.log_id));
+            put_header(
+                &mut hashed,
+                FrameKind::Normal,
+                0,
+                group,
+                Some(&entry.log_id),
+            );
             hashed.extend_from_slice(&command.encode());
         }
         EntryPayload::Membership(membership) => {
-            put_header(&mut hashed, FrameKind::Membership, 0, group, Some(&entry.log_id));
-            hashed.extend_from_slice(
-                &postcard::to_allocvec(membership)
-                    .map_err(|error| io::Error::other(format!("encoding a membership: {error}")))?,
+            put_header(
+                &mut hashed,
+                FrameKind::Membership,
+                0,
+                group,
+                Some(&entry.log_id),
             );
+            hashed
+                .extend_from_slice(&postcard::to_allocvec(membership).map_err(|error| {
+                    io::Error::other(format!("encoding a membership: {error}"))
+                })?);
         }
     }
     seal(hashed)
@@ -247,7 +267,13 @@ pub fn encode_vote(group: GroupId, vote: &Vote) -> io::Result<Vec<u8>> {
     let mut hashed = Vec::with_capacity(FRAME_HEADER);
     // the vote's term and leader ride in the log id fields, at index zero
     let log_id = LogId::new(vote.leader_id().clone(), 0);
-    put_header(&mut hashed, FrameKind::Vote, u8::from(vote.is_committed()), group, Some(&log_id));
+    put_header(
+        &mut hashed,
+        FrameKind::Vote,
+        u8::from(vote.is_committed()),
+        group,
+        Some(&log_id),
+    );
     seal(hashed)
 }
 
@@ -258,7 +284,11 @@ pub fn encode_vote(group: GroupId, vote: &Vote) -> io::Result<Vec<u8>> {
 /// * `kind` - Which of the three
 /// * `group` - The group
 /// * `log_id` - The log id, or none
-pub fn encode_marker(kind: FrameKind, group: GroupId, log_id: Option<&WalLogId>) -> io::Result<Vec<u8>> {
+pub fn encode_marker(
+    kind: FrameKind,
+    group: GroupId,
+    log_id: Option<&WalLogId>,
+) -> io::Result<Vec<u8>> {
     let mut hashed = Vec::with_capacity(FRAME_HEADER);
     put_header(&mut hashed, kind, u8::from(log_id.is_some()), group, log_id);
     seal(hashed)
@@ -396,10 +426,11 @@ pub fn command_of(bytes: &[u8]) -> Option<Command> {
     match decode_at(bytes, 0)? {
         (
             Frame::Entry {
-                entry: Entry {
-                    payload: EntryPayload::Normal(command),
-                    ..
-                },
+                entry:
+                    Entry {
+                        payload: EntryPayload::Normal(command),
+                        ..
+                    },
                 ..
             },
             _,
@@ -501,7 +532,9 @@ mod tests {
         assert_eq!(whole, bytes.len() as u64);
         assert_eq!(decoded.len(), frames.len());
         let mut at = 0u64;
-        for ((offset, len, frame), (expected, expected_len)) in decoded.iter().zip(frames.iter().zip(&lens)) {
+        for ((offset, len, frame), (expected, expected_len)) in
+            decoded.iter().zip(frames.iter().zip(&lens))
+        {
             assert_eq!(*offset, at);
             assert_eq!(*len as usize, *expected_len);
             assert_eq!(frame, expected);

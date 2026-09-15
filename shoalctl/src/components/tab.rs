@@ -12,8 +12,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
-use shoal::{client::Shoal, traits::QuerySupport};
 use shoal::shared::queries::parser;
+use shoal::{client::Shoal, traits::QuerySupport};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use unicode_width::UnicodeWidthStr;
@@ -358,7 +358,9 @@ where
     {
         let mut tab = Tab::new("Cluster");
         tab.kind = TabKind::Cluster;
-        tab.cluster.alive.store(true, std::sync::atomic::Ordering::SeqCst);
+        tab.cluster
+            .alive
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         tab.content = "polling the cluster...".to_string();
         let alive = tab.cluster.alive.clone();
         let shoal = shoal.clone();
@@ -367,7 +369,11 @@ where
         tokio::task::spawn(async move {
             while alive.load(std::sync::atomic::Ordering::SeqCst) {
                 let model = poll_cluster::<S>(&shoal).await;
-                if app_tx.send(AppEvent::ClusterFrame { tab_id: id, model }).await.is_err() {
+                if app_tx
+                    .send(AppEvent::ClusterFrame { tab_id: id, model })
+                    .await
+                    .is_err()
+                {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -457,7 +463,13 @@ where
                 Ok(_) if follow != Follow::None && !is_status => Some((op, follow)),
                 _ => None,
             };
-            let _ = app_tx.send(AppEvent::AdminOutcome { tab_id: id, outcome, follow: follow_up }).await;
+            let _ = app_tx
+                .send(AppEvent::AdminOutcome {
+                    tab_id: id,
+                    outcome,
+                    follow: follow_up,
+                })
+                .await;
         });
     }
 }
@@ -474,7 +486,14 @@ where
     use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest};
     // one read per frame, each answered as the json the node built for it
     let mut frames = Vec::with_capacity(6);
-    for kind in [AdminKind::Members, AdminKind::Readiness, AdminKind::Replication, AdminKind::Plans, AdminKind::Backups, AdminKind::Recoveries] {
+    for kind in [
+        AdminKind::Members,
+        AdminKind::Readiness,
+        AdminKind::Replication,
+        AdminKind::Plans,
+        AdminKind::Backups,
+        AdminKind::Recoveries,
+    ] {
         let name = kind.name();
         let response = shoal
             .admin(&AdminRequest {
@@ -490,7 +509,9 @@ where
             Err(error) => return Err(format!("{name}: {} ({:?})", error.msg, error.code())),
         }
     }
-    Ok(ClusterModel::from_frames(&frames[0], &frames[1], &frames[2], &frames[3], &frames[4], &frames[5]))
+    Ok(ClusterModel::from_frames(
+        &frames[0], &frames[1], &frames[2], &frames[3], &frames[4], &frames[5],
+    ))
 }
 
 /// Send an operation and read its record once, or read a record
@@ -554,8 +575,12 @@ where
         .await
         .map_err(|error| format!("{error:?}"))?;
     match response.outcome {
-        Ok(AdminOutcome::Applied { version }) => Ok(vec![format!("{op} applied at version {version}")]),
-        Ok(AdminOutcome::Repeated { version }) => Ok(vec![format!("{op} was applied before, at version {version}")]),
+        Ok(AdminOutcome::Applied { version }) => {
+            Ok(vec![format!("{op} applied at version {version}")])
+        }
+        Ok(AdminOutcome::Repeated { version }) => Ok(vec![format!(
+            "{op} was applied before, at version {version}"
+        )]),
         Ok(AdminOutcome::Read(value)) => {
             let _ = follow;
             Ok(vec![format!("{op}: {value}")])
@@ -571,7 +596,11 @@ where
 /// * `shoal` - The client to read through
 /// * `op` - The operation
 /// * `follow` - How its record is read
-pub async fn follow_once<S>(shoal: &Arc<Shoal<S>>, op: Uuid, follow: Follow) -> Result<(Vec<String>, bool), String>
+pub async fn follow_once<S>(
+    shoal: &Arc<Shoal<S>>,
+    op: Uuid,
+    follow: Follow,
+) -> Result<(Vec<String>, bool), String>
 where
     S: QuerySupport + Send + Sync + 'static,
 {
@@ -854,7 +883,9 @@ where
     pub fn close_active_tab(&mut self) -> bool {
         // a cluster tab's poller stops with it
         if let Some(tab) = self.tabs.get(self.active) {
-            tab.cluster.alive.store(false, std::sync::atomic::Ordering::SeqCst);
+            tab.cluster
+                .alive
+                .store(false, std::sync::atomic::Ordering::SeqCst);
         }
         // remove our current tab
         self.tabs.remove(self.active);

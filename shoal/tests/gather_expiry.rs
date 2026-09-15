@@ -49,8 +49,11 @@ pub struct ExpiryDb {
 async fn a_standalone_gather_expires_at_the_query_deadline() -> Result<(), TestError> {
     let temp_dir = utils::test_dir();
     // two shards, and a second's budget for a bundle
-    let conf = utils::build_config(&temp_dir)
-        .networking(Networking::default().port(0).query_deadline(Duration::from_secs(1)));
+    let conf = utils::build_config(&temp_dir).networking(
+        Networking::default()
+            .port(0)
+            .query_deadline(Duration::from_secs(1)),
+    );
     let (client, pool) = utils::start_with_conf::<ExpiryDb>(conf).await?;
     // rows on enough keys that a get over all of them is split across both shards
     let keys: Vec<u64> = (1..=32).collect();
@@ -65,18 +68,34 @@ async fn a_standalone_gather_expires_at_the_query_deadline() -> Result<(), TestE
     // a get over every key comes back whole while nothing is held
     let whole = client.send_one(ItemGet::new(keys.clone())).await?;
     let rows = whole.access::<Item>()?.map(|rows| rows.len()).unwrap_or(0);
-    assert_eq!(rows, keys.len(), "the get over every key did not find every row");
+    assert_eq!(
+        rows,
+        keys.len(),
+        "the get over every key did not find every row"
+    );
     // hold every share on every shard for longer than the deadline, and longer than this
     // test is willing to wait for the get: an unexpired gather is a get that never returns
-    for answer in pool.read_verb(None, ReadVerb::HoldShares { ms: 6000, dup: false })? {
+    for answer in pool.read_verb(
+        None,
+        ReadVerb::HoldShares {
+            ms: 6000,
+            dup: false,
+        },
+    )? {
         answer.map_err(|error| TestError::Io(std::io::Error::other(error)))?;
     }
     // the same get is now answered with a timeout, once, within its budget
     let started = std::time::Instant::now();
-    let held = tokio::time::timeout(Duration::from_secs(4), client.send_one(ItemGet::new(keys.clone()))).await;
+    let held = tokio::time::timeout(
+        Duration::from_secs(4),
+        client.send_one(ItemGet::new(keys.clone())),
+    )
+    .await;
     let elapsed = started.elapsed();
     let held = held.map_err(|_| {
-        TestError::Io(std::io::Error::other("the split get never returned: the gather did not expire"))
+        TestError::Io(std::io::Error::other(
+            "the split get never returned: the gather did not expire",
+        ))
     })?;
     match held {
         Err(Errors::Server { code, msg, .. }) => {
@@ -85,8 +104,14 @@ async fn a_standalone_gather_expires_at_the_query_deadline() -> Result<(), TestE
         }
         other => panic!("a held get was not answered Timeout: {other:?}"),
     }
-    assert!(elapsed >= Duration::from_millis(900), "the timeout came before the deadline: {elapsed:?}");
-    assert!(elapsed < Duration::from_secs(3), "the timeout waited for the hold rather than the deadline: {elapsed:?}");
+    assert!(
+        elapsed >= Duration::from_millis(900),
+        "the timeout came before the deadline: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "the timeout waited for the hold rather than the deadline: {elapsed:?}"
+    );
     // the gather is gone and counted, on whichever shard coordinated the bundle
     let mut resident = 0u64;
     let mut timeouts = 0u64;
@@ -101,7 +126,11 @@ async fn a_standalone_gather_expires_at_the_query_deadline() -> Result<(), TestE
     tokio::time::sleep(Duration::from_secs(6)).await;
     let again = client.send_one(ItemGet::new(keys.clone())).await?;
     let rows = again.access::<Item>()?.map(|rows| rows.len()).unwrap_or(0);
-    assert_eq!(rows, keys.len(), "the get after the release did not find every row");
+    assert_eq!(
+        rows,
+        keys.len(),
+        "the get after the release did not find every row"
+    );
     let mut late = 0u64;
     for answer in pool.read_verb(None, ReadVerb::Gathers)? {
         let view = answer.map_err(|error| TestError::Io(std::io::Error::other(error)))?;

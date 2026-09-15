@@ -24,7 +24,6 @@ use glommio::{
 use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
 use lru::LruCache;
-use rustls::ServerConfig;
 use rkyv::{
     bytecheck::CheckBytes,
     rancor::Strategy,
@@ -32,12 +31,13 @@ use rkyv::{
     validation::{archive::ArchiveValidator, shared::SharedValidator, Validator},
     Archive, DeserializeUnsized,
 };
+use rustls::ServerConfig;
+use std::net::SocketAddr;
+use std::rc::Rc;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
-use std::net::SocketAddr;
-use std::rc::Rc;
 use std::time::Duration;
 use std::{cell::Cell, cell::RefCell, hash::BuildHasherDefault};
 use std::{collections::HashMap, collections::HashSet, io::IoSlice};
@@ -45,16 +45,16 @@ use tracing::{event, info_span, instrument, Instrument, Level, Span};
 use uuid::Uuid;
 
 use super::control::{AdminCall, ControlRequest};
+use super::database::ShoalDatabase;
+use super::hosting::Hosting;
+use super::map::{MapCell, TabletMap};
 use super::messages::{Answer, PeerEvent, QueryMetadata, ReadPlan, Reply, ReplyKind, ServerMsg};
-use super::replication::ShardNetwork;
 use super::peer::{
     self, Frame, FrameKey, Lane, LinkEvent, ListenerContext, Local, PeerSetup, Peers, Pending,
     ShardTransportView,
 };
+use super::replication::ShardNetwork;
 use super::request_body::RequestBody;
-use super::database::ShoalDatabase;
-use super::hosting::Hosting;
-use super::map::{MapCell, TabletMap};
 use super::ring::Ring;
 use super::routing::ArchivedShardRouting;
 use super::stage_profile::{self, StageStamps, Stamp};
@@ -208,13 +208,14 @@ async fn client_rx_relay<S: ShoalDatabase>(
         // the accepting shard rather than routed anywhere
         // ([F39](../../../docs/src/features/membership.md))
         if header.kind != MessageType::Queries {
-            let msg = match read_control_frame(&mut tcp_rx, &header, peer, principal.as_deref()).await {
-                Ok(msg) => msg,
-                Err(error) => {
-                    event!(Level::ERROR, msg = "refused a control frame", %peer, %error);
-                    break;
-                }
-            };
+            let msg =
+                match read_control_frame(&mut tcp_rx, &header, peer, principal.as_deref()).await {
+                    Ok(msg) => msg,
+                    Err(error) => {
+                        event!(Level::ERROR, msg = "refused a control frame", %peer, %error);
+                        break;
+                    }
+                };
             if let Err(error) = kanal_tx.send(msg).await {
                 event!(Level::ERROR, msg = "failed to forward a control frame", %peer, ?error);
                 break;
@@ -365,7 +366,9 @@ async fn read_control_frame<S: ShoalDatabase>(
         // an admin request is judged by the shard, so its json is decoded here
         MessageType::Admin => {
             let request: AdminRequest = proto_admin::decode_rest(&body[protocol::QUERY_ID_LEN..])
-                .map_err(|error| ServerError::GlommioGeneric(format!("decoding an admin request: {error}")))?;
+                .map_err(|error| {
+                ServerError::GlommioGeneric(format!("decoding an admin request: {error}"))
+            })?;
             Ok(ServerMsg::Admin {
                 client: peer,
                 id,
@@ -460,20 +463,16 @@ async fn write_error_frame(
     // cut this message down to what a frame will carry
     let msg = proto_error::truncate_msg(msg);
     // build the header and the fixed fields that go ahead of it
-    let preamble = match proto_error::error_preamble(
-        query_id,
-        code,
-        msg.len(),
-        peer_max_frame_bytes,
-    ) {
-        Ok(preamble) => preamble,
-        // a client whose frame bound cannot hold even an empty error frame cannot be told
-        // anything, so there is nothing left to do for it
-        Err(error) => {
-            event!(Level::ERROR, msg = "could not frame an error", %query_id, %error);
-            return false;
-        }
-    };
+    let preamble =
+        match proto_error::error_preamble(query_id, code, msg.len(), peer_max_frame_bytes) {
+            Ok(preamble) => preamble,
+            // a client whose frame bound cannot hold even an empty error frame cannot be told
+            // anything, so there is nothing left to do for it
+            Err(error) => {
+                event!(Level::ERROR, msg = "could not frame an error", %query_id, %error);
+                return false;
+            }
+        };
     // build our vectored byte slices to send
     let mut bufs = &mut [IoSlice::new(&preamble), IoSlice::new(msg.as_bytes())][..];
     // keep sending until all of this failure has been sent
@@ -905,15 +904,21 @@ async fn server_auth(
         match scram.step(&payload) {
             // another round, so answer with the challenge and wait for the next proof
             Ok(ServerStep::Challenge(challenge)) => {
-                let frame =
-                    proto_auth::encode_auth_response(AuthStatus::Challenge, &challenge, max_frame_bytes)?;
+                let frame = proto_auth::encode_auth_response(
+                    AuthStatus::Challenge,
+                    &challenge,
+                    max_frame_bytes,
+                )?;
                 stream.write_all(&frame).await?;
                 stream.flush().await?;
             }
             // this client is who it says it is, and the payload proves this server is too
             Ok(ServerStep::Success { payload, principal }) => {
-                let frame =
-                    proto_auth::encode_auth_response(AuthStatus::Success, &payload, max_frame_bytes)?;
+                let frame = proto_auth::encode_auth_response(
+                    AuthStatus::Success,
+                    &payload,
+                    max_frame_bytes,
+                )?;
                 stream.write_all(&frame).await?;
                 stream.flush().await?;
                 return Ok(principal);
@@ -1440,11 +1445,23 @@ where
                             .initial_map
                             .read_ring_for(setup.local.node, &hosting)?
                             .unwrap_or_else(|| ring.clone());
-                        (ring, replica_ring, true, map, Some(Rc::new(RefCell::new(local))))
+                        (
+                            ring,
+                            replica_ring,
+                            true,
+                            map,
+                            Some(Rc::new(RefCell::new(local))),
+                        )
                     }
                     None => {
                         let ring = Ring::new(shard_count)?;
-                        (ring.clone(), ring, false, map, Some(Rc::new(RefCell::new(local))))
+                        (
+                            ring.clone(),
+                            ring,
+                            false,
+                            map,
+                            Some(Rc::new(RefCell::new(local))),
+                        )
                     }
                 }
             }
@@ -1564,16 +1581,23 @@ where
         let json = match serde_json::to_vec(&map.frame()) {
             Ok(json) => json,
             Err(error) => {
-                event!(Level::ERROR, msg = "a topology frame did not encode", ?error);
+                event!(
+                    Level::ERROR,
+                    msg = "a topology frame did not encode",
+                    ?error
+                );
                 return;
             }
         };
-        let kind = ReplyKind::Topology { version: map.version };
+        let kind = ReplyKind::Topology {
+            version: map.version,
+        };
         // a client whose channel is gone is one the acceptor is about to report gone
-        self.subscribed.retain(|client| match self.client_map.get(client) {
-            Some(tx) => tx.try_send(control_reply(Uuid::nil(), kind, &json)).is_ok(),
-            None => false,
-        });
+        self.subscribed
+            .retain(|client| match self.client_map.get(client) {
+                Some(tx) => tx.try_send(control_reply(Uuid::nil(), kind, &json)).is_ok(),
+                None => false,
+            });
     }
 
     /// Subscribe a client to the topology, answering with the current map at once
@@ -1587,14 +1611,20 @@ where
         let json = match serde_json::to_vec(&map.frame()) {
             Ok(json) => json,
             Err(error) => {
-                event!(Level::ERROR, msg = "a topology frame did not encode", ?error);
+                event!(
+                    Level::ERROR,
+                    msg = "a topology frame did not encode",
+                    ?error
+                );
                 return;
             }
         };
         if let Some(tx) = self.client_map.get(&client) {
             let _ = tx.try_send(control_reply(
                 Uuid::nil(),
-                ReplyKind::Topology { version: map.version },
+                ReplyKind::Topology {
+                    version: map.version,
+                },
                 &json,
             ));
         }
@@ -1651,7 +1681,9 @@ where
                     ErrorCode::Unauthorized,
                     format!(
                         "{} may not change the cluster; cluster.admins names {:?}",
-                        principal.as_deref().unwrap_or("an unauthenticated connection"),
+                        principal
+                            .as_deref()
+                            .unwrap_or("an unauthenticated connection"),
                         map.admins
                     ),
                 ));
@@ -1677,10 +1709,9 @@ where
             return;
         }
         glommio::spawn_local(async move {
-            let answered = glommio::timer::timeout(ADMIN_TIMEOUT, async {
-                Ok(rx.as_async().recv().await)
-            })
-            .await;
+            let answered =
+                glommio::timer::timeout(ADMIN_TIMEOUT, async { Ok(rx.as_async().recv().await) })
+                    .await;
             let answer = match answered {
                 Ok(Ok(answer)) => answer,
                 _ => AdminResponse {
@@ -1732,25 +1763,22 @@ where
                 // a server that asked for encryption and silently served in clear is the failure
                 // this whole feature exists to prevent, so it is checked before anything binds
                 if !crate::shared::tls::ktls::is_available() {
-                    return Err(crate::shared::tls::TlsError::UlpUnavailable(
-                        std::io::Error::new(
+                    return Err(
+                        crate::shared::tls::TlsError::UlpUnavailable(std::io::Error::new(
                             std::io::ErrorKind::Unsupported,
                             "the 'tls' kernel module is not loaded",
-                        ),
-                    )
-                    .into());
+                        ))
+                        .into(),
+                    );
                 }
                 Some(crate::shared::tls::server_config(options)?)
             }
             None => None,
         };
         // bind our tcp socket, reusably, so a restart on the same port binds at once
-        let addr: SocketAddr = self
-            .conf
-            .networking
-            .to_addr()
-            .parse()
-            .map_err(|error| ServerError::GlommioGeneric(format!("the client address does not parse: {error}")))?;
+        let addr: SocketAddr = self.conf.networking.to_addr().parse().map_err(|error| {
+            ServerError::GlommioGeneric(format!("the client address does not parse: {error}"))
+        })?;
         let tcp_sock = peer::bind_reusable(addr)?;
         // remember what the kernel actually gave us, which is the only answer when the config
         // asked for port zero
@@ -1928,8 +1956,10 @@ where
                     index == end_index,
                     error,
                 );
-                let span = info_span!(parent: request, "Coordinator::route", id = %bundle_id, index);
-                self.reply(client, bundle_id, span, stamps, response).await?;
+                let span =
+                    info_span!(parent: request, "Coordinator::route", id = %bundle_id, index);
+                self.reply(client, bundle_id, span, stamps, response)
+                    .await?;
             }
             return Ok(());
         }
@@ -1970,8 +2000,10 @@ where
                     index == end_index,
                     error,
                 );
-                let span = info_span!(parent: request, "Coordinator::route", id = %bundle_id, index);
-                self.reply(client, bundle_id, span, stamps, response).await?;
+                let span =
+                    info_span!(parent: request, "Coordinator::route", id = %bundle_id, index);
+                self.reply(client, bundle_id, span, stamps, response)
+                    .await?;
             }
         }
         // initialize a vec to store the per shard shares we find
@@ -1979,8 +2011,10 @@ where
         // the reads refused by name while routing, answered once the ring borrow is over
         let mut refused_reads = Vec::new();
         // the remote shares of this bundle, gathered per node into one forward each
-        let mut remote: HashMap<NodeId, Vec<(crate::shared::protocol::peer::ForwardEntry, Pending<D>)>> =
-            HashMap::new();
+        let mut remote: HashMap<
+            NodeId,
+            Vec<(crate::shared::protocol::peer::ForwardEntry, Pending<D>)>,
+        > = HashMap::new();
         // crawl over our queries
         for (offset, kind) in queries.queries.iter().enumerate() {
             // get this queries absolute index in its stream
@@ -2178,11 +2212,14 @@ where
         }
         // answer every read refused while routing, in its own table variant
         for (table, index, end, query_span, stamps, error) in refused_reads {
-            let response = <D::ClientType as QuerySupport>::failed(table, bundle_id, index, end, error);
-            self.reply(client, bundle_id, query_span, stamps, response).await?;
+            let response =
+                <D::ClientType as QuerySupport>::failed(table, bundle_id, index, end, error);
+            self.reply(client, bundle_id, query_span, stamps, response)
+                .await?;
         }
         // flush one forward per node, and answer at once anything the queue could not take
-        self.flush_forwards(body, bundle_id, base_index, attempt, deadline, remote).await?;
+        self.flush_forwards(body, bundle_id, base_index, attempt, deadline, remote)
+            .await?;
         Ok(())
     }
 
@@ -2217,8 +2254,15 @@ where
                 // a node routed to a remote contact without peers is a bug in setup, not a
                 // query; answer every share so no client waits forever
                 for (entry, pending) in shares {
-                    self.fail_forward(node, bundle_id, entry.index, pending, ErrorCode::Internal, "this node has no peers")
-                        .await?;
+                    self.fail_forward(
+                        node,
+                        bundle_id,
+                        entry.index,
+                        pending,
+                        ErrorCode::Internal,
+                        "this node has no peers",
+                    )
+                    .await?;
                 }
                 continue;
             };
@@ -2229,8 +2273,13 @@ where
             // and what this shard waits for the peer: the forward timeout from now, or the
             // bundle's deadline if that comes first
             let forward_timeout = peers.transport().forward_timeout.duration();
-            let forward_deadline = now.plus_nanos(forward_timeout.as_nanos().min(u128::from(u64::MAX)) as u64);
-            let pending_deadline = if deadline.since(forward_deadline) > 0 { forward_deadline } else { deadline };
+            let forward_deadline =
+                now.plus_nanos(forward_timeout.as_nanos().min(u128::from(u64::MAX)) as u64);
+            let pending_deadline = if deadline.since(forward_deadline) > 0 {
+                forward_deadline
+            } else {
+                deadline
+            };
             // split the shares into the entries the frame carries and the pendings we record
             let mut entries = Vec::with_capacity(shares.len());
             let mut pendings = Vec::with_capacity(shares.len());
@@ -2255,7 +2304,10 @@ where
                 entries_len: entry_bytes.len() as u32,
             }
             .encode();
-            let max = self.peer_setup.as_ref().map_or(u32::MAX, |setup| setup.local.max_frame_bytes);
+            let max = self
+                .peer_setup
+                .as_ref()
+                .map_or(u32::MAX, |setup| setup.local.max_frame_bytes);
             let frame = Frame::new(
                 MessageType::Forward,
                 vec![
@@ -2267,14 +2319,21 @@ where
                 max,
             )?;
             // try to queue it, answering every entry with a definite refusal if the queue is full
-            match self.peers.as_mut().expect("peers exist here").enqueue(node, Lane::Data, frame) {
+            match self
+                .peers
+                .as_mut()
+                .expect("peers exist here")
+                .enqueue(node, Lane::Data, frame)
+            {
                 Ok(()) => {
                     // recorded as pending, one entry at a time
                     for (entry, pending) in entries.into_iter().zip(pendings) {
-                        self.peers
-                            .as_mut()
-                            .expect("peers exist here")
-                            .expect(bundle_id, entry.index, node, pending);
+                        self.peers.as_mut().expect("peers exist here").expect(
+                            bundle_id,
+                            entry.index,
+                            node,
+                            pending,
+                        );
                     }
                 }
                 Err(_) => {
@@ -2340,8 +2399,14 @@ where
             meta.read.slot = pending.slot;
             self.handle_gathered(meta, response, true).await
         } else {
-            self.reply(pending.client, bundle_id, pending.span, pending.stamps, response)
-                .await
+            self.reply(
+                pending.client,
+                bundle_id,
+                pending.span,
+                pending.stamps,
+                response,
+            )
+            .await
         }
     }
 
@@ -2427,7 +2492,8 @@ where
         stamps: StageStamps,
         response: <D::ClientType as QuerySupport>::ResponseKinds,
     ) -> Result<(), ServerError> {
-        self.reply_with_token(client, query_id, span, stamps, response, None).await
+        self.reply_with_token(client, query_id, span, stamps, response, None)
+            .await
     }
 
     /// Send a response back to the client, with the session token a write minted
@@ -2459,8 +2525,12 @@ where
         // a client relay never uses them, but a peer relay frames an answer by bundle and index,
         // and reading the index back out of the archive it just sealed would mean validating
         // what it wrote ([F38](../../../docs/src/features/inter-node-transport.md))
-        let index = <<D::ClientType as QuerySupport>::ResponseKinds as ShoalResponseSupport>::index(&response);
-        let end = <<D::ClientType as QuerySupport>::ResponseKinds as ShoalResponseSupport>::end(&response);
+        let index = <<D::ClientType as QuerySupport>::ResponseKinds as ShoalResponseSupport>::index(
+            &response,
+        );
+        let end = <<D::ClientType as QuerySupport>::ResponseKinds as ShoalResponseSupport>::end(
+            &response,
+        );
         // archive our response
         let archived = rkyv::to_bytes::<_>(&response)?;
         // record what serializing this response cost
@@ -2469,8 +2539,19 @@ where
         // stages on the get path large enough to be worth measuring on its own
         stamps.mark_replied();
         // and hand the bytes on the same way an answer serialized in the table is
-        self.reply_sealed(client, query_id, index, end, ReplyKind::Whole, span, stamps, archived, token, (0, 0))
-            .await
+        self.reply_sealed(
+            client,
+            query_id,
+            index,
+            end,
+            ReplyKind::Whole,
+            span,
+            stamps,
+            archived,
+            token,
+            (0, 0),
+        )
+        .await
     }
 
     /// Send a reply that has already been serialized back to the client
@@ -2702,12 +2783,16 @@ where
                 #[allow(clippy::cast_possible_truncation)]
                 let tablet = Ring::tablet_of(key) as u16;
                 if !self.serves_tablet(table, tablet) {
-                    return self.answer_stale(meta, query, span, gathered_meta, tablet).await;
+                    return self
+                        .answer_stale(meta, query, span, gathered_meta, tablet)
+                        .await;
                 }
                 return self.propose_write(meta, table, key, payload).await;
             }
             if let Some(tablet) = self.stale_tablet(&query) {
-                return self.answer_stale(meta, query, span, gathered_meta, tablet).await;
+                return self
+                    .answer_stale(meta, query, span, gathered_meta, tablet)
+                    .await;
             }
             // a strong or session read waits for its barrier and its lower bounds first, on a
             // task of its own; it comes back here as `ReadReady` with its plan marked ready
@@ -2723,7 +2808,9 @@ where
                     ErrorCode::Unavailable,
                     format!("group {group} is installing a snapshot; its tablets are not readable until it is installed"),
                 );
-                return self.answer_read_failure(meta, query, span, gathered_meta, error).await;
+                return self
+                    .answer_read_failure(meta, query, span, gathered_meta, error)
+                    .await;
             }
             // a tablet whose copy is quarantined serves no read either: the copy is not to be
             // trusted until a verified repair or an operator lifts it
@@ -2733,7 +2820,9 @@ where
                     ErrorCode::Quarantined,
                     format!("this node's copy of group {group} is quarantined ({}); read it through another replica", reason.as_str()),
                 );
-                return self.answer_read_failure(meta, query, span, gathered_meta, error).await;
+                return self
+                    .answer_read_failure(meta, query, span, gathered_meta, error)
+                    .await;
             }
         }
         // try to handle this query
@@ -2751,7 +2840,18 @@ where
                     unreachable!("an answer is either open or sealed")
                 };
                 return self
-                    .reply_sealed(addr, query_id, m_index, m_end, ReplyKind::Whole, span, stamps, archived, None, (m_attempt, 0))
+                    .reply_sealed(
+                        addr,
+                        query_id,
+                        m_index,
+                        m_end,
+                        ReplyKind::Whole,
+                        span,
+                        stamps,
+                        archived,
+                        None,
+                        (m_attempt, 0),
+                    )
                     .await;
             };
             // record that this queries synchronous work is finished
@@ -2834,37 +2934,41 @@ where
     ) -> Result<(), ServerError> {
         // take this share into the gather it names, if it names one we are still waiting on
         let key = (meta.id, meta.index);
-        let gather = match self.gathering.arrive(key, meta.read.attempt, meta.read.slot, response, failed) {
-            // more shares are still owed
-            gather::Arrival::Merged => return Ok(()),
-            // every slot has reported, so this query is ours to answer now
-            gather::Arrival::Complete(gather) => gather,
-            // we already answered this query, or it expired, or this is an older attempt at
-            // it: there is nothing left to merge it into
-            gather::Arrival::Late => {
-                self.read_stats.late_shares += 1;
-                event!(
-                    Level::DEBUG,
-                    msg = "a share arrived for a query we already answered",
-                    id = meta.id.to_string(),
-                    index = meta.index,
-                    attempt = meta.read.attempt,
-                );
-                return Ok(());
-            }
-            // this slot was already filled, so the share is a repeat
-            gather::Arrival::Duplicate => {
-                self.read_stats.duplicate_shares += 1;
-                event!(
-                    Level::DEBUG,
-                    msg = "a share arrived for a slot already covered",
-                    id = meta.id.to_string(),
-                    index = meta.index,
-                    slot = meta.read.slot,
-                );
-                return Ok(());
-            }
-        };
+        let gather =
+            match self
+                .gathering
+                .arrive(key, meta.read.attempt, meta.read.slot, response, failed)
+            {
+                // more shares are still owed
+                gather::Arrival::Merged => return Ok(()),
+                // every slot has reported, so this query is ours to answer now
+                gather::Arrival::Complete(gather) => gather,
+                // we already answered this query, or it expired, or this is an older attempt at
+                // it: there is nothing left to merge it into
+                gather::Arrival::Late => {
+                    self.read_stats.late_shares += 1;
+                    event!(
+                        Level::DEBUG,
+                        msg = "a share arrived for a query we already answered",
+                        id = meta.id.to_string(),
+                        index = meta.index,
+                        attempt = meta.read.attempt,
+                    );
+                    return Ok(());
+                }
+                // this slot was already filled, so the share is a repeat
+                gather::Arrival::Duplicate => {
+                    self.read_stats.duplicate_shares += 1;
+                    event!(
+                        Level::DEBUG,
+                        msg = "a share arrived for a slot already covered",
+                        id = meta.id.to_string(),
+                        index = meta.index,
+                        slot = meta.read.slot,
+                    );
+                    return Ok(());
+                }
+            };
         // a query with no shares at all has nothing to answer with
         let Some(mut merged) = gather.merged else {
             return Ok(());
@@ -2957,10 +3061,14 @@ where
         for entry in entries {
             // an offset past the bundle is a peer out of step with us, and ends this bundle
             if entry.offset as usize >= archived.queries.len() {
-                return Err(ProtocolError::MalformedForward("a forward names a query the bundle does not hold").into());
+                return Err(ProtocolError::MalformedForward(
+                    "a forward names a query the bundle does not hold",
+                )
+                .into());
             }
             // the span this entry's work hangs off, joined to the origin's trace if it sent one
-            let span = info_span!(parent: None, "Shoal::forwarded", id = %bundle, index = entry.index);
+            let span =
+                info_span!(parent: None, "Shoal::forwarded", id = %bundle, index = entry.index);
             if let Some(trace) = &entry.trace {
                 trace::adopt_remote_parent(&span, trace);
             }
@@ -3014,12 +3122,15 @@ where
             // hand it to the executor hosting the slot that owns its partitions, over the mesh
             // ([F47](../../../docs/src/features/local-rehome.md))
             self.comms
-                .send(&ShardContact::Local(self.hosting.host_of_slot(entry.shard)), ServerMsg::Query {
-                    meta,
-                    body: body.clone(),
-                    offset: entry.offset as usize,
-                    keys,
-                })
+                .send(
+                    &ShardContact::Local(self.hosting.host_of_slot(entry.shard)),
+                    ServerMsg::Query {
+                        meta,
+                        body: body.clone(),
+                        offset: entry.offset as usize,
+                        keys,
+                    },
+                )
                 .await?;
         }
         Ok(())
@@ -3034,27 +3145,58 @@ where
     async fn handle_peer_event(&mut self, event: PeerEvent) -> Result<(), ServerError> {
         match event {
             // the replication lane's events are the tablet groups'
-            PeerEvent::Link(event @ (LinkEvent::Frame { lane: Lane::Replication, .. }
-            | LinkEvent::Down { lane: Lane::Replication, .. })) => {
+            PeerEvent::Link(
+                event @ (LinkEvent::Frame {
+                    lane: Lane::Replication,
+                    ..
+                }
+                | LinkEvent::Down {
+                    lane: Lane::Replication,
+                    ..
+                }),
+            ) => {
                 if let LinkEvent::Down { node, reason, .. } = &event {
                     event!(Level::WARN, msg = "a replication link went down", %node, reason);
                 }
                 self.handle_replication_link(event);
             }
-            PeerEvent::Link(LinkEvent::Up { node, lane, incarnation, negotiated }) => {
+            PeerEvent::Link(LinkEvent::Up {
+                node,
+                lane,
+                incarnation,
+                negotiated,
+            }) => {
                 event!(Level::DEBUG, msg = "a peer link came up", %node, %lane, incarnation, wire = negotiated.version);
             }
             // the bulk lane carries snapshot streams and owes nothing to a client: a lost link
             // is dialled afresh by the next stream, and the receiver's resume offset recovers
             // what it lost ([F43](../../../docs/src/features/node-recovery.md))
-            PeerEvent::Link(LinkEvent::Down { node, lane: Lane::Bulk, reason, .. }) => {
+            PeerEvent::Link(LinkEvent::Down {
+                node,
+                lane: Lane::Bulk,
+                reason,
+                ..
+            }) => {
                 event!(Level::WARN, msg = "a bulk link went down", %node, reason);
             }
-            PeerEvent::Link(LinkEvent::Frame { lane: Lane::Bulk, .. }) => {}
-            PeerEvent::Link(LinkEvent::Frame { node, header, head, payload, .. }) => {
+            PeerEvent::Link(LinkEvent::Frame {
+                lane: Lane::Bulk, ..
+            }) => {}
+            PeerEvent::Link(LinkEvent::Frame {
+                node,
+                header,
+                head,
+                payload,
+                ..
+            }) => {
                 self.handle_forwarded(node, header, &head, payload).await?;
             }
-            PeerEvent::Link(LinkEvent::Down { node, unsent, reason, .. }) => {
+            PeerEvent::Link(LinkEvent::Down {
+                node,
+                unsent,
+                reason,
+                ..
+            }) => {
                 event!(Level::WARN, msg = "a peer link went down", %node, reason);
                 self.resolve_lost_link(node, &unsent).await?;
             }
@@ -3099,8 +3241,9 @@ where
         if header.kind != MessageType::Forwarded {
             return Ok(());
         }
-        let raw: [u8; crate::shared::protocol::peer::FORWARDED_PREAMBLE_LEN] =
-            head.try_into().map_err(|_| ProtocolError::MalformedForward("a forwarded head is the wrong size"))?;
+        let raw: [u8; crate::shared::protocol::peer::FORWARDED_PREAMBLE_LEN] = head
+            .try_into()
+            .map_err(|_| ProtocolError::MalformedForward("a forwarded head is the wrong size"))?;
         let preamble = crate::shared::protocol::peer::ForwardedPreamble::decode(&raw)?;
         let bundle = Uuid::from_bytes(preamble.bundle);
         use crate::shared::protocol::peer::ForwardedKind;
@@ -3179,14 +3322,18 @@ where
                 let code = ErrorCode::from_u16(code);
                 let pending = if code == ErrorCode::StaleTopology {
                     self.read_stats.stale_refusals += 1;
-                    match self.reroute_pending(node, bundle, preamble.index, pending).await? {
+                    match self
+                        .reroute_pending(node, bundle, preamble.index, pending)
+                        .await?
+                    {
                         Some(pending) => pending,
                         None => return Ok(()),
                     }
                 } else {
                     pending
                 };
-                self.fail_forward(node, bundle, preamble.index, pending, code, &msg).await
+                self.fail_forward(node, bundle, preamble.index, pending, code, &msg)
+                    .await
             }
         }
     }
@@ -3198,7 +3345,11 @@ where
     /// * `node` - The node whose link was lost
     /// * `unsent` - The keys of frames the link never wrote
     #[allow(clippy::future_not_send)]
-    async fn resolve_lost_link(&mut self, node: NodeId, unsent: &[FrameKey]) -> Result<(), ServerError> {
+    async fn resolve_lost_link(
+        &mut self,
+        node: NodeId,
+        unsent: &[FrameKey],
+    ) -> Result<(), ServerError> {
         let Some(peers) = self.peers.as_mut() else {
             return Ok(());
         };
@@ -3215,13 +3366,27 @@ where
             let Some(pending) = self.reroute_pending(node, bundle, index, pending).await? else {
                 continue;
             };
-            self.fail_forward(node, bundle, index, pending, ErrorCode::Unavailable, "the link to this node went down before the query was sent")
-                .await?;
+            self.fail_forward(
+                node,
+                bundle,
+                index,
+                pending,
+                ErrorCode::Unavailable,
+                "the link to this node went down before the query was sent",
+            )
+            .await?;
         }
         // a frame written but unanswered when the link dropped is an unknown outcome
         for ((bundle, index), pending) in unknown {
-            self.fail_forward(node, bundle, index, pending, ErrorCode::OutcomeUnknown, "the link to this node went down after the query was sent")
-                .await?;
+            self.fail_forward(
+                node,
+                bundle,
+                index,
+                pending,
+                ErrorCode::OutcomeUnknown,
+                "the link to this node went down after the query was sent",
+            )
+            .await?;
         }
         Ok(())
     }
@@ -3240,7 +3405,13 @@ where
     /// * `index` - The query's index in it
     /// * `pending` - What was owed, handed back if it was not sent
     #[allow(clippy::future_not_send)]
-    async fn reroute_pending(&mut self, node: NodeId, bundle: Uuid, index: u64, pending: Pending<D>) -> Result<Option<Pending<D>>, ServerError> {
+    async fn reroute_pending(
+        &mut self,
+        node: NodeId,
+        bundle: Uuid,
+        index: u64,
+        pending: Pending<D>,
+    ) -> Result<Option<Pending<D>>, ServerError> {
         if pending.rerouted || Stamp::now() >= pending.bundle_deadline {
             return Ok(Some(pending));
         }
@@ -3271,7 +3442,8 @@ where
         let body = again.body.clone();
         let mut remote = HashMap::new();
         remote.insert(holder.node, vec![(entry, again)]);
-        self.flush_forwards(&body, bundle, base_index, attempt, bundle_deadline, remote).await?;
+        self.flush_forwards(&body, bundle, base_index, attempt, bundle_deadline, remote)
+            .await?;
         Ok(None)
     }
 
@@ -3283,8 +3455,15 @@ where
         };
         let expired = peers.expired(Stamp::now());
         for ((bundle, index, node), pending) in expired {
-            self.fail_forward(node, bundle, index, pending, ErrorCode::OutcomeUnknown, "the peer did not answer within the deadline")
-                .await?;
+            self.fail_forward(
+                node,
+                bundle,
+                index,
+                pending,
+                ErrorCode::OutcomeUnknown,
+                "the peer did not answer within the deadline",
+            )
+            .await?;
         }
         Ok(())
     }
@@ -3304,7 +3483,10 @@ where
         let Some(peers) = self.peers.as_mut() else {
             return;
         };
-        let max = self.peer_setup.as_ref().map_or(u32::MAX, |setup| setup.local.max_frame_bytes);
+        let max = self
+            .peer_setup
+            .as_ref()
+            .map_or(u32::MAX, |setup| setup.local.max_frame_bytes);
         let stream = *Uuid::new_v4().as_bytes();
         // one begin, with an empty manifest
         let begin = crate::shared::protocol::peer::SnapshotBegin {
@@ -3318,7 +3500,12 @@ where
         let _ = peers.enqueue(
             node,
             Lane::Bulk,
-            match Frame::new(MessageType::SnapshotBegin, vec![Bytes::copy_from_slice(&begin)], FrameKey::Bulk(0), max) {
+            match Frame::new(
+                MessageType::SnapshotBegin,
+                vec![Bytes::copy_from_slice(&begin)],
+                FrameKey::Bulk(0),
+                max,
+            ) {
                 Ok(frame) => frame,
                 Err(_) => return,
             },
@@ -3339,7 +3526,10 @@ where
             .encode();
             let frame = match Frame::new(
                 MessageType::SnapshotChunk,
-                vec![Bytes::copy_from_slice(&chunk), Bytes::copy_from_slice(&payload[..len])],
+                vec![
+                    Bytes::copy_from_slice(&chunk),
+                    Bytes::copy_from_slice(&payload[..len]),
+                ],
                 FrameKey::Bulk(len),
                 max,
             ) {
@@ -3366,7 +3556,12 @@ where
             resume_from: sent,
         }
         .encode();
-        if let Ok(frame) = Frame::new(MessageType::SnapshotEnd, vec![Bytes::copy_from_slice(&end)], FrameKey::Bulk(0), max) {
+        if let Ok(frame) = Frame::new(
+            MessageType::SnapshotEnd,
+            vec![Bytes::copy_from_slice(&end)],
+            FrameKey::Bulk(0),
+            max,
+        ) {
             let _ = peers.enqueue(node, Lane::Bulk, frame);
         }
     }
@@ -3400,11 +3595,13 @@ where
         // the material was read by the pool into the holder every executor shares; what a
         // shard checks is that the kernel can take the keys
         if setup.tls.is_encrypted() && !crate::shared::tls::ktls::is_available() {
-            return Err(crate::shared::tls::TlsError::UlpUnavailable(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "the 'tls' kernel module is not loaded",
-            ))
-            .into());
+            return Err(
+                crate::shared::tls::TlsError::UlpUnavailable(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "the 'tls' kernel module is not loaded",
+                ))
+                .into(),
+            );
         }
         // what this node says about itself, shared by the listener and the links on this shard
         let local = self
@@ -3425,13 +3622,16 @@ where
         // a snapshot transfer asks the loop for its file through the mesh, since the transmitter
         // runs on a task of openraft's ([F43](../../../docs/src/features/node-recovery.md))
         let builder_tx = self.shard_local_tx.clone_sync();
-        let replication_conf = self.conf.cluster.as_ref().map(|cluster| cluster.replication.clone()).unwrap_or_default();
-        // the byte budget every stream this shard sends draws on ([F46](../../../docs/src/features/capacity-rebalancing.md))
-        let stream_budget = self
+        let replication_conf = self
             .conf
             .cluster
             .as_ref()
-            .map_or(0, |cluster| u64::try_from(cluster.migration.stream_bytes_per_sec).unwrap_or(u64::MAX));
+            .map(|cluster| cluster.replication.clone())
+            .unwrap_or_default();
+        // the byte budget every stream this shard sends draws on ([F46](../../../docs/src/features/capacity-rebalancing.md))
+        let stream_budget = self.conf.cluster.as_ref().map_or(0, |cluster| {
+            u64::try_from(cluster.migration.stream_bytes_per_sec).unwrap_or(u64::MAX)
+        });
         let network = ShardNetwork::new(
             self.map.clone(),
             setup.dial.clone(),
@@ -3466,7 +3666,8 @@ where
             hosting: self.hosting.clone(),
             bulk_received: self.bulk_received.clone(),
         };
-        let handle = glommio::spawn_local_into(peer::peer_acceptor(listener, ctx), self.high_priority)?;
+        let handle =
+            glommio::spawn_local_into(peer::peer_acceptor(listener, ctx), self.high_priority)?;
         self.tasks.push(handle);
         Ok(Some(network))
     }
@@ -3634,13 +3835,13 @@ where
                     keys,
                 } => self.handle_query(meta, &body, offset, keys).await?,
                 // run this query again now that the partition it waited on has been read
-                ServerMsg::Released { meta, query } => {
-                    self.handle_released(meta, query).await?
-                }
+                ServerMsg::Released { meta, query } => self.handle_released(meta, query).await?,
                 // collect this shards share of a query we split across shards
-                ServerMsg::Gathered { meta, response, failed } => {
-                    self.handle_gathered(meta, response, failed).await?
-                }
+                ServerMsg::Gathered {
+                    meta,
+                    response,
+                    failed,
+                } => self.handle_gathered(meta, response, failed).await?,
                 // load this partition from disk
                 ServerMsg::Partition(loaded) => {
                     let (table, partition_id) = (loaded.table, loaded.loaded.partition_id);
@@ -3661,7 +3862,10 @@ where
                     // a record that failed its checksum quarantines the copy it belongs to,
                     // before the queries parked on it hear why
                     // ([F44](../../../docs/src/features/repair.md))
-                    if error.as_ref().is_some_and(|error| error.code == ErrorCode::CorruptArchive.as_u16()) {
+                    if error
+                        .as_ref()
+                        .is_some_and(|error| error.code == ErrorCode::CorruptArchive.as_u16())
+                    {
                         self.quarantine_for_checksum(table, partition_id).await;
                     }
                     self.tables
@@ -3695,7 +3899,10 @@ where
                     entries,
                     data,
                     base,
-                } => self.handle_forward(conn, origin, preamble, entries, data, base).await?,
+                } => {
+                    self.handle_forward(conn, origin, preamble, entries, data, base)
+                        .await?
+                }
                 // something a peer link this shard owns learned
                 ServerMsg::Peer(event) => self.handle_peer_event(event).await?,
                 // drive a snapshot stream at a peer, for the bounded-bytes test
@@ -3705,7 +3912,11 @@ where
                     let _ = reply.send(self.transport_view());
                 }
                 // a tablet group's committed batch, applied here in committed order
-                ServerMsg::Apply { group, entries, done } => {
+                ServerMsg::Apply {
+                    group,
+                    entries,
+                    done,
+                } => {
                     self.handle_apply(group, entries, done).await?;
                 }
                 // a proposal this shard made resolved
@@ -3716,7 +3927,10 @@ where
                     group,
                     outcome,
                     bytes,
-                } => self.answer_proposal(meta, table, tablet, group, outcome, bytes).await?,
+                } => {
+                    self.answer_proposal(meta, table, tablet, group, outcome, bytes)
+                        .await?
+                }
                 // a read's waits are done, so it runs now
                 ServerMsg::ReadReady {
                     meta,
@@ -3724,7 +3938,10 @@ where
                     span,
                     gathered_meta,
                     outcome,
-                } => self.handle_read_ready(meta, query, span, gathered_meta, outcome).await?,
+                } => {
+                    self.handle_read_ready(meta, query, span, gathered_meta, outcome)
+                        .await?
+                }
                 // a peer's replication request for a group this shard hosts
                 ServerMsg::Replication {
                     origin,
@@ -3747,27 +3964,55 @@ where
                     self.handle_segment_compacted(table, generation);
                 }
                 // the checkpoint file landed
-                ServerMsg::BuildSnapshot { group, reply } => self.handle_build_snapshot(group, reply).await?,
-                ServerMsg::SnapshotBuilt { group, outcome } => self.handle_snapshot_built(group, outcome).await?,
+                ServerMsg::BuildSnapshot { group, reply } => {
+                    self.handle_build_snapshot(group, reply).await?
+                }
+                ServerMsg::SnapshotBuilt { group, outcome } => {
+                    self.handle_snapshot_built(group, outcome).await?
+                }
                 ServerMsg::InstallSnapshot {
                     group,
                     path,
                     manifest,
                     meta,
                     done,
-                } => self.handle_install_snapshot(group, path, manifest, meta, done).await?,
-                ServerMsg::SnapshotInstalled { table, group, outcome } => {
-                    self.handle_snapshot_installed(table, group, outcome).await?;
+                } => {
+                    self.handle_install_snapshot(group, path, manifest, meta, done)
+                        .await?
                 }
-                ServerMsg::SnapshotRecords { group, outcome } => self.handle_snapshot_records(group, outcome).await?,
-                ServerMsg::SnapshotCleaned { group, outcome } => self.handle_snapshot_cleaned(group, outcome),
-                ServerMsg::Digested { group, op, outcome } => self.handle_digested(group, op, outcome),
-                ServerMsg::Quarantine { group, action, reply } => self.handle_quarantine(group, action, reply).await,
-                ServerMsg::RepairDone { op, group, phase } => self.handle_repair_done(op, group, phase),
+                ServerMsg::SnapshotInstalled {
+                    table,
+                    group,
+                    outcome,
+                } => {
+                    self.handle_snapshot_installed(table, group, outcome)
+                        .await?;
+                }
+                ServerMsg::SnapshotRecords { group, outcome } => {
+                    self.handle_snapshot_records(group, outcome).await?
+                }
+                ServerMsg::SnapshotCleaned { group, outcome } => {
+                    self.handle_snapshot_cleaned(group, outcome)
+                }
+                ServerMsg::Digested { group, op, outcome } => {
+                    self.handle_digested(group, op, outcome)
+                }
+                ServerMsg::Quarantine {
+                    group,
+                    action,
+                    reply,
+                } => self.handle_quarantine(group, action, reply).await,
+                ServerMsg::RepairDone { op, group, phase } => {
+                    self.handle_repair_done(op, group, phase)
+                }
                 // a backup driver or a restore driver finished with a group
                 // ([F49](../../../docs/src/features/backup-and-recovery.md))
-                ServerMsg::BackupDone { op, group, phase } => self.handle_backup_done(op, group, phase),
-                ServerMsg::RestoreDone { op, group, phase } => self.handle_restore_done(op, group, phase),
+                ServerMsg::BackupDone { op, group, phase } => {
+                    self.handle_backup_done(op, group, phase)
+                }
+                ServerMsg::RestoreDone { op, group, phase } => {
+                    self.handle_restore_done(op, group, phase)
+                }
                 // a driver asking for a group's current handle, after a restart it caused
                 ServerMsg::GroupHandle { group, reply } => {
                     let handle = self
@@ -3777,9 +4022,20 @@ where
                         .and_then(|slot| slot.raft.clone().map(|raft| (raft, slot.state.clone())));
                     let _ = reply.send(handle);
                 }
-                ServerMsg::MoveDone { op, group, progress } => self.handle_move_done(op, group, progress),
-                ServerMsg::TabletsDropped { group, outcome, .. } => self.handle_tablets_dropped(group, outcome).await?,
-                ServerMsg::RepairInstall { group, path, manifest, reply } => {
+                ServerMsg::MoveDone {
+                    op,
+                    group,
+                    progress,
+                } => self.handle_move_done(op, group, progress),
+                ServerMsg::TabletsDropped { group, outcome, .. } => {
+                    self.handle_tablets_dropped(group, outcome).await?
+                }
+                ServerMsg::RepairInstall {
+                    group,
+                    path,
+                    manifest,
+                    reply,
+                } => {
                     let outcome = self.restart_group_for_install(group, path, manifest);
                     let _ = reply.send(outcome);
                 }
@@ -3791,7 +4047,12 @@ where
                     self.sweep_segments().await?;
                     let _ = reply.send(());
                 }
-                ServerMsg::SnapshotBytes { node, stream, offset, bytes } => {
+                ServerMsg::SnapshotBytes {
+                    node,
+                    stream,
+                    offset,
+                    bytes,
+                } => {
                     self.handle_snapshot_bytes(node, stream, offset, bytes);
                 }
                 ServerMsg::BulkLaneEnded { node } => self.handle_bulk_lane_ended(node),
@@ -3837,7 +4098,11 @@ where
                 }
             }
             // a sealed or applied segment is judged between two messages
-            if self.replication.as_ref().is_some_and(|replication| replication.sweep_due) {
+            if self
+                .replication
+                .as_ref()
+                .is_some_and(|replication| replication.sweep_due)
+            {
                 self.sweep_segments().await?;
             }
             // if we have no more messages then flush our current queries to disk
@@ -4029,7 +4294,10 @@ mod tests {
             ]
         );
         // a single frame, or none, is left alone
-        let mut single = vec![reply(ReplyKind::Whole, a), reply(ReplyKind::Topology { version: 1 }, Uuid::nil())];
+        let mut single = vec![
+            reply(ReplyKind::Whole, a),
+            reply(ReplyKind::Topology { version: 1 }, Uuid::nil()),
+        ];
         coalesce_topology(&mut single);
         assert_eq!(single.len(), 2);
         let mut none = vec![reply(ReplyKind::Whole, a), reply(ReplyKind::Share, b)];

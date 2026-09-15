@@ -22,29 +22,28 @@
 // behind the engine - the regression crate catches that directly. It resolves to the one
 // workspace pin, and `tests/partition_keys.rs` freezes what that pin hashes eight keys to
 // (resolved item 65).
-pub use shoal_proto::{deepsize2, gxhash, rkyv, serde_json, tracing, uuid};
 #[cfg(feature = "server")]
 pub use shoal_core::{glommio, kanal, lru};
+pub use shoal_proto::{deepsize2, gxhash, rkyv, serde_json, tracing, uuid};
 
 // The protocol: what both peers see. Present whether or not an engine is linked.
 pub use shoal_proto::shared::{self, traits};
 
 // The client. Its error types come from the protocol crate rather than from here, because
 // `QuerySupport` and `shared::responses` both name them.
-pub use shoal_proto::FromShoal;
-pub use shoal_proto::client::{ChannelError, ConnectError, Errors, QuerySuceededOpts};
 pub use shoal_client::client::{self, Shoal, ShoalResponse, ShoalUnorderedResultStream};
+pub use shoal_proto::client::{ChannelError, ConnectError, Errors, QuerySuceededOpts};
+pub use shoal_proto::FromShoal;
 
 // The server, and the engine it runs on. None of this exists without the `server` feature, which
 // is the whole point: a `#[shoal::db(client)]` schema names its table and storage types in field
 // position only, never in a `use`, so it never reaches for any of these.
 #[cfg(feature = "server")]
-pub use shoal_core::ShoalPool;
-#[cfg(feature = "server")]
 pub use shoal_core::server::{
-    self, Conf,
+    self,
     database::ShoalDatabase,
     routing::{ArchivedShardRouting, ShardRouting},
+    Conf,
 };
 #[cfg(feature = "server")]
 pub use shoal_core::storage::{self, FileSystem, NoStorage};
@@ -53,5 +52,7 @@ pub use shoal_core::tables::{
     self, EphemeralSortedTable, EphemeralUnsortedTable, PersistentSortedTable,
     PersistentUnsortedTable,
 };
+#[cfg(feature = "server")]
+pub use shoal_core::ShoalPool;
 
-pub use shoal_derive::{ShoalProjection, ShoalSortedTable, ShoalUnsortedTable, db};
+pub use shoal_derive::{db, ShoalProjection, ShoalSortedTable, ShoalUnsortedTable};

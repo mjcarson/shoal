@@ -213,7 +213,12 @@ pub const GROUPS: &[Group] = &[
             prefixes: &[],
             // the grid and the configuration sweeps drive mixtures, so a difference in one of them
             // is never attributable to a path. that is exactly what this group excludes.
-            excluding: &["macro/grid/", "macro/skew/", "macro/conf/", "macro/cluster/"],
+            excluding: &[
+                "macro/grid/",
+                "macro/skew/",
+                "macro/conf/",
+                "macro/cluster/",
+            ],
             exactly: &[],
         },
     },
@@ -582,7 +587,10 @@ mod tests {
     fn every_group_selects_something() {
         let all = every_bench();
         for group in GROUPS {
-            let picked = all.iter().filter(|entry| group.members.holds(entry)).count();
+            let picked = all
+                .iter()
+                .filter(|entry| group.members.holds(entry))
+                .count();
             assert!(picked > 0, "the {} group selects nothing", group.name);
         }
     }

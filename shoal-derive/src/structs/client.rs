@@ -166,14 +166,17 @@ pub fn add(
         .map(|table| table.inner_type.to_string())
         .collect();
     // build every projection name in this database paired with the table it projects
-    let projection_name_pairs = tables.iter().zip(projections).flat_map(|(table, declared)| {
-        let table_name_str = table.inner_type.to_string();
-        declared.iter().map(move |projection| {
-            let projection_str = projection.to_string();
-            let table_name_str = table_name_str.clone();
-            quote! { (#projection_str, #table_name_str) }
-        })
-    });
+    let projection_name_pairs = tables
+        .iter()
+        .zip(projections)
+        .flat_map(|(table, declared)| {
+            let table_name_str = table.inner_type.to_string();
+            declared.iter().map(move |projection| {
+                let projection_str = projection.to_string();
+                let table_name_str = table_name_str.clone();
+                quote! { (#projection_str, #table_name_str) }
+            })
+        });
     // build our table_fields arms
     let table_fields_arms = tables.iter().map(|table| {
         let inner_type = &table.inner_type;

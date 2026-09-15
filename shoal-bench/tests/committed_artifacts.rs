@@ -100,11 +100,7 @@ fn every_committed_macro_capture_parses() {
         );
         for (id, workload) in &capture.workloads {
             let moved: u64 = workload.counters.values().sum();
-            assert!(
-                moved > 0,
-                "{} says {id} moved no rows",
-                path.display()
-            );
+            assert!(moved > 0, "{} says {id} moved no rows", path.display());
         }
     }
 }
@@ -236,7 +232,11 @@ fn every_committed_stage_report_parses() {
         // and every report says which workload it came from, or the artifact cannot be keyed. a
         // version 1 artifact is filled in on the way through, so this holds for those too
         for (name, report) in &reports.reports {
-            assert!(!name.is_empty(), "{}: a report is keyed on nothing", path.display());
+            assert!(
+                !name.is_empty(),
+                "{}: a report is keyed on nothing",
+                path.display()
+            );
             let _ = report;
         }
     }
@@ -378,7 +378,11 @@ fn a_capture_that_counted_no_queries_reports_no_query_rate() {
             .unwrap_or_else(|err| panic!("{}: {err:#}", path.display()));
         for (id, workload) in &capture.workloads {
             // none of these counted `reads` or `writes`, so none of them can report a rate
-            if workload.counters.keys().all(|name| !OP_COUNTERS.contains(&name.as_str())) {
+            if workload
+                .counters
+                .keys()
+                .all(|name| !OP_COUNTERS.contains(&name.as_str()))
+            {
                 assert!(
                     workload.ops_per_sec().is_none(),
                     "{} invented a query rate for {id}",
@@ -418,10 +422,14 @@ fn historical_artifacts_and_ports_remain_compatible() {
     }
     // and every port in the frozen map is the port that id still gets
     let frozen: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(store.perf_dir().join("ports.json")).expect("docs/perf/ports.json"),
+        &std::fs::read_to_string(store.perf_dir().join("ports.json"))
+            .expect("docs/perf/ports.json"),
     )
     .expect("ports.json parses");
-    assert_eq!(frozen["base_port"], serde_json::json!(shoal_bench::run::plan::BASE_PORT));
+    assert_eq!(
+        frozen["base_port"],
+        serde_json::json!(shoal_bench::run::plan::BASE_PORT)
+    );
     let ports = frozen["ports"].as_object().expect("a map of id to port");
     assert!(!ports.is_empty());
     for (id, port) in ports {
@@ -457,5 +465,8 @@ fn a_single_node_capture_serializes_no_cluster_record() {
             .expect("a macro capture"),
     )
     .expect("the capture reads");
-    assert!(!text.contains("\"cluster\""), "a single-node capture spells a cluster key");
+    assert!(
+        !text.contains("\"cluster\""),
+        "a single-node capture spells a cluster key"
+    );
 }

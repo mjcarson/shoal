@@ -385,7 +385,14 @@ impl<S: QuerySupport> ShoalBuilder<S> {
                 }
             }
         }
-        Shoal::connect(endpoints, self.options, self.pool, self.deadlines, self.read_options).await
+        Shoal::connect(
+            endpoints,
+            self.options,
+            self.pool,
+            self.deadlines,
+            self.read_options,
+        )
+        .await
     }
 }
 

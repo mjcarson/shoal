@@ -241,8 +241,14 @@ mod tests {
     /// shorten differently and read as a different scope on the chart.
     #[test]
     fn a_scope_from_any_crate_loses_its_prefix() {
-        assert_eq!(shorten("shoal_core::server::shard::reply"), "server::shard::reply");
-        assert_eq!(shorten("shoal_proto::shared::protocol::decode_response"), "shared::protocol::decode_response");
+        assert_eq!(
+            shorten("shoal_core::server::shard::reply"),
+            "server::shard::reply"
+        );
+        assert_eq!(
+            shorten("shoal_proto::shared::protocol::decode_response"),
+            "shared::protocol::decode_response"
+        );
         assert_eq!(shorten("shoal_client::client::send"), "client::send");
         // and something from outside the workspace is left exactly as it came
         assert_eq!(shorten("glommio::io::read_at"), "glommio::io::read_at");

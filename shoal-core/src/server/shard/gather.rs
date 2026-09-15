@@ -134,10 +134,16 @@ impl<T, R> Gather<T, R> {
     #[must_use]
     fn is_complete(&self) -> bool {
         // one failure is enough to answer, since the merge has already made the answer one
-        if self.slots.iter().any(|slot| slot.state == SlotState::Failed) {
+        if self
+            .slots
+            .iter()
+            .any(|slot| slot.state == SlotState::Failed)
+        {
             return true;
         }
-        self.slots.iter().all(|slot| slot.state == SlotState::Covered)
+        self.slots
+            .iter()
+            .all(|slot| slot.state == SlotState::Covered)
     }
 }
 
@@ -181,7 +187,9 @@ pub(super) struct Gathers<T, R> {
 impl<T, R: MergeShare> Default for Gathers<T, R> {
     /// An empty map
     fn default() -> Self {
-        Gathers { map: HashMap::new() }
+        Gathers {
+            map: HashMap::new(),
+        }
     }
 }
 
@@ -235,7 +243,11 @@ impl<T, R: MergeShare> Gathers<T, R> {
             return Arrival::Duplicate;
         }
         // the share fills its slot, with rows or without: coverage is the slot
-        target.state = if failed { SlotState::Failed } else { SlotState::Covered };
+        target.state = if failed {
+            SlotState::Failed
+        } else {
+            SlotState::Covered
+        };
         // and is merged into what has been collected so far
         match &mut gather.merged {
             Some(merged) => merged.merge_share(response),
@@ -380,17 +392,32 @@ mod tests {
         assert_eq!(gathers.len(), 0);
         assert!(gathers.expire(now).is_empty());
         // a share that arrives after the expiry is late
-        assert!(matches!(gathers.arrive(key, 1, 0, share(true), false), Arrival::Late));
+        assert!(matches!(
+            gathers.arrive(key, 1, 0, share(true), false),
+            Arrival::Late
+        ));
         // a live gather: a share for an older attempt is late and covers nothing
         gathers.insert(key, gather(2, 5, now.plus_nanos(1_000_000_000)));
-        assert!(matches!(gathers.arrive(key, 4, 0, share(true), false), Arrival::Late));
+        assert!(matches!(
+            gathers.arrive(key, 4, 0, share(true), false),
+            Arrival::Late
+        ));
         // the first share merges and leaves one outstanding
-        assert!(matches!(gathers.arrive(key, 5, 0, share(true), false), Arrival::Merged));
+        assert!(matches!(
+            gathers.arrive(key, 5, 0, share(true), false),
+            Arrival::Merged
+        ));
         // the same slot again is a duplicate, and does not complete the gather
-        assert!(matches!(gathers.arrive(key, 5, 0, share(true), false), Arrival::Duplicate));
+        assert!(matches!(
+            gathers.arrive(key, 5, 0, share(true), false),
+            Arrival::Duplicate
+        ));
         assert_eq!(gathers.len(), 1);
         // a slot the gather does not have is a duplicate too, not a crash
-        assert!(matches!(gathers.arrive(key, 5, 9, share(true), false), Arrival::Duplicate));
+        assert!(matches!(
+            gathers.arrive(key, 5, 9, share(true), false),
+            Arrival::Duplicate
+        ));
         // the last slot completes it exactly once, and the answer is the merge of both
         let Arrival::Complete(done) = gathers.arrive(key, 5, 1, share(false), false) else {
             panic!("the last share did not complete the gather");
@@ -399,7 +426,10 @@ mod tests {
         assert_eq!(done.merged, Some(Share::Exists(true)));
         assert_eq!(gathers.len(), 0);
         // and anything after that is late
-        assert!(matches!(gathers.arrive(key, 5, 1, share(false), false), Arrival::Late));
+        assert!(matches!(
+            gathers.arrive(key, 5, 1, share(false), false),
+            Arrival::Late
+        ));
         // an unexpired gather is left alone by a sweep
         gathers.insert(key, gather(1, 6, now.plus_nanos(1_000_000_000)));
         assert!(gathers.expire(now).is_empty());
@@ -415,7 +445,10 @@ mod tests {
         let mut gathers: Gathers<(), Share> = Gathers::default();
         // three slots; the second fails before the third arrives
         gathers.insert(key, gather(3, 1, far));
-        assert!(matches!(gathers.arrive(key, 1, 0, share(true), false), Arrival::Merged));
+        assert!(matches!(
+            gathers.arrive(key, 1, 0, share(true), false),
+            Arrival::Merged
+        ));
         let Arrival::Complete(done) = gathers.arrive(key, 1, 1, failure(), true) else {
             panic!("a failed share did not complete the gather");
         };
@@ -423,11 +456,20 @@ mod tests {
         assert_eq!(done.outstanding(), 1);
         assert_eq!(done.merged, Some(Share::Error));
         // the third share is late: the answer has gone out
-        assert!(matches!(gathers.arrive(key, 1, 2, share(true), false), Arrival::Late));
+        assert!(matches!(
+            gathers.arrive(key, 1, 2, share(true), false),
+            Arrival::Late
+        ));
         // an empty share is coverage: two empties complete a gather of two
         gathers.insert(key, gather(2, 2, far));
-        assert!(matches!(gathers.arrive(key, 2, 0, share(false), false), Arrival::Merged));
-        assert!(matches!(gathers.arrive(key, 2, 1, share(false), false), Arrival::Complete(_)));
+        assert!(matches!(
+            gathers.arrive(key, 2, 0, share(false), false),
+            Arrival::Merged
+        ));
+        assert!(matches!(
+            gathers.arrive(key, 2, 1, share(false), false),
+            Arrival::Complete(_)
+        ));
     }
 
     /// A client that goes away takes its gathers with it and nobody else's

@@ -169,7 +169,11 @@ mod tests {
     fn the_description_counts_what_moved() {
         let rows = vec![row("a", -20.0, 9.0), row("b", 1.0, 9.0)];
         let svg = draw(&rows, "trailing").expect("it draws");
-        assert!(svg.contains("2 micro benchmarks against trailing"), "{}", &svg[..300]);
+        assert!(
+            svg.contains("2 micro benchmarks against trailing"),
+            "{}",
+            &svg[..300]
+        );
         assert!(svg.contains("1 moved outside"));
     }
 

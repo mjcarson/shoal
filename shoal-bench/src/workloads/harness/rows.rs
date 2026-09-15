@@ -247,7 +247,10 @@ mod tests {
         let mut seen = [0usize; MIXED_SMALL.len()];
         for index in 0..8_192 {
             let width = profile.width(7, index);
-            let slot = MIXED_SMALL.iter().position(|w| *w == width).expect("declared");
+            let slot = MIXED_SMALL
+                .iter()
+                .position(|w| *w == width)
+                .expect("declared");
             seen[slot] += 1;
         }
         // 8,192 rows over four widths averages 2,048, so nothing should be far off it

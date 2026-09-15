@@ -23,7 +23,6 @@ use crate::storage::{ArchiveMapKinds, FilteredFullArchiveMap, FullArchiveMap};
 use super::conf::FileSystemTableConf;
 use super::reader::IntentLogReader;
 
-
 /// The magic a checksummed archive begins with
 ///
 /// A format 1 archive begins with the size of its first record, and no partition is
@@ -120,11 +119,16 @@ pub fn record_checksum(payload: &[u8]) -> u64 {
 ///
 /// * `writer` - The active archive's writer
 /// * `payload` - The archived partition
-pub async fn write_record(writer: &mut DmaStreamWriter, payload: &[u8]) -> Result<u64, ServerError> {
+pub async fn write_record(
+    writer: &mut DmaStreamWriter,
+    payload: &[u8],
+) -> Result<u64, ServerError> {
     // write the size of this record's payload
     writer.write_all(&payload.len().to_le_bytes()).await?;
     // then the checksum a read verifies it against
-    writer.write_all(&record_checksum(payload).to_le_bytes()).await?;
+    writer
+        .write_all(&record_checksum(payload).to_le_bytes())
+        .await?;
     // the map entry points at the payload, not at the prefix
     let offset = writer.current_pos();
     // then the payload itself
@@ -424,7 +428,6 @@ impl<N: TableNameSupport> FilteredFullArchiveMap<N, ArchiveMap> {
             None => Err(ServerError::Shoal(ShoalError::TableMapMissing)),
         }
     }
-
 }
 
 /// Check whether a failed open means the file was not there
@@ -558,7 +561,9 @@ impl ArchiveMap {
         // clone this file handle and place it in our archive map
         self.add_archive(*self.active.borrow(), file.dup()?);
         // a new archive is this build's format, and begins with the header that says so
-        self.formats.borrow_mut().insert(*self.active.borrow(), ArchiveFormat::Checksummed);
+        self.formats
+            .borrow_mut()
+            .insert(*self.active.borrow(), ArchiveFormat::Checksummed);
         // build a stream writer for this file
         let mut writer = DmaStreamWriterBuilder::new(file).build();
         // write the header, so a reader can tell this archive's records carry checksums
@@ -680,7 +685,11 @@ impl ArchiveMap {
     #[must_use]
     pub fn format_of(&self, archive_id: &Uuid) -> ArchiveFormat {
         // an archive nobody opened through this map has no format we can vouch for
-        self.formats.borrow().get(archive_id).copied().unwrap_or(ArchiveFormat::Unverified)
+        self.formats
+            .borrow()
+            .get(archive_id)
+            .copied()
+            .unwrap_or(ArchiveFormat::Unverified)
     }
 
     /// Read one partition's record out of its archive and verify it
@@ -717,17 +726,25 @@ impl ArchiveMap {
     ///
     /// * `archive` - The open archive
     /// * `entry` - Where the partition's record is
-    pub async fn read_record_from(&self, archive: &DmaFile, entry: &ArchiveEntry) -> Result<ReadResult, ServerError> {
+    pub async fn read_record_from(
+        &self,
+        archive: &DmaFile,
+        entry: &ArchiveEntry,
+    ) -> Result<ReadResult, ServerError> {
         // a format 1 record has nothing to verify against, so read it as it is and count it
         if self.format_of(&entry.archive) == ArchiveFormat::Unverified {
-            self.integrity.unverified_reads.set(self.integrity.unverified_reads.get() + 1);
+            self.integrity
+                .unverified_reads
+                .set(self.integrity.unverified_reads.get() + 1);
             return Ok(archive.read_at(entry.offset, entry.size).await?);
         }
         // read the checksum ahead of the payload and the payload in one read
         let read = archive.read_at(entry.offset - 8, entry.size + 8).await?;
         // a short read is a torn record, which is corruption of a different shape
         if read.len() < entry.size + 8 {
-            self.integrity.checksum_failures.set(self.integrity.checksum_failures.get() + 1);
+            self.integrity
+                .checksum_failures
+                .set(self.integrity.checksum_failures.get() + 1);
             return Err(ServerError::Shoal(ShoalError::CorruptArchive {
                 archive: entry.archive,
                 partition_id: entry.key,
@@ -739,7 +756,9 @@ impl ArchiveMap {
         let expected = u64::from_le_bytes(read[..8].try_into()?);
         let found = record_checksum(&read[8..]);
         if expected != found {
-            self.integrity.checksum_failures.set(self.integrity.checksum_failures.get() + 1);
+            self.integrity
+                .checksum_failures
+                .set(self.integrity.checksum_failures.get() + 1);
             return Err(ServerError::Shoal(ShoalError::CorruptArchive {
                 archive: entry.archive,
                 partition_id: entry.key,
@@ -989,8 +1008,14 @@ mod tests {
             // a table's map under a directory of its own
             let temp_dir = test_dir();
             let conf = FileSystemTableConf::builder()
-                .latency_sensitive(super::super::conf::FileSystemLatencyWriterConf::builder().path(temp_dir.path()))
-                .throughput_sensitive(super::super::conf::FileSystemThroughputWriterConf::builder().path(temp_dir.path()));
+                .latency_sensitive(
+                    super::super::conf::FileSystemLatencyWriterConf::builder()
+                        .path(temp_dir.path()),
+                )
+                .throughput_sensitive(
+                    super::super::conf::FileSystemThroughputWriterConf::builder()
+                        .path(temp_dir.path()),
+                );
             conf.setup_paths("T").await.expect("paths");
             let map = Rc::new(ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map"));
             // two archives, both open in the handle cache
@@ -1007,11 +1032,14 @@ mod tests {
             assert!(map.loaded_archives.borrow().contains_key(&second));
             // the removal suspends at the close; the read lands while it is suspended
             let remover = map.clone();
-            let removing = glommio::spawn_local(async move { remover.remove_archive(&first).await });
+            let removing =
+                glommio::spawn_local(async move { remover.remove_archive(&first).await });
             let reader = map.clone();
             let reading = glommio::spawn_local(async move { reader.get_archive(&second).await });
             removing.await.expect("the removal failed");
-            let handle = reading.await.expect("the read failed while an archive was being removed");
+            let handle = reading
+                .await
+                .expect("the read failed while an archive was being removed");
             handle.close().await.expect("a close");
             // the removed archive is gone from the cache and the other is still there
             assert!(!map.loaded_archives.borrow().contains_key(&first));

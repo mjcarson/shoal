@@ -280,9 +280,16 @@ pub fn build_report(
         if mine.is_empty() {
             continue;
         }
-        ops.insert(op.as_str().to_string(), op_report(mine.clone(), clock_overhead_ns));
+        ops.insert(
+            op.as_str().to_string(),
+            op_report(mine.clone(), clock_overhead_ns),
+        );
         for hop in [StageHop::Same, StageHop::LocalShard, StageHop::RemoteNode] {
-            let took: Vec<&Journey> = mine.iter().copied().filter(|entry| entry.hop == hop).collect();
+            let took: Vec<&Journey> = mine
+                .iter()
+                .copied()
+                .filter(|entry| entry.hop == hop)
+                .collect();
             if took.is_empty() {
                 continue;
             }
@@ -617,8 +624,8 @@ pub fn read_report(path: &Path) -> Result<StageReport, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_report, journey, read_report, write_report, ClientRecord, BUCKET_FRACTION,
-        MIN_BUCKET, REPORT_VERSION, STAGE_NAMES,
+        BUCKET_FRACTION, ClientRecord, MIN_BUCKET, REPORT_VERSION, STAGE_NAMES, build_report,
+        journey, read_report, write_report,
     };
     use shoal::server::stage_profile::{Offset, StageOp, StageRecord, StageStamps, Stamp};
     use uuid::Uuid;
@@ -999,7 +1006,8 @@ mod tests {
         let text = serde_json::to_string(&report).expect("serializes");
         assert!(text.contains("\"get/remote\""));
         let stripped = text.replace(",\"hops\":", ",\"hops_was_here\":");
-        let old: super::StageReport = serde_json::from_str(&stripped).expect("an old report parses");
+        let old: super::StageReport =
+            serde_json::from_str(&stripped).expect("an old report parses");
         assert!(old.hops.is_empty());
     }
 }

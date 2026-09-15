@@ -141,7 +141,12 @@ impl Page {
             .find(|snapshot| snapshot.complete.contains(&layer) && snapshot.has(layer))
             // and a tree that only ever captured part of it draws the newest of those, because a
             // page built from a filtered capture still beats a page built from nothing
-            .or_else(|| self.timeline.iter().rev().find(|snapshot| snapshot.has(layer)))
+            .or_else(|| {
+                self.timeline
+                    .iter()
+                    .rev()
+                    .find(|snapshot| snapshot.has(layer))
+            })
     }
 
     /// What was concluded about one capture
@@ -150,9 +155,7 @@ impl Page {
     ///
     /// * `label` - The capture's name
     pub fn status(&self, label: &str) -> Option<&CaptureStatus> {
-        self.statuses
-            .iter()
-            .find(|status| status.label == label)
+        self.statuses.iter().find(|status| status.label == label)
     }
 }
 
@@ -250,13 +253,15 @@ pub mod tests {
         page.current = String::new();
         // the micro layer comes from the newest capture that has one
         assert_eq!(
-            page.current_for(Layer::Micro).map(|snapshot| snapshot.label.as_str()),
+            page.current_for(Layer::Micro)
+                .map(|snapshot| snapshot.label.as_str()),
             Some("micro-only")
         );
         // and the macro layer comes from the newest capture that has *that*, not from a capture
         // that never measured it
         assert_eq!(
-            page.current_for(Layer::Macro).map(|snapshot| snapshot.label.as_str()),
+            page.current_for(Layer::Macro)
+                .map(|snapshot| snapshot.label.as_str()),
             Some("full")
         );
     }
@@ -285,7 +290,8 @@ pub mod tests {
         ];
         page.current = String::new();
         assert_eq!(
-            page.current_for(Layer::Micro).map(|snapshot| snapshot.label.as_str()),
+            page.current_for(Layer::Micro)
+                .map(|snapshot| snapshot.label.as_str()),
             Some("full")
         );
     }
@@ -312,7 +318,8 @@ pub mod tests {
         ];
         page.current = "filtered".to_string();
         assert_eq!(
-            page.current_for(Layer::Micro).map(|snapshot| snapshot.label.as_str()),
+            page.current_for(Layer::Micro)
+                .map(|snapshot| snapshot.label.as_str()),
             Some("filtered")
         );
     }

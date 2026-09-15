@@ -335,24 +335,44 @@ fn cluster_difference(run: &WorkloadCapture, baseline: &WorkloadCapture) -> Opti
                 return Some(format!("rf {} -> {}", before.active_rf, after.active_rf));
             }
             if after.write_policy != before.write_policy {
-                return Some(format!("writes {} -> {}", before.write_policy, after.write_policy));
+                return Some(format!(
+                    "writes {} -> {}",
+                    before.write_policy, after.write_policy
+                ));
             }
             if after.read_policy != before.read_policy {
-                return Some(format!("reads {} -> {}", before.read_policy, after.read_policy));
+                return Some(format!(
+                    "reads {} -> {}",
+                    before.read_policy, after.read_policy
+                ));
             }
             if after.driver != before.driver {
                 return Some(format!("driver {} -> {}", before.driver, after.driver));
             }
             // the machines the nodes ran on, node by node, once both sides recorded them
             // ([F50](../../../docs/src/features/cluster-operations.md))
-            if after.emulated != before.emulated && !after.environments.is_empty() && !before.environments.is_empty() {
+            if after.emulated != before.emulated
+                && !after.environments.is_empty()
+                && !before.environments.is_empty()
+            {
                 return Some(format!(
                     "{} -> {}",
-                    if before.emulated { "one machine" } else { "physical nodes" },
-                    if after.emulated { "one machine" } else { "physical nodes" }
+                    if before.emulated {
+                        "one machine"
+                    } else {
+                        "physical nodes"
+                    },
+                    if after.emulated {
+                        "one machine"
+                    } else {
+                        "physical nodes"
+                    }
                 ));
             }
-            crate::model::macro_layer::environments_difference(&after.environments, &before.environments)
+            crate::model::macro_layer::environments_difference(
+                &after.environments,
+                &before.environments,
+            )
         }
     }
 }
@@ -530,7 +550,10 @@ mod tests {
     /// Two overlapping intervals are not a result however far apart their medians are
     #[test]
     fn overlapping_intervals_are_not_a_result() {
-        let comparison = compare(&capture(&[1_500, 1_700, 1_900]), &capture(&[1_600, 1_800, 2_000]));
+        let comparison = compare(
+            &capture(&[1_500, 1_700, 1_900]),
+            &capture(&[1_600, 1_800, 2_000]),
+        );
         let wall = &comparison.rows[0];
         assert_eq!(wall.verdict, MacroVerdict::NotAResult);
         assert!(wall.gap.is_none());
@@ -540,7 +563,10 @@ mod tests {
     /// Two disjoint intervals are a result, reported as the gap between their nearest ends
     #[test]
     fn disjoint_intervals_are_a_result() {
-        let comparison = compare(&capture(&[1_000, 1_100, 1_200]), &capture(&[1_600, 1_800, 2_000]));
+        let comparison = compare(
+            &capture(&[1_000, 1_100, 1_200]),
+            &capture(&[1_600, 1_800, 2_000]),
+        );
         let wall = &comparison.rows[0];
         assert_eq!(wall.verdict, MacroVerdict::Result);
         // the gap is baseline's fastest minus this run's slowest, not median minus median
@@ -553,7 +579,10 @@ mod tests {
     /// A disjoint pair in the slower direction is a regression
     #[test]
     fn a_slower_disjoint_result_is_a_regression() {
-        let comparison = compare(&capture(&[2_000, 2_100, 2_200]), &capture(&[1_000, 1_100, 1_200]));
+        let comparison = compare(
+            &capture(&[2_000, 2_100, 2_200]),
+            &capture(&[1_000, 1_100, 1_200]),
+        );
         assert!(comparison.rows[0].is_regression());
         assert!(comparison.has_regression());
     }
@@ -570,7 +599,10 @@ mod tests {
     #[test]
     fn throughput_is_the_wall_clock_inverted() {
         // this run is faster, so its wall clock fell and its throughput rose
-        let comparison = compare(&capture(&[1_000, 1_100, 1_200]), &capture(&[1_600, 1_800, 2_000]));
+        let comparison = compare(
+            &capture(&[1_000, 1_100, 1_200]),
+            &capture(&[1_600, 1_800, 2_000]),
+        );
         let throughput = comparison
             .rows
             .iter()
@@ -659,21 +691,24 @@ mod tests {
     #[test]
     fn a_workload_on_one_side_only_is_reported_absent() {
         let mut run = capture_as("macro/a", &[1_000, 1_100]);
-        run.workloads.extend(capture_as("macro/b", &[2_000, 2_100]).workloads);
+        run.workloads
+            .extend(capture_as("macro/b", &[2_000, 2_100]).workloads);
         let baseline = capture_as("macro/a", &[1_000, 1_100]);
         let comparison = compare(&run, &baseline);
         // the shared workload compared normally
-        assert!(comparison.rows.iter().any(|row| row.metric == "macro/a/wall_clock"
-            && row.verdict != MacroVerdict::Absent));
+        assert!(
+            comparison.rows.iter().any(
+                |row| row.metric == "macro/a/wall_clock" && row.verdict != MacroVerdict::Absent
+            )
+        );
         // and the one only the run has is named
         assert_eq!(comparison.only_in_run, vec!["macro/b".to_string()]);
         assert!(comparison.only_in_baseline.is_empty());
         assert_eq!(comparison.missing(), vec!["macro/b"]);
         assert!(
-            comparison
-                .rows
-                .iter()
-                .any(|row| row.metric == "macro/b/wall_clock" && row.verdict == MacroVerdict::Absent)
+            comparison.rows.iter().any(
+                |row| row.metric == "macro/b/wall_clock" && row.verdict == MacroVerdict::Absent
+            )
         );
         // an absent workload is never a regression, since nothing was measured twice
         assert!(!comparison.has_regression());
@@ -723,7 +758,10 @@ mod tests {
             .expect("the o17 macro capture reads")
             .expect("the o17 macro capture exists");
         let comparison = compare(&after, &frozen);
-        assert!(!comparison.disjoint, "two version 1 captures must still join");
+        assert!(
+            !comparison.disjoint,
+            "two version 1 captures must still join"
+        );
         assert!(comparison.missing().is_empty());
         // and neither of them recorded a tracing fact, which is not the same as disagreeing
         assert!(
@@ -851,9 +889,20 @@ mod tests {
         // and two clusters that differ in what an acknowledgement means are named
         let other = clustered_capture(&[1_000, 1_100], 3, "in-process");
         let traced = compare(&after, &other).traced;
-        assert!(traced[0].contains("driver in-process -> separate"), "{traced:?}");
+        assert!(
+            traced[0].contains("driver in-process -> separate"),
+            "{traced:?}"
+        );
         // while two alike, or two single-node captures, say nothing
-        assert!(compare(&after, &clustered_capture(&[1_000, 1_100], 3, "separate")).traced.is_empty());
-        assert!(compare(&before, &capture(&[1_000, 1_100])).traced.is_empty());
+        assert!(
+            compare(&after, &clustered_capture(&[1_000, 1_100], 3, "separate"))
+                .traced
+                .is_empty()
+        );
+        assert!(
+            compare(&before, &capture(&[1_000, 1_100]))
+                .traced
+                .is_empty()
+        );
     }
 }

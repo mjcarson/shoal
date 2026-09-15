@@ -98,7 +98,9 @@ impl SnapshotBegin {
             manifest_len: u32_at(raw, 48),
         };
         if body_len != SNAPSHOT_BEGIN_LEN + begin.manifest_len as usize {
-            return Err(ProtocolError::MalformedForward("a snapshot begin does not fit its frame"));
+            return Err(ProtocolError::MalformedForward(
+                "a snapshot begin does not fit its frame",
+            ));
         }
         Ok(begin)
     }
@@ -143,7 +145,9 @@ impl SnapshotChunk {
             checksum: u32_at(raw, 28),
         };
         if body_len != SNAPSHOT_CHUNK_LEN + chunk.len as usize {
-            return Err(ProtocolError::MalformedForward("a snapshot chunk does not fit its frame"));
+            return Err(ProtocolError::MalformedForward(
+                "a snapshot chunk does not fit its frame",
+            ));
         }
         Ok(chunk)
     }

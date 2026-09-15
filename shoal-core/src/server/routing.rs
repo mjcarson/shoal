@@ -290,7 +290,9 @@ impl<T: ShoalSortedTable + std::fmt::Debug> ArchivedShardRouting for SortedQuery
         match archived {
             ArchivedSortedQuery::Get(get) => native_keys(&get.partition_keys),
             ArchivedSortedQuery::Exists(exists) => native_keys(&exists.partition_keys),
-            ArchivedSortedQuery::Insert { key, .. } | ArchivedSortedQuery::Delete { key, .. } => vec![key.to_native()],
+            ArchivedSortedQuery::Insert { key, .. } | ArchivedSortedQuery::Delete { key, .. } => {
+                vec![key.to_native()]
+            }
             ArchivedSortedQuery::Update(update) => vec![update.partition_key.to_native()],
         }
     }
@@ -303,7 +305,9 @@ impl<T: ShoalSortedTable + std::fmt::Debug> ArchivedShardRouting for SortedQuery
     fn archived_limit(archived: &<Self as rkyv::Archive>::Archived) -> Option<usize> {
         // only a get returns rows that a limit could apply to
         match archived {
-            ArchivedSortedQuery::Get(get) => get.limit.as_ref().map(|limit| limit.to_native() as usize),
+            ArchivedSortedQuery::Get(get) => {
+                get.limit.as_ref().map(|limit| limit.to_native() as usize)
+            }
             _ => None,
         }
     }
@@ -391,7 +395,8 @@ impl<T: ShoalUnsortedTable + std::fmt::Debug> ArchivedShardRouting for UnsortedQ
         // ([F42](../../../docs/src/features/primary-failover.md))
         match archived {
             ArchivedUnsortedQuery::Get(get) => native_keys(&get.partition_keys),
-            ArchivedUnsortedQuery::Insert { key, .. } | ArchivedUnsortedQuery::Delete { key, .. } => vec![key.to_native()],
+            ArchivedUnsortedQuery::Insert { key, .. }
+            | ArchivedUnsortedQuery::Delete { key, .. } => vec![key.to_native()],
             ArchivedUnsortedQuery::Update(update) => vec![update.partition_key.to_native()],
             ArchivedUnsortedQuery::Exists(exists) => vec![exists.partition_key.to_native()],
         }

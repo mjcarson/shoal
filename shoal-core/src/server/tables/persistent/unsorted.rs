@@ -23,23 +23,25 @@ use tracing::Span;
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
+use crate::server::database::ShoalDatabase;
 use crate::server::messages::{Answer, LoadedPartition, QueryMetadata, SealReply, ServerMsg};
 use crate::server::replication::digest::{hash_partition, PartitionDigest, PendingDigest};
 use crate::server::replication::{CommandResult, ResultKind};
-use crate::server::tables::persistent::{adjust_memory_usage, open, ApplyStep, RowSink};
-use crate::shared::protocol::peer::Command;
-use crate::shared::protocol::error::ErrorCode;
 use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::UnsortedPartition;
+use crate::server::tables::persistent::{adjust_memory_usage, open, ApplyStep, RowSink};
 use crate::server::tables::persistent::{
     apply_failure, corrupt_archive, eviction_totals, PartitionLoad, PendingGets,
 };
 use crate::server::tables::storage::StorageSupport;
 use crate::server::{Conf, ServerError};
+use crate::shared::protocol::error::ErrorCode;
+use crate::shared::protocol::peer::Command;
 use crate::shared::queries::{UnsortedExists, UnsortedGet, UnsortedQuery, UnsortedUpdate};
 use crate::shared::responses::{Response, ResponseAction, ResponseError};
-use crate::server::database::ShoalDatabase;
-use crate::shared::traits::{RkyvSupport, ShoalProjection, ShoalTableSupport, ShoalUnsortedTable, TableNameSupport};
+use crate::shared::traits::{
+    RkyvSupport, ShoalProjection, ShoalTableSupport, ShoalUnsortedTable, TableNameSupport,
+};
 use crate::storage::{
     link_released, FullArchiveMap, IntentReadSupport, LoaderMsg, Loaders, PendingResponse,
     RecoveryStats, ShouldPrune,
@@ -362,7 +364,8 @@ where
                 return Ok(PartitionLoad::Idle);
             }
             return Ok(PartitionLoad::Failed(
-                self.fail_partition(partition_id, &read_span, None).unwrap_or_default(),
+                self.fail_partition(partition_id, &read_span, None)
+                    .unwrap_or_default(),
             ));
         }
         // if we have an existing loaded partition then do not use our newly loaded data
@@ -392,8 +395,12 @@ where
                                 error = ?error,
                             );
                             return Ok(PartitionLoad::Failed(
-                                self.fail_partition(partition_id, &read_span, Some(&corrupt_archive(self.table_name, partition_id)))
-                                    .unwrap_or_default(),
+                                self.fail_partition(
+                                    partition_id,
+                                    &read_span,
+                                    Some(&corrupt_archive(self.table_name, partition_id)),
+                                )
+                                .unwrap_or_default(),
                             ));
                         }
                     };
@@ -430,8 +437,12 @@ where
                             error = ?error,
                         );
                         return Ok(PartitionLoad::Failed(
-                            self.fail_partition(partition_id, &read_span, Some(&corrupt_archive(self.table_name, partition_id)))
-                                .unwrap_or_default(),
+                            self.fail_partition(
+                                partition_id,
+                                &read_span,
+                                Some(&corrupt_archive(self.table_name, partition_id)),
+                            )
+                            .unwrap_or_default(),
                         ));
                     }
                 };
@@ -1182,13 +1193,21 @@ where
         for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
-        <<R as ShoalTableSupport>::UpdateData as Archive>::Archived:
-            rkyv::Deserialize<<R as ShoalTableSupport>::UpdateData, Strategy<Pool, rkyv::rancor::Error>>,
+        <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: rkyv::Deserialize<
+            <R as ShoalTableSupport>::UpdateData,
+            Strategy<Pool, rkyv::rancor::Error>,
+        >,
     {
         let (key, intent) = match query {
-            UnsortedQuery::Insert { row, .. } => (row.get_partition_key(), UnsortedIntents::Insert(row.clone())),
+            UnsortedQuery::Insert { row, .. } => (
+                row.get_partition_key(),
+                UnsortedIntents::Insert(row.clone()),
+            ),
             UnsortedQuery::Delete { key } => (*key, UnsortedIntents::<R>::delete(*key)),
-            UnsortedQuery::Update(update) => (update.partition_key, UnsortedIntents::<R>::update(update.clone())),
+            UnsortedQuery::Update(update) => (
+                update.partition_key,
+                UnsortedIntents::<R>::update(update.clone()),
+            ),
             UnsortedQuery::Get(_) | UnsortedQuery::Exists(_) => return None,
         };
         Some((key, RkyvSupport::serialize(&intent).to_vec()))
@@ -1213,8 +1232,10 @@ where
         for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
-        <<R as ShoalTableSupport>::UpdateData as Archive>::Archived:
-            rkyv::Deserialize<<R as ShoalTableSupport>::UpdateData, Strategy<Pool, rkyv::rancor::Error>>,
+        <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: rkyv::Deserialize<
+            <R as ShoalTableSupport>::UpdateData,
+            Strategy<Pool, rkyv::rancor::Error>,
+        >,
     {
         // the generation the partition is stamped with is the WAL's
         self.generation = generation;
@@ -1225,18 +1246,29 @@ where
         // validated: the bytes crossed a process boundary
         let intent = match UnsortedIntents::<R>::access(&aligned) {
             Ok(intent) => intent,
-            Err(error) => return ApplyStep::Refused(format!("the command's payload is not an unsorted intent: {error}")),
+            Err(error) => {
+                return ApplyStep::Refused(format!(
+                    "the command's payload is not an unsorted intent: {error}"
+                ))
+            }
         };
         match intent {
             ArchivedUnsortedIntents::Insert(archived) => {
                 let row: R = match RkyvSupport::deserialize(archived) {
                     Ok(row) => row,
-                    Err(error) => return ApplyStep::Refused(format!("the command's row does not decode: {error}")),
+                    Err(error) => {
+                        return ApplyStep::Refused(format!(
+                            "the command's row does not decode: {error}"
+                        ))
+                    }
                 };
                 let key = row.get_partition_key();
                 let partition = UnsortedPartition::new(key, row);
                 let new_size = partition.size;
-                let wrapped = MaybeLoaded::Loaded { partition, generation };
+                let wrapped = MaybeLoaded::Loaded {
+                    partition,
+                    generation,
+                };
                 let diff = match self.partitions.insert(key, wrapped) {
                     Some(old) => new_size.cast_signed() - old.size().cast_signed(),
                     None => new_size.cast_signed(),
@@ -1260,7 +1292,10 @@ where
                                 partition: UnsortedPartition::tombstone(key),
                                 generation,
                             };
-                            adjust_memory_usage(&self.memory_usage, partition.size().cast_signed() - before.cast_signed());
+                            adjust_memory_usage(
+                                &self.memory_usage,
+                                partition.size().cast_signed() - before.cast_signed(),
+                            );
                             true
                         }
                     }
@@ -1276,10 +1311,15 @@ where
                 })
             }
             ArchivedUnsortedIntents::Update(archived) => {
-                let update = match rkyv::deserialize::<UnsortedUpdate<R>, rkyv::rancor::Error>(archived) {
-                    Ok(update) => update,
-                    Err(error) => return ApplyStep::Refused(format!("the command's update does not decode: {error}")),
-                };
+                let update =
+                    match rkyv::deserialize::<UnsortedUpdate<R>, rkyv::rancor::Error>(archived) {
+                        Ok(update) => update,
+                        Err(error) => {
+                            return ApplyStep::Refused(format!(
+                                "the command's update does not decode: {error}"
+                            ))
+                        }
+                    };
                 let key = update.partition_key;
                 let updated = match self.partitions.get_mut(&key) {
                     Some(partition) => {
@@ -1288,11 +1328,21 @@ where
                         } else {
                             let before = partition.size();
                             if let Some(loaded) = partition.update(&update) {
-                                *partition = MaybeLoaded::Loaded { partition: loaded, generation };
-                            } else if let MaybeLoaded::Loaded { generation: stamped, .. } = partition {
+                                *partition = MaybeLoaded::Loaded {
+                                    partition: loaded,
+                                    generation,
+                                };
+                            } else if let MaybeLoaded::Loaded {
+                                generation: stamped,
+                                ..
+                            } = partition
+                            {
                                 *stamped = generation;
                             }
-                            adjust_memory_usage(&self.memory_usage, partition.size().cast_signed() - before.cast_signed());
+                            adjust_memory_usage(
+                                &self.memory_usage,
+                                partition.size().cast_signed() - before.cast_signed(),
+                            );
                             true
                         }
                     }
@@ -1319,7 +1369,11 @@ where
     ///
     /// * `partition_key` - The partition
     /// * `span` - The span the read hangs off
-    pub async fn request_load(&mut self, partition_key: u64, span: &Span) -> Result<bool, ServerError> {
+    pub async fn request_load(
+        &mut self,
+        partition_key: u64,
+        span: &Span,
+    ) -> Result<bool, ServerError> {
         // a read already asked for, by an apply or by a query, is one to wait on
         if self.loading.contains(&partition_key) || self.blocked.contains_key(&partition_key) {
             return Ok(true);
@@ -1433,7 +1487,9 @@ where
                     MaybeRow::Tombstone => None,
                 },
                 MaybeLoaded::Accessible(read) => match &read.archived().row {
-                    ArchivedMaybeRow::Row(row) => <R as RkyvSupport>::deserialize(row).ok().map(|row| RkyvSupport::serialize(&row)),
+                    ArchivedMaybeRow::Row(row) => <R as RkyvSupport>::deserialize(row)
+                        .ok()
+                        .map(|row| RkyvSupport::serialize(&row)),
                     ArchivedMaybeRow::Tombstone => None,
                 },
             };
@@ -1460,10 +1516,15 @@ where
         // the record is read back as the row it holds and re-serialized, never hashed as it lies
         let archived = <UnsortedPartition<R> as RkyvSupport>::access(bytes)?;
         let row = match &archived.row {
-            ArchivedMaybeRow::Row(row) => Some(RkyvSupport::serialize(&<R as RkyvSupport>::deserialize(row)?)),
+            ArchivedMaybeRow::Row(row) => Some(RkyvSupport::serialize(
+                &<R as RkyvSupport>::deserialize(row)?,
+            )),
             ArchivedMaybeRow::Tombstone => None,
         };
-        Ok(hash_partition(key, row.iter().map(|bytes| bytes.as_slice())))
+        Ok(hash_partition(
+            key,
+            row.iter().map(|bytes| bytes.as_slice()),
+        ))
     }
 
     /// Every resident partition of some tablets, as its key and archived bytes
@@ -1487,7 +1548,9 @@ where
             }
             let bytes = match entry {
                 MaybeLoaded::Loaded { partition, .. } => match &partition.row {
-                    MaybeRow::Row(_) => rkyv::to_bytes::<rkyv::rancor::Error>(partition).map(|bytes| bytes.to_vec()),
+                    MaybeRow::Row(_) => {
+                        rkyv::to_bytes::<rkyv::rancor::Error>(partition).map(|bytes| bytes.to_vec())
+                    }
                     MaybeRow::Tombstone => continue,
                 },
                 MaybeLoaded::Accessible(read) => match &read.archived().row {
@@ -1497,7 +1560,9 @@ where
             };
             match bytes {
                 Ok(bytes) => records.push((*key, bytes)),
-                Err(error) => event!(Level::WARN, msg = "a partition could not be serialized for a snapshot", key, %error),
+                Err(error) => {
+                    event!(Level::WARN, msg = "a partition could not be serialized for a snapshot", key, %error)
+                }
             }
         }
         records.sort_by_key(|(key, _)| *key);
@@ -1522,7 +1587,12 @@ where
             let tablet = crate::server::ring::Ring::tablet_of(key) as u16;
             tablets.contains(&tablet)
         };
-        let victims: Vec<u64> = self.partitions.keys().copied().filter(|key| owned(*key)).collect();
+        let victims: Vec<u64> = self
+            .partitions
+            .keys()
+            .copied()
+            .filter(|key| owned(*key))
+            .collect();
         for victim in &victims {
             if let Some(partition) = self.partitions.remove(victim) {
                 let size = partition.size();
@@ -1540,7 +1610,12 @@ where
             .filter(|key| owned(*key))
             .collect();
         self.stale.extend(in_flight);
-        event!(Level::INFO, msg = "evicted the resident partitions of installed tablets", evicted = victims.len(), stale = self.stale.len());
+        event!(
+            Level::INFO,
+            msg = "evicted the resident partitions of installed tablets",
+            evicted = victims.len(),
+            stale = self.stale.len()
+        );
     }
 
     /// Replace every resident partition of some tablets with a snapshot's records
@@ -1558,14 +1633,19 @@ where
     /// # Errors
     ///
     /// Fails if a record does not validate as a partition, before anything is replaced.
-    pub fn install_partitions(&mut self, tablets: &[u16], records: Vec<(u64, Vec<u8>)>) -> Result<(), ServerError> {
+    pub fn install_partitions(
+        &mut self,
+        tablets: &[u16],
+        records: Vec<(u64, Vec<u8>)>,
+    ) -> Result<(), ServerError> {
         // every record validated and deserialized first, so a bad file changes nothing
         let mut partitions = Vec::with_capacity(records.len());
         for (key, bytes) in records {
             let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
             aligned.extend_from_slice(&bytes);
             let archived = <UnsortedPartition<R> as RkyvSupport>::access(&aligned)?;
-            let partition: UnsortedPartition<R> = <UnsortedPartition<R> as RkyvSupport>::deserialize(archived)?;
+            let partition: UnsortedPartition<R> =
+                <UnsortedPartition<R> as RkyvSupport>::deserialize(archived)?;
             partitions.push((key, partition));
         }
         self.evict_tablets(tablets);
@@ -1576,7 +1656,13 @@ where
                 continue;
             }
             let size = crate::tables::partitions::PartitionSupport::size(&partition);
-            self.partitions.insert(key, MaybeLoaded::Loaded { partition, generation });
+            self.partitions.insert(
+                key,
+                MaybeLoaded::Loaded {
+                    partition,
+                    generation,
+                },
+            );
             *self.memory_usage.borrow_mut() += size;
         }
         Ok(())
@@ -1972,7 +2058,9 @@ where
     }
 
     /// Get the partition key for an intent that arrived as bytes, validating them first
-    fn partition_key_and_intent_checked(bytes: &[u8]) -> Result<(u64, UnsortedIntents<T>), ServerError>
+    fn partition_key_and_intent_checked(
+        bytes: &[u8],
+    ) -> Result<(u64, UnsortedIntents<T>), ServerError>
     where
         for<'a> ArchivedUnsortedIntents<T>: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,

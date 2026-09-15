@@ -261,22 +261,42 @@ pub fn generate(name: &str, seed: u64, params: &ScheduleParams, policy: Policy) 
         let candidates: Vec<(Category, u32)> = [
             (Category::Deliver, w.deliver, !enabled.deliver.is_empty()),
             (Category::Drop, w.drop, !enabled.deliver.is_empty()),
-            (Category::Duplicate, w.duplicate, !enabled.duplicate.is_empty()),
+            (
+                Category::Duplicate,
+                w.duplicate,
+                !enabled.duplicate.is_empty(),
+            ),
             (Category::Fsync, w.fsync, !enabled.fsync.is_empty()),
             (Category::Election, w.election, !enabled.election.is_empty()),
-            (Category::Heartbeat, w.heartbeat, !enabled.heartbeat.is_empty()),
+            (
+                Category::Heartbeat,
+                w.heartbeat,
+                !enabled.heartbeat.is_empty(),
+            ),
             (Category::Report, w.report, !enabled.report.is_empty()),
             (Category::Client, w.client, has_client),
             (Category::Read, w.read, !enabled.up.is_empty()),
-            (Category::StrongRead, w.strong_read, !enabled.heartbeat.is_empty()),
+            (
+                Category::StrongRead,
+                w.strong_read,
+                !enabled.heartbeat.is_empty(),
+            ),
             (Category::Retry, w.retry, !enabled.retry.is_empty()),
             (Category::Timeout, w.timeout, !enabled.timeout.is_empty()),
             (Category::Crash, w.crash, !enabled.crash.is_empty()),
             (Category::Restart, w.restart, !enabled.restart.is_empty()),
             (Category::Pause, w.pause, !enabled.pause.is_empty()),
             (Category::Resume, w.resume, !enabled.resume.is_empty()),
-            (Category::Checkpoint, w.checkpoint, !enabled.checkpoint.is_empty()),
-            (Category::MarkDown, w.mark_down, !enabled.mark_down.is_empty()),
+            (
+                Category::Checkpoint,
+                w.checkpoint,
+                !enabled.checkpoint.is_empty(),
+            ),
+            (
+                Category::MarkDown,
+                w.mark_down,
+                !enabled.mark_down.is_empty(),
+            ),
         ]
         .into_iter()
         .filter(|(_, weight, possible)| *possible && *weight > 0)
@@ -288,7 +308,9 @@ pub fn generate(name: &str, seed: u64, params: &ScheduleParams, policy: Policy) 
         let weights: Vec<u32> = candidates.iter().map(|(_, weight)| *weight).collect();
         let category = candidates[rng.weighted(&weights)].0;
         // a candidate within the category
-        let pick = |rng: &mut SplitMix64, events: &[Event]| events[rng.below(events.len() as u64) as usize].clone();
+        let pick = |rng: &mut SplitMix64, events: &[Event]| {
+            events[rng.below(events.len() as u64) as usize].clone()
+        };
         let event = match category {
             Category::Deliver => pick(&mut rng, &enabled.deliver),
             Category::Drop => {
@@ -391,7 +413,11 @@ fn client_op(rng: &mut SplitMix64, params: &ScheduleParams, enabled: &Enabled, o
         2 => MutationOp::Delete { key },
         _ => MutationOp::Cas {
             key,
-            expected: if rng.below(2) == 0 { None } else { Some(Value(1000 + rng.below(u64::from(op.max(1))) as u32)) },
+            expected: if rng.below(2) == 0 {
+                None
+            } else {
+                Some(Value(1000 + rng.below(u64::from(op.max(1))) as u32))
+            },
             value,
         },
     };
@@ -417,7 +443,13 @@ fn client_op(rng: &mut SplitMix64, params: &ScheduleParams, enabled: &Enabled, o
 /// * `enabled` - What the world allows
 /// * `op` - The operation number
 /// * `level` - The level to read at
-fn read_op(rng: &mut SplitMix64, params: &ScheduleParams, enabled: &Enabled, op: u32, level: ReadLevel) -> Event {
+fn read_op(
+    rng: &mut SplitMix64,
+    params: &ScheduleParams,
+    enabled: &Enabled,
+    op: u32,
+    level: ReadLevel,
+) -> Event {
     let key = Key(rng.below(u64::from(params.keys)) as u8);
     let tablet = params.tablets[rng.below(params.tablets.len() as u64) as usize];
     let target = enabled.up[rng.below(enabled.up.len() as u64) as usize];
@@ -444,7 +476,12 @@ fn read_op(rng: &mut SplitMix64, params: &ScheduleParams, enabled: &Enabled, op:
 /// * `params` - The topology and limits
 /// * `enabled` - What the world allows
 /// * `op` - The operation number
-fn strong_read_op(rng: &mut SplitMix64, params: &ScheduleParams, enabled: &Enabled, op: u32) -> Event {
+fn strong_read_op(
+    rng: &mut SplitMix64,
+    params: &ScheduleParams,
+    enabled: &Enabled,
+    op: u32,
+) -> Event {
     let key = Key(rng.below(u64::from(params.keys)) as u8);
     let leader = &enabled.heartbeat[rng.below(enabled.heartbeat.len() as u64) as usize];
     let (target, tablet) = match leader {
@@ -526,7 +563,10 @@ impl Builder {
             };
             self.event(Event::Deliver { msg });
             delivered += 1;
-            assert!(delivered < DELIVER_ALL_BOUND, "the cluster never went quiet");
+            assert!(
+                delivered < DELIVER_ALL_BOUND,
+                "the cluster never went quiet"
+            );
         }
         self
     }
@@ -594,7 +634,12 @@ impl Builder {
     /// * `tablet` - The tablet
     pub fn fsync(&mut self, node: NodeId, tablet: TabletId) -> &mut Self {
         while self.world.violation.is_none()
-            && !self.world.group(node, tablet).volatile.pending_fsync.is_empty()
+            && !self
+                .world
+                .group(node, tablet)
+                .volatile
+                .pending_fsync
+                .is_empty()
         {
             self.event(Event::StorageComplete { node, tablet });
         }
@@ -697,7 +742,12 @@ pub fn stale_report_schedule(prefix: u64, policy: Policy) -> Schedule {
     };
     let tablet = params.tablets[0];
     let (a, b, c) = (NodeId(1), NodeId(2), NodeId(3));
-    let name = format!("stale_report_b{}_c{}_ab{}", prefix + 1, prefix + 2, prefix + 3);
+    let name = format!(
+        "stale_report_b{}_c{}_ab{}",
+        prefix + 1,
+        prefix + 2,
+        prefix + 3
+    );
     let mut builder = Builder::new(&name, &params, policy);
     let key = Key(1);
     let value = |n: u64| Value(n as u32);
@@ -709,14 +759,30 @@ pub fn stale_report_schedule(prefix: u64, policy: Policy) -> Schedule {
     builder.deliver_all();
     // the shared prefix
     for n in 0..prefix {
-        builder.write(MutationOp::Cas { key, expected: None, value: value(n) }, tablet, a);
+        builder.write(
+            MutationOp::Cas {
+                key,
+                expected: None,
+                value: value(n),
+            },
+            tablet,
+            a,
+        );
         builder.replicate_fully(a, tablet);
     }
     // B says how far it is
     builder.event(Event::Report { node: b, tablet });
     builder.deliver_from_to(Actor::Node(b), Actor::Observer);
     // the next write reaches C and not B; C says how far it is
-    builder.write(MutationOp::Cas { key, expected: None, value: value(prefix) }, tablet, a);
+    builder.write(
+        MutationOp::Cas {
+            key,
+            expected: None,
+            value: value(prefix),
+        },
+        tablet,
+        a,
+    );
     builder.deliver_from_to(Actor::Node(a), Actor::Node(c));
     builder.drop_from_to(Actor::Node(a), Actor::Node(b));
     builder.fsync(c, tablet);
@@ -725,7 +791,15 @@ pub fn stale_report_schedule(prefix: u64, policy: Policy) -> Schedule {
     builder.event(Event::Report { node: c, tablet });
     builder.deliver_from_to(Actor::Node(c), Actor::Observer);
     // the write after reaches B and not C, and A and B commit it
-    builder.write(MutationOp::Cas { key, expected: None, value: value(prefix + 1) }, tablet, a);
+    builder.write(
+        MutationOp::Cas {
+            key,
+            expected: None,
+            value: value(prefix + 1),
+        },
+        tablet,
+        a,
+    );
     builder.deliver_from_to(Actor::Node(a), Actor::Node(b));
     builder.drop_from_to(Actor::Node(a), Actor::Node(c));
     builder.fsync(b, tablet);

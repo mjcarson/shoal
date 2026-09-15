@@ -37,9 +37,9 @@ use openraft::type_config::alias::{SnapshotMetaOf, SnapshotOf, StoredMembershipO
 use openraft::{OptionalSend, Snapshot, SnapshotMeta, StoredMembership};
 
 use super::digest::{DigestAnswer, KEPT_REPORTS};
-use crate::server::control::repair::Quarantine;
 use super::snapshot::SnapshotManifest;
 use super::types::{DataConfig, Remembered};
+use crate::server::control::repair::Quarantine;
 use crate::server::database::ShoalDatabase;
 use crate::server::messages::ServerMsg;
 use crate::server::wal::WalLogId;
@@ -151,7 +151,9 @@ pub fn identity_ms(request: &RequestId) -> Option<u64> {
     // a version 7 identity's first forty-eight bits are the millisecond it was minted at,
     // read as they are rather than through a conversion that rounds its sub-millisecond bits
     let bytes = request.bundle;
-    Some(u64::from_be_bytes([0, 0, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]]))
+    Some(u64::from_be_bytes([
+        0, 0, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+    ]))
 }
 
 impl MachineState {
@@ -169,7 +171,8 @@ impl MachineState {
         seed: Vec<(RequestId, Remembered)>,
     ) -> Self {
         // the seed is put oldest first, so the newest is what the bound keeps longest
-        let mut dedup = LruCache::new(NonZeroUsize::new(REMEMBERED_REQUESTS).expect("a positive bound"));
+        let mut dedup =
+            LruCache::new(NonZeroUsize::new(REMEMBERED_REQUESTS).expect("a positive bound"));
         for (request, remembered) in seed {
             dedup.put(request, remembered);
         }
@@ -203,7 +206,13 @@ impl MachineState {
         self.memberships.push_back(membership);
         // what the checkpoint already covers is never asked for again
         let checkpoint = self.checkpoint_index();
-        while self.memberships.len() > 1 && self.memberships.front().is_some_and(|kept| kept.log_id().as_ref().is_some_and(|log_id| log_id.index <= checkpoint)) {
+        while self.memberships.len() > 1
+            && self.memberships.front().is_some_and(|kept| {
+                kept.log_id()
+                    .as_ref()
+                    .is_some_and(|log_id| log_id.index <= checkpoint)
+            })
+        {
             self.memberships.pop_front();
         }
     }
@@ -222,7 +231,12 @@ impl MachineState {
         self.memberships
             .iter()
             .rev()
-            .find(|membership| membership.log_id().as_ref().is_none_or(|log_id| log_id.index <= index))
+            .find(|membership| {
+                membership
+                    .log_id()
+                    .as_ref()
+                    .is_none_or(|log_id| log_id.index <= index)
+            })
             .cloned()
             .unwrap_or_else(|| self.checkpoint_membership.clone())
     }
@@ -267,7 +281,8 @@ impl MachineState {
     /// Whether the checkpoint is held where it is for a repair stream
     #[must_use]
     pub fn checkpoint_held(&self) -> bool {
-        self.hold_checkpoint_until.is_some_and(|until| std::time::Instant::now() < until)
+        self.hold_checkpoint_until
+            .is_some_and(|until| std::time::Instant::now() < until)
     }
 
     /// Note that a scrub was applied and its digest is on its way
@@ -342,7 +357,11 @@ impl MachineState {
     /// would be applied as new. Recorded with the checkpoint for M9a's expiry check.
     #[must_use]
     pub fn retry_floor(&self) -> u64 {
-        self.dedup.iter().map(|(_, remembered)| remembered.applied).min().unwrap_or(0)
+        self.dedup
+            .iter()
+            .map(|(_, remembered)| remembered.applied)
+            .min()
+            .unwrap_or(0)
     }
 
     /// The index the loop has applied, or zero
@@ -388,7 +407,11 @@ impl<D: ShoalDatabase> GroupMachine<D> {
     /// * `state` - The state the loop shares
     /// * `tx` - The loop's channel
     #[must_use]
-    pub fn new(group: GroupId, state: Rc<RefCell<MachineState>>, tx: AsyncSender<ServerMsg<D>>) -> Self {
+    pub fn new(
+        group: GroupId,
+        state: Rc<RefCell<MachineState>>,
+        tx: AsyncSender<ServerMsg<D>>,
+    ) -> Self {
         GroupMachine { group, state, tx }
     }
 
@@ -446,7 +469,9 @@ impl<D: ShoalDatabase> RaftStateMachine<DataConfig> for GroupMachine<D> {
     type SnapshotBuilder = GroupMachine<D>;
 
     /// What the loop has applied, and the membership as of then
-    async fn applied_state(&mut self) -> Result<(Option<WalLogId>, StoredMembershipOf<DataConfig>), io::Error> {
+    async fn applied_state(
+        &mut self,
+    ) -> Result<(Option<WalLogId>, StoredMembershipOf<DataConfig>), io::Error> {
         let state = self.state.borrow();
         Ok((state.applied.clone(), state.membership.clone()))
     }
@@ -527,7 +552,9 @@ impl<D: ShoalDatabase> RaftStateMachine<DataConfig> for GroupMachine<D> {
     }
 
     /// The snapshot at the checkpoint, once there is one, or a received file waiting past it
-    async fn get_current_snapshot(&mut self) -> Result<Option<SnapshotOf<DataConfig, SnapshotData>>, io::Error> {
+    async fn get_current_snapshot(
+        &mut self,
+    ) -> Result<Option<SnapshotOf<DataConfig, SnapshotData>>, io::Error> {
         let (built, pending) = {
             let state = self.state.borrow();
             (state.snapshot_at.is_some(), state.pending_install.is_some())
@@ -555,7 +582,11 @@ mod tests {
     /// * `ms` - Milliseconds since the epoch
     /// * `index` - The write's index in its bundle
     fn minted_at(ms: u64, index: u64) -> RequestId {
-        let timestamp = uuid::Timestamp::from_unix(uuid::NoContext, ms / 1000, u32::try_from((ms % 1000) * 1_000_000).unwrap_or(0));
+        let timestamp = uuid::Timestamp::from_unix(
+            uuid::NoContext,
+            ms / 1000,
+            u32::try_from((ms % 1000) * 1_000_000).unwrap_or(0),
+        );
         RequestId {
             bundle: *uuid::Uuid::new_v7(timestamp).as_bytes(),
             index,
@@ -600,7 +631,11 @@ mod tests {
             state.remember(minted_at(now - 100_000 + at, at), remembered(at));
         }
         assert_eq!(state.dedup.len(), REMEMBERED_REQUESTS);
-        assert_eq!(state.expired_before, now - 100_000, "the oldest identity's time is the watermark");
+        assert_eq!(
+            state.expired_before,
+            now - 100_000,
+            "the oldest identity's time is the watermark"
+        );
         // an unknown identity minted before the watermark is expired even inside the window
         assert!(state.is_expired(&minted_at(now - 100_001, 7), now, window));
         assert!(!state.is_expired(&minted_at(now - 99_000, 7), now, window));
@@ -612,12 +647,19 @@ mod tests {
             mixed.remember(minted_at(now + at, at), remembered(at));
         }
         assert_eq!(mixed.dedup.len(), REMEMBERED_REQUESTS);
-        assert!(mixed.dedup.peek(&random).is_none(), "the random identity was kept");
+        assert!(
+            mixed.dedup.peek(&random).is_none(),
+            "the random identity was kept"
+        );
         assert_eq!(mixed.expired_before, 0);
         // the checkpoint carries the watermark, and a file without it seeds zero
-        let checkpoint = GroupCheckpoint::new(None, &no_membership()).expired_before(state.expired_before);
+        let checkpoint =
+            GroupCheckpoint::new(None, &no_membership()).expired_before(state.expired_before);
         assert_eq!(checkpoint.expired_before, now - 100_000);
-        let without: GroupCheckpoint = serde_json::from_str("{\"applied\":null,\"membership_at\":null,\"configs\":[],\"members\":[]}").expect("an old file decodes");
+        let without: GroupCheckpoint = serde_json::from_str(
+            "{\"applied\":null,\"membership_at\":null,\"configs\":[],\"members\":[]}",
+        )
+        .expect("an old file decodes");
         assert_eq!(without.expired_before, 0);
     }
 }

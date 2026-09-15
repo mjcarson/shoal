@@ -198,10 +198,11 @@ fn curves(
     // one entry per series, each sorted along the x axis so the line is drawn left to right
     let mut grouped: BTreeMap<u64, Vec<(f64, f64, bool)>> = BTreeMap::new();
     for point in points {
-        grouped
-            .entry(series_of(point))
-            .or_default()
-            .push((x_of(point), y_of(point), point.separated));
+        grouped.entry(series_of(point)).or_default().push((
+            x_of(point),
+            y_of(point),
+            point.separated,
+        ));
     }
     let mut out: Vec<(u64, Vec<(f64, f64, bool)>)> = grouped.into_iter().collect();
     for (_, series) in &mut out {
@@ -312,12 +313,18 @@ fn draw_overhead(
                 colour.stroke_width(2),
             ))?;
             // a filled marker is a result, a hollow one is a pair whose intervals overlapped
-            chart.draw_series(curve.iter().filter(|(_, _, ok)| *ok).map(|(x, y, _)| {
-                Circle::new((*x, *y), 3, colour.filled())
-            }))?;
-            chart.draw_series(curve.iter().filter(|(_, _, ok)| !*ok).map(|(x, y, _)| {
-                Circle::new((*x, *y), 3, colour.stroke_width(1))
-            }))?;
+            chart.draw_series(
+                curve
+                    .iter()
+                    .filter(|(_, _, ok)| *ok)
+                    .map(|(x, y, _)| Circle::new((*x, *y), 3, colour.filled())),
+            )?;
+            chart.draw_series(
+                curve
+                    .iter()
+                    .filter(|(_, _, ok)| !*ok)
+                    .map(|(x, y, _)| Circle::new((*x, *y), 3, colour.stroke_width(1))),
+            )?;
         }
         // a note when some pairs were not separated, so the chart cannot look more certain than
         // the data is
@@ -520,7 +527,10 @@ pub fn draw_absolute(capture: &MacroCaptureV2) -> Result<String> {
             .draw()?;
         for (index, (_, curve)) in lines.iter().enumerate() {
             let colour = palette::series(index);
-            chart.draw_series(LineSeries::new(curve.iter().copied(), colour.stroke_width(2)))?;
+            chart.draw_series(LineSeries::new(
+                curve.iter().copied(),
+                colour.stroke_width(2),
+            ))?;
             chart.draw_series(
                 curve
                     .iter()
@@ -650,7 +660,10 @@ mod tests {
     #[test]
     /// An arm is paired with its twin on the facts rather than on its name
     fn a_pair_is_joined_on_its_facts() {
-        let points = pairs(&capture_with(&[100, 100, 100], &[200, 200, 200]), DEPTH_SWEEP);
+        let points = pairs(
+            &capture_with(&[100, 100, 100], &[200, 200, 200]),
+            DEPTH_SWEEP,
+        );
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].row_bytes, 256);
         assert_eq!(points[0].plain_ns, 100.0);
@@ -672,11 +685,17 @@ mod tests {
     /// This is the macro layer's own rule, and it is what stops a curve being drawn through noise.
     fn overlapping_intervals_are_not_separated() {
         // the two sets of runs interleave, so neither is reliably faster
-        let points = pairs(&capture_with(&[100, 150, 300], &[120, 200, 280]), DEPTH_SWEEP);
+        let points = pairs(
+            &capture_with(&[100, 150, 300], &[120, 200, 280]),
+            DEPTH_SWEEP,
+        );
         assert_eq!(points.len(), 1);
         assert!(!points[0].separated);
         // and one where they do not overlap at all
-        let points = pairs(&capture_with(&[100, 110, 120], &[200, 210, 220]), DEPTH_SWEEP);
+        let points = pairs(
+            &capture_with(&[100, 110, 120], &[200, 210, 220]),
+            DEPTH_SWEEP,
+        );
         assert!(points[0].separated);
     }
 
@@ -712,8 +731,14 @@ mod tests {
     fn the_overhead_chart_is_drawn_in_nanoseconds() {
         let capture = capture_with(&[100, 110, 120], &[300, 310, 320]);
         let svg = draw_by_row(&capture).expect("it draws");
-        assert!(svg.contains("what TLS added"), "the axis is not the added cost");
-        assert!(!svg.contains("TLS cost over plaintext"), "the percentage axis survived");
+        assert!(
+            svg.contains("what TLS added"),
+            "the axis is not the added cost"
+        );
+        assert!(
+            !svg.contains("TLS cost over plaintext"),
+            "the percentage axis survived"
+        );
         // 200 ns of overhead, written the way every other duration on the page is
         assert!(svg.contains(" ns"), "no duration was written on the axis");
         assert!(!svg.contains('%'), "a percentage was written anyway");
@@ -740,7 +765,12 @@ mod tests {
             arm(256, 8, 1, true, &[500, 510, 520]),
         );
         let svg = draw_absolute(&capture).expect("it draws");
-        for name in ["1 deep, plaintext", "1 deep, TLS", "8 deep, plaintext", "8 deep, TLS"] {
+        for name in [
+            "1 deep, plaintext",
+            "1 deep, TLS",
+            "8 deep, plaintext",
+            "8 deep, TLS",
+        ] {
             assert!(svg.contains(name), "{name} is not on the chart");
         }
     }

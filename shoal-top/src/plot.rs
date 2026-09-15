@@ -264,7 +264,10 @@ fn draw_lines(
         // is - so two captures of one curve are one colour and one marker in two dash patterns,
         // which is the comparison the explorer exists to make
         let color = theme::series(palette, line.hue as usize);
-        let at = captures.iter().position(|at| *at == line.capture).unwrap_or_default();
+        let at = captures
+            .iter()
+            .position(|at| *at == line.capture)
+            .unwrap_or_default();
         let (style, marker) = stroke_of(axis, at, line.mark as usize);
         // split into runs of consecutive measurements, which is what puts a gap where a capture
         // never measured this workload
@@ -355,9 +358,7 @@ fn draw_bars(
         // dash and marker does not apply: a bar has neither of the other two channels, so two
         // captures of one curve drawn in one hue would be two adjacent bars of the same colour with
         // nothing at all to tell them apart
-        plot_ui.bar_chart(
-            BarChart::new(line.name.clone(), bars).color(theme::series(palette, at)),
-        );
+        plot_ui.bar_chart(BarChart::new(line.name.clone(), bars).color(theme::series(palette, at)));
     }
 }
 
@@ -415,11 +416,7 @@ fn log_of(value: f64) -> f64 {
     // zero and negative values have no logarithm. returning the non finite result rather than
     // clamping is deliberate: `runs` breaks the line there instead of drawing a floor that would
     // read as a measurement
-    if value > 0.0 {
-        value.log10()
-    } else {
-        f64::NAN
-    }
+    if value > 0.0 { value.log10() } else { f64::NAN }
 }
 
 /// The captures being drawn, in the order they first appear among the series

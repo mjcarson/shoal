@@ -153,7 +153,9 @@ impl fmt::Display for TableId {
 /// a shard is the unit that owns a WAL and applies a command, and a group's members are the
 /// shards that hold copies of its tablets. `Display` renders `node/shard`, which is what a
 /// consensus library's log lines and a fixture's digests print.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub struct ShardAddr {
     /// The node
     pub node: NodeId,
@@ -234,7 +236,9 @@ pub const GROUP_ID_SEED: i64 = 0;
 /// the subsequence of it that names the tablet ([F40](../../../docs/src/features/replication.md)).
 /// The identity is the hash of the table and the address list, so every node computes the same
 /// one from the same map without agreeing about anything first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct GroupId(pub u64);
 
@@ -280,7 +284,10 @@ mod tests {
         assert_eq!(GroupId::of(table, &[a, b]), GroupId::of(table, &[a, b]));
         // a different order, table or member is a different group
         assert_ne!(GroupId::of(table, &[a, b]), GroupId::of(table, &[b, a]));
-        assert_ne!(GroupId::of(table, &[a, b]), GroupId::of(TableId::of("Note"), &[a, b]));
+        assert_ne!(
+            GroupId::of(table, &[a, b]),
+            GroupId::of(TableId::of("Note"), &[a, b])
+        );
         assert_ne!(GroupId::of(table, &[a, b]), GroupId::of(table, &[a]));
         // an integer address is the integer node on shard zero
         assert_eq!(ShardAddr::from(7), ShardAddr::new(NodeId::from(7), 0));

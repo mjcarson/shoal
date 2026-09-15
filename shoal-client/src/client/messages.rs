@@ -122,9 +122,11 @@ impl SendOptions {
             level: self.read,
             // the wire carries milliseconds; a deadline under one is sent as one rather than
             // as zero, which would mean the server's default
-            deadline_ms: self
-                .deadline
-                .map_or(0, |deadline| u32::try_from(deadline.as_millis()).unwrap_or(u32::MAX).max(1)),
+            deadline_ms: self.deadline.map_or(0, |deadline| {
+                u32::try_from(deadline.as_millis())
+                    .unwrap_or(u32::MAX)
+                    .max(1)
+            }),
             tokens: self.tokens.clone(),
         }
     }

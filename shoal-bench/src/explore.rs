@@ -73,11 +73,7 @@ pub fn run_explore(store: &Store, args: &ExploreArgs) -> Result<i32> {
     let measured = index
         .captures
         .iter()
-        .filter(|capture| {
-            capture
-                .layers
-                .contains(&shoal_top::index::Layer::Macro)
-        })
+        .filter(|capture| capture.layers.contains(&shoal_top::index::Layer::Macro))
         .count();
     println!(
         "{} captures, {} of them with a macro layer, {} workloads, {} measurements",
@@ -91,8 +87,7 @@ pub fn run_explore(store: &Store, args: &ExploreArgs) -> Result<i32> {
         .out
         .clone()
         .unwrap_or_else(|| store.root().join(DEFAULT_OUT));
-    std::fs::create_dir_all(&out)
-        .with_context(|| format!("creating {}", out.display()))?;
+    std::fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
     let index_path = out.join("index.json");
     crate::store::write_json(&index_path, &index)?;
     println!("wrote {}", index_path.display());
@@ -114,8 +109,8 @@ pub fn run_explore(store: &Store, args: &ExploreArgs) -> Result<i32> {
 fn open_window(index_path: &PathBuf) -> Result<i32> {
     // a native window needs a display, and a benchmark machine reached over SSH has none. winit
     // would panic several frames in; saying so here gives somebody the flag that does work
-    let headless = std::env::var_os("DISPLAY").is_none()
-        && std::env::var_os("WAYLAND_DISPLAY").is_none();
+    let headless =
+        std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none();
     if headless {
         eprintln!(
             "This machine has no display, so there is no window to open.\n\n\

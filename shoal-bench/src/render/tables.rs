@@ -84,9 +84,7 @@ pub fn macro_summary(captures: &[(String, MacroCaptureV2)]) -> String {
             "Rows/sec",
             "Rows",
         ],
-        &[
-            "---", "---", "---", "---:", "---:", "---:", "---:", "---:",
-        ],
+        &["---", "---", "---", "---:", "---:", "---:", "---:", "---:"],
         &rows,
     )
 }
@@ -143,9 +141,7 @@ pub fn encryption(depth: &[Point], clients: &[Point]) -> String {
         .chain(clients.iter().map(|point| ("clients", point)))
         .collect();
     // sorted explicitly, because the page has to render the same bytes twice
-    ordered.sort_by_key(|(sweep, point)| {
-        (*sweep, point.row_bytes, point.depth, point.clients)
-    });
+    ordered.sort_by_key(|(sweep, point)| (*sweep, point.row_bytes, point.depth, point.clients));
     for (sweep, point) in ordered {
         rows.push(vec![
             sweep.to_string(),
@@ -168,7 +164,14 @@ pub fn encryption(depth: &[Point], clients: &[Point]) -> String {
     }
     table(
         &[
-            "Sweep", "Row", "Depth", "Clients", "Plaintext p50", "TLS p50", "Overhead", "Verdict",
+            "Sweep",
+            "Row",
+            "Depth",
+            "Clients",
+            "Plaintext p50",
+            "TLS p50",
+            "Overhead",
+            "Verdict",
         ],
         &["---", "---:", "---:", "---:", "---:", "---:", "---:", "---"],
         &rows,
@@ -321,7 +324,13 @@ pub fn stage_ranks(report: &StageReport, op: &str, top: usize) -> Option<String>
         })
         .collect();
     Some(table(
-        &["Rank", "Total", "Queries", "Where the time went", "Unaccounted"],
+        &[
+            "Rank",
+            "Total",
+            "Queries",
+            "Where the time went",
+            "Unaccounted",
+        ],
         &["---", "---:", "---:", "---", "---:"],
         &rows,
     ))
@@ -367,7 +376,13 @@ pub fn noise_buckets(groups: &[(String, Vec<(f64, f64)>)]) -> String {
         }
     }
     table(
-        &["Repeat set", "Benchmark duration", "Benchmarks", "Median spread", "Worst spread"],
+        &[
+            "Repeat set",
+            "Benchmark duration",
+            "Benchmarks",
+            "Median spread",
+            "Worst spread",
+        ],
         &["---", "---", "---:", "---:", "---:"],
         &rows,
     )
@@ -727,7 +742,10 @@ pub fn fanout(curve: &[Arm<'_>]) -> String {
             .rsplit_once('/')
             .and_then(|(_, tail)| tail.parse::<u64>().ok())
             .unwrap_or(0);
-        (arm.id.rsplit_once('/').map(|(head, _)| head.to_string()), keys)
+        (
+            arm.id.rsplit_once('/').map(|(head, _)| head.to_string()),
+            keys,
+        )
     });
     let rows: Vec<Vec<String>> = sorted
         .iter()
@@ -784,7 +802,14 @@ pub fn transport(modes: &[Arm<'_>]) -> String {
         })
         .collect();
     table(
-        &["Workload", "Row", "Depth", "Wall clock", "get p50", "get p99"],
+        &[
+            "Workload",
+            "Row",
+            "Depth",
+            "Wall clock",
+            "get p50",
+            "get p99",
+        ],
         &["---", "---:", "---:", "---:", "---:", "---:"],
         &rows,
     )
@@ -825,7 +850,14 @@ pub fn control_pairs(capture: &MacroCaptureV2, pairs: &[(&str, &str, &str)]) -> 
         return String::new();
     }
     table(
-        &["Workload", "Control", "What the pair is", "Wall clock", "Control's", "Ratio"],
+        &[
+            "Workload",
+            "Control",
+            "What the pair is",
+            "Wall clock",
+            "Control's",
+            "Ratio",
+        ],
         &["---", "---", "---", "---:", "---:", "---:"],
         &rows,
     )

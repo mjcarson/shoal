@@ -23,7 +23,17 @@ use crate::store::Store;
 /// cheapest and most repeatable measurement to the most expensive and least, which is also the
 /// order they should be read in when judging a change.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, clap::ValueEnum,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    clap::ValueEnum,
 )]
 #[serde(rename_all = "lowercase")]
 #[clap(rename_all = "lowercase")]
@@ -637,16 +647,17 @@ mod tests {
             for id in profiled_for(layer) {
                 let instrumented = instrumented_id(layer, id);
                 assert!(
-                    registry.entries().iter().any(|entry| entry.id == instrumented),
+                    registry
+                        .entries()
+                        .iter()
+                        .any(|entry| entry.id == instrumented),
                     "{instrumented} is missing from the registry"
                 );
             }
         }
         assert_eq!(
             registry.len(),
-            6 + crate::workload_ids::IDS.len()
-                + PROFILED_WORKLOADS.len()
-                + STAGED_WORKLOADS.len()
+            6 + crate::workload_ids::IDS.len() + PROFILED_WORKLOADS.len() + STAGED_WORKLOADS.len()
         );
     }
 
@@ -700,9 +711,7 @@ mod tests {
     #[test]
     fn filters_are_combined_with_or() {
         let registry = registry();
-        let picked = registry
-            .select(&filters(&["seek_bytes"]))
-            .expect("selects");
+        let picked = registry.select(&filters(&["seek_bytes"])).expect("selects");
         assert_eq!(picked.len(), 1);
     }
 
@@ -749,7 +758,11 @@ mod tests {
         };
         let picked = registry.select(&by_group).expect("selects");
         assert!(picked.len() > 1);
-        assert!(picked.iter().all(|entry| entry.id.starts_with("macro/conf/storage/")));
+        assert!(
+            picked
+                .iter()
+                .all(|entry| entry.id.starts_with("macro/conf/storage/"))
+        );
         // and narrowing it with a substring intersects rather than widening it back out
         let narrowed = Selection {
             filters: vec!["durability".to_string()],
@@ -759,9 +772,7 @@ mod tests {
         };
         let picked = registry.select(&narrowed).expect("selects");
         assert!(
-            picked
-                .iter()
-                .all(|entry| entry.id.contains("durability")),
+            picked.iter().all(|entry| entry.id.contains("durability")),
             "{picked:?}"
         );
         assert_eq!(picked.len(), 2);
@@ -778,8 +789,16 @@ mod tests {
             groups: vec!["conf/storage".to_string(), "fanout".to_string()],
         };
         let picked = registry.select(&selection).expect("selects");
-        assert!(picked.iter().any(|entry| entry.id.starts_with("macro/conf/storage/")));
-        assert!(picked.iter().any(|entry| entry.id.starts_with("macro/fanout/")));
+        assert!(
+            picked
+                .iter()
+                .any(|entry| entry.id.starts_with("macro/conf/storage/"))
+        );
+        assert!(
+            picked
+                .iter()
+                .any(|entry| entry.id.starts_with("macro/fanout/"))
+        );
     }
 
     /// A group that does not exist is an error, and names the ones that do

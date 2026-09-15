@@ -6,3 +6,9 @@
 # already existing elements were commented out
 
 #/target
+
+# the milestone working plans at the root and the compiler's crash dumps stay out of history;
+# the F pages under docs/src/features/ are the record the plans were written into
+/m*.plan
+/m*.md
+/rustc-ice-*.txt

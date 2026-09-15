@@ -97,10 +97,7 @@ impl CodeVerdict {
     /// Whether this verdict means the capture still describes the current code
     pub fn is_current(&self) -> bool {
         // being behind is fine as long as nothing this layer measures moved
-        matches!(
-            self,
-            CodeVerdict::Fresh | CodeVerdict::Unaffected { .. }
-        )
+        matches!(self, CodeVerdict::Fresh | CodeVerdict::Unaffected { .. })
     }
 }
 
@@ -251,9 +248,7 @@ pub fn env_verdict(meta: Option<&CaptureMeta>, now: &Fingerprint) -> EnvVerdict 
     if meta.env.rustc != now.env.rustc {
         fields.push("rustc".to_string());
     }
-    if meta.env.rustflags != now.env.rustflags
-        || meta.env.rustflags_env != now.env.rustflags_env
-    {
+    if meta.env.rustflags != now.env.rustflags || meta.env.rustflags_env != now.env.rustflags_env {
         fields.push("rustflags".to_string());
     }
     // a digest that differs with no field to point at means one of the recorded strings moved in
@@ -350,7 +345,10 @@ pub fn run_status(store: &Store, args: &StatusArgs) -> Result<i32> {
                 now.env.cpu_model
             );
             println!();
-            println!("{:<20} {:<22} {:<8} {}", "capture", "captured", "layer", "verdict");
+            println!(
+                "{:<20} {:<22} {:<8} {}",
+                "capture", "captured", "layer", "verdict"
+            );
             for report in &reports {
                 for (layer, verdict) in &report.code {
                     println!(

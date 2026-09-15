@@ -31,8 +31,14 @@ impl Observer {
     /// * `msg` - The report
     /// * `all` - Every node, to tell about a changed up list
     pub fn on_report(&mut self, msg: &Message, all: &[NodeId]) -> Vec<Output> {
-        let (Actor::Node(from), Body::ProgressReport { last_index, last_term, leader }) =
-            (msg.from, &msg.body)
+        let (
+            Actor::Node(from),
+            Body::ProgressReport {
+                last_index,
+                last_term,
+                leader,
+            },
+        ) = (msg.from, &msg.body)
         else {
             return Vec::new();
         };
@@ -161,7 +167,13 @@ mod tests {
             observer.on_report(&report(node, index, leader), &all);
         }
         let out = observer.on_mark_down(NodeId(1), &Policy::safe(), &all, &[T]);
-        assert!(out.iter().all(|o| matches!(o, Output::Send(Message { body: Body::UpList { .. }, .. }))));
+        assert!(out.iter().all(|o| matches!(
+            o,
+            Output::Send(Message {
+                body: Body::UpList { .. },
+                ..
+            })
+        )));
         assert_eq!(observer.up.len(), 2);
     }
 
@@ -178,7 +190,11 @@ mod tests {
         let promoted: Vec<_> = out
             .iter()
             .filter_map(|o| match o {
-                Output::Send(Message { to: Actor::Node(node), body: Body::Promote { term }, .. }) => Some((*node, *term)),
+                Output::Send(Message {
+                    to: Actor::Node(node),
+                    body: Body::Promote { term },
+                    ..
+                }) => Some((*node, *term)),
                 _ => None,
             })
             .collect();

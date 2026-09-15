@@ -59,7 +59,10 @@ pub struct PartitionDigest {
 ///
 /// * `key` - The partition key
 /// * `rows` - Every live row's serialized bytes, in canonical order
-pub fn hash_partition<'a, I: IntoIterator<Item = &'a [u8]>>(key: u64, rows: I) -> Option<PartitionDigest> {
+pub fn hash_partition<'a, I: IntoIterator<Item = &'a [u8]>>(
+    key: u64,
+    rows: I,
+) -> Option<PartitionDigest> {
     // fold the key first, then every row as it comes, counting them
     let mut hasher = gxhash::GxHasher::with_seed(CANONICAL_SEED);
     hasher.write_u64(key);
@@ -96,7 +99,11 @@ pub fn hash_partition<'a, I: IntoIterator<Item = &'a [u8]>>(key: u64, rows: I) -
 /// * `tablets` - The tablets the group serves
 /// * `partitions` - Every live partition's digest, by key
 #[must_use]
-pub fn fold_group(schema_id: u64, tablets: &[u16], partitions: &BTreeMap<u64, PartitionDigest>) -> (u64, u64, u64) {
+pub fn fold_group(
+    schema_id: u64,
+    tablets: &[u16],
+    partitions: &BTreeMap<u64, PartitionDigest>,
+) -> (u64, u64, u64) {
     // the prefix: what the digest is of
     let mut hasher = gxhash::GxHasher::with_seed(CANONICAL_SEED);
     hasher.write_u64(schema_id);
@@ -188,7 +195,11 @@ impl ArchivedCut {
     /// * `entries` - The records, in key order
     /// * `handles` - An open handle per distinct archive the records are in
     #[must_use]
-    pub fn new(map: Arc<ArchiveMap>, entries: Vec<ArchiveEntry>, handles: HashMap<Uuid, DmaFile>) -> Self {
+    pub fn new(
+        map: Arc<ArchiveMap>,
+        entries: Vec<ArchiveEntry>,
+        handles: HashMap<Uuid, DmaFile>,
+    ) -> Self {
         ArchivedCut {
             entries,
             handles,
@@ -238,7 +249,12 @@ impl PendingDigest {
     /// * `schema_id` - The structural fingerprint of the schema
     /// * `tablets` - The tablets the group serves
     /// * `boundary` - The index the scrub was applied at
-    pub async fn finish(self, schema_id: u64, tablets: &[u16], boundary: u64) -> Result<DigestReport, ServerError> {
+    pub async fn finish(
+        self,
+        schema_id: u64,
+        tablets: &[u16],
+        boundary: u64,
+    ) -> Result<DigestReport, ServerError> {
         let PendingDigest {
             mut resident,
             archived,
@@ -246,7 +262,10 @@ impl PendingDigest {
         } = self;
         let mut checksum_failures = 0u64;
         let mut bytes = 0u64;
-        let unverified_before = archived.map.as_ref().map_or(0, |map| map.integrity.unverified_reads.get());
+        let unverified_before = archived
+            .map
+            .as_ref()
+            .map_or(0, |map| map.integrity.unverified_reads.get());
         // every archived record, through the handle collected for its archive
         for entry in &archived.entries {
             let Some(map) = archived.map.as_ref() else {
@@ -267,7 +286,11 @@ impl PendingDigest {
                 }
                 // a corrupt record is what the scrub exists to find: counted, and the
                 // digest goes on over what could be read
-                Err(ServerError::Shoal(ShoalError::CorruptArchive { archive, partition_id, .. })) => {
+                Err(ServerError::Shoal(ShoalError::CorruptArchive {
+                    archive,
+                    partition_id,
+                    ..
+                })) => {
                     checksum_failures += 1;
                     event!(Level::ERROR, msg = "a scrub found a corrupt record", archive = %archive, partition = format!("{partition_id:016x}"));
                 }
@@ -316,7 +339,10 @@ mod tests {
         let rows_b: Vec<&[u8]> = vec![b"gamma"];
         // a partition hashed twice from the same rows is one digest, whatever held them
         let a = hash_partition(1, rows_a.iter().copied()).expect("live rows");
-        assert_eq!(a, hash_partition(1, rows_a.iter().copied()).expect("live rows"));
+        assert_eq!(
+            a,
+            hash_partition(1, rows_a.iter().copied()).expect("live rows")
+        );
         let b = hash_partition(2, rows_b.iter().copied()).expect("live rows");
         // the rows in another order are a different partition: order is the caller's to make canonical
         let reversed: Vec<&[u8]> = rows_a.iter().rev().copied().collect();
@@ -354,7 +380,10 @@ mod tests {
         } else {
             erased.remove(&2);
         }
-        assert_eq!(fold_group(0xfeed, &tablets, &erased).0, fold_group(0xfeed, &tablets, &missing).0);
+        assert_eq!(
+            fold_group(0xfeed, &tablets, &erased).0,
+            fold_group(0xfeed, &tablets, &missing).0
+        );
         // another schema or another placement never agrees by accident
         assert_ne!(folded.0, fold_group(0xbeef, &tablets, &forward).0);
         assert_ne!(folded.0, fold_group(0xfeed, &[0u16, 1], &forward).0);

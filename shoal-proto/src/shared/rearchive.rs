@@ -242,7 +242,11 @@ where
 /// * `archived` - The archived vector being written back out
 /// * `resolver` - What serializing its elements produced
 /// * `out` - Where the vector belongs
-pub fn resolve_vec<A>(archived: &ArchivedVec<A>, resolver: VecResolver, out: Place<ArchivedVec<A>>) {
+pub fn resolve_vec<A>(
+    archived: &ArchivedVec<A>,
+    resolver: VecResolver,
+    out: Place<ArchivedVec<A>>,
+) {
     // a vector is a relative pointer and a length, and the length is all that is read here
     ArchivedVec::resolve_from_len(archived.len(), resolver, out);
 }
@@ -267,7 +271,8 @@ pub fn serialize_via_owned<T, S>(
 ) -> Result<OwnedResolver<T>, S::Error>
 where
     T: Archive + Serialize<S>,
-    <T as Archive>::Archived: Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
+    <T as Archive>::Archived:
+        Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
     S: Fallible + ?Sized,
     S::Error: Source,
 {
@@ -286,7 +291,10 @@ where
 ///
 /// * `resolver` - The materialized field and what serializing it produced
 /// * `out` - Where the archived field belongs
-pub fn resolve_via_owned<T: Archive>(resolver: OwnedResolver<T>, out: Place<<T as Archive>::Archived>) {
+pub fn resolve_via_owned<T: Archive>(
+    resolver: OwnedResolver<T>,
+    out: Place<<T as Archive>::Archived>,
+) {
     // take the value back out of the resolver that kept it alive for this
     let OwnedResolver { owned, resolver } = resolver;
     owned.resolve(resolver, out);
@@ -559,12 +567,17 @@ mod tests {
             Row {
                 id: 7,
                 title: "Arrival".to_owned(),
-                tag: Tag { name: "first contact, which is long enough to be written out of line".to_owned() },
+                tag: Tag {
+                    name: "first contact, which is long enough to be written out of line"
+                        .to_owned(),
+                },
             },
             Row {
                 id: 9,
                 title: "Primer".to_owned(),
-                tag: Tag { name: "time travel".to_owned() },
+                tag: Tag {
+                    name: "time travel".to_owned(),
+                },
             },
         ];
         // archive the rows the way a partition on disk holds them

@@ -37,7 +37,9 @@ pub async fn read_header(
         Err(error) => return Err(error.into()),
     }
     // judge it before its length is used for anything, at the version this connection speaks
-    Ok(Some(protocol::RawHeader::decode(&raw).validate_at(version, max_frame_bytes)?))
+    Ok(Some(
+        protocol::RawHeader::decode(&raw).validate_at(version, max_frame_bytes)?,
+    ))
 }
 
 /// Read a fixed size head into an array of its own
@@ -62,7 +64,10 @@ pub async fn read_array<const N: usize>(
 ///
 /// * `rx` - The read half of the connection
 /// * `len` - How many bytes to read, which the header has already bounded
-pub async fn read_body(rx: &mut ReadHalf<TcpStream>, len: usize) -> Result<AlignedVec, ServerError> {
+pub async fn read_body(
+    rx: &mut ReadHalf<TcpStream>,
+    len: usize,
+) -> Result<AlignedVec, ServerError> {
     let mut body = AlignedVec::with_capacity(len);
     // the read overwrites every byte, so the buffer is not zeroed first
     body.resize(len, 0);
@@ -168,5 +173,12 @@ pub fn header_at(
     body_len: usize,
     max_frame_bytes: u32,
 ) -> Result<[u8; HEADER_LEN], ProtocolError> {
-    Ok(Header::at(version, kind, protocol::Flags::NONE, body_len, max_frame_bytes)?.encode())
+    Ok(Header::at(
+        version,
+        kind,
+        protocol::Flags::NONE,
+        body_len,
+        max_frame_bytes,
+    )?
+    .encode())
 }

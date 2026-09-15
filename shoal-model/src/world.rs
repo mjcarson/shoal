@@ -165,7 +165,8 @@ impl World {
                 match msg.to {
                     Actor::Node(node) => {
                         if let Some(node) = self.nodes.get_mut(&node) {
-                            outputs = node.step(Input::Message(msg.clone()), &self.cfg, &self.policy);
+                            outputs =
+                                node.step(Input::Message(msg.clone()), &self.cfg, &self.policy);
                         }
                     }
                     Actor::Observer => {
@@ -206,13 +207,22 @@ impl World {
                 }
             }
             Event::Crash { node } => {
-                outputs = self.transition(*node, |node| !matches!(node.status, Status::Crashed), Node::crash);
+                outputs = self.transition(
+                    *node,
+                    |node| !matches!(node.status, Status::Crashed),
+                    Node::crash,
+                );
             }
             Event::Restart { node } => {
-                outputs = self.transition(*node, |node| matches!(node.status, Status::Crashed), Node::restart);
+                outputs = self.transition(
+                    *node,
+                    |node| matches!(node.status, Status::Crashed),
+                    Node::restart,
+                );
             }
             Event::Pause { node } => {
-                outputs = self.transition(*node, |node| matches!(node.status, Status::Up), Node::pause);
+                outputs =
+                    self.transition(*node, |node| matches!(node.status, Status::Up), Node::pause);
             }
             Event::Resume { node } => {
                 let (cfg, policy) = (self.cfg.clone(), self.policy);
@@ -224,9 +234,9 @@ impl World {
             }
             Event::MarkDown { node } => {
                 let all = self.node_ids();
-                outputs = self
-                    .observer
-                    .on_mark_down(*node, &self.policy, &all, &self.params.tablets);
+                outputs =
+                    self.observer
+                        .on_mark_down(*node, &self.policy, &all, &self.params.tablets);
             }
         }
         self.finish_step(outputs)
@@ -409,8 +419,12 @@ impl World {
         for attempt in self.ledger.pending() {
             enabled.timeout.push(Event::ClientTimeout { attempt });
         }
-        let retried: std::collections::BTreeSet<Attempt> =
-            self.ledger.records.iter().map(|record| record.attempt).collect();
+        let retried: std::collections::BTreeSet<Attempt> = self
+            .ledger
+            .records
+            .iter()
+            .map(|record| record.attempt)
+            .collect();
         for record in &self.ledger.records {
             let next = Attempt {
                 id: record.attempt.id,

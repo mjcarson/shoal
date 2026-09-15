@@ -526,25 +526,45 @@ mod tests {
         assert!(!status.is_mutation());
         for kind in [moving, status] {
             let json = serde_json::to_vec(&kind).expect("a kind encodes");
-            assert_eq!(decode_rest::<AdminKind>(&json).expect("a kind decodes"), kind);
+            assert_eq!(
+                decode_rest::<AdminKind>(&json).expect("a kind decodes"),
+                kind
+            );
         }
         // the placement operations are mutations and the plan reads are not, and all round trip (F46)
         let node = NodeId::mint();
         let mutations = [
             AdminKind::Activate { wire: 5 },
-            AdminKind::Backup { table: None, path: "/backups".to_string() },
-            AdminKind::Restore { path: "/backups/x".to_string() },
+            AdminKind::Backup {
+                table: None,
+                path: "/backups".to_string(),
+            },
+            AdminKind::Restore {
+                path: "/backups/x".to_string(),
+            },
             AdminKind::Decommission { node },
-            AdminKind::Remove { node, replacement: Some(NodeId::mint()) },
-            AdminKind::Remove { node, replacement: None },
-            AdminKind::Maintenance { node, suspend: true },
+            AdminKind::Remove {
+                node,
+                replacement: Some(NodeId::mint()),
+            },
+            AdminKind::Remove {
+                node,
+                replacement: None,
+            },
+            AdminKind::Maintenance {
+                node,
+                suspend: true,
+            },
             AdminKind::Rebalance,
             AdminKind::ReloadTls,
         ];
         for kind in mutations {
             assert!(kind.is_mutation(), "{}", kind.name());
             let json = serde_json::to_vec(&kind).expect("a kind encodes");
-            assert_eq!(decode_rest::<AdminKind>(&json).expect("a kind decodes"), kind);
+            assert_eq!(
+                decode_rest::<AdminKind>(&json).expect("a kind decodes"),
+                kind
+            );
         }
         for kind in [
             AdminKind::PlanStatus { op: Uuid::new_v4() },
@@ -556,11 +576,22 @@ mod tests {
         ] {
             assert!(!kind.is_mutation(), "{}", kind.name());
             let json = serde_json::to_vec(&kind).expect("a kind encodes");
-            assert_eq!(decode_rest::<AdminKind>(&json).expect("a kind decodes"), kind);
+            assert_eq!(
+                decode_rest::<AdminKind>(&json).expect("a kind decodes"),
+                kind
+            );
         }
         // a remove without a replacement decodes from a frame that leaves it out
-        let bare: AdminKind = serde_json::from_value(serde_json::json!({ "Remove": { "node": node } })).expect("decodes");
-        assert_eq!(bare, AdminKind::Remove { node, replacement: None });
+        let bare: AdminKind =
+            serde_json::from_value(serde_json::json!({ "Remove": { "node": node } }))
+                .expect("decodes");
+        assert_eq!(
+            bare,
+            AdminKind::Remove {
+                node,
+                replacement: None
+            }
+        );
         // a member frame from before F46 reads as a plain member
         let older: TopologyMember = serde_json::from_value(serde_json::json!({
             "node": node, "client": "a", "data": "b", "control": "c", "shards": 1,
@@ -580,7 +611,10 @@ mod tests {
         let refused = AdminResponse {
             node: NodeId::mint(),
             topology_version: 8,
-            outcome: Err(AdminError::new(ErrorCode::StaleVersion, "the cluster is at 8")),
+            outcome: Err(AdminError::new(
+                ErrorCode::StaleVersion,
+                "the cluster is at 8",
+            )),
         };
         let body = encode_body(&Uuid::nil(), &refused).expect("a refusal encodes");
         let back: AdminResponse = decode_rest(&body[QUERY_ID_LEN..]).expect("a refusal decodes");

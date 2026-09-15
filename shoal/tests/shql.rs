@@ -440,7 +440,10 @@ fn binds_the_limit() {
     let sorted = parse_review("SELECT * FROM Review WHERE movie = 'alien' LIMIT 3");
     assert_eq!(sorted.limit, Some(3));
     // a query with no limit leaves it unset
-    assert_eq!(parse_movie("SELECT * FROM Movie WHERE id = 550").limit, None);
+    assert_eq!(
+        parse_movie("SELECT * FROM Movie WHERE id = 550").limit,
+        None
+    );
 }
 
 #[test]
@@ -459,7 +462,8 @@ fn binds_unsorted_filters() {
 /// Several filter conditions can be set at once
 fn binds_multiple_filters() {
     // parse a query filtering on both filterable fields
-    let get = parse_movie("SELECT * FROM Movie WHERE id = 550 AND title = 'Alien' AND watched = true");
+    let get =
+        parse_movie("SELECT * FROM Movie WHERE id = 550 AND title = 'Alien' AND watched = true");
     // both filters should have been picked up
     let filters = get.filters.expect("expected filters to be set");
     assert_eq!(filters.title, Some(vec!["Alien".to_string()]));
@@ -633,7 +637,10 @@ fn annotates_fields_with_their_role_and_type() {
 #[test]
 /// Fields are fuzzy matched the same way tables are
 fn fuzzy_matches_field_names() {
-    assert_eq!(suggest_text("SELECT * FROM Movie WHERE wat"), vec!["watched"]);
+    assert_eq!(
+        suggest_text("SELECT * FROM Movie WHERE wat"),
+        vec!["watched"]
+    );
     assert!(suggest_text("SELECT * FROM Movie WHERE zzz").is_empty());
 }
 
@@ -652,7 +659,10 @@ fn suggests_values_a_field_accepts() {
         vec!["true", "false"]
     );
     // a string field gets its opening quote
-    assert_eq!(suggest_text("SELECT * FROM Movie WHERE title = "), vec!["'"]);
+    assert_eq!(
+        suggest_text("SELECT * FROM Movie WHERE title = "),
+        vec!["'"]
+    );
     // and there is nothing useful to offer for a number
     assert!(suggest_text("SELECT * FROM Movie WHERE id = ").is_empty());
 }
@@ -714,10 +724,7 @@ fn suggests_in_alongside_equals() {
         vec!["=", "IN"]
     );
     // once IN has been typed the list has to be opened
-    assert_eq!(
-        suggest_text("SELECT * FROM Movie WHERE id IN "),
-        vec!["("]
-    );
+    assert_eq!(suggest_text("SELECT * FROM Movie WHERE id IN "), vec!["("]);
 }
 
 #[test]
@@ -774,8 +781,7 @@ fn accepted_text_is_spaced_for_the_next_token() {
 /// Suggestions replace the word under the cursor, not the whole query
 fn replaces_only_the_word_under_the_cursor() {
     let query = "SELECT * FROM Mov";
-    let completions =
-        shoal::shared::queries::parser::suggest::<ShqlDbClient>(query, query.len());
+    let completions = shoal::shared::queries::parser::suggest::<ShqlDbClient>(query, query.len());
     assert_eq!(completions.word_start, "SELECT * FROM ".len());
     assert_eq!(completions.word_end, query.len());
 }

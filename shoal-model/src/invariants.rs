@@ -71,7 +71,11 @@ impl Violation {
 impl fmt::Display for Violation {
     /// `P5 at step 611: ...`
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} at step {}: {}", self.property, self.step, self.detail)
+        write!(
+            f,
+            "{} at step {}: {}",
+            self.property, self.step, self.detail
+        )
     }
 }
 
@@ -271,7 +275,11 @@ impl Checker {
                 let votes: BTreeSet<NodeId> =
                     votes.intersection(&world.cfg.voters).copied().collect();
                 if !world.cfg.is_majority(votes.len()) {
-                    let how = if *by_promotion { "by promotion" } else { "without a majority" };
+                    let how = if *by_promotion {
+                        "by promotion"
+                    } else {
+                        "without a majority"
+                    };
                     return Some(self.violation(
                         Property::P5,
                         format!(
@@ -313,7 +321,8 @@ impl Checker {
                 // P2: every entry belongs to this stream, at a contiguous index
                 for index in from.0..=to.0 {
                     let entry = group.entry(LogIndex(index));
-                    let sound = entry.is_some_and(|entry| entry.tablet == *tablet && entry.index.0 == index);
+                    let sound = entry
+                        .is_some_and(|entry| entry.tablet == *tablet && entry.index.0 == index);
                     if !sound {
                         return Some(self.violation(
                             Property::P2,
@@ -329,7 +338,8 @@ impl Checker {
                     let theirs = &other.groups[tablet];
                     for index in from.0..=to.0 {
                         let index = LogIndex(index);
-                        let (Some(mine), Some(its)) = (group.entry(index), theirs.entry(index)) else {
+                        let (Some(mine), Some(its)) = (group.entry(index), theirs.entry(index))
+                        else {
                             continue;
                         };
                         if mine.term != its.term {
@@ -399,7 +409,11 @@ impl Checker {
                 ..
             } => {
                 // the read has to observe everything acknowledged on its key up to now
-                let floor = self.acknowledged.get(&(*tablet, *key)).copied().unwrap_or_default();
+                let floor = self
+                    .acknowledged
+                    .get(&(*tablet, *key))
+                    .copied()
+                    .unwrap_or_default();
                 self.read_floors.insert(*attempt, floor);
                 None
             }
@@ -622,15 +636,14 @@ impl Checker {
                     ));
                 }
                 // P5: one leader per term, among the nodes that are not crashed
-                if matches!(group.role, Role::Leader(_)) && !matches!(node.status, Status::Crashed) {
+                if matches!(group.role, Role::Leader(_)) && !matches!(node.status, Status::Crashed)
+                {
                     if let Some(other) = leaders.insert((*tablet, group.stable.term), node.id) {
                         return Some(self.violation(
                             Property::P5,
                             format!(
                                 "P5: nodes {} and {} both lead tablet {tablet} in term {}",
-                                other.0,
-                                node.id.0,
-                                group.stable.term.0
+                                other.0, node.id.0, group.stable.term.0
                             ),
                         ));
                     }
@@ -759,7 +772,14 @@ mod tests {
         let (s1, s2, s3, s4, s5) = (NodeId(1), NodeId(2), NodeId(3), NodeId(4), NodeId(5));
         // (a) S1 leads term 1 and its entry reaches S2 only
         b.elect(s1, T);
-        b.write(MutationOp::Insert { key: Key(1), value: Value(1) }, T, s1);
+        b.write(
+            MutationOp::Insert {
+                key: Key(1),
+                value: Value(1),
+            },
+            T,
+            s1,
+        );
         b.deliver_from_to(Actor::Node(s1), Actor::Node(s2));
         for node in [s3, s4, s5] {
             b.drop_from_to(Actor::Node(s1), Actor::Node(node));
@@ -770,7 +790,10 @@ mod tests {
         // (b) S1 crashes; S5 leads term 2 with S3 and S4's votes (S2 refuses: longer log).
         // only the votes travel: S5's noop must stay on S5 alone
         b.event(Event::Crash { node: s1 });
-        b.event(Event::ElectionTimeout { node: s5, tablet: T });
+        b.event(Event::ElectionTimeout {
+            node: s5,
+            tablet: T,
+        });
         for node in [s2, s3, s4] {
             b.deliver_from_to(Actor::Node(s5), Actor::Node(node));
         }
@@ -787,10 +810,19 @@ mod tests {
         b.event(Event::Restart { node: s1 });
         // S1 still holds term 1, so its first try lands in term 2, where S3 and S4 have voted;
         // the second lands in term 3 and wins with S2, S3 and S4
-        b.event(Event::ElectionTimeout { node: s1, tablet: T });
+        b.event(Event::ElectionTimeout {
+            node: s1,
+            tablet: T,
+        });
         b.deliver_all();
-        assert!(!b.world().group(s1, T).is_leader(), "S1 won term 2 against S5's voters");
-        b.event(Event::ElectionTimeout { node: s1, tablet: T });
+        assert!(
+            !b.world().group(s1, T).is_leader(),
+            "S1 won term 2 against S5's voters"
+        );
+        b.event(Event::ElectionTimeout {
+            node: s1,
+            tablet: T,
+        });
         b.deliver_all();
         assert!(b.world().group(s1, T).is_leader(), "S1 should lead term 3");
         assert_eq!(b.world().group(s1, T).stable.term, Term(3));
@@ -800,20 +832,40 @@ mod tests {
         b.deliver_from_to(Actor::Node(s3), Actor::Node(s1));
         // index 1 is the noop `elect` replicated everywhere; index 2 is the figure's entry
         let committed = b.world().checker.committed_index(T);
-        assert_eq!(committed, LogIndex(1), "the term-1 entry was counted committed too early");
+        assert_eq!(
+            committed,
+            LogIndex(1),
+            "the term-1 entry was counted committed too early"
+        );
         // (e) S1's own term-3 noop becomes durable on a majority: now everything before it is
         b.fsync_all();
         b.deliver_all();
         assert!(b.world().checker.committed_index(T) >= LogIndex(2));
-        assert!(b.world().violation.is_none(), "{}", b.world().violation.clone().unwrap());
+        assert!(
+            b.world().violation.is_none(),
+            "{}",
+            b.world().violation.clone().unwrap()
+        );
     }
 
     /// A violation's identity is its property and detail, not the step it was found at
     #[test]
     fn same_failure_ignores_the_step() {
-        let a = Violation { property: Property::P3, step: 1, detail: "x".into() };
-        let b = Violation { property: Property::P3, step: 9, detail: "x".into() };
-        let c = Violation { property: Property::P4, step: 1, detail: "x".into() };
+        let a = Violation {
+            property: Property::P3,
+            step: 1,
+            detail: "x".into(),
+        };
+        let b = Violation {
+            property: Property::P3,
+            step: 9,
+            detail: "x".into(),
+        };
+        let c = Violation {
+            property: Property::P4,
+            step: 1,
+            detail: "x".into(),
+        };
         assert!(a.same_failure(&b));
         assert!(!a.same_failure(&c));
     }

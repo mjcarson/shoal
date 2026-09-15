@@ -140,8 +140,8 @@ fn preflight(wanted: &str) -> Result<()> {
 /// * `root` - The repository whose lockfile to read
 fn locked_version(root: &Path) -> Result<String> {
     let path: PathBuf = root.join("Cargo.lock");
-    let lock = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let lock =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     // a deliberately small parse: find the package block, take the version line that follows. the
     // alternative is a toml dependency, which this crate's manifest is explicit about not adding
     let mut lines = lock.lines();

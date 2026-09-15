@@ -39,11 +39,12 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::model::macro_layer::Timing;
-use crate::workloads::cluster_failover::{fraction_of, Failover, KILLED_NODE};
+use crate::workloads::cluster_failover::{Failover, KILLED_NODE, fraction_of};
 use crate::workloads::cluster_replication::NODE_SHARDS;
 use crate::workloads::harness::seed::Scale;
 use crate::workloads::workload::{
-    BackgroundKind, BackgroundSpec, BoxFuture, Context, FaultSpec, Measurement, ServerNeed, Workload, WorkloadPlan,
+    BackgroundKind, BackgroundSpec, BoxFuture, Context, FaultSpec, Measurement, ServerNeed,
+    Workload, WorkloadPlan,
 };
 
 /// The add arm's identifier
@@ -211,7 +212,9 @@ impl Workload for Rebalance {
     /// * `scale` - How large a run was asked for
     fn plan(&self, scale: Scale) -> WorkloadPlan {
         let mut plan = self.twin.plan(scale);
-        if let ServerNeed::Fresh(overrides) | ServerNeed::RestartAfterSeed(overrides) = &mut plan.server {
+        if let ServerNeed::Fresh(overrides) | ServerNeed::RestartAfterSeed(overrides) =
+            &mut plan.server
+        {
             if let Some(cluster) = overrides.cluster.as_mut() {
                 // a fourth member, joined and placed on by nothing, for the plan to bring in
                 if self.kind.has_spare() {
@@ -299,7 +302,7 @@ impl Workload for Rebalance {
 
 #[cfg(test)]
 mod tests {
-    use super::{all, RebalanceKind, ADD_ID, BLOCKED_ID, DECOMMISSION_ID, DRAINED_NODE, REMOVE_ID};
+    use super::{ADD_ID, BLOCKED_ID, DECOMMISSION_ID, DRAINED_NODE, REMOVE_ID, RebalanceKind, all};
     use crate::workloads::cluster_failover;
     use crate::workloads::cluster_migration::MOVE_ID;
     use crate::workloads::harness::seed::Scale;
@@ -314,12 +317,25 @@ mod tests {
         let ids: Vec<&str> = arms.iter().map(|arm| arm.id()).collect();
         assert_eq!(ids, [ADD_ID, DECOMMISSION_ID, REMOVE_ID, BLOCKED_ID]);
         let registered = crate::workload_ids::IDS;
-        let migration = registered.iter().position(|id| *id == MOVE_ID).expect("the migration arm is registered");
+        let migration = registered
+            .iter()
+            .position(|id| *id == MOVE_ID)
+            .expect("the migration arm is registered");
         for (offset, id) in ids.iter().enumerate() {
-            let position = registered.iter().position(|known| known == id).unwrap_or_else(|| panic!("{id} is not registered"));
-            assert_eq!(position, migration + 1 + offset, "{id} is not appended in order after the migration arm");
+            let position = registered
+                .iter()
+                .position(|known| known == id)
+                .unwrap_or_else(|| panic!("{id} is not registered"));
+            assert_eq!(
+                position,
+                migration + 1 + offset,
+                "{id} is not appended in order after the migration arm"
+            );
         }
-        let kill = cluster_failover::all().into_iter().next().expect("the kill arm exists");
+        let kill = cluster_failover::all()
+            .into_iter()
+            .next()
+            .expect("the kill arm exists");
         for arm in &arms {
             for scale in [Scale::Smoke, Scale::Full] {
                 let mine = arm.plan(scale);
@@ -331,12 +347,20 @@ mod tests {
                 assert_eq!(mine_overrides.shards, theirs_overrides.shards);
                 let mine_cluster = mine_overrides.cluster.as_ref().expect("a placement");
                 let theirs_cluster = theirs_overrides.cluster.as_ref().expect("a placement");
-                assert_eq!(mine_cluster.replication_factor, theirs_cluster.replication_factor);
+                assert_eq!(
+                    mine_cluster.replication_factor,
+                    theirs_cluster.replication_factor
+                );
                 assert_eq!(mine_cluster.peers, theirs_cluster.peers);
                 assert_eq!(mine_cluster.nodes(), theirs_cluster.nodes());
                 // a spare on every arm but the blocked one, and the grace on the remove arm alone
                 if arm.kind().has_spare() {
-                    assert_eq!(mine_cluster.spares, vec![theirs_cluster.peers[0]], "{}", arm.id());
+                    assert_eq!(
+                        mine_cluster.spares,
+                        vec![theirs_cluster.peers[0]],
+                        "{}",
+                        arm.id()
+                    );
                     assert_eq!(mine_cluster.members(), theirs_cluster.nodes() + 1);
                 } else {
                     assert!(mine_cluster.spares.is_empty(), "{}", arm.id());
@@ -356,15 +380,32 @@ mod tests {
                 // the plan inside the run, and the kill on the remove arm alone, never restarted
                 let spec = arm.background(scale).expect("the arm asks for a plan");
                 assert!(spec.at < spec.run_for);
-                assert_eq!(spec.run_for, kill.fault(scale).expect("the kill arm's schedule").run_for);
+                assert_eq!(
+                    spec.run_for,
+                    kill.fault(scale).expect("the kill arm's schedule").run_for
+                );
                 assert!(spec.kind.is_plan());
                 match (arm.kind(), &spec.kind) {
                     (RebalanceKind::Add, BackgroundKind::Rebalance) => {}
-                    (RebalanceKind::Decommission, BackgroundKind::Decommission { node, blocked: false })
-                    | (RebalanceKind::CapacityBlocked, BackgroundKind::Decommission { node, blocked: true }) => {
+                    (
+                        RebalanceKind::Decommission,
+                        BackgroundKind::Decommission {
+                            node,
+                            blocked: false,
+                        },
+                    )
+                    | (
+                        RebalanceKind::CapacityBlocked,
+                        BackgroundKind::Decommission {
+                            node,
+                            blocked: true,
+                        },
+                    ) => {
                         assert_eq!(*node, DRAINED_NODE);
                     }
-                    (RebalanceKind::Remove, BackgroundKind::Expire { node }) => assert_eq!(*node, DRAINED_NODE),
+                    (RebalanceKind::Remove, BackgroundKind::Expire { node }) => {
+                        assert_eq!(*node, DRAINED_NODE)
+                    }
                     (kind, spec) => panic!("{kind:?} asks for {spec:?}"),
                 }
                 match arm.fault(scale) {

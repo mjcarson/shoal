@@ -304,7 +304,9 @@ async fn a_projected_get_off_disk_answers_what_a_resident_one_does() -> Result<(
     let (client, pool) =
         utils::start_with_conf::<TestDb>(utils::build_single_shard_config(&temp_dir)).await?;
     let response = client
-        .send_one(TestRecordGet::new(vec!["partition_key".to_owned()]).projection::<TestRecordKeys>())
+        .send_one(
+            TestRecordGet::new(vec!["partition_key".to_owned()]).projection::<TestRecordKeys>(),
+        )
         .await?;
     let projected: Vec<TestRecordKeys> = response
         .access::<TestRecordKeys>()?
@@ -805,7 +807,10 @@ fn intent_dir(temp_dir: &TempDir) -> PathBuf {
     // every table gets its own directory directly under our storage path
     for table in std::fs::read_dir(temp_dir.path()).expect("Failed to read storage path") {
         // build the path this table would keep its intent logs in
-        let intents = table.expect("Failed to read table dir").path().join("intents");
+        let intents = table
+            .expect("Failed to read table dir")
+            .path()
+            .join("intents");
         // this is our table if that directory exists
         if intents.is_dir() {
             return intents;
@@ -995,7 +1000,11 @@ async fn ack_survives_sigkill_child() -> Result<(), TestError> {
     // insert enough rows to span many intent log buffers, each with its own pad
     // region, and wait for every one of them to be acknowledged
     for index in 0..CRASH_ROWS {
-        let row = TestRecord::new("partition_key", &format!("sort_key_{index:04}"), "survives a kill");
+        let row = TestRecord::new(
+            "partition_key",
+            &format!("sort_key_{index:04}"),
+            "survives a kill",
+        );
         client.send_one(row).await?;
     }
     // tell our parent our write has been acknowledged so it can kill us
@@ -1036,7 +1045,12 @@ async fn ack_survives_sigkill() -> Result<(), TestError> {
     let temp_dir = utils::test_dir();
     // re-run this test binary as a child running only the child half
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "ack_survives_sigkill_child", "--ignored", "--nocapture"])
+        .args([
+            "--exact",
+            "ack_survives_sigkill_child",
+            "--ignored",
+            "--nocapture",
+        ])
         .env(utils::CRASH_DIR_VAR, temp_dir.path())
         .stdout(Stdio::piped())
         .spawn()
@@ -1692,7 +1706,9 @@ async fn shql_rejects_a_partition_key_constrained_twice() -> Result<(), TestErro
         panic!("expected the AND spelling to be refused");
     };
     assert!(
-        error.message.contains("'partition_key' is constrained twice by AND"),
+        error
+            .message
+            .contains("'partition_key' is constrained twice by AND"),
         "unexpected message: {}",
         error.message
     );
@@ -2056,7 +2072,10 @@ async fn get_by_range_reads_from_disk() -> Result<(), TestError> {
     // a range past every row that partition holds is still a miss
     let range = range_of(Bound::Excluded("e"), Bound::Unbounded);
     let rows = get_row_keys_by_range(&client, names, range).await?;
-    assert!(rows.is_empty(), "a range past the end answered with {rows:?}");
+    assert!(
+        rows.is_empty(),
+        "a range past the end answered with {rows:?}"
+    );
     // Shutdown server
     pool.exit()?;
     Ok(())
@@ -2183,9 +2202,7 @@ async fn a_partition_can_be_paged_by_its_sort_key() -> Result<(), TestError> {
             None => SortRange::default(),
         };
         // read this page
-        let get = TestRecordGet::new(names.clone())
-            .sort_range(range)
-            .limit(2);
+        let get = TestRecordGet::new(names.clone()).sort_range(range).limit(2);
         let mut stream = client.send(client.query().add(get)).await?;
         let page = drain_row_keys(&mut stream).await?;
         // a page with nothing in it is the end of the partition
@@ -2341,14 +2358,16 @@ async fn projection_returns_only_its_own_fields() -> Result<(), TestError> {
     // read them back as the projection instead of as whole rows
     let response = client
         .send_one(
-            TestRecordGet::new(vec!["partition_key".to_owned()])
-                .projection::<TestRecordKeys>(),
+            TestRecordGet::new(vec!["partition_key".to_owned()]).projection::<TestRecordKeys>(),
         )
         .await?;
     // the rows are in the projections variant, not the tables
     let rows = response.access::<TestRecordKeys>()?.unwrap();
     let keys: Vec<String> = rows.iter().map(|row| row.sort_key.to_string()).collect();
-    assert_eq!(keys, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    assert_eq!(
+        keys,
+        vec!["a".to_string(), "b".to_string(), "c".to_string()]
+    );
     // every projected row still names the partition it came from
     for row in rows.iter() {
         assert_eq!(row.partition_key.as_str(), "partition_key");
@@ -2373,8 +2392,7 @@ async fn a_projected_response_is_not_the_row_type() -> Result<(), TestError> {
     // read it back as the projection
     let response = client
         .send_one(
-            TestRecordGet::new(vec!["partition_key".to_owned()])
-                .projection::<TestRecordKeys>(),
+            TestRecordGet::new(vec!["partition_key".to_owned()]).projection::<TestRecordKeys>(),
         )
         .await?;
     // reaching for the row type is the wrong type, not an empty answer
@@ -2401,8 +2419,7 @@ async fn projection_reads_an_archived_partition() -> Result<(), TestError> {
     // read it back as the projection, which has to find it on disk first
     let response = client
         .send_one(
-            TestRecordGet::new(vec!["partition_key".to_owned()])
-                .projection::<TestRecordKeys>(),
+            TestRecordGet::new(vec!["partition_key".to_owned()]).projection::<TestRecordKeys>(),
         )
         .await?;
     // the projection came out of the archive with both of its keys intact
@@ -2442,8 +2459,7 @@ async fn projection_survives_a_blocked_disk_read() -> Result<(), TestError> {
     // read it back as the projection, which parks on the load of this partition
     let response = client
         .send_one(
-            TestRecordGet::new(vec!["partition_key".to_owned()])
-                .projection::<TestRecordKeys>(),
+            TestRecordGet::new(vec!["partition_key".to_owned()]).projection::<TestRecordKeys>(),
         )
         .await?;
     // the replayed get answered with the projection it was sent with
@@ -2551,10 +2567,7 @@ async fn a_projected_get_and_a_row_get_share_a_batch() -> Result<(), TestError> 
     let queries = client
         .query()
         .add(TestRecordGet::new(vec!["partition_key".to_owned()]))
-        .add(
-            TestRecordGet::new(vec!["partition_key".to_owned()])
-                .projection::<TestRecordKeys>(),
-        );
+        .add(TestRecordGet::new(vec!["partition_key".to_owned()]).projection::<TestRecordKeys>());
     let mut stream = client.send(queries).await?;
     // the first response holds whole rows and carries the payload the projection drops
     let first = stream.next().await?.expect("a response for the row get");

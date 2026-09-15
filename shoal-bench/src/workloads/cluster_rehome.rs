@@ -87,11 +87,17 @@ mod tests {
         assert_eq!(arm.sweep, Sweep::Rehome);
         // the server is cycled between the seed and the measurement
         let plan = arm.plan(Scale::Full);
-        assert!(plan.server.restarts(), "the rehome arm does not restart its server");
+        assert!(
+            plan.server.restarts(),
+            "the rehome arm does not restart its server"
+        );
         let overrides = plan.server.overrides().expect("the arm needs a server");
         assert_eq!(overrides.shards, Some(SEEDED_SHARDS));
         assert_eq!(overrides.restart_shards, Some(RESTART_SHARDS));
-        assert!(RESTART_SHARDS < SEEDED_SHARDS, "a shrink restarts at fewer executors");
+        assert!(
+            RESTART_SHARDS < SEEDED_SHARDS,
+            "a shrink restarts at fewer executors"
+        );
         // and it is a cluster of one, so the rehome moves groups and the capture has a record
         let cluster = overrides.cluster.as_ref().expect("a cluster block");
         assert!(cluster.peers.is_empty());

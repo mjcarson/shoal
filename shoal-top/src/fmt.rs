@@ -102,7 +102,11 @@ pub fn bytes_axis(value: f64) -> String {
     }
     // whole bytes are always whole, and a scaled value keeps one decimal only while it is small
     // enough for that decimal to mean anything
-    let places = if unit == 0 || scaled.abs() >= 100.0 { 0 } else { 1 };
+    let places = if unit == 0 || scaled.abs() >= 100.0 {
+        0
+    } else {
+        1
+    };
     let rendered = fixed(scaled, places);
     // a scaled value that landed on a whole number is written as one, so an axis of powers of two
     // reads `4 KiB` rather than `4.0 KiB`

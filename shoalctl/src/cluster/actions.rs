@@ -96,10 +96,14 @@ impl ClusterAction {
     /// Says what was wrong with the line, for the error box.
     pub fn parse(line: &str) -> Result<Self, String> {
         let mut words = line.split_whitespace();
-        let verb = words.next().ok_or_else(|| "type an operation; `help` lists them".to_string())?;
+        let verb = words
+            .next()
+            .ok_or_else(|| "type an operation; `help` lists them".to_string())?;
         let node = |word: Option<&str>| -> Result<NodeId, String> {
             let word = word.ok_or_else(|| format!("{verb} needs a node id"))?;
-            word.parse::<Uuid>().map(NodeId).map_err(|_| format!("{word} is not a node id"))
+            word.parse::<Uuid>()
+                .map(NodeId)
+                .map_err(|_| format!("{word} is not a node id"))
         };
         let action = match verb {
             "initialize" => {
@@ -113,14 +117,19 @@ impl ClusterAction {
                 }
                 ClusterAction::Initialize { nodes }
             }
-            "decommission" => ClusterAction::Decommission { node: node(words.next())? },
+            "decommission" => ClusterAction::Decommission {
+                node: node(words.next())?,
+            },
             "remove" => {
                 let removed = node(words.next())?;
                 let replacement = match words.next() {
                     Some(word) => Some(node(Some(word))?),
                     None => None,
                 };
-                ClusterAction::Remove { node: removed, replacement }
+                ClusterAction::Remove {
+                    node: removed,
+                    replacement,
+                }
             }
             "maintenance" => {
                 let member = node(words.next())?;
@@ -129,37 +138,66 @@ impl ClusterAction {
                     Some("off") => false,
                     other => return Err(format!("maintenance takes `on` or `off`, not {other:?}")),
                 };
-                ClusterAction::Maintenance { node: member, suspend }
+                ClusterAction::Maintenance {
+                    node: member,
+                    suspend,
+                }
             }
             "rebalance" => ClusterAction::Rebalance,
             "repair" => {
-                let table = words.next().ok_or_else(|| "repair needs a table name".to_string())?.to_string();
+                let table = words
+                    .next()
+                    .ok_or_else(|| "repair needs a table name".to_string())?
+                    .to_string();
                 let mode = words.next().unwrap_or("verify");
                 if mode != "verify" && mode != "repair" {
                     return Err(format!("repair takes `verify` or `repair`, not {mode:?}"));
                 }
-                ClusterAction::Repair { table, mode: mode.to_string() }
+                ClusterAction::Repair {
+                    table,
+                    mode: mode.to_string(),
+                }
             }
             "backup" => {
-                let first = words.next().ok_or_else(|| "backup needs a directory".to_string())?.to_string();
+                let first = words
+                    .next()
+                    .ok_or_else(|| "backup needs a directory".to_string())?
+                    .to_string();
                 match words.next() {
-                    Some(path) => ClusterAction::Backup { table: Some(first), path: path.to_string() },
-                    None => ClusterAction::Backup { table: None, path: first },
+                    Some(path) => ClusterAction::Backup {
+                        table: Some(first),
+                        path: path.to_string(),
+                    },
+                    None => ClusterAction::Backup {
+                        table: None,
+                        path: first,
+                    },
                 }
             }
             "restore" => ClusterAction::Restore {
-                path: words.next().ok_or_else(|| "restore needs a directory".to_string())?.to_string(),
+                path: words
+                    .next()
+                    .ok_or_else(|| "restore needs a directory".to_string())?
+                    .to_string(),
             },
             "activate" => {
-                let word = words.next().ok_or_else(|| "activate needs a wire version".to_string())?;
+                let word = words
+                    .next()
+                    .ok_or_else(|| "activate needs a wire version".to_string())?;
                 ClusterAction::Activate {
-                    wire: word.parse().map_err(|_| format!("{word} is not a wire version"))?,
+                    wire: word
+                        .parse()
+                        .map_err(|_| format!("{word} is not a wire version"))?,
                 }
             }
             "status" => {
-                let word = words.next().ok_or_else(|| "status needs an operation id".to_string())?;
+                let word = words
+                    .next()
+                    .ok_or_else(|| "status needs an operation id".to_string())?;
                 ClusterAction::Status {
-                    op: word.parse().map_err(|_| format!("{word} is not an operation id"))?,
+                    op: word
+                        .parse()
+                        .map_err(|_| format!("{word} is not an operation id"))?,
                 }
             }
             "reload-tls" | "reload_tls" => ClusterAction::ReloadTls,
@@ -175,7 +213,8 @@ impl ClusterAction {
     #[must_use]
     pub fn help() -> Vec<String> {
         vec![
-            "initialize <node> [<node>...]  place every tablet over these members, once".to_string(),
+            "initialize <node> [<node>...]  place every tablet over these members, once"
+                .to_string(),
             "decommission <node>            drain a member and take it out".to_string(),
             "remove <node> [replacement]    remove a member the cluster gave up on".to_string(),
             "maintenance <node> on|off      hold or resume a down member's grace".to_string(),
@@ -212,7 +251,12 @@ impl ClusterAction {
                 .find(|member| member.node == id)
                 .map_or_else(
                     || format!("{id} (not a member this node knows)"),
-                    |member| format!("{id} ({} {} {}, weight {})", member.role, member.health, member.phase, member.weight),
+                    |member| {
+                        format!(
+                            "{id} ({} {} {}, weight {})",
+                            member.role, member.health, member.phase, member.weight
+                        )
+                    },
                 )
         };
         match self {
@@ -294,8 +338,15 @@ impl ClusterAction {
     #[must_use]
     pub fn request(&self) -> (AdminKind, Follow) {
         match self {
-            ClusterAction::Initialize { nodes } => (AdminKind::Initialize { nodes: nodes.clone() }, Follow::None),
-            ClusterAction::Decommission { node } => (AdminKind::Decommission { node: *node }, Follow::Plan),
+            ClusterAction::Initialize { nodes } => (
+                AdminKind::Initialize {
+                    nodes: nodes.clone(),
+                },
+                Follow::None,
+            ),
+            ClusterAction::Decommission { node } => {
+                (AdminKind::Decommission { node: *node }, Follow::Plan)
+            }
             ClusterAction::Remove { node, replacement } => (
                 AdminKind::Remove {
                     node: *node,
@@ -328,7 +379,9 @@ impl ClusterAction {
                 },
                 Follow::Backup,
             ),
-            ClusterAction::Restore { path } => (AdminKind::Restore { path: path.clone() }, Follow::Restore),
+            ClusterAction::Restore { path } => {
+                (AdminKind::Restore { path: path.clone() }, Follow::Restore)
+            }
             ClusterAction::Activate { wire } => (AdminKind::Activate { wire: *wire }, Follow::None),
             ClusterAction::Status { op } => (AdminKind::PlanStatus { op: *op }, Follow::None),
             ClusterAction::ReloadTls => (AdminKind::ReloadTls, Follow::None),
@@ -363,9 +416,11 @@ impl Follow {
     pub fn is_done(self, record: &Value) -> bool {
         match self {
             Follow::Plan => !record["outcome"].is_null(),
-            Follow::Repair | Follow::Backup | Follow::Restore => record["groups"]
-                .as_object()
-                .is_some_and(|groups| !groups.is_empty() && groups.values().all(|group| group["phase"] == "Done")),
+            Follow::Repair | Follow::Backup | Follow::Restore => {
+                record["groups"].as_object().is_some_and(|groups| {
+                    !groups.is_empty() && groups.values().all(|group| group["phase"] == "Done")
+                })
+            }
             Follow::Move => record["phase"] == "Done",
             Follow::None => true,
         }
@@ -379,10 +434,20 @@ impl Follow {
     /// * `record` - The record read
     #[must_use]
     pub fn render(self, op: Uuid, record: &Value) -> Vec<String> {
-        let mut lines = vec![format!("following {op}: {}", if self.is_done(record) { "done" } else { "running" })];
+        let mut lines = vec![format!(
+            "following {op}: {}",
+            if self.is_done(record) {
+                "done"
+            } else {
+                "running"
+            }
+        )];
         match self {
             Follow::Plan => {
-                lines.push(format!("phase {}", record["phase"].as_str().unwrap_or_default()));
+                lines.push(format!(
+                    "phase {}",
+                    record["phase"].as_str().unwrap_or_default()
+                ));
                 if let Some(reason) = record["blocked"]["reason"].as_str() {
                     lines.push(format!("blocked: {reason}"));
                 }
@@ -392,7 +457,9 @@ impl Follow {
                         step["tablet"],
                         step["from"].as_str().unwrap_or_default(),
                         step["to"].as_str().unwrap_or_default(),
-                        step["state"].as_str().map_or_else(|| step["state"].to_string(), str::to_string)
+                        step["state"]
+                            .as_str()
+                            .map_or_else(|| step["state"].to_string(), str::to_string)
                     ));
                 }
                 if !record["outcome"].is_null() {
@@ -403,7 +470,9 @@ impl Follow {
                 for (group, progress) in record["groups"].as_object().into_iter().flatten() {
                     lines.push(format!(
                         "  {group} {} {}",
-                        progress["phase"].as_str().map_or_else(|| progress["phase"].to_string(), str::to_string),
+                        progress["phase"]
+                            .as_str()
+                            .map_or_else(|| progress["phase"].to_string(), str::to_string),
                         progress["outcome"]
                     ));
                 }
@@ -456,65 +525,211 @@ mod tests {
         assert_eq!(decommission, ClusterAction::Decommission { node });
         assert_eq!(
             ClusterAction::parse(&format!("remove {node} {other}")).expect("parses"),
-            ClusterAction::Remove { node, replacement: Some(other) }
+            ClusterAction::Remove {
+                node,
+                replacement: Some(other)
+            }
         );
-        assert_eq!(ClusterAction::parse(&format!("maintenance {node} on")).expect("parses"), ClusterAction::Maintenance { node, suspend: true });
-        assert_eq!(ClusterAction::parse("rebalance").expect("parses"), ClusterAction::Rebalance);
-        assert_eq!(ClusterAction::parse("repair Note").expect("parses"), ClusterAction::Repair { table: "Note".to_string(), mode: "verify".to_string() });
-        assert_eq!(ClusterAction::parse("backup /b").expect("parses"), ClusterAction::Backup { table: None, path: "/b".to_string() });
-        assert_eq!(ClusterAction::parse("backup Note /b").expect("parses"), ClusterAction::Backup { table: Some("Note".to_string()), path: "/b".to_string() });
-        assert_eq!(ClusterAction::parse("restore /b/x").expect("parses"), ClusterAction::Restore { path: "/b/x".to_string() });
-        assert_eq!(ClusterAction::parse("activate 5").expect("parses"), ClusterAction::Activate { wire: 5 });
+        assert_eq!(
+            ClusterAction::parse(&format!("maintenance {node} on")).expect("parses"),
+            ClusterAction::Maintenance {
+                node,
+                suspend: true
+            }
+        );
+        assert_eq!(
+            ClusterAction::parse("rebalance").expect("parses"),
+            ClusterAction::Rebalance
+        );
+        assert_eq!(
+            ClusterAction::parse("repair Note").expect("parses"),
+            ClusterAction::Repair {
+                table: "Note".to_string(),
+                mode: "verify".to_string()
+            }
+        );
+        assert_eq!(
+            ClusterAction::parse("backup /b").expect("parses"),
+            ClusterAction::Backup {
+                table: None,
+                path: "/b".to_string()
+            }
+        );
+        assert_eq!(
+            ClusterAction::parse("backup Note /b").expect("parses"),
+            ClusterAction::Backup {
+                table: Some("Note".to_string()),
+                path: "/b".to_string()
+            }
+        );
+        assert_eq!(
+            ClusterAction::parse("restore /b/x").expect("parses"),
+            ClusterAction::Restore {
+                path: "/b/x".to_string()
+            }
+        );
+        assert_eq!(
+            ClusterAction::parse("activate 5").expect("parses"),
+            ClusterAction::Activate { wire: 5 }
+        );
         let op = Uuid::new_v4();
-        assert_eq!(ClusterAction::parse(&format!("status {op}")).expect("parses"), ClusterAction::Status { op });
-        assert_eq!(ClusterAction::parse("reload-tls").expect("parses"), ClusterAction::ReloadTls);
+        assert_eq!(
+            ClusterAction::parse(&format!("status {op}")).expect("parses"),
+            ClusterAction::Status { op }
+        );
+        assert_eq!(
+            ClusterAction::parse("reload-tls").expect("parses"),
+            ClusterAction::ReloadTls
+        );
         // the refusals name what was wrong
-        assert_eq!(ClusterAction::parse(&format!("initialize {node}")).expect("parses"), ClusterAction::Initialize { nodes: vec![node] });
+        assert_eq!(
+            ClusterAction::parse(&format!("initialize {node}")).expect("parses"),
+            ClusterAction::Initialize { nodes: vec![node] }
+        );
         assert!(ClusterAction::parse("").unwrap_err().contains("help"));
-        assert!(ClusterAction::parse("initialize").unwrap_err().contains("at least one"));
-        assert!(ClusterAction::parse(&format!("initialize {node} nope")).unwrap_err().contains("not a node id"));
-        assert!(ClusterAction::parse("decommission nope").unwrap_err().contains("not a node id"));
-        assert!(ClusterAction::parse(&format!("maintenance {node} maybe")).unwrap_err().contains("on"));
-        assert!(ClusterAction::parse("repair Note sideways").unwrap_err().contains("verify"));
-        assert!(ClusterAction::parse("activate five").unwrap_err().contains("wire version"));
-        assert!(ClusterAction::parse("frobnicate").unwrap_err().contains("not an operation"));
-        assert!(ClusterAction::parse("rebalance now").unwrap_err().contains("fewer"));
+        assert!(
+            ClusterAction::parse("initialize")
+                .unwrap_err()
+                .contains("at least one")
+        );
+        assert!(
+            ClusterAction::parse(&format!("initialize {node} nope"))
+                .unwrap_err()
+                .contains("not a node id")
+        );
+        assert!(
+            ClusterAction::parse("decommission nope")
+                .unwrap_err()
+                .contains("not a node id")
+        );
+        assert!(
+            ClusterAction::parse(&format!("maintenance {node} maybe"))
+                .unwrap_err()
+                .contains("on")
+        );
+        assert!(
+            ClusterAction::parse("repair Note sideways")
+                .unwrap_err()
+                .contains("verify")
+        );
+        assert!(
+            ClusterAction::parse("activate five")
+                .unwrap_err()
+                .contains("wire version")
+        );
+        assert!(
+            ClusterAction::parse("frobnicate")
+                .unwrap_err()
+                .contains("not an operation")
+        );
+        assert!(
+            ClusterAction::parse("rebalance now")
+                .unwrap_err()
+                .contains("fewer")
+        );
         // the previews: the identity as the model knows it, the movement and the boundary
         let preview = decommission.preview(&model);
-        assert!(preview[0].contains(&node.to_string()) && preview[0].contains("voter up member, weight 2"), "{preview:?}");
-        assert!(preview[1].starts_with("moves:") && preview[2].starts_with("boundary:"), "{preview:?}");
+        assert!(
+            preview[0].contains(&node.to_string())
+                && preview[0].contains("voter up member, weight 2"),
+            "{preview:?}"
+        );
+        assert!(
+            preview[1].starts_with("moves:") && preview[2].starts_with("boundary:"),
+            "{preview:?}"
+        );
         assert!(preview[2].contains("tombstoned"), "{preview:?}");
-        let unknown = ClusterAction::Remove { node: other, replacement: None }.preview(&model);
-        assert!(unknown[0].contains("not a member this node knows"), "{unknown:?}");
+        let unknown = ClusterAction::Remove {
+            node: other,
+            replacement: None,
+        }
+        .preview(&model);
+        assert!(
+            unknown[0].contains("not a member this node knows"),
+            "{unknown:?}"
+        );
         let activate = ClusterAction::Activate { wire: 5 }.preview(&model);
-        assert!(activate[0].contains("activated 4") && activate[0].contains("4..=5"), "{activate:?}");
-        assert!(ClusterAction::Restore { path: "/b".to_string() }.preview(&model)[2].contains("once"));
+        assert!(
+            activate[0].contains("activated 4") && activate[0].contains("4..=5"),
+            "{activate:?}"
+        );
+        assert!(
+            ClusterAction::Restore {
+                path: "/b".to_string()
+            }
+            .preview(&model)[2]
+                .contains("once")
+        );
         assert_eq!(ClusterAction::Status { op }.preview(&model).len(), 1);
         assert!(ClusterAction::Status { op }.is_mutation() == false && decommission.is_mutation());
         // the requests and their follow-ups
-        assert_eq!(decommission.request(), (AdminKind::Decommission { node }, Follow::Plan));
+        assert_eq!(
+            decommission.request(),
+            (AdminKind::Decommission { node }, Follow::Plan)
+        );
         assert_eq!(ClusterAction::Rebalance.request().1, Follow::Plan);
-        assert_eq!(ClusterAction::Repair { table: "Note".to_string(), mode: "verify".to_string() }.request().1, Follow::Repair);
-        assert_eq!(ClusterAction::Backup { table: None, path: "/b".to_string() }.request().1, Follow::Backup);
-        assert_eq!(ClusterAction::Activate { wire: 5 }.request(), (AdminKind::Activate { wire: 5 }, Follow::None));
-        assert_eq!(ClusterAction::ReloadTls.request(), (AdminKind::ReloadTls, Follow::None));
+        assert_eq!(
+            ClusterAction::Repair {
+                table: "Note".to_string(),
+                mode: "verify".to_string()
+            }
+            .request()
+            .1,
+            Follow::Repair
+        );
+        assert_eq!(
+            ClusterAction::Backup {
+                table: None,
+                path: "/b".to_string()
+            }
+            .request()
+            .1,
+            Follow::Backup
+        );
+        assert_eq!(
+            ClusterAction::Activate { wire: 5 }.request(),
+            (AdminKind::Activate { wire: 5 }, Follow::None)
+        );
+        assert_eq!(
+            ClusterAction::ReloadTls.request(),
+            (AdminKind::ReloadTls, Follow::None)
+        );
         assert_eq!(Follow::Plan.status(op), Some(AdminKind::PlanStatus { op }));
         assert_eq!(Follow::None.status(op), None);
         // a record says when it is done, and renders as lines while it runs
         let running = json!({ "phase": "Running", "outcome": null, "steps": [ { "tablet": 0, "from": "a", "to": "b", "state": "Moving" } ], "blocked": null });
         assert!(!Follow::Plan.is_done(&running));
         let lines = Follow::Plan.render(op, &running);
-        assert!(lines[0].contains("running") && lines.iter().any(|line| line.contains("tablet 0 a -> b Moving")), "{lines:?}");
+        assert!(
+            lines[0].contains("running")
+                && lines
+                    .iter()
+                    .any(|line| line.contains("tablet 0 a -> b Moving")),
+            "{lines:?}"
+        );
         let done = json!({ "phase": "Done", "outcome": "Completed", "steps": [], "blocked": null });
         assert!(Follow::Plan.is_done(&done));
-        assert!(Follow::Plan.render(op, &done).iter().any(|line| line.contains("outcome")));
+        assert!(
+            Follow::Plan
+                .render(op, &done)
+                .iter()
+                .any(|line| line.contains("outcome"))
+        );
         let groups = json!({ "groups": { "g1": { "phase": "Done", "outcome": { "Written": {} } }, "g2": { "phase": "Cutting", "outcome": null } } });
         assert!(!Follow::Backup.is_done(&groups));
         assert!(Follow::Backup.render(op, &groups).len() == 3);
         assert!(Follow::Backup.is_done(&json!({ "groups": { "g1": { "phase": "Done" } } })));
         assert!(!Follow::Repair.is_done(&json!({ "groups": {} })));
-        assert!(ClusterAction::help().iter().any(|line| line.starts_with("decommission")));
-        assert!(ClusterAction::help().iter().any(|line| line.starts_with("initialize")));
+        assert!(
+            ClusterAction::help()
+                .iter()
+                .any(|line| line.starts_with("decommission"))
+        );
+        assert!(
+            ClusterAction::help()
+                .iter()
+                .any(|line| line.starts_with("initialize"))
+        );
     }
 
     /// An initialize lists its members in the order typed, one line each with what the model
@@ -543,22 +758,46 @@ mod tests {
             ..ClusterModel::default()
         };
         // the order typed is the order kept
-        let action = ClusterAction::parse(&format!("initialize {third} {second} {first}")).expect("parses");
-        assert_eq!(action, ClusterAction::Initialize { nodes: vec![third, second, first] });
+        let action =
+            ClusterAction::parse(&format!("initialize {third} {second} {first}")).expect("parses");
+        assert_eq!(
+            action,
+            ClusterAction::Initialize {
+                nodes: vec![third, second, first]
+            }
+        );
         assert!(action.is_mutation());
         // the preview: a header, a line per member in that order, the factor and the boundary
         let preview = action.preview(&model);
         assert_eq!(preview.len(), 6, "{preview:?}");
         assert!(preview[0].contains("3 members"), "{preview:?}");
-        assert!(preview[1].contains(&third.to_string()) && preview[1].contains("not a member"), "{preview:?}");
-        assert!(preview[2].contains(&second.to_string()) && preview[2].contains("voter up member, weight 4"), "{preview:?}");
+        assert!(
+            preview[1].contains(&third.to_string()) && preview[1].contains("not a member"),
+            "{preview:?}"
+        );
+        assert!(
+            preview[2].contains(&second.to_string())
+                && preview[2].contains("voter up member, weight 4"),
+            "{preview:?}"
+        );
         assert!(preview[3].contains(&first.to_string()), "{preview:?}");
-        assert!(preview[4].starts_with("moves:") && preview[4].contains("factor 2"), "{preview:?}");
-        assert!(preview[5].starts_with("boundary:") && preview[5].contains("once"), "{preview:?}");
+        assert!(
+            preview[4].starts_with("moves:") && preview[4].contains("factor 2"),
+            "{preview:?}"
+        );
+        assert!(
+            preview[5].starts_with("boundary:") && preview[5].contains("once"),
+            "{preview:?}"
+        );
         // the request carries the members in that order and is followed by nothing
         assert_eq!(
             action.request(),
-            (AdminKind::Initialize { nodes: vec![third, second, first] }, Follow::None)
+            (
+                AdminKind::Initialize {
+                    nodes: vec![third, second, first]
+                },
+                Follow::None
+            )
         );
     }
 }

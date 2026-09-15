@@ -205,7 +205,10 @@ impl<S: Ord> SortRange<S> {
         // an unbounded end can never cross the other one
         let (start, end) = match (&self.start, &self.end) {
             (Bound::Unbounded, _) | (_, Bound::Unbounded) => return false,
-            (Bound::Included(start) | Bound::Excluded(start), Bound::Included(end) | Bound::Excluded(end)) => (start, end),
+            (
+                Bound::Included(start) | Bound::Excluded(start),
+                Bound::Included(end) | Bound::Excluded(end),
+            ) => (start, end),
         };
         // a start past its end names nothing, and a single key needs both ends to include it
         match start.cmp(end) {

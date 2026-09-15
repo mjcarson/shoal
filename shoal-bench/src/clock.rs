@@ -162,14 +162,17 @@ mod tests {
         // shift the year so it begins in March, which puts the leap day at the end of it
         let year = year - i64::from(month <= 2);
         // which four hundred year era that year falls in
-        let era = if year >= 0 { year / 400 } else { (year - 399) / 400 };
+        let era = if year >= 0 {
+            year / 400
+        } else {
+            (year - 399) / 400
+        };
         let year_of_era = year - era * 400;
         // the day within the year, counted from March
         let month_shifted = if month > 2 { month - 3 } else { month + 9 };
         let day_of_year = (153 * month_shifted + 2) / 5 + day - 1;
         // the day within the era, then back onto the Unix epoch
-        let day_of_era =
-            year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+        let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
         era * 146_097 + day_of_era - 719_468
     }
 }

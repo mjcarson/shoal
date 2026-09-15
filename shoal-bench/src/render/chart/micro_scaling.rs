@@ -156,7 +156,9 @@ pub fn families(capture: &MicroCapture) -> Vec<Family> {
         .map(|(name, mut points)| {
             // sorted by size, so the line is drawn left to right
             points.sort_by(|left, right| {
-                left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal)
+                left.0
+                    .partial_cmp(&right.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
             let axis = ScalingAxis::of(&name);
             Family { name, axis, points }
@@ -165,13 +167,7 @@ pub fn families(capture: &MicroCapture) -> Vec<Family> {
     // the most expensive first, so the eye lands on the lines that matter and the tail is what
     // gets folded away if there are too many
     families.sort_by(|left, right| {
-        let cost = |family: &Family| {
-            family
-                .points
-                .last()
-                .map(|(_, ns)| *ns)
-                .unwrap_or_default()
-        };
+        let cost = |family: &Family| family.points.last().map(|(_, ns)| *ns).unwrap_or_default();
         cost(right)
             .partial_cmp(&cost(left))
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -410,7 +406,10 @@ mod tests {
             .map(|(name, cost)| (name.as_str(), *cost))
             .collect();
         let svg = draw(&families(&capture(&refs)), ScalingAxis::Rows).expect("it draws");
-        assert!(svg.contains("4 cheaper families not drawn"), "the tail was not declared");
+        assert!(
+            svg.contains("4 cheaper families not drawn"),
+            "the tail was not declared"
+        );
     }
 
     /// A cost of zero cannot be placed on a log axis and does not produce a broken chart

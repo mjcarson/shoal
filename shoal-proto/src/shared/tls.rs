@@ -441,15 +441,21 @@ pub fn node_identity_of(cert: &[u8]) -> Result<Option<crate::shared::identity::N
             // the certificate body, whose extensions are the last, tagged, optional field
             let uris = cert.next().read_sequence(|tbs| {
                 // the version is explicitly tagged and optional
-                let _ = tbs.read_optional(|version| version.read_tagged(yasna::Tag::context(0), |v| v.read_der()))?;
+                let _ = tbs.read_optional(|version| {
+                    version.read_tagged(yasna::Tag::context(0), |v| v.read_der())
+                })?;
                 // the serial, the signature algorithm, the issuer, the validity, the subject
                 // and the public key are walked as opaque elements
                 for _ in 0..6 {
                     tbs.next().read_der()?;
                 }
                 // the two unique identifiers, if either is present
-                let _ = tbs.read_optional(|id| id.read_tagged_implicit(yasna::Tag::context(1), |r| r.read_bitvec_bytes()))?;
-                let _ = tbs.read_optional(|id| id.read_tagged_implicit(yasna::Tag::context(2), |r| r.read_bitvec_bytes()))?;
+                let _ = tbs.read_optional(|id| {
+                    id.read_tagged_implicit(yasna::Tag::context(1), |r| r.read_bitvec_bytes())
+                })?;
+                let _ = tbs.read_optional(|id| {
+                    id.read_tagged_implicit(yasna::Tag::context(2), |r| r.read_bitvec_bytes())
+                })?;
                 // the extensions, each an oid, an optional critical flag and a value
                 let mut found = Vec::new();
                 let extensions = tbs.read_optional(|ext| {
@@ -457,7 +463,8 @@ pub fn node_identity_of(cert: &[u8]) -> Result<Option<crate::shared::identity::N
                         list.read_sequence_of(|extension| {
                             extension.read_sequence(|extension| {
                                 let oid = extension.next().read_oid()?;
-                                let _critical = extension.read_optional(|critical| critical.read_bool())?;
+                                let _critical =
+                                    extension.read_optional(|critical| critical.read_bool())?;
                                 let value = extension.next().read_bytes()?;
                                 if oid == san_oid {
                                     // the names, each tagged by its kind; a uri is context 6
@@ -466,7 +473,10 @@ pub fn node_identity_of(cert: &[u8]) -> Result<Option<crate::shared::identity::N
                                         names.read_sequence_of(|name| {
                                             let raw = name.read_tagged_der()?;
                                             if raw.tag() == yasna::Tag::context(6) {
-                                                uris.push(String::from_utf8_lossy(raw.value()).into_owned());
+                                                uris.push(
+                                                    String::from_utf8_lossy(raw.value())
+                                                        .into_owned(),
+                                                );
                                             }
                                             Ok(())
                                         })?;
@@ -488,7 +498,11 @@ pub fn node_identity_of(cert: &[u8]) -> Result<Option<crate::shared::identity::N
             Ok(uris)
         })
     })
-    .map_err(|error| TlsError::Config(rustls::Error::General(format!("the peer certificate does not parse: {error}"))))?;
+    .map_err(|error| {
+        TlsError::Config(rustls::Error::General(format!(
+            "the peer certificate does not parse: {error}"
+        )))
+    })?;
     // the first name of the node scheme is the node, if it is a uuid
     Ok(uris
         .iter()
@@ -582,19 +596,27 @@ impl PeerTlsHolder {
     /// Whether a peer's certificate has to name its node
     #[must_use]
     pub fn binds_identity(&self) -> bool {
-        self.options.as_ref().is_some_and(|options| options.bind_identity)
+        self.options
+            .as_ref()
+            .is_some_and(|options| options.bind_identity)
     }
 
     /// What this node dials with right now, if encrypted
     #[must_use]
     pub fn client(&self) -> Option<Arc<ClientConfig>> {
-        self.inner.read().ok().and_then(|pair| pair.as_ref().map(|pair| pair.client.clone()))
+        self.inner
+            .read()
+            .ok()
+            .and_then(|pair| pair.as_ref().map(|pair| pair.client.clone()))
     }
 
     /// What this node accepts with right now, if encrypted
     #[must_use]
     pub fn server(&self) -> Option<Arc<ServerConfig>> {
-        self.inner.read().ok().and_then(|pair| pair.as_ref().map(|pair| pair.server.clone()))
+        self.inner
+            .read()
+            .ok()
+            .and_then(|pair| pair.as_ref().map(|pair| pair.server.clone()))
     }
 
     /// Read the material again and swap both configs in, or leave both as they were
@@ -798,9 +820,8 @@ pub trait Handshaker: Sized {
     ) -> UnbufferedStatus<'c, 'i, Self::Data>;
 
     /// Give up this connection's session in favour of the kernel's record layer
-    fn into_kernel(
-        self,
-    ) -> Result<(ExtractedSecrets, KernelConnection<Self::Data>), rustls::Error>;
+    fn into_kernel(self)
+        -> Result<(ExtractedSecrets, KernelConnection<Self::Data>), rustls::Error>;
 
     /// The peer's leaf certificate, once the handshake has verified its chain
     fn peer_leaf(&self) -> Option<CertificateDer<'static>>;
@@ -834,7 +855,9 @@ impl Handshaker for UnbufferedClientConnection {
 
     /// The server's leaf, which every client handshake verified
     fn peer_leaf(&self) -> Option<CertificateDer<'static>> {
-        (**self).peer_certificates().and_then(|chain| chain.first().cloned())
+        (**self)
+            .peer_certificates()
+            .and_then(|chain| chain.first().cloned())
     }
 }
 
@@ -863,7 +886,9 @@ impl Handshaker for UnbufferedServerConnection {
 
     /// The client's leaf, if the config required one and it was verified
     fn peer_leaf(&self) -> Option<CertificateDer<'static>> {
-        (**self).peer_certificates().and_then(|chain| chain.first().cloned())
+        (**self)
+            .peer_certificates()
+            .and_then(|chain| chain.first().cloned())
     }
 }
 
@@ -984,7 +1009,11 @@ impl<C: Handshaker> TlsHandshake<C> {
         };
         // this is where rustls stops being in the data path and the kernel starts
         let (secrets, kernel) = self.conn.into_kernel().map_err(TlsError::Handshake)?;
-        Ok(Established { secrets, kernel, peer })
+        Ok(Established {
+            secrets,
+            kernel,
+            peer,
+        })
     }
 }
 
@@ -1003,8 +1032,7 @@ impl TlsClientHandshake {
     /// * `name` - The name to ask that server for
     pub fn client(config: Arc<ClientConfig>, name: ServerName<'static>) -> Result<Self, TlsError> {
         // the unbuffered shape, because this has to be driven over two different async runtimes
-        let conn =
-            UnbufferedClientConnection::new(config, name).map_err(TlsError::Handshake)?;
+        let conn = UnbufferedClientConnection::new(config, name).map_err(TlsError::Handshake)?;
         Ok(TlsHandshake::new(conn))
     }
 }

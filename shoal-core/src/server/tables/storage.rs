@@ -22,12 +22,12 @@ pub mod none;
 pub use fs::FileSystem;
 pub use none::NoStorage;
 
+use crate::server::database::ShoalDatabase;
 use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::replication::{ArchivedCut, IntegrityStats};
 use crate::server::stage_profile::{StageDurability, StageStamps};
 use crate::server::{Conf, ServerError};
 use crate::shared::responses::{Response, ResponseAction};
-use crate::server::database::ShoalDatabase;
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, TableNameSupport};
 use crate::tables::partitions::{MaybeLoaded, PartitionSupport};
 
@@ -210,7 +210,10 @@ pub enum CompactionJob {
         /// The last entry of each group with frames in the job, which the compactor tracks
         /// so a snapshot it cuts afterwards knows its boundary
         /// ([F43](../../../docs/src/features/node-recovery.md))
-        positions: Vec<(crate::shared::identity::GroupId, crate::server::wal::WalLogId)>,
+        positions: Vec<(
+            crate::shared::identity::GroupId,
+            crate::server::wal::WalLogId,
+        )>,
     },
     /// Cut a snapshot of one group's tablets from the archives, as they stand between two jobs
     ///
@@ -232,9 +235,16 @@ pub enum CompactionJob {
         /// Every membership the cut could be as of, the checkpoint's first and the ones applied
         /// since after it; the one at the boundary goes in the manifest
         /// ([F45](../../../docs/src/features/replica-migration.md))
-        memberships: Vec<openraft::type_config::alias::StoredMembershipOf<crate::server::replication::DataConfig>>,
+        memberships: Vec<
+            openraft::type_config::alias::StoredMembershipOf<
+                crate::server::replication::DataConfig,
+            >,
+        >,
         /// Every remembered request of the group, which the trailer filters to the boundary
-        retries: Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>,
+        retries: Vec<(
+            crate::shared::protocol::peer::RequestId,
+            crate::server::replication::Remembered,
+        )>,
         /// The newest time-ordered identity the group has forgotten, for the manifest
         /// ([F45](../../../docs/src/features/replica-migration.md))
         expired_before: u64,
@@ -840,7 +850,11 @@ pub trait StorageSupport: Sized {
     /// * `tablets` - The tablets
     /// * `resident` - The keys the table already hashed from memory
     #[allow(async_fn_in_trait)]
-    async fn archived_cut(&self, tablets: &[u16], resident: &HashSet<u64>) -> Result<ArchivedCut, ServerError> {
+    async fn archived_cut(
+        &self,
+        tablets: &[u16],
+        resident: &HashSet<u64>,
+    ) -> Result<ArchivedCut, ServerError> {
         let _ = (tablets, resident);
         Ok(ArchivedCut::empty())
     }
@@ -876,12 +890,12 @@ pub trait StorageSupport: Sized {
 #[cfg(test)]
 mod tests {
     use super::{PendingResponse, QueryMetadata, RecoveryStats};
-    use std::sync::{Arc, Mutex};
-    use tracing::span::{Attributes, Id};
-    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
     use crate::server::stage_profile::{StageStamps, Stamp};
     use crate::shared::responses::ResponseAction;
+    use std::sync::{Arc, Mutex};
+    use tracing::span::{Attributes, Id};
     use tracing::Span;
+    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
     use uuid::Uuid;
 
     /// Build a pending response queue holding one entry per position
@@ -1016,9 +1030,15 @@ mod tests {
                 .id()
                 .expect("the requester's span was not enabled")
                 .into_u64();
-            let read_id = read.id().expect("the read's span was not enabled").into_u64();
+            let read_id = read
+                .id()
+                .expect("the read's span was not enabled")
+                .into_u64();
             for (span, follows) in edges {
-                assert_eq!(follows, read_id, "a link pointed somewhere other than the read");
+                assert_eq!(
+                    follows, read_id,
+                    "a link pointed somewhere other than the read"
+                );
                 assert_ne!(
                     span, requester,
                     "the query that asked for the read was linked to its own child"

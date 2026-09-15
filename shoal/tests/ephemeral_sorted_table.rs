@@ -568,7 +568,10 @@ async fn nothing_is_written_to_the_storage_directory() -> Result<(), TestError> 
         .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
         .collect();
     left.sort();
-    assert_eq!(left, vec!["shoal-meta.json".to_string(), "shoal.lock".to_string()]);
+    assert_eq!(
+        left,
+        vec!["shoal-meta.json".to_string(), "shoal.lock".to_string()]
+    );
     Ok(())
 }
 

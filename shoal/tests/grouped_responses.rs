@@ -17,9 +17,9 @@
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
-use shoal::shared::responses::{GetRows, Response, ResponseAction, ResponseError};
 use shoal::shared::protocol::error::ErrorCode;
 use shoal::shared::rearchive::Rearchive;
+use shoal::shared::responses::{GetRows, Response, ResponseAction, ResponseError};
 use shoal::shared::row_ref::RowRef;
 use shoal::tables::{EphemeralSortedTable, EphemeralUnsortedTable};
 use shoal_derive::{db, ShoalSortedTable, ShoalUnsortedTable};
@@ -179,7 +179,8 @@ fn every_response_kinds_variant_is_byte_identical_to_its_ref_mirror() {
     let rows = tiered_rows();
     let (owned, borrowed) = both_shapes(&rows);
     let owned = GroupDbResponseKinds::TieredRow(response(ResponseAction::Get(Some(owned))));
-    let borrowed = GroupDbResponseKindsRef::TieredRow(response(ResponseAction::Get(Some(borrowed))));
+    let borrowed =
+        GroupDbResponseKindsRef::TieredRow(response(ResponseAction::Get(Some(borrowed))));
     assert_eq!(
         rkyv::to_bytes::<rkyv::rancor::Error>(&owned)
             .unwrap()

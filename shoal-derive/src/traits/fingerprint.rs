@@ -19,10 +19,7 @@ use syn::{Ident, Type};
 ///
 /// * `fields` - The fields to collect the names of
 fn names(fields: &[(Ident, Type)]) -> HashSet<String> {
-    fields
-        .iter()
-        .map(|(ident, _)| ident.to_string())
-        .collect()
+    fields.iter().map(|(ident, _)| ident.to_string()).collect()
 }
 
 /// Build the constant expression that fingerprints one row or projection

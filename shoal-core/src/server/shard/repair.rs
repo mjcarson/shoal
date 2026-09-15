@@ -23,12 +23,16 @@ use uuid::Uuid;
 
 use crate::server::control::plane::ControlRequest;
 use crate::server::control::repair::{
-    DigestSummary, GroupRepair, Quarantine, QuarantineAction, QuarantineReason, RepairMode, RepairOutcome, RepairPhase,
+    DigestSummary, GroupRepair, Quarantine, QuarantineAction, QuarantineReason, RepairMode,
+    RepairOutcome, RepairPhase,
 };
 use crate::server::control::types::{ControlCommand, ControlResponse};
 use crate::server::database::ShoalDatabase;
 use crate::server::messages::ServerMsg;
-use crate::server::replication::{DataConfig, DigestAnswer, DigestIntegrity, DigestReport, GroupMachine, MachineState, ShardNetwork, ShardPeer};
+use crate::server::replication::{
+    DataConfig, DigestAnswer, DigestIntegrity, DigestReport, GroupMachine, MachineState,
+    ShardNetwork, ShardPeer,
+};
 use crate::shared::identity::{GroupId, NodeId, ShardAddr, TableId};
 use crate::shared::protocol::peer::Command;
 
@@ -86,9 +90,16 @@ pub async fn scrub_group<D: ShoalDatabase>(
 ) -> Result<ScrubOutcome, String> {
     let started = Instant::now();
     // the entry: committed at the boundary every replica cuts at
-    let written = glommio::timer::timeout(timeout, async { Ok(raft.client_write(Command::scrub(table, op)).await) }).await;
+    let written = glommio::timer::timeout(timeout, async {
+        Ok(raft.client_write(Command::scrub(table, op)).await)
+    })
+    .await;
     let log_id = match written {
-        Err(_) => return Err(format!("group {group} did not commit the scrub within {timeout:?}")),
+        Err(_) => {
+            return Err(format!(
+                "group {group} did not commit the scrub within {timeout:?}"
+            ))
+        }
         Ok(Ok(response)) => response.log_id,
         Ok(Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward)))) => {
             return Err(format!(
@@ -114,7 +125,8 @@ pub async fn scrub_group<D: ShoalDatabase>(
             } else {
                 let peer = ShardPeer::new(*member, network.clone());
                 match peer.digest(group, op, remaining.max(DIGEST_POLL)).await {
-                    Ok(bytes) => postcard::from_bytes::<DigestAnswer>(&bytes).map_err(|error| format!("decoding a digest answer: {error}")),
+                    Ok(bytes) => postcard::from_bytes::<DigestAnswer>(&bytes)
+                        .map_err(|error| format!("decoding a digest answer: {error}")),
                     Err(failure) => Err(failure.to_string()),
                 }
             };
@@ -140,7 +152,10 @@ pub async fn scrub_group<D: ShoalDatabase>(
             // whoever is still out answers with the last thing it said
             for member in members {
                 if !reports.contains_key(member) {
-                    let why = last.get(member).cloned().unwrap_or_else(|| "never asked".to_string());
+                    let why = last
+                        .get(member)
+                        .cloned()
+                        .unwrap_or_else(|| "never asked".to_string());
                     reports.insert(*member, Err(format!("no report within {timeout:?}: {why}")));
                 }
             }
@@ -148,7 +163,12 @@ pub async fn scrub_group<D: ShoalDatabase>(
         }
         glommio::timer::sleep(DIGEST_POLL).await;
     }
-    Ok(ScrubOutcome { op, boundary, log_id, reports })
+    Ok(ScrubOutcome {
+        op,
+        boundary,
+        log_id,
+        reports,
+    })
 }
 
 /// The directory under `wal/Shard-N/` a quarantined copy's marker lives in
@@ -170,10 +190,15 @@ fn marker_name(group: GroupId) -> String {
 /// * `wal_dir` - The shard's WAL directory
 /// * `group` - The group
 /// * `quarantine` - The quarantine
-pub async fn write_quarantine(wal_dir: &Path, group: GroupId, quarantine: &Quarantine) -> std::io::Result<()> {
+pub async fn write_quarantine(
+    wal_dir: &Path,
+    group: GroupId,
+    quarantine: &Quarantine,
+) -> std::io::Result<()> {
     let dir = wal_dir.join(QUARANTINE_DIR);
     std::fs::create_dir_all(&dir)?;
-    let bytes = postcard::to_allocvec(quarantine).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let bytes = postcard::to_allocvec(quarantine)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     crate::server::wal::write_atomic(&dir, &marker_name(group), bytes).await
 }
 
@@ -194,8 +219,14 @@ pub async fn clear_quarantine(wal_dir: &Path, group: GroupId) -> std::io::Result
     let directory = glommio::io::Directory::open(wal_dir.join(QUARANTINE_DIR))
         .await
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    directory.sync().await.map_err(|error| std::io::Error::other(error.to_string()))?;
-    directory.close().await.map_err(|error| std::io::Error::other(error.to_string()))?;
+    directory
+        .sync()
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    directory
+        .close()
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(())
 }
 
@@ -224,7 +255,12 @@ pub fn scan_quarantine(wal_dir: &Path) -> HashMap<GroupId, Quarantine> {
                 found.insert(GroupId(group), quarantine);
             }
             None => {
-                tracing::event!(tracing::Level::ERROR, msg = "a quarantine marker does not decode; the copy is held quarantined by name", group = name);
+                tracing::event!(
+                    tracing::Level::ERROR,
+                    msg =
+                        "a quarantine marker does not decode; the copy is held quarantined by name",
+                    group = name
+                );
                 found.insert(
                     GroupId(group),
                     Quarantine {
@@ -332,7 +368,11 @@ pub fn judge(members: &[ShardAddr], scrub: &ScrubOutcome, source: Option<NodeId>
             // reported was not judged, and the outcome says so by name
             let outcome = if quarantine.is_empty() {
                 RepairOutcome::Clean {
-                    unreported: members.iter().filter(|member| !verified.contains_key(member)).copied().collect(),
+                    unreported: members
+                        .iter()
+                        .filter(|member| !verified.contains_key(member))
+                        .copied()
+                        .collect(),
                 }
             } else {
                 RepairOutcome::Divergent {
@@ -412,17 +452,28 @@ mod tests {
         };
         // clean
         let verdict = judge(&members, &scrub([(7, 0), (7, 0), (7, 0)]), None);
-        assert_eq!(verdict.outcome, RepairOutcome::Clean { unreported: Vec::new() });
+        assert_eq!(
+            verdict.outcome,
+            RepairOutcome::Clean {
+                unreported: Vec::new()
+            }
+        );
         assert!(verdict.quarantine.is_empty());
         assert_eq!(verdict.trusted, Some(7));
         // one divergent
         let verdict = judge(&members, &scrub([(7, 0), (7, 0), (9, 0)]), None);
-        assert_eq!(verdict.quarantine, vec![(members[2], QuarantineReason::Divergent)]);
+        assert_eq!(
+            verdict.quarantine,
+            vec![(members[2], QuarantineReason::Divergent)]
+        );
         assert!(matches!(verdict.outcome, RepairOutcome::Divergent { .. }));
         assert_eq!(verdict.trusted_members, vec![members[0], members[1]]);
         // one invalid, the rest agreeing
         let verdict = judge(&members, &scrub([(7, 0), (0, 2), (7, 0)]), None);
-        assert_eq!(verdict.quarantine, vec![(members[1], QuarantineReason::Checksum)]);
+        assert_eq!(
+            verdict.quarantine,
+            vec![(members[1], QuarantineReason::Checksum)]
+        );
         assert_eq!(verdict.trusted, Some(7));
         // a three way split: unresolved, nothing quarantined, the digests kept
         let verdict = judge(&members, &scrub([(1, 0), (2, 0), (3, 0)]), None);
@@ -437,14 +488,20 @@ mod tests {
         }
         // one invalid and two disagreeing: unresolved, the invalid one still quarantined
         let verdict = judge(&members, &scrub([(1, 0), (2, 0), (0, 1)]), None);
-        assert_eq!(verdict.quarantine, vec![(members[2], QuarantineReason::Checksum)]);
+        assert_eq!(
+            verdict.quarantine,
+            vec![(members[2], QuarantineReason::Checksum)]
+        );
         assert!(matches!(verdict.outcome, RepairOutcome::Unresolved { .. }));
         // the operator's source decides a split
         let verdict = judge(&members, &scrub([(1, 0), (2, 0), (3, 0)]), Some(nodes[0]));
         assert_eq!(verdict.trusted, Some(1));
         assert_eq!(
             verdict.quarantine,
-            vec![(members[1], QuarantineReason::Operator), (members[2], QuarantineReason::Operator)]
+            vec![
+                (members[1], QuarantineReason::Operator),
+                (members[2], QuarantineReason::Operator)
+            ]
         );
         // a source whose own copy is invalid establishes nothing
         let verdict = judge(&members, &scrub([(0, 1), (2, 0), (3, 0)]), Some(nodes[0]));
@@ -453,13 +510,17 @@ mod tests {
         // a member that never reported is neither trusted nor quarantined, and two of three
         // agreeing is still a majority of the set
         let mut partial = scrub([(7, 0), (7, 0), (7, 0)]);
-        partial.reports.insert(members[2], Err("no report".to_string()));
+        partial
+            .reports
+            .insert(members[2], Err("no report".to_string()));
         let verdict = judge(&members, &partial, None);
         assert_eq!(verdict.trusted, Some(7));
         assert!(verdict.quarantine.is_empty());
         assert_eq!(
             verdict.outcome,
-            RepairOutcome::Clean { unreported: vec![members[2]] },
+            RepairOutcome::Clean {
+                unreported: vec![members[2]]
+            },
             "a missing report is named, not judged"
         );
     }
@@ -525,16 +586,32 @@ impl<D: ShoalDatabase> DriverContext<D> {
     ///
     /// * `target` - The quarantined copy
     async fn install_on(&self, target: ShardAddr) -> Result<u64, String> {
-        let mut peer = crate::server::replication::GroupPeer::for_repair(self.group, target, self.network.clone());
+        let mut peer = crate::server::replication::GroupPeer::for_repair(
+            self.group,
+            target,
+            self.network.clone(),
+        );
         for attempt in 0..CUTS_AT_MOST {
-            let built = self.network.build(self.group).await.map_err(|error| format!("cutting a snapshot: {error}"))?;
+            let built = self
+                .network
+                .build(self.group)
+                .await
+                .map_err(|error| format!("cutting a snapshot: {error}"))?;
             let vote = self.raft.metrics().borrow_watched().vote.clone();
             event!(Level::INFO, msg = "sending a repair snapshot", op = %self.op, group = %self.group, %target, boundary = built.manifest.boundary.index, attempt);
             match peer
-                .repair_snapshot(vote, built.path.clone(), built.manifest.clone(), self.op, self.snapshot_timeout)
+                .repair_snapshot(
+                    vote,
+                    built.path.clone(),
+                    built.manifest.clone(),
+                    self.op,
+                    self.snapshot_timeout,
+                )
                 .await?
             {
-                crate::server::replication::network::RepairSend::Installed => return Ok(built.manifest.boundary.index),
+                crate::server::replication::network::RepairSend::Installed => {
+                    return Ok(built.manifest.boundary.index)
+                }
                 crate::server::replication::network::RepairSend::Behind { checkpoint } => {
                     event!(Level::INFO, msg = "the target's checkpoint is past the cut; moving this shard's past it", op = %self.op, group = %self.group, %target, checkpoint, ours = self.state.borrow().checkpoint_index());
                     self.advance_past(checkpoint).await?;
@@ -557,11 +634,17 @@ impl<D: ShoalDatabase> DriverContext<D> {
         let started = Instant::now();
         while self.state.borrow().checkpoint_index() <= past {
             if started.elapsed() > self.timeout {
-                return Err(format!("the checkpoint did not pass {past} within {:?}", self.timeout));
+                return Err(format!(
+                    "the checkpoint did not pass {past} within {:?}",
+                    self.timeout
+                ));
             }
             // an entry past the index: a scrub under a throwaway operation costs one cut
             let written = glommio::timer::timeout(self.timeout, async {
-                Ok(self.raft.client_write(Command::scrub(self.table, Uuid::new_v4())).await)
+                Ok(self
+                    .raft
+                    .client_write(Command::scrub(self.table, Uuid::new_v4()))
+                    .await)
             })
             .await;
             match written {
@@ -577,7 +660,9 @@ impl<D: ShoalDatabase> DriverContext<D> {
             let _ = done.await;
             // the compactor's merge moves the checkpoint on its own time
             let waited = Instant::now();
-            while self.state.borrow().checkpoint_index() <= past && waited.elapsed() < Duration::from_secs(5) {
+            while self.state.borrow().checkpoint_index() <= past
+                && waited.elapsed() < Duration::from_secs(5)
+            {
                 glommio::timer::sleep(Duration::from_millis(100)).await;
             }
         }
@@ -607,10 +692,13 @@ impl<D: ShoalDatabase> DriverContext<D> {
                 .try_send(ControlRequest::Propose { command, reply })
                 .map_err(|_| "the control thread is not taking proposals".to_string())?;
             let remaining = PROGRESS_TIMEOUT.saturating_sub(started.elapsed());
-            let answered = glommio::timer::timeout(remaining, async { Ok(rx.as_async().recv().await) }).await;
+            let answered =
+                glommio::timer::timeout(remaining, async { Ok(rx.as_async().recv().await) }).await;
             last = match answered {
                 Ok(Ok(Ok(ControlResponse::Applied { .. }))) => return Ok(()),
-                Ok(Ok(Ok(ControlResponse::Refused { reason }))) => return Err(format!("the progress was refused: {reason}")),
+                Ok(Ok(Ok(ControlResponse::Refused { reason }))) => {
+                    return Err(format!("the progress was refused: {reason}"))
+                }
                 Ok(Ok(Ok(other))) => format!("the progress was not applied: {other:?}"),
                 Ok(Ok(Err(error))) => error,
                 Ok(Err(_)) => "the control thread dropped the proposal".to_string(),
@@ -618,7 +706,9 @@ impl<D: ShoalDatabase> DriverContext<D> {
             };
             glommio::timer::sleep(Duration::from_millis(500)).await;
         }
-        Err(format!("the progress was not committed within {PROGRESS_TIMEOUT:?}: {last}"))
+        Err(format!(
+            "the progress was not committed within {PROGRESS_TIMEOUT:?}: {last}"
+        ))
     }
 
     /// Tell a member what to do with its copy's quarantine, and wait until it has
@@ -639,11 +729,16 @@ impl<D: ShoalDatabase> DriverContext<D> {
                 })
                 .await
                 .map_err(|error| format!("{error:?}"))?;
-            return done.await.unwrap_or_else(|_| Err("the loop dropped the quarantine".to_string()));
+            return done
+                .await
+                .unwrap_or_else(|_| Err("the loop dropped the quarantine".to_string()));
         }
         let peer = ShardPeer::new(member, self.network.clone());
         let payload = postcard::to_allocvec(&action).map_err(|error| error.to_string())?;
-        match peer.quarantine(self.group, payload, QUARANTINE_TIMEOUT).await {
+        match peer
+            .quarantine(self.group, payload, QUARANTINE_TIMEOUT)
+            .await
+        {
             Ok(_) => Ok(()),
             Err(failure) => Err(format!("{member} did not take the quarantine: {failure}")),
         }
@@ -710,12 +805,16 @@ pub async fn drive_group<D: ShoalDatabase>(context: DriverContext<D>) {
 /// # Arguments
 ///
 /// * `context` - Everything the driver needs
-async fn drive_group_inner<D: ShoalDatabase>(context: &DriverContext<D>) -> Result<RepairPhase, String> {
+async fn drive_group_inner<D: ShoalDatabase>(
+    context: &DriverContext<D>,
+) -> Result<RepairPhase, String> {
     let me = context.me.node;
     // a release: every member lifts, and the group is done
     if context.release {
         for member in &context.members {
-            context.quarantine(*member, QuarantineAction::Lift { op: None }).await?;
+            context
+                .quarantine(*member, QuarantineAction::Lift { op: None })
+                .await?;
         }
         event!(Level::INFO, msg = "released a group's quarantines, as the operator asked", op = %context.op, group = %context.group);
         context
@@ -788,14 +887,21 @@ async fn drive_group_inner<D: ShoalDatabase>(context: &DriverContext<D>) -> Resu
     // never lifts anything
     if context.mode == RepairMode::Repair && verdict.trusted.is_some() {
         for member in &verdict.trusted_members {
-            context.quarantine(*member, QuarantineAction::Lift { op: None }).await?;
+            context
+                .quarantine(*member, QuarantineAction::Lift { op: None })
+                .await?;
         }
     }
     // a verify is done at the judgement; so is a repair with nothing to repair
-    let repairable = context.mode == RepairMode::Repair && matches!(verdict.outcome, RepairOutcome::Divergent { .. });
+    let repairable = context.mode == RepairMode::Repair
+        && matches!(verdict.outcome, RepairOutcome::Divergent { .. });
     context
         .commit(GroupRepair {
-            phase: if repairable { RepairPhase::Judged } else { RepairPhase::Done },
+            phase: if repairable {
+                RepairPhase::Judged
+            } else {
+                RepairPhase::Done
+            },
             driver: Some(me),
             boundary: Some(scrub.boundary),
             reports: reports.clone(),
@@ -831,7 +937,11 @@ async fn drive_group_inner<D: ShoalDatabase>(context: &DriverContext<D>) -> Resu
     }
     // every quarantined copy in turn: a durable one from a snapshot cut past its checkpoint,
     // a volatile one by restarting it empty for the leader to feed
-    let targets: Vec<ShardAddr> = verdict.quarantine.iter().map(|(member, _)| *member).collect();
+    let targets: Vec<ShardAddr> = verdict
+        .quarantine
+        .iter()
+        .map(|(member, _)| *member)
+        .collect();
     let mut boundary = scrub.boundary;
     for target in &targets {
         context
@@ -847,7 +957,9 @@ async fn drive_group_inner<D: ShoalDatabase>(context: &DriverContext<D>) -> Resu
             })
             .await?;
         if context.volatile {
-            context.quarantine(*target, QuarantineAction::Rebuild).await?;
+            context
+                .quarantine(*target, QuarantineAction::Rebuild)
+                .await?;
             continue;
         }
         boundary = context.install_on(*target).await?;
@@ -879,11 +991,15 @@ async fn drive_group_inner<D: ShoalDatabase>(context: &DriverContext<D>) -> Resu
     let mut lifted = Vec::new();
     if after.trusted.is_some() {
         for member in &after.trusted_members {
-            context.quarantine(*member, QuarantineAction::Lift { op: None }).await?;
+            context
+                .quarantine(*member, QuarantineAction::Lift { op: None })
+                .await?;
             lifted.push(*member);
         }
     }
-    let repaired = targets.iter().all(|target| after.trusted_members.contains(target));
+    let repaired = targets
+        .iter()
+        .all(|target| after.trusted_members.contains(target));
     let outcome = if repaired {
         RepairOutcome::Repaired {
             source: context.me,
@@ -893,7 +1009,10 @@ async fn drive_group_inner<D: ShoalDatabase>(context: &DriverContext<D>) -> Resu
         }
     } else {
         RepairOutcome::Failed {
-            reason: format!("after the install the copies still disagree: {:?}", after.outcome),
+            reason: format!(
+                "after the install the copies still disagree: {:?}",
+                after.outcome
+            ),
         }
     };
     event!(Level::INFO, msg = "a group's repair is done", op = %context.op, group = %context.group, ?outcome, lifted = lifted.len());

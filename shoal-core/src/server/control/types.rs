@@ -40,13 +40,17 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::backup::{
-    judge_coverage, BackupFile, BackupPhase, BackupRecord, GroupBackup, GroupRestore, RecoveryRecord, RestoreRecord,
-    KEPT_BACKUPS, KEPT_RESTORES,
+    judge_coverage, BackupFile, BackupPhase, BackupRecord, GroupBackup, GroupRestore,
+    RecoveryRecord, RestoreRecord, KEPT_BACKUPS, KEPT_RESTORES,
 };
-use super::migrate::{DataConfiguration, GroupMove, MoveOutcome, MovePhase, MoveRecord, KEPT_MOVES};
+use super::migrate::{
+    DataConfiguration, GroupMove, MoveOutcome, MovePhase, MoveRecord, KEPT_MOVES,
+};
 use super::plan::{Blocked, PlanKind, PlanOutcome, PlanPhase, PlanRecord, PlanUpdate, KEPT_PLANS};
+use super::repair::{
+    GroupRepair, QuarantinedCopy, RepairMode, RepairPhase, RepairRecord, KEPT_REPAIRS,
+};
 use super::runtime::GlommioRuntime;
-use super::repair::{GroupRepair, QuarantinedCopy, RepairMode, RepairPhase, RepairRecord, KEPT_REPAIRS};
 use crate::server::conf::cluster::{BootstrapPolicy, Consistency};
 use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
 use crate::shared::protocol::MIN_PEER_VERSION;
@@ -828,7 +832,9 @@ impl fmt::Display for ControlCommand {
     /// Name the command, which is what openraft's traces print
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ControlCommand::Bootstrap { cluster, member, .. } => {
+            ControlCommand::Bootstrap {
+                cluster, member, ..
+            } => {
                 write!(f, "Bootstrap({cluster} by {member})")
             }
             ControlCommand::ObserveMember(member) => write!(f, "ObserveMember({member})"),
@@ -839,44 +845,109 @@ impl fmt::Display for ControlCommand {
             ControlCommand::ReportShards { node, failed, .. } => {
                 write!(f, "ReportShards({node} {failed:?})")
             }
-            ControlCommand::Initialize { nodes, .. } => write!(f, "Initialize({} nodes)", nodes.len()),
-            ControlCommand::SetControlVoters { count, .. } => write!(f, "SetControlVoters({count})"),
-            ControlCommand::SetTableReadPolicy { table, level, .. } => {
-                write!(f, "SetTableReadPolicy({table} {})", level.map_or("clear", |level| level.as_str()))
+            ControlCommand::Initialize { nodes, .. } => {
+                write!(f, "Initialize({} nodes)", nodes.len())
             }
-            ControlCommand::Repair { op, table, mode, .. } => write!(f, "Repair({op} {table} {})", mode.as_str()),
-            ControlCommand::RepairProgress { op, group, progress, .. } => {
+            ControlCommand::SetControlVoters { count, .. } => {
+                write!(f, "SetControlVoters({count})")
+            }
+            ControlCommand::SetTableReadPolicy { table, level, .. } => {
+                write!(
+                    f,
+                    "SetTableReadPolicy({table} {})",
+                    level.map_or("clear", |level| level.as_str())
+                )
+            }
+            ControlCommand::Repair {
+                op, table, mode, ..
+            } => write!(f, "Repair({op} {table} {})", mode.as_str()),
+            ControlCommand::RepairProgress {
+                op,
+                group,
+                progress,
+                ..
+            } => {
                 write!(f, "RepairProgress({op} {group} {:?})", progress.phase)
             }
             ControlCommand::ReportQuarantine { node, copies, .. } => {
                 write!(f, "ReportQuarantine({node} {} copies)", copies.len())
             }
-            ControlCommand::Move { op, tablet, from, to, .. } => write!(f, "Move({op} tablet {tablet} {from} -> {to})"),
-            ControlCommand::MoveProgress { op, group, progress, .. } => {
+            ControlCommand::Move {
+                op,
+                tablet,
+                from,
+                to,
+                ..
+            } => write!(f, "Move({op} tablet {tablet} {from} -> {to})"),
+            ControlCommand::MoveProgress {
+                op,
+                group,
+                progress,
+                ..
+            } => {
                 write!(f, "MoveProgress({op} {group} {})", progress.phase.name())
             }
             ControlCommand::Decommission { op, node, .. } => write!(f, "Decommission({op} {node})"),
-            ControlCommand::Remove { op, node, replacement, .. } => {
+            ControlCommand::Remove {
+                op,
+                node,
+                replacement,
+                ..
+            } => {
                 write!(f, "Remove({op} {node} replacement {replacement:?})")
             }
-            ControlCommand::Maintenance { op, node, suspend, .. } => write!(f, "Maintenance({op} {node} suspend {suspend})"),
+            ControlCommand::Maintenance {
+                op, node, suspend, ..
+            } => write!(f, "Maintenance({op} {node} suspend {suspend})"),
             ControlCommand::Rebalance { op, .. } => write!(f, "Rebalance({op})"),
-            ControlCommand::GraceElapsed { node, elapsed_ms, expire, .. } => {
-                write!(f, "GraceElapsed({node} {elapsed_ms}ms expire {})", expire.is_some())
+            ControlCommand::GraceElapsed {
+                node,
+                elapsed_ms,
+                expire,
+                ..
+            } => {
+                write!(
+                    f,
+                    "GraceElapsed({node} {elapsed_ms}ms expire {})",
+                    expire.is_some()
+                )
             }
-            ControlCommand::PlanProgress { op, progress, .. } => write!(f, "PlanProgress({op} {progress:?})"),
+            ControlCommand::PlanProgress { op, progress, .. } => {
+                write!(f, "PlanProgress({op} {progress:?})")
+            }
             ControlCommand::Tombstone { node, .. } => write!(f, "Tombstone({node})"),
             ControlCommand::Activate { op, wire, .. } => write!(f, "Activate({op} wire {wire})"),
-            ControlCommand::Backup { op, table, path, .. } => write!(f, "Backup({op} {table:?} to {path})"),
-            ControlCommand::BackupProgress { op, group, progress, .. } => {
+            ControlCommand::Backup {
+                op, table, path, ..
+            } => write!(f, "Backup({op} {table:?} to {path})"),
+            ControlCommand::BackupProgress {
+                op,
+                group,
+                progress,
+                ..
+            } => {
                 write!(f, "BackupProgress({op} {group} {:?})", progress.phase)
             }
-            ControlCommand::Restore { op, source, path, .. } => write!(f, "Restore({op} from {source} at {path})"),
-            ControlCommand::RestoreProgress { op, group, progress, .. } => {
+            ControlCommand::Restore {
+                op, source, path, ..
+            } => write!(f, "Restore({op} from {source} at {path})"),
+            ControlCommand::RestoreProgress {
+                op,
+                group,
+                progress,
+                ..
+            } => {
                 write!(f, "RestoreProgress({op} {group} {:?})", progress.phase)
             }
-            ControlCommand::ForceRecovered { survivors, lost, .. } => {
-                write!(f, "ForceRecovered({} survivors, {} lost)", survivors.len(), lost.len())
+            ControlCommand::ForceRecovered {
+                survivors, lost, ..
+            } => {
+                write!(
+                    f,
+                    "ForceRecovered({} survivors, {} lost)",
+                    survivors.len(),
+                    lost.len()
+                )
             }
         }
     }
@@ -933,7 +1004,9 @@ impl ControlResponse {
         match self {
             ControlResponse::Applied { topology_version } => Some(*topology_version),
             ControlResponse::Repeated { first } => first.applied_version(),
-            ControlResponse::Refused { .. } | ControlResponse::Fenced { .. } | ControlResponse::Removed { .. } => None,
+            ControlResponse::Refused { .. }
+            | ControlResponse::Fenced { .. }
+            | ControlResponse::Removed { .. } => None,
         }
     }
 }
@@ -1107,7 +1180,12 @@ impl ControlState {
                 self.topology_version += 1;
                 self.members.insert(
                     member.node,
-                    MemberState::fresh(member.clone(), MemberHealth::Up, role, self.topology_version),
+                    MemberState::fresh(
+                        member.clone(),
+                        MemberHealth::Up,
+                        role,
+                        self.topology_version,
+                    ),
                 );
                 self.applied()
             }
@@ -1145,7 +1223,10 @@ impl ControlState {
                     return self.applied();
                 }
                 // a down episode opens a grace where the policy removes a member for it
-                let grace = self.policy.as_ref().and_then(|policy| policy.auto_remove_after);
+                let grace = self
+                    .policy
+                    .as_ref()
+                    .and_then(|policy| policy.auto_remove_after);
                 self.topology_version += 1;
                 let version = self.topology_version;
                 let state = self.members.get_mut(node).expect("checked above");
@@ -1165,7 +1246,9 @@ impl ControlState {
                     }),
                     // a member back up under a removal keeps the removal: a late heartbeat
                     // cannot reverse it, and its grace is the record of why
-                    (MemberHealth::Up, _, _) if state.phase == MemberPhase::Removing => state.grace.take(),
+                    (MemberHealth::Up, _, _) if state.phase == MemberPhase::Removing => {
+                        state.grace.take()
+                    }
                     _ => None,
                 };
                 self.applied()
@@ -1192,7 +1275,10 @@ impl ControlState {
                     return self.applied();
                 }
                 self.topology_version += 1;
-                self.members.get_mut(node).expect("checked above").shards_failed = failed.clone();
+                self.members
+                    .get_mut(node)
+                    .expect("checked above")
+                    .shards_failed = failed.clone();
                 self.applied()
             }
             // the one explicit placement
@@ -1300,7 +1386,9 @@ impl ControlState {
                 // the table has to be one the schema serves, which the initialization recorded
                 if !self.tables.iter().any(|(_, id)| id == table) {
                     return ControlResponse::Refused {
-                        reason: format!("table {table} is not one the placement was initialized with"),
+                        reason: format!(
+                            "table {table} is not one the placement was initialized with"
+                        ),
                     };
                 }
                 if let Some(refusal) = self.check_version(*expected_version) {
@@ -1340,7 +1428,9 @@ impl ControlState {
                 }
                 if !self.tables.iter().any(|(_, id)| id == table) {
                     return ControlResponse::Refused {
-                        reason: format!("table {table} is not one the placement was initialized with"),
+                        reason: format!(
+                            "table {table} is not one the placement was initialized with"
+                        ),
                     };
                 }
                 if let Some(node) = source {
@@ -1356,7 +1446,8 @@ impl ControlState {
                 // the groups the placement derives for the table, or the one holding the tablet;
                 // a group whose set is under a move not yet done waits behind it
                 // ([F45](../../../../docs/src/features/replica-migration.md))
-                let map = crate::server::map::TabletMap::from_state(self, None, &self.tables.clone());
+                let map =
+                    crate::server::map::TabletMap::from_state(self, None, &self.tables.clone());
                 let groups: BTreeMap<GroupId, GroupRepair> = map
                     .groups_of(*table)
                     .into_iter()
@@ -1403,7 +1494,11 @@ impl ControlState {
                 );
                 // forget the oldest once too many are kept
                 while self.repairs.len() > KEPT_REPAIRS {
-                    let oldest = self.repairs.values().min_by_key(|record| record.requested_at).map(|record| record.op);
+                    let oldest = self
+                        .repairs
+                        .values()
+                        .min_by_key(|record| record.requested_at)
+                        .map(|record| record.op);
                     match oldest {
                         Some(op) => {
                             self.repairs.remove(&op);
@@ -1486,7 +1581,10 @@ impl ControlState {
                     return self.applied();
                 }
                 self.topology_version += 1;
-                self.members.get_mut(node).expect("checked above").quarantined = copies.clone();
+                self.members
+                    .get_mut(node)
+                    .expect("checked above")
+                    .quarantined = copies.clone();
                 self.applied()
             }
             // a move: the record, with the set derived from the map as it stands
@@ -1575,7 +1673,15 @@ impl ControlState {
                 source,
                 source_schema,
                 files,
-            } => self.apply_restore(*op, principal, *expected_version, path, *source, *source_schema, files),
+            } => self.apply_restore(
+                *op,
+                principal,
+                *expected_version,
+                path,
+                *source,
+                *source_schema,
+                files,
+            ),
             // a driver's word on where a group's restore stands
             ControlCommand::RestoreProgress {
                 op,
@@ -1592,7 +1698,14 @@ impl ControlState {
                 at,
                 last_committed,
                 recovered_ms,
-            } => self.apply_force_recovered(*op, survivors, lost, *at, *last_committed, *recovered_ms),
+            } => self.apply_force_recovered(
+                *op,
+                survivors,
+                lost,
+                *at,
+                *last_committed,
+                *recovered_ms,
+            ),
             // a wire version activated, judged against what every member reported
             ControlCommand::Activate {
                 expected_version,
@@ -1611,7 +1724,13 @@ impl ControlState {
     /// * `principal` - Who asked
     /// * `expected_version` - The topology version the request was written against
     /// * `node` - The member
-    fn apply_decommission(&mut self, op: Uuid, principal: &str, expected_version: u64, node: NodeId) -> ControlResponse {
+    fn apply_decommission(
+        &mut self,
+        op: Uuid,
+        principal: &str,
+        expected_version: u64,
+        node: NodeId,
+    ) -> ControlResponse {
         if self.policy.is_none() || self.initialized.is_none() {
             return ControlResponse::Refused {
                 reason: "no placement has been initialized to decommission a member of".to_string(),
@@ -1628,7 +1747,10 @@ impl ControlState {
             MemberPhase::Leaving => return self.applied(),
             other => {
                 return ControlResponse::Refused {
-                    reason: format!("{node} is {}, and only a member can be decommissioned", other.name()),
+                    reason: format!(
+                        "{node} is {}, and only a member can be decommissioned",
+                        other.name()
+                    ),
                 };
             }
         }
@@ -1643,7 +1765,12 @@ impl ControlState {
         let state = self.members.get_mut(&node).expect("checked above");
         state.phase = MemberPhase::Leaving;
         state.since = version;
-        self.record_plan(PlanRecord::new(op, PlanKind::Decommission { node }, principal, version));
+        self.record_plan(PlanRecord::new(
+            op,
+            PlanKind::Decommission { node },
+            principal,
+            version,
+        ));
         self.applied()
     }
 
@@ -1700,7 +1827,10 @@ impl ControlState {
                 Some(state) if state.is_placeable() => {}
                 Some(state) => {
                     return ControlResponse::Refused {
-                        reason: format!("{replacement} is {}, and only an up member can replace another", state.state_name()),
+                        reason: format!(
+                            "{replacement} is {}, and only an up member can replace another",
+                            state.state_name()
+                        ),
                     };
                 }
                 None => {
@@ -1716,7 +1846,8 @@ impl ControlState {
             }
             let map = crate::server::map::TabletMap::from_state(self, None, &self.tables.clone());
             let shared = map.rule_sets_served().into_iter().any(|(members, _)| {
-                members.iter().any(|member| member.node == node) && members.iter().any(|member| member.node == replacement)
+                members.iter().any(|member| member.node == node)
+                    && members.iter().any(|member| member.node == replacement)
             });
             if shared {
                 return ControlResponse::Refused {
@@ -1740,7 +1871,12 @@ impl ControlState {
             grace.expired = true;
             grace.plan = Some(op);
         }
-        self.record_plan(PlanRecord::new(op, PlanKind::Remove { node, replacement }, principal, version));
+        self.record_plan(PlanRecord::new(
+            op,
+            PlanKind::Remove { node, replacement },
+            principal,
+            version,
+        ));
         self.applied()
     }
 
@@ -1751,7 +1887,12 @@ impl ControlState {
     /// * `expected_version` - The topology version the request was written against
     /// * `node` - The member
     /// * `suspend` - Whether to suspend, or resume
-    fn apply_maintenance(&mut self, expected_version: u64, node: NodeId, suspend: bool) -> ControlResponse {
+    fn apply_maintenance(
+        &mut self,
+        expected_version: u64,
+        node: NodeId,
+        suspend: bool,
+    ) -> ControlResponse {
         let Some(state) = self.members.get(&node) else {
             return ControlResponse::Refused {
                 reason: format!("{node} is not a member of this cluster"),
@@ -1759,7 +1900,10 @@ impl ControlState {
         };
         let Some(grace) = state.grace.as_ref() else {
             return ControlResponse::Refused {
-                reason: format!("{node} is under no grace to suspend; it is {} and the policy may not remove", state.state_name()),
+                reason: format!(
+                    "{node} is under no grace to suspend; it is {} and the policy may not remove",
+                    state.state_name()
+                ),
             };
         };
         if grace.expired {
@@ -1788,7 +1932,12 @@ impl ControlState {
     /// * `op` - The operation, which is the plan's identity
     /// * `principal` - Who asked
     /// * `expected_version` - The topology version the request was written against
-    fn apply_rebalance(&mut self, op: Uuid, principal: &str, expected_version: u64) -> ControlResponse {
+    fn apply_rebalance(
+        &mut self,
+        op: Uuid,
+        principal: &str,
+        expected_version: u64,
+    ) -> ControlResponse {
         if self.policy.is_none() || self.initialized.is_none() {
             return ControlResponse::Refused {
                 reason: "no placement has been initialized to rebalance".to_string(),
@@ -1819,8 +1968,17 @@ impl ControlState {
             .find(|record| record.kind.drains() == node);
         clash.map(|record| ControlResponse::Refused {
             reason: match node {
-                Some(node) => format!("{node} is already under plan {} ({}), which is {}", record.op, record.kind.name(), record.phase.name()),
-                None => format!("a rebalance is already under way as plan {}, which is {}", record.op, record.phase.name()),
+                Some(node) => format!(
+                    "{node} is already under plan {} ({}), which is {}",
+                    record.op,
+                    record.kind.name(),
+                    record.phase.name()
+                ),
+                None => format!(
+                    "a rebalance is already under way as plan {}, which is {}",
+                    record.op,
+                    record.phase.name()
+                ),
             },
         })
     }
@@ -1856,7 +2014,13 @@ impl ControlState {
     /// * `episode` - The down episode the count is of
     /// * `elapsed_ms` - How much has elapsed
     /// * `expire` - The plan to remove under, when the grace is over
-    fn apply_grace_elapsed(&mut self, node: NodeId, episode: Uuid, elapsed_ms: u64, expire: Option<Uuid>) -> ControlResponse {
+    fn apply_grace_elapsed(
+        &mut self,
+        node: NodeId,
+        episode: Uuid,
+        elapsed_ms: u64,
+        expire: Option<Uuid>,
+    ) -> ControlResponse {
         let Some(state) = self.members.get(&node) else {
             return ControlResponse::Refused {
                 reason: format!("{node} is not a member, so has no grace to count"),
@@ -1870,7 +2034,10 @@ impl ControlState {
         // a count of another episode, a suspended grace or one already over changes nothing
         if grace.episode != episode {
             return ControlResponse::Refused {
-                reason: format!("{node}'s grace is of episode {} and the count is of {episode}", grace.episode),
+                reason: format!(
+                    "{node}'s grace is of episode {} and the count is of {episode}",
+                    grace.episode
+                ),
             };
         }
         if grace.suspended || grace.expired {
@@ -1895,7 +2062,12 @@ impl ControlState {
             // the member is removing now, from wherever it stood, and its plan is recorded
             state.phase = MemberPhase::Removing;
             state.since = version;
-            self.record_plan(PlanRecord::new(plan, PlanKind::Expiry { node, episode }, "policy", version));
+            self.record_plan(PlanRecord::new(
+                plan,
+                PlanKind::Expiry { node, episode },
+                "policy",
+                version,
+            ));
         }
         self.applied()
     }
@@ -1908,7 +2080,13 @@ impl ControlState {
     /// * `node` - The leader
     /// * `incarnation` - The incarnation it leads at
     /// * `progress` - What changed
-    fn apply_plan_progress(&mut self, op: Uuid, node: NodeId, incarnation: u64, progress: &PlanUpdate) -> ControlResponse {
+    fn apply_plan_progress(
+        &mut self,
+        op: Uuid,
+        node: NodeId,
+        incarnation: u64,
+        progress: &PlanUpdate,
+    ) -> ControlResponse {
         let Some(member) = self.members.get(&node) else {
             return ControlResponse::Refused {
                 reason: format!("{node} is not a member, so cannot drive a plan"),
@@ -1939,11 +2117,24 @@ impl ControlState {
                     reason: reason.clone(),
                     since: version,
                 });
-                record.phase = if record.blocked.is_some() { PlanPhase::Blocked } else { PlanPhase::Running };
+                record.phase = if record.blocked.is_some() {
+                    PlanPhase::Blocked
+                } else {
+                    PlanPhase::Running
+                };
             }
-            PlanUpdate::Step { tablet, op: moved, state } => {
+            PlanUpdate::Step {
+                tablet,
+                op: moved,
+                state,
+            } => {
                 // the live step for the set, or nothing to update
-                let Some(step) = record.steps.iter_mut().rev().find(|step| step.tablet == *tablet && step.is_live()) else {
+                let Some(step) = record
+                    .steps
+                    .iter_mut()
+                    .rev()
+                    .find(|step| step.tablet == *tablet && step.is_live())
+                else {
                     return self.applied();
                 };
                 if step.state == *state && step.op == *moved {
@@ -1955,7 +2146,8 @@ impl ControlState {
                 step.state = state.clone();
             }
             PlanUpdate::Blocked(reason) => {
-                let same = record.blocked.as_ref().map(|blocked| &blocked.reason) == reason.as_ref();
+                let same =
+                    record.blocked.as_ref().map(|blocked| &blocked.reason) == reason.as_ref();
                 if same {
                     return self.applied();
                 }
@@ -1963,7 +2155,11 @@ impl ControlState {
                     reason: reason.clone(),
                     since: version,
                 });
-                record.phase = if record.blocked.is_some() { PlanPhase::Blocked } else { PlanPhase::Running };
+                record.phase = if record.blocked.is_some() {
+                    PlanPhase::Blocked
+                } else {
+                    PlanPhase::Running
+                };
             }
             PlanUpdate::Finishing => {
                 if record.phase == PlanPhase::Finishing {
@@ -1978,7 +2174,10 @@ impl ControlState {
                 record.outcome = Some(outcome.clone());
                 // a drain that did not complete leaves its member where it stood: a leaving
                 // member is a member again, a removing one stays removing under its grace
-                if let (Some(node), false) = (record.kind.drains(), matches!(outcome, PlanOutcome::Completed { .. })) {
+                if let (Some(node), false) = (
+                    record.kind.drains(),
+                    matches!(outcome, PlanOutcome::Completed { .. }),
+                ) {
                     if let Some(state) = self.members.get_mut(&node) {
                         if state.phase == MemberPhase::Leaving {
                             state.phase = MemberPhase::Member;
@@ -2008,12 +2207,18 @@ impl ControlState {
         }
         if !matches!(state.phase, MemberPhase::Leaving | MemberPhase::Removing) {
             return ControlResponse::Refused {
-                reason: format!("{node} is a plain member; only a leaving or removing member is tombstoned"),
+                reason: format!(
+                    "{node} is a plain member; only a leaving or removing member is tombstoned"
+                ),
             };
         }
         // a member still holding a set is not out: its plan is what takes it out
         let map = crate::server::map::TabletMap::from_state(self, None, &self.tables.clone());
-        if map.rule_sets_served().iter().any(|(members, _)| members.iter().any(|member| member.node == node)) {
+        if map
+            .rule_sets_served()
+            .iter()
+            .any(|(members, _)| members.iter().any(|member| member.node == node))
+        {
             return ControlResponse::Refused {
                 reason: format!("{node} still holds a replica set; its plan has to move every set before it is tombstoned"),
             };
@@ -2078,7 +2283,10 @@ impl ControlState {
             Some(state) if state.is_placeable() => {}
             Some(state) => {
                 return ControlResponse::Refused {
-                    reason: format!("{to} is {}, and only an up member can be moved to", state.state_name()),
+                    reason: format!(
+                        "{to} is {}, and only an up member can be moved to",
+                        state.state_name()
+                    ),
                 };
             }
             None => {
@@ -2106,7 +2314,9 @@ impl ControlState {
         }
         let Some(slot) = expected.iter().position(|member| member.node == from) else {
             return ControlResponse::Refused {
-                reason: format!("{from} is not a member of the set serving tablet {tablet}: {expected:?}"),
+                reason: format!(
+                    "{from} is not a member of the set serving tablet {tablet}: {expected:?}"
+                ),
             };
         };
         if expected.iter().any(|member| member.node == to) {
@@ -2116,7 +2326,11 @@ impl ControlState {
         }
         // the destination's shard: the one the rule would give the set's first tablet on it
         let nodes = self.initialized.as_ref().map_or(1, Vec::len).max(1);
-        let to_shards = self.members.get(&to).map_or(1, |state| state.record.shards).max(1);
+        let to_shards = self
+            .members
+            .get(&to)
+            .map_or(1, |state| state.record.shards)
+            .max(1);
         // truncation cannot happen: the modulus is a shard count, which the ring bounds
         #[allow(clippy::cast_possible_truncation)]
         let to_shard = ((usize::from(tablets[0]) / nodes) % to_shards) as u16;
@@ -2139,7 +2353,12 @@ impl ControlState {
         let behind_repair = self
             .repairs
             .values()
-            .filter(|record| record.groups.iter().any(|(group, progress)| groups.contains_key(group) && !progress.is_done()))
+            .filter(|record| {
+                record
+                    .groups
+                    .iter()
+                    .any(|(group, progress)| groups.contains_key(group) && !progress.is_done())
+            })
             .max_by_key(|record| record.requested_at)
             .map(|record| record.op);
         let phase = match behind_move.or(behind_repair) {
@@ -2222,7 +2441,9 @@ impl ControlState {
         };
         if record.is_queued() {
             return ControlResponse::Refused {
-                reason: format!("move {op} is queued behind another transition and cannot be driven yet"),
+                reason: format!(
+                    "move {op} is queued behind another transition and cannot be driven yet"
+                ),
             };
         }
         let Some(current) = record.groups.get_mut(&group) else {
@@ -2246,10 +2467,12 @@ impl ControlState {
             let configuration = record.configuration(version);
             let first = configuration.tablets[0];
             let backward = self.configurations.get(&first).is_some_and(|existing| {
-                existing
-                    .configs
-                    .iter()
-                    .any(|(group, index)| configuration.configs.get(group).is_some_and(|new| new < index))
+                existing.configs.iter().any(|(group, index)| {
+                    configuration
+                        .configs
+                        .get(group)
+                        .is_some_and(|new| new < index)
+                })
             });
             if !backward {
                 self.configurations.insert(first, configuration);
@@ -2259,10 +2482,13 @@ impl ControlState {
         let record = self.moves.get_mut(&op).expect("checked above");
         if record.groups.values().all(GroupMove::is_done) {
             record.phase = MovePhase::Done;
-            let failed = record.groups.values().find_map(|progress| match &progress.outcome {
-                Some(MoveOutcome::Failed { reason }) => Some(reason.clone()),
-                _ => None,
-            });
+            let failed = record
+                .groups
+                .values()
+                .find_map(|progress| match &progress.outcome {
+                    Some(MoveOutcome::Failed { reason }) => Some(reason.clone()),
+                    _ => None,
+                });
             record.outcome = Some(match failed {
                 Some(reason) => MoveOutcome::Failed { reason },
                 None => MoveOutcome::Moved,
@@ -2324,7 +2550,10 @@ impl ControlState {
         }
         // a removed identity never comes back, at any incarnation and by any door
         if self.tombstones.contains_key(&record.node)
-            || self.members.get(&record.node).is_some_and(|state| state.phase == MemberPhase::Removed)
+            || self
+                .members
+                .get(&record.node)
+                .is_some_and(|state| state.phase == MemberPhase::Removed)
         {
             return ControlResponse::Removed { node: record.node };
         }
@@ -2344,7 +2573,10 @@ impl ControlState {
         match self.members.get(&record.node) {
             // a node nobody admitted cannot observe itself in; the leader admits it first
             None if !admitting => ControlResponse::Refused {
-                reason: format!("{} is not a member; a joiner is admitted by the leader first", record.node),
+                reason: format!(
+                    "{} is not a member; a joiner is admitted by the leader first",
+                    record.node
+                ),
             },
             // a joiner let in for the first time, joining until it reports in
             None => {
@@ -2352,7 +2584,12 @@ impl ControlState {
                 let version = self.topology_version;
                 self.members.insert(
                     record.node,
-                    MemberState::fresh(record.clone(), MemberHealth::Joining, MemberRole::Learner, version),
+                    MemberState::fresh(
+                        record.clone(),
+                        MemberHealth::Joining,
+                        MemberRole::Learner,
+                        version,
+                    ),
                 );
                 self.applied()
             }
@@ -2421,7 +2658,14 @@ impl ControlState {
     /// * `expected_version` - The version the request was written against
     /// * `table` - The table, or none for every table
     /// * `path` - The directory the files go under
-    fn apply_backup(&mut self, op: Uuid, principal: &str, expected_version: u64, table: Option<TableId>, path: &str) -> ControlResponse {
+    fn apply_backup(
+        &mut self,
+        op: Uuid,
+        principal: &str,
+        expected_version: u64,
+        table: Option<TableId>,
+        path: &str,
+    ) -> ControlResponse {
         if self.policy.is_none() || self.initialized.is_none() {
             return ControlResponse::Refused {
                 reason: "no placement has been initialized to back up".to_string(),
@@ -2470,7 +2714,9 @@ impl ControlState {
                     .chain(
                         self.repairs
                             .values()
-                            .filter(|record| !record.is_done() && record.groups.contains_key(&group))
+                            .filter(|record| {
+                                !record.is_done() && record.groups.contains_key(&group)
+                            })
                             .map(|record| (record.requested_at, record.op)),
                     )
                     .max()
@@ -2504,7 +2750,11 @@ impl ControlState {
         );
         // forget the oldest once too many are kept
         while self.backups.len() > KEPT_BACKUPS {
-            let oldest = self.backups.values().min_by_key(|record| record.requested_at).map(|record| record.op);
+            let oldest = self
+                .backups
+                .values()
+                .min_by_key(|record| record.requested_at)
+                .map(|record| record.op);
             match oldest {
                 Some(op) => {
                     self.backups.remove(&op);
@@ -2524,7 +2774,14 @@ impl ControlState {
     /// * `node` - The driver
     /// * `incarnation` - The incarnation it drives at
     /// * `progress` - Where the group stands
-    fn apply_backup_progress(&mut self, op: Uuid, group: GroupId, node: NodeId, incarnation: u64, progress: &GroupBackup) -> ControlResponse {
+    fn apply_backup_progress(
+        &mut self,
+        op: Uuid,
+        group: GroupId,
+        node: NodeId,
+        incarnation: u64,
+        progress: &GroupBackup,
+    ) -> ControlResponse {
         let Some(member) = self.members.get(&node) else {
             return ControlResponse::Refused {
                 reason: format!("{node} is not a member, so cannot drive a backup"),
@@ -2599,13 +2856,18 @@ impl ControlState {
         }
         if Some(source) == self.cluster {
             return ControlResponse::Refused {
-                reason: "a backup is restored into a new cluster, never into the one it was cut in".to_string(),
+                reason: "a backup is restored into a new cluster, never into the one it was cut in"
+                    .to_string(),
             };
         }
         // every tablet of every restored table in exactly one file
         // a tablet id is twelve bits, so the count fits a u16
         #[allow(clippy::cast_possible_truncation)]
-        let coverage = match judge_coverage(files, &self.tables, crate::server::ring::TABLET_COUNT as u16) {
+        let coverage = match judge_coverage(
+            files,
+            &self.tables,
+            crate::server::ring::TABLET_COUNT as u16,
+        ) {
             Ok(coverage) => coverage,
             Err(reason) => return ControlResponse::Refused { reason },
         };
@@ -2617,7 +2879,10 @@ impl ControlState {
         let mut groups: BTreeMap<GroupId, GroupRestore> = BTreeMap::new();
         for (table, covered) in &coverage {
             for (group, _, tablets) in map.groups_of(*table) {
-                let mut names: Vec<String> = tablets.iter().filter_map(|tablet| covered.get(tablet).cloned()).collect();
+                let mut names: Vec<String> = tablets
+                    .iter()
+                    .filter_map(|tablet| covered.get(tablet).cloned())
+                    .collect();
                 names.sort();
                 names.dedup();
                 groups.insert(
@@ -2650,7 +2915,11 @@ impl ControlState {
             },
         );
         while self.restores.len() > KEPT_RESTORES {
-            let oldest = self.restores.values().min_by_key(|record| record.requested_at).map(|record| record.op);
+            let oldest = self
+                .restores
+                .values()
+                .min_by_key(|record| record.requested_at)
+                .map(|record| record.op);
             match oldest {
                 Some(op) => {
                     self.restores.remove(&op);
@@ -2670,7 +2939,14 @@ impl ControlState {
     /// * `node` - The driver
     /// * `incarnation` - The incarnation it drives at
     /// * `progress` - Where the group stands
-    fn apply_restore_progress(&mut self, op: Uuid, group: GroupId, node: NodeId, incarnation: u64, progress: &GroupRestore) -> ControlResponse {
+    fn apply_restore_progress(
+        &mut self,
+        op: Uuid,
+        group: GroupId,
+        node: NodeId,
+        incarnation: u64,
+        progress: &GroupRestore,
+    ) -> ControlResponse {
         let Some(member) = self.members.get(&node) else {
             return ControlResponse::Refused {
                 reason: format!("{node} is not a member, so cannot drive a restore"),
@@ -2721,7 +2997,15 @@ impl ControlState {
     /// * `at` - The node the recovery was run on
     /// * `last_committed` - The index the survivor had committed
     /// * `recovered_ms` - When
-    fn apply_force_recovered(&mut self, op: Uuid, survivors: &[NodeId], lost: &[NodeId], at: NodeId, last_committed: u64, recovered_ms: u64) -> ControlResponse {
+    fn apply_force_recovered(
+        &mut self,
+        op: Uuid,
+        survivors: &[NodeId],
+        lost: &[NodeId],
+        at: NodeId,
+        last_committed: u64,
+        recovered_ms: u64,
+    ) -> ControlResponse {
         if self.cluster.is_none() {
             return ControlResponse::Refused {
                 reason: "no cluster has been bootstrapped to recover".to_string(),
@@ -2769,7 +3053,15 @@ impl ControlState {
             seed.extend_from_slice(node.0.as_bytes());
             let plan = Uuid::from_u64_pair(gxhash::gxhash64(&seed, 0), gxhash::gxhash64(&seed, 1));
             if self.check_one_plan(Some(*node)).is_none() {
-                self.record_plan(PlanRecord::new(plan, PlanKind::Remove { node: *node, replacement: None }, "recovery", version));
+                self.record_plan(PlanRecord::new(
+                    plan,
+                    PlanKind::Remove {
+                        node: *node,
+                        replacement: None,
+                    },
+                    "recovery",
+                    version,
+                ));
             }
         }
         self.recoveries.push(RecoveryRecord {
@@ -2790,10 +3082,16 @@ impl ControlState {
     /// * `expected_version` - The version the request was written against
     /// * `wire` - The version to activate
     /// * `members` - The newest version each member reported, as the leader heard it
-    fn apply_activate(&mut self, expected_version: u64, wire: u8, members: &BTreeMap<NodeId, u8>) -> ControlResponse {
+    fn apply_activate(
+        &mut self,
+        expected_version: u64,
+        wire: u8,
+        members: &BTreeMap<NodeId, u8>,
+    ) -> ControlResponse {
         if self.cluster.is_none() {
             return ControlResponse::Refused {
-                reason: "no cluster has been bootstrapped to activate a wire version in".to_string(),
+                reason: "no cluster has been bootstrapped to activate a wire version in"
+                    .to_string(),
             };
         }
         if let Some(refusal) = self.check_version(expected_version) {
@@ -2820,7 +3118,16 @@ impl ControlState {
             .members
             .values()
             .filter(|member| member.phase != MemberPhase::Removed)
-            .map(|member| (member.record.node, members.get(&member.record.node).copied().unwrap_or(0).max(MIN_PEER_VERSION)))
+            .map(|member| {
+                (
+                    member.record.node,
+                    members
+                        .get(&member.record.node)
+                        .copied()
+                        .unwrap_or(0)
+                        .max(MIN_PEER_VERSION),
+                )
+            })
             .filter(|(_, reported)| *reported < wire)
             .map(|(node, reported)| format!("{node} at {reported}"))
             .collect();
@@ -2926,7 +3233,12 @@ impl ControlState {
                 None => {
                     self.members.insert(
                         *node,
-                        MemberState::fresh(record.clone(), MemberHealth::Joining, role, self.topology_version + 1),
+                        MemberState::fresh(
+                            record.clone(),
+                            MemberHealth::Joining,
+                            role,
+                            self.topology_version + 1,
+                        ),
                     );
                     changed = true;
                 }
@@ -2934,7 +3246,8 @@ impl ControlState {
         }
         // a member the configuration no longer names votes in nothing: a removed one, taken
         // out of the group ([F46](../../../../docs/src/features/capacity-rebalancing.md))
-        let named: std::collections::BTreeSet<NodeId> = membership.nodes().map(|(node, _)| *node).collect();
+        let named: std::collections::BTreeSet<NodeId> =
+            membership.nodes().map(|(node, _)| *node).collect();
         for (node, state) in &mut self.members {
             if !named.contains(node) && state.role != MemberRole::Learner {
                 state.role = MemberRole::Learner;
@@ -3001,7 +3314,11 @@ impl ControlState {
 
     /// The plans not yet done, in request order
     pub fn open_plans(&self) -> Vec<&PlanRecord> {
-        let mut plans: Vec<&PlanRecord> = self.plans.values().filter(|record| !record.is_done()).collect();
+        let mut plans: Vec<&PlanRecord> = self
+            .plans
+            .values()
+            .filter(|record| !record.is_done())
+            .collect();
         plans.sort_by_key(|record| record.requested_at);
         plans
     }
@@ -3019,7 +3336,9 @@ impl ControlState {
         let gone: Vec<NodeId> = self
             .members
             .iter()
-            .filter(|(_, state)| matches!(state.phase, MemberPhase::Removing | MemberPhase::Removed))
+            .filter(|(_, state)| {
+                matches!(state.phase, MemberPhase::Removing | MemberPhase::Removed)
+            })
             .map(|(node, _)| *node)
             .collect();
         let short = map
@@ -3104,7 +3423,10 @@ mod tests {
             policy,
             member: member(NodeId::mint(), "b"),
         };
-        assert!(matches!(state.apply(&again), ControlResponse::Refused { .. }));
+        assert!(matches!(
+            state.apply(&again),
+            ControlResponse::Refused { .. }
+        ));
         assert_eq!(state.cluster, Some(cluster));
         assert_eq!(state.topology_version, 1);
         // the same member observed unchanged is not a change
@@ -3419,7 +3741,9 @@ mod tests {
                 nodes: vec![node],
                 tables: tables.clone(),
             }),
-            ControlResponse::Applied { topology_version: 2 }
+            ControlResponse::Applied {
+                topology_version: 2
+            }
         );
         // `All` is not a read level
         assert!(matches!(
@@ -3433,42 +3757,71 @@ mod tests {
         ));
         // setting records, and moves the version once
         assert_eq!(
-            state.apply(&set(Uuid::new_v4(), 2, TableId::of("Note"), Some(Consistency::Quorum))),
-            ControlResponse::Applied { topology_version: 3 }
+            state.apply(&set(
+                Uuid::new_v4(),
+                2,
+                TableId::of("Note"),
+                Some(Consistency::Quorum)
+            )),
+            ControlResponse::Applied {
+                topology_version: 3
+            }
         );
-        assert_eq!(state.table_read_policy.get(&TableId::of("Note")), Some(&Consistency::Quorum));
+        assert_eq!(
+            state.table_read_policy.get(&TableId::of("Note")),
+            Some(&Consistency::Quorum)
+        );
         assert_eq!(state.table_read_policy.get(&TableId::of("Row")), None);
         // the same level again applies without moving the version
         assert_eq!(
-            state.apply(&set(Uuid::new_v4(), 3, TableId::of("Note"), Some(Consistency::Quorum))),
-            ControlResponse::Applied { topology_version: 3 }
+            state.apply(&set(
+                Uuid::new_v4(),
+                3,
+                TableId::of("Note"),
+                Some(Consistency::Quorum)
+            )),
+            ControlResponse::Applied {
+                topology_version: 3
+            }
         );
         // the map resolves each table on its own: Note at its policy, Row at the cluster's
         let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
         assert_eq!(map.read_level_of(TableId::of("Note")), Consistency::Quorum);
         assert_eq!(map.read_level_of(TableId::of("Row")), Consistency::One);
-        assert_eq!(map.frame().table_read_policy, vec![("Note".to_string(), "quorum".to_string())]);
+        assert_eq!(
+            map.frame().table_read_policy,
+            vec![("Note".to_string(), "quorum".to_string())]
+        );
         // clearing removes it and moves the version once; clearing again moves nothing
         assert_eq!(
             state.apply(&set(Uuid::new_v4(), 3, TableId::of("Note"), None)),
-            ControlResponse::Applied { topology_version: 4 }
+            ControlResponse::Applied {
+                topology_version: 4
+            }
         );
         assert!(state.table_read_policy.is_empty());
         assert_eq!(
             state.apply(&set(Uuid::new_v4(), 4, TableId::of("Note"), None)),
-            ControlResponse::Applied { topology_version: 4 }
+            ControlResponse::Applied {
+                topology_version: 4
+            }
         );
         // and a repeated op is answered as it was the first time
         let op = Uuid::new_v4();
         assert_eq!(
             state.apply(&set(op, 4, TableId::of("Row"), Some(Consistency::One))),
-            ControlResponse::Applied { topology_version: 5 }
+            ControlResponse::Applied {
+                topology_version: 5
+            }
         );
         assert!(matches!(
             state.apply(&set(op, 5, TableId::of("Row"), Some(Consistency::Quorum))),
             ControlResponse::Repeated { .. }
         ));
-        assert_eq!(state.table_read_policy.get(&TableId::of("Row")), Some(&Consistency::One));
+        assert_eq!(
+            state.table_read_policy.get(&TableId::of("Row")),
+            Some(&Consistency::One)
+        );
     }
 
     /// A move is recorded against the set as the map serves it, queued behind a transition on
@@ -3499,7 +3852,9 @@ mod tests {
                 nodes: vec![node, b, c],
                 tables: tables.clone(),
             }),
-            ControlResponse::Applied { topology_version: version + 1 }
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
         );
         let moving = |op, expected_version, tablet, from, to| ControlCommand::Move {
             op,
@@ -3543,11 +3898,16 @@ mod tests {
         let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
         let expected = map.replicas_of(0);
         let (_, tablets) = map.rule_set_of(0);
-        let slot = expected.iter().position(|member| member.node == c).expect("c is in the set");
+        let slot = expected
+            .iter()
+            .position(|member| member.node == c)
+            .expect("c is in the set");
         let op = Uuid::new_v4();
         assert_eq!(
             state.apply(&moving(op, version, 0, c, d)),
-            ControlResponse::Applied { topology_version: version + 1 }
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
         );
         let record = state.moves.get(&op).expect("recorded").clone();
         assert_eq!(record.phase, MovePhase::Planned);
@@ -3559,7 +3919,10 @@ mod tests {
         target[slot] = record.to;
         assert_eq!(record.target, target);
         assert_eq!(record.groups.len(), 2, "one group per table");
-        assert!(record.groups.values().all(|progress| progress.phase == MovePhase::Planned));
+        assert!(record
+            .groups
+            .values()
+            .all(|progress| progress.phase == MovePhase::Planned));
         let groups: Vec<GroupId> = record.groups.keys().copied().collect();
         // the map carries it, and the destination learns from it
         let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
@@ -3571,15 +3934,21 @@ mod tests {
         let queued = Uuid::new_v4();
         assert_eq!(
             state.apply(&moving(queued, version, 0, b, d)),
-            ControlResponse::Applied { topology_version: version + 1 }
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
         );
         assert_eq!(state.moves[&queued].phase, MovePhase::Queued { behind: op });
-        let other_tablet = (0..4096u16).find(|tablet| !record.covers(*tablet)).expect("another set");
+        let other_tablet = (0..4096u16)
+            .find(|tablet| !record.covers(*tablet))
+            .expect("another set");
         let version = state.topology_version;
         let other = Uuid::new_v4();
         assert_eq!(
             state.apply(&moving(other, version, other_tablet, node, d)),
-            ControlResponse::Applied { topology_version: version + 1 }
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
         );
         assert_eq!(state.moves[&other].phase, MovePhase::Planned);
         // progress: an unknown op, a queued op and a stranger are refused; an old run is fenced
@@ -3610,29 +3979,63 @@ mod tests {
             ControlResponse::Refused { reason } if reason.contains("not part of")
         ));
         assert!(matches!(
-            state.apply(&report(op, groups[0], 0, progress(MovePhase::Learner, None))),
+            state.apply(&report(
+                op,
+                groups[0],
+                0,
+                progress(MovePhase::Learner, None)
+            )),
             ControlResponse::Fenced { .. }
         ));
         // a phase moves the version once, and the same phase again moves nothing
         let version = state.topology_version;
         assert_eq!(
-            state.apply(&report(op, groups[0], 1, progress(MovePhase::Learner, None))),
-            ControlResponse::Applied { topology_version: version + 1 }
+            state.apply(&report(
+                op,
+                groups[0],
+                1,
+                progress(MovePhase::Learner, None)
+            )),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
         );
         assert_eq!(
-            state.apply(&report(op, groups[0], 1, progress(MovePhase::Learner, None))),
-            ControlResponse::Applied { topology_version: version + 1 }
+            state.apply(&report(
+                op,
+                groups[0],
+                1,
+                progress(MovePhase::Learner, None)
+            )),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
         );
-        assert_eq!(state.moves[&op].groups[&groups[0]].phase, MovePhase::Learner);
+        assert_eq!(
+            state.moves[&op].groups[&groups[0]].phase,
+            MovePhase::Learner
+        );
         assert_eq!(state.moves[&op].phase, MovePhase::Planned);
         // one group activated publishes nothing; the last one publishes the configuration
-        state.apply(&report(op, groups[0], 1, progress(MovePhase::Activated, Some(40))));
+        state.apply(&report(
+            op,
+            groups[0],
+            1,
+            progress(MovePhase::Activated, Some(40)),
+        ));
         assert_eq!(state.moves[&op].phase, MovePhase::Planned);
         assert!(state.configurations.is_empty());
         let version = state.topology_version;
         assert_eq!(
-            state.apply(&report(op, groups[1], 1, progress(MovePhase::Activated, Some(41)))),
-            ControlResponse::Applied { topology_version: version + 1 }
+            state.apply(&report(
+                op,
+                groups[1],
+                1,
+                progress(MovePhase::Activated, Some(41))
+            )),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
         );
         assert_eq!(state.moves[&op].phase, MovePhase::Published);
         let configuration = state.configurations.get(&tablets[0]).expect("published");
@@ -3666,8 +4069,15 @@ mod tests {
         // a done group stays done, whatever a late driver says
         let version = state.topology_version;
         assert_eq!(
-            state.apply(&report(op, groups[0], 1, progress(MovePhase::Learner, None))),
-            ControlResponse::Applied { topology_version: version }
+            state.apply(&report(
+                op,
+                groups[0],
+                1,
+                progress(MovePhase::Learner, None)
+            )),
+            ControlResponse::Applied {
+                topology_version: version
+            }
         );
         assert_eq!(state.moves[&op].groups[&groups[0]].phase, MovePhase::Done);
         // the released move's expected set is the one it was recorded against, which the
@@ -3728,7 +4138,10 @@ mod tests {
         let group = *state.moves[&moved].groups.keys().next().expect("a group");
         let repaired = Uuid::new_v4();
         state.apply(&repairing(repaired, state.topology_version));
-        assert_eq!(state.repairs[&repaired].groups[&group].phase, RepairPhase::Queued { behind: moved });
+        assert_eq!(
+            state.repairs[&repaired].groups[&group].phase,
+            RepairPhase::Queued { behind: moved }
+        );
         // nobody drives a queued group
         let progress = ControlCommand::RepairProgress {
             op: repaired,
@@ -3740,7 +4153,9 @@ mod tests {
                 ..GroupRepair::default()
             },
         };
-        assert!(matches!(state.apply(&progress), ControlResponse::Refused { reason } if reason.contains("queued")));
+        assert!(
+            matches!(state.apply(&progress), ControlResponse::Refused { reason } if reason.contains("queued"))
+        );
         // the move done releases it to pending
         let done = |op, group| ControlCommand::MoveProgress {
             op,
@@ -3757,12 +4172,21 @@ mod tests {
         };
         state.apply(&done(moved, group));
         assert_eq!(state.moves[&moved].phase, MovePhase::Done);
-        assert_eq!(state.repairs[&repaired].groups[&group].phase, RepairPhase::Pending);
+        assert_eq!(
+            state.repairs[&repaired].groups[&group].phase,
+            RepairPhase::Pending
+        );
         // a repair under way, then a move of the set: queued behind the repair
-        assert!(matches!(state.apply(&progress), ControlResponse::Applied { .. }));
+        assert!(matches!(
+            state.apply(&progress),
+            ControlResponse::Applied { .. }
+        ));
         let back = Uuid::new_v4();
         state.apply(&moving(back, state.topology_version, d, c));
-        assert_eq!(state.moves[&back].phase, MovePhase::Queued { behind: repaired });
+        assert_eq!(
+            state.moves[&back].phase,
+            MovePhase::Queued { behind: repaired }
+        );
         let group_done = ControlCommand::RepairProgress {
             op: repaired,
             group,
@@ -3773,7 +4197,9 @@ mod tests {
                 driver: Some(node),
                 boundary: Some(9),
                 reports: Vec::new(),
-                outcome: Some(RepairOutcome::Clean { unreported: Vec::new() }),
+                outcome: Some(RepairOutcome::Clean {
+                    unreported: Vec::new(),
+                }),
             },
         };
         state.apply(&group_done);
@@ -3781,7 +4207,10 @@ mod tests {
         assert_eq!(state.moves[&back].phase, MovePhase::Planned);
         // the released move is recorded against the set as the map served it when it was
         // asked, which the earlier move had already moved
-        assert!(state.moves[&back].expected.iter().any(|member| member.node == d));
+        assert!(state.moves[&back]
+            .expected
+            .iter()
+            .any(|member| member.node == d));
     }
 
     /// A member is decommissioned to leaving and removed to removing, a plain up member cannot
@@ -3791,7 +4220,9 @@ mod tests {
     /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
     #[test]
     fn a_member_is_decommissioned_removed_and_tombstoned() {
-        use crate::server::control::plan::{PlanKind, PlanOutcome, PlanPhase, PlanStep, PlanUpdate, StepState};
+        use crate::server::control::plan::{
+            PlanKind, PlanOutcome, PlanPhase, PlanStep, PlanUpdate, StepState,
+        };
         use crate::server::control::types::MemberPhase;
         let (mut state, _, node) = bootstrapped();
         let (b, c, d) = (NodeId::mint(), NodeId::mint(), NodeId::mint());
@@ -3833,7 +4264,12 @@ mod tests {
         ));
         // decommissioned: leaving, with a plan recorded under the operation
         let plan = Uuid::new_v4();
-        assert_eq!(state.apply(&decommission(plan, version, b)), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(
+            state.apply(&decommission(plan, version, b)),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
+        );
         assert_eq!(state.members[&b].phase, MemberPhase::Leaving);
         assert_eq!(state.members[&b].state_name(), "leaving");
         assert!(!state.members[&b].is_placeable());
@@ -3852,55 +4288,133 @@ mod tests {
             ControlResponse::Refused { reason } if reason.contains("already under plan")
         ));
         // decommissioning it again is applied and changes nothing
-        assert_eq!(state.apply(&decommission(Uuid::new_v4(), version, b)), ControlResponse::Applied { topology_version: version });
+        assert_eq!(
+            state.apply(&decommission(Uuid::new_v4(), version, b)),
+            ControlResponse::Applied {
+                topology_version: version
+            }
+        );
         // a tombstone while it still holds a set is refused
         assert!(matches!(
             state.apply(&ControlCommand::Tombstone { node: b, op: Some(plan) }),
             ControlResponse::Refused { reason } if reason.contains("still holds")
         ));
         // the leader's progress: steps, then a step moving, then moved, then finishing
-        let progress = |progress| ControlCommand::PlanProgress { op: plan, node, incarnation: 1, progress };
+        let progress = |progress| ControlCommand::PlanProgress {
+            op: plan,
+            node,
+            incarnation: 1,
+            progress,
+        };
         let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
-        let sets: Vec<u16> = map.rule_sets_served().iter().map(|(_, tablets)| tablets[0]).collect();
-        let steps: Vec<PlanStep> = sets.iter().map(|tablet| PlanStep { tablet: *tablet, from: b, to: d, bytes: 5, op: None, state: StepState::Pending }).collect();
+        let sets: Vec<u16> = map
+            .rule_sets_served()
+            .iter()
+            .map(|(_, tablets)| tablets[0])
+            .collect();
+        let steps: Vec<PlanStep> = sets
+            .iter()
+            .map(|tablet| PlanStep {
+                tablet: *tablet,
+                from: b,
+                to: d,
+                bytes: 5,
+                op: None,
+                state: StepState::Pending,
+            })
+            .collect();
         let version = state.topology_version;
-        assert_eq!(state.apply(&progress(PlanUpdate::Steps { steps: steps.clone(), blocked: None })), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(
+            state.apply(&progress(PlanUpdate::Steps {
+                steps: steps.clone(),
+                blocked: None
+            })),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
+        );
         assert_eq!(state.plans[&plan].phase, PlanPhase::Running);
         assert_eq!(state.plans[&plan].steps.len(), sets.len());
         assert_eq!(state.plans[&plan].replanned, 1);
         let moved = Uuid::new_v4();
-        state.apply(&progress(PlanUpdate::Step { tablet: sets[0], op: Some(moved), state: StepState::Moving }));
+        state.apply(&progress(PlanUpdate::Step {
+            tablet: sets[0],
+            op: Some(moved),
+            state: StepState::Moving,
+        }));
         assert_eq!(state.plans[&plan].steps[0].op, Some(moved));
         assert_eq!(state.plans[&plan].steps[0].state, StepState::Moving);
         // the same step again moves nothing
         let version = state.topology_version;
-        assert_eq!(state.apply(&progress(PlanUpdate::Step { tablet: sets[0], op: Some(moved), state: StepState::Moving })), ControlResponse::Applied { topology_version: version });
+        assert_eq!(
+            state.apply(&progress(PlanUpdate::Step {
+                tablet: sets[0],
+                op: Some(moved),
+                state: StepState::Moving
+            })),
+            ControlResponse::Applied {
+                topology_version: version
+            }
+        );
         // blocked and unblocked by reason
-        state.apply(&progress(PlanUpdate::Blocked(Some("tablet 1: nowhere".to_string()))));
+        state.apply(&progress(PlanUpdate::Blocked(Some(
+            "tablet 1: nowhere".to_string(),
+        ))));
         assert_eq!(state.plans[&plan].phase, PlanPhase::Blocked);
-        assert_eq!(state.plans[&plan].blocked.as_ref().map(|blocked| blocked.reason.as_str()), Some("tablet 1: nowhere"));
+        assert_eq!(
+            state.plans[&plan]
+                .blocked
+                .as_ref()
+                .map(|blocked| blocked.reason.as_str()),
+            Some("tablet 1: nowhere")
+        );
         state.apply(&progress(PlanUpdate::Blocked(None)));
         assert_eq!(state.plans[&plan].phase, PlanPhase::Running);
         // an old run of the leader is fenced, an unknown plan refused
         assert!(matches!(
-            state.apply(&ControlCommand::PlanProgress { op: plan, node, incarnation: 0, progress: PlanUpdate::Finishing }),
+            state.apply(&ControlCommand::PlanProgress {
+                op: plan,
+                node,
+                incarnation: 0,
+                progress: PlanUpdate::Finishing
+            }),
             ControlResponse::Fenced { .. }
         ));
         assert!(matches!(
-            state.apply(&ControlCommand::PlanProgress { op: Uuid::new_v4(), node, incarnation: 1, progress: PlanUpdate::Finishing }),
+            state.apply(&ControlCommand::PlanProgress {
+                op: Uuid::new_v4(),
+                node,
+                incarnation: 1,
+                progress: PlanUpdate::Finishing
+            }),
             ControlResponse::Refused { .. }
         ));
         // a decommission that fails puts the member back; a fresh one is planned again
-        state.apply(&progress(PlanUpdate::Done(PlanOutcome::Failed { reason: "gave up".to_string() })));
+        state.apply(&progress(PlanUpdate::Done(PlanOutcome::Failed {
+            reason: "gave up".to_string(),
+        })));
         assert!(state.plans[&plan].is_done());
         assert_eq!(state.members[&b].phase, MemberPhase::Member);
         // a done plan stays done
         let version = state.topology_version;
-        assert_eq!(state.apply(&progress(PlanUpdate::Finishing)), ControlResponse::Applied { topology_version: version });
+        assert_eq!(
+            state.apply(&progress(PlanUpdate::Finishing)),
+            ControlResponse::Applied {
+                topology_version: version
+            }
+        );
         // now the removal path: b called down under the grace, then removed at an operator's word
         let episode = Uuid::new_v4();
-        state.apply(&ControlCommand::SetHealth { node: b, health: MemberHealth::Down, incarnation: 1, episode: Some(episode) });
-        assert!(state.members[&b].grace.as_ref().is_some_and(|grace| grace.episode == episode && grace.elapsed_ms == 0));
+        state.apply(&ControlCommand::SetHealth {
+            node: b,
+            health: MemberHealth::Down,
+            incarnation: 1,
+            episode: Some(episode),
+        });
+        assert!(state.members[&b]
+            .grace
+            .as_ref()
+            .is_some_and(|grace| grace.episode == episode && grace.elapsed_ms == 0));
         // a replacement has to be a placeable member outside every set of the member
         let version = state.topology_version;
         assert!(matches!(
@@ -3912,12 +4426,29 @@ mod tests {
             ControlResponse::Refused { reason } if reason.contains("not a member")
         ));
         let removal = Uuid::new_v4();
-        assert_eq!(state.apply(&remove(removal, version, b, Some(d))), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(
+            state.apply(&remove(removal, version, b, Some(d))),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
+        );
         assert_eq!(state.members[&b].phase, MemberPhase::Removing);
         assert_eq!(state.members[&b].state_name(), "removing");
-        assert!(state.members[&b].grace.as_ref().is_some_and(|grace| grace.expired && grace.plan == Some(removal)));
-        assert_eq!(state.plans[&removal].kind, PlanKind::Remove { node: b, replacement: Some(d) });
-        assert_eq!(state.under_replicated_sets(), u32::try_from(sets.len()).unwrap());
+        assert!(state.members[&b]
+            .grace
+            .as_ref()
+            .is_some_and(|grace| grace.expired && grace.plan == Some(removal)));
+        assert_eq!(
+            state.plans[&removal].kind,
+            PlanKind::Remove {
+                node: b,
+                replacement: Some(d)
+            }
+        );
+        assert_eq!(
+            state.under_replicated_sets(),
+            u32::try_from(sets.len()).unwrap()
+        );
         // a late up keeps the removal, and its grace with it
         state.apply(&ControlCommand::ObserveMember(member(b, "b")));
         assert_eq!(state.members[&b].health, MemberHealth::Up);
@@ -3933,8 +4464,17 @@ mod tests {
             let op = Uuid::new_v4();
             let version = state.topology_version;
             assert_eq!(
-                state.apply(&ControlCommand::Move { op, principal: format!("plan {removal}"), expected_version: version, tablet: *tablet, from: b, to: d }),
-                ControlResponse::Applied { topology_version: version + 1 }
+                state.apply(&ControlCommand::Move {
+                    op,
+                    principal: format!("plan {removal}"),
+                    expected_version: version,
+                    tablet: *tablet,
+                    from: b,
+                    to: d
+                }),
+                ControlResponse::Applied {
+                    topology_version: version + 1
+                }
             );
             let groups: Vec<GroupId> = state.moves[&op].groups.keys().copied().collect();
             for group in groups {
@@ -3954,22 +4494,55 @@ mod tests {
             }
         }
         let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
-        assert!(map.rule_sets_served().iter().all(|(members, _)| members.iter().all(|member| member.node != b)));
+        assert!(map
+            .rule_sets_served()
+            .iter()
+            .all(|(members, _)| members.iter().all(|member| member.node != b)));
         assert_eq!(state.under_replicated_sets(), 0);
         // tombstoned: removed, the grace gone, the identity refused at observe and admit at
         // any incarnation, and never re-added by a configuration naming it
         let version = state.topology_version;
-        assert_eq!(state.apply(&ControlCommand::Tombstone { node: b, op: Some(removal) }), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(
+            state.apply(&ControlCommand::Tombstone {
+                node: b,
+                op: Some(removal)
+            }),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
+        );
         assert_eq!(state.members[&b].phase, MemberPhase::Removed);
         assert_eq!(state.members[&b].state_name(), "removed");
         assert!(state.members[&b].grace.is_none());
         assert_eq!(state.tombstones[&b].op, Some(removal));
-        assert_eq!(state.apply(&ControlCommand::Tombstone { node: b, op: Some(removal) }), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(
+            state.apply(&ControlCommand::Tombstone {
+                node: b,
+                op: Some(removal)
+            }),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
+        );
         let mut later = member(b, "b");
         later.incarnation = 9;
-        assert_eq!(state.apply(&ControlCommand::ObserveMember(later.clone())), ControlResponse::Removed { node: b });
-        assert_eq!(state.apply(&ControlCommand::Admit(later)), ControlResponse::Removed { node: b });
-        assert_eq!(state.apply(&ControlCommand::SetHealth { node: b, health: MemberHealth::Up, incarnation: 9, episode: None }), ControlResponse::Removed { node: b });
+        assert_eq!(
+            state.apply(&ControlCommand::ObserveMember(later.clone())),
+            ControlResponse::Removed { node: b }
+        );
+        assert_eq!(
+            state.apply(&ControlCommand::Admit(later)),
+            ControlResponse::Removed { node: b }
+        );
+        assert_eq!(
+            state.apply(&ControlCommand::SetHealth {
+                node: b,
+                health: MemberHealth::Up,
+                incarnation: 9,
+                episode: None
+            }),
+            ControlResponse::Removed { node: b }
+        );
         assert!(matches!(
             state.apply(&remove(Uuid::new_v4(), state.topology_version, b, None)),
             ControlResponse::Refused { reason } if reason.contains("already removed")
@@ -3984,31 +4557,60 @@ mod tests {
         nodes.insert(c, member(c, "c"));
         state.members.remove(&b);
         nodes.insert(b, member(b, "b"));
-        let membership = openraft::Membership::new(vec![[node, c].into_iter().collect()], nodes).expect("a membership");
+        let membership = openraft::Membership::new(vec![[node, c].into_iter().collect()], nodes)
+            .expect("a membership");
         state.observe_membership(&membership);
         assert!(!state.members.contains_key(&b));
         // a member the configuration no longer names votes in nothing
         assert_eq!(state.members[&d].role, MemberRole::Learner);
-        assert_eq!(state.voters(), vec![node, c].into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>());
+        assert_eq!(
+            state.voters(),
+            vec![node, c]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
         // a rebalance is one at a time, and done with nothing is done
         let version = state.topology_version;
         let rebalance = Uuid::new_v4();
         assert_eq!(
-            state.apply(&ControlCommand::Rebalance { op: rebalance, principal: "alice".to_string(), expected_version: version }),
-            ControlResponse::Applied { topology_version: version + 1 }
+            state.apply(&ControlCommand::Rebalance {
+                op: rebalance,
+                principal: "alice".to_string(),
+                expected_version: version
+            }),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
         );
         assert!(matches!(
             state.apply(&ControlCommand::Rebalance { op: Uuid::new_v4(), principal: "alice".to_string(), expected_version: version + 1 }),
             ControlResponse::Refused { reason } if reason.contains("already under way")
         ));
-        state.apply(&ControlCommand::PlanProgress { op: rebalance, node, incarnation: 1, progress: PlanUpdate::Done(PlanOutcome::Nothing { reason: "balanced".to_string() }) });
+        state.apply(&ControlCommand::PlanProgress {
+            op: rebalance,
+            node,
+            incarnation: 1,
+            progress: PlanUpdate::Done(PlanOutcome::Nothing {
+                reason: "balanced".to_string(),
+            }),
+        });
         assert!(state.plans[&rebalance].is_done());
         // the removal is the one plan still open until the leader says it is done
         assert_eq!(state.open_plans().len(), 1);
         let completed = state.plans[&removal].completed();
-        state.apply(&ControlCommand::PlanProgress { op: removal, node, incarnation: 1, progress: PlanUpdate::Done(completed) });
+        state.apply(&ControlCommand::PlanProgress {
+            op: removal,
+            node,
+            incarnation: 1,
+            progress: PlanUpdate::Done(completed),
+        });
         assert!(state.open_plans().is_empty());
-        assert!(state.tombstones.contains_key(&b), "a completed removal leaves the tombstone");
+        assert!(
+            state.tombstones.contains_key(&b),
+            "a completed removal leaves the tombstone"
+        );
     }
 
     /// A grace opens with a down episode, its count is monotonic and of its own episode, a
@@ -4032,66 +4634,187 @@ mod tests {
         });
         // no grace on a member that is up
         assert!(state.members[&b].grace.is_none());
-        let elapsed = |episode, elapsed_ms, expire| ControlCommand::GraceElapsed { node: b, episode, elapsed_ms, expire };
-        assert!(matches!(state.apply(&elapsed(Uuid::new_v4(), 5, None)), ControlResponse::Refused { reason } if reason.contains("no grace")));
+        let elapsed = |episode, elapsed_ms, expire| ControlCommand::GraceElapsed {
+            node: b,
+            episode,
+            elapsed_ms,
+            expire,
+        };
+        assert!(
+            matches!(state.apply(&elapsed(Uuid::new_v4(), 5, None)), ControlResponse::Refused { reason } if reason.contains("no grace"))
+        );
         // down opens one at zero
         let episode = Uuid::new_v4();
-        state.apply(&ControlCommand::SetHealth { node: b, health: MemberHealth::Down, incarnation: 1, episode: Some(episode) });
+        state.apply(&ControlCommand::SetHealth {
+            node: b,
+            health: MemberHealth::Down,
+            incarnation: 1,
+            episode: Some(episode),
+        });
         let grace = state.members[&b].grace.clone().expect("a grace");
-        assert_eq!((grace.episode, grace.elapsed_ms, grace.suspended, grace.expired), (episode, 0, false, false));
+        assert_eq!(
+            (
+                grace.episode,
+                grace.elapsed_ms,
+                grace.suspended,
+                grace.expired
+            ),
+            (episode, 0, false, false)
+        );
         // a count of another episode is refused; a count moves the version once per change
-        assert!(matches!(state.apply(&elapsed(Uuid::new_v4(), 5, None)), ControlResponse::Refused { .. }));
+        assert!(matches!(
+            state.apply(&elapsed(Uuid::new_v4(), 5, None)),
+            ControlResponse::Refused { .. }
+        ));
         let version = state.topology_version;
-        assert_eq!(state.apply(&elapsed(episode, 1000, None)), ControlResponse::Applied { topology_version: version + 1 });
-        assert_eq!(state.apply(&elapsed(episode, 1000, None)), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(
+            state.apply(&elapsed(episode, 1000, None)),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
+        );
+        assert_eq!(
+            state.apply(&elapsed(episode, 1000, None)),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
+        );
         // never backwards
-        assert_eq!(state.apply(&elapsed(episode, 500, None)), ControlResponse::Applied { topology_version: version + 1 });
-        assert_eq!(state.members[&b].grace.as_ref().map(|grace| grace.elapsed_ms), Some(1000));
+        assert_eq!(
+            state.apply(&elapsed(episode, 500, None)),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
+        );
+        assert_eq!(
+            state.members[&b]
+                .grace
+                .as_ref()
+                .map(|grace| grace.elapsed_ms),
+            Some(1000)
+        );
         // suspended: not counted, and an operator's word alone
-        let maintenance = |suspend, expected_version| ControlCommand::Maintenance { op: Uuid::new_v4(), principal: "alice".to_string(), expected_version, node: b, suspend };
+        let maintenance = |suspend, expected_version| ControlCommand::Maintenance {
+            op: Uuid::new_v4(),
+            principal: "alice".to_string(),
+            expected_version,
+            node: b,
+            suspend,
+        };
         assert!(matches!(
             state.apply(&ControlCommand::Maintenance { op: Uuid::new_v4(), principal: "alice".to_string(), expected_version: state.topology_version, node, suspend: true }),
             ControlResponse::Refused { reason } if reason.contains("no grace")
         ));
         let version = state.topology_version;
-        assert_eq!(state.apply(&maintenance(true, version)), ControlResponse::Applied { topology_version: version + 1 });
-        assert_eq!(state.apply(&maintenance(true, version + 1)), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(
+            state.apply(&maintenance(true, version)),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
+        );
+        assert_eq!(
+            state.apply(&maintenance(true, version + 1)),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
+        );
         let version = state.topology_version;
-        assert_eq!(state.apply(&elapsed(episode, 5000, Some(Uuid::new_v4()))), ControlResponse::Applied { topology_version: version });
-        assert_eq!(state.members[&b].grace.as_ref().map(|grace| grace.elapsed_ms), Some(1000));
+        assert_eq!(
+            state.apply(&elapsed(episode, 5000, Some(Uuid::new_v4()))),
+            ControlResponse::Applied {
+                topology_version: version
+            }
+        );
+        assert_eq!(
+            state.members[&b]
+                .grace
+                .as_ref()
+                .map(|grace| grace.elapsed_ms),
+            Some(1000)
+        );
         assert_eq!(state.members[&b].phase, MemberPhase::Member);
         // resumed: continues from the committed count
-        assert_eq!(state.apply(&maintenance(false, version)), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(
+            state.apply(&maintenance(false, version)),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
+        );
         state.apply(&elapsed(episode, 2000, None));
-        assert_eq!(state.members[&b].grace.as_ref().map(|grace| grace.elapsed_ms), Some(2000));
+        assert_eq!(
+            state.members[&b]
+                .grace
+                .as_ref()
+                .map(|grace| grace.elapsed_ms),
+            Some(2000)
+        );
         // a return clears the grace; a second episode is a fresh one
         state.apply(&ControlCommand::ObserveMember(member(b, "b")));
         assert!(state.members[&b].grace.is_none());
         let second = Uuid::new_v4();
-        state.apply(&ControlCommand::SetHealth { node: b, health: MemberHealth::Down, incarnation: 1, episode: Some(second) });
-        assert_eq!(state.members[&b].grace.as_ref().map(|grace| (grace.episode, grace.elapsed_ms)), Some((second, 0)));
-        assert!(matches!(state.apply(&elapsed(episode, 3000, None)), ControlResponse::Refused { .. }));
+        state.apply(&ControlCommand::SetHealth {
+            node: b,
+            health: MemberHealth::Down,
+            incarnation: 1,
+            episode: Some(second),
+        });
+        assert_eq!(
+            state.members[&b]
+                .grace
+                .as_ref()
+                .map(|grace| (grace.episode, grace.elapsed_ms)),
+            Some((second, 0))
+        );
+        assert!(matches!(
+            state.apply(&elapsed(episode, 3000, None)),
+            ControlResponse::Refused { .. }
+        ));
         // expiry: once, removing under the plan named, and a second word changes nothing
         let plan = Uuid::new_v4();
         let version = state.topology_version;
-        assert_eq!(state.apply(&elapsed(second, 9000, Some(plan))), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(
+            state.apply(&elapsed(second, 9000, Some(plan))),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
+        );
         let grace = state.members[&b].grace.clone().expect("a grace");
         assert!(grace.expired);
         assert_eq!(grace.plan, Some(plan));
         assert_eq!(state.members[&b].phase, MemberPhase::Removing);
-        assert_eq!(state.plans[&plan].kind, PlanKind::Expiry { node: b, episode: second });
+        assert_eq!(
+            state.plans[&plan].kind,
+            PlanKind::Expiry {
+                node: b,
+                episode: second
+            }
+        );
         assert_eq!(state.plans[&plan].principal, "policy");
-        assert_eq!(state.apply(&elapsed(second, 9500, Some(Uuid::new_v4()))), ControlResponse::Applied { topology_version: version + 1 });
+        assert_eq!(
+            state.apply(&elapsed(second, 9500, Some(Uuid::new_v4()))),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
+        );
         assert_eq!(state.plans.len(), 1);
         // and a policy that never removes opens no grace at all
         let mut never = ControlState::default();
         let mut policy = Cluster::default().policy();
         policy.auto_remove_after = None;
         let cluster = ClusterId::mint();
-        never.apply(&ControlCommand::Bootstrap { cluster, policy, member: member(node, "a") });
+        never.apply(&ControlCommand::Bootstrap {
+            cluster,
+            policy,
+            member: member(node, "a"),
+        });
         never.apply(&ControlCommand::Admit(member(b, "b")));
         never.apply(&ControlCommand::ObserveMember(member(b, "b")));
-        never.apply(&ControlCommand::SetHealth { node: b, health: MemberHealth::Down, incarnation: 1, episode: Some(Uuid::new_v4()) });
+        never.apply(&ControlCommand::SetHealth {
+            node: b,
+            health: MemberHealth::Down,
+            incarnation: 1,
+            episode: Some(Uuid::new_v4()),
+        });
         assert!(never.members[&b].grace.is_none());
     }
 
@@ -4103,8 +4826,9 @@ mod tests {
         let mut nodes = std::collections::BTreeMap::new();
         nodes.insert(node, member(node, "a"));
         nodes.insert(learner, member(learner, "b"));
-        let membership = openraft::Membership::new(vec![[node].into_iter().collect()], nodes.clone())
-            .expect("a membership");
+        let membership =
+            openraft::Membership::new(vec![[node].into_iter().collect()], nodes.clone())
+                .expect("a membership");
         assert!(state.observe_membership(&membership));
         assert_eq!(state.topology_version, 2);
         assert_eq!(state.members[&node].role, MemberRole::Voter);
@@ -4114,8 +4838,9 @@ mod tests {
         assert!(!state.observe_membership(&membership));
         assert_eq!(state.topology_version, 2);
         // a promotion moves the role
-        let promoted = openraft::Membership::new(vec![[node, learner].into_iter().collect()], nodes)
-            .expect("a membership");
+        let promoted =
+            openraft::Membership::new(vec![[node, learner].into_iter().collect()], nodes)
+                .expect("a membership");
         assert!(state.observe_membership(&promoted));
         assert_eq!(state.members[&learner].role, MemberRole::Voter);
         let mut both = vec![node, learner];
@@ -4142,18 +4867,28 @@ mod tests {
             ..member(node, client)
         };
         // an activation carrying what the members reported, as the leader heard them
-        let activate = |op: Uuid, expected_version: u64, wire: u8, reported: &[(NodeId, u8)]| ControlCommand::Activate {
-            op,
-            principal: "admin".to_string(),
-            expected_version,
-            wire,
-            members: reported.iter().copied().collect(),
+        let activate = |op: Uuid, expected_version: u64, wire: u8, reported: &[(NodeId, u8)]| {
+            ControlCommand::Activate {
+                op,
+                principal: "admin".to_string(),
+                expected_version,
+                wire,
+                members: reported.iter().copied().collect(),
+            }
         };
         // an activation of a version the one member reports less than is refused naming it
         let version = state.topology_version;
-        match state.apply(&activate(Uuid::new_v4(), version, PROTOCOL_VERSION, &[(node, MIN_PEER_VERSION)])) {
+        match state.apply(&activate(
+            Uuid::new_v4(),
+            version,
+            PROTOCOL_VERSION,
+            &[(node, MIN_PEER_VERSION)],
+        )) {
             ControlResponse::Refused { reason } => {
-                assert!(reason.contains(&node.to_string()) && reason.contains("speaks less"), "{reason}");
+                assert!(
+                    reason.contains(&node.to_string()) && reason.contains("speaks less"),
+                    "{reason}"
+                );
             }
             other => panic!("an activation above a member's wire applied: {other:?}"),
         }
@@ -4165,69 +4900,136 @@ mod tests {
         assert_eq!(state.activated_wire(), MIN_PEER_VERSION);
         // the floor itself is already activated: applied without moving the version
         assert_eq!(
-            state.apply(&activate(Uuid::new_v4(), version, MIN_PEER_VERSION, &[(node, MIN_PEER_VERSION)])),
-            ControlResponse::Applied { topology_version: version }
+            state.apply(&activate(
+                Uuid::new_v4(),
+                version,
+                MIN_PEER_VERSION,
+                &[(node, MIN_PEER_VERSION)]
+            )),
+            ControlResponse::Applied {
+                topology_version: version
+            }
         );
         // the member restarts on a build that speaks the newest, and a second member joins
         // speaking it too; a third is admitted at the floor and then removed
         let mut upgraded = speaking(node, "a", PROTOCOL_VERSION);
         upgraded.incarnation = 2;
-        assert!(matches!(state.apply(&ControlCommand::ObserveMember(upgraded)), ControlResponse::Applied { .. }));
+        assert!(matches!(
+            state.apply(&ControlCommand::ObserveMember(upgraded)),
+            ControlResponse::Applied { .. }
+        ));
         let second = NodeId::mint();
-        assert!(matches!(state.apply(&ControlCommand::Admit(speaking(second, "b", PROTOCOL_VERSION))), ControlResponse::Applied { .. }));
+        assert!(matches!(
+            state.apply(&ControlCommand::Admit(speaking(
+                second,
+                "b",
+                PROTOCOL_VERSION
+            ))),
+            ControlResponse::Applied { .. }
+        ));
         let third = NodeId::mint();
-        assert!(matches!(state.apply(&ControlCommand::Admit(speaking(third, "c", MIN_PEER_VERSION))), ControlResponse::Applied { .. }));
+        assert!(matches!(
+            state.apply(&ControlCommand::Admit(speaking(
+                third,
+                "c",
+                MIN_PEER_VERSION
+            ))),
+            ControlResponse::Applied { .. }
+        ));
         // the third holds the activation back, by what it reported
         let version = state.topology_version;
-        let reported = [(node, PROTOCOL_VERSION), (second, PROTOCOL_VERSION), (third, MIN_PEER_VERSION)];
-        match state.apply(&activate(Uuid::new_v4(), version, PROTOCOL_VERSION, &reported)) {
-            ControlResponse::Refused { reason } => assert!(reason.contains(&third.to_string()), "{reason}"),
+        let reported = [
+            (node, PROTOCOL_VERSION),
+            (second, PROTOCOL_VERSION),
+            (third, MIN_PEER_VERSION),
+        ];
+        match state.apply(&activate(
+            Uuid::new_v4(),
+            version,
+            PROTOCOL_VERSION,
+            &reported,
+        )) {
+            ControlResponse::Refused { reason } => {
+                assert!(reason.contains(&third.to_string()), "{reason}")
+            }
             other => panic!("an activation above a member's wire applied: {other:?}"),
         }
         // until it is removed, which takes it out of the judgment; and the second member's
         // record, persisted by an older build without the field, is healed by the apply
         state.members.get_mut(&third).expect("the third").phase = super::MemberPhase::Removed;
-        state.members.get_mut(&second).expect("the second").record.wire_max = 0;
+        state
+            .members
+            .get_mut(&second)
+            .expect("the second")
+            .record
+            .wire_max = 0;
         assert_eq!(state.members[&second].record.wire_max(), MIN_PEER_VERSION);
         let op = Uuid::new_v4();
         let version = state.topology_version;
         let reported = [(node, PROTOCOL_VERSION), (second, PROTOCOL_VERSION)];
         assert_eq!(
             state.apply(&activate(op, version, PROTOCOL_VERSION, &reported)),
-            ControlResponse::Applied { topology_version: version + 1 }
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
         );
         assert_eq!(state.activated_wire(), PROTOCOL_VERSION);
         assert_eq!(state.members[&second].record.wire_max(), PROTOCOL_VERSION);
         // a repeat of the operation is answered as the first was
-        assert!(matches!(state.apply(&activate(op, version, PROTOCOL_VERSION, &reported)), ControlResponse::Repeated { .. }));
+        assert!(matches!(
+            state.apply(&activate(op, version, PROTOCOL_VERSION, &reported)),
+            ControlResponse::Repeated { .. }
+        ));
         // it never lowers
         let version = state.topology_version;
-        match state.apply(&activate(Uuid::new_v4(), version, MIN_PEER_VERSION, &reported)) {
-            ControlResponse::Refused { reason } => assert!(reason.contains("never lowers"), "{reason}"),
+        match state.apply(&activate(
+            Uuid::new_v4(),
+            version,
+            MIN_PEER_VERSION,
+            &reported,
+        )) {
+            ControlResponse::Refused { reason } => {
+                assert!(reason.contains("never lowers"), "{reason}")
+            }
             other => panic!("an activation lowered: {other:?}"),
         }
         // and a stale version is refused before anything is judged
         assert!(matches!(
-            state.apply(&activate(Uuid::new_v4(), version - 1, PROTOCOL_VERSION, &reported)),
+            state.apply(&activate(
+                Uuid::new_v4(),
+                version - 1,
+                PROTOCOL_VERSION,
+                &reported
+            )),
             ControlResponse::Refused { .. }
         ));
         // a member below the activated wire is refused at observe, at any incarnation, and at admit
         let mut rolled_back = speaking(node, "a", MIN_PEER_VERSION);
         rolled_back.incarnation = 3;
         match state.apply(&ControlCommand::ObserveMember(rolled_back)) {
-            ControlResponse::Refused { reason } => assert!(reason.contains("activated"), "{reason}"),
+            ControlResponse::Refused { reason } => {
+                assert!(reason.contains("activated"), "{reason}")
+            }
             other => panic!("a member below the activated wire was observed: {other:?}"),
         }
         assert_eq!(state.members[&node].record.incarnation, 2);
         let fourth = NodeId::mint();
         assert!(matches!(
-            state.apply(&ControlCommand::Admit(speaking(fourth, "d", MIN_PEER_VERSION))),
+            state.apply(&ControlCommand::Admit(speaking(
+                fourth,
+                "d",
+                MIN_PEER_VERSION
+            ))),
             ControlResponse::Refused { .. }
         ));
         assert!(!state.members.contains_key(&fourth));
         // one at the wire is admitted
         assert!(matches!(
-            state.apply(&ControlCommand::Admit(speaking(fourth, "d", PROTOCOL_VERSION))),
+            state.apply(&ControlCommand::Admit(speaking(
+                fourth,
+                "d",
+                PROTOCOL_VERSION
+            ))),
             ControlResponse::Applied { .. }
         ));
         // the map carries the activation

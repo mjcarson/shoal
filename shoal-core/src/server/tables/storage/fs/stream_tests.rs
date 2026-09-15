@@ -14,7 +14,9 @@ use tempfile::TempDir;
 
 use super::conf::Durability;
 use super::reader::IntentLogReader;
-use super::stream::{align_up, pad_region, staging_target, FlushState, PAD_SENTINEL, PAD_SENTINEL_SIZE};
+use super::stream::{
+    align_up, pad_region, staging_target, FlushState, PAD_SENTINEL, PAD_SENTINEL_SIZE,
+};
 
 /// Create a temp dir on a filesystem that supports direct IO
 ///
@@ -89,7 +91,9 @@ async fn round_trip(path: &PathBuf, log: &[u8]) -> Vec<Vec<u8>> {
     // write our log out with buffered IO so we control the exact bytes on disk
     std::fs::write(path, log).expect("Failed to write log");
     // open this log with our reader
-    let mut reader = IntentLogReader::new(path).await.expect("Failed to open log");
+    let mut reader = IntentLogReader::new(path)
+        .await
+        .expect("Failed to open log");
     // read every record back out
     let mut records = Vec::new();
     while let Some(read) = reader.next_buff().await.expect("Failed to read log") {
@@ -168,7 +172,9 @@ fn batched_flush_round_trips() {
         let temp_dir = test_dir();
         let path = temp_dir.path().join("batched-log");
         // build two flushes holding three records each
-        let records: Vec<Vec<u8>> = (0..6u8).map(|index| vec![index; 40 + index as usize]).collect();
+        let records: Vec<Vec<u8>> = (0..6u8)
+            .map(|index| vec![index; 40 + index as usize])
+            .collect();
         let flushes = vec![records[..3].to_vec(), records[3..].to_vec()];
         let log = build_log(&flushes, 512);
         let read_back = round_trip(&path, &log).await;
@@ -417,7 +423,17 @@ fn a_record_wider_than_the_ceiling_gets_its_own_buffer() {
 /// the old behaviour back.
 fn a_ceiling_at_the_floor_is_the_old_behaviour() {
     // every awkward width either side of the floor
-    for width in [1usize, 64, 512, 4095, 4096, 4097, 8 << 10, 64 << 10, 4 << 20] {
+    for width in [
+        1usize,
+        64,
+        512,
+        4095,
+        4096,
+        4097,
+        8 << 10,
+        64 << 10,
+        4 << 20,
+    ] {
         assert_eq!(
             staging_target(width, 4096, 4096),
             std::cmp::max(4096, width),
