@@ -315,9 +315,10 @@ every shard; a stranger's first question belongs on the lane the control thread 
   of one version; the client keeps the newest and there is no per-client count.
 - **The detector's grace is a constant** of five intervals, not a setting.
 - **The admin audit line is logged and not asserted** by any test.
-- **A control refusal's code is derived from its reason** - a refusal whose text mentions a
-  stale version is `StaleVersion`, every other is `Internal`. Filed as
-  [item 98](../appendix/known-issues.md#98-an-admin-refusals-error-code-is-derived-from-its-reason-text).
+- ~~**A control refusal's code is derived from its reason** - a refusal whose text mentions a
+  stale version is `StaleVersion`, every other is `Internal`.~~ A refusal carries a
+  `RefusalKind` and the code is derived from that
+  ([Resolved #98](../appendix/resolved/admin-refusal-kinds.md)).
 - **`ShoalPool::transport()` still reaches shard zero** ([item 95](../appendix/known-issues.md#95-shoalpooltransport-reports-shard-zeros-links-and-calls-them-the-nodes)).
 - **The fixture suite is what a loaded machine makes it.** Every test allocates whole cores and
   runs beside the others; under a full workspace run with child logging on, timeouts were
@@ -435,7 +436,7 @@ on a standalone one; a subscription is one entry in a set per connection.
 | `cluster_fixture::table_ids_and_streams_are_stable_across_restart` | Two committed ids equal to the derived ones; rows in the persistent table read back after every node restarts, under the same ids; the ephemeral rows gone |
 | `cluster_fixture::client_receives_topology_with_client_endpoints` | The frame names three members whose client endpoints are the fixture's and each answers a round trip; a fourth joining moves the frame; a burst of restarts leaves the client at the cluster's version |
 | `cluster_fixture::readiness_distinguishes_process_control_and_data` | One node at factor three: joined, placed, `default_writes` short by one, an insert refused `QuorumUnavailable` naming have 1 need 2, a get served; two joiners lift it before initialization while each is unplaced and answers a get `NotInitialized`; initialization places them; a factor-one cluster admits writes at once |
-| `cluster_fixture::admin_mutations_require_principal_and_operation_identity` | An anonymous client refused at connect; a non-admin reads and is refused a mutation `Unauthorized`; the admin refused `StaleVersion`, then applied, then answered `Repeated` for the same request with the log unchanged, then refused a fresh operation once initialized |
+| `cluster_fixture::admin_mutations_require_principal_and_operation_identity` | An anonymous client refused at connect; a non-admin reads and is refused a mutation `Unauthorized`; the admin refused `StaleVersion`, then applied, then answered `Repeated` for the same request with the log unchanged, then refused a fresh operation once initialized, `AlreadyInitialized` by code |
 | `cluster_fixture::fresh_failure_reports_do_not_mask_shard_failure` | A dead shard committed as `shards_failed` with the member still up and pinging; three replayed reports counted and moving nothing; the member paused and called `Down` within a bound while a quorum write is admitted with two up; resumed and called `Up` |
 | `control::types::tests::*` | Every apply rule: bootstrap, admit, observe and its four fencing outcomes, promotion mirrored from the membership, `Initialize` once with its refusals, `SetControlVoters` over {1, 3, 5}, health by incarnation, repeated operations answered as first applied and refusals not remembered |
 | `control::detector::tests::*` (three) | Phi growing with silence and zero before the mean; a regular reporter calm, replays and older runs counted and ignored, silence suspected, a newer run starting over; a seeded member's grace, its first real report replacing the seed, a reset forgetting everything |

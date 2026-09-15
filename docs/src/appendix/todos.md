@@ -592,8 +592,8 @@ rather than from the diff:
   [F50](../features/cluster-operations.md).
 - **A detector grace that is a setting** rather than five intervals, and the `Detector` view on a
   follower meaning more than its local table.
-- **A refusal kind beside a refusal's reason**, so an admin client gets a code rather than a
-  sentence to parse ([item 98](known-issues.md#98-an-admin-refusals-error-code-is-derived-from-its-reason-text)).
+- ~~**A refusal kind beside a refusal's reason**, so an admin client gets a code rather than a
+  sentence to parse.~~ Built by [Resolved #98](resolved/admin-refusal-kinds.md).
 - ~~**A data quorum that refuses writes a partitioned leader's stale map admits.** M4's.~~
   Built by [F40](../features/replication.md): the write is proposed to a group that cannot
   commit it and is answered `OutcomeUnknown` at the deadline.

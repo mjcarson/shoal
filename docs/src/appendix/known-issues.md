@@ -32,9 +32,9 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 97, 99, 101, 104, 105, 108 and 111, and
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 97, 98, 99, 101, 104, 105, 108 and 111, and
 why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ item 110 is the newest entry here ~~and the newest number~~ and 111 the newest number, and why 17, 33, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 97, 99, 101, 104, 105, 108 and 111 are on the resolved page. **111 never
+83, 84, 85, 86, 88, 89, 90, 94, 97, 98, 99, 101, 104, 105, 108 and 111 are on the resolved page. **111 never
 appeared here**: it was found by [F47](../features/local-rehome.md)'s crash matrix - a read
 landing while an archive closed panicked the executor - reproduced against the map alone and
 fixed in the same change ([Resolved #111](resolved/archive-removal-borrow.md)). **108 never
@@ -1842,27 +1842,6 @@ whose `ClusterFacts` record is the first consumer.
 the views before answering, or the pool holds a sender per shard the way the fixture's
 `shard_cpus` are already per shard. The record should then say which shards answered, since a
 shard that is wedged is exactly the one whose links matter.
-
-### 98. An admin refusal's error code is derived from its reason text
-
-`shoal-core/src/server/control/plane.rs`, `handle_admin`
-
-The state machine answers a refused admin operation with `ControlResponse::Refused { reason }`,
-a sentence, and the control thread turns that into an `AdminError` for the client by reading
-the sentence: a reason containing "stale version" becomes `ErrorCode::StaleVersion`, and every
-other refusal - a node that is not a member, a node that is not up, a duplicate, a second
-initialization, a voter count outside {1, 3, 5} - becomes `ErrorCode::Internal` with the
-sentence as its message. A client that wants to act on *why* it was refused has a string to
-parse, and a reason whose wording changes changes a code.
-
-**Established by reading the source**, while writing
-[F39](../features/membership.md)'s admin test, which asserts on the message for the
-"already initialized" case because there is no code to assert on.
-
-**Fix direction:** `Refused` carries a reason *kind* beside the sentence - not a member, not
-up, duplicate, already initialized, stale version, bad voter count - and `handle_admin` maps
-the kind to a code, with `Internal` kept for a kind it does not know. The sentence stays for
-the log.
 
 ### 100. `duplicate_node_identity_is_fenced` fails under the fixture suite at full parallelism
 

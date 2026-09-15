@@ -201,6 +201,7 @@
   - [96. `cluster.transport.ping_interval` is parsed, documented and consumed by nothing](appendix/resolved/ping-interval-consumer.md)
   - [101. A member that fell silent before its fifth report was never called Down](appendix/resolved/short-lived-member-detection.md)
   - [97. stage_join.rs had not compiled since F36, and needed /opt/shoal to run](appendix/resolved/stage-join-storage.md)
+  - [98. An admin refusal's error code was derived from its reason text](appendix/resolved/admin-refusal-kinds.md)
   - [99. A durable follower's log reversion stopped the leader's whole process](appendix/resolved/durable-log-reversion.md)
   - [104. A restart merged every sealed segment below the checkpoint into the archives again](appendix/resolved/segments-recompacted-after-restart.md)
   - [105. A volatile group never checkpointed, so its log was never purged](appendix/resolved/volatile-groups-never-purged.md)

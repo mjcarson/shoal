@@ -207,7 +207,7 @@ impl<D: ShoalDatabase> MoveContext<D> {
                     crash_point::hit(&progress.phase, self.group);
                     return Ok(());
                 }
-                Ok(Ok(Ok(ControlResponse::Refused { reason }))) => {
+                Ok(Ok(Ok(ControlResponse::Refused { reason, .. }))) => {
                     return Err(format!("the progress was refused: {reason}"))
                 }
                 Ok(Ok(Ok(other))) => format!("the progress was not applied: {other:?}"),

@@ -15,7 +15,6 @@ a second copy. A new defect goes to known issues at the next free number, never 
 | Item | What | Page |
 | --- | --- | --- |
 | [95](../appendix/known-issues.md#95-shoalpooltransport-reports-shard-zeros-links-and-calls-them-the-nodes) | `ShoalPool::transport()` reports shard zero's links and calls them the node's | [C2](transport.md) |
-| [98](../appendix/known-issues.md#98-an-admin-refusals-error-code-is-derived-from-its-reason-text) | An admin refusal's error code is derived from its reason text | [C9](operations.md) |
 | [100](../appendix/known-issues.md#100-duplicate_node_identity_is_fenced-fails-under-the-fixture-suite-at-full-parallelism) | `duplicate_node_identity_is_fenced` fails under the fixture suite at full parallelism | [C11](testing.md) |
 | [102](../appendix/known-issues.md#102-a-deferred-fixture-node-can-lose-its-reserved-port-to-an-outbound-connection) | A deferred fixture node can lose its reserved port to an outbound connection | [C11](testing.md) |
 | [103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait) | A returning leader is refused its own re-election until its old lease lapses, and hops to it wait | [C7](failover.md) |

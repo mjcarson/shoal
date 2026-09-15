@@ -62,7 +62,7 @@ const ALL_TYPES: [MessageType; 26] = [
 ];
 
 /// Every error code this build knows, so a test can walk all of them
-const ALL_CODES: [ErrorCode; 21] = [
+const ALL_CODES: [ErrorCode; 33] = [
     ErrorCode::Unknown,
     ErrorCode::Internal,
     ErrorCode::StorageRead,
@@ -84,6 +84,18 @@ const ALL_CODES: [ErrorCode; 21] = [
     ErrorCode::StaleVersion,
     ErrorCode::NotLeader,
     ErrorCode::NotInitialized,
+    ErrorCode::IdentityExpired,
+    ErrorCode::StaleTopology,
+    ErrorCode::Quarantined,
+    ErrorCode::NotMember,
+    ErrorCode::NotUp,
+    ErrorCode::Duplicate,
+    ErrorCode::AlreadyInitialized,
+    ErrorCode::BadVoterCount,
+    ErrorCode::InvalidRequest,
+    ErrorCode::WrongPhase,
+    ErrorCode::UnknownOperation,
+    ErrorCode::WireVersion,
 ];
 
 /// A frame bound big enough that no test trips it by accident
@@ -574,6 +586,18 @@ fn every_error_code_round_trips_through_its_discriminant() {
         (ErrorCode::StaleVersion, 61),
         (ErrorCode::NotLeader, 62),
         (ErrorCode::NotInitialized, 63),
+        (ErrorCode::IdentityExpired, 22),
+        (ErrorCode::StaleTopology, 55),
+        (ErrorCode::Quarantined, 64),
+        (ErrorCode::NotMember, 65),
+        (ErrorCode::NotUp, 66),
+        (ErrorCode::Duplicate, 67),
+        (ErrorCode::AlreadyInitialized, 68),
+        (ErrorCode::BadVoterCount, 69),
+        (ErrorCode::InvalidRequest, 70),
+        (ErrorCode::WrongPhase, 71),
+        (ErrorCode::UnknownOperation, 72),
+        (ErrorCode::WireVersion, 73),
     ];
     // check both directions for each one
     for (code, raw) in pinned {
@@ -592,7 +616,7 @@ fn every_error_code_round_trips_through_its_discriminant() {
 #[test]
 fn an_unknown_error_code_reads_as_unknown() {
     // walk some numbers no variant claims, including the gaps inside the bands
-    for raw in [2u16, 13, 23, 42, 56, 65, 9000, u16::MAX] {
+    for raw in [2u16, 13, 23, 42, 56, 74, 9000, u16::MAX] {
         assert_eq!(ErrorCode::from_u16(raw), ErrorCode::Unknown);
     }
 }

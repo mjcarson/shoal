@@ -57,7 +57,7 @@ use super::repair::{QuarantinedCopy, RepairMode};
 use super::store::{self, ControlStateMachine, CONTROL_DIR};
 use super::types::{
     ControlCommand, ControlConfig, ControlResponse, ControlState, MemberHealth, MemberPhase,
-    MemberRecord, MemberRole, MemberState, Tombstone,
+    MemberRecord, MemberRole, MemberState, RefusalKind, Tombstone,
 };
 use crate::server::conf::cluster::{
     BootstrapPolicy, DialOverride, Migration, Rebalance, Transport,
@@ -1987,7 +1987,12 @@ impl Core {
                         ),
                         retry: false,
                     },
-                    Ok(ControlResponse::Refused { reason }) => JoinResponse::Refused { reason, retry: false },
+                    Ok(ControlResponse::Refused { reason, .. }) => {
+                        JoinResponse::Refused {
+                            reason,
+                            retry: false,
+                        }
+                    }
                     Ok(ControlResponse::Removed { node }) => JoinResponse::Refused {
                         reason: format!("removed identity: {node} was removed from this cluster and cannot rejoin"),
                         retry: false,
@@ -2678,12 +2683,8 @@ impl Core {
                     ControlResponse::Applied { topology_version } => Ok(AdminOutcome::Repeated {
                         version: topology_version,
                     }),
-                    ControlResponse::Refused { reason } => Err(AdminError::new(
-                        if reason.contains("stale version") {
-                            ErrorCode::StaleVersion
-                        } else {
-                            ErrorCode::Internal
-                        },
+                    ControlResponse::Refused { reason, kind } => Err(AdminError::new(
+                        refusal_code(kind),
                         format!("repeated: {reason}"),
                     )),
                     other => Err(AdminError::new(
@@ -2691,14 +2692,9 @@ impl Core {
                         format!("repeated: {other:?}"),
                     )),
                 },
-                Ok(ControlResponse::Refused { reason }) => Err(AdminError::new(
-                    if reason.contains("stale version") {
-                        ErrorCode::StaleVersion
-                    } else {
-                        ErrorCode::Internal
-                    },
-                    reason,
-                )),
+                Ok(ControlResponse::Refused { reason, kind }) => {
+                    Err(AdminError::new(refusal_code(kind), reason))
+                }
                 Ok(ControlResponse::Fenced { .. }) => {
                     Err(AdminError::new(ErrorCode::Internal, "fenced".to_string()))
                 }
@@ -2876,7 +2872,7 @@ impl Core {
             Ok(ControlResponse::Removed { node }) => {
                 Err(ServerError::Shoal(ShoalError::Removed { node }))
             }
-            Ok(ControlResponse::Refused { reason }) => {
+            Ok(ControlResponse::Refused { reason, .. }) => {
                 event!(Level::WARN, msg = "the observation was refused", reason);
                 self.observe_after = Some(Instant::now() + OBSERVE_BACKOFF);
                 Ok(())
@@ -3902,11 +3898,11 @@ impl Core {
                             *expected_version = machine.state().topology_version;
                         }
                         match propose(&raft, &network, &machine, command.clone()).await {
-                            Ok(ControlResponse::Refused { reason })
-                                if reason.contains("stale version") =>
+                            Ok(ControlResponse::Refused { reason, kind })
+                                if kind == RefusalKind::StaleVersion =>
                             {
                                 glommio::timer::sleep(LEASE_POLL).await;
-                                answer = Some(Ok(ControlResponse::Refused { reason }));
+                                answer = Some(Ok(ControlResponse::Refused { reason, kind }));
                             }
                             other => {
                                 answer = Some(other);
@@ -4168,6 +4164,36 @@ async fn write_here(
                 )))
             }
         }
+    }
+}
+
+/// The error code a refusal of this kind is answered with
+///
+/// The kind is what the state machine decided; the code is what the client reads. `Other` is
+/// the one kind that reaches `Internal`, and a `Queued` refusal is `Unavailable` because the
+/// same request succeeds once the transition ahead of it is done
+/// ([Resolved #98](../../../../docs/src/appendix/resolved/admin-refusal-kinds.md)).
+///
+/// # Arguments
+///
+/// * `kind` - Why the command was refused
+#[must_use]
+pub fn refusal_code(kind: RefusalKind) -> ErrorCode {
+    // every kind has one code, and the wording of the reason decides none of them
+    match kind {
+        RefusalKind::NotMember => ErrorCode::NotMember,
+        RefusalKind::NotUp => ErrorCode::NotUp,
+        RefusalKind::WrongPhase => ErrorCode::WrongPhase,
+        RefusalKind::Duplicate => ErrorCode::Duplicate,
+        RefusalKind::AlreadyInitialized => ErrorCode::AlreadyInitialized,
+        RefusalKind::NotInitialized => ErrorCode::NotInitialized,
+        RefusalKind::StaleVersion => ErrorCode::StaleVersion,
+        RefusalKind::BadVoterCount => ErrorCode::BadVoterCount,
+        RefusalKind::UnknownOperation => ErrorCode::UnknownOperation,
+        RefusalKind::Queued => ErrorCode::Unavailable,
+        RefusalKind::WireVersion => ErrorCode::WireVersion,
+        RefusalKind::Invalid => ErrorCode::InvalidRequest,
+        RefusalKind::Other => ErrorCode::Internal,
     }
 }
 

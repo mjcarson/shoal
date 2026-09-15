@@ -3584,6 +3584,13 @@ async fn admin_mutations_require_principal_and_operation_identity() -> Result<()
         .outcome
         .as_ref()
         .expect_err("a second initialization was applied");
+    // refused by kind, not by a sentence a client would have to parse: before item 98 every
+    // refusal but a stale version reached the client as `Internal`
+    assert_eq!(
+        error.code(),
+        shoal::shared::protocol::error::ErrorCode::AlreadyInitialized,
+        "a second initialization was refused with the wrong code: {fresh:?}"
+    );
     assert!(error.msg.contains("initialized"), "{fresh:?}");
     Ok(())
 }
