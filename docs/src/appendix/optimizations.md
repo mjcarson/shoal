@@ -246,8 +246,9 @@ where the pass found a second copy nobody had filed.
 
 ### Dependency edges
 
-Rendered as a table rather than a graph: the book has no mermaid preprocessor, so a diagram would
-come out as a code block.
+Rendered as a table rather than a graph. The book renders mermaid since the
+[distributed chapter](../distributed/overview.md)'s diagrams; this table predates that and reads
+well enough as it is.
 
 | Edge | Why |
 | --- | --- |

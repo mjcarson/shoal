@@ -1600,11 +1600,10 @@ fn handle_command(
         }
         // which start of this node this is
         "INCARNATION" => Ok(serde_json::json!({ "incarnation": pool.identity().incarnation })),
-        // read the peer certificate, key and authority again ([F50](../../docs/src/features/cluster-operations.md))
-        "RELOAD_TLS" => pool
-            .reload_tls()
-            .map(|report| serde_json::to_value(report).unwrap_or_default())
-            .map_err(|error| format!("{error}")),
+        // read the peer certificate, key and authority again, through the admin verb so the
+        // operator's path is the one driven and a refusal carries its wording
+        // ([F50](../../docs/src/features/cluster-operations.md))
+        "RELOAD_TLS" => admin(AdminKind::ReloadTls),
         // how many bytes the control log holds, so a test can see whether an entry was written
         "LOG_LEN" => std::fs::metadata(dir.join("control").join("log"))
             .map(|meta| serde_json::json!({ "bytes": meta.len() }))

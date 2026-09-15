@@ -239,5 +239,5 @@ left.
 - [TODOs](../appendix/todos.md#distribution) — multi-node routing, which this is a prerequisite for
   and not a substitute for
 - [Distributed Shoal](../distributed/overview.md) — where multi-node routing is now designed;
-  [C4](../distributed/tablet-map.md#pushed-to-clients) is step 1 of this page, built for servers
+  [C4](../distributed/tablet-map.md#how-a-map-reaches-a-shard-and-a-client) is step 1 of this page, built for servers
   and clients at once

@@ -1,6 +1,6 @@
 # Runbooks
 
-The procedures [C9](../distributed/operations.md#runbooks) named, as an operator follows
+The procedures [C9](../distributed/operations.md#the-runbooks) named, as an operator follows
 them: the exact operation, the keys in `shoal.yml` it turns on, what to wait for, and where the
 rollback point is. Every operation below is an admin request - sent through a client with a
 principal `cluster.admins` names, or typed into the `shoalctl` cluster tab
@@ -25,7 +25,8 @@ encrypted lanes ([14](#14-rotate-certificates-and-authorities)). On every other 
 **Do.** Start the first node; it mints a cluster and a node id into its marker and leads a
 control group of one. Start the others; each joins through a seed as a learner and is promoted
 to voter up to `control_voters`. Wait until `Members` shows every node `up` and the voters you
-asked for. Then `Initialize { nodes }` in the order you want the tablets dealt, once: it places
+asked for. Then `Initialize { nodes }` in the order you want the tablets dealt, once - typed as
+`initialize <node> [<node>...]` on the cluster tab, or sent from code: it places
 every tablet over those nodes at the factor. Wait for `Readiness.data.default_writes` to say
 `Ok` before opening the cluster to clients - `Members = up` is not data readiness.
 

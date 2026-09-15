@@ -297,9 +297,11 @@ every shard; a stranger's first question belongs on the lane the control thread 
   episode is minted and recorded so that they have something to name.~~ `Down` still moves
   nothing inside the grace; since [F46](capacity-rebalancing.md) the grace is counted and
   expires into a removal plan, and the episode is what the grace names.
-- **A certificate is still not bound to a node.** Q11's identity half is answered by the
+- ~~**A certificate is still not bound to a node.** Q11's identity half is answered by the
   incarnation; the `shoal-node://<id>` SAN is written and unread, and `IdentityMismatch` is
-  defined and never produced.
+  defined and never produced.~~ Since [F50](cluster-operations.md) the SAN is read and judged
+  against the hello on both ends of every lane, and `IdentityMismatch` and `Unauthorized` are
+  produced by name.
 - **A partitioned leader keeps its map for one detection window** and admits writes it should
   not, since its `up()` count is stale until the detector moves. ~~M4's data quorum is what
   refuses those writes.~~ Since [F40](replication.md) the data quorum refuses them: a write

@@ -2,269 +2,236 @@
 
 ## Context
 
-Default writes wait for a durable quorum, while default reads may lag. A primary orders each
-tablet's noncommutative mutations. The protocol must preserve successful operations through
-leader changes, reconfiguration, restart and compaction; an acknowledgement counter alone does
-not establish this. [C13](protocol.md) is the protocol contract and decision gate.
+A default write waits for a durable quorum; a default read may lag. A primary orders each
+tablet's mutations, and every replica applies the same committed commands in the same order,
+so an acknowledged write survives leader changes, reconfiguration, restart and compaction. The
+protocol is Raft under the shard - `openraft`, one group per table and replica set - on one
+shared WAL per shard ([C13](protocol.md#the-contract), P2–P4). Built by
+[F40](../features/replication.md), with the persisted retry table and the lease from
+[F42](../features/primary-failover.md), snapshots and the retention budget from
+[F43](../features/node-recovery.md), and identity expiry from [F45](../features/replica-migration.md).
 
-## What exists today
+## How it works
 
-**Delivered at M4 by [F40](../features/replication.md).** Every tablet has an `openraft` group -
-one per table and distinct replica set, hosted by the shard each member names - whose log is
-one shared format 2 WAL per shard (`shoal-core/src/server/wal/`), written in batches with one
-`fdatasync` each and every `IOFlushed` completed after it. A write is one `Command` - the
-table's intent serialized once, with the bundle and index as its identity - proposed through
-the group by the replica the accepting node holds, applied by every replica in committed order
-with no storage commit of its own, and its result derived there
-(`PersistentUnsortedTable::apply`, `PersistentSortedTable::apply`); a partition the apply
-needs from disk parks the batch behind a load. A `Quorum` write is answered once a majority
-has fsynced it and this shard applied it, `All` once every voter has it, a retry with the
-same identity as the first time from a per-group LRU with a payload digest, a proposal past
-its deadline `OutcomeUnknown`, one past the pending or volatile bound `Shedding` before
-anything is recorded; `One` writes are refused at validation and an `Async` persistent table
-on a cluster node at start. A group's checkpoint is the log id its table's archives are
-complete to, moved by the compactor from sealed segments every group applied past; the
-snapshot is that checkpoint, the purge follows it, and a segment goes once every group purged
-past it. Rotation advances nothing but the durable position. Since M6
-([F42](../features/primary-failover.md)) the retry table is persisted beside the checkpoint as
-`retries.bin` and seeded at open, so a retry after the purge point is answered as the first
-attempt was; the checkpoint carries the table's low-water mark ~~for M9a's expiry check~~ and,
-since [F45](../features/replica-migration.md), the newest time-ordered identity the table has
-forgotten, which with `replication.retry_window` is what a retry is judged expired against
-before it is proposed - `IdentityExpired` by name, never applied as new; a
-leader whose lease lapsed answers `NotLeader` before it appends rather than `OutcomeUnknown`
-at its deadline; a proposal hopping to a leader whose link is down is `NotLeader` at once when
-its frame was never written; and a client can pin its bundle id as the identity and retry
-under it. Since M7 ([F43](../features/node-recovery.md)) a member behind the purge point is
-fed a snapshot per group - a file the compactor cuts at the group's checkpoint with the retry
-table's remembered results in its trailer, streamed over the bulk lane, installed atomically
-under a marker and reseeded into the dedup table - and the sealed WAL is bounded in bytes by
-`replication.retained_bytes`, past which the groups pinning it are forced to snapshot and
-purge; a volatile group snapshots the same way into memory and its checkpoint is its applied
-position ([item 105](../appendix/resolved/volatile-groups-never-purged.md)). What is not there:
-~~catch-up past the purge point (M7),~~ ~~a durable low-water mark
-for the retry table and the leader's step-down at its lease (M6),~~ leadership moved after a
-failover - it stays where the election put it. Every M4 and M6 row of the table below is a
-test. Before that, and still on a standalone node:
-`FileSystem::commit` (`shoal-core/src/server/tables/storage/fs.rs`) serializes an intent,
-checksums it and stages it into a per-shard, per-table WAL. The table applies a mutation in
-memory and parks its result in `PendingResponse`; local durability later releases it.
-`DataFlushed` wakes the sweep, and rotation currently drains the queue because the old WAL was
-fsynced. The [compactor](../storage/compaction.md) merges intents into archives and deletes logs.
+### The groups and the shared WAL
 
-~~`NoStorage::commit` (`storage/none.rs`) only advances a watermark. It does not serialize an
-intent. The persistent and ephemeral tables share table implementations, but their storage
-hooks cannot already supply the same replication bytes.~~ Since M4 the bytes come from
-`build_intent`, one function on the one table type above both storage engines, and the
-command is applied by `apply`, which commits nothing to storage. Updates carry changed fields
-and require an ordered base state; insert/delete results can also depend on existing state -
-which is why both are derived on apply, in committed order.
+A shard's `Replication` (`shoal-core/src/server/shard/groups.rs`) holds one `Group` per
+`GroupSpec` the map gives it ([C4](tablet-map.md#the-placement-rule)) - its `openraft` handle,
+its `GroupMachine`, its checkpoint - and a table from `(TableId, tablet)` to the group serving
+it. Every persistent group's log is the shard's shared format 2 WAL under `wal/Shard-N/`
+(`shoal-core/src/server/wal/`): a frame is `[len u32][gxhash32]` unhashed, then
+`[kind][version=2][flag][reserved][group u64][index u64][term u64][leader ShardAddr]` hashed
+with the body, so the index over a file is rebuilt from headers alone and a group's history is
+the frames that name it. Kinds are `Blank`, `Normal`, `Membership`, `Vote`, `Committed`,
+`Purged`, `Truncate` and `Forget`; a membership body is postcard; vote and committed records
+carry no body. The store stages every group's appends into the open batch, and one writer task
+does one `write_at` and one `fdatasync` per batch **across every group on the shard**, then
+completes every `IOFlushed` in it - the group commit across groups the M1 spike asked for
+([C13](protocol.md#q1-and-q13-at-m1)). A segment is sealed past `replication.segment_bytes`;
+rotation advances the durable position and releases nothing. A volatile group - an ephemeral
+table's - logs into a `MemoryWal` bounded by `volatile_log_bytes`, which a restart empties.
 
-## The design
+### A write's path
 
-### Why a primary
+```mermaid
+sequenceDiagram
+    participant C as client
+    participant K as coordinator shard
+    participant E as executing shard (holds the replica)
+    participant L as group leader
+    participant F as followers
+    C->>K: bundle (identity = bundle id, uuid v7)
+    Note over K: Queries::access validates once<br/>route by key on the ring; write_admission
+    K->>E: ServerMsg::Query (mesh) or Forward (data lane)
+    Note over E: write_command -> (table, key, payload)<br/>serves_tablet? else StaleTopology<br/>propose_write: pending_bytes / volatile bound -> Shedding<br/>is_expired(identity) -> IdentityExpired
+    E->>L: raft.client_write(Command) here if leading,<br/>else one hop: ReplicateKind::Propose
+    Note over L: Lease::of == Lapsed -> NotLeader before anything is appended
+    L->>L: append to wal/Shard-N (batch, one fdatasync)
+    L->>F: AppendEntries (replication lane)
+    F-->>L: ack after the follower's own fdatasync
+    Note over L: majority durable: committed
+    L->>E: apply in committed order on every replica
+    Note over E: dedup LRU -> Duplicate / Refused<br/>apply_command derives the result, commits nothing to storage<br/>remember(identity, digest, result)
+    E-->>K: ServerMsg::Proposed: Applied(result) + SessionToken
+    K-->>C: response (Flags::SESSION_TOKEN)
+```
 
-Keep one primary per `(TableId, range_id)` tablet. Replicas apply the same committed commands in
-the same order. Leaderless last-writer-wins partial updates would require a different conflict
-model and storage metadata; the user chose ordered primary replication.
+The coordinator - the shard whose client sent the bundle - validates the bytes once, routes
+each query's keys on the replica ring and admits a write against the map
+(`QuorumUnavailable` naming the shortfall when fewer members are up than the factor's quorum).
+The executing shard, the one hosting the tablet's slot on this node, turns the query into a
+`Command { table, tablet, request: RequestId { bundle, index }, payload }` - the same intent
+bytes a standalone node would log, built once by `build_intent` above both storage engines -
+and `propose_write` admits it: `pending_bytes` (proposed and unanswered bytes per group) and
+`volatile_log_bytes` shed before anything is recorded; an identity older than
+`replication.retry_window` or than the group's `expired_before` watermark is `IdentityExpired`
+before it is proposed, so the log never carries it. The command is proposed through this
+replica's handle when it leads and hops once to the leader over the replication lane when it
+does not (`ReplicateKind::Propose`); a hop whose frame the link never wrote is `NotLeader` at
+once, one written and unanswered is `OutcomeUnknown` at the deadline. The leader whose lease
+lapsed (`Lease::of`, [C7](failover.md#the-lease)) answers `NotLeader` before it appends.
 
-The implementation is an embedded Raft group per tablet, agreed at the Before-M0 gate
-([C13 P2 and P5](protocol.md#the-contract)), with library and runtime selection gated by C13 Q1
-- *per tablet* in identity and progress, and at M4 one group serves every tablet of a table
-whose replicas are the same ordered set, which the map's rule makes `N × shards` groups a
-table rather than 4096 ([F40](../features/replication.md)). Cluster membership remains embedded `openraft`; it does not elect
-individual tablet leaders by comparing heartbeat reports. A consensus library defines the
-append, election and configuration rules, and Shoal's storage adapter must honor them.
-
-### The primary stamps
-
-Each record has stable table/range identity, logical log index, leadership term and record kind.
-Configuration entries carry configuration identity, and mutation entries carry request identity.
-Indices continue across terms and physical log rotations. Persist term/vote before sending the
-responses the chosen protocol requires. Compare log history using that protocol's matching
-rules, not a highest tuple observed asynchronously by the control plane.
-
-Track appended, durable, committed, applied and checkpointed prefixes separately. Per-replica
-progress is monotonic within the corresponding history/configuration. A higher term is not
-permission to claim that all earlier data has been installed.
-
-### The intent record, format 2
-
-The earlier fourteen-byte header is superseded by a versioned replication envelope. Its exact
-encoding ~~is Q2, to be settled before M4~~ was Q2, settled at M4 as the format 2 frame
-([decision record](protocol.md#q2-q3-and-q4-at-m4)): `[len][gxhash32]` unhashed, then kind,
-version, flag, group, index, term and the leader's shard address hashed with the body.
-Required information includes table/range identity,
-term/index, entry kind, request identity where applicable, payload size and checksum. Configuration
-and snapshot-boundary records have typed payloads. Define byte order, length bounds, rkyv alignment
-and checked decoding; do not cast a payload at an arbitrary fourteen-byte offset into an archive.
-
-Keep logical logs independent while multiplexing physical writes where appropriate. A durability
-completion identifies the physical segment/generation and covered offsets; an index maps those
-completions to each logical stream's contiguous durable prefix. Never reuse a physical offset
-without its generation. A shared WAL is retained until every dependent stream has a safe
-checkpoint or retained history elsewhere under the specified recovery policy.
-
-The storage marker and WAL/archive formats are versioned separately. A supported offline
-migration/export path and refusal behavior for unsupported formats are documented before release;
-starting an existing database empty is not an upgrade plan.
-
-### The bytes are forwarded, not re-serialized
-
-Move replication encoding to a common mutation boundary above `FileSystem` and `NoStorage`.
-Serialize a command once, feed the immutable payload to local WAL staging and peer transport,
-and validate it on arrival. Applying a command can require decoding fields; reusing bytes does
-not imply zero deserialization in the state machine.
-
-Existing intents may need to become deterministic commands rather than the result of mutating
-local state before commitment. In the initial design, apply commands in committed order and
-compute the response there, including no-op/conditional results. A retry of a committed command
-returns its original result. Any speculative execution or pipeline must specify dependencies,
-rollback and separate committed visibility in Q4 before being used as an optimization.
-
-Batch messages across active groups with byte and time bounds; light load must not wait forever
-for a full buffer. Disk group commit and network batching are separate queues with separate
-completion signals. Benchmark the common path on both storage backends.
+The leader appends, the batch syncs once, followers append to their own shards' WALs and
+acknowledge after their own fsync, and the entry commits at a majority of the committed voter
+configuration. Every replica then applies it in committed order (`GroupMachine::apply` posts
+`ServerMsg::Apply` to the shard loop, which runs `apply_command` on the table): a partition the
+apply needs from disk parks the batch and blocks that group alone; the result - inserted or
+not, deleted or not, updated or not - is derived from the state the replica finds, and no
+storage commit of its own happens, because durability is the log's. The proposer waits for its
+own replica's apply, then `answer_proposal` mints a `SessionToken { cluster, table, tablet,
+group, index }` and the answer goes back the way the query came. `All` waits until every
+voter's matched index has passed the entry.
 
 ### The quorum gate
 
-The default successful mutation response requires consensus commitment backed by a majority's
-fsync completions, plus local application to derive its result. `All` additionally waits for
-all voters in the operation's defined configuration; it is not reinterpreted when a node is
-marked down. During reconfiguration follow the selected protocol and capture the operation's
-required configuration(s), rather than changing a parked request's threshold retroactively.
-
-Track `durable_match[replica]` and derive quorum progress from distinct voter identities. A
-repeated cumulative ack or `DataFlushed` event updates a watermark; it does not add a vote.
-Local durability counts once. Learners, installing copies and replicas from unrelated terms or
-configurations do not count. Do not implement a second, weaker commit rule beside the library.
-
-A preflight liveness check may reject a request known to be unavailable. It cannot guarantee
-that a request accepted for processing will reach a quorum: peers can fail immediately after
-the check. Deadlines and response loss have explicit outcomes below. `Up`/`Down` never changes
-the size of a quorum. Initial bootstrap does not serve default writes until the intended RF
-configuration is ready. RF=3 subsequently tolerates one failed member without shrinking RF.
-
-**Rotation no longer drains responses.** It advances only the covered local durable positions.
-*At M4:* `ROTATE` on the leader releases nothing (`quorum_success_requires_distinct_durable_voters`);
-a batch's `IOFlushed` fires after its own segment's sync and never on a rotation.
-Keep pending requests keyed by logical tablet/index and their local WAL generation. Wake the
-response machinery after every relevant durability, commitment and application advance. Isolate
-pending queues by tablet so one stalled tablet does not block unrelated successful operations.
+The threshold is the committed voter configuration's majority, counted by distinct voter
+identity from the library's own matching. A repeated acknowledgement updates a watermark and
+adds no vote; local durability counts once; learners, installing copies and replicas from
+another term or configuration count for nothing; `Up`/`Down` never changes the size of a
+quorum (`quorum_success_requires_distinct_durable_voters`, `async_replica_cannot_weaken_durable_quorum`).
+A persistent table configured `Async` on a cluster node is refused at start, since a receipt
+that precedes an fsync cannot make a durable quorum. A cluster of one at a factor of three is
+observable and refuses default writes until two more members are up
+(`bootstrap_does_not_reduce_configured_quorum`). One stalled group holds only its own pending
+bytes; the shard's other groups continue (`slow_tablet_does_not_block_other_tablets`).
 
 ### Followers apply in order
 
-Use the selected protocol's append matching, conflict rejection, duplicate handling and retry
-rules. A duplicate matching entry is acknowledged without reapplying it; a gap requests retained
-history or a snapshot. Buffer limits apply to gaps, future terms and reconnects. Persist a higher
-term before responding as required. A stale topology may delay routing, but cannot override the
-replication group's authority.
+Append matching, conflict rejection and duplicate handling are the library's: a duplicate
+entry is acknowledged without reapplying it, a gap is fed from the retained log or a snapshot,
+a higher term is persisted before the reply (`duplicates_gaps_and_old_terms_do_not_reapply`).
+Only committed prefixes reach query-visible state and checkpoints hold only applied, committed
+state: a leader's uncommitted suffix that a later leader truncates is never in an archive,
+because a sealed segment is handed to the compactor only once every group applied past its
+frames (`uncommitted_suffix_never_enters_checkpoint`).
 
-Apply only committed prefixes to query-visible state. Compaction checkpoints only applied,
-committed state. Retain the checkpoint's last term/index and configuration plus enough log
-history for matching and catch-up. Recovery may truncate an uncommitted WAL suffix; it never
-tries to undo such a suffix after merging it into an authoritative archive.
+### Checkpoints and retention
 
-### What the client is promised
-
-| Policy/outcome | Contract |
-| --- | --- |
-| `Quorum` success, default | Durable committed mutation and its original result; survives loss of a minority in the established configuration |
-| `All` success | Same, with all required voters durably acknowledging; no silent downgrade |
-| `One` | Optional local durable append acknowledgement, potentially rolled back; needs a distinct accepted/pending API, otherwise refused in v1 |
-| Volatile replicated table | Explicit memory-only policy; no full-cluster restart durability claim; never counted as stable-storage quorum |
-| Definitely rejected | Admission/routing failed before accepting the command; safe to retry with its identity |
-| Outcome unknown | Command may have committed; retry only with the same identity or query its result |
-
-A disk configured `Async` cannot satisfy a required fsync acknowledgement. Validate cluster/table
-policy compatibility on admission and refuse unsupported combinations. Document the physical
-failure assumptions from C13 rather than calling replication alone durability.
+A group's checkpoint is the last log id its table's archives are complete to, recorded per
+group with its membership in `wal/Shard-N/checkpoint.json` and moved by the compactor: a sealed
+segment is compacted once every group applied past it and deleted once every group purged past
+it. openraft's snapshot is that checkpoint, and the purge follows it every
+`replication.checkpoint_entries`, keeping `retained_entries` behind for a slow member. The
+sealed WAL is bounded in bytes by `replication.retained_bytes`: past it the sweep forces the
+groups pinning the oldest segments to snapshot and purge, and a member behind the purge point
+is fed a snapshot ([C7](failover.md#a-returning-node)). A volatile group's checkpoint is its
+applied position and its snapshot is cut from memory.
 
 ### Retry identity
 
-Before application-ready failover, support a stable client/session identity plus operation
-sequence or an equivalent unique id, scoped to a tablet command. Carry it across redirects,
-reconnects and coordinator changes. Replicate the payload digest and original result with the
-state-machine effect. Reject reuse with a different payload. Replaying an already committed
-identity must not reapply it, even if its first response never reached the client.
+A bundle's identity is its id, a version 7 uuid minted by the client (`SendOptions::identity`
+pins one; the client's retry loop reuses it), and every command carries it as `RequestId`. On
+apply, every replica remembers the identity, a digest of the payload and the result in a
+per-group LRU (`MachineState`), so a retry after a lost reply is answered as the first attempt
+was - `Duplicate` with the original result - and never applied again, and a reuse with another
+payload is `Refused`. The table is persisted beside the checkpoint as `wal/Shard-N/retries.bin`,
+written atomically before `checkpoint.json` names the index it is complete to, and seeded at
+open only from a sidecar written for exactly that checkpoint; a snapshot carries it in its
+trailer, so a retry across an election, a compaction, a restart, a snapshot and a move is
+answered the same (`lost_response_retry_returns_original_result`,
+`retry_identity_survives_snapshot_and_migration`). An identity's timestamp bounds its life:
+older than `retry_window` (five minutes) or than `expired_before` - the newest time-ordered
+identity the table evicted, carried by the checkpoint and the snapshot manifest - is
+`IdentityExpired` before proposal, never applied as new. An identity that is not time-ordered
+never expires by time.
 
-Checkpoint deduplication state with the data; migrate and restore it. Bound retention explicitly:
-prefer a durable session low-water mark and reject expired requests instead of silently executing
-them as new. Client cancellation does not roll back an accepted command. A bundle carries stable
-per-operation/sub-operation identities; no atomicity across tablets is implied, and partial
-outcomes remain visible to the caller.
+### What the client is promised
+
+| Outcome | Code | What was recorded | Retry |
+| --- | --- | --- | --- |
+| `Applied` with a result and a token | — | Durable, committed, applied on a majority; survives loss of a minority | — |
+| `Duplicate` | — | The first attempt's result, from the retry table | — |
+| `Shedding` | 30 | Nothing: the byte bound refused it before proposal | Safe, same identity |
+| `NotLeader` | 62 | Nothing: a lapsed lease, a hop the link never wrote, or no leader within the deadline | Safe, same identity |
+| `QuorumUnavailable` | 51 | Nothing: too few members up for the factor's quorum | Safe, same identity |
+| `IdentityExpired` | 22 | Nothing: the identity is older than the window or the group's watermark | Mint a new identity |
+| `StaleTopology` | 55 | Nothing: the node serves no group for the tablet; the origin re-sent it once | Safe, same identity |
+| `Unavailable` | 50 | Nothing written: the link went down before the frame | Safe, same identity |
+| `OutcomeUnknown` | 32 | Proposed or written and never answered within the deadline; may have committed | Same identity only, answered from the retry table |
+| `Timeout` | 31 | The client's own deadline passed | Same identity only |
+
+`SendOptions::retry(within)` loops on `NotLeader`, `Unavailable`, `QuorumUnavailable`,
+`ConnectionLost`, `OutcomeUnknown`, `Timeout` and connection errors with a backoff from 20 ms
+to 500 ms under the same identity ([Client](../api/client.md)). `One` writes are refused at
+validation: a local append that may be rolled back needs an accepted-or-pending result API
+that nothing offers. A volatile table's write is committed by its group and survives no
+full-cluster restart, and is never counted as a stable-storage quorum.
+
+## Design choices
+
+One group per ordered replica set rather than per tablet, because heartbeats do not coalesce
+across groups and the spike found a thousand groups saturate a thread. One shared WAL per shard
+with one fsync per batch, because sixty-four independent groups fsyncing on one executor cost
+27× one group ([C13](protocol.md#q1-and-q13-at-m1)). Apply-and-derive on every replica rather
+than execute-on-the-leader-and-ship-the-effect, because the result of an insert or a
+conditional update depends on state only committed order settles. A time-ordered identity,
+because an index is nothing a client can compare its retry to. The retry table beside the
+checkpoint, because a retry past the purge point has no log to be answered from.
 
 ## Alternatives rejected
 
-The original ack counter can count the same replica repeatedly. The original `Unavailable`
-precheck cannot distinguish a lost response from an uncommitted request. Both are replaced above.
-Per-tablet Raft is no longer rejected on the assumption of a second vote round per write.
-A custom protocol must pass C13's design gate, not be introduced to avoid an adapter.
-
-Physical WAL sharing and logical tablet independence are compatible. A separate duplicate WAL
-is not mandatory, but adapting today's WAL must supply all consensus persistence guarantees.
-The earlier unconditional requirement to preserve today's apply-before-ack path is superseded
-where it exposes or checkpoints uncommitted data.
+An acknowledgement counter, which counts one replica twice; an `Unavailable` precheck as a
+proof that nothing was committed; a second, weaker commit rule beside the library's; a
+separate duplicate WAL per group; speculative execution before commit; `One` writes emulated
+by `Quorum`; raft-rs's `RawNode`, which has no runtime seam to adapt.
 
 ## What it costs
 
-Replication adds network traffic, per-group state, and durable follower work. For a design that
-requires local fsync plus one of two follower fsyncs at RF=3, healthy write latency is approximately
-`max(local_sync, min(follower_B_roundtrip_and_sync, follower_C_roundtrip_and_sync))`, plus routing,
-queuing and apply time. Other quorum completion rules must be measured according to their actual
-implementation. Every follower still needs sustainable apply/storage capacity even when omitted
-from the fastest quorum. Record pending bytes, lag and catch-up debt alongside latency.
+Network traffic to every follower, per-group state, and durable follower work. Healthy write
+latency at a factor of three is about `max(local_sync, min(follower_B, follower_C))` plus
+routing, queueing and apply, where each follower term is a round trip and an fsync; every
+follower still needs sustainable apply capacity even when omitted from the fastest quorum. The
+proposer waits on its own apply, so a parked partition load is on the write's path. Pending
+bytes, lag and catch-up debt are recorded beside latency on every cluster arm.
 
-## What it breaks
+## Limitations
 
-WAL format, `StorageSupport::commit`, mutation execution, `PendingResponse`, rotation, recovery
-and compaction contracts all change. Client errors gain explicit ambiguous outcomes and retry
-identities. The wire format and table identity must remain usable by client-only builds.
+The checkpoint file is rewritten whole. `All` is polled from metrics. An isolated leader
+*inside* its lease still appends and answers `OutcomeUnknown` at the deadline. Leadership
+stays where an election put it. The identity watermark is replica-local, so two coordinators
+can answer one late retry differently, though neither applies it twice. A standalone node has
+no retry table. A volatile group's survivor trips a debug assertion when a majority loses its
+memory log at once ([item 109](../appendix/known-issues.md#109-a-volatile-groups-survivor-trips-an-openraft-debug-assertion-when-a-majority-loses-its-memory-log-at-once)).
+See [C15](open-issues.md).
 
 ## Invariants to uphold
 
 - A replica counts once, only for durable matching data in the required configuration.
-- An acknowledged committed operation and its deduplication result survive promotion and checkpoints.
-- Logical history remains contiguous across separate WAL files and restarts.
+- An acknowledged committed operation and its retry result survive promotion, checkpoints and moves.
+- Logical history is contiguous across WAL files and restarts.
 - Query-visible and checkpointed state contain only committed applied commands.
 - Liveness observations never lower the quorum or change a request's promised durability.
 - Rotation and duplicate acknowledgements cannot release an insufficiently replicated response.
+- Nothing is proposed after a refusal that says nothing was.
 
-## Prerequisites
+## How it is measured
 
-[C13](protocol.md) Q1–Q4, [C4](tablet-map.md), [C2](transport.md), and C7's checkpoint contract
-before M4 - all met ([Q2, Q3 and Q4 at M4](protocol.md#q2-q3-and-q4-at-m4)). Basic
-application ~~lands in~~ landed at M4; the full retry/failover release gate ~~is M6~~ was met at
-M6 ([Q4 at M6](protocol.md#q4-at-m6)).
-
-## How it would be measured
-
-[C10](performance.md)'s paired durable/volatile replication arms, idle-group scale test, row-size
-sweep and conditional-update workload. Compare completed committed operations and result latency;
-an accepted-only `One` result is not interchangeable with a committed mutation result.
+`macro/cluster/replication/{durable,volatile}` against `macro/cluster/overhead/nodes/3`: the
+same placement at a factor of three and of one, on the persistent and the ephemeral table
+([C10](performance.md#the-arms)). Completed committed operations and result latency are what
+is compared; every cluster record carries the groups, lag, pending and volatile bytes and the
+writes answered unknown or rejected.
 
 ## Acceptance tests
 
 | Test | Asserts | Milestone |
 | --- | --- | --- |
-| `quorum_success_requires_distinct_durable_voters` | Duplicate remote/local completions cannot release a response; durable hooks establish the required voters before success | M4 |
+| `quorum_success_requires_distinct_durable_voters` | Duplicate remote and local completions cannot release a response; durable hooks establish the required voters before success | M4 |
 | `rotation_preserves_pending_replication_requirements` | Several WAL rotations never count local storage twice or compare offsets from different generations | M4 |
-| `bootstrap_does_not_reduce_configured_quorum` | RF=3 on one node is observable but rejects default writes until initialization completes | M4 |
-| `async_replica_cannot_weaken_durable_quorum` | Incompatible policies are refused or that receipt is excluded from stable acknowledgements | M4 |
-| `table_streams_recover_independently_without_holes` | Interleaved tables, different fsync completion orders and restart preserve each stream | M4 |
-| `duplicates_gaps_and_old_terms_do_not_reapply` | Duplicate append, lost frame, reordered response and stale term converge through protocol recovery | M4 |
-| `uncommitted_suffix_never_enters_checkpoint` | Force rotation and compaction before commitment, elect another leader, restart: no speculative effect remains | M4 |
-| `conditional_results_follow_committed_order` | Concurrent insert/update/delete/no-op commands give consistent results on all replicas | M4 |
+| `bootstrap_does_not_reduce_configured_quorum` | A factor of three on one node is observable and rejects default writes until initialization completes | M4 |
+| `async_replica_cannot_weaken_durable_quorum` | An incompatible policy is refused, or its receipt is excluded from stable acknowledgements | M4 |
+| `table_streams_recover_independently_without_holes` | Interleaved tables, different fsync completion orders and a restart preserve each stream | M4 |
+| `duplicates_gaps_and_old_terms_do_not_reapply` | A duplicate append, a lost frame, a reordered response and a stale term converge through protocol recovery | M4 |
+| `uncommitted_suffix_never_enters_checkpoint` | Rotation and compaction before commitment, another leader elected, a restart: no speculative effect remains | M4 |
+| `conditional_results_follow_committed_order` | Concurrent insert, update, delete and no-op commands give consistent results on every replica | M4 |
 | `slow_tablet_does_not_block_other_tablets` | A tablet without quorum consumes bounded resources while others continue | M4 |
-| `lost_response_retry_returns_original_result` | Drop a committed reply and change primary; same identity returns the original result once | M6 |
-| `retry_identity_survives_snapshot_and_migration` | Checkpoint, move and retry preserve effect and result; changed payload and expired identity are refused | M9a |
+| `lost_response_retry_returns_original_result` | A committed reply dropped and the primary changed: the same identity returns the original result once | M6 |
+| `retry_identity_survives_snapshot_and_migration` | A checkpoint, a move and a retry preserve effect and result; a changed payload and an expired identity are refused | M9a |
 | `volatile_replication_uses_common_encoding` | Ephemeral replica digests converge through the same command encoding, with explicit weaker durability | M4 |
 
 ## Related
 
-[C6](reads.md), [C7](failover.md), [C8](rebalancing.md), [C13](protocol.md).
-The adapter must honor the chosen library's storage completion contract; for the control-plane
-candidate see [OpenRaft log storage](https://docs.rs/openraft/latest/openraft/storage/trait.RaftLogStorage.html).
-For the data-plane spike inspect [raft-rs RawNode](https://docs.rs/raft/latest/raft/raw_node/struct.RawNode.html),
-including Ready processing and persistence/application advancement, rather than assuming an async
-runtime or shared-WAL adapter is already provided.
+[C4](tablet-map.md), [C6](reads.md), [C7](failover.md), [C8](rebalancing.md),
+[C13](protocol.md), [Storage](../storage/overview.md), the
+[OpenRaft log storage contract](https://docs.rs/openraft/latest/openraft/storage/trait.RaftLogStorage.html)
+the shared WAL implements.

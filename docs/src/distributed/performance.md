@@ -2,301 +2,211 @@
 
 ## Context
 
-The performance question has two parts: what distribution costs with fixed resources, and what
-additional hardware buys. A replicated three-node cluster with RF=3 holds all data on every node;
-that is a redundancy experiment, not proof of write/storage scale-out. Benchmark sustainable
-committed work, latency tails and recovery debt rather than a short-lived acknowledgement rate.
+The performance question has two parts: what distribution costs at fixed resources, and what
+more hardware buys. A three-node cluster at a factor of three holds every byte on every node -
+a redundancy experiment, never proof of write or storage scale-out. Every cluster arm below is a
+`shoal-bench` workload with a stable id, a recorded placement and its own record on the
+capture, and every one of them is judged on completed committed work, latency tails and
+replica lag rather than an acknowledgement rate. Built by [F36](../features/cluster-harness.md)
+(the cluster record and the separate driver) and extended by every feature after it with the
+arm that prices it; [F50](../features/cluster-operations.md) records every node's machine and
+runs a node on another host.
 
-## What exists today
+## How it works
 
-`shoal-bench` runs one workload arm at a time, records provenance, compares committed captures and
-renders the performance chapter. The frozen B1 baseline stays unchanged. Workload ids are stable
-and their positions influence port allocation — since [F36](../features/cluster-harness.md) the
-historical assignments are frozen in `docs/perf/ports.json` and a test holds every id to them,
-and cluster arms get a block of their own above that range. Core selection is configurable, but
-logical CPU 0 is excluded and the driver is not universally pinned. F36 added the
-`ClusterFacts` record this page asks for below, absent from every single-node capture and named by
-`compare` rather than compared across, and the separate load driver: `shoal-workload serve` starts
-a workload's server and `run --server` drives it from another process. ~~No workload runs against a
-cluster yet.~~ Since [F37](../features/node-identity-control-plane.md) the overhead arm runs
-against a cluster of one, and since [F38](../features/inter-node-transport.md) the three hop arms
-of the table below run against a two-node ~~static placement~~ cluster: the measured process stages the
-identities, markers, disjoint physical cores and a port block, starts the peer as a `serve
---staged` child that joins node zero through its seed ([F39](../features/membership.md)), hosts
-node zero in process, initializes the placement once the peer is up, and records the
-initialization order, the committed members, the map version, the voter and learner counts,
-every node's cores, the
-hop the arm was built for with the mix its construction implies, and the data lane's frame and
-shed counters on `ClusterFacts`. The driver is still in process with node zero, recorded as such.
-~~`NoStorage::commit` does no serialization; its replication benchmark needs C5's common command
-path.~~ Since [F40](../features/replication.md) three more arms run against a three-node
-cluster of three shards a node: `macro/cluster/overhead/nodes/3` at a factor of one, and
-`macro/cluster/replication/{durable,volatile}` at three on the persistent and the ephemeral
-table, which share the command encoding C5 asked for. Every cluster record now carries
-`offered_load` - the closed-loop depth the arm scheduled - `replicas`, every node's groups,
-groups led, lag, pending and volatile bytes and unknown and rejected writes at the end of the
-run, read from each node's own report, and `outcomes` summed; all three are mirrored into the
-explorer with defaults, so every committed artifact still loads. An arm asking for more copies
-than it places nodes is refused before a server starts. Since [F41](../features/read-consistency.md)
-seven read arms run: `macro/cluster/reads/{one,barrier,session}` on the replication arms'
-placement at a factor of three, differing only in what the read asks for, and
-`macro/cluster/fanout/{get,filter,limit,empty}` on the same nodes at a factor of one, a six key
-get split three ways in four shapes. Every read arm's record carries `reads` - the level, the
-session flag, the fanout, and every node's barriers, hops, barrier and application wait means
-and maxima, session waits, timeouts and late and duplicate shares - mirrored into the explorer
-the same way. The harness waits for every peer to hold the placement before it seeds, and the
-cluster port blocks are numbered among the cluster arms so none sits in the ephemeral range
-(`ClusterOverride::feasibility`), which is what "not a Cartesian product that silently lowers
-RF" means in code. Since [F42](../features/primary-failover.md) one fault arm runs:
-`macro/cluster/failover/kill`, the durable replication arm's placement and mixture driven for
-a fixed time by a client that does not retry, with node one killed a third of the way through
-and started again from the same identity two thirds through by a thread of the harness on the
-driver's clock. Its record carries `cluster.fault` - the kind, the node, the kill and restart
-marks, the client's first failure and its first sustained success, the outage between them,
-three windows each with its own distribution, and a per second series of operations, errors
-and percentiles - which is the time series this page asks for below, mirrored into the
-explorer whole; the timed driver behind it counts a failed operation rather than ending the
-run. Since [F43](../features/node-recovery.md) two catch-up arms run:
-`macro/cluster/catchup/{log,snapshot}`, the kill arm's shape with the survivors' retention at
-the defaults and shortened past what the returning node missed, the returning node sampled
-each second once it is placed again with its lag judged against node zero's committed index
-per group. Their record carries `cluster.catchup` beside `cluster.fault` - how the node caught
-up, the restart and convergence marks and the seconds between them, the bytes and entries the
-snapshots moved and the entries the log fed, and a per second series of its lag - and says
-`none` with the series kept when a run ends before the lag is held at zero, which is what both
-arms recorded at smoke scale on the development host, where the outage outlasts the absence.
-Since [F44](../features/repair.md) the background arm runs: `macro/cluster/background/repair`,
-the kill arm's placement and mixture with nothing killed and a `Repair` of the reference table
-in verify mode asked for a third of the way through, its record polled until every group is
-done. Its record carries `cluster.background` - the marks, the groups and how many were clean,
-what the scrubs hashed and read across every node, and the client's distribution before,
-during and after with a per second series - which is the interference this page asks for.
-Since [F45](../features/replica-migration.md) the migration arm runs:
-`macro/cluster/migration/move`, the kill arm's placement and mixture with a fourth member
-staged beside the placement and placed on by nothing, and a `Move` of one set from node one to
-the spare asked for a third of the way through, its record polled until it is done. Its record
-carries `cluster.migration` - the marks, how long each phase took summed over the set's
-groups, what the destination was fed and the client's distribution before, during and after
-with a per second series - which is the transfer bytes, duration and pauses M9a's exit asks
-for; the harness stages the spare and shortens the source's grace so the move is done inside
-the run. Since [F46](../features/capacity-rebalancing.md) the four rebalance arms run:
-`macro/cluster/rebalance/{add,decommission,remove,capacity_blocked}`, the same placement with a
-plan the control leader drives from a third of the way through - a `Rebalance` onto a spare, a
-`Decommission` onto it, an expiry after node one is killed for good under a five second grace,
-and a `Decommission` with no spare that stays blocked - three moves per member at a time so
-the nine sets fit the run. Each carries `cluster.rebalance`: the kind, the marks, the steps
-and what they moved, the blocked reason, the windows and the series, and `p99_ratio_permille`,
-which is the number M9b's two-times budget is judged on; the remove arm carries `cluster.fault`
-beside it with no restart mark. Since [F47](../features/local-rehome.md) one arm prices a
-node's core count changing: `macro/rehome/shrink`, the one node cluster arm seeded at twelve
-executors and measured at eight, whose `cluster.rehome` is the pool's report of what the start
-between moved and `millis` how long it was held for it. The open-loop schedule is not built; the
-arms are closed loops at one depth.
+### What each experiment holds constant
 
-## The design
-
-### What distribution costs
-
-| Experiment | Hold constant | Learn |
+| Experiment | Held constant | Learned |
 | --- | --- | --- |
-| Standalone versus cluster RF=1 | Same commit, data, drivers, cores, storage policy and load | Routing/metadata/replication-adapter overhead without network replication |
-| Local shard, another local shard, remote node | Same read-only data and query | Ownership and network/validation/merge cost |
-| RF=1 versus RF=3 on the same hardware | Placement-aware routing, data size, read/write policy and offered load | Replication cost including every follower's work |
-| RF=3 committed versus optional accepted-only write | Same topology and command mix | Acknowledgement latency tradeoff, with distinct semantics visibly labeled |
-| One versus barrier versus session reads | Same replica placement, query and write background | Freshness cost and application wait |
-| Idle and active groups versus tablet/table count | Same cores and aggregate active load | Consensus state, timers, heartbeat batching and scheduling cost |
-| Add/repair/recover while serving | Same foreground offered load and data | Tail latency, errors, resource competition and convergence |
+| Standalone versus a cluster of one | Commit, data, driver, cores, storage policy, load | Routing, metadata and adapter overhead without replication (`overhead/nodes/1` against `grid/unsorted/r50/1024`) |
+| Same shard, another local shard, a remote node | The read-only data and query | Ownership and the hop's network, validation and merge cost (`hop/*`) |
+| A factor of one versus three on one placement | Placement, data size, policy, offered load | Replication's cost including every follower's work (`replication/*` against `overhead/nodes/3`) |
+| Durable versus volatile at a factor of three | The placement and the command encoding | What the fsync costs beyond the round trip (`replication/durable` against `volatile`) |
+| `One` versus barrier versus session reads | The placement, the query, no write background | The barrier and application wait (`reads/*`) |
+| A get split three ways in four shapes | The placement at a factor of one | Gathering, decoding, coverage and ordering (`fanout/*`) |
+| A primary killed and restarted while serving | The durable placement and mixture, a client that does not retry | The outage as a time series (`failover/kill`) |
+| A node returning inside and past the retention | The kill arm's shape | Seconds and bytes to catch up by log and by snapshot (`catchup/*`) |
+| A scrub, a move, a plan or a backup while serving | The kill arm's placement and mixture, nothing killed | The foreground's tail during the background work (`background/*`, `migration/move`, `rebalance/*`) |
+| A node restarted at fewer executors | The one-node arm's data | The rehome's hold (`rehome/shrink`) |
 
-The Raft integration spike measures candidate memory/group, idle CPU, message rate, storage batch
-size and active throughput. Try realistic table counts as well as one table: 4096 groups per table
-can dominate before data arrives. Compare coarser grouping only with its lost migration/leadership
-independence recorded. No library wins solely by a microbenchmark without durability semantics.
+### The emulated placement
 
-### Emulating a cluster on one machine
+```mermaid
+flowchart LR
+    subgraph host["one machine: disjoint physical cores per node, SMT siblings excluded"]
+        subgraph n0["node 0 (in the driver's process)"]
+            d["driver: closed loop, one depth,<br/>records every latency"]
+            c0["control core"]
+            s0["3 shards"]
+        end
+        subgraph n1["node 1: serve --staged (child)"]
+            c1["control core"]
+            s1["3 shards"]
+        end
+        subgraph n2["node 2: serve --staged (child)"]
+            c2["control core"]
+            s2["3 shards"]
+        end
+    end
+    ports["ports: a block of eight per node above 20000,<br/>client / data / control / spare, below the ephemeral floor"]
+    n0 -. "seeds" .-> n1
+    n0 -. "seeds" .-> n2
+    d -- "Initialize, then the mixture" --> s0
+```
 
-#### How
+A cluster arm stages a node id, a cluster id, a marker, disjoint physical cores, a control cpu
+and a port block per node; hosts node zero in the driver's process; starts every other node as
+a `shoal-workload serve --staged` child that joins node zero through its seed; waits for every
+member up and the voters promoted; sends `Initialize` in the recorded order; waits for every
+peer to hold the placement; then seeds and drives. Every node's cores, the initialization
+order, the committed members, the map version and the voter and learner counts go on
+`ClusterFacts`, with every node's own report - groups, groups led, lag, pending and volatile
+bytes, unknown and rejected writes - read at the end of the run, and since F50 every node's
+machine (host, CPU, governor, kernel, memory, SMT, NUMA, filesystem, build digest) under
+`cluster.environments`, with `emulated` derived from the hostnames and a peer whose build is
+not the driver's refused. `shoal-bench run --remote <index>=<user@host>:<dir> --driver-address
+<addr>` puts a node of every placed arm on another host, started over ssh from the binary and
+`shoal.yml` there and killed by its pid file; node zero is always the driver's. The port
+blocks are numbered among the cluster arms and stay under 32768, since one numbered among
+every workload sat in the ephemeral range and lost its control port to a `TIME_WAIT`.
 
-Use N server processes and a separate load driver. Assign explicit disjoint physical-core slices
-for data shards, control runtimes and driver, excluding SMT siblings where isolation is claimed.
-C1's configurable control core prevents every emulated node sharing CPU 0. Respect actual allowed
-cpusets/NUMA topology and record sharing if the machine cannot support full isolation. Keep the
-total control-plus-data CPU budget fixed for overhead experiments, not just data shard count.
+Emulation shares disks, caches, memory bandwidth, NUMA paths and the kernel: a persistent arm
+measures replication plus device contention, and its ephemeral twin removes the storage work
+but adds its own serialization, so their difference is a comparison and not an additive
+decomposition. Loopback emulates no bandwidth, congestion or independent machine failure, and
+a loopback latency multiplied by an RTT ratio is not a forecast. The proxies the fixture uses
+are not on the arms. A physical capture needs the benchmark host; none is committed.
 
-Give each node independent storage directories and client/data/control ports. Partitioning tests
-need every actual endpoint routed through the harness, including reconnects and direct control
-connections. Run one complete cluster arm at a time; simultaneous processes inside that arm are
-intentional, independent benchmark arms remain serialized.
+### The arms
 
-The driver owns workload generation and latency recording; do not colocate node 1 inside the
-same pinned driver process unless all runtime/thread placement has been explicitly accounted for.
-Record every node's resource allocation, not just the coordinator. Put test storage on a filesystem
-that exercises intended direct-I/O behavior; tmpfs is a separately labeled experiment.
+Every id is appended, never renamed or interleaved, and the placement each arm reads against is
+part of its family. `--group cluster` selects every `macro/cluster/` arm and `--group rehome`
+the rehome arm ([F21](../features/benchmark-groups.md)).
 
-#### The caveats
+| Arm | Placement | What it isolates | Record |
+| --- | --- | --- | --- |
+| `macro/cluster/overhead/nodes/1` | one node, twelve executors | The grid's reference cell served by a node with a `cluster:` block; read beside `macro/grid/unsorted/r50/1024` and nowhere else | `cluster` |
+| `macro/cluster/hop/{same_shard,local_shard,remote_node}` | two nodes | A read answered by the accepting shard, another shard of the node, or a node away; `local_shard` is a mixture until [D7](../direction/shard-aware-routing.md) | the data lane's frame and shed counters |
+| `macro/cluster/overhead/nodes/3` | three nodes, three shards each, factor one | The reference mixture replicated to nobody; the placement the replication and read arms are read against, never `nodes/1`, whose shard count it does not share | `cluster.replicas` |
+| `macro/cluster/replication/{durable,volatile}` | the same, factor three | A durable and a volatile quorum on the persistent and the ephemeral table | `cluster.replicas`, `outcomes` |
+| `macro/cluster/reads/{one,barrier,session}` | the same, factor three | One get at the reference depth differing only in the level and the token | `cluster.reads`: level, session flag, fanout, per node the barriers, hops, barrier and application waits, session waits, timeouts, late and duplicate shares |
+| `macro/cluster/fanout/{get,filter,limit,empty}` | the same, factor one | A six key get split three ways; `empty` reads keys it never wrote (`Workload::expects_rows`) | `cluster.reads` |
+| `macro/cluster/failover/kill` | the durable cell | Node one killed a third of the way through and restarted two thirds through, driven for a fixed time by a client that does not retry | `cluster.fault`: the marks, the first failure and the recovery, three windows with a distribution each, a per second series |
+| `macro/cluster/catchup/{log,snapshot}` | the kill arm | The returning node inside the retention and past it, its lag sampled each second against node zero | `cluster.catchup`: how it caught up, the marks, the bytes and entries, the lag series; `none` when the run ended unconverged |
+| `macro/cluster/background/repair` | the kill arm, nothing killed | A verify-mode `Repair` asked for a third of the way through | `cluster.background`: the marks, the groups, what the scrubs hashed and read, three windows and a series |
+| `macro/cluster/migration/move` | the kill arm with a spare | One set moved from node one to the spare a third of the way through | `cluster.migration`: the marks, each phase's time, what the destination was fed, three windows and a series |
+| `macro/cluster/rebalance/{add,decommission,remove,capacity_blocked}` | the kill arm with a spare, or none | A `Rebalance` onto the spare, a `Decommission` onto it, an expiry after node one is killed for good under a five second grace, a `Decommission` with no spare that stays blocked | `cluster.rebalance`: the kind, the marks, the steps, the blocked reason, the windows, the series and `p99_ratio_permille`; `unfinished` by construction for the blocked arm |
+| `macro/rehome/shrink` | one node, seeded at twelve executors and started at eight | The rehome's hold between two runs | `cluster.rehome`: the pool's report and `millis` |
+| `macro/cluster/background/backup` | the kill arm, nothing killed, wire 5 activated | A `Backup` of the table asked for a third of the way through | `cluster.backup`: the marks, the files' counts, bytes and records, the windows and the series |
 
-Shared disks, caches, memory bandwidth, NUMA paths and the kernel remain shared failure/performance
-domains. Persistent emulation measures replication plus device contention. Ephemeral twins remove
-durable storage work but add their own common replication serialization; their difference is a
-useful comparison, not an exact additive decomposition of nonlinear contention.
+Every record is mirrored into the explorer with defaults so every committed artifact still
+loads ([F29](../features/benchmark-explorer.md)). An arm asking for more copies than it places
+nodes is refused before a server starts. The failover, catch-up, background, migration and
+rebalance arms are driven for a fixed time by a client that counts a failed operation rather
+than ending the run, and their windows - `before`, `during`, `after` - each carry their own
+distribution so the outage is never averaged into the run.
 
-Loopback does not emulate network bandwidth, congestion or independent machine failures. Never
-multiply loopback latency by an RTT ratio and present it as a cluster forecast. Add deterministic
-proxy latency/bandwidth/fault controls for protocol experiments and optional network namespaces/
-netem for packet-level studies. Real hardware measurements remain necessary for capacity claims.
+### What is measured, and how
 
-### Scaling and heterogeneous nodes
+Every arm is a closed loop at one depth. p50, p95, p99 and maximum latency, completed committed
+operations, rejected and unknown outcomes, retries, queue bytes and replica lag are recorded
+throughout; a fault arm records raw distributions around its marks. A capacity claim holds only
+inside an explicit latency, error and lag envelope, and sustainable throughput is what every
+replica keeps up with, never a rate the slowest follower cannot apply. Paired runs with their
+spread are what a comparison rests on ([Benchmarking](../performance/benchmarking.md)).
 
-Run both fixed-resource distribution and scale-out experiments. Fixed resource counts test overhead;
-scale-out holds resources per node and RF fixed while adding nodes, then tests fixed-data and
-proportionally growing-data cases. N>RF is necessary to test partitioned write/storage gains.
-Four or more emulated nodes can establish the workload shape even if only three real machines are
-available; label that limitation and do not claim physical scale-out from it.
+### The numbers so far
 
-At N=RF each node stores/applies every mutation. Quorum latency may omit a slow follower, but
-sustainable throughput cannot ignore indefinitely growing lag. Record that follower's disk/apply
-rate and test headroom for recovery. Weight placement by feasible capacity when N>RF, and vary
-primary placement on the unequal three real nodes. Include skewed traffic, a hot tablet, a hot
-partition and a slow replica. Splitting a range cannot divide a single partition automatically.
+Every number a cluster arm has produced is smoke-scale, on the development host, and is
+recorded on the F page that produced it as not a capture: a durable quorum at about twice a
+single fsync's median on a shared device and a volatile one under two milliseconds
+([F40](../features/replication.md#performance)); a barrier about a millisecond over a `One`
+read at the median, the barrier wait itself 590 µs on average with the hop on two reads in
+three, and a session read within a tenth of a millisecond of `One`
+([F41](../features/read-consistency.md#performance)); at the default five second base, an outage
+of 15.9 s that fell to 11.7 s once an unsent frame was refused and to a third of the writes
+refused at once with the rest served once a wanted link redialled at the floor
+([F42](../features/primary-failover.md#performance)); and a catch-up the smoke run could not
+show, since a twenty-four second run's outage outlasts the absence, recorded `none` with its
+series kept ([F43](../features/node-recovery.md#performance)). **No full-scale capture of any cluster arm
+is committed**, and the pages under `docs/src/performance/` carry none; taking one is the
+benchmark host's, on a clean tree, after the change that claims an effect is committed.
 
-Measure per-node standalone capacity under the same software/policy as useful context, plus
-within-cluster paired comparisons with stable placement and driver allocation. Do not compare a
-new three-machine absolute number to frozen one-machine B1 as if the difference were software.
-Record CPU model/count, affinity/NUMA/SMT, memory, kernel, device/path/fsync policy, network link,
-RTT distribution, versions, placement/configuration and active feature set for every node.
-
-### The workloads
-
-Append stable ids; do not rename or interleave existing ones. These are workload families to be
-expanded only into feasible combinations, not a Cartesian product that silently lowers RF:
-
-| Family | Purpose |
+| Gate as set | Where it stands |
 | --- | --- |
-| `macro/cluster/hop/{same_shard,local_shard,remote_node}` | Read-only transport and ownership control |
-| `macro/cluster/groups/{idle,active}` | Table/tablet count and batching/library spike |
-| `macro/cluster/overhead/nodes/{1,2,3}` | Fixed total resource budget; explicit feasible RF/policy. `1` since F37, `3` since [F40](../features/replication.md) at three shards a node - not the one-node arm's twelve, which is why the three-node arms are read against each other |
-| `macro/cluster/replication/{durable,volatile}` | Same command encoding and workload with distinct durability contracts. Both since [F40](../features/replication.md), on the `nodes/3` placement at a factor of three |
-| `macro/cluster/scaleout/nodes/{3,4,6}` | RF=3, resources per node fixed; emulated cases explicitly identified |
-| `macro/cluster/reads/{one,barrier,session}` | Read-only ~~and write-background~~ consistency costs. All three since [F41](../features/read-consistency.md), on the `replication/` placement at a factor of three and read against each other; the write-background variant is filed with the open-loop schedule |
-| `macro/cluster/fanout/{get,filter,limit,empty}` | Remote gathering, decoding, coverage and ordering. All four since [F41](../features/read-consistency.md), on the `nodes/3` placement at a factor of one |
-| `macro/cluster/writes/{insert,update,delete,conditional,retry}` | Result derivation, no-ops, deduplication and hot-key behavior |
-| `macro/cluster/failover` | Outage and recovery under a specified fault schedule. `kill` since [F42](../features/primary-failover.md), on the `replication/` placement at a factor of three; a pause and a partition are the fixture's |
-| `macro/cluster/catchup/{log,snapshot}` | Time/bytes to catch up ~~at several foreground mutation rates~~ at the reference mixture. Both since [F43](../features/node-recovery.md), the `failover/kill` arm with the retention at the defaults and shortened past the absence; the mutation rate sweep is filed with the open-loop schedule |
-| `macro/cluster/rebalance/{add,decommission,remove,capacity_blocked}` | Transition progress and supported load envelope |
-| `macro/rehome/shrink` | The startup cost of changing a node's core count. Since [F47](../features/local-rehome.md), the `nodes/1` arm restarted from twelve executors to eight; a growth arm is not built |
-| `macro/cluster/background/{repair,backup}` | Foreground interference, integrity work and restore preparation. `repair` since [F44](../features/repair.md), the `failover/kill` arm with a verify of the table in the background and nothing killed; `backup` since [F49](../features/backup-and-recovery.md), the same with the wire version activated and a `Backup` of the table cut instead, its record `cluster.backup`; a restore is priced by nothing |
+| No material one-node overhead | Unmeasured at scale; the pair exists |
+| A loopback hop under 100 µs at p50 | Unmeasured at scale; the three hop arms exist |
+| Durable replication reported as curves and lag | Smoke numbers only |
+| Fixed-resource reads at 0.8× the matched single node | Unmeasured |
+| Failover at base plus two seconds with healthy survivors | Not met as set: two to three times the base ([C7](failover.md#the-window-and-what-a-client-sees)) |
+| A healthy rebalance with zero final errors and p99 inflation under 2× | `p99_ratio_permille` is on every rebalance record; judged at smoke scale |
+| Bounded recovery bytes, memory and disk | `retention_and_recovery_memory_are_bounded`; the catch-up arms record convergence or `none` |
 
-Extend ScaleFacts with separate read/write/durability policies, node count, desired/active RF,
-data/control/driver core allocation, table/tablet count, offered load and dataset size. Mirror
-portable fields in shoal-top and keep old artifacts parsing via optional defaults. Add a separate
-cluster environment record and comparability verdict so historical single-node records remain
-meaningful. Full profiles and traces cover all nodes or clearly identify partial attribution.
-*At M10c ([F50](../features/cluster-operations.md)): every node's process reads its own machine
-at its ready line and the capture carries `cluster.environments`, `emulated` is derived from
-the hostnames, `compare` names the first node whose machine differs, the explorer mirrors the
-record, and `shoal-bench run --remote <index>=<user@host>:<dir>` puts a node on another host.
-No physical capture is committed by it; the pages that would carry one are unchanged.*
+## Design choices
 
-Preserve historical single-node port allocations. Add an explicit cluster port-range allocator
-(or bind-zero with actual endpoints recorded) with room for all three endpoints per node and
-fault proxies. Validate disjoint ranges and the u16 boundary; multiplying every existing port by
-a new block size both changes old assignments and does not itself solve collisions.
-
-### Measurement protocol
-
-Warm up, then drive multiple offered-load levels, including an open-loop schedule or equivalent
-latency accounting that includes waiting before request dispatch. Record p50/p95/p99 and maximum
-latency, completed committed ops/sec, rejected/unknown outcomes, retries, queue bytes and replica
-lag throughout. Closed-loop arms remain useful but cannot alone expose overload pauses.
-
-Run long enough to reveal replication/compaction debt and demonstrate stable lag, then measure
-drain/recovery. A capacity result passes only within an explicit latency/error/lag envelope.
-Record raw distributions/time series around faults; do not average the outage away. Driver CPU,
-network and scheduling must have headroom, and scheduled versus actual issue times reveal a
-saturated generator. Use repeated paired runs and measured spread, with confidence/variability
-reported rather than treating an arbitrary noise band as an unlimited acceptance margin.
-
-### The acceptance numbers
-
-Initial numeric budgets are hypotheses, not measured properties. Agree concrete budgets before
-capturing each milestone and revise them only with recorded causes and tradeoffs:
-
-| Gate | Initial objective |
-| --- | --- |
-| Standalone/one-node overhead | No material regression outside paired-run variation; investigate routing, apply and adapter costs |
-| Loopback hop | Initial p50 added-latency budget 100 µs, with tails also reported |
-| Durable replication | Report complete latency/throughput curves and lag; no universal 1.5×/2× promise across devices |
-| Fixed-resource distribution | Initial read-throughput objective at least 0.8× matched single node, with latency/error envelope |
-| Failover | Initial timeout-base + 2s objective only for healthy survivors, bounded delay and specified backlog |
-| Healthy rebalance | Zero final operation errors within supported load/deadlines; initial p99 inflation budget 2× |
-| Recovery | Bounded bytes/memory/disk and convergence under documented mutation rate/headroom |
-
-RF=3 on one initialized replica is an unavailable-policy test, not a throughput arm claiming a
-quorum. An optional `One` accepted-only result is never plotted as equivalent to committed success.
-*At M4:* the durable replication gate has its first numbers, at smoke scale on the development
-host and recorded on the [F40 page](../features/replication.md#performance) as not a capture -
-a durable quorum at about twice a single fsync's median on a shared device, a volatile one
-under two milliseconds; the curve, and whether the leader's flush overlaps its followers', is
-the benchmark host's to draw ([O47](../appendix/optimizations.md)). *At M5:* the read gate has
-its first numbers the same way, on the [F41 page](../features/read-consistency.md#performance):
-a barrier about a millisecond over a `One` read at the median, of which the barrier wait itself
-is 590 µs on average with the hop on two reads in three, an application wait of nothing with no
-writes running, and a session read within a tenth of a millisecond of `One`.
+One arm per question rather than a grid over the cluster, because a regression on a mixture
+cannot be attributed. A record per family with defaults, so an older artifact loads. A fixed
+time and windows for every fault arm, so the outage is a series and not an average. The driver
+in node zero's process, recorded as such, rather than a fourth pinned process the machine may
+not have cores for. Every node's machine on the capture, so a physical capture on unequal
+hardware can say which node differed.
 
 ## Alternatives rejected
 
-Assuming replica-byte weighting works at N=RF, deriving real-network capacity from loopback ratios,
-measuring only p50, and hiding a slow follower behind the fastest quorum are superseded. The
-initial guesses are replaced by comparable experiments with visible semantics and resource budgets.
+Weighting replica bytes at N = RF; deriving network capacity from loopback ratios; measuring
+p50 alone; hiding a slow follower behind the fastest quorum; a Cartesian product of arms that
+silently lowers the factor; comparing a three-machine number to the frozen one-machine B1 as if
+the difference were software.
 
 ## What it costs
 
-More environment/progress facts and longer steady-state/fault captures. Keep small smoke arms for
-correctness and select groups for meaningful captures. Follow repository rules: commit executable
-changes first, preserve B1, capture clean, render generated pages and commit rendered results
-separately. This documentation-only change captures nothing.
+Longer captures: every fault, background, migration and rebalance arm is driven for a fixed
+time. `list --groups` prints what a capture of `cluster` or `rehome` would cost, projected from
+a hand-maintained constant that has not been re-measured since the macro layer grew.
 
-## What it breaks
+## Limitations
 
-Harness process/port/environment modeling expands, while historical ids, files and frozen results
-remain readable. Existing generated performance pages are not edited by hand.
+There is no open-loop schedule, so an overload pause is not exposed. The families the design
+named and nobody built: `groups/{idle,active}` (the spike stands in), `overhead/nodes/2`,
+`scaleout/nodes/{3,4,6}`, `writes/{insert,update,delete,conditional,retry}`, a failover by
+pause or by partition, a catch-up at several mutation rates, a rehome that grows, a write
+background under the read arms, and a restore's cost. Nothing is measured on more nodes than
+the factor, so nothing here is evidence of scale-out. See [C15](open-issues.md).
 
 ## Invariants to uphold
 
-- Compare like durability, completed-operation semantics and accounted resource budgets.
-- Sustainable results include all replicas' work and bounded lag/debt.
-- Emulation and physical-node measurements are visibly distinct.
-- Faults report time-series windows, not a single averaged throughput.
-- Existing workload identities and frozen baseline provenance remain intact.
+- Like durability, completed-operation semantics and accounted resource budgets are compared.
+- A sustainable result includes every replica's work and a bounded lag.
+- Emulated and physical measurements are visibly distinct.
+- A fault reports time-series windows, never one averaged throughput.
+- Existing workload identities, port blocks and the frozen baseline stay intact.
 
-## Prerequisites
+## How it is measured
 
-M0 harness and C13 Q1/Q8/Q13; C2 onward supplies each measured path. No benchmark of an unbuilt
-protocol is claimed as evidence.
-
-## How it would be measured
-
-The experiment and measurement tables above define the captures; [milestones](milestones.md)
-assign the gates. Generated cluster pages retain the book's scope/comparability explanations.
+By the arms above; the [milestones](milestones.md) assign the gates and the F pages carry the
+smoke numbers. A capture goes through `shoal-bench run --label <label> --group cluster` on a
+clean tree, and `render` writes the generated pages ([Benchmarking](../performance/benchmarking.md)).
 
 ## Acceptance tests
 
 | Test | Asserts | Milestone |
 | --- | --- | --- |
-| `cluster_fixture_accounts_for_all_cores_and_endpoints` | Driver/control/data allocations and port ranges are recorded and disjoint where claimed | M0 |
-| `historical_artifacts_and_ports_remain_compatible` | Existing facts parse and historical single-node port assignments remain unchanged | M0 |
-| `infeasible_rf_policy_is_not_a_throughput_arm` | Desired RF=3 on one node yields an availability test, not downgraded quorum throughput | M4 |
-| `capacity_capture_records_lag_and_offered_load` | Capacity records include scheduled load, completion/error/tail and every replica's debt | M4 |
-| `read_capture_records_barrier_and_application_wait` | A read arm's record carries the level, the session flag, the fanout and every node's barrier and application waits, summed and per node; an older record still loads | M5 |
-| `fault_capture_preserves_outage_time_series` | Failure/recovery window remains visible with separate before/during/after distributions | M6 |
+| `cluster_fixture_accounts_for_all_cores_and_endpoints` | Driver, control and data allocations and port ranges are recorded and disjoint where claimed | M0 |
+| `historical_artifacts_and_ports_remain_compatible` | Existing facts parse and historical single-node port assignments stay unchanged | M0 |
+| `infeasible_rf_policy_is_not_a_throughput_arm` | A desired factor of three on one node is an availability test, not a downgraded quorum's throughput | M4 |
+| `capacity_capture_records_lag_and_offered_load` | A capacity record carries the scheduled load, completions, errors, tails and every replica's debt | M4 |
+| `read_capture_records_barrier_and_application_wait` | A read arm's record carries the level, the session flag, the fanout and every node's barrier and application waits; an older record still loads | M5 |
+| `fault_capture_preserves_outage_time_series` | The failure and recovery window stays visible with separate before, during and after distributions | M6 |
 | `catchup_capture_records_convergence` | A returning node's record carries its restart and convergence marks, the split by log and by snapshot and the lag series; a run that ends unconverged says so and keeps the series | M7 |
-| `background_capture_records_scrub_interference` | A background repair's record carries its marks, the windows before, during and after it with their own distributions, a bucket per second and what the scrubs read; a run with no repair is all `before`; an older record loads without it | M8 |
-| `migration_capture_records_transfer_and_pauses` | A move's record carries its marks, the time each phase took, what the destination was fed, the windows before, during and after with their own distributions and a bucket per second, and `unfinished` for a run that ended first; an F44 record loads without it | M9a |
-| `rebalance_capture_records_plan_and_windows` | A plan's record carries its kind, its marks, its steps and what they moved, its blocked reason, the windows and the series, and the p99 ratio in thousandths; a blocked plan the run outlasted is `unfinished` with its reason kept; an F45 record loads without it | M9b |
-| `physical_cluster_records_each_node_environment` | Unequal real hardware and primary placement are retained in comparability metadata: every node's environment under `cluster.environments`, `emulated` derived from the hostnames, and a difference named node by node ([F50](../features/cluster-operations.md)) | M10c |
-| `a_remote_spec_parses_and_builds_its_commands`, `a_remote_node_serves_a_smoke_capture` | A node of a placed arm runs on another host through `--remote`, started over ssh from a binary of this build and killed by its pid file; the smoke capture runs when `SHOAL_REMOTE_SMOKE` names a host and says so otherwise ([F50](../features/cluster-operations.md)) | M10c |
+| `background_capture_records_scrub_interference` | A background repair's record carries its marks, the three windows with their own distributions, a bucket per second and what the scrubs read; an older record loads without it | M8 |
+| `migration_capture_records_transfer_and_pauses` | A move's record carries its marks, each phase's time, what the destination was fed, the three windows and `unfinished` for a run that ended first | M9a |
+| `rebalance_capture_records_plan_and_windows` | A plan's record carries its kind, marks, steps, blocked reason, windows, series and the p99 ratio in thousandths; a blocked plan the run outlasted is `unfinished` with its reason | M9b |
+| `physical_cluster_records_each_node_environment` | Every node's environment is under `cluster.environments`, `emulated` is derived from the hostnames, and a difference is named node by node | M10c |
+| `a_remote_spec_parses_and_builds_its_commands` | A `--remote` spec parses and builds the ssh, scp and kill command lines for a node of this build on another host | M10c |
+| `a_remote_node_serves_a_smoke_capture` | A node of a placed arm runs on another host through `--remote` when `SHOAL_REMOTE_SMOKE` names one, and says so otherwise | M10c |
 
 ## Related
 
 [C5](replication.md), [C7](failover.md), [C8](rebalancing.md), [C11](testing.md),
-[Benchmarking](../performance/benchmarking.md), [Baseline](../performance/baseline.md),
-[C13](protocol.md) protocol-cost gates.
+[C13](protocol.md), [Benchmarking](../performance/benchmarking.md),
+[Baseline](../performance/baseline.md), [F21](../features/benchmark-groups.md).

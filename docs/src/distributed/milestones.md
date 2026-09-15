@@ -1,39 +1,37 @@
 # Milestones
 
-The Before-M0 gate is settled ([decision record](protocol.md#decision-record), 2026-09-11), and
-~~M0, M1 and M2~~ ~~M0 through M7~~ ~~M0 through M8 and M9a~~ M0 through M10 are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
-and M10a/b/c refine M10 without renumbering later work. Acceptance tests live in their owning C pages and are indexed
-by [C11](testing.md#the-acceptance-test-table). Each test names one gate below. This is an order
-with dependencies and measurable exit criteria, not dates.
+Every milestone is delivered: the Before-M0 gate was settled on 2026-09-11
+([decision record](protocol.md#decision-record)) and M0 through M10c were delivered between
+2026-09-11 and 2026-09-14 as [F36](../features/cluster-harness.md) through
+[F50](../features/cluster-operations.md). This page is the record of each gate as it was set
+and what met it: the tests it named, the evidence, what was decided under it, and what it left
+undone on purpose. M0–M10 are stable identifiers; M9a/b/c refine M9 and M10a/b/c refine M10.
+Acceptance tests live on their owning C pages, indexed by [C11](testing.md#the-acceptance-table),
+and each names one gate below; `acceptance_tables_have_unique_tests_and_valid_milestones` holds
+every section here to those tables. What is still open after all of them is [C15](open-issues.md).
 
-**All stages use embedded Shoal coordination. No external membership or failover service is a
-prerequisite, a fallback, or an eventual deployment step.** [C13](protocol.md) is the decision
-record. Before implementation, settle its blocking questions and record the evidence, including
-exact dependency source versions and benchmark provenance.
+**Every stage uses embedded Shoal coordination. No external membership or failover service was
+a prerequisite, a fallback, or a deployment step.** [C13](protocol.md) is the decision record,
+with every dependency pinned at an exact version and every measurement labelled by host.
 
 ## Group 0 — Protocol and foundations
 
 ### Before M0: the protocol contract
 
-**Settled 2026-09-11.** The six clauses below are [C13's P1–P6](protocol.md#the-contract), one
-numbered property each, with the schedule that violates it and the test that owns it. The data
-protocol is Raft. The [decision record](protocol.md#decision-record) holds the evidence and pins
-the candidate libraries at exact versions; it selects none of them, which stays M1's spike. No
-code, type or dependency was added at this gate.
-
-Agree C13's failure model, table-qualified stream identity, durable quorum, committed visibility,
-control/data authority split and no cross-tablet transaction promise. Prefer embedded data Raft;
-~~Q1's spike selects the library/runtime and tests whether group count/batching are practical~~
-the protocol is fixed here and Q1's spike, in M1, selects the library/runtime and tests whether
-group count/batching are practical.
-The model can begin with that protocol while integration alternatives remain under evaluation.
-A custom protocol cannot bypass this gate by calling primary appointment a topology edit.
+**Settled 2026-09-11.** The six clauses are [C13's P1–P6](protocol.md#the-contract), one
+numbered property each, with the schedule that violates it and the test that owns it: the
+failure model, table-qualified stream identity, a durable quorum, committed visibility, the
+control/data authority split and no cross-tablet transaction promise. The data protocol was
+fixed as Raft; the [decision record](protocol.md#decision-record) pinned the candidate libraries
+at exact versions and selected none, which was M1's spike. No code, type or dependency was added
+at this gate, and a custom protocol could not have passed it by calling primary appointment a
+topology edit.
 
 ### M0. Step 0: the harness and the facts
 
 **Delivered** on 2026-09-11 as [F36](../features/cluster-harness.md), which also closed
-[item 58](../appendix/resolved/unreported-shard-death.md) and
-[item 88](../appendix/resolved/readiness-probe-refusals.md). The eight tests below are runnable:
+[item 58](../appendix/resolved/pool-readiness.md) and
+[item 88](../appendix/resolved/pool-readiness.md). The eight tests below are runnable:
 `cargo test -p shoal-model`, `cargo test -p shoal --test cluster_fixture`, and
 `cargo test -p shoal-bench --test committed_artifacts --test acceptance_tables`. What was
 delivered, what was not, and the evidence are on the F page; the rest of this section is the
@@ -65,9 +63,9 @@ closed [item 65](../appendix/resolved/gxhash-pin.md). The five tests below are r
 `cargo test -p shoal --test cluster_fixture`, the two conformance suites and the crash test as
 `cargo test -p shoal-core control`, and the spike as `cargo run -p shoal-spike --release`. What
 was delivered, what was not, and the evidence are on the F page; the rest of this section is
-the gate as it was set. *Not done, on purpose:* no control listener is bound, no joiner exists,
-and the replication policy is recorded and reported rather than enforced - a one node cluster
-serves every read and write exactly as a standalone node does.
+the gate as it was set. *Not done at M1, on purpose:* no control listener was bound (M2), no joiner existed (M3),
+and the replication policy was recorded and reported rather than enforced (M3, M4) - a one
+node cluster served every read and write exactly as a standalone node did.
 
 **Delivers.** Stable node/cluster identity, explicit bootstrap, configurable control core and
 SMT/cpuset validation, versioned marker, basic topology observation and single-node embedded
@@ -83,7 +81,7 @@ network/storage/runtime seams and record idle/active group memory/CPU and batchi
 Compare standalone versus matched one-node cluster; investigate any material overhead. The
 control-plane choice does not force the same library or runtime onto every data shard.
 *Met:* `openraft` `0.10.0-alpha.34` pinned exactly with the seams named by path
-([decision record](protocol.md#q1-and-q13-decided-at-m1)); the runtime and storage suites
+([decision record](protocol.md#q1-and-q13-at-m1)); the runtime and storage suites
 pass; idle memory, CPU and message rate recorded at 1, 64, 1024 and 4096 groups under two
 timer settings, and the batching finding - heartbeats do not coalesce across groups - is what
 M4 inherits; `macro/cluster/overhead/nodes/1` exists beside its standalone twin and both ran at
@@ -97,11 +95,11 @@ with the real comparison waiting on the benchmark host.
 are runnable as `cargo test -p shoal --test cluster_fixture` (three of them) and `cargo test -p
 shoal-core peer` (the malformed-peer one), the hop arms as `shoal-bench run --group cluster`.
 What was delivered, what was not, and the evidence are on the F page; the rest of this section
-is the gate as it was set. *Not done, on purpose:* no joiner - a static placement names the
-nodes and every node is still a group of one; no retry - `attempt` is always zero; snapshots are
-counted, checksummed and discarded; a peer's certificate is checked to the cluster's authority
-and not yet bound to its node identity, which is Q11's with the joiner; and the hop capture
-itself is the benchmark host's - the arms ran at smoke scale on the development host.
+is the gate as it was set. *Not done at M2, on purpose:* no joiner - a static placement named the nodes and every node
+was a group of one (M3); no retry - `attempt` was always zero (M6); snapshots were counted,
+checksummed and discarded (M7); a peer's certificate was checked to the cluster's authority and
+not bound to its node identity (M10c); and the hop capture is the benchmark host's - the arms
+ran at smoke scale on the development host.
 
 **Delivers.** Remote contacts, validated forwarding/gathering, separate control/data/bulk lanes,
 bounded byte queues, identity/authentication handshake and trace propagation. Use static test
@@ -125,8 +123,8 @@ and leaves the control lane pinging and the data lane answering
 `shoal-proto/src/shared/protocol/peer/` with their layouts drawn in the module docs, and the F
 page names them. Q10 and Q11 have their contracts recorded at
 [C13](protocol.md#q10-and-q11-at-m2): schema identity, wire version and capabilities are three
-separately compared things, exact at M2; a peer certificate chains to `ca` and its binding to a
-node is the joiner's.
+separately compared things, exact at M2; a peer certificate chains to `ca`, and its binding to a
+node came at M10c.
 
 ## Group A — Replicate a live system
 
@@ -136,14 +134,14 @@ node is the joiner's.
 [item 96](../appendix/resolved/ping-interval-consumer.md) on the way. All thirteen rows below
 are runnable as `cargo test -p shoal --test cluster_fixture`; the fanout measurement as `cargo
 run -p shoal-spike --release -- fanout`. What was delivered, what was not, and the evidence are
-on the F page; the rest of this section is the gate as it was set. *Not done, on purpose:* the
-map is an ordered node list pushed whole, not per-tablet records or deltas - those arrive when a
-tablet can move (~~M9a~~ a set's configuration rides the map since [F45](../features/replica-migration.md)); `Initialize` is applied once and a second is refused ~~naming M9a~~ naming the `Move` operation; `Down`
-moves nothing, and grace expiry, `Leaving`, `Removing` and removal are M9b's; a replication
-factor above one is desired and reported, with one copy served (M4); a certificate is still not
-bound to a node - Q11's identity half is the incarnation, and the SAN stays unread; the
-detector's grace on a leader change is a constant; and the capture of the arms over real
-membership is the benchmark host's - they ran at smoke scale on the development host.
+on the F page; the rest of this section is the gate as it was set. *Not done at M3, on purpose:* the map was an ordered node list pushed whole, not per-tablet
+records or deltas - a moved set's configuration rides the map since M9a; `Initialize` is
+applied once and a second is refused naming the `Move` operation; `Down` moved nothing, and
+grace expiry, `Leaving`, `Removing` and removal came at M9b; a replication factor above one was
+desired and reported with one copy served (M4); a certificate was not bound to a node - Q11's
+identity half was the incarnation, and the SAN was read at M10c; the detector's grace on a
+leader change is a constant; and the capture of the arms over real membership is the benchmark
+host's - they ran at smoke scale on the development host.
 
 **Delivers.** Embedded control membership, explicit three/five-voter policy, learners, durable
 placement intent, stable table identity and replica readiness distinctions. Direct control traffic,
@@ -175,14 +173,13 @@ runnable: the nine fixture rows as `cargo test -p shoal --test cluster_fixture`,
 rows and the placement row as `cargo test -p shoal-core`, the two C10 rows as `cargo test -p
 shoal-bench`; openraft's storage conformance suite runs over the shared WAL and the memory log
 under `cargo test -p shoal-core wal`. What was delivered, what was not, and the evidence are on
-the F page; the rest of this section is the gate as it was set. *Not done, on purpose:* a
-member behind the purge point cannot catch up, since installing a snapshot is M7's; the retry
-table is a bounded in-memory LRU rebuilt from the log, and its durable low-water mark is M6's;
-an isolated leader learns it is not one at its lease and not before (M6); leadership after a
-failover stays where the election put it (~~M5~~ M6); a node holding no replica of a tablet still
-routes its writes to the placement primary's node, which nothing moves before M6; the arms are
-closed-loop and the open-loop capacity schedule is filed; and the capture is the benchmark
-host's - the arms ran at smoke scale on the development host.
+the F page; the rest of this section is the gate as it was set. *Not done at M4, on purpose:* a member behind the purge point could not catch up, since
+installing a snapshot came at M7; the retry table was a bounded in-memory LRU rebuilt from the
+log, and its durable low-water mark came at M6; an isolated leader learned it was not one at its
+lease and not before (M6); leadership after a failover stays where the election put it; a node
+holding no replica of a tablet routed its writes to the placement primary's node until M6
+routed by health; the arms are closed-loop and the open-loop capacity schedule is filed; and
+the capture is the benchmark host's - the arms ran at smoke scale on the development host.
 
 | Test | Where | What it asserts |
 | --- | --- | --- |
@@ -238,13 +235,12 @@ are runnable as `cargo test -p shoal --test cluster_fixture`, with the limit row
 timeout row's identity rules as unit tests beside them, the mixed-policy row's control state as
 a unit test in `shoal-core`, the C10 row as `cargo test -p shoal-bench`, and the protocol model's
 strong read as `cargo test -p shoal-model`. What was delivered, what was not, and the evidence
-are on the F page; the rest of this section is the gate as it was set. *Not done, on purpose:*
-a read is not retried within its budget, though the attempt identity a retry needs is minted
-and echoed (M6); a token through a leader change and a barrier through one are M6 gates and
-were not run; leadership is not moved toward a reader; `Primary` is not a level (Q5); no
-coverage list rides the response frame; leases stay deferred (Q6); the stage report does not
-yet draw the two wait stamps a read carries; and the capture is the benchmark host's - the seven
-arms ran at smoke scale on the development host.
+are on the F page; the rest of this section is the gate as it was set. *Not done at M5, on purpose:* a read was not rerouted within its budget, though the attempt
+identity a reroute needs was minted and echoed (M6); a token through a leader change and a
+barrier through one were M6's gates and were run there; leadership is not moved toward a
+reader; `Primary` is not a level (Q5); no coverage list rides the response frame; leases stay
+unbuilt (Q6); the stage report does not draw the two wait stamps a read carries; and the
+capture is the benchmark host's - the seven arms ran at smoke scale on the development host.
 
 | Test | Where | What it asserts |
 | --- | --- | --- |
@@ -293,11 +289,11 @@ below are runnable as `cargo test -p shoal --test cluster_fixture -- --test-thre
 row as `cargo test -p shoal-bench`, with the retry table's persistence, the routing rules, the
 detector's fix and the client's retry loop as unit tests beside them. What was delivered, what
 was not, and the evidence are on the F page; the rest of this section is the gate as it was
-set. *Not done, on purpose:* leadership is not moved toward a reader or back to a returning
-node; ~~identity expiry is M9a's and only the floor is recorded~~ identity expiry arrived with [F45](../features/replica-migration.md); a returning leader waits out
-its old lease before its groups are led again ([item 103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait));
-catch-up past the purge point is M7's; streams never retry; no coverage list rides the
-response frame; a `Down` member is never removed (M9b); leases stay deferred (Q6); and the
+set. *Not done at M6, on purpose:* leadership is not moved toward a reader or back to a returning
+node; identity expiry came at M9a, with only the floor recorded here; a returning leader waits
+out its old lease before its groups are led again ([item 103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait));
+catch-up past the purge point came at M7; streams never retry; no coverage list rides the
+response frame; a `Down` member was never removed until M9b; leases stay unbuilt (Q6); and the
 capture is the benchmark host's - the arm ran at smoke scale on the development host.
 
 | Test | Where | What it asserts |
@@ -350,12 +346,12 @@ checkpoint filter and marker carry, and the four settings' bounds as unit tests 
 was delivered, what was not, and the evidence are on the F page; the rest of this section is the
 gate as it was set. Two defects found while mapping the code were fixed on the way, each
 reproduced first: [item 104](../appendix/resolved/segments-recompacted-after-restart.md) and
-[item 105](../appendix/resolved/volatile-groups-never-purged.md). *Not done, on purpose:* a
+[item 105](../appendix/resolved/volatile-groups-never-purged.md). *Not done at M7, on purpose:* a
 snapshot is per group, so a returning node installs every tablet its replica set shares rather
 than the ones it is behind on; a partial transfer survives a lane cut but not a receiver restart;
 the bench arms ran at smoke scale on the development host, where the outage outlasts the
-absence and neither arm shows a catch-up; item 99 (a durable follower's log reversion) stays
-for M8, ~~where it is still open~~ where it was [fixed first](../appendix/resolved/durable-log-reversion.md);
+absence and neither arm shows a catch-up; item 99 (a durable follower's log reversion) was left
+for M8, where it was [fixed first](../appendix/resolved/durable-log-reversion.md);
 and a member isolated on every lane long enough to inflate its term trips an openraft
 debug assertion in the control plane when healed
 ([item 106](../appendix/known-issues.md#106-a-member-isolated-on-every-lane-long-enough-to-inflate-its-term-trips-an-openraft-debug-assertion-when-healed)).
@@ -401,7 +397,7 @@ runnable as `cargo test -p shoal --test cluster_fixture -- --test-threads 6`, th
 checksums, the canonical fold, the judge and the `repair:` block's bounds as unit tests beside
 them. What was delivered, what was not, and the evidence are on the F page; the rest of this
 section is the gate as it was set. [Item 99](../appendix/resolved/durable-log-reversion.md),
-left for this milestone by M7, was reproduced and fixed first. *Not done, on purpose:* routing
+left for this milestone by M7, was reproduced and fixed first. *Not done at M8, on purpose:* routing
 around a quarantined copy is per tablet rather than per table, and on the fixture's placement
 a read through the holding node is routed to another replica rather than refused, so the
 refusal by name is observed only in the window before the map carries the quarantine; a
@@ -437,7 +433,7 @@ Corrupt primary and followers separately; vary archive layout, deletes and check
 
 **Evidence/exit.** Corruption detected and repaired from justified evidence, or stopped with an
 actionable unresolved state. Measure scrub/repair resource and foreground-latency interference.
-~~Migration interaction is tested when its implementation arrives in M9a.~~ Migration interaction
+Migration interaction
 is `repair_serializes_with_migration_and_new_commits`, delivered with [F45](../features/replica-migration.md).
 *Met:* a corrupt primary and corrupt followers are found by their checksums and repaired from
 a verified majority, a split nobody can judge stops with every digest recorded and every copy
@@ -450,14 +446,15 @@ foreground's median twice what the run's ramp had it at; the capture is the benc
 *Decided:* [Q12 at M8](protocol.md#q12-at-m8) - the scheduled half is verification only, off by
 default and priced by the arm; the destructive half is an operator's, under the majority rule
 or a named source, never automatic on an unresolved split; a backup as a second provenance and
-permanent quorum loss stay M10's.
+permanent quorum loss came at M10b.
 
 ## Group C — Elastic membership
 
 ### M9. Migration and the rebalancer
 
-M9 is complete only after M9a/b/c. Each substage is independently reviewable; inter-node migration
-and safe node replacement can be delivered before retiring the local shard-count refusal.
+M9 was complete once M9a, M9b and M9c were, on 2026-09-14. Each substage was independently
+reviewable, and inter-node migration and safe node replacement were delivered before the local
+shard-count refusal was retired.
 
 ### M9a. Safe replica migration
 
@@ -466,11 +463,11 @@ below are runnable as `cargo test -p shoal --test cluster_fixture -- --test-thre
 rows as `cargo test -p shoal-bench`, with the map's overlay, the record's apply and queueing,
 the identity window, the forgotten log and the `migration:` block's bounds as unit tests beside
 them. What was delivered, what was not, and the evidence are on the F page; the rest of this
-section is the gate as it was set. *Not done, on purpose:* a move is of a whole replica set -
+section is the gate as it was set. *Not done at M9a, on purpose:* a move is of a whole replica set -
 every table's group over the tablets the rule placed together - since routing is per tablet,
-and the set's groups move one at a time per shard; there is no transfer budget, no disk reserve,
-no same-node move, no replication factor change and no operator-chosen destination shard, all
-M9b's; a learner is fed the whole group's snapshot where a log tail would do
+and the set's groups move one at a time per shard; the transfer budget and the disk reserve
+came at M9b, and a same-node move, a replication factor change and an operator-chosen
+destination shard are not built; a learner is fed the whole group's snapshot where a log tail would do
 ([O55](../appendix/optimizations.md#o55-a-learner-inside-the-retained-log-is-fed-a-snapshot-when-the-leaders-cached-cut-is-newer-than-its-purge-point));
 a stale route is answered by the origin's one further send rather than a relayed second hop;
 identity expiry is judged on the coordinator's own replica against a wall clock and its own
@@ -525,7 +522,7 @@ rows below are runnable as `cargo test -p shoal --test cluster_fixture -- --test
 the C10 rows as `cargo test -p shoal-bench`, with the phase machine, the grace count, the
 planner, the tablet bytes, the rate limiter, the capacity override and the `migration:` and
 `rebalance:` blocks' bounds as unit tests beside them. What was delivered, what was not, and
-the evidence are on the F page; the rest of this section is the gate as it was set. *Not done,
+the evidence are on the F page; the rest of this section is the gate as it was set. *Not done at M9b,
 on purpose:* the leader drains on its own - a decommission, a removal, an elapsed grace - and
 spreads onto a new member only under an explicit `Rebalance`, decided with the user; the
 balance target is measured archived bytes against node weight, water-filled to what a member
@@ -583,7 +580,7 @@ runnable as `cargo test -p shoal --test cluster_fixture -- --test-threads 6`, th
 row as `cargo test -p shoal --test storage_meta`, the C10 rows as `cargo test -p shoal-bench`,
 with the marker, the hosting, the manifest, each step's redo, the rings, the dispatch and the
 archive removal as unit tests beside them. What was delivered, what was not, and the evidence
-are on the F page; the rest of this section is the gate as it was set. *Not done, on purpose:*
+are on the F page; the rest of this section is the gate as it was set. *Not done at M9c, on purpose:*
 a cluster node's slots are claimed once and bound the executors, so growth past them is
 [M9b](#m9b-capacity-aware-rebalancing-and-removal)'s `Replace` and not a local operation; the
 deal is per slot on a cluster node and per tablet on a standalone one, by count and not by
@@ -630,8 +627,8 @@ files, and every step reads and writes them.
 Split into three substages on 2026-09-14, each with an F page, a table of its acceptance
 rows and a commit series of its own: M10a is the rolling upgrade, M10b backup, restore, export
 and permanent quorum loss, M10c rotation, the cluster tab, the runbooks and the physical
-capture. M10 is delivered when all three are, which it was on 2026-09-14 with
-[F50](../features/cluster-operations.md): the gate as it was set, then the three tables:
+capture. M10 was delivered when all three were, on 2026-09-14 with
+[F50](../features/cluster-operations.md). The gate as it was set:
 
 **Delivers.** Full runbooks/TUI, rolling wire/schema/storage compatibility and activation rules,
 certificate/address rotation, backup/restore and permanent-quorum-loss recovery, supported
@@ -658,7 +655,7 @@ third runs when `SHOAL_PREVIOUS_TEST_BINARY` names a `cluster_fixture` binary fr
 commit and prints a skip otherwise, and was run once against the binary of the commit before
 F48. The negotiation, the codec, the header range, the activation and the pin are unit tests
 beside them. What was delivered, what was not, and the evidence are on the F page; the rest of
-this section is the gate as it was set. *Not done, on purpose:* a schema change as a rolling
+this section is the gate as it was set. *Not done at M10a, and said:* a schema change as a rolling
 operation is explicitly unsupported, and so is a marker format migration in place - both are a
 new cluster and a restore of a backup or an export; no capability is optional yet, so the gate that
 intersects them has nothing to gate; and the suite's mixed cluster is one binary pinned two
@@ -690,7 +687,7 @@ build was upgraded in place. *Decided:* [Q10 at M10a](protocol.md#q10-at-m10a).
 below are runnable as `cargo test -p shoal --test cluster_fixture -- --test-threads 6`; the
 recovery, the coverage rules, the file's identity and the block are unit tests beside them,
 and the arm's record and placement are the bench's. What was delivered, what was not, and the
-evidence are on the F page; the rest of this section is the gate as it was set. *Not done, on
+evidence are on the F page; the rest of this section is the gate as it was set. *Not done at M10b, on
 purpose:* the single-node path is an export restored into a fresh cluster rather than an
 import into a node directory, since rows loaded before `Initialize` do not follow it; a
 recovery keeps one survivor and nothing else; a backup is not shipped, encrypted or aged; and
@@ -723,10 +720,9 @@ single-node data restored into a cluster of three and judged by digest against i
 **Delivered** on 2026-09-14 as [F50](../features/cluster-operations.md), which makes
 [M10](#m10-operations-and-the-real-cluster) delivered whole. The fixture rows below are
 runnable as `cargo test -p shoal --test cluster_fixture -- --test-threads 6`; the certificate
-row needs the kernel's TLS module and skips by name without it, and was written on a host
-without one and not run there; the remote smoke runs when `SHOAL_REMOTE_SMOKE` names a host and
+row needs the kernel's TLS module and skips by name without it; the remote smoke runs when `SHOAL_REMOTE_SMOKE` names a host and
 says so otherwise. What was delivered, what was not, and the table of every M10-named debt are
-on the F page; the rest of this section is the gate as it was set. *Not done, on purpose:*
+on the F page; the rest of this section is the gate as it was set. *Not done at M10c, on purpose:*
 nothing issues or distributes a certificate - a leaf is issued for a node id that exists, by the
 operator; no physical capture is committed - the record and the launcher are, and the capture
 is the benchmark host's to take; and the backup arm of this gate was delivered by
@@ -768,6 +764,6 @@ was written. Performance evidence can change an implementation choice, not weake
 
 ## Related
 
-[Overview](overview.md), [C13 decisions](protocol.md#questions-to-answer),
-[C11 tests](testing.md#the-acceptance-test-table), [C10 performance](performance.md),
-[C12 implementation references](prior-art.md#implementation-reading-list).
+[Overview](overview.md), [C13](protocol.md#the-questions-and-where-each-was-decided),
+[C11](testing.md#the-acceptance-table), [C10](performance.md),
+[C12](prior-art.md#implementation-reading-list), [C15](open-issues.md).

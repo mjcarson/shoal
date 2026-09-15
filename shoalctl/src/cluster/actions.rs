@@ -25,6 +25,11 @@ pub enum Follow {
 /// One operation an operator typed
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClusterAction {
+    /// Place every tablet over these members, in this order, once
+    Initialize {
+        /// The members, in the order the tablets are dealt over them
+        nodes: Vec<NodeId>,
+    },
     /// Drain a member and take it out of the cluster
     Decommission {
         /// The member
@@ -97,6 +102,17 @@ impl ClusterAction {
             word.parse::<Uuid>().map(NodeId).map_err(|_| format!("{word} is not a node id"))
         };
         let action = match verb {
+            "initialize" => {
+                // every remaining word is a member, in the order typed
+                let mut nodes = Vec::new();
+                for word in words.by_ref() {
+                    nodes.push(node(Some(word))?);
+                }
+                if nodes.is_empty() {
+                    return Err("initialize needs at least one node id".to_string());
+                }
+                ClusterAction::Initialize { nodes }
+            }
             "decommission" => ClusterAction::Decommission { node: node(words.next())? },
             "remove" => {
                 let removed = node(words.next())?;
@@ -159,6 +175,7 @@ impl ClusterAction {
     #[must_use]
     pub fn help() -> Vec<String> {
         vec![
+            "initialize <node> [<node>...]  place every tablet over these members, once".to_string(),
             "decommission <node>            drain a member and take it out".to_string(),
             "remove <node> [replacement]    remove a member the cluster gave up on".to_string(),
             "maintenance <node> on|off      hold or resume a down member's grace".to_string(),
@@ -199,6 +216,20 @@ impl ClusterAction {
                 )
         };
         match self {
+            ClusterAction::Initialize { nodes } => {
+                // the members in the order typed, then what is placed and what cannot be undone
+                let mut lines = vec![format!("initialize over {} members in this order:", nodes.len())];
+                lines.extend(nodes.iter().map(|node| format!("  {}", member(node))));
+                lines.push(format!(
+                    "moves: nothing; every tablet of every table is placed over these nodes at factor {}",
+                    model.desired_rf
+                ));
+                lines.push(
+                    "boundary: once; a second initialize is refused, and the order is changed by moves, not by another initialize"
+                        .to_string(),
+                );
+                lines
+            }
             ClusterAction::Decommission { node } => vec![
                 format!("decommission {}", member(node)),
                 "moves: every set it holds, to the members the planner picks, one at a time".to_string(),
@@ -263,6 +294,7 @@ impl ClusterAction {
     #[must_use]
     pub fn request(&self) -> (AdminKind, Follow) {
         match self {
+            ClusterAction::Initialize { nodes } => (AdminKind::Initialize { nodes: nodes.clone() }, Follow::None),
             ClusterAction::Decommission { node } => (AdminKind::Decommission { node: *node }, Follow::Plan),
             ClusterAction::Remove { node, replacement } => (
                 AdminKind::Remove {
@@ -437,7 +469,10 @@ mod tests {
         assert_eq!(ClusterAction::parse(&format!("status {op}")).expect("parses"), ClusterAction::Status { op });
         assert_eq!(ClusterAction::parse("reload-tls").expect("parses"), ClusterAction::ReloadTls);
         // the refusals name what was wrong
+        assert_eq!(ClusterAction::parse(&format!("initialize {node}")).expect("parses"), ClusterAction::Initialize { nodes: vec![node] });
         assert!(ClusterAction::parse("").unwrap_err().contains("help"));
+        assert!(ClusterAction::parse("initialize").unwrap_err().contains("at least one"));
+        assert!(ClusterAction::parse(&format!("initialize {node} nope")).unwrap_err().contains("not a node id"));
         assert!(ClusterAction::parse("decommission nope").unwrap_err().contains("not a node id"));
         assert!(ClusterAction::parse(&format!("maintenance {node} maybe")).unwrap_err().contains("on"));
         assert!(ClusterAction::parse("repair Note sideways").unwrap_err().contains("verify"));
@@ -479,5 +514,51 @@ mod tests {
         assert!(Follow::Backup.is_done(&json!({ "groups": { "g1": { "phase": "Done" } } })));
         assert!(!Follow::Repair.is_done(&json!({ "groups": {} })));
         assert!(ClusterAction::help().iter().any(|line| line.starts_with("decommission")));
+        assert!(ClusterAction::help().iter().any(|line| line.starts_with("initialize")));
+    }
+
+    /// An initialize lists its members in the order typed, one line each with what the model
+    /// knows of them, names the factor they are placed at and that it happens once, and sends
+    /// the members in that order with nothing to follow
+    #[test]
+    fn initialize_previews_its_order_and_is_sent_once() {
+        let first = NodeId::from(3);
+        let second = NodeId::from(5);
+        let third = NodeId::from(7);
+        let model = ClusterModel {
+            desired_rf: 2,
+            members: vec![MemberRow {
+                node: second.to_string(),
+                role: "voter".to_string(),
+                health: "up".to_string(),
+                phase: "member".to_string(),
+                incarnation: 1,
+                grace_remaining_ms: None,
+                weight: 4,
+                free_bytes: None,
+                held_bytes: None,
+                wire_max: 5,
+                client: "127.0.0.1:1".to_string(),
+            }],
+            ..ClusterModel::default()
+        };
+        // the order typed is the order kept
+        let action = ClusterAction::parse(&format!("initialize {third} {second} {first}")).expect("parses");
+        assert_eq!(action, ClusterAction::Initialize { nodes: vec![third, second, first] });
+        assert!(action.is_mutation());
+        // the preview: a header, a line per member in that order, the factor and the boundary
+        let preview = action.preview(&model);
+        assert_eq!(preview.len(), 6, "{preview:?}");
+        assert!(preview[0].contains("3 members"), "{preview:?}");
+        assert!(preview[1].contains(&third.to_string()) && preview[1].contains("not a member"), "{preview:?}");
+        assert!(preview[2].contains(&second.to_string()) && preview[2].contains("voter up member, weight 4"), "{preview:?}");
+        assert!(preview[3].contains(&first.to_string()), "{preview:?}");
+        assert!(preview[4].starts_with("moves:") && preview[4].contains("factor 2"), "{preview:?}");
+        assert!(preview[5].starts_with("boundary:") && preview[5].contains("once"), "{preview:?}");
+        // the request carries the members in that order and is followed by nothing
+        assert_eq!(
+            action.request(),
+            (AdminKind::Initialize { nodes: vec![third, second, first] }, Follow::None)
+        );
     }
 }

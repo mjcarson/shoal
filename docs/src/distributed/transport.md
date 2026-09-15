@@ -2,262 +2,247 @@
 
 ## Context
 
-Add remote communication while preserving shard ownership, validated framing and bounded work.
-Shoal's embedded control and data consensus protocols use this transport; no external service
-owns discovery or elections. The transport must make its persistence, timeout and retry semantics
-explicit rather than assume reliable sockets eliminate distributed failures.
+A node forwards a query's shares to the nodes that hold them, replicates a tablet group's log to
+the nodes in its set, carries the control group's RPCs, and streams snapshots - each without
+letting a slow peer stall the others, and each carrying bytes that are validated where they
+arrive. The transport is the same framing the client uses ([Wire protocol](../architecture/wire-protocol.md))
+with a peer hello in front of it. Built by [F38](../features/inter-node-transport.md), extended
+by [F40](../features/replication.md) (the replication lane), [F41](../features/read-consistency.md)
+(read plans and tokens on a forward), [F42](../features/primary-failover.md) (what a link never
+wrote), [F43](../features/node-recovery.md) (the snapshot stream), [F48](../features/rolling-compatibility.md)
+(the wire range) and [F50](../features/cluster-operations.md) (the certificate binding).
 
-## What exists today
+## How it works
 
-**Delivered at M2 by [F38](../features/inter-node-transport.md)**, against a static placement
-~~rather than the membership M3 brings~~ that [F39](../features/membership.md) then replaced
-with the committed map: a node's peers are the members the control group holds, the handshake
-judges by the committed incarnation and admits a joiner on the control lane alone, the control
-lane carries `Join`, `StatusReport` and `Propose` beside the group's RPCs, and a stalled data
-receiver leaves control elections working (`control_elections_do_not_depend_on_data_shard_relay`).
-`ShardContact` has `Local` and `Remote { node, shard }`;
-`mesh_id()` is gone and a remote contact cannot become a local index. Three lanes on three
-sockets - data and bulk owned by shards, control by the control thread - each with a byte bound
-that sheds before anything is recorded, and an in-flight bound per accepted connection. A 68
-byte pre-schema hello is judged in one order on both ends; a bundle is forwarded as the client's
-bytes, one frame per node, and re-validated on arrival; whole answers come back sealed and shares
-are merged at the gather; `Shedding`, `Unavailable` and `OutcomeUnknown` keep a definite refusal
-apart from an unknown outcome. The control group's RPCs go over the control lane as JSON. A trace
-crosses the hop from each query's own span. Every lane is mutual kTLS when `cluster.tls` is set.
-The four M2 rows of the table below exist as tests, and the hop arms of
-[C10](performance.md#the-workloads) exist as workloads. **At M4** ([F40](../features/replication.md))
-a fourth lane, `Lane::Replication`, on the data port and owned by every shard, carries the
-data consensus family: `Replicate` (type 25) and `ReplicateResponse` (26), a 24 byte head
-naming the correlation id, the group, the target shard, the kind - `AppendEntries`, `Vote`,
-`Propose`, `Snapshot` - and the deadline, and a postcard body; one link per peer node per
-shard with its own correlation table and its own bound, `transport.replication_queue_bytes`,
-so a follower that stops reading holds nothing but its queue. `Propose` is the one hop a write
-takes from a replica to its leader; ~~`Snapshot` is answered by name until M7~~ `Snapshot` is
-the M7 control pair ([F43](../features/node-recovery.md)): `Begin` carries the sender's vote,
-the stream id and the manifest and `End` the total and checksum, answered `Resume { from }`,
-`Installed` or `Refused`, while the bytes ride the bulk lane as `SnapshotBegin`, chunks and
-`SnapshotEnd` frames routed to the target shard, so a stalled transfer holds the bulk lane's
-queue and never the replication lane's. **At M5**
-([F41](../features/read-consistency.md)) the lane gains `ReadBarrier`, the one hop a strong read
-takes from a replica to its leader for a read index; a forward entry carries a read plan - the
-resolved level, the gather slot it fills and its tokens - under `FLAG_READ`; the `Forwarded`
-head widens from thirty-two bytes to ninety-six for the attempt, the slot and a token; and all
-three sit behind `CAP_READ_CONSISTENCY_V1`, which the M2 exact-match rule refuses an M4 peer
-by. **At M8** ([F44](../features/repair.md)) the replication lane gains `Digest`, a member's
-canonical report of a scrub asked by the operation and answered pending, the report or
-unknown, and `Quarantine`, a driver's word to a member about its copy, answered once the
-member's marker is durable; a repair snapshot rides the M7 stream with the operation on its
-begin, judged against the receiver's checkpoint and answered `Behind` when the cut has to be
-taken again. `PROTOCOL_VERSION` went to 4 for the scrub entry a peer built before could not
-tell from a write. **At M9a** ([F45](../features/replica-migration.md)) the replication lane
-gains `Applied`, a member's own applied index asked under a move's operation for the
-activation barrier; `Retired`, whether a member's retired copy of a group is gone; and
-`TransferLeader`, the library's transfer message, without which a transferring leader's own
-lease is the first to lapse and it wins its election back. A snapshot stream to a move's
-destination carries the operation in `SnapshotBegin.transition`, reserved and zero until
-then, and the manifest gained the sender's forgotten-identity watermark. A forwarded query a
-node no longer serves the tablet of is answered on the forward's own frame as an error the
-origin acts on - `StaleTopology`, code 55, with one more send from the origin and never a
-relayed second hop - and a write whose identity is older than the retry window is
-`IdentityExpired`, code 22, before it is proposed. Between a client and a node the same milestone spends the hello's reserved byte fourteen on
-a capability set, and only a granted bit puts a read options section behind a bundle's trace
-context or a session token ahead of a response's payload - the selected-version contract, with
-no version bump. **At M6** ([F42](../features/primary-failover.md)) the transport learns the
-difference between a frame it wrote and one it did not, on both lanes: a forward the data link
-never wrote is sent to another holder once under the same attempt and slot, a proposal or a
-barrier the replication link never wrote is `NotSent` and answered `NotLeader` at once, and
-either that was written and never answered stays unknown. A link a frame wants redials at
-`reconnect_min` rather than waiting out its exponential backoff, which is what bounds the wait
-for that answer at a dead peer to the floor and what keeps the control plane's leader from
-losing its lead every time a member returns. The identity and the budget cross the hop
-unchanged (`deadline_and_operation_id_survive_forwarding`); nothing on the wire moved.
+### Four lanes on two ports
 
-Before that: ~~`ShardContact::Local`, `Comms::send` and the kanal mesh route queries within a
-process.~~ `ServerMsg::Partition` still carries a Glommio read result with a restricted Send
-safety argument, and has no wire form. `QueryMetadata` carries routing/gather and trace metadata;
-local responses bypass the coordinator *within a node* because client relays are shared there,
-and across nodes they return to the coordinator holding the client. F14 provides TLS/kTLS and
-F35 trace context. ~~Existing local queues are mostly unbounded~~ - the peer queues are bounded
-in bytes; the local mesh queues still are not ([item 15](../appendix/known-issues.md#15-no-backpressure-anywhere)).
+| Lane | Port | Owned by | Carries | Byte bound |
+| --- | --- | --- | --- | --- |
+| `Data` (1) | `cluster.port` | every shard, `SO_REUSEPORT` | `Forward` / `Forwarded`: a bundle's shares as the client's bytes, answers and shares back | `transport.data_queue_bytes` per peer |
+| `Control` (2) | `cluster.control_port` | the control thread | the control group's `append_entries`, `vote` and `full_snapshot` as JSON; `Join`, `Ping`/`Pong`, `StatusReport`, `Propose` | `transport.control_queue_bytes` |
+| `Bulk` (3) | `cluster.port` | every shard | `SnapshotBegin`, `SnapshotChunk`, `SnapshotEnd`: a snapshot's bytes, routed to the target slot | `transport.bulk_queue_bytes` |
+| `Replication` (4) | `cluster.port` | every shard, one link per peer node per shard | `Replicate` / `ReplicateResponse`: the tablet groups' `AppendEntries`, `Vote`, `Propose`, `Snapshot` (`Begin`/`End`), `ReadBarrier`, `Digest`, `Quarantine`, `Applied`, `Retired`, `TransferLeader` as postcard under a 24 byte head | `transport.replication_queue_bytes` |
 
-## The design
+```mermaid
+flowchart LR
+    subgraph a["node A"]
+        ac["control thread"]
+        as0["shard 0"]
+        as1["shard 1"]
+    end
+    subgraph b["node B"]
+        bc["control thread<br/>listens control_port"]
+        bl["peer listener, cluster.port<br/>(every shard, SO_REUSEPORT)"]
+        bs0["shard 0"]
+        bs1["shard 1"]
+    end
+    ac -- "Control lane: group RPCs,<br/>join, ping, reports" --> bc
+    as0 -- "Data lane: Forward" --> bl
+    as0 -- "Replication lane: Replicate" --> bl
+    as0 -- "Bulk lane: snapshot chunks" --> bl
+    as1 -- "its own three links" --> bl
+    bl -- "dispatch_target(slot)" --> bs0
+    bl -- "dispatch_target(slot)" --> bs1
+```
 
-### The second variant
+Every lane is its own socket, so bulk bytes already written cannot delay a vote behind them.
+The control lane is dialled to the peer's control address and owned by the control thread, so
+a stalled data shard cannot stop an election or a ping (`control_elections_do_not_depend_on_data_shard_relay`).
+The other three are dialled to the peer's data address; the kernel hands an accepted connection
+to one of the shards listening on the port, and an inbound frame naming a slot is handed to the
+executor hosting it by `peer::listener::dispatch_target` - the one place a slot becomes an
+executor. With S shards and N nodes a node holds up to `3 × S × (N−1)` outbound data-port links
+and `N−1` control links; the fixture's `cluster.dial` map lets a test put a proxy on each
+direction of each lane.
 
-Add `ShardContact::Remote { node, shard }`, and audit every `mesh_id()` caller so a remote contact
-cannot be converted into a local array index. *Built at M2: `mesh_id()` was replaced by
-`local_index() -> Option<usize>`, so the audit is the type's.* Peer encoders accept only explicitly serializable
-message types; there is no wire form for `ServerMsg::Partition`, a kanal sender, a Span handle,
-or any other process-local ownership object.
+### The hello
 
-### Who owns a connection
+Every connection opens with a 68 byte pre-schema `PeerHello` (`shoal-proto/src/shared/protocol/peer/hello.rs`):
+`cluster`, `node`, `incarnation`, `lane`, `wire_min..=wire_max`, a `capabilities` bit set,
+`schema_id`, `shards` (the slot count) and `max_frame_bytes`, written at `MIN_PEER_VERSION` so
+every build reads it. Both ends judge it in one order (`handshake::judge`,
+`shoal-core/src/server/peer/handshake.rs`), and the first refusal names itself:
 
-Initially a sending data shard owns lazy outbound connections per remote node and traffic lane.
-A data peer listener can use SO_REUSEPORT and relay bounded validated bytes to the named shard.
-Measure the extra local hop before adopting per-shard endpoints. A lane may need a separate
-socket to avoid TCP head-of-line blocking; priority queues on one stream cannot preempt bytes
-already written to it.
+```mermaid
+flowchart TB
+    v["wire ranges meet?"] -- no --> r1["NoCommonVersion"]
+    v -- yes --> c["every required capability granted?"]
+    c -- no --> r2["CapabilityMissing"]
+    c -- yes --> t["certificate names this node?<br/>(bind_identity)"]
+    t -- "another node" --> r3["IdentityMismatch"]
+    t -- "no node" --> r4["Unauthorized"]
+    t -- yes --> w["at or above the activated wire?"]
+    w -- no --> r5["BelowActivatedWire"]
+    w -- yes --> l["lane served here?"]
+    l -- no --> r6["LaneRefused"]
+    l -- yes --> j["names no cluster?"]
+    j -- "yes: a joiner" --> jl["control lane only, schema checked,<br/>admitted as a joiner"]
+    j -- no --> k["our cluster?"]
+    k -- no --> r7["WrongCluster / Removed"]
+    k -- yes --> m["committed member at this<br/>incarnation and slot count?"]
+    m -- unknown --> r8["UnknownNode"]
+    m -- lower or duplicate --> r9["Fenced"]
+    m -- other count --> r10["ShardCountMismatch"]
+    m -- yes --> s["schema id equal?"]
+    s -- no --> r11["SchemaMismatch"]
+    s -- yes --> ok["Negotiated: version, capabilities,<br/>peer frame bound"]
+```
 
-The embedded control runtime owns independent control connections/listener (C1), including
-metadata Raft and status reports. A stalled data shard must not block them. Data-consensus vote,
-heartbeat and acknowledgement messages also need reserved scheduling/buffer capacity so bulk
-transfer cannot cause elections or deadlock. ~~Q1/M2 documents which lanes use separate sockets.~~
-*At M2 every lane is a separate socket: data, bulk and control, the first two dialled to the
-peer's data address and the third to its control address.*
+A shard judges membership against the map it holds (`Admission` over `MapCell`); the control
+thread against its applied state. A joiner - a hello naming no cluster - is admitted on the
+control lane alone and nowhere else ([C3](membership.md#joining)). The identity check reads the
+`shoal-node://<id>` URI SAN off the leaf the authority verified ([below](#encryption-and-identity)).
+What survives the judge is `Negotiated { version, capabilities, max_frame_bytes }`, kept per
+link and per accepted connection.
 
-With S shards and N nodes, one lane starts with S × (N−1) outbound data connections per node;
-additional lanes/inbound connections/control traffic increase that. Bound reconnect attempts,
-file descriptors, queued bytes and total buffers. Stagger reconnects with backoff/jitter.
-Record and test limits at Q13's target cluster size, not just N=3.
+### Links
 
-### The peer handshake
+A link (`peer/link.rs`) is one task owned by the shard or control thread that dials it, in one
+of `Idle`, `Connecting`, `Up` or `Backoff`. `Link::enqueue` sheds synchronously at the lane's
+byte bound, before anything is recorded: a forward past it is answered `Shedding`, an append
+past it is refused and retried by openraft. A lost link backs off from `reconnect_min` to
+`reconnect_max` with jitter, but a link a frame *wants* redials at the floor, so a refusal
+takes `reconnect_min` and not the backoff. When a link goes down it reports the frames it never
+wrote (`LinkEvent::Down { unsent }`), and that list is the line between a definite and an
+unknown outcome: a forward never written is sent once more to another holder that is up, under
+the same attempt and slot; a proposal or barrier never written is `RpcFailure::NotSent`,
+answered `NotLeader` at once; anything written and unanswered is `Unavailable` or
+`OutcomeUnknown`, and only the client retries it under its identity ([C5](replication.md#what-the-client-is-promised)).
+An accepted connection holds at most `transport.inflight_bytes` of forwarded bytes unanswered.
 
-Use a fixed, bounded pre-schema handshake, carrying cluster/node identity, incarnation, supported
-wire versions/capabilities and schema identity. Exchange authenticated control/data/client
-endpoints during discovery. Reject a wrong cluster and mismatched identity before any data frame.
-A seed address discovers the embedded cluster; it is not an external membership authority.
+### A bundle is forwarded as bytes
 
-Use mTLS and a defined certificate-to-node binding when configured; validate chain, expected
-identity and authorization to join. *At M2 the chain is validated to `ca` on every lane and the
-`shoal-node://<id>` SAN is written and not yet read; ~~the binding lands with the joiner~~ the
-joiner landed at M3 fencing by incarnation and the SAN is still unread. At M10c
-([F50](../features/cluster-operations.md)) the SAN is read on both ends of every lane and judged
-against the hello, a leaf and an authority rotate on a live node through `ReloadTls` and a
-bundle, and an address change is followed by the cluster.* Q11 resolves first-boot certificate provisioning before a
-random NodeId exists, SAN encoding, CA/certificate rotation and cloned-node fencing. TLS cannot
-be described as a complete identity design until that bootstrap path exists - *which is
-explicitly manual: the id is minted at the first claim and the leaf issued for it before the
-node joins under the binding ([runbook 14](../operations/runbooks.md#14-rotate-certificates-and-authorities))*. When deployment
-policy allows plaintext, document that peer identity is trusted inside that explicit boundary.
-Client encryption requires equivalent protection on both control and data peer lanes.
+The coordinator - the shard whose client sent the bundle - routes each query's keys on the
+map's ring and builds one `Forward` frame per remote node: the client's own serialized bytes,
+and per entry an offset into them, the query index, the target slot, the gather slot and a read
+plan (`FLAG_READ`: the resolved level, the slot it fills, its tokens) under the bundle's
+attempt and the milliseconds of budget remaining. The receiving shard re-validates the bytes as
+if a client had sent them - lengths, offsets, indices, keys, alignment, the rkyv payload - before
+any archive is touched; `ServerMsg::Partition` and every other process-local object has no wire
+form. The serving node counts the deadline down from arrival. An answer comes back on the
+same connection as `Forwarded`: a whole response sealed, or a share with the attempt and slot
+it fills, which the coordinator's gather merges ([C6](reads.md#fan-out-across-nodes)); a query
+for a tablet the node no longer serves is answered `StaleTopology` on the forward's own frame,
+and the origin sends it once more to another holder. A trace crosses the hop from each query's
+own span (`trace_context_crosses_nodes_without_false_batch_parent`).
 
-### The message types
+### Replication frames
 
-| Family | Required information |
-| --- | --- |
-| Peer hello/ack | Identity, incarnation, capabilities, schema identity, refusal reason |
-| Forward / Forwarded | Original operation/query and attempt ids, destination, coverage, resolved policy, remaining deadline, bounded hop count and return address. *At M5:* the attempt minted per bundle and echoed, the resolved level and the slot per entry, the budget remaining rather than a fresh one, and a token on a write's answer |
-| Data consensus | Tablet/group identity plus selected library's election, append, configuration and read-barrier payloads. *At M4:* `Replicate`/`ReplicateResponse` on the replication lane, openraft's `AppendEntries` and `Vote` as postcard. *At M5:* `ReadBarrier`, answered with the leader's `ReadLogId` or a leader hint. *At M8:* `Digest` and `Quarantine`, and the scrub entry as a command whose tablet no write can name |
-| Replication receipts | Matching term/history, replica/configuration and durable completion evidence; duplicate-safe. *At M4:* openraft's append response, sent after the follower's `fdatasync` |
-| Catch-up | Tablet/group, matching term/index boundary and snapshot fallback negotiation. *At M7:* openraft's, from the retained log while the follower is inside it and a snapshot once it is not |
-| Snapshot begin/chunk/end | Snapshot/transition identity, manifest, boundary, offset, length, checksum and resume metadata. *At M7:* the `Begin`/`End` RPCs on the replication lane and the `SnapshotBegin`/chunk/`SnapshotEnd` frames on the bulk lane, each chunk `[offset u64][bytes]` under `replication.snapshot_chunk_bytes`, resumed from the prefix the receiver holds |
-| Control Raft | Typed request/response identity and embedded OpenRaft payload |
-| Ping / Pong / StatusReport | Probe sequence/incarnation and bounded/coalesced status; no assumption about extensible library heartbeat replies |
-| Admin | Authenticated request id, expected version for mutations, operation id and status/result |
+A tablet group's RPCs ride the replication lane as postcard under a 24 byte head naming the
+correlation id, the group, the target slot, the kind and the deadline. `AppendEntries` and
+`Vote` are openraft's; a follower answers an append after its own `fdatasync`. `Propose` is the
+one hop a write takes from a replica to its leader and `ReadBarrier` the one hop a strong read
+takes for a read index; `Snapshot` is the `Begin`/`End` control pair of a snapshot whose bytes
+ride the bulk lane in `snapshot_chunk_bytes` chunks, so a stalled transfer holds the bulk
+queue and never the replication lane's ([C7](failover.md#snapshots-and-atomic-installation));
+`Digest` and `Quarantine` are a scrub's report and a driver's verdict ([C9](operations.md#repair));
+`Applied`, `Retired` and `TransferLeader` are a move's probes and its leadership hand-off
+([C8](rebalancing.md#a-move)). Each link has its own correlation table and its own bound, so a
+follower that stops reading holds nothing but its queue.
 
-Append numeric message types rather than renumbering existing ones. Exact encodings follow the
-chosen library/version and C13 Q2/Q10; the first draft's fixed Replicate/SetPrimary sketches are
-not a substitute for election, commit, configuration and read-barrier messages.
+### Backpressure
 
-### The bundle is forwarded as bytes
+Every queue is bounded in bytes, and admission sheds before a command is accepted; once
+accepted, a timeout or a lost peer is an unknown outcome unless something definite came back.
+Bulk work has its own lane and queue, so a snapshot cannot starve the appends and votes beside
+it, and a slow follower blocks neither the other follower nor the shard's other groups. Nothing
+holds a consensus or storage resource while waiting on a queue whose consumer needs it. The
+local kanal mesh between a node's own shards is still unbounded ([item 15](../appendix/known-issues.md#15-no-backpressure-anywhere)).
 
-Forward immutable serialized requests and validate on every process boundary before unchecked
-archive access. Validate frame lengths, offsets, query indices, keys/coverage and destination as
-well as the rkyv payload. Preserve alignment of archived data. Network arrival cannot inherit
-another process's unsafe-memory preconditions. Consensus and snapshot payloads get corresponding
-bounds, checksums and validated decoding; trusted mTLS is not a replacement for memory safety.
+### Compatibility and the wire version
 
-Serialize replication commands at the common boundary above both storage backends (C5).
-Network batches contain typed records routed to their actual replica destinations; a physical
-WAL buffer can mix tablets and must not simply be broadcast to one tablet's followers.
+Schema identity, wire version and capabilities are three separately compared fields.
+`SCHEMA_ID` is the structural fingerprint without `PROTOCOL_VERSION` folded in and must match
+exactly: a schema change is not a rolling operation ([C9](operations.md#rolling-upgrade)). The
+wire is a range, `MIN_PEER_VERSION..=PROTOCOL_VERSION` (4 to 5), narrowed by
+`transport.wire_version` to hold a node below the build's newest through a rolling upgrade;
+`PeerHello::negotiate` picks the highest both ranges hold. Every frame header names the version
+its body is encoded at, a receiver refuses a frame above what was negotiated, and the one body
+with two codecs is the snapshot manifest. Every capability the build defines is required
+(`CAP_FORWARD_V1`, `CAP_CONTROL_RAFT_V1`, `CAP_BULK_SNAPSHOT_V1`, `CAP_MEMBERSHIP_V1`,
+`CAP_REPLICATION_V1`, `CAP_READ_CONSISTENCY_V1`); an optional one would be gated by
+`Negotiated::has`. The cluster's activated wire (`Activate { wire }`) is the committed boundary
+past which no member rolls back: a hello below it is `BelowActivatedWire`, and a node whose
+build is below it stops at start. Between a client and a node the version is exact at
+`CLIENT_WIRE_VERSION` and the hello's capability byte gates the read options section and the
+session token.
 
-### Responses stop bypassing the coordinator across nodes
+### Encryption and identity
 
-Remote owners return results to the coordinator holding the client connection. Forward sealed
-bytes where no merge is needed. Gathered remote shares require validated decoding and explicit
-coverage, including empty results. Preserve one complete response/error per query index and
-ignore duplicate/late attempts after completion. Propagate trace context across a request's hops;
-a batch spanning several requests needs links or per-record context rather than one false parent.
+With `cluster.tls` set every lane is mutual TLS 1.3 handed to the kernel, as `networking.tls`
+does for clients ([F14](../features/encryption-in-transit.md)): the listener requires a chain to
+`ca`, the dialler presents its own leaf, and both ends read the `shoal-node://<id>` URI SAN off
+the peer's leaf and judge it against the hello - `IdentityMismatch` for another node,
+`Unauthorized` for none - unless `cluster.tls.bind_identity` is off, which trusts the chain
+alone for a deployment sharing one leaf. The material is read once into a `PeerTlsHolder` that
+every listener and link consult at each handshake, and `ReloadTls` rebuilds both configs and
+swaps the pair or neither; `ca` may be a bundle through an authority rotation
+([C9](operations.md#certificates)). kTLS needs the kernel's `tls` module loaded; the server
+refuses to start rather than fall back. Without `cluster.tls` the lanes are plaintext and peer
+identity is trusted inside whatever boundary the deployment draws around them.
 
-### Backpressure, from the first line
+## Design choices
 
-Bound bytes as well as message counts on inbound/outbound channels, pending client operations,
-consensus/gap buffers, gathers and snapshot chunks. Admission sheds before accepting a command
-when capacity is unavailable. Once accepted, a timeout or lost peer gives an unknown outcome
-unless definitely rejected; do not report ordinary shedding as proof it was never committed.
-
-Separate bulk snapshots/repair from foreground queries and replication, with reserved capacity
-for progress messages. A slow follower must not block replication to the other follower or all
-of its shard's tablets. Never hold a consensus/storage resource while awaiting a queue whose
-consumer needs that same resource. End-to-end budgets and cancellation bound orphaned work.
-
-### Compatibility and rolling upgrades
-
-Negotiate a supported protocol and capability set, then actually encode/decode that version.
-~~The current schema fingerprint folds PROTOCOL_VERSION (`shoal-derive/src/traits/fingerprint.rs`);
-separate structural schema identity from transport capabilities~~ *Done at M2: `SCHEMA_ID` is the
-structural fingerprint without the version, and the hello carries it beside a version range and a
-capability set as three things; ~~at M2 all three must match exactly~~ since
-[F48](../features/rolling-compatibility.md) the schema id matches exactly, the version is
-negotiated to the highest both read, and the capabilities intersect* ~~or provide explicit versioned
-fingerprints/codecs~~. Merely accepting n−1 in the handshake leaves incompatible payload layouts,
-which is why M2 did not and why F48's every frame names the version its body is encoded at, with
-the snapshot manifest as the one body with two codecs.
-
-~~Define a cluster minimum/active feature version. Enable new commands or formats only after all
-required participants can process them; persist that activation decision. Record rollback limits
-once a new storage feature is activated. Test old/new binaries exchanging queries, replication,
-snapshots, elections and reconfiguration, not only a successful hello.~~ *Done at M10a:
-`ControlState::activated` is the committed activation, `Activate` is refused until every
-member's running build reports the version, a member below it is refused at every door, the
-version 2 snapshot header is written only past it, the rollback matrix is on the F page, and
-the three tests exchange forwards, quorum writes, barrier reads, snapshots over the older link
-and an election - one of them against a real previous build.* Schema evolution beyond exact
-structural compatibility ~~needs a separately specified migration path (Q10)~~ is explicitly
-unsupported as a rolling operation: a new cluster and a restore of a backup or an export is the path.
+Four lanes on separate sockets rather than priorities on one stream, because bytes already
+written to a socket cannot be preempted. The control lane on its own port and thread, so
+partial failure of a shard is visible rather than masked. Forwarding the client's bytes rather
+than re-serializing, because the coordinator would otherwise decode what it never needs. A link
+that reports what it never wrote, because that is the only evidence that turns a lost peer into
+a definite refusal. A version range and a capability set in the hello from M2, so M10a could
+negotiate without changing the hello's shape.
 
 ## Alternatives rejected
 
-Sending process-local objects, trusting remote validation, unbounded peer buffers and accepting
-an old version without its codec are excluded. Using the existing framing is the baseline;
-choice of RPC library is secondary to proving compatible payload and flow-control contracts.
-Control traffic routed exclusively through a data shard is rejected because it masks partial failure.
+Sending process-local objects; trusting remote validation; unbounded peer buffers; accepting an
+older version in the hello without a codec for it (M2 matched exactly until the codec existed);
+an RPC library in place of the framing the client already uses; control traffic routed through a
+data shard.
 
 ## What it costs
 
-Cross-node requests/responses add socket work and validation; remote merges add decoding.
-Independent lanes consume sockets/buffers but prevent bulk work monopolizing progress traffic.
-Topology, trace and policy metadata are measured at actual encoded size. Reconnect storms and
-slow peers are part of the performance and availability tests.
+A cross-node request adds socket work and a second validation; a remote merge adds decoding.
+Independent lanes cost sockets and buffers - up to `3 × S × (N−1)` data-port links a node - and
+prevent bulk work monopolizing progress traffic. Topology, trace and policy metadata are
+measured at their encoded size on the hop arms.
 
-## What it breaks
+## Limitations
 
-Comms/contact routing, return addresses, request metadata and framing compatibility. Existing
-client-only schemas must remain independent of Glommio and the consensus implementations.
+`ShoalPool::transport()` reports shard zero's links and calls them the node's
+([item 95](../appendix/known-issues.md#95-shoalpooltransport-reports-shard-zeros-links-and-calls-them-the-nodes)).
+`local_shard` in the hop arms is a mixture until [D7](../direction/shard-aware-routing.md).
+The reconnect floor is a node's setting, not the policy's, so a deployment whose floor is
+longer than its clients' patience waits it out. Peer identity under plaintext lanes is the
+deployment's boundary. See [C15](open-issues.md).
 
 ## Invariants to uphold
 
-- A data connection remains owned by one shard; control sockets by their embedded runtime.
-- A process boundary reestablishes checked decoding and alignment invariants.
-- One slow peer cannot exhaust all memory or block independent quorum progress.
-- Accepted write identity and deadline survive every hop and reconnect.
-- Compatible handshake implies working selected-version payloads, not just accepted metadata.
+- A data connection is owned by one shard; control sockets by the control thread.
+- A process boundary re-establishes checked decoding and alignment.
+- One slow peer cannot exhaust memory or block independent quorum progress.
+- An accepted write's identity and deadline survive every hop and reconnect.
+- A compatible handshake implies working selected-version payloads, not accepted metadata.
+- A frame the link never wrote is the only thing rerouted or refused as definite.
 
-## Prerequisites
+## How it is measured
 
-[C1](node-identity.md), [C13](protocol.md) Q1/Q2/Q10/Q11/Q13, F10 framing, F14 TLS and F35 tracing.
-
-## How it would be measured
-
-[C10](performance.md) local/remote hop controls, row-size/batch sweeps, bulk-stream interference,
-connection counts, queue byte limits and mixed-version operation. Record validation and merge cost.
+The three hop arms `macro/cluster/hop/{same_shard,local_shard,remote_node}` price the hop
+([C10](performance.md#the-arms)); the read arms carry the data lane's frame and shed counters;
+the catch-up arms the bulk lane's bytes.
 
 ## Acceptance tests
 
 | Test | Asserts | Milestone |
 | --- | --- | --- |
-| `remote_query_returns_one_result_per_index` | Cross-node split/unsplit requests preserve coverage, ordering and response identity | M2 |
-| `peer_rejects_wrong_cluster_identity_and_malformed_payload` | Invalid identity, lengths, offsets, archives and alignment cannot reach unchecked access | M2 |
-| `slow_peer_has_bounded_bytes_and_independent_lanes` | Snapshot/peer stall cannot exhaust memory or stop unrelated progress messages | M2 |
+| `remote_query_returns_one_result_per_index` | Cross-node split and unsplit requests preserve coverage, ordering and response identity | M2 |
+| `peer_rejects_wrong_cluster_identity_and_malformed_payload` | Invalid identity, lengths, offsets, archives and alignment cannot reach unchecked access; a leaf naming another node or none is refused by name | M2 |
+| `slow_peer_has_bounded_bytes_and_independent_lanes` | A snapshot or peer stall cannot exhaust memory or stop unrelated progress messages | M2 |
 | `control_elections_do_not_depend_on_data_shard_relay` | A stalled data receiver leaves direct control networking functional | M3 |
 | `trace_context_crosses_nodes_without_false_batch_parent` | Remote work retains the originating context or correct batch links | M2 |
-| `deadline_and_operation_id_survive_forwarding` | Redirect/reconnect cannot reset budgets or replay accepted writes under a new identity | M6 |
-| `mixed_versions_exchange_real_cluster_operations` | n/n−1 codecs support queries, replication, snapshots and elections until explicit activation ([F48](../features/rolling-compatibility.md)) | M10a |
+| `deadline_and_operation_id_survive_forwarding` | A redirect or reconnect cannot reset a budget or replay an accepted write under a new identity | M6 |
+| `mixed_versions_exchange_real_cluster_operations` | n and n−1 codecs carry queries, replication, snapshots and elections until an explicit activation | M10a |
 
-## Related and implementation references
+## Related
 
-[C3](membership.md), [C5](replication.md), [C7](failover.md), [C13](protocol.md).
-[Wire protocol](../architecture/wire-protocol.md), [F14 TLS](../features/encryption-in-transit.md),
-[F35 trace context](../features/wire-trace-context.md).
-[OpenRaft integration guide](https://docs.rs/openraft/latest/openraft/docs/getting_started/index.html)
-identifies the application network adapter seam; Shoal supplies that adapter over its own endpoints.
+[C3](membership.md), [C5](replication.md), [C7](failover.md), [C13](protocol.md),
+[Wire protocol](../architecture/wire-protocol.md), [F14](../features/encryption-in-transit.md),
+[F35](../features/wire-trace-context.md).

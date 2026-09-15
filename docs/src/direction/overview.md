@@ -112,8 +112,9 @@ since `XL` *means* "reaches the wire format, the on-disk format, or the client".
 
 ## The dependency graph
 
-The book has no mermaid preprocessor, so this is a table
-([Optimizations](../appendix/optimizations.md) does the same for the same reason). Hard edges only.
+A table rather than a graph
+([Optimizations](../appendix/optimizations.md) does the same); the book renders mermaid since
+the distributed chapter's diagrams, and this table predates that. Hard edges only.
 
 | Edge | Why |
 | --- | --- |

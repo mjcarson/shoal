@@ -30,30 +30,21 @@ codebase — which is periodically compacted into *archives* of partition data, 
 It is worth being blunt about the boundaries, because the crate descriptions ("a distributed
 database") oversell the current state:
 
-- **Not distributed.** ~~`ShardContact` has exactly one variant, `Local(usize)`
-  (`shoal-core/src/server/shard.rs:169`). All routing is to shards on the current process.
-  There is no node discovery, no inter-node transport, and no cluster membership.~~ Since
-  [F38](features/inter-node-transport.md) `ShardContact` has a `Remote { node, shard }` variant
-  and a node forwards queries to the nodes ~~a **static placement** names~~ the cluster's
-  membership names, over bounded, optionally
-  encrypted lanes. ~~There is still no node discovery, no cluster membership and no replication:
-  every node is a consensus group of one, and a placement is a file a test or a benchmark
-  writes, not something the cluster agrees on~~ Since [F39](features/membership.md) a node joins
-  a cluster through its seeds, the cluster agrees on its members, its placement and its tables,
-  fences a duplicate and calls a silent member down; ~~there is still no replication - every
-  tablet has one home~~ and since [F40](features/replication.md) every tablet is replicated
-  by a Raft group and a default write waits for a durable majority
-  ([Distributed Shoal](distributed/overview.md)).
-- ~~**No replication.** Every partition lives on exactly one shard, in one copy, on one disk.~~
-  **Replicated, on a cluster node.** Since [F40](features/replication.md) a tablet has
-  `min(replication_factor, nodes)` copies on distinct nodes, a write is acknowledged once a
-  majority has fsynced it, and a `One` read is served from the local copy's committed state.
-  A standalone node still holds one copy on one disk, and what is not built yet - ~~strong
-  reads, failover that moves leadership, catch-up past the purge point, rebalancing~~ ~~a local
-  shard-count change,~~ rolling upgrades, backup and restore - is the
-  rest of the [milestones](distributed/milestones.md); strong reads, failover, catch-up,
-  repair, migration, rebalancing and a local core-count change are built
-  ([F41](features/read-consistency.md) through [F47](features/local-rehome.md)).
+- **Distributed, as a cluster of nodes.** A node with a `cluster:` block joins a cluster
+  through its seeds; the cluster agrees on its members, its placement and its tables under an
+  embedded Raft group, fences a duplicate identity, calls a silent member down, and forwards a
+  query's shares to the nodes that hold them over bounded, optionally encrypted lanes
+  ([Distributed Shoal](distributed/overview.md)). A node with no `cluster:` block is a
+  standalone database and none of this exists in it.
+- **Replicated, on a cluster node.** A tablet has `min(replication_factor, nodes)` copies on
+  distinct nodes, each a Raft group; a default write is acknowledged once a majority has
+  fsynced it, a default read is the local copy's committed state, and a strong read is a
+  barrier from the leader. A primary that dies is replaced by its group's own election, a node
+  that returns is fed a snapshot, a corrupt copy is quarantined and repaired from a verified
+  majority, replica sets move between nodes under plans, a rolling upgrade negotiates and
+  activates the wire, and a cluster is backed up and restored into a new identity
+  ([F36](features/cluster-harness.md) through [F50](features/cluster-operations.md)). A
+  standalone node still holds one copy on one disk.
 - **No transactions.** There is no atomicity across queries, no isolation between them, and
   no rollback. A bundle of queries is a batch, not a transaction.
 - **No secondary indexes.** A partition is only ever found by its partition key; there is no
@@ -61,14 +52,10 @@ database") oversell the current state:
   matched or bounded, so a large partition can be paged through
   ([F1](features/sort-key-ranges.md)) — but that narrows what a partition returns, not which
   partitions can be reached ([Query Execution](tables/query-execution.md)).
-- ~~**No ~~rebalancing~~ local shard-count change.** Shard count is baked into the on-disk file layout. Changing it between
-  restarts is refused at startup ([Partitioning and the Tablet Map](architecture/partitioning.md)).~~
-  **A core-count change is a restart, not a migration** - the files of the executors that no
-  longer run are moved onto the ones that do before a shard starts, and the start is held for it
-  ([F47](features/local-rehome.md)); a cluster node's slots, the shard count its peers record,
-  never move, and are the ceiling on its executors.
-  Replica sets do move between nodes since [F45](features/replica-migration.md), and a plan
-  moves them by weight and bytes since [F46](features/capacity-rebalancing.md).
+- **A core-count change is a restart, not a migration.** The files of the executors that no
+  longer run are moved onto the ones that do before a shard starts, and the start is held for
+  it ([F47](features/local-rehome.md)); a cluster node's slots, the shard count its peers
+  record, never move, and are the ceiling on its executors. Growing past them is a `Replace`.
 - **Encryption and authentication are both optional and both off by default.** A server can require
   SCRAM-SHA-256 and refuse a client that cannot do it ([F12](features/authentication.md)), and it
   can encrypt its listener with TLS 1.3 ([F14](features/encryption-in-transit.md)). Neither is on
@@ -81,15 +68,12 @@ designed in [Direction](direction/overview.md) — which is a design record, not
 its nine entries have since been built, in whole ([F10](features/framing-and-protocol-evolution.md),
 [F11](features/error-channel.md)) and in half ([F12](features/authentication.md)).
 
-Shoal is best understood as a fast single-node partitioned key-value store with a
-persistence layer, on top of which distribution ~~has not yet been built~~ is being built a
-milestone at a time - the transport, membership, replication, failover, recovery, repair,
-migration, rebalancing and a local core-count change exist; ~~failover and rebalancing do not~~
-~~a local shard-count change and~~ the operations milestone does not. How it would be —
-replication with a primary per tablet, membership under Raft, failover, rebalancing, and the
-tests and benchmarks that would prove each — is designed in
-[Distributed Shoal](distributed/overview.md), which is to the first five bullets above what
-Direction is to the last one: a design record with an order, and nothing in it built.
+Shoal is best understood as a fast partitioned key-value store with a persistence layer, run
+either as one node or as a cluster of them. The cluster - replication with a primary per
+tablet, membership under Raft, failover, recovery, repair, migration, rebalancing, upgrades,
+backup and the tests and benchmarks that prove each - is described in
+[Distributed Shoal](distributed/overview.md), with what is still open on its
+[last page](distributed/open-issues.md).
 
 ## A note on the current branch
 

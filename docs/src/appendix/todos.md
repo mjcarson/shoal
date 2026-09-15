@@ -215,70 +215,27 @@ knowing before starting:
   under Raft. This is less additive than it sounds, since membership and failure detection need
   consensus anyway.
 
-Also needed for a real cluster: ~~replication (there is exactly one copy of every partition),
-membership and failure detection,~~ and rebalancing - replication and membership are built
-([F40](../features/replication.md), [F39](../features/membership.md)).
+Also needed for a real cluster, and built: replication ([F40](../features/replication.md)),
+membership and failure detection ([F39](../features/membership.md)) and rebalancing
+([F46](../features/capacity-rebalancing.md)).
 
 The *client* half of this is now designed separately.
 [D7](../direction/shard-aware-routing.md) covers routing a query to the shard that owns its tablet
 from the client rather than from a coordinator, which is a prerequisite for multi-node routing and
 not a substitute for it — the transport and membership work above is unchanged by it.
 
-**Where the rest of this now lives.** The transport, membership, replication and failover halves
-have grown a design rather than staying this sketch. That design is the
-[Distributed Shoal](../distributed/overview.md) part — the `Remote` variant is
-[C2](../distributed/transport.md), the replica set per tablet is [C4](../distributed/tablet-map.md),
-the placement authority is [C3](../distributed/membership.md), and the "actual work" the
+**Where the rest of this now lives.** The transport, membership, replication and failover
+halves grew a design and then an implementation: the [Distributed Shoal](../distributed/overview.md)
+chapter describes the cluster as it runs - the `Remote` variant is
+[C2](../distributed/transport.md), the replica set per tablet [C4](../distributed/tablet-map.md),
+the placement authority [C3](../distributed/membership.md), and the "actual work" the
 tablet-ring page deferred is [C5](../distributed/replication.md) through
-[C7](../distributed/failover.md). This entry still records *that* it is unbuilt. ~~Nothing there is
-built either.~~ C2 is built ([F38](../features/inter-node-transport.md)); ~~C3 onward are not~~
-C3's membership half and C4's map are built ([F39](../features/membership.md)); ~~C5 onward are not~~
-C5's write path, C4's replica sets and C6's `One` reads are built ([F40](../features/replication.md));
-C6's strong reads and C7 onward are not. [C13](../distributed/protocol.md) adds the embedded control/data protocol contract
-and the questions that gate implementation; no external membership or failover service is required.
-That contract was agreed on 2026-09-11 as the gate before M0 ([P1–P6](../distributed/protocol.md#the-contract)),
-which settled the protocol and pinned candidate libraries without selecting one or building anything.
-M0 itself was delivered the same day as [F36](../features/cluster-harness.md): the contract as an
-executable model in `shoal-model`, the cluster fixture, and the benchmark's cluster record — still
-nothing that makes one node speak to another. M1 followed as
-[F37](../features/node-identity-control-plane.md): a node is now somebody — a `NodeId` and a
-`ClusterId` in a format 2 marker, the `cluster:` block, a control thread on its own core running
-an embedded `openraft` group of one on a glommio runtime — and the placement authority C3 asks
-for exists as a group with one member and a state machine that holds the cluster, its members
-and its policy. ~~Still nothing that makes one node speak to another: the peer endpoints are
-advertised and bound by nothing, which is M2.~~ M2 is delivered as
-[F38](../features/inter-node-transport.md): a node speaks to the nodes its placement names over
-three bounded lanes, forwards bundles as validated bytes, and carries its control group's RPCs and
-its traces across the hop. M3 is delivered as [F39](../features/membership.md): a node joins
-through seeds as a learner, the leader promotes voters under the policy and fences a duplicate
-by incarnation, the map is committed and pushed to every shard and every subscribed client,
-admin operations ride the client connection, writes need their quorum, and the leader's
-phi-accrual detector commits a silent member `Down`. M4 is delivered as
-[F40](../features/replication.md): every tablet has a Raft group on every replica's shard, the
-group's log is one shared WAL per shard, a write is one command applied in committed order
-everywhere with its result derived there, a default write waits for a durable majority, and
-three arms price a durable and a volatile quorum against the same placement replicating to
-nobody. M5 is delivered as [F41](../features/read-consistency.md): a `Quorum` read obtains a
-read barrier from its group's leader and applies through it, a committed write hands back a
-session token a later read is served past, every gather has a slot per share and a deadline, a
-bundle's level resolves per table from versioned control state, and seven arms price a barrier,
-a session token and a fan-out. M6 is delivered as [F42](../features/primary-failover.md): the
-retry table survives the purge point, a lapsed lease is `NotLeader` before anything is
-appended, a barrier follows the leader, a non-holder routes by health and a never-written share
-is sent to another holder once, a client pins its identity and retries under a budget, and one
-arm records a kill and a restart as a time series. M7 is delivered as
-[F43](../features/node-recovery.md): a member behind the purge point is fed a snapshot per
-group - a file the compactor cuts at the checkpoint, streamed in resumable chunks over the bulk
-lane, installed atomically under a marker with the install redone at open - the sealed WAL is
-bounded in bytes with a forced purge behind the groups pinning it, an installing group's
-tablets refuse reads while the rest of the node serves, and two arms price the catch-up by log
-and by snapshot.
-
-M9c is delivered as [F47](../features/local-rehome.md): a cluster node's slots are claimed
-once and its executors host them through a node-local table, a standalone node hosts per
-tablet, and a changed core count is a rehome run before a shard starts - fold, copy, move,
-reclaim, finalize - under a manifest that is resumed at its step, with one arm pricing the
-start.
+[C8](../distributed/rebalancing.md). Every milestone is delivered, M0 through M10c, as
+[F36](../features/cluster-harness.md) through [F50](../features/cluster-operations.md); the
+[milestones page](../distributed/milestones.md) records each gate and what met it, and
+[C15](../distributed/open-issues.md) indexes what is still open. This entry no longer records
+that anything is unbuilt; what each feature left undone on purpose is the lists below, which
+are the record the next change starts from.
 
 **What F50 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
@@ -296,9 +253,6 @@ list rather than from the diff:
 - **A physical capture.** The record and the launcher exist and the launcher was proven
   against no host but by its command lines: `SHOAL_REMOTE_SMOKE` names the host it would run
   against. The capture on unequal hardware, and the render of it, are the benchmark host's.
-- **The certificate test on this host.** `certificate_rotation_binds_identity` skips by name
-  without the kernel's TLS module and was not run where it was written; `modprobe tls` is the
-  one step between it and a run.
 - **A remote launcher that reads the host's own configuration.** The remote `shoal.yml` is the
   operator's to write with local storage paths; the launcher copies the staged file and nothing
   else, and refuses a build that is not its own by digest.
@@ -712,7 +666,7 @@ shard is not viable at any heartbeat interval a failure detector would want, and
 tablets alternative Q1 named is the expected shape for M4; and **fsyncs from independent groups on
 one thread queue behind each other** (395 µs alone, 10.8 ms with sixty four leaders writing at
 once), which is the number Q2's shared physical WAL has to beat. Both are in the
-[decision record](../distributed/protocol.md#q1-and-q13-decided-at-m1).
+[decision record](../distributed/protocol.md#q1-and-q13-at-m1).
 
 ### Rebalancing
 
@@ -756,7 +710,7 @@ A third piece appears once the map is editable, and it is on the client side:
 [D7](../direction/shard-aware-routing.md#5-staleness-which-is-what-makes-it-safe) — any client
 holding a copy of the map holds a stale one during a move, so the map has to carry a version and
 a query routed against a stale one needs a forwarding/refresh path. The original requirement to
-forward rather than ever refuse is superseded by [C4](../distributed/tablet-map.md#staleness-on-servers-too):
+forward rather than ever refuse is superseded by [C4](../distributed/tablet-map.md#staleness):
 bounded forwarding may return a structured routing error, and write retries preserve operation
 identity. Dead sources and stale routing loops must not become indefinite waits.
 
