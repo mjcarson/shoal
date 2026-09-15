@@ -147,10 +147,10 @@ topology epoch — and every one of them makes the format more likely to change,
 
 ## Still open
 
-**The marker still only guards the default storage root.** A per-table `storage.tables` override
-pointing elsewhere is unmarked, so this check does not run for it at all — filed as
-[item 43](../known-issues.md#43-the-storage-marker-only-guards-the-default-storage-root) and
-unaffected by this fix.
+~~**The marker still only guards the default storage root.** A per-table `storage.tables` override
+pointing elsewhere is unmarked, so this check does not run for it at all.~~ Every root carries
+a mirror of the marker since [Resolved #43](marker-every-root.md), read through the same
+`read`, so the format check runs for it too.
 
 **A directory written before the marker existed has none.** `claim` treats a missing marker as a
 new directory and claims it, which for a directory written by the vnode ring means starting and
@@ -186,8 +186,8 @@ match on known versions this page said a second format would be is that match.
 
 - [Items 11, 12, 37](tablet-ring.md) built `StorageMeta` and explain why a storage directory can
   only be read back by what wrote it.
-- [Item 43](../known-issues.md#43-the-storage-marker-only-guards-the-default-storage-root) and
+- [Resolved #43](marker-every-root.md) closed one of the two holes in the same guard;
   [item 46](../known-issues.md#46-an-unmarked-storage-directory-is-claimed-rather-than-refused)
-  are the two remaining holes in the same guard.
+  is the other.
 - [Configuration](../../getting-started/configuration.md) describes the marker an operator finds
   in a storage directory.

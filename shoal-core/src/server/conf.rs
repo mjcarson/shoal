@@ -524,6 +524,39 @@ impl Storage {
         self.tables = tables;
         self
     }
+
+    /// Every distinct root this configuration writes under, the primary first
+    ///
+    /// The primary is the default settings' latency path, where the marker, the hosting file
+    /// and the rehome manifest live; after it, in a stable order, every other path the
+    /// default's throughput writer or any table's own settings name. Each of them is locked
+    /// and carries a mirror of the marker, so a directory borrowed from another server is
+    /// refused before a shard opens it
+    /// ([Resolved #43](../../../docs/src/appendix/resolved/marker-every-root.md)).
+    #[must_use]
+    pub fn roots(&self) -> Vec<PathBuf> {
+        // the primary, which is what everything before this used alone
+        let primary = self.default.filesystem.latency_sensitive.path.clone();
+        let mut roots = vec![primary];
+        // every other path, each once, in a stable order so the locks are taken the same way
+        // by every start
+        let mut others: Vec<PathBuf> = std::iter::once(&self.default.filesystem)
+            .chain(self.tables.values().map(|settings| match settings {
+                TableSettings::FS(filesystem) => filesystem,
+            }))
+            .flat_map(|filesystem| {
+                [
+                    filesystem.latency_sensitive.path.clone(),
+                    filesystem.throughput_sensitive.path.clone(),
+                ]
+            })
+            .filter(|path| !roots.contains(path))
+            .collect();
+        others.sort();
+        others.dedup();
+        roots.extend(others);
+        roots
+    }
 }
 
 /// The different levels to log tracing info at

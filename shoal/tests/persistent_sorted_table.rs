@@ -2728,13 +2728,12 @@ async fn a_get_whose_partition_cannot_be_read_does_not_hang() -> Result<(), Test
     assert_eq!(test_data, record);
     // Shutdown server
     //
-    // `exit` reports a shard's error now rather than swallowing it (item 58), and this is the
-    // one test where a shard can have one to report: a compaction that ran while the archives
-    // were unreadable killed the compactor, whose loop stops on its first failed job (item 91).
-    // Whether that happened depends on when the log rotated, so it is allowed here and said so
-    if let Err(error) = pool.exit() {
-        eprintln!("the compactor died on the unreadable archives, item 91: {error:?}");
-    }
+    // `exit` reports a shard's error rather than swallowing it (item 58), and this is the one
+    // test where a shard could have one to report: a compaction that ran while the archives
+    // were unreadable killed the compactor, whose loop stopped on its first failed job. That
+    // was allowed here and printed until [Resolved #91](../../docs/src/appendix/resolved/compaction-retry.md);
+    // a job that fails before writing is tried again now, so the exit has nothing to report
+    pool.exit()?;
     Ok(())
 }
 
@@ -2819,6 +2818,96 @@ async fn a_get_whose_archive_is_missing_does_not_end_its_shard() -> Result<(), T
     // the row was there all along, and is found once its archive is back where it belongs
     assert_eq!(test_data, record);
     // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// A compaction that meets an unreadable archive is tried again, and merges what it loads
+///
+/// The sorted twin of the unsorted table's test of the same name
+/// ([Resolved #91](../../docs/src/appendix/resolved/compaction-retry.md)), and the half that
+/// proves the merge: a sorted partition holds several rows, so the row archived before the
+/// fault and the row written under it are both read afterwards - which is only true if the
+/// retried job loaded the archive it could not open the first time, rather than writing the
+/// new row over a partition it never read.
+///
+/// Skipped when the archives cannot be made unreadable, which is the case under root.
+#[tokio::test]
+async fn a_compaction_that_meets_an_unreadable_archive_is_tried_again() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // a server whose intent log rotates every few writes
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_pressured_config(&temp_dir)).await?;
+    // a row, and enough after it to rotate the log and archive its partition
+    let first = TestRecord::new("partition_key", "a", "first");
+    client.send_one(first.clone()).await?;
+    for index in 0..64 {
+        let filler = TestRecord::new(
+            format!("filler_{index}"),
+            "sort_key".to_string(),
+            "x".repeat(256),
+        );
+        client.send_one(filler).await?;
+    }
+    // shut down, which compacts every log into the archives, and start again
+    pool.exit()?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_pressured_config(&temp_dir)).await?;
+    // take the permissions off the archives, so a compaction that loads this partition fails
+    let Some(hidden) = utils::UnreadableArchives::new(&temp_dir, "TestRecord") else {
+        pool.exit()?;
+        return Ok(());
+    };
+    // a second row in the archived partition, and a rotation behind it: the compaction of
+    // that log has to load the partition from the archive it cannot open
+    let second = TestRecord::new("partition_key", "b", "second");
+    client.send_one(second.clone()).await?;
+    for index in 0..64 {
+        let filler = TestRecord::new(
+            format!("later_{index}"),
+            "sort_key".to_string(),
+            "x".repeat(256),
+        );
+        client.send_one(filler).await?;
+    }
+    // give the job time to fail and be scheduled again, more than once
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // put the archives back
+    drop(hidden);
+    // the retried compaction removes every rotated log, once it can read the archives
+    let intents = temp_dir.path().join("TestRecord").join("intents");
+    let rotated = |dir: &std::path::Path| -> usize {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.file_name().to_string_lossy().contains("-inactive-"))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while rotated(&intents) > 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the rotated logs were never compacted once the archives were readable again: {} left",
+            rotated(&intents)
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // both rows are read: the one archived before the fault and the one merged onto it
+    let get = TestRecordGet::new(vec![first.partition_key.clone()]);
+    let response = client.send_one(get).await?;
+    let rows = response.access::<TestRecord>()?.unwrap();
+    let mut values: Vec<String> = rows
+        .iter()
+        .map(|access| TestRecord::deserialize(access).unwrap().data)
+        .collect();
+    values.sort();
+    assert_eq!(values, vec!["first".to_string(), "second".to_string()]);
+    // the compactor lived through it, so the exit has nothing to report
     pool.exit()?;
     Ok(())
 }

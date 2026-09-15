@@ -588,7 +588,8 @@ bytes; the rehome runs before any shard starts, on one core, and never while ser
 growth's donor keeps its dead records until its own compaction; a partial snapshot install is
 dropped for the leader to feed again rather than carried; and every crash test runs one storage
 root, so a table under its own `storage.tables` root is moved on the same manifest untested
-(item 43). The "data configuration/address updates" the gate names are what did not have to
+(the root is marked and locked since [Resolved #43](../appendix/resolved/marker-every-root.md);
+the crash matrix over it is still to be run). The "data configuration/address updates" the gate names are what did not have to
 happen: no address changes, because a peer names a slot and a slot never moves.
 
 | Test | Where | What it asserts |

@@ -408,6 +408,17 @@ pub enum ShoalError {
     /// Two servers on one directory would both claim the same node identity and write the same
     /// files. The lock is what refuses the second one.
     StorageDirectoryLocked { path: PathBuf },
+    /// A root a table or a writer is pointed at carries another server's marker
+    ///
+    /// Every distinct root a configuration names carries a mirror of the primary root's marker
+    /// ([Resolved #43](../../../docs/src/appendix/resolved/marker-every-root.md)); one that
+    /// names another node, another cluster, another slot count or another layout was written
+    /// by another server, and serving it would strand or mix that server's data.
+    StorageRootMismatch {
+        root: PathBuf,
+        found: String,
+        expected: String,
+    },
     /// The control core the configuration names is not one this process may run on
     ///
     /// Checked against the process's actual affinity - a container's cpuset, a `taskset` - rather
@@ -627,6 +638,17 @@ impl std::fmt::Display for ShoalError {
             ShoalError::TopologyWentBackwards { found, observed } => write!(
                 f,
                 "topology version {observed} was observed after {found} had already been recorded"
+            ),
+            ShoalError::StorageRootMismatch {
+                root,
+                found,
+                expected,
+            } => write!(
+                f,
+                "the storage root {} was written by another server: its marker says {found} and \
+                 this server is {expected}; point the table at a root of its own, or at one this \
+                 node claimed",
+                root.display()
             ),
             ShoalError::StorageDirectoryLocked { path } => write!(
                 f,

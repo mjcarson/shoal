@@ -188,3 +188,97 @@ async fn a_changed_core_count_rehomes_and_reads_back() -> Result<(), TestError> 
     );
     Ok(())
 }
+
+/// A table under its own storage root is marked and guarded like the default root
+///
+/// Before [Resolved #43](../../docs/src/appendix/resolved/marker-every-root.md) the marker
+/// guarded the default latency root alone: a table pointed at a root of its own through
+/// `storage.tables` carried no marker, so that root could be handed to another server and
+/// nothing would say so. Every distinct root now takes a mirror of the marker at the claim,
+/// and a root written by another node is refused before a shard opens it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_table_under_its_own_root_is_marked_and_guarded() -> Result<(), TestError> {
+    use shoal::server::conf::TableSettings;
+    use shoal::server::StorageMeta;
+    use shoal::storage::fs::conf::{
+        FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
+    };
+    // two roots: the default, and one the table is pointed at
+    let temp_dir = utils::test_dir();
+    let table_root = utils::test_dir();
+    let own_root = || {
+        TableSettings::FS(
+            FileSystemTableConf::default()
+                .latency_sensitive(FileSystemLatencyWriterConf::default().path(table_root.path()))
+                .throughput_sensitive(
+                    FileSystemThroughputWriterConf::default().path(table_root.path()),
+                ),
+        )
+    };
+    // a server with the table under its own root, written to and shut down
+    let mut conf = utils::build_config(&temp_dir);
+    conf.storage = conf.storage.table("TestRecord", own_root());
+    let (client, pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    client
+        .send_one(TestRecord {
+            partition_key: key(0),
+            data: "data-0".to_string(),
+        })
+        .await?;
+    pool.exit()?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // both roots carry the marker, and they name one node
+    let primary = StorageMeta::read(temp_dir.path())?.expect("the default root has no marker");
+    let mirror = StorageMeta::read(table_root.path())?.expect("the table's root has no marker");
+    assert_eq!(
+        mirror.node, primary.node,
+        "the table's root names another node"
+    );
+    assert_eq!(mirror.shards, primary.shards);
+    // a restart is the same node on both roots, and the row is there
+    let mut conf = utils::build_config(&temp_dir);
+    conf.storage = conf.storage.table("TestRecord", own_root());
+    let (client, pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    let found = client.send_one(TestRecordGet::new(vec![key(0)])).await?;
+    assert_eq!(
+        found.access::<TestRecord>()?.map(|rows| rows.len()),
+        Some(1),
+        "the row under the table's own root did not read back"
+    );
+    pool.exit()?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let reopened = StorageMeta::read(table_root.path())?.expect("the mirror is gone");
+    assert_eq!(reopened.node, primary.node);
+    // a root another server claimed is refused as this table's, before anything is served
+    let other_server = utils::test_dir();
+    let (_client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_config(&other_server)).await?;
+    pool.exit()?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let theirs = StorageMeta::read(other_server.path())?.expect("the other server has no marker");
+    assert_ne!(theirs.node, primary.node);
+    let borrowed = TableSettings::FS(
+        FileSystemTableConf::default()
+            .latency_sensitive(FileSystemLatencyWriterConf::default().path(other_server.path()))
+            .throughput_sensitive(
+                FileSystemThroughputWriterConf::default().path(other_server.path()),
+            ),
+    );
+    let mut conf = utils::build_config(&temp_dir);
+    conf.storage = conf.storage.table("TestRecord", borrowed);
+    let refused = shoal::ShoalPool::<TestDb>::start(conf);
+    match refused {
+        Err(error) => {
+            let text = format!("{error}");
+            assert!(
+                text.contains("written by another server"),
+                "the borrowed root was refused for another reason: {text}"
+            );
+        }
+        Ok(pool) => {
+            pool.exit()?;
+            panic!("a root another server claimed was taken as this table's");
+        }
+    }
+    Ok(())
+}

@@ -626,10 +626,12 @@ running server holds, so a second process on the same directory is refused rathe
 the same node; `shoal-hosting.json` is the executor table, absent until a rehome or a claim with
 headroom writes one; and `shoal-rehome.json` exists only while a rehome is in progress.
 
-Two holes remain in the guard. It covers the default storage root only, not a per-table
-`storage.tables` override, whose files a rehome moves untested
-([item 43](../appendix/known-issues.md#43-the-storage-marker-only-guards-the-default-storage-root)),
-and a directory with *no* marker is claimed rather than refused — which includes every directory
+Every distinct root the storage section names is locked and carries the marker: the default
+latency path is the primary, where the hosting file and the rehome manifest live, and every
+other path - a table's own `storage.tables` root, or a throughput path apart from the latency
+one - takes a mirror of it at the claim and is refused by name when another server wrote it
+([Resolved #43](../appendix/resolved/marker-every-root.md)). One hole remains in the guard: a
+directory with *no* marker is claimed rather than refused — which includes every directory
 written before the marker existed
 ([item 46](../appendix/known-issues.md#46-an-unmarked-storage-directory-is-claimed-rather-than-refused)).
 If you have a data directory older than the marker, start from an empty one.

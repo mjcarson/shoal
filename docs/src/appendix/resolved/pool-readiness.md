@@ -136,8 +136,9 @@ server runs; the join is what `exit` is for.
   third line item 88 quoted and the one line the fixed run still prints, and it is a real event:
   the server closed under the client. Whether a client that outlives its server should say so at
   `ERROR` is a client decision, filed nowhere yet because the line is honest.
-- **The honest `exit` surfaced a compactor that dies on its first failed job**, which is
-  [item 91](../known-issues.md#91-a-compaction-that-fails-ends-the-compactor).
+- **The honest `exit` surfaced a compactor that dies on its first failed job**, which was
+  [item 91](compaction-retry.md): a job that fails before writing is tried again now, and one
+  that fails after writing is the remainder still filed.
 - **`stage_join.rs` still names a fixed port** above the capture range, because
   `RunRequest::port` is resolved into the harness's address before the pool exists.
 - **Item 16** — a shard that does not die at all — is the version of 58 worth more than any

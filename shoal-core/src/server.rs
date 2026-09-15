@@ -104,8 +104,8 @@ pub struct ShoalPool<S: ShoalDatabase> {
     reservation: Option<socket2::Socket>,
     /// Who this node is, read from the storage marker at the claim
     identity: Identity,
-    /// The lock on the storage directory, held for as long as the pool exists
-    _lock: DirectoryLock,
+    /// The locks on every storage root, the primary first, held for as long as the pool exists
+    _locks: Vec<DirectoryLock>,
     /// The control plane, if this is a cluster node
     control: Option<ControlHandle>,
     /// The cpus the shards run on, in ascending order
@@ -250,6 +250,21 @@ where
         // claimed here too, once ([F47](../../docs/src/features/local-rehome.md))
         let slots = conf.cluster.as_ref().and_then(|cluster| cluster.slots);
         let identity = StorageMeta::claim(&root, cpus.len(), slots, intent)?;
+        // every other root the configuration writes under - a table's own, or a throughput
+        // path apart from the latency one - is locked and carries a mirror of the marker, so
+        // a root borrowed from another server is refused before a shard opens it
+        // ([Resolved #43](../../docs/src/appendix/resolved/marker-every-root.md))
+        let primary = StorageMeta::read(&root)?.ok_or_else(|| {
+            ServerError::IO(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the marker this claim just wrote is not there to mirror",
+            ))
+        })?;
+        let mut locks = vec![lock];
+        for other in conf.storage.roots().into_iter().skip(1) {
+            locks.push(DirectoryLock::acquire(&other)?);
+            StorageMeta::mirror(&other, &primary)?;
+        }
         // remember how many shards readiness has to hear from, and where they run
         let shards = cpus.len();
         let mut shard_cpus: Vec<usize> = cpus.iter().map(|location| location.cpu).collect();
@@ -372,7 +387,7 @@ where
             ready: false,
             reservation,
             identity,
-            _lock: lock,
+            _locks: locks,
             control,
             shard_cpus,
             control_tx,
