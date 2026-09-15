@@ -32,9 +32,9 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 97, 98, 99, 101, 104, 105, 108 and 111, and
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 101, 104, 105, 108 and 111, and
 why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ item 110 is the newest entry here ~~and the newest number~~ and 111 the newest number, and why 17, 33, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 97, 98, 99, 101, 104, 105, 108 and 111 are on the resolved page. **111 never
+83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 101, 104, 105, 108 and 111 are on the resolved page. **111 never
 appeared here**: it was found by [F47](../features/local-rehome.md)'s crash matrix - a read
 landing while an archive closed panicked the executor - reproduced against the map alone and
 fixed in the same change ([Resolved #111](resolved/archive-removal-borrow.md)). **108 never
@@ -1821,27 +1821,6 @@ an error. **Established by reading the source** while writing the golden key tes
 what `Hash for str` writes - `write_str`, which the std hasher contract spells as the bytes then
 `0xff` - and freeze the archived hash beside the live one in `partition_keys.rs` so the two cannot
 drift again.
-
-### 95. `ShoalPool::transport()` reports shard zero's links and calls them the node's
-
-`shoal-core/src/server.rs`, `ShoalPool::transport`
-
-The method's doc says it gathers every shard's peer links and its loop runs once: the pool
-reaches the shards through a channel to shard zero alone, and the relay that would ask the rest
-is not built. A node with one shard is reported whole. A node with four reports whatever shard
-zero happened to dial - for the `local_shard` hop arm, which forwards nothing from any shard, an
-empty list, and for a node whose other shards forward, a fraction of the frames with no sign
-that it is one.
-
-**Established by reading the source**, and seen on the artifact: `macro/cluster/hop/local_shard`
-records `transport.links: []` on a node that served two hundred reads, which is true of shard
-zero and would be read as true of the node. Filed with [F38](../features/inter-node-transport.md),
-whose `ClusterFacts` record is the first consumer.
-
-**Fix direction:** either `ServerMsg::Transport` fans out across the mesh and shard zero collects
-the views before answering, or the pool holds a sender per shard the way the fixture's
-`shard_cpus` are already per shard. The record should then say which shards answered, since a
-shard that is wedged is exactly the one whose links matter.
 
 ### 100. `duplicate_node_identity_is_fenced` fails under the fixture suite at full parallelism
 

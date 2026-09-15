@@ -618,22 +618,36 @@ where
 
     /// What every shard's peer links look like, gathered from all of them
     ///
-    /// Asks each shard in turn over the mesh and collects the answers. A standalone node has no
-    /// links and reports an empty view ([F38](../../../docs/src/features/inter-node-transport.md)).
+    /// Asks each shard in turn over the mesh and collects the answers, one view per shard in
+    /// shard order, so a caller can see which shard held which link. A standalone node has no
+    /// links and reports an empty view per shard
+    /// ([F38](../../../docs/src/features/inter-node-transport.md)).
+    ///
+    /// # Errors
+    ///
+    /// A shard that is gone or does not answer within five seconds is reported by its index as
+    /// [`ServerError::ShardFailed`], since a shard that is wedged is exactly the one whose links
+    /// matter ([Resolved #95](../../../docs/src/appendix/resolved/transport-view-every-shard.md)).
     pub fn transport(&self) -> Result<Vec<peer::ShardTransportView>, ServerError> {
         let mut views = Vec::with_capacity(self.shards);
-        // ask shard 0, which forwards nothing here - each shard answers for itself, so the pool
-        // asks every one. The mesh only reaches shard 0 from here, so shard 0 relays the request
-        // to the rest is not built yet; at M2 the pool asks shard 0 and the fixture drives one
-        // node's shards through it
-        for _ in 0..1 {
-            let (tx, rx) = std::sync::mpsc::channel();
-            self.control_tx
-                .send(messages::ServerMsg::Transport(tx))
-                .map_err(|_| ServerError::Shoal(ShoalError::NotClustered))?;
+        // ask every shard for its own view, since each holds its own links
+        for (shard, tx) in self.shard_txs.iter().enumerate() {
+            let (reply, rx) = std::sync::mpsc::channel();
+            tx.send(messages::ServerMsg::Transport(reply))
+                .map_err(|_| ServerError::ShardFailed {
+                    shard,
+                    error: "its mesh channel is closed".to_string(),
+                })?;
+            // a shard that does not answer is named, rather than the node reported as though
+            // the shards that did answer were all of it
             match rx.recv_timeout(Duration::from_secs(5)) {
                 Ok(view) => views.push(view),
-                Err(_) => return Err(ServerError::Shoal(ShoalError::NotClustered)),
+                Err(_) => {
+                    return Err(ServerError::ShardFailed {
+                        shard,
+                        error: "it did not answer for its transport view".to_string(),
+                    })
+                }
             }
         }
         Ok(views)

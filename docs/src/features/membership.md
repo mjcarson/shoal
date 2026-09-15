@@ -319,7 +319,7 @@ every shard; a stranger's first question belongs on the lane the control thread 
   stale version is `StaleVersion`, every other is `Internal`.~~ A refusal carries a
   `RefusalKind` and the code is derived from that
   ([Resolved #98](../appendix/resolved/admin-refusal-kinds.md)).
-- **`ShoalPool::transport()` still reaches shard zero** ([item 95](../appendix/known-issues.md#95-shoalpooltransport-reports-shard-zeros-links-and-calls-them-the-nodes)).
+- ~~**`ShoalPool::transport()` still reaches shard zero**~~ ([Resolved #95](../appendix/resolved/transport-view-every-shard.md)).
 - **The fixture suite is what a loaded machine makes it.** Every test allocates whole cores and
   runs beside the others; under a full workspace run with child logging on, timeouts were
   observed that never reproduced alone. The waits were made per node where a follower could

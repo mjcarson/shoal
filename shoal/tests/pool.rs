@@ -306,3 +306,35 @@ async fn a_port_of_zero_resolves_to_one_every_shard_binds() -> Result<(), TestEr
     pool.exit()?;
     Ok(())
 }
+
+/// The transport view names every shard, each answering for its own links
+///
+/// `ShoalPool::transport` said it gathered every shard's links and asked shard zero alone, so a
+/// node of four shards was reported as whatever shard zero happened to dial
+/// ([Resolved #95](../../docs/src/appendix/resolved/transport-view-every-shard.md)). A standalone
+/// node holds no links, which is the point: what this asserts is that every shard answered, in
+/// shard order, and that a node is never reported as though one shard were all of it.
+#[tokio::test]
+async fn the_transport_view_names_every_shard() -> Result<(), TestError> {
+    let temp_dir = utils::test_dir();
+    // two shards, which is one more than the pool used to ask
+    let conf = utils::build_config(&temp_dir);
+    let mut pool = ShoalPool::<TestDb>::start(conf)?;
+    pool.ready(utils::READY_TIMEOUT)?;
+    // ask for the transport view
+    let views = pool.transport()?;
+    // one view per shard, in shard order, each naming itself
+    let shards: Vec<usize> = views.iter().map(|view| view.shard).collect();
+    assert_eq!(
+        shards,
+        vec![0, 1],
+        "the transport view did not come from every shard"
+    );
+    // and a standalone node holds no links on any of them
+    assert!(
+        views.iter().all(|view| view.links.is_empty()),
+        "a standalone node reported a peer link: {views:?}"
+    );
+    pool.exit()?;
+    Ok(())
+}

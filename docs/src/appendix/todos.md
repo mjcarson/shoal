@@ -606,8 +606,8 @@ rather than from the diff:
   client. The per-query control needs a shard-addressable connection, which is
   [D7](../direction/shard-aware-routing.md)'s design; when it exists the arm can become pure and
   its `expected_mix` become `{same: 0, local: 100}`.
-- **`ShoalPool::transport()` across every shard**, not shard zero's view
-  ([item 95](known-issues.md#95-shoalpooltransport-reports-shard-zeros-links-and-calls-them-the-nodes)).
+- ~~**`ShoalPool::transport()` across every shard**, not shard zero's view.~~ Built by
+  [Resolved #95](resolved/transport-view-every-shard.md).
 - ~~**A consumer for `transport.ping_interval`** - the failure detector, M3's
   ([item 96](known-issues.md#96-clustertransportping_interval-is-parsed-documented-and-consumed-by-nothing)).~~
   Built by [F39](../features/membership.md) as the control thread's pinger, beside the detector

@@ -247,10 +247,13 @@ process keeps both true: a multi-node arm is one `run` command, and the children
   routed to the target shard - with its control on the replication lane; the probe stays for
   the lane's own test, and `full_snapshot` over the control lane is still unexercised, since
   the control group's members never fall behind its snapshot.
-- **`ShoalPool::transport()` reaches shard zero.** The pool asks one shard for its links; the
+- ~~**`ShoalPool::transport()` reaches shard zero.** The pool asks one shard for its links; the
   relay that would gather every shard's view is not built. A four-shard node's artifact shows
   shard zero's links, which for the hop arms is the whole story on one-shard node zero and an
-  empty list on the four-shard one. Filed as an item.
+  empty list on the four-shard one. Filed as an item.~~ Every shard answers for its own, and
+  the record says which shards answered
+  ([Resolved #95](../appendix/resolved/transport-view-every-shard.md)); a capture from before
+  it recorded shard zero alone.
 - ~~**`transport.ping_interval` is parsed and consumed by nothing.** No periodic pinger exists;
   the pings the fixture sends are on demand. The failure detector is M3's. Filed as an item.~~
   Consumed since [F39](membership.md) ([Resolved #96](../appendix/resolved/ping-interval-consumer.md)).
