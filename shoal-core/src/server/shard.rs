@@ -4104,6 +4104,8 @@ where
                 .is_some_and(|replication| replication.sweep_due)
             {
                 self.sweep_segments().await?;
+                // and whether every group's core is still there to sweep for
+                self.probe_cores().await;
             }
             // if we have no more messages then flush our current queries to disk
             if self.shard_local_rx.is_empty() {

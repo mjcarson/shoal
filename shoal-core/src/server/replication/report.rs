@@ -67,6 +67,20 @@ pub struct GroupReport {
     /// ([F46](../../../../docs/src/features/capacity-rebalancing.md)).
     #[serde(default)]
     pub bytes: u64,
+    /// Why this copy's `RaftCore` is gone, if it is
+    ///
+    /// A core that panicked answers nothing and moves nothing; the shard's sweep finds it and
+    /// says so here, and `up` is false for as long as it is
+    /// ([Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_dead: Option<String>,
+    /// The term this shard's copy of the group is at
+    ///
+    /// Climbs by one per election; a copy standing for an election nobody grants climbs it
+    /// alone, which is what a test of a returning leader or an isolated member reads
+    /// ([Resolved #103](../../../../docs/src/appendix/resolved/returning-leader.md)).
+    #[serde(default)]
+    pub term: u64,
 }
 
 /// What a shard's snapshots have done since it started

@@ -32,9 +32,9 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 104, 105, 107, 108, 110 and 111, and
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110 and 111, and
 why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ item 113 is the newest entry here and the newest number, and why 17, 33, 43, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 104, 105, 107, 108, 110 and 111 are on the resolved page. **111 never
+83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110 and 111 are on the resolved page. **111 never
 appeared here**: it was found by [F47](../features/local-rehome.md)'s crash matrix - a read
 landing while an archive closed panicked the executor - reproduced against the map alone and
 fixed in the same change ([Resolved #111](resolved/archive-removal-borrow.md)). **108 never
@@ -1762,108 +1762,6 @@ an error. **Established by reading the source** while writing the golden key tes
 what `Hash for str` writes - `write_str`, which the std hasher contract spells as the bytes then
 `0xff` - and freeze the archived hash beside the live one in `partition_keys.rs` so the two cannot
 drift again.
-
-### 103. A returning leader is refused its own re-election until its old lease lapses, and hops to it wait
-
-`shoal-core/src/server/shard/groups.rs`, `propose_through`, the `Electing` arm; openraft
-`engine_impl.rs`, `handle_vote_req`
-
-A tablet group's leader that is killed and started again before `election_timeout_max` - twice
-the failover base - has passed asks for its old term back, since its persisted vote names
-itself, and every follower refuses it: their lease of that same leader has not expired. It asks
-again at a higher term, is refused again, and its groups are led only once the lease lapses and
-an election runs, which at the default base of five seconds is ten to fifteen seconds after the
-kill however quickly the process came back. Meanwhile a write from another node that still
-names it as leader hops to it, lands on a member that is `Electing`, and waits for a leader
-within the forwarded deadline rather than being refused, so a client sees whole seconds with no
-answer instead of a burst of `NotLeader` it could retry elsewhere.
-
-**Established by running it**: the failover arm's smoke runs on the development host
-([F42](../features/primary-failover.md#performance)) restart node one 8.6 seconds after killing
-it, and the per second series shows zero completed operations for most of the seconds after the
-restart, with the write tail at the forwarded deadline, until the election; the first run's
-child logs show the restarted node's groups asking for term 1 and every follower answering
-`reject vote-request: leader lease has not yet expire`. The fixture's tests restart their
-killed leaders after the lease has lapsed, which is why none of them sees it.
-
-**Fix direction:** two halves. Answer a hop that lands on an `Electing` member `NotLeader` at
-once instead of waiting the election out, so the returning node's window is refusals rather
-than a stall - the client's retry covers it. And on a restart, have a group whose persisted
-vote names itself start as a plain follower rather than a candidate for its old term, so the
-survivors' election is not delayed by refusing it; whether openraft offers that short of
-clearing the vote is the question to answer first.
-
-### 106. A member isolated on every lane long enough to inflate its term trips an openraft debug assertion when healed
-
-`shoal-core/src/server/control/`, the control group's `RaftCore`; openraft
-`engine/engine_impl.rs:1039`, `following_handler`
-
-A cluster node cut off on every lane - control and data, both directions - keeps electing: the
-control group's member on it times out, votes for itself at a higher term, is answered by
-nobody, and does it again, so after a minute of isolation its term is far above the survivors'.
-When the lanes are healed, the survivors' leader reaches it and the member's engine takes the
-following path with a vote that is its own uncommitted one, which openraft asserts is
-committed: `Expect the Leader vote to be committed: <T62-N8256a052-…/0:->` at
-`following_handler`, a `debug_assert!`, so the control thread panics and the child dies. A
-release build compiles the assertion out and what the engine does past it has not been
-looked at.
-
-**Established by running it**: the first shape of `retention_and_recovery_memory_are_bounded`
-isolated node two with `isolate` for about sixty seconds under wide writes and healed it; the
-child's panic is the line above, in the fixture's debug build, and the test failed on the
-`NotReady` its readiness wait got afterwards. Cutting only the data lanes, which is what the
-retention budget needs, leaves the control member a follower and the test passes; that is the
-shape the test kept ([F43](../features/node-recovery.md#limitations)). No M6 test isolates a
-node for longer than its control member's first few elections.
-
-A second assertion of the same family was seen once, in a child of the fixture suite run
-under a load that failed seven of its tests on timing: `leader.vote(<T1-N60bf…/0:Q>) >=
-state.vote(<T2-N60bf…/0:->)` at `engine_impl.rs:1000`, `try_leader_handler` - a node still
-holding a leader handle at term one after voting for itself at term two. Which child and which
-group is not known; the suite passed on the next run.
-
-**Fix direction:** establish first whether the assertion is openraft's bug or a state this
-node's runtime lets it reach - a `Vote` request the isolated member sent itself that the
-healed lane delivers late is the candidate. If it is the library's, pin the fix or work around
-it by having a member that has lost its quorum for longer than a bound stop electing, which
-is also what keeps its term from inflating; the phi-accrual detector already knows the member
-is `Down` on the leader's side. Either way a fixture test that isolates a node for a minute
-on every lane and heals it belongs beside the M6 partition tests.
-
-### 109. A volatile group's survivor trips an openraft debug assertion when a majority loses its memory log at once
-
-`shoal-core/src/server/wal/memory.rs`, `shoal-core/src/server/shard/groups.rs` (`group_config`,
-`allow_log_reversion`); openraft `raft_state/log_state_reader.rs:25`, `has_log_id`
-
-An ephemeral table's group keeps its log in memory, so a member that restarts comes back with
-none; `allow_log_reversion` lets the leader feed it again ([Resolved #99](resolved/durable-log-reversion.md)).
-When two of a group's three voters restart at once they come back empty together and can
-elect each other - a candidate with an empty log wins against another with an empty log - and
-the new leader appends fresh entries at indexes the surviving third voter has *committed*.
-The survivor's `has_log_id` then meets a `prev_log_id` below its committed index with a
-different leader id and asserts `Some(log_id.to_ref()) <= self.committed().to_ref()`, a
-`debug_assert!`, so the group's `RaftCore` task panics on the survivor and the group is dead on
-that shard until the process restarts; the shard itself does not die, so the pool reports no
-failure. A release build compiles the assertion out and what the engine does past it - truncate
-the committed entries, presumably - has not been looked at. The data is gone either way: two of
-three memory logs lost at once is the ephemeral table's contract, and the survivor's committed
-entries were only ever committed under a quorum that no longer exists.
-
-**Established by running it**: the first shape of `migration_resumes_after_each_phase_failure`
-armed `MOVE_CRASH_AT` for any group on every node, so the drivers of both tables' groups - which
-commit each phase within milliseconds of each other on two different nodes - died together,
-twice in a row for the ephemeral table's group; the survivor's panic is the line above, in the
-fixture's debug build, and the move that followed never finished because the leader's
-replication to a dead `RaftCore` timed out forever. The test now names the persistent table's
-group so exactly one driver dies ([F45](../features/replica-migration.md#invariants-to-uphold)).
-
-**Fix direction:** a volatile group whose new leader's log is empty should not append past a
-follower's committed index without first truncating it under a rule the follower accepts - or,
-simpler, a volatile group that has lost a majority's memory should be restarted empty on every
-member, the way [F44](../features/repair.md)'s `QuarantineAction::Rebuild` restarts one, rather
-than let two empty members outvote a full one. Either way a fixture test that kills two voters
-of an ephemeral table's group at once and reads through the third afterwards belongs beside the
-M4 tests, and the shard should notice a group whose `RaftCore` is gone and report it.
 
 ### 112. `certificate_rotation_binds_identity` fails about half its runs alone on the development host
 

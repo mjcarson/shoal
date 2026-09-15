@@ -654,6 +654,18 @@ impl ShardNetwork {
             .collect()
     }
 
+    /// Whether this shard can reach nobody over the replication lane
+    ///
+    /// True when the shard has dialled at least one peer and none of its links is up. A group
+    /// on such a shard has no election to win and stops standing for one
+    /// ([Resolved #106](../../../../docs/src/appendix/resolved/isolated-member-term-inflation.md)).
+    #[must_use]
+    pub fn is_isolated(&self) -> bool {
+        let links = self.shared.links.borrow();
+        // a shard with no link yet has nobody to be cut off from
+        !links.is_empty() && links.values().all(|link| !link.link.is_up())
+    }
+
     /// This node's identity
     #[must_use]
     pub fn local_node(&self) -> NodeId {

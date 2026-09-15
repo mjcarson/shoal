@@ -317,9 +317,11 @@ consistent state to serve.
 - ~~**Item 99 stays open**: a durable follower's log reversion still stops the leader's process,
   and is M8's.~~ Fixed at M8 ([Resolved #99](../appendix/resolved/durable-log-reversion.md)):
   the member is fed from the log or from this feature's snapshot.
-- **Item 106**, found on the way and filed: a member isolated on every lane long enough to
-  inflate its term trips an openraft debug assertion in the control plane when healed. The
-  retention test cuts the data lanes alone.
+- ~~**Item 106**, found on the way and filed: a member isolated on every lane long enough to
+  inflate its term trips an openraft debug assertion in the control plane when healed.~~
+  Resolved ([Resolved #106](../appendix/resolved/isolated-member-term-inflation.md)): an
+  isolated member no longer stands. The retention test still cuts the data lanes alone, which
+  is the shape the retention budget needs.
 
 ## Invariants to uphold
 

@@ -203,7 +203,12 @@ configuration allows the reversion and a durable one's does not.~~ A shorter log
 member does mean an acknowledgement was lost - but the member is the one that is wrong, not the
 leader, so every group's configuration now allows the reversion and the leader feeds the member
 again from its log or a snapshot while the member counts `log_lost`
-([Resolved #99](../appendix/resolved/durable-log-reversion.md)).
+([Resolved #99](../appendix/resolved/durable-log-reversion.md)). And a volatile copy that came
+back empty knows it did: the shard marks every volatile group it holds under
+`wal/Shard-N/volatile/`, and an empty copy of a marked group neither initializes the group
+again nor grants a vote to a candidate as empty as itself for two election timeouts, so two
+members that lost their memory at once cannot elect each other over a survivor that kept it
+([Resolved #109](../appendix/resolved/volatile-majority-loss.md)).
 
 **Bounds are per group and definite.** `pending_bytes` is counted per group on the proposing
 shard and a write past it is shed before it is recorded, so a stalled group holds a bounded

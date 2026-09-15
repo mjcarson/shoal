@@ -4995,6 +4995,122 @@ async fn a_dead_primary_fails_writes_only_until_its_election() -> Result<(), Fix
     Ok(())
 }
 
+/// The term a node's copy of a key's group is at, as that node reports it
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node to ask
+/// * `table` - The table's name
+/// * `key` - The partition key
+fn group_term_on(
+    cluster: &mut Cluster,
+    node: usize,
+    table: &str,
+    key: u64,
+) -> Result<u64, FixtureError> {
+    let tablet = tablet_of(key) as u64;
+    let view = groups_of(cluster, node)?;
+    for shard in view["shards"].as_array().into_iter().flatten() {
+        for group in shard["groups"].as_array().into_iter().flatten() {
+            let serves = group["table_name"] == table
+                && group["tablet_ids"]
+                    .as_array()
+                    .is_some_and(|tablets| tablets.iter().any(|t| t.as_u64() == Some(tablet)));
+            if serves {
+                return Ok(group["term"].as_u64().unwrap_or_default());
+            }
+        }
+    }
+    Err(FixtureError::NotReady(format!(
+        "node {node} hosts no group for key {key} of {table}: {view}"
+    )))
+}
+
+/// A leader restarted inside its own lease stalls no hop and inflates no term (C7 M6)
+///
+/// [Item 103](../../docs/src/appendix/resolved/returning-leader.md): a group's leader killed
+/// and started again before its lease lapsed asked for its old lead back, was refused by every
+/// follower whose lease of it had not lapsed, asked again at a higher term, and meanwhile a
+/// write from another node that still named it as leader hopped to it, landed on a member
+/// that was electing, and waited out the forwarded deadline. Three nodes at a base of one
+/// second and a five second deadline: node one is killed and restarted at once, and a key it
+/// led is written through node zero without a retry every tenth of a second until it lands.
+/// Every failure on the way is `NotLeader` inside a second - never the deadline - and the
+/// term node one's copy reports afterwards is the survivors' one election above what it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leader_restarted_inside_its_lease_stalls_no_hop() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::error::ErrorCode;
+    let base = Duration::from_secs(1);
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .primary_failover_after(base)
+        .write_timeout(Duration::from_secs(5))
+        .query_deadline(Duration::from_secs(5))
+        .start()
+        .await?;
+    let (key, _group) = key_led_by(&mut cluster, "Note", 1, 7000)?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    write_note(&addr, key, "before").await?;
+    let term_before = group_term_on(&mut cluster, 1, "Note", key)?;
+    // the leader dies and is back inside its lease, which is twice the base
+    cluster.kill(1)?;
+    cluster.restart(1, NodeKind::Server)?;
+    let restarted = Instant::now();
+    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    let mut refusals = 0u32;
+    let mut slowest = Duration::ZERO;
+    loop {
+        let sent = Instant::now();
+        let outcome = client
+            .send_one(Note {
+                key,
+                text: "during".to_string(),
+            })
+            .await;
+        let took = sent.elapsed();
+        // answered at once either way: a refusal in milliseconds, or a success once the
+        // survivors elected - never a hop held on the returning leader while it elects
+        assert!(
+            took < Duration::from_millis(1_500),
+            "a write hopping to the returning leader was held for {took:?}: {outcome:?}"
+        );
+        slowest = slowest.max(took);
+        match outcome {
+            Ok(_) => break,
+            Err(shoal::client::Errors::Server { code, .. }) => {
+                assert!(
+                    matches!(code, ErrorCode::NotLeader | ErrorCode::Unavailable),
+                    "a write hopping to the returning leader failed {code:?} after {took:?}"
+                );
+                refusals += 1;
+            }
+            Err(other) => panic!("a write failed off the wire: {other:?}"),
+        }
+        assert!(
+            restarted.elapsed() < base * 6,
+            "the group node one led elected nobody within six bases; {refusals} refusals"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    cluster.wait_joined(&[1])?;
+    let term_after = group_term_on(&mut cluster, 1, "Note", key)?;
+    eprintln!(
+        "the returning leader's group refused {refusals} writes, the slowest in {slowest:?}, \
+         and went from term {term_before} to {term_after} in {:?}",
+        restarted.elapsed()
+    );
+    // one election - the survivors' - and at most one more for a split vote, not one per
+    // refused ask by the returning leader
+    assert!(
+        term_after <= term_before + 2,
+        "the group's term went from {term_before} to {term_after}: the returning leader stood \
+         for its old lead again and again"
+    );
+    Ok(())
+}
+
 /// A quorum success needs distinct durable voters, and nothing releases it early (C5 M4)
 ///
 /// Three nodes at a factor of three, every lane through a proxy. The replication lane from the
@@ -8758,6 +8874,206 @@ async fn volatile_replication_uses_common_encoding() -> Result<(), FixtureError>
         found_nothing(client.send_one(RowGet::new(vec![100])).await),
         "an ephemeral row survived a full restart"
     );
+    Ok(())
+}
+
+/// Two volatile voters lost at once do not kill the survivor's group (C5 M4)
+///
+/// [Item 109](../../docs/src/appendix/resolved/volatile-majority-loss.md): an ephemeral
+/// table's group keeps its log in memory, so two of its three voters restarted together come
+/// back empty together, elect each other - an empty log is as up to date as another - and the
+/// new leader appends at indexes the survivor has committed, which trips openraft's
+/// `has_log_id` on the survivor and leaves its core dead with the shard none the wiser. Rows
+/// are written through node zero; nodes one and two are killed at once and restarted at once;
+/// node zero's copy of every volatile group is still up afterwards - a core that died reports
+/// `core_dead` and is not up - the group elects, the rows written before the kill read back
+/// through node zero, and new rows are written and read on every node.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_volatile_voters_lost_at_once_do_not_kill_the_survivor() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .primary_failover_after(Duration::from_secs(1))
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await?;
+    for key in 300..320u64 {
+        client
+            .send_one(Row {
+                key,
+                data: format!("row {key}"),
+            })
+            .await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Row", Duration::from_secs(20))?;
+    // the term every volatile group is at, as the survivor sees it, before the loss
+    let terms_before: std::collections::BTreeMap<u64, u64> = {
+        let view = groups_of(&mut cluster, 0)?;
+        let mut terms = std::collections::BTreeMap::new();
+        for shard in view["shards"].as_array().into_iter().flatten() {
+            for group in shard["groups"].as_array().into_iter().flatten() {
+                if group["table_name"] == "Row" {
+                    terms.insert(
+                        group["group"].as_u64().unwrap_or_default(),
+                        group["term"].as_u64().unwrap_or_default(),
+                    );
+                }
+            }
+        }
+        terms
+    };
+    assert!(
+        !terms_before.is_empty(),
+        "the survivor holds no volatile group"
+    );
+    // two of every group's three voters lose their memory at once
+    cluster.kill(1)?;
+    cluster.kill(2)?;
+    cluster.restart(1, NodeKind::Server)?;
+    cluster.restart(2, NodeKind::Server)?;
+    cluster.wait_joined(&[1, 2])?;
+    // every group the survivor did not lead elects again - a term above the one before, with
+    // a leader - and the survivor's copies are alive throughout: a core that died would
+    // report so and be down. A group the survivor leads keeps its lead: the empties accept
+    // its appends, and it needs no election
+    let survivor = cluster.node_ids()[0].clone();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let view = groups_of(&mut cluster, 0)?;
+        let mut elected = 0;
+        let mut waiting = 0;
+        for shard in view["shards"].as_array().into_iter().flatten() {
+            for group in shard["groups"].as_array().into_iter().flatten() {
+                if group["table_name"] != "Row" {
+                    continue;
+                }
+                assert!(
+                    group["core_dead"].is_null(),
+                    "the survivor's copy of a volatile group died: {group}"
+                );
+                assert_eq!(group["up"], true, "{group}");
+                let id = group["group"].as_u64().unwrap_or_default();
+                let before = terms_before.get(&id).copied().unwrap_or_default();
+                let led_by_survivor = group["leader"]["node"] == survivor;
+                if !group["leader"].is_null()
+                    && (led_by_survivor || group["term"].as_u64().unwrap_or_default() > before)
+                {
+                    elected += 1;
+                } else {
+                    waiting += 1;
+                }
+            }
+        }
+        if waiting == 0 && elected > 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the volatile groups elected nobody after two voters came back empty: {view}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // every row written before the kill reads back through the survivor, and so do new ones
+    // written through it, on every node
+    for key in 300..320u64 {
+        let found = client.send_one(RowGet::new(vec![key])).await?;
+        assert!(
+            found.access::<Row>()?.is_some_and(|rows| rows.len() == 1),
+            "row {key} was lost with the two voters' memory"
+        );
+    }
+    for key in 320..330u64 {
+        client
+            .send_one(Row {
+                key,
+                data: format!("row {key}"),
+            })
+            .await?;
+    }
+    let rows = wait_digests_equal(&mut cluster, &[0, 1, 2], "Row", Duration::from_secs(30))?;
+    assert_eq!(rows["rows"].as_u64(), Some(30), "{rows}");
+    for node in 0..3 {
+        assert_eq!(cluster.node(node).failure(), None, "node {node} died");
+    }
+    Ok(())
+}
+
+/// A member isolated on every lane long enough to inflate its term heals without dying (C3 M6)
+///
+/// [Item 106](../../docs/src/appendix/resolved/isolated-member-term-inflation.md): a node cut
+/// off on every lane keeps electing - its control member times out, votes for itself at a
+/// higher term, is answered by nobody, and again - so after a while its term is far above the
+/// survivors', and when the lanes are healed the survivors' leader reaching it took the
+/// following path with a vote of its own that openraft asserts is committed, and the child
+/// died. Three nodes, node two isolated for twelve seconds under writes - dozens of control
+/// elections at the fixture's base - then healed: node two is alive, joins again, its term
+/// climbed by no more than a handful, and a write through it lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_isolated_on_every_lane_heals_without_dying() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .primary_failover_after(Duration::from_secs(1))
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let addrs: Vec<String> = (0..3)
+        .map(|id| cluster.node(id).endpoints.client.to_string())
+        .collect();
+    write_note(&addrs[2], 9000, "before").await?;
+    let term_before = cluster.node_mut(2).command("MEMBERS")?["ok"]["term"]
+        .as_u64()
+        .unwrap_or_default();
+    // cut node two off on every lane, both directions, and keep the cluster busy meanwhile
+    cluster.isolate(2);
+    let isolated = Instant::now();
+    let mut key = 9001u64;
+    while isolated.elapsed() < Duration::from_secs(12) {
+        let _ = write_note(&addrs[0], key, "during").await;
+        key += 1;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let term_isolated = cluster.node_mut(2).command("MEMBERS")?["ok"]["term"]
+        .as_u64()
+        .unwrap_or_default();
+    // healed, the survivors' leader reaches it again
+    cluster.heal(2);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert_eq!(
+            cluster.node(2).failure(),
+            None,
+            "node two died once its lanes were healed"
+        );
+        if write_note(&addrs[2], key, "after").await.is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node two served no write within thirty seconds of being healed"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let term_after = cluster.node_mut(2).command("MEMBERS")?["ok"]["term"]
+        .as_u64()
+        .unwrap_or_default();
+    eprintln!(
+        "node two's control term: {term_before} before, {term_isolated} isolated, {term_after} healed"
+    );
+    // an isolated member that cannot reach anybody has no election to win, and asks for none
+    assert!(
+        term_isolated <= term_before + 3,
+        "node two's control term went from {term_before} to {term_isolated} while isolated"
+    );
+    for node in 0..3 {
+        assert_eq!(cluster.node(node).failure(), None, "node {node} died");
+    }
     Ok(())
 }
 
@@ -14826,6 +15142,47 @@ fn wait_links_at(
     }
 }
 
+/// Wait until every up link *into* a node from the others speaks one version, and there is one
+///
+/// A node that came back leads nothing until an election puts a lead on it - a returning
+/// leader waits out its lease and an empty volatile copy waits to be fed
+/// ([Resolved #103](../../docs/src/appendix/resolved/returning-leader.md),
+/// [Resolved #109](../../docs/src/appendix/resolved/volatile-majority-loss.md)) - so it may
+/// hold no outbound link for a while; the links the others made to it are what it came back on.
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node the links lead to
+/// * `others` - The nodes whose links are read
+/// * `version` - The version every link has to report
+/// * `within` - How long to wait
+fn wait_links_into(
+    cluster: &mut Cluster,
+    node: usize,
+    others: &[usize],
+    version: u8,
+    within: Duration,
+) -> Result<Vec<(usize, String, u8)>, FixtureError> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let mut links = Vec::new();
+        for other in others {
+            let (from, _) = wire_of(cluster, *other)?;
+            links.extend(from.into_iter().filter(|(peer, _, _)| *peer == node));
+        }
+        if !links.is_empty() && links.iter().all(|(_, _, spoken)| *spoken == version) {
+            return Ok(links);
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!(
+                "the links into node {node} never all spoke {version}: {links:?}"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// Wait until a node reports the cluster's activated wire version
 ///
 /// # Arguments
@@ -14985,7 +15342,13 @@ async fn mixed_versions_exchange_real_cluster_operations() -> Result<(), Fixture
         "node two installed no snapshot: {installed}"
     );
     // still pinned: every link it came back on speaks the floor
-    wait_links_at(&mut cluster, 2, MIN_PEER_VERSION, Duration::from_secs(10))?;
+    wait_links_into(
+        &mut cluster,
+        2,
+        &[0, 1],
+        MIN_PEER_VERSION,
+        Duration::from_secs(10),
+    )?;
     // the one member at the newest version killed: the two at the floor elect, commit, serve
     cluster.kill(0)?;
     let leader = cluster.wait_leader_among(1, &[1, 2], Duration::from_secs(30))?;
@@ -15012,7 +15375,13 @@ async fn mixed_versions_exchange_real_cluster_operations() -> Result<(), Fixture
     cluster.restart(0, NodeKind::Server)?;
     cluster.wait_joined(&[0])?;
     wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))?;
-    wait_links_at(&mut cluster, 0, MIN_PEER_VERSION, Duration::from_secs(10))?;
+    wait_links_into(
+        &mut cluster,
+        0,
+        &[1, 2],
+        MIN_PEER_VERSION,
+        Duration::from_secs(10),
+    )?;
     // the newest version cannot be activated while two members speak the floor
     let refused = cluster
         .node_mut(0)
@@ -15224,7 +15593,13 @@ async fn rolling_upgrade_survives_operations_and_failure() -> Result<(), Fixture
             cluster.restart(1, NodeKind::Server)?;
             cluster.wait_joined(&[1])?;
             // still at the old version, so still spoken to at the floor
-            wait_links_at(&mut cluster, 1, MIN_PEER_VERSION, Duration::from_secs(15))?;
+            wait_links_into(
+                &mut cluster,
+                1,
+                &[0, 2],
+                MIN_PEER_VERSION,
+                Duration::from_secs(15),
+            )?;
             let (_, wire) = wire_of(&mut cluster, 0)?;
             assert_eq!(wire["min_member"], u64::from(MIN_PEER_VERSION), "{wire}");
             assert_eq!(wire["max_member"], u64::from(PROTOCOL_VERSION), "{wire}");
@@ -15242,13 +15617,15 @@ async fn rolling_upgrade_survives_operations_and_failure() -> Result<(), Fixture
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    // every member reports the newest, and every link speaks it
+    // every member reports the newest, and every link into every member speaks it
     let (_, wire) = wire_of(&mut cluster, 0)?;
     assert_eq!(wire["min_member"], u64::from(PROTOCOL_VERSION), "{wire}");
     for node in 0..3 {
-        wait_links_at(
+        let others: Vec<usize> = (0..3).filter(|other| *other != node).collect();
+        wait_links_into(
             &mut cluster,
             node,
+            &others,
             PROTOCOL_VERSION,
             Duration::from_secs(15),
         )?;

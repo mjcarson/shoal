@@ -397,8 +397,10 @@ list rather than from the diff:
 - **Apply-time expiry.** Expiry is judged on the coordinator's own replica; a replica that has
   forgotten more refuses more. Making the watermark deterministic across replicas would need it
   in the log.
-- **A volatile group that loses a majority's memory at once** elects an empty leader over a
-  full survivor ([item 109](known-issues.md#109-a-volatile-groups-survivor-trips-an-openraft-debug-assertion-when-a-majority-loses-its-memory-log-at-once)).
+- ~~**A volatile group that loses a majority's memory at once** elects an empty leader over a
+  full survivor.~~ An empty copy that held the group before neither initializes it again nor
+  grants to an empty candidate, so the survivor leads
+  ([Resolved #109](resolved/volatile-majority-loss.md)).
 
 **What F44 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
@@ -461,9 +463,10 @@ list rather than from the diff:
   and no catch-up, since the outage outlasts the absence there; the capture is the benchmark
   host's, and a smoke schedule long enough for the survivors to serve writes while the node is
   away would be a third arm rather than a change to these two.
-- **Item 106.** A member isolated on every lane long enough to inflate its term trips an
-  openraft debug assertion in the control plane when healed
-  ([item 106](known-issues.md#106-a-member-isolated-on-every-lane-long-enough-to-inflate-its-term-trips-an-openraft-debug-assertion-when-healed)).
+- ~~**Item 106.** A member isolated on every lane long enough to inflate its term trips an
+  openraft debug assertion in the control plane when healed.~~ A member that can reach nobody
+  stops standing ([Resolved #106](resolved/isolated-member-term-inflation.md)); pre-vote, which
+  would cover a partial partition too, is still unbuilt.
 
 **What F42 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
@@ -489,11 +492,11 @@ list rather than from the diff:
   to expire a follower's lease early; a link that dropped could be a hint to elect, but the
   other followers would still refuse the vote inside their lease. The window is the base's to
   tune.
-- **A returning leader's own re-election.** Refused by the same lease until it lapses
-  ([item 103](known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait));
+- ~~**A returning leader's own re-election.** Refused by the same lease until it lapses;
   a hop that lands on a member that is `Electing` could be answered `NotLeader` at once rather
   than waiting the election out, which would make the returning node's window a burst of
-  refusals rather than a stall.
+  refusals rather than a stall.~~ Both built by
+  [Resolved #103](resolved/returning-leader.md).
 - **The transport's floor is the file's.** `reconnect_min` bounds how long a hop to a dead
   peer waits; it is not on the map, so two nodes can disagree about it where they cannot about
   the failover base.
