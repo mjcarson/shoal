@@ -21,7 +21,6 @@ a second copy. A new defect goes to known issues at the next free number, never 
 | [110](../appendix/known-issues.md#110-the-kill-arms-client-fails-a-steady-share-of-its-operations-for-as-long-as-node-one-is-dead) | The kill arm's client fails a steady share of its operations for as long as node one is dead | [C7](failover.md), [C10](performance.md) |
 | [113](../appendix/known-issues.md#113-glommios-dmafileopen_at-unwraps-statfs-after-a-successful-open) | glommio's `DmaFile::open_at` unwraps `statfs` after a successful open; fixed in the fork's working tree, uncommitted there | [C11](testing.md) |
 | [15](../appendix/known-issues.md#15-no-backpressure-anywhere) | The local kanal mesh between a node's shards is unbounded; only the peer lanes are bounded in bytes | [C2](transport.md) |
-| [43](../appendix/known-issues.md#43-the-storage-marker-only-guards-the-default-storage-root) | A table under its own `storage.tables` root is not covered by the rehome crash matrix | [C8](rebalancing.md) |
 
 ## Explicitly unsupported
 

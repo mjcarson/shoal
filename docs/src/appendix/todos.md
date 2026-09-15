@@ -331,9 +331,10 @@ list rather than from the diff:
   shard starts; moving a slot between executors while serving is a same-node move under
   writers, which is M9a's phases on a local lane, and nobody has asked for the start time it
   would save ([O59](optimizations.md#o59-the-rehome-runs-on-one-core-and-blocks-the-start)).
-- **`storage.tables` roots.** The rehome moves a table's files under the table's own settings,
-  but every crash test runs one root; a second root is [item 43](known-issues.md#43-the-storage-marker-only-guards-the-default-storage-root)'s
-  and stays open.
+- **`storage.tables` roots in the crash matrix.** The rehome moves a table's files under the
+  table's own settings, but every crash test runs one root; a second root is marked and locked
+  since [Resolved #43](resolved/marker-every-root.md) and still untested under a crash, and a
+  second root on another device twice so.
 - **A growth arm and a standalone arm.** `macro/rehome/shrink` prices a cluster node's shrink;
   a growth's donor keeps its dead records ([O58](optimizations.md#o58-a-rehomes-moved-records-are-copied-and-a-donors-archives-keep-the-dead-ones))
   and a standalone node's fold of intent logs is never priced.

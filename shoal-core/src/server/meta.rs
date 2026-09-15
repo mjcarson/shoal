@@ -265,6 +265,22 @@ pub struct Identity {
 }
 
 impl Identity {
+    /// The identity a marker on another root has to agree with, as a sentence
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The marker
+    fn describe(meta: &StorageMeta) -> String {
+        format!(
+            "node {} in {} with {} slots under layout {}",
+            meta.node,
+            meta.cluster
+                .map_or_else(|| "no cluster".to_string(), |cluster| cluster.to_string()),
+            meta.shards,
+            meta.layout
+        )
+    }
+
     /// Check that a cluster a peer has proved it belongs to is the one this directory is in
     ///
     /// The seam the M2 handshake calls once a peer has authenticated: a directory in cluster
@@ -745,6 +761,57 @@ impl StorageMeta {
         // the same count as the layout's origin needs no field at all
         found.physical = (physical != found.shards).then_some(physical);
         found.write(root)
+    }
+
+    /// Mirror the primary root's marker onto another root this node writes under
+    ///
+    /// A table under its own `storage.tables` root, or a default throughput path apart from
+    /// the latency one, is guarded the way the primary is
+    /// ([Resolved #43](../../../docs/src/appendix/resolved/marker-every-root.md)): an unmarked
+    /// root takes a copy of the primary's marker, and a marked one has to name the same node,
+    /// the same slot count and the same layout - and the same cluster, or none, since a
+    /// joiner's mirror is written before it is admitted. The copy is refreshed on every claim;
+    /// the fields that move between claims - the topology, the incarnation, the mode, the
+    /// executor count - are the primary's alone and are read from no mirror.
+    ///
+    /// # Arguments
+    ///
+    /// * `root` - The other root
+    /// * `primary` - The primary root's marker, as claimed
+    ///
+    /// # Errors
+    ///
+    /// Refuses a root whose marker was written by another server, and fails if the marker
+    /// cannot be read or written.
+    #[instrument(name = "StorageMeta::mirror", skip_all, fields(root = %root.display()), err(Debug))]
+    pub fn mirror(root: &Path, primary: &StorageMeta) -> Result<(), ServerError> {
+        // whatever this root already says about itself
+        if let Some(found) = Self::read(root)? {
+            // the same node, slots and layout, and the same cluster unless the mirror was
+            // written before this node was admitted to one
+            let same_cluster = found.cluster.is_none() || found.cluster == primary.cluster;
+            if found.node != primary.node
+                || found.shards != primary.shards
+                || found.layout != primary.layout
+                || !same_cluster
+            {
+                return Err(ServerError::Shoal(ShoalError::StorageRootMismatch {
+                    root: root.to_path_buf(),
+                    found: Identity::describe(&found),
+                    expected: Identity::describe(primary),
+                }));
+            }
+        } else {
+            // say what this root is being claimed as, since it is what a later start is held to
+            event!(
+                Level::INFO,
+                msg = "Claimed another storage root for this node",
+                path = Self::path(root).display().to_string(),
+                node = primary.node.to_string(),
+            );
+        }
+        // write the primary's marker, so the mirror follows the identity as it moves
+        primary.write(root)
     }
 
     /// Fill in the cluster a joiner has been admitted to, once
@@ -1341,5 +1408,109 @@ mod tests {
         // releasing the first frees the directory
         drop(first);
         DirectoryLock::acquire(dir.path()).expect("failed to retake a released lock");
+    }
+
+    /// A second root takes a mirror of the primary's marker, and keeps it across a claim
+    ///
+    /// Before [Resolved #43](../../../docs/src/appendix/resolved/marker-every-root.md) a root a
+    /// table was pointed at carried no marker at all, so nothing guarded it.
+    #[test]
+    fn a_second_root_is_mirrored_with_the_same_identity() {
+        let primary = tempfile::tempdir().expect("failed to build a temp dir");
+        let other = tempfile::tempdir().expect("failed to build a temp dir");
+        // the primary is claimed, and the other root nothing has written takes a mirror
+        let identity = StorageMeta::claim(primary.path(), 2, None, ClusterIntent::Standalone)
+            .expect("failed to claim");
+        let claimed = StorageMeta::read(primary.path())
+            .expect("no metadata")
+            .expect("no marker");
+        StorageMeta::mirror(other.path(), &claimed).expect("failed to mirror a fresh root");
+        let mirrored = StorageMeta::read(other.path())
+            .expect("no metadata")
+            .expect("no mirror written");
+        assert_eq!(mirrored.node, identity.node);
+        assert_eq!(mirrored, claimed);
+        // a reclaim of the primary moves the incarnation; the mirror follows it
+        StorageMeta::claim(primary.path(), 2, None, ClusterIntent::Standalone)
+            .expect("failed to reclaim");
+        let reclaimed = StorageMeta::read(primary.path())
+            .expect("no metadata")
+            .expect("no marker");
+        assert_eq!(reclaimed.incarnation, 2);
+        StorageMeta::mirror(other.path(), &reclaimed).expect("failed to refresh the mirror");
+        let refreshed = StorageMeta::read(other.path())
+            .expect("no metadata")
+            .expect("no mirror");
+        assert_eq!(refreshed, reclaimed);
+        // a joiner's mirror written before admission names no cluster, and is refreshed once
+        // the primary does
+        let joiner = tempfile::tempdir().expect("failed to build a temp dir");
+        let joiner_root = tempfile::tempdir().expect("failed to build a temp dir");
+        StorageMeta::claim(joiner.path(), 2, None, ClusterIntent::Join).expect("failed to join");
+        let joining = StorageMeta::read(joiner.path())
+            .expect("no metadata")
+            .expect("no marker");
+        StorageMeta::mirror(joiner_root.path(), &joining).expect("failed to mirror a joiner");
+        let cluster = ClusterId::mint();
+        StorageMeta::adopt_cluster(joiner.path(), cluster).expect("failed to adopt");
+        let admitted = StorageMeta::read(joiner.path())
+            .expect("no metadata")
+            .expect("no marker");
+        StorageMeta::mirror(joiner_root.path(), &admitted)
+            .expect("a mirror from before admission was refused");
+        assert_eq!(
+            StorageMeta::read(joiner_root.path())
+                .expect("no metadata")
+                .expect("no mirror")
+                .cluster,
+            Some(cluster)
+        );
+    }
+
+    /// A second root written by another server is refused, naming both
+    #[test]
+    fn a_second_root_written_by_another_node_is_refused() {
+        let ours = tempfile::tempdir().expect("failed to build a temp dir");
+        let theirs = tempfile::tempdir().expect("failed to build a temp dir");
+        // two servers, each with a root of its own
+        StorageMeta::claim(ours.path(), 2, None, ClusterIntent::Standalone)
+            .expect("failed to claim");
+        StorageMeta::claim(theirs.path(), 2, None, ClusterIntent::Standalone)
+            .expect("failed to claim");
+        let claimed = StorageMeta::read(ours.path())
+            .expect("no metadata")
+            .expect("no marker");
+        let before = std::fs::read(StorageMeta::path(theirs.path())).expect("a marker");
+        // their root as our table's root: another node
+        let error = StorageMeta::mirror(theirs.path(), &claimed)
+            .expect_err("another server's root was taken as ours");
+        assert!(
+            matches!(
+                &error,
+                ServerError::Shoal(ShoalError::StorageRootMismatch { root, found, expected })
+                    if root == theirs.path()
+                        && found.contains(&StorageMeta::read(theirs.path()).unwrap().unwrap().node.to_string())
+                        && expected.contains(&claimed.node.to_string())
+            ),
+            "{error:?}"
+        );
+        // and the refusal wrote nothing over their marker
+        let after = std::fs::read(StorageMeta::path(theirs.path())).expect("a marker");
+        assert_eq!(before, after);
+        // the same node at another slot count is refused too: a cluster root laid out for
+        // another count is another server's data
+        let cluster = tempfile::tempdir().expect("failed to build a temp dir");
+        let cluster_root = tempfile::tempdir().expect("failed to build a temp dir");
+        StorageMeta::claim(cluster.path(), 2, Some(4), ClusterIntent::Bootstrap)
+            .expect("failed to bootstrap");
+        let mut narrower = StorageMeta::read(cluster.path())
+            .expect("no metadata")
+            .expect("no marker");
+        StorageMeta::mirror(cluster_root.path(), &narrower).expect("failed to mirror");
+        narrower.shards = 2;
+        assert!(matches!(
+            StorageMeta::mirror(cluster_root.path(), &narrower),
+            Err(ServerError::Shoal(ShoalError::StorageRootMismatch { .. }))
+        ));
     }
 }

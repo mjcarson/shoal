@@ -246,9 +246,10 @@ starts earning its keep.
   reclaimed, the hosting rewritten - under a manifest a crash at any point resumes. What stays
   fixed on a cluster node is its *slots*, which peers record and the rule hashes; a standalone
   node has none to keep.
-- **The storage marker only covers the default storage root.** A per-table `storage.tables`
-  override pointing elsewhere is unguarded, and a rehome moves its files untested
-  ([item 43](../appendix/known-issues.md#43-the-storage-marker-only-guards-the-default-storage-root)).
+- ~~**The storage marker only covers the default storage root.** A per-table `storage.tables`
+  override pointing elsewhere is unguarded~~ - every root carries a mirror of the marker since
+  [Resolved #43](../appendix/resolved/marker-every-root.md); a rehome still moves a second
+  root's files untested.
 - ~~**Tablet assignment is derived, not persisted.** `Ring::new` recomputes it on every start, so
   a tablet is movable in principle only; nothing can move one and have it survive a restart.
   Persisting the map is the first half of rebalancing

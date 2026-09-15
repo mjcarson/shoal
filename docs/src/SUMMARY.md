@@ -175,6 +175,7 @@
   - [33. Collected split-query state had no expiry](appendix/resolved/gather-expiry.md)
   - [34. The request length prefix is unvalidated](appendix/resolved/unvalidated-length-prefix.md)
   - [38, 58, 88. The pool returned before its shards had bound](appendix/resolved/pool-readiness.md)
+  - [43. The storage marker only guarded the default storage root](appendix/resolved/marker-every-root.md)
   - [44. A compaction discarded a damaged log's tail in silence](appendix/resolved/compaction-tail-loss.md)
   - [45. The storage marker's format field was written and never read](appendix/resolved/storage-marker-format.md)
   - [48. A query that does not parse was answered with silence](appendix/resolved/query-error-display.md)

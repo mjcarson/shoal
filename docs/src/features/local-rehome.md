@@ -195,10 +195,10 @@ reproduction runs against the map alone.
 - **Balance is per slot on a cluster node.** Twelve slots on eight executors is uneven by
   construction - four executors carry two slots - and the deal counts slots, not bytes. A
   byte-weighted deal is a planned follow-up ([todos](../appendix/todos.md)).
-- **`storage.tables` roots are not covered.** The rehome resolves a table's settings by name
-  through `table_settings` and moves files under the table's own paths, but every crash test
-  runs with one storage root; a table under a second root is untested
-  ([item 43](../appendix/known-issues.md) stays open and says so).
+- **`storage.tables` roots are moved untested.** The rehome resolves a table's settings by
+  name through `table_settings` and moves files under the table's own paths, but every crash
+  test runs with one storage root; a table under a second root is marked and locked since
+  [Resolved #43](../appendix/resolved/marker-every-root.md) and still untested under a crash.
 - **Partial installs are dropped, not carried.** A snapshot half received when the node stopped
   is fed again by the leader; `installs_dropped` counts them.
 - **Groups cost what they hold.** The Log step copies every retained entry above the purge

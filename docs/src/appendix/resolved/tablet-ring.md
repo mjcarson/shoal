@@ -237,10 +237,10 @@ shard has its own archive map, so changing `resources.cores` still cannot work â
 startup error rather than silent loss, which is a better failure but not a fix. Tablet-keyed
 storage is the path and is filed with its reasoning.
 
-**`StorageMeta` only guards the default storage root.** A per-table storage override pointing at
+~~**`StorageMeta` only guards the default storage root.** A per-table storage override pointing at
 a different directory is unguarded, so a mixed configuration can still strand the overridden
-table's data silently. Filed as
-[item 43](../known-issues.md#43-the-storage-marker-only-guards-the-default-storage-root).
+table's data silently.~~ Every root takes a mirror of the marker since
+[Resolved #43](marker-every-root.md).
 
 **`StorageMeta` does not guard a directory written before it existed.** A directory with no
 marker is claimed rather than refused, and every directory written before this change has none â€”

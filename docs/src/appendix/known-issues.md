@@ -31,9 +31,9 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
+list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
 76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 104, 105, 107, 108 and 111, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ item 113 is the newest entry here and the newest number, and why 17, 33, 78, 79, 80, 82,
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ item 113 is the newest entry here and the newest number, and why 17, 33, 43, 78, 79, 80, 82,
 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 104, 105, 107, 108 and 111 are on the resolved page. **111 never
 appeared here**: it was found by [F47](../features/local-rehome.md)'s crash matrix - a read
 landing while an archive closed panicked the executor - reproduced against the map alone and
@@ -717,32 +717,6 @@ temporary scoping, which means an edition bump would silently change the failure
 the code. **The workspace is already mixed** — `shoal-bench` and `shoalctl` are edition 2024 while
 `shoal`, `shoal-core` and `shoal-derive` are 2021 — so the bump is a per-crate decision that has
 already been made three times without this being considered.
-
-### 43. The storage marker only guards the default storage root
-
-`shoal-core/src/server.rs` claims `storage.default.filesystem.latency_sensitive.path`, and that
-one path alone, with the shard count that wrote it
-([items 11, 12](resolved/tablet-ring.md)).
-
-A table with its own `storage.tables` entry pointing somewhere else is not covered. So a
-configuration that overrides one table's path keeps the guard for every other table and loses it
-for that one: ~~reopening with a changed `cores` refuses to start only if the default root was
-also written, and if it was not, the overridden table's data is stranded exactly as silently as
-before.~~ Since [F47](../features/local-rehome.md) reopening with a changed `cores` is a rehome
-rather than a refusal, and the rehome resolves every table's settings by name through
-`table_settings` and moves files under the table's own paths - but the marker, the hosting and
-the manifest live under the default root alone, the lock is that root's, and every crash test
-runs with one root. A table under a second root is moved on the same manifest and is untested
-there; a second root that is not on the same device is untested twice.
-
-Found while building the marker rather than by reading the storage config, which is why it is
-recorded here instead of being fixed there — covering it properly means claiming every distinct
-root a config names, and deciding what a marker means when two tables disagree.
-
-**Fix direction:** collect the distinct roots across `storage.default` and every `storage.tables`
-entry, and claim each one. The shard count is the same for all of them, so the file's contents do
-not change — only how many are written. The rehome's manifest belongs with the marker and stays
-one file.
 
 ### 46. An unmarked storage directory is claimed rather than refused
 
