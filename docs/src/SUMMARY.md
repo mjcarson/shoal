@@ -217,6 +217,7 @@
   - [109. A volatile group's survivor tripped an openraft debug assertion when a majority lost its memory log at once](appendix/resolved/volatile-majority-loss.md)
   - [110. The kill arm's client failed a steady share of its operations for as long as node one was dead](appendix/resolved/dead-primary-write-failures.md)
   - [111. Removing an archive held the handle cache across its close](appendix/resolved/archive-removal-borrow.md)
+  - [112. certificate_rotation_binds_identity failed about half its runs alone](appendix/resolved/certificate-test-leader.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

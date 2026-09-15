@@ -17003,12 +17003,14 @@ async fn certificate_rotation_binds_identity() -> Result<(), FixtureError> {
         Duration::from_secs(10),
     )
     .await?;
-    // a leaf naming another node: refused as a mismatch at both ends of every new handshake
+    // a leaf naming another node: refused as a mismatch at both ends of every new handshake.
+    // The misnamed node is the one restarted, so the fresh handshakes are its own dials and
+    // the others' dials back to it; restarting node zero instead left its rejoin at the mercy
+    // of which member led - node two, half the time, which it could not reach (item 112)
     cluster.reissue_leaf(2, Some(&node1))?;
     let report = cluster.node_mut(2).command("RELOAD_TLS")?;
     assert_eq!(report["ok"]["own_identity"], node1, "{report}");
-    cluster.restart(0, NodeKind::Server)?;
-    cluster.wait_joined(&[0])?;
+    cluster.restart(2, NodeKind::Server)?;
     wait_link_failure(
         &mut cluster,
         0,
@@ -17027,8 +17029,7 @@ async fn certificate_rotation_binds_identity() -> Result<(), FixtureError> {
     cluster.reissue_leaf(2, None)?;
     let report = cluster.node_mut(2).command("RELOAD_TLS")?;
     assert!(report["ok"]["own_identity"].is_null(), "{report}");
-    cluster.restart(0, NodeKind::Server)?;
-    cluster.wait_joined(&[0])?;
+    cluster.restart(2, NodeKind::Server)?;
     wait_link_failure(&mut cluster, 0, 2, "names no node", Duration::from_secs(60))?;
     wait_link_failure(
         &mut cluster,
@@ -17053,9 +17054,13 @@ async fn certificate_rotation_binds_identity() -> Result<(), FixtureError> {
     cluster.reissue_leaf(2, Some(&node2))?;
     let report = cluster.node_mut(2).command("RELOAD_TLS")?;
     assert_eq!(report["ok"]["own_identity"], node2, "{report}");
-    for (from, to) in [(0usize, 2usize), (2, 0), (1, 2), (2, 1)] {
+    // the others' links to it come up - they lead, so they dial it - and its own control link
+    // does, which is its join; a replication link of its own is dialled only once it leads
+    // something, which a node that came back twice into a refusal may not for a while
+    for (from, to) in [(0usize, 2usize), (1, 2)] {
         wait_link_failure(&mut cluster, from, to, "", Duration::from_secs(60))?;
     }
+    cluster.wait_joined(&[2])?;
     let addrs: Vec<String> = (0..3)
         .map(|node| cluster.node(node).endpoints.client.to_string())
         .collect();
