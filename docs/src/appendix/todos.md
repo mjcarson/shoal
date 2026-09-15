@@ -592,8 +592,8 @@ rather than from the diff:
   [F50](../features/cluster-operations.md).
 - **A detector grace that is a setting** rather than five intervals, and the `Detector` view on a
   follower meaning more than its local table.
-- **A refusal kind beside a refusal's reason**, so an admin client gets a code rather than a
-  sentence to parse ([item 98](known-issues.md#98-an-admin-refusals-error-code-is-derived-from-its-reason-text)).
+- ~~**A refusal kind beside a refusal's reason**, so an admin client gets a code rather than a
+  sentence to parse.~~ Built by [Resolved #98](resolved/admin-refusal-kinds.md).
 - ~~**A data quorum that refuses writes a partitioned leader's stale map admits.** M4's.~~
   Built by [F40](../features/replication.md): the write is proposed to a group that cannot
   commit it and is answered `OutcomeUnknown` at the deadline.
@@ -606,8 +606,8 @@ rather than from the diff:
   client. The per-query control needs a shard-addressable connection, which is
   [D7](../direction/shard-aware-routing.md)'s design; when it exists the arm can become pure and
   its `expected_mix` become `{same: 0, local: 100}`.
-- **`ShoalPool::transport()` across every shard**, not shard zero's view
-  ([item 95](known-issues.md#95-shoalpooltransport-reports-shard-zeros-links-and-calls-them-the-nodes)).
+- ~~**`ShoalPool::transport()` across every shard**, not shard zero's view.~~ Built by
+  [Resolved #95](resolved/transport-view-every-shard.md).
 - ~~**A consumer for `transport.ping_interval`** - the failure detector, M3's
   ([item 96](known-issues.md#96-clustertransportping_interval-is-parsed-documented-and-consumed-by-nothing)).~~
   Built by [F39](../features/membership.md) as the control thread's pinger, beside the detector

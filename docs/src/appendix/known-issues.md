@@ -32,9 +32,9 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 99, 101, 104, 105, 108 and 111, and
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 101, 102, 104, 105, 108 and 111, and
 why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ item 110 is the newest entry here ~~and the newest number~~ and 111 the newest number, and why 17, 33, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 99, 101, 104, 105, 108 and 111 are on the resolved page. **111 never
+83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 101, 102, 104, 105, 108 and 111 are on the resolved page. **111 never
 appeared here**: it was found by [F47](../features/local-rehome.md)'s crash matrix - a read
 landing while an archive closed panicked the executor - reproduced against the map alone and
 fixed in the same change ([Resolved #111](resolved/archive-removal-borrow.md)). **108 never
@@ -1822,48 +1822,6 @@ what `Hash for str` writes - `write_str`, which the std hasher contract spells a
 `0xff` - and freeze the archived hash beside the live one in `partition_keys.rs` so the two cannot
 drift again.
 
-### 95. `ShoalPool::transport()` reports shard zero's links and calls them the node's
-
-`shoal-core/src/server.rs`, `ShoalPool::transport`
-
-The method's doc says it gathers every shard's peer links and its loop runs once: the pool
-reaches the shards through a channel to shard zero alone, and the relay that would ask the rest
-is not built. A node with one shard is reported whole. A node with four reports whatever shard
-zero happened to dial - for the `local_shard` hop arm, which forwards nothing from any shard, an
-empty list, and for a node whose other shards forward, a fraction of the frames with no sign
-that it is one.
-
-**Established by reading the source**, and seen on the artifact: `macro/cluster/hop/local_shard`
-records `transport.links: []` on a node that served two hundred reads, which is true of shard
-zero and would be read as true of the node. Filed with [F38](../features/inter-node-transport.md),
-whose `ClusterFacts` record is the first consumer.
-
-**Fix direction:** either `ServerMsg::Transport` fans out across the mesh and shard zero collects
-the views before answering, or the pool holds a sender per shard the way the fixture's
-`shard_cpus` are already per shard. The record should then say which shards answered, since a
-shard that is wedged is exactly the one whose links matter.
-
-### 98. An admin refusal's error code is derived from its reason text
-
-`shoal-core/src/server/control/plane.rs`, `handle_admin`
-
-The state machine answers a refused admin operation with `ControlResponse::Refused { reason }`,
-a sentence, and the control thread turns that into an `AdminError` for the client by reading
-the sentence: a reason containing "stale version" becomes `ErrorCode::StaleVersion`, and every
-other refusal - a node that is not a member, a node that is not up, a duplicate, a second
-initialization, a voter count outside {1, 3, 5} - becomes `ErrorCode::Internal` with the
-sentence as its message. A client that wants to act on *why* it was refused has a string to
-parse, and a reason whose wording changes changes a code.
-
-**Established by reading the source**, while writing
-[F39](../features/membership.md)'s admin test, which asserts on the message for the
-"already initialized" case because there is no code to assert on.
-
-**Fix direction:** `Refused` carries a reason *kind* beside the sentence - not a member, not
-up, duplicate, already initialized, stale version, bad voter count - and `handle_admin` maps
-the kind to a code, with `Internal` kept for a kind it does not know. The sentence stays for
-the log.
-
 ### 100. `duplicate_node_identity_is_fenced` fails under the fixture suite at full parallelism
 
 `shoal/tests/cluster_fixture.rs`, `duplicate_node_identity_is_fenced`
@@ -1889,29 +1847,6 @@ allocator makes the clone wait for cores, the fixture's `ready_timeout` is the b
 if the leader admitted the same incarnation from a second address, that is a fencing defect
 and this item moves up. Until then the suite is run at a lower thread count, which the
 [test-coverage](test-coverage.md) runbook now says.
-
-### 102. A deferred fixture node can lose its reserved port to an outbound connection
-
-`shoal/tests/cluster/mod.rs`, `build_membership_cluster`, `Cluster::start`, `start_deferred`
-
-The fixture reserves every node's data and control port with a bound, never-listening
-`SO_REUSEPORT` socket from the ephemeral range, and drops every reservation once the nodes it
-starts have bound. A node the builder deferred has not bound anything at that point, so its two
-ports are free until `start_deferred` runs - free for any other test in the suite to take as the
-*local* end of an outbound connection, which the kernel hands out from the same range. When that
-happens the deferred node fails to bind with `AddrInUse` and the test fails; the memory note on
-this host records that a listener cannot bind over a client-side `TIME_WAIT` whatever it sets,
-so the reservation trick cannot be extended to cover the gap.
-
-**Established by running it**: `minority_cannot_commit_membership_changes` failed once with
-`AddrInUse` on its deferred node under the full fixture suite at `--test-threads 6` while
-[F42](../features/primary-failover.md) ran it, and passes alone and in the next two suite runs.
-The M6 tests start no deferred node.
-
-**Fix direction:** keep a deferred node's reservations until it starts, by handing them to
-`start_deferred` rather than dropping them with the rest; or take the fixture's ports from a
-block under 32768 the way the benchmark harness does since [F41](../features/read-consistency.md),
-which is the fix that also stops a reservation colliding with a `TIME_WAIT`.
 
 ### 103. A returning leader is refused its own re-election until its old lease lapses, and hops to it wait
 
@@ -2077,26 +2012,3 @@ which is what its family page says to expect.
 and, if they are `Unavailable` or `PeerUnavailable` from a forward to the dead primary,
 propose through the local replica when the node holds one, which is what `read_ring_for` does
 for reads. Then a smoke run of the kill arm should show the outage the F42 page shows.
-
-### 97. `stage_join.rs` had not compiled since F36, and needs `/opt/shoal` to run
-
-`shoal-bench/tests/stage_join.rs`
-
-The one integration test that starts a server under `--features stage-profile` and reads the
-report it wrote. [F36](../features/cluster-harness.md) added `server` and `cluster` to
-`RunRequest` and did not add them here, so from that commit until
-[F38](../features/inter-node-transport.md) the binary failed to compile - and because it is
-behind a feature no default run enables, nothing said so. F38 fixed the initializer. What it
-found underneath is that the test resolves the **committed** `shoal.yml`, whose storage paths are
-`/opt/shoal`, so on a host without that directory it fails at server start with
-`PermissionDenied` before it can join anything; on the development host it does.
-
-**Established by running it**: `cargo test -p shoal-bench --features stage-profile --test
-stage_join` on `europa`, `the arm runs: failed to start a server: IO(Os { code: 13, kind:
-PermissionDenied })`.
-
-**Fix direction:** two things. The test should write a scratch copy of `shoal.yml` with its
-storage under a `tempfile` directory, the way the F38 smoke runs did by hand, so it runs
-wherever the suite does. And the feature-gated binaries want a place in CI or in the
-[test-coverage](test-coverage.md) runbook that builds them, since a binary that does not compile
-for two features is a gap the count cannot see.

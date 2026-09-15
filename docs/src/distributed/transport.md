@@ -207,8 +207,8 @@ measured at their encoded size on the hop arms.
 
 ## Limitations
 
-`ShoalPool::transport()` reports shard zero's links and calls them the node's
-([item 95](../appendix/known-issues.md#95-shoalpooltransport-reports-shard-zeros-links-and-calls-them-the-nodes)).
+~~`ShoalPool::transport()` reports shard zero's links and calls them the node's~~ - every
+shard answers for its own since [Resolved #95](../appendix/resolved/transport-view-every-shard.md).
 `local_shard` in the hop arms is a mixture until [D7](../direction/shard-aware-routing.md).
 The reconnect floor is a node's setting, not the policy's, so a deployment whose floor is
 longer than its clients' patience waits it out. Peer identity under plaintext lanes is the

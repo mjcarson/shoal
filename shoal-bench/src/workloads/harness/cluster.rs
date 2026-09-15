@@ -1494,14 +1494,21 @@ pub fn transport_facts(
     let Some(cluster) = &conf.cluster else {
         bail!("a transport record was asked of a standalone node");
     };
-    // what the pool can see, which at M2 is shard zero's links
+    // every shard's links, each shard answering for its own
     let views = pool
         .transport()
         .map_err(|error| anyhow::anyhow!("failed to read the transport: {error:?}"))?;
+    // which shards answered, so a reader can tell a node with no links from a shard that
+    // held none
+    let shards = views.iter().map(|view| view.shard).collect();
     let links = views
         .into_iter()
-        .flat_map(|view| view.links)
-        .map(|link| LinkFacts {
+        .flat_map(|view| {
+            let shard = view.shard;
+            view.links.into_iter().map(move |link| (shard, link))
+        })
+        .map(|(shard, link)| LinkFacts {
+            shard,
             node: link.node.to_string(),
             lane: link.lane,
             state: link.state,
@@ -1521,6 +1528,7 @@ pub fn transport_facts(
         inflight_bytes: cluster.transport.inflight_bytes as u64,
         forward_timeout_ms: u64::try_from(cluster.transport.forward_timeout.duration().as_millis())
             .unwrap_or(u64::MAX),
+        shards,
         links,
     })
 }

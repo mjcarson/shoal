@@ -135,7 +135,7 @@ impl<D: ShoalDatabase> RestoreContext<D> {
                 glommio::timer::timeout(remaining, async { Ok(rx.as_async().recv().await) }).await;
             last = match answered {
                 Ok(Ok(Ok(ControlResponse::Applied { .. }))) => return Ok(()),
-                Ok(Ok(Ok(ControlResponse::Refused { reason }))) => {
+                Ok(Ok(Ok(ControlResponse::Refused { reason, .. }))) => {
                     return Err(format!("the progress was refused: {reason}"))
                 }
                 Ok(Ok(Ok(other))) => format!("the progress was not applied: {other:?}"),

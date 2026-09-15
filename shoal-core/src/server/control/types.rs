@@ -953,6 +953,43 @@ impl fmt::Display for ControlCommand {
     }
 }
 
+/// Why a command was refused, as a kind a caller can act on
+///
+/// The sentence beside it is for the log; this is for the code. `handle_admin` maps each kind to
+/// an [`ErrorCode`](crate::shared::protocol::error::ErrorCode), so a client sees *why* it was
+/// refused without parsing the sentence, and a reason whose wording changes changes no code
+/// ([Resolved #98](../../../../docs/src/appendix/resolved/admin-refusal-kinds.md)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RefusalKind {
+    /// The node named is not a member of this cluster
+    NotMember,
+    /// The member named is not up, and the command needs an up one
+    NotUp,
+    /// The member named is in the wrong phase or under the wrong grace for the command
+    WrongPhase,
+    /// A node, a set or a plan is named twice, or already holds what it would be given
+    Duplicate,
+    /// The cluster, the placement or the restore is already done and cannot be done again
+    AlreadyInitialized,
+    /// No cluster has been bootstrapped or no placement initialized to run the command in
+    NotInitialized,
+    /// The request was written against a topology version the cluster has moved past
+    StaleVersion,
+    /// The control voter count is not one the policy allows
+    BadVoterCount,
+    /// The operation, group, table or tablet named is not one the cluster records
+    UnknownOperation,
+    /// The operation is queued behind another transition on the same set
+    Queued,
+    /// The wire version named cannot be activated or is below what the command needs
+    WireVersion,
+    /// The request is malformed as stated, whatever the cluster's state
+    Invalid,
+    /// A reason the kinds above do not name, which a peer on an older wire version decodes to
+    #[default]
+    Other,
+}
+
 /// What applying a command produced
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlResponse {
@@ -966,8 +1003,13 @@ pub enum ControlResponse {
     /// A refusal is still a committed entry - the log does not skip it - but it changes nothing,
     /// and the topology version does not move.
     Refused {
-        /// Why
+        /// Why, as a sentence for the log
         reason: String,
+        /// Why, as a kind a caller can act on
+        ///
+        /// Defaulted on decode so a response from a peer that predates the kind still reads.
+        #[serde(default)]
+        kind: RefusalKind,
     },
     /// Refused because the node's committed incarnation is at or beyond the one offered
     ///
@@ -998,6 +1040,20 @@ pub enum ControlResponse {
 }
 
 impl ControlResponse {
+    /// Refuse a command, with the kind a caller acts on and the sentence the log carries
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - Why, as a kind
+    /// * `reason` - Why, as a sentence
+    #[must_use]
+    pub fn refused<S: Into<String>>(kind: RefusalKind, reason: S) -> Self {
+        ControlResponse::Refused {
+            reason: reason.into(),
+            kind,
+        }
+    }
+
     /// The topology version this response reports, if it applied
     #[must_use]
     pub fn applied_version(&self) -> Option<u64> {
@@ -1162,12 +1218,13 @@ impl ControlState {
             } => {
                 // a cluster that exists is never created again, whatever asks
                 if let Some(existing) = self.cluster {
-                    return ControlResponse::Refused {
-                        reason: format!(
+                    return ControlResponse::refused(
+                        RefusalKind::AlreadyInitialized,
+                        format!(
                             "the cluster is already {existing}; a second bootstrap ({cluster}) \
                              would fork it"
                         ),
-                    };
+                    );
                 }
                 self.cluster = Some(*cluster);
                 self.policy = Some(policy.clone());
@@ -1202,9 +1259,10 @@ impl ControlState {
                 episode,
             } => {
                 let Some(state) = self.members.get(node) else {
-                    return ControlResponse::Refused {
-                        reason: format!("{node} is not a member, so has no health to set"),
-                    };
+                    return ControlResponse::refused(
+                        RefusalKind::NotMember,
+                        format!("{node} is not a member, so has no health to set"),
+                    );
                 };
                 // evidence about an older run of the node says nothing about this one
                 if *incarnation < state.record.incarnation {
@@ -1260,9 +1318,10 @@ impl ControlState {
                 failed,
             } => {
                 let Some(state) = self.members.get(node) else {
-                    return ControlResponse::Refused {
-                        reason: format!("{node} is not a member, so has no shards to report"),
-                    };
+                    return ControlResponse::refused(
+                        RefusalKind::NotMember,
+                        format!("{node} is not a member, so has no shards to report"),
+                    );
                 };
                 if *incarnation < state.record.incarnation {
                     return ControlResponse::Fenced {
@@ -1289,24 +1348,27 @@ impl ControlState {
                 ..
             } => {
                 if self.cluster.is_none() {
-                    return ControlResponse::Refused {
-                        reason: "no cluster has been bootstrapped to place tablets in".to_string(),
-                    };
+                    return ControlResponse::refused(
+                        RefusalKind::NotInitialized,
+                        "no cluster has been bootstrapped to place tablets in".to_string(),
+                    );
                 }
                 if let Some(refusal) = self.check_version(*expected_version) {
                     return refusal;
                 }
                 if self.initialized.is_some() {
-                    return ControlResponse::Refused {
-                        reason: "the placement is already initialized; a replica set moves \
+                    return ControlResponse::refused(
+                        RefusalKind::AlreadyInitialized,
+                        "the placement is already initialized; a replica set moves \
                                  between nodes by a Move operation, not a second initialization"
                             .to_string(),
-                    };
+                    );
                 }
                 if nodes.is_empty() {
-                    return ControlResponse::Refused {
-                        reason: "a placement needs at least one node".to_string(),
-                    };
+                    return ControlResponse::refused(
+                        RefusalKind::Invalid,
+                        "a placement needs at least one node".to_string(),
+                    );
                 }
                 // every node named has to be a member that is up, and named once
                 let mut seen = std::collections::BTreeSet::new();
@@ -1314,23 +1376,26 @@ impl ControlState {
                     match self.members.get(node) {
                         Some(state) if state.is_placeable() => {}
                         Some(state) => {
-                            return ControlResponse::Refused {
-                                reason: format!(
+                            return ControlResponse::refused(
+                                RefusalKind::NotUp,
+                                format!(
                                     "{node} is {}, and only an up member can be placed on",
                                     state.state_name()
                                 ),
-                            };
+                            );
                         }
                         None => {
-                            return ControlResponse::Refused {
-                                reason: format!("{node} is not a member of this cluster"),
-                            };
+                            return ControlResponse::refused(
+                                RefusalKind::NotMember,
+                                format!("{node} is not a member of this cluster"),
+                            );
                         }
                     }
                     if !seen.insert(*node) {
-                        return ControlResponse::Refused {
-                            reason: format!("{node} is named twice in the placement"),
-                        };
+                        return ControlResponse::refused(
+                            RefusalKind::Duplicate,
+                            format!("{node} is named twice in the placement"),
+                        );
                     }
                 }
                 self.initialized = Some(nodes.clone());
@@ -1345,14 +1410,16 @@ impl ControlState {
                 ..
             } => {
                 let Some(policy) = self.policy.as_mut() else {
-                    return ControlResponse::Refused {
-                        reason: "no cluster has been bootstrapped to set a policy on".to_string(),
-                    };
+                    return ControlResponse::refused(
+                        RefusalKind::NotInitialized,
+                        "no cluster has been bootstrapped to set a policy on".to_string(),
+                    );
                 };
                 if !matches!(count, 1 | 3 | 5) {
-                    return ControlResponse::Refused {
-                        reason: format!("control_voters is {count}; it has to be 1, 3 or 5"),
-                    };
+                    return ControlResponse::refused(
+                        RefusalKind::BadVoterCount,
+                        format!("control_voters is {count}; it has to be 1, 3 or 5"),
+                    );
                 }
                 let current = policy.control_voters;
                 if let Some(refusal) = self.check_version(*expected_version) {
@@ -1373,23 +1440,25 @@ impl ControlState {
                 ..
             } => {
                 if self.policy.is_none() {
-                    return ControlResponse::Refused {
-                        reason: "no cluster has been bootstrapped to set a policy on".to_string(),
-                    };
+                    return ControlResponse::refused(
+                        RefusalKind::NotInitialized,
+                        "no cluster has been bootstrapped to set a policy on".to_string(),
+                    );
                 }
                 // `All` is not a read level anything serves; the only strong read is `Quorum`
                 if *level == Some(Consistency::All) {
-                    return ControlResponse::Refused {
-                        reason: "read_consistency All is not served; the strong read level is Quorum (C6)".to_string(),
-                    };
+                    return ControlResponse::refused(
+                        RefusalKind::Invalid,
+                        "read_consistency All is not served; the strong read level is Quorum (C6)"
+                            .to_string(),
+                    );
                 }
                 // the table has to be one the schema serves, which the initialization recorded
                 if !self.tables.iter().any(|(_, id)| id == table) {
-                    return ControlResponse::Refused {
-                        reason: format!(
-                            "table {table} is not one the placement was initialized with"
-                        ),
-                    };
+                    return ControlResponse::refused(
+                        RefusalKind::UnknownOperation,
+                        format!("table {table} is not one the placement was initialized with"),
+                    );
                 }
                 if let Some(refusal) = self.check_version(*expected_version) {
                     return refusal;
@@ -1422,22 +1491,23 @@ impl ControlState {
                 release,
             } => {
                 if self.policy.is_none() || self.initialized.is_none() {
-                    return ControlResponse::Refused {
-                        reason: "no placement has been initialized to repair".to_string(),
-                    };
+                    return ControlResponse::refused(
+                        RefusalKind::NotInitialized,
+                        "no placement has been initialized to repair".to_string(),
+                    );
                 }
                 if !self.tables.iter().any(|(_, id)| id == table) {
-                    return ControlResponse::Refused {
-                        reason: format!(
-                            "table {table} is not one the placement was initialized with"
-                        ),
-                    };
+                    return ControlResponse::refused(
+                        RefusalKind::UnknownOperation,
+                        format!("table {table} is not one the placement was initialized with"),
+                    );
                 }
                 if let Some(node) = source {
                     if !self.members.contains_key(node) {
-                        return ControlResponse::Refused {
-                            reason: format!("{node} is not a member, so cannot be a source"),
-                        };
+                        return ControlResponse::refused(
+                            RefusalKind::NotMember,
+                            format!("{node} is not a member, so cannot be a source"),
+                        );
                     }
                 }
                 if let Some(refusal) = self.check_version(*expected_version) {
@@ -1470,12 +1540,13 @@ impl ControlState {
                     })
                     .collect();
                 if groups.is_empty() {
-                    return ControlResponse::Refused {
-                        reason: match tablet {
+                    return ControlResponse::refused(
+                        RefusalKind::UnknownOperation,
+                        match tablet {
                             Some(tablet) => format!("no group of {table} serves tablet {tablet}"),
                             None => format!("the placement derives no groups for {table}"),
                         },
-                    };
+                    );
                 }
                 self.topology_version += 1;
                 self.repairs.insert(
@@ -1517,9 +1588,10 @@ impl ControlState {
                 progress,
             } => {
                 let Some(member) = self.members.get(node) else {
-                    return ControlResponse::Refused {
-                        reason: format!("{node} is not a member, so cannot drive a repair"),
-                    };
+                    return ControlResponse::refused(
+                        RefusalKind::NotMember,
+                        format!("{node} is not a member, so cannot drive a repair"),
+                    );
                 };
                 if *incarnation < member.record.incarnation {
                     return ControlResponse::Fenced {
@@ -1529,14 +1601,16 @@ impl ControlState {
                     };
                 }
                 let Some(record) = self.repairs.get_mut(op) else {
-                    return ControlResponse::Refused {
-                        reason: format!("no repair operation {op} is recorded"),
-                    };
+                    return ControlResponse::refused(
+                        RefusalKind::UnknownOperation,
+                        format!("no repair operation {op} is recorded"),
+                    );
                 };
                 let Some(current) = record.groups.get_mut(group) else {
-                    return ControlResponse::Refused {
-                        reason: format!("group {group} is not part of repair {op}"),
-                    };
+                    return ControlResponse::refused(
+                        RefusalKind::UnknownOperation,
+                        format!("group {group} is not part of repair {op}"),
+                    );
                 };
                 // a group that is done stays done, whatever a late driver says
                 if current.is_done() {
@@ -1544,9 +1618,7 @@ impl ControlState {
                 }
                 // a group queued behind a move is nobody's to drive yet
                 if current.is_queued() {
-                    return ControlResponse::Refused {
-                        reason: format!("group {group} of repair {op} is queued behind a move and cannot be driven yet"),
-                    };
+                    return ControlResponse::refused(RefusalKind::Queued, format!("group {group} of repair {op} is queued behind a move and cannot be driven yet"));
                 }
                 if current == progress {
                     return self.applied();
@@ -1566,9 +1638,10 @@ impl ControlState {
                 copies,
             } => {
                 let Some(state) = self.members.get(node) else {
-                    return ControlResponse::Refused {
-                        reason: format!("{node} is not a member, so has no copies to report"),
-                    };
+                    return ControlResponse::refused(
+                        RefusalKind::NotMember,
+                        format!("{node} is not a member, so has no copies to report"),
+                    );
                 };
                 if *incarnation < state.record.incarnation {
                     return ControlResponse::Fenced {
@@ -1732,26 +1805,29 @@ impl ControlState {
         node: NodeId,
     ) -> ControlResponse {
         if self.policy.is_none() || self.initialized.is_none() {
-            return ControlResponse::Refused {
-                reason: "no placement has been initialized to decommission a member of".to_string(),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotInitialized,
+                "no placement has been initialized to decommission a member of".to_string(),
+            );
         }
         let Some(state) = self.members.get(&node) else {
-            return ControlResponse::Refused {
-                reason: format!("{node} is not a member of this cluster"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotMember,
+                format!("{node} is not a member of this cluster"),
+            );
         };
         match state.phase {
             MemberPhase::Member => {}
             // already leaving is applied and changes nothing: the first plan drains it
             MemberPhase::Leaving => return self.applied(),
             other => {
-                return ControlResponse::Refused {
-                    reason: format!(
+                return ControlResponse::refused(
+                    RefusalKind::WrongPhase,
+                    format!(
                         "{node} is {}, and only a member can be decommissioned",
                         other.name()
                     ),
-                };
+                );
             }
         }
         if let Some(refusal) = self.check_version(expected_version) {
@@ -1792,32 +1868,33 @@ impl ControlState {
         replacement: Option<NodeId>,
     ) -> ControlResponse {
         if self.policy.is_none() || self.initialized.is_none() {
-            return ControlResponse::Refused {
-                reason: "no placement has been initialized to remove a member of".to_string(),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotInitialized,
+                "no placement has been initialized to remove a member of".to_string(),
+            );
         }
         let Some(state) = self.members.get(&node) else {
-            return ControlResponse::Refused {
-                reason: format!("{node} is not a member of this cluster"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotMember,
+                format!("{node} is not a member of this cluster"),
+            );
         };
         // a live member is drained by a decommission, not torn out; a leaving one may be
         // hurried out, and a down one replaced
         let removable = state.health == MemberHealth::Down || state.phase == MemberPhase::Leaving;
         match state.phase {
             MemberPhase::Removed => {
-                return ControlResponse::Refused {
-                    reason: format!("{node} is already removed"),
-                };
+                return ControlResponse::refused(
+                    RefusalKind::NotMember,
+                    format!("{node} is already removed"),
+                );
             }
             MemberPhase::Removing => return self.applied(),
             _ if !removable => {
-                return ControlResponse::Refused {
-                    reason: format!(
+                return ControlResponse::refused(RefusalKind::WrongPhase, format!(
                         "{node} is {} and a member; only a down or leaving member can be removed - decommission a live one",
                         state.health.name()
-                    ),
-                };
+                    ));
             }
             _ => {}
         }
@@ -1826,23 +1903,26 @@ impl ControlState {
             match self.members.get(&replacement) {
                 Some(state) if state.is_placeable() => {}
                 Some(state) => {
-                    return ControlResponse::Refused {
-                        reason: format!(
+                    return ControlResponse::refused(
+                        RefusalKind::NotUp,
+                        format!(
                             "{replacement} is {}, and only an up member can replace another",
                             state.state_name()
                         ),
-                    };
+                    );
                 }
                 None => {
-                    return ControlResponse::Refused {
-                        reason: format!("{replacement} is not a member of this cluster"),
-                    };
+                    return ControlResponse::refused(
+                        RefusalKind::NotMember,
+                        format!("{replacement} is not a member of this cluster"),
+                    );
                 }
             }
             if replacement == node {
-                return ControlResponse::Refused {
-                    reason: format!("{node} cannot replace itself"),
-                };
+                return ControlResponse::refused(
+                    RefusalKind::Invalid,
+                    format!("{node} cannot replace itself"),
+                );
             }
             let map = crate::server::map::TabletMap::from_state(self, None, &self.tables.clone());
             let shared = map.rule_sets_served().into_iter().any(|(members, _)| {
@@ -1850,9 +1930,7 @@ impl ControlState {
                     && members.iter().any(|member| member.node == replacement)
             });
             if shared {
-                return ControlResponse::Refused {
-                    reason: format!("{replacement} already holds a set with {node}; a replacement has to be outside every set it would take"),
-                };
+                return ControlResponse::refused(RefusalKind::Duplicate, format!("{replacement} already holds a set with {node}; a replacement has to be outside every set it would take"));
             }
         }
         if let Some(refusal) = self.check_version(expected_version) {
@@ -1894,22 +1972,22 @@ impl ControlState {
         suspend: bool,
     ) -> ControlResponse {
         let Some(state) = self.members.get(&node) else {
-            return ControlResponse::Refused {
-                reason: format!("{node} is not a member of this cluster"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotMember,
+                format!("{node} is not a member of this cluster"),
+            );
         };
         let Some(grace) = state.grace.as_ref() else {
-            return ControlResponse::Refused {
-                reason: format!(
+            return ControlResponse::refused(
+                RefusalKind::WrongPhase,
+                format!(
                     "{node} is under no grace to suspend; it is {} and the policy may not remove",
                     state.state_name()
                 ),
-            };
+            );
         };
         if grace.expired {
-            return ControlResponse::Refused {
-                reason: format!("{node}'s grace has elapsed and it is removing; maintenance cannot suspend a removal"),
-            };
+            return ControlResponse::refused(RefusalKind::WrongPhase, format!("{node}'s grace has elapsed and it is removing; maintenance cannot suspend a removal"));
         }
         if let Some(refusal) = self.check_version(expected_version) {
             return refusal;
@@ -1939,9 +2017,10 @@ impl ControlState {
         expected_version: u64,
     ) -> ControlResponse {
         if self.policy.is_none() || self.initialized.is_none() {
-            return ControlResponse::Refused {
-                reason: "no placement has been initialized to rebalance".to_string(),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotInitialized,
+                "no placement has been initialized to rebalance".to_string(),
+            );
         }
         if let Some(refusal) = self.check_version(expected_version) {
             return refusal;
@@ -1966,20 +2045,23 @@ impl ControlState {
             .values()
             .filter(|record| !record.is_done())
             .find(|record| record.kind.drains() == node);
-        clash.map(|record| ControlResponse::Refused {
-            reason: match node {
-                Some(node) => format!(
-                    "{node} is already under plan {} ({}), which is {}",
-                    record.op,
-                    record.kind.name(),
-                    record.phase.name()
-                ),
-                None => format!(
-                    "a rebalance is already under way as plan {}, which is {}",
-                    record.op,
-                    record.phase.name()
-                ),
-            },
+        clash.map(|record| {
+            ControlResponse::refused(
+                RefusalKind::Duplicate,
+                match node {
+                    Some(node) => format!(
+                        "{node} is already under plan {} ({}), which is {}",
+                        record.op,
+                        record.kind.name(),
+                        record.phase.name()
+                    ),
+                    None => format!(
+                        "a rebalance is already under way as plan {}, which is {}",
+                        record.op,
+                        record.phase.name()
+                    ),
+                },
+            )
         })
     }
 
@@ -2022,23 +2104,26 @@ impl ControlState {
         expire: Option<Uuid>,
     ) -> ControlResponse {
         let Some(state) = self.members.get(&node) else {
-            return ControlResponse::Refused {
-                reason: format!("{node} is not a member, so has no grace to count"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotMember,
+                format!("{node} is not a member, so has no grace to count"),
+            );
         };
         let Some(grace) = state.grace.as_ref() else {
-            return ControlResponse::Refused {
-                reason: format!("{node} is under no grace"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::WrongPhase,
+                format!("{node} is under no grace"),
+            );
         };
         // a count of another episode, a suspended grace or one already over changes nothing
         if grace.episode != episode {
-            return ControlResponse::Refused {
-                reason: format!(
+            return ControlResponse::refused(
+                RefusalKind::WrongPhase,
+                format!(
                     "{node}'s grace is of episode {} and the count is of {episode}",
                     grace.episode
                 ),
-            };
+            );
         }
         if grace.suspended || grace.expired {
             return self.applied();
@@ -2088,9 +2173,10 @@ impl ControlState {
         progress: &PlanUpdate,
     ) -> ControlResponse {
         let Some(member) = self.members.get(&node) else {
-            return ControlResponse::Refused {
-                reason: format!("{node} is not a member, so cannot drive a plan"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotMember,
+                format!("{node} is not a member, so cannot drive a plan"),
+            );
         };
         if incarnation < member.record.incarnation {
             return ControlResponse::Fenced {
@@ -2101,9 +2187,10 @@ impl ControlState {
         }
         let version = self.topology_version + 1;
         let Some(record) = self.plans.get_mut(&op) else {
-            return ControlResponse::Refused {
-                reason: format!("no plan {op} is recorded"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::UnknownOperation,
+                format!("no plan {op} is recorded"),
+            );
         };
         // a done plan stays done, whatever a late leader says
         if record.is_done() {
@@ -2198,19 +2285,21 @@ impl ControlState {
     /// * `op` - The plan that removed it
     fn apply_tombstone(&mut self, node: NodeId, op: Option<Uuid>) -> ControlResponse {
         let Some(state) = self.members.get(&node) else {
-            return ControlResponse::Refused {
-                reason: format!("{node} is not a member, so cannot be tombstoned"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotMember,
+                format!("{node} is not a member, so cannot be tombstoned"),
+            );
         };
         if state.phase == MemberPhase::Removed {
             return self.applied();
         }
         if !matches!(state.phase, MemberPhase::Leaving | MemberPhase::Removing) {
-            return ControlResponse::Refused {
-                reason: format!(
+            return ControlResponse::refused(
+                RefusalKind::WrongPhase,
+                format!(
                     "{node} is a plain member; only a leaving or removing member is tombstoned"
                 ),
-            };
+            );
         }
         // a member still holding a set is not out: its plan is what takes it out
         let map = crate::server::map::TabletMap::from_state(self, None, &self.tables.clone());
@@ -2219,9 +2308,7 @@ impl ControlState {
             .iter()
             .any(|(members, _)| members.iter().any(|member| member.node == node))
         {
-            return ControlResponse::Refused {
-                reason: format!("{node} still holds a replica set; its plan has to move every set before it is tombstoned"),
-            };
+            return ControlResponse::refused(RefusalKind::WrongPhase, format!("{node} still holds a replica set; its plan has to move every set before it is tombstoned"));
         }
         self.topology_version += 1;
         let version = self.topology_version;
@@ -2269,36 +2356,41 @@ impl ControlState {
         to: NodeId,
     ) -> ControlResponse {
         if self.policy.is_none() || self.initialized.is_none() {
-            return ControlResponse::Refused {
-                reason: "no placement has been initialized to move a replica set of".to_string(),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotInitialized,
+                "no placement has been initialized to move a replica set of".to_string(),
+            );
         }
         if from == to {
-            return ControlResponse::Refused {
-                reason: format!("{from} cannot replace itself"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::Invalid,
+                format!("{from} cannot replace itself"),
+            );
         }
         // the destination has to be an up member that is staying; the source a member at all
         match self.members.get(&to) {
             Some(state) if state.is_placeable() => {}
             Some(state) => {
-                return ControlResponse::Refused {
-                    reason: format!(
+                return ControlResponse::refused(
+                    RefusalKind::NotUp,
+                    format!(
                         "{to} is {}, and only an up member can be moved to",
                         state.state_name()
                     ),
-                };
+                );
             }
             None => {
-                return ControlResponse::Refused {
-                    reason: format!("{to} is not a member of this cluster"),
-                };
+                return ControlResponse::refused(
+                    RefusalKind::NotMember,
+                    format!("{to} is not a member of this cluster"),
+                );
             }
         }
         if !self.members.contains_key(&from) {
-            return ControlResponse::Refused {
-                reason: format!("{from} is not a member of this cluster"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotMember,
+                format!("{from} is not a member of this cluster"),
+            );
         }
         if let Some(refusal) = self.check_version(expected_version) {
             return refusal;
@@ -2308,21 +2400,22 @@ impl ControlState {
         let expected = map.replicas_of(usize::from(tablet));
         let (rule, tablets) = map.rule_set_of(usize::from(tablet));
         if expected.is_empty() || tablets.is_empty() {
-            return ControlResponse::Refused {
-                reason: format!("no replica set serves tablet {tablet}"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::UnknownOperation,
+                format!("no replica set serves tablet {tablet}"),
+            );
         }
         let Some(slot) = expected.iter().position(|member| member.node == from) else {
-            return ControlResponse::Refused {
-                reason: format!(
-                    "{from} is not a member of the set serving tablet {tablet}: {expected:?}"
-                ),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotMember,
+                format!("{from} is not a member of the set serving tablet {tablet}: {expected:?}"),
+            );
         };
         if expected.iter().any(|member| member.node == to) {
-            return ControlResponse::Refused {
-                reason: format!("{to} is already a member of the set serving tablet {tablet}"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::Duplicate,
+                format!("{to} is already a member of the set serving tablet {tablet}"),
+            );
         }
         // the destination's shard: the one the rule would give the set's first tablet on it
         let nodes = self.initialized.as_ref().map_or(1, Vec::len).max(1);
@@ -2423,9 +2516,10 @@ impl ControlState {
         progress: &GroupMove,
     ) -> ControlResponse {
         let Some(member) = self.members.get(&node) else {
-            return ControlResponse::Refused {
-                reason: format!("{node} is not a member, so cannot drive a move"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotMember,
+                format!("{node} is not a member, so cannot drive a move"),
+            );
         };
         if incarnation < member.record.incarnation {
             return ControlResponse::Fenced {
@@ -2435,21 +2529,22 @@ impl ControlState {
             };
         }
         let Some(record) = self.moves.get_mut(&op) else {
-            return ControlResponse::Refused {
-                reason: format!("no move operation {op} is recorded"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::UnknownOperation,
+                format!("no move operation {op} is recorded"),
+            );
         };
         if record.is_queued() {
-            return ControlResponse::Refused {
-                reason: format!(
-                    "move {op} is queued behind another transition and cannot be driven yet"
-                ),
-            };
+            return ControlResponse::refused(
+                RefusalKind::Queued,
+                format!("move {op} is queued behind another transition and cannot be driven yet"),
+            );
         }
         let Some(current) = record.groups.get_mut(&group) else {
-            return ControlResponse::Refused {
-                reason: format!("group {group} is not part of move {op}"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::UnknownOperation,
+                format!("group {group} is not part of move {op}"),
+            );
         };
         // a group that is done stays done, whatever a late driver says
         if current.is_done() {
@@ -2544,9 +2639,10 @@ impl ControlState {
     fn observe(&mut self, record: &MemberRecord, admitting: bool) -> ControlResponse {
         // an observation before the bootstrap describes a member of nothing
         if self.cluster.is_none() {
-            return ControlResponse::Refused {
-                reason: "no cluster has been bootstrapped to observe a member of".to_string(),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotInitialized,
+                "no cluster has been bootstrapped to observe a member of".to_string(),
+            );
         }
         // a removed identity never comes back, at any incarnation and by any door
         if self.tombstones.contains_key(&record.node)
@@ -2562,22 +2658,24 @@ impl ControlState {
         // ([F48](../../../../docs/src/features/rolling-compatibility.md))
         let activated = self.activated_wire();
         if record.wire_max() < activated {
-            return ControlResponse::Refused {
-                reason: format!(
+            return ControlResponse::refused(
+                RefusalKind::WireVersion,
+                format!(
                     "{} speaks wire version {} at most and the cluster has activated {activated}",
                     record.node,
                     record.wire_max()
                 ),
-            };
+            );
         }
         match self.members.get(&record.node) {
             // a node nobody admitted cannot observe itself in; the leader admits it first
-            None if !admitting => ControlResponse::Refused {
-                reason: format!(
+            None if !admitting => ControlResponse::refused(
+                RefusalKind::NotMember,
+                format!(
                     "{} is not a member; a joiner is admitted by the leader first",
                     record.node
                 ),
-            },
+            ),
             // a joiner let in for the first time, joining until it reports in
             None => {
                 self.topology_version += 1;
@@ -2667,33 +2765,34 @@ impl ControlState {
         path: &str,
     ) -> ControlResponse {
         if self.policy.is_none() || self.initialized.is_none() {
-            return ControlResponse::Refused {
-                reason: "no placement has been initialized to back up".to_string(),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotInitialized,
+                "no placement has been initialized to back up".to_string(),
+            );
         }
         if let Some(table) = table {
             if !self.tables.iter().any(|(_, id)| *id == table) {
-                return ControlResponse::Refused {
-                    reason: format!("table {table} is not one the placement was initialized with"),
-                };
+                return ControlResponse::refused(
+                    RefusalKind::UnknownOperation,
+                    format!("table {table} is not one the placement was initialized with"),
+                );
             }
         }
         if path.is_empty() {
-            return ControlResponse::Refused {
-                reason: "a backup needs a directory to write under".to_string(),
-            };
+            return ControlResponse::refused(
+                RefusalKind::Invalid,
+                "a backup needs a directory to write under".to_string(),
+            );
         }
         // the file header that identifies a backup's cluster is the one written past the
         // activation of wire version 5 ([F48](../../../../docs/src/features/rolling-compatibility.md))
         let needed = crate::server::replication::snapshot::SNAPSHOT_V2_FROM_WIRE;
         if self.activated_wire() < needed {
-            return ControlResponse::Refused {
-                reason: format!(
+            return ControlResponse::refused(RefusalKind::WireVersion, format!(
                     "a backup needs wire version {needed} activated, and the cluster has activated {}; a \
                      backup file identifies its cluster in a header only that version writes",
                     self.activated_wire()
-                ),
-            };
+                ));
         }
         if let Some(refusal) = self.check_version(expected_version) {
             return refusal;
@@ -2732,9 +2831,10 @@ impl ControlState {
             }
         }
         if groups.is_empty() {
-            return ControlResponse::Refused {
-                reason: "the placement derives no groups to back up".to_string(),
-            };
+            return ControlResponse::refused(
+                RefusalKind::Invalid,
+                "the placement derives no groups to back up".to_string(),
+            );
         }
         self.topology_version += 1;
         self.backups.insert(
@@ -2783,9 +2883,10 @@ impl ControlState {
         progress: &GroupBackup,
     ) -> ControlResponse {
         let Some(member) = self.members.get(&node) else {
-            return ControlResponse::Refused {
-                reason: format!("{node} is not a member, so cannot drive a backup"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotMember,
+                format!("{node} is not a member, so cannot drive a backup"),
+            );
         };
         if incarnation < member.record.incarnation {
             return ControlResponse::Fenced {
@@ -2795,23 +2896,23 @@ impl ControlState {
             };
         }
         let Some(record) = self.backups.get_mut(&op) else {
-            return ControlResponse::Refused {
-                reason: format!("no backup operation {op} is recorded"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::UnknownOperation,
+                format!("no backup operation {op} is recorded"),
+            );
         };
         let Some(current) = record.groups.get_mut(&group) else {
-            return ControlResponse::Refused {
-                reason: format!("group {group} is not part of backup {op}"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::UnknownOperation,
+                format!("group {group} is not part of backup {op}"),
+            );
         };
         // a group that is done stays done, whatever a late driver says
         if current.is_done() {
             return self.applied();
         }
         if current.is_queued() {
-            return ControlResponse::Refused {
-                reason: format!("group {group} of backup {op} is queued behind another operation and cannot be driven yet"),
-            };
+            return ControlResponse::refused(RefusalKind::Queued, format!("group {group} of backup {op} is queued behind another operation and cannot be driven yet"));
         }
         if current == progress {
             return self.applied();
@@ -2844,21 +2945,21 @@ impl ControlState {
         files: &[BackupFile],
     ) -> ControlResponse {
         if self.policy.is_none() || self.initialized.is_none() {
-            return ControlResponse::Refused {
-                reason: "no placement has been initialized to restore into".to_string(),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotInitialized,
+                "no placement has been initialized to restore into".to_string(),
+            );
         }
         // once per cluster: a second restore would put two histories under one identity
         if let Some(restored) = self.restored_from {
-            return ControlResponse::Refused {
-                reason: format!("this cluster was already restored from {restored}; a restore is once, into a new cluster"),
-            };
+            return ControlResponse::refused(RefusalKind::AlreadyInitialized, format!("this cluster was already restored from {restored}; a restore is once, into a new cluster"));
         }
         if Some(source) == self.cluster {
-            return ControlResponse::Refused {
-                reason: "a backup is restored into a new cluster, never into the one it was cut in"
+            return ControlResponse::refused(
+                RefusalKind::Invalid,
+                "a backup is restored into a new cluster, never into the one it was cut in"
                     .to_string(),
-            };
+            );
         }
         // every tablet of every restored table in exactly one file
         // a tablet id is twelve bits, so the count fits a u16
@@ -2869,7 +2970,7 @@ impl ControlState {
             crate::server::ring::TABLET_COUNT as u16,
         ) {
             Ok(coverage) => coverage,
-            Err(reason) => return ControlResponse::Refused { reason },
+            Err(reason) => return ControlResponse::refused(RefusalKind::Invalid, reason),
         };
         if let Some(refusal) = self.check_version(expected_version) {
             return refusal;
@@ -2895,9 +2996,10 @@ impl ControlState {
             }
         }
         if groups.is_empty() {
-            return ControlResponse::Refused {
-                reason: "the placement derives no groups to restore into".to_string(),
-            };
+            return ControlResponse::refused(
+                RefusalKind::Invalid,
+                "the placement derives no groups to restore into".to_string(),
+            );
         }
         self.topology_version += 1;
         self.restored_from = Some(source);
@@ -2948,9 +3050,10 @@ impl ControlState {
         progress: &GroupRestore,
     ) -> ControlResponse {
         let Some(member) = self.members.get(&node) else {
-            return ControlResponse::Refused {
-                reason: format!("{node} is not a member, so cannot drive a restore"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotMember,
+                format!("{node} is not a member, so cannot drive a restore"),
+            );
         };
         if incarnation < member.record.incarnation {
             return ControlResponse::Fenced {
@@ -2960,14 +3063,16 @@ impl ControlState {
             };
         }
         let Some(record) = self.restores.get_mut(&op) else {
-            return ControlResponse::Refused {
-                reason: format!("no restore operation {op} is recorded"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::UnknownOperation,
+                format!("no restore operation {op} is recorded"),
+            );
         };
         let Some(current) = record.groups.get_mut(&group) else {
-            return ControlResponse::Refused {
-                reason: format!("group {group} is not part of restore {op}"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::UnknownOperation,
+                format!("group {group} is not part of restore {op}"),
+            );
         };
         if current.is_done() {
             return self.applied();
@@ -3007,21 +3112,24 @@ impl ControlState {
         recovered_ms: u64,
     ) -> ControlResponse {
         if self.cluster.is_none() {
-            return ControlResponse::Refused {
-                reason: "no cluster has been bootstrapped to recover".to_string(),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotInitialized,
+                "no cluster has been bootstrapped to recover".to_string(),
+            );
         }
         // every survivor has to be a member, and no survivor is lost
         for node in survivors {
             if !self.members.contains_key(node) {
-                return ControlResponse::Refused {
-                    reason: format!("{node} is not a member, so cannot survive a recovery"),
-                };
+                return ControlResponse::refused(
+                    RefusalKind::NotMember,
+                    format!("{node} is not a member, so cannot survive a recovery"),
+                );
             }
             if lost.contains(node) {
-                return ControlResponse::Refused {
-                    reason: format!("{node} is named both surviving and lost"),
-                };
+                return ControlResponse::refused(
+                    RefusalKind::Duplicate,
+                    format!("{node} is named both surviving and lost"),
+                );
             }
         }
         self.topology_version += 1;
@@ -3089,10 +3197,10 @@ impl ControlState {
         members: &BTreeMap<NodeId, u8>,
     ) -> ControlResponse {
         if self.cluster.is_none() {
-            return ControlResponse::Refused {
-                reason: "no cluster has been bootstrapped to activate a wire version in"
-                    .to_string(),
-            };
+            return ControlResponse::refused(
+                RefusalKind::NotInitialized,
+                "no cluster has been bootstrapped to activate a wire version in".to_string(),
+            );
         }
         if let Some(refusal) = self.check_version(expected_version) {
             return refusal;
@@ -3100,17 +3208,16 @@ impl ControlState {
         // an activation never goes down: the boundary is what nobody rolls back past
         let current = self.activated_wire();
         if wire < current {
-            return ControlResponse::Refused {
-                reason: format!(
+            return ControlResponse::refused(RefusalKind::WireVersion, format!(
                     "wire version {wire} is below the activated {current}; an activation never lowers"
-                ),
-            };
+                ));
         }
         // and it never goes below the floor every member reads
         if wire < MIN_PEER_VERSION {
-            return ControlResponse::Refused {
-                reason: format!("wire version {wire} is below the floor {MIN_PEER_VERSION}"),
-            };
+            return ControlResponse::refused(
+                RefusalKind::WireVersion,
+                format!("wire version {wire} is below the floor {MIN_PEER_VERSION}"),
+            );
         }
         // every member in any phase but removed has to speak it, by what the command says
         // it reported; one the command does not name is not known to
@@ -3132,15 +3239,13 @@ impl ControlState {
             .map(|(node, reported)| format!("{node} at {reported}"))
             .collect();
         if !behind.is_empty() {
-            return ControlResponse::Refused {
-                reason: format!(
+            return ControlResponse::refused(RefusalKind::WireVersion, format!(
                     "wire version {wire} cannot be activated: {} speak{} less; restart {} on a build \
                      that speaks {wire} first",
                     behind.join(", "),
                     if behind.len() == 1 { "s" } else { "" },
                     if behind.len() == 1 { "it" } else { "them" },
-                ),
-            };
+                ));
         }
         // the same version again is applied without moving anything
         if wire == current {
@@ -3175,13 +3280,14 @@ impl ControlState {
         if expected == self.topology_version {
             None
         } else {
-            Some(ControlResponse::Refused {
-                reason: format!(
+            Some(ControlResponse::refused(
+                RefusalKind::StaleVersion,
+                format!(
                     "stale version: the request was written against topology version {expected} \
                      and the cluster is at {}",
                     self.topology_version
                 ),
-            })
+            ))
         }
     }
 
@@ -3354,7 +3460,7 @@ impl ControlState {
 mod tests {
     use super::{
         Consistency, ControlCommand, ControlResponse, ControlState, MemberHealth, MemberRecord,
-        MemberRole,
+        MemberRole, RefusalKind,
     };
     use crate::server::conf::Cluster;
     use crate::shared::identity::{ClusterId, GroupId, NodeId, TableId};
@@ -3634,26 +3740,28 @@ mod tests {
         // a stale version is refused, and the refusal is not remembered: the same op sent again
         // against the current version is a fresh attempt, refused here for another reason
         let stale = state.apply(&initialize(op, 0, vec![node]));
-        assert!(matches!(&stale, ControlResponse::Refused { reason } if reason.contains("stale")));
+        assert!(
+            matches!(&stale, ControlResponse::Refused { reason, .. } if reason.contains("stale"))
+        );
         assert!(matches!(
             state.apply(&initialize(op, 2, vec![node, joiner])),
-            ControlResponse::Refused { reason } if reason.contains("joining")
+            ControlResponse::Refused { reason, .. } if reason.contains("joining")
         ));
         assert!(state.initialized.is_none());
         // a joining member cannot be placed on
         assert!(matches!(
             state.apply(&initialize(Uuid::new_v4(), 2, vec![node, joiner])),
-            ControlResponse::Refused { reason } if reason.contains("joining")
+            ControlResponse::Refused { reason, .. } if reason.contains("joining")
         ));
         state.apply(&ControlCommand::ObserveMember(member(joiner, "b")));
         // a duplicate and a stranger are refused too
         assert!(matches!(
             state.apply(&initialize(Uuid::new_v4(), 3, vec![node, node])),
-            ControlResponse::Refused { reason } if reason.contains("twice")
+            ControlResponse::Refused { reason, .. } if reason.contains("twice")
         ));
         assert!(matches!(
             state.apply(&initialize(Uuid::new_v4(), 3, vec![NodeId::mint()])),
-            ControlResponse::Refused { reason } if reason.contains("not a member")
+            ControlResponse::Refused { reason, .. } if reason.contains("not a member")
         ));
         // the real one applies once
         let op = Uuid::new_v4();
@@ -3680,7 +3788,7 @@ mod tests {
         // and a fresh op is refused, naming the migration
         assert!(matches!(
             state.apply(&initialize(Uuid::new_v4(), 4, vec![joiner])),
-            ControlResponse::Refused { reason } if reason.contains("Move")
+            ControlResponse::Refused { reason, .. } if reason.contains("Move")
         ));
         assert_eq!(state.operations.len(), 1);
     }
@@ -3731,7 +3839,7 @@ mod tests {
         };
         assert!(matches!(
             state.apply(&set(Uuid::new_v4(), 1, TableId::of("Note"), Some(Consistency::Quorum))),
-            ControlResponse::Refused { reason } if reason.contains("not one the placement")
+            ControlResponse::Refused { reason, .. } if reason.contains("not one the placement")
         ));
         assert_eq!(
             state.apply(&ControlCommand::Initialize {
@@ -3748,12 +3856,12 @@ mod tests {
         // `All` is not a read level
         assert!(matches!(
             state.apply(&set(Uuid::new_v4(), 2, TableId::of("Note"), Some(Consistency::All))),
-            ControlResponse::Refused { reason } if reason.contains("C6")
+            ControlResponse::Refused { reason, .. } if reason.contains("C6")
         ));
         // a stale version is refused before anything is recorded
         assert!(matches!(
             state.apply(&set(Uuid::new_v4(), 1, TableId::of("Note"), Some(Consistency::Quorum))),
-            ControlResponse::Refused { reason } if reason.contains("stale")
+            ControlResponse::Refused { reason, .. } if reason.contains("stale")
         ));
         // setting records, and moves the version once
         assert_eq!(
@@ -3868,23 +3976,23 @@ mod tests {
         // refusals: a stranger, a source outside the set, a destination inside it, a stale version
         assert!(matches!(
             state.apply(&moving(Uuid::new_v4(), version, 0, c, NodeId::mint())),
-            ControlResponse::Refused { reason } if reason.contains("not a member")
+            ControlResponse::Refused { reason, .. } if reason.contains("not a member")
         ));
         assert!(matches!(
             state.apply(&moving(Uuid::new_v4(), version, 0, d, b)),
-            ControlResponse::Refused { reason } if reason.contains("not a member of the set")
+            ControlResponse::Refused { reason, .. } if reason.contains("not a member of the set")
         ));
         assert!(matches!(
             state.apply(&moving(Uuid::new_v4(), version, 0, c, b)),
-            ControlResponse::Refused { reason } if reason.contains("already a member")
+            ControlResponse::Refused { reason, .. } if reason.contains("already a member")
         ));
         assert!(matches!(
             state.apply(&moving(Uuid::new_v4(), version, 0, c, c)),
-            ControlResponse::Refused { reason } if reason.contains("itself")
+            ControlResponse::Refused { reason, .. } if reason.contains("itself")
         ));
         assert!(matches!(
             state.apply(&moving(Uuid::new_v4(), version - 1, 0, c, d)),
-            ControlResponse::Refused { reason } if reason.contains("stale")
+            ControlResponse::Refused { reason, .. } if reason.contains("stale")
         ));
         // a joining destination is refused too
         let e = NodeId::mint();
@@ -3892,7 +4000,7 @@ mod tests {
         let version = state.topology_version;
         assert!(matches!(
             state.apply(&moving(Uuid::new_v4(), version, 0, c, e)),
-            ControlResponse::Refused { reason } if reason.contains("joining")
+            ControlResponse::Refused { reason, .. } if reason.contains("joining")
         ));
         // the real one: recorded against the set the map serves tablet zero with
         let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
@@ -3968,15 +4076,15 @@ mod tests {
         };
         assert!(matches!(
             state.apply(&report(Uuid::new_v4(), groups[0], 1, progress(MovePhase::Learner, None))),
-            ControlResponse::Refused { reason } if reason.contains("no move operation")
+            ControlResponse::Refused { reason, .. } if reason.contains("no move operation")
         ));
         assert!(matches!(
             state.apply(&report(queued, groups[0], 1, progress(MovePhase::Learner, None))),
-            ControlResponse::Refused { reason } if reason.contains("queued")
+            ControlResponse::Refused { reason, .. } if reason.contains("queued")
         ));
         assert!(matches!(
             state.apply(&report(op, GroupId(1), 1, progress(MovePhase::Learner, None))),
-            ControlResponse::Refused { reason } if reason.contains("not part of")
+            ControlResponse::Refused { reason, .. } if reason.contains("not part of")
         ));
         assert!(matches!(
             state.apply(&report(
@@ -4154,7 +4262,7 @@ mod tests {
             },
         };
         assert!(
-            matches!(state.apply(&progress), ControlResponse::Refused { reason } if reason.contains("queued"))
+            matches!(state.apply(&progress), ControlResponse::Refused { reason, .. } if reason.contains("queued"))
         );
         // the move done releases it to pending
         let done = |op, group| ControlCommand::MoveProgress {
@@ -4256,11 +4364,11 @@ mod tests {
         let version = state.topology_version;
         assert!(matches!(
             state.apply(&remove(Uuid::new_v4(), version, b, None)),
-            ControlResponse::Refused { reason } if reason.contains("decommission a live one")
+            ControlResponse::Refused { reason, .. } if reason.contains("decommission a live one")
         ));
         assert!(matches!(
             state.apply(&decommission(Uuid::new_v4(), version, NodeId::mint())),
-            ControlResponse::Refused { reason } if reason.contains("not a member")
+            ControlResponse::Refused { reason, .. } if reason.contains("not a member")
         ));
         // decommissioned: leaving, with a plan recorded under the operation
         let plan = Uuid::new_v4();
@@ -4281,11 +4389,11 @@ mod tests {
         let version = state.topology_version;
         assert!(matches!(
             state.apply(&ControlCommand::Move { op: Uuid::new_v4(), principal: "alice".to_string(), expected_version: version, tablet: 0, from: c, to: b }),
-            ControlResponse::Refused { reason } if reason.contains("leaving")
+            ControlResponse::Refused { reason, .. } if reason.contains("leaving")
         ));
         assert!(matches!(
             state.apply(&remove(Uuid::new_v4(), version, b, None)),
-            ControlResponse::Refused { reason } if reason.contains("already under plan")
+            ControlResponse::Refused { reason, .. } if reason.contains("already under plan")
         ));
         // decommissioning it again is applied and changes nothing
         assert_eq!(
@@ -4297,7 +4405,7 @@ mod tests {
         // a tombstone while it still holds a set is refused
         assert!(matches!(
             state.apply(&ControlCommand::Tombstone { node: b, op: Some(plan) }),
-            ControlResponse::Refused { reason } if reason.contains("still holds")
+            ControlResponse::Refused { reason, .. } if reason.contains("still holds")
         ));
         // the leader's progress: steps, then a step moving, then moved, then finishing
         let progress = |progress| ControlCommand::PlanProgress {
@@ -4419,11 +4527,11 @@ mod tests {
         let version = state.topology_version;
         assert!(matches!(
             state.apply(&remove(Uuid::new_v4(), version, b, Some(c))),
-            ControlResponse::Refused { reason } if reason.contains("already holds a set")
+            ControlResponse::Refused { reason, .. } if reason.contains("already holds a set")
         ));
         assert!(matches!(
             state.apply(&remove(Uuid::new_v4(), version, b, Some(NodeId::mint()))),
-            ControlResponse::Refused { reason } if reason.contains("not a member")
+            ControlResponse::Refused { reason, .. } if reason.contains("not a member")
         ));
         let removal = Uuid::new_v4();
         assert_eq!(
@@ -4457,7 +4565,7 @@ mod tests {
         // maintenance cannot suspend a removal
         assert!(matches!(
             state.apply(&ControlCommand::Maintenance { op: Uuid::new_v4(), principal: "alice".to_string(), expected_version: state.topology_version, node: b, suspend: true }),
-            ControlResponse::Refused { reason } if reason.contains("cannot suspend a removal")
+            ControlResponse::Refused { reason, .. } if reason.contains("cannot suspend a removal")
         ));
         // every set moved to d through the moves the plan issues; the configurations say so
         for tablet in &sets {
@@ -4545,11 +4653,11 @@ mod tests {
         );
         assert!(matches!(
             state.apply(&remove(Uuid::new_v4(), state.topology_version, b, None)),
-            ControlResponse::Refused { reason } if reason.contains("already removed")
+            ControlResponse::Refused { reason, .. } if reason.contains("already removed")
         ));
         assert!(matches!(
             state.apply(&decommission(Uuid::new_v4(), state.topology_version, b)),
-            ControlResponse::Refused { reason } if reason.contains("removed")
+            ControlResponse::Refused { reason, .. } if reason.contains("removed")
         ));
         // a membership entry still naming it does not bring it back
         let mut nodes = std::collections::BTreeMap::new();
@@ -4586,7 +4694,7 @@ mod tests {
         );
         assert!(matches!(
             state.apply(&ControlCommand::Rebalance { op: Uuid::new_v4(), principal: "alice".to_string(), expected_version: version + 1 }),
-            ControlResponse::Refused { reason } if reason.contains("already under way")
+            ControlResponse::Refused { reason, .. } if reason.contains("already under way")
         ));
         state.apply(&ControlCommand::PlanProgress {
             op: rebalance,
@@ -4641,7 +4749,7 @@ mod tests {
             expire,
         };
         assert!(
-            matches!(state.apply(&elapsed(Uuid::new_v4(), 5, None)), ControlResponse::Refused { reason } if reason.contains("no grace"))
+            matches!(state.apply(&elapsed(Uuid::new_v4(), 5, None)), ControlResponse::Refused { reason, .. } if reason.contains("no grace"))
         );
         // down opens one at zero
         let episode = Uuid::new_v4();
@@ -4703,7 +4811,7 @@ mod tests {
         };
         assert!(matches!(
             state.apply(&ControlCommand::Maintenance { op: Uuid::new_v4(), principal: "alice".to_string(), expected_version: state.topology_version, node, suspend: true }),
-            ControlResponse::Refused { reason } if reason.contains("no grace")
+            ControlResponse::Refused { reason, .. } if reason.contains("no grace")
         ));
         let version = state.topology_version;
         assert_eq!(
@@ -4884,7 +4992,7 @@ mod tests {
             PROTOCOL_VERSION,
             &[(node, MIN_PEER_VERSION)],
         )) {
-            ControlResponse::Refused { reason } => {
+            ControlResponse::Refused { reason, .. } => {
                 assert!(
                     reason.contains(&node.to_string()) && reason.contains("speaks less"),
                     "{reason}"
@@ -4949,7 +5057,7 @@ mod tests {
             PROTOCOL_VERSION,
             &reported,
         )) {
-            ControlResponse::Refused { reason } => {
+            ControlResponse::Refused { reason, .. } => {
                 assert!(reason.contains(&third.to_string()), "{reason}")
             }
             other => panic!("an activation above a member's wire applied: {other:?}"),
@@ -4988,7 +5096,7 @@ mod tests {
             MIN_PEER_VERSION,
             &reported,
         )) {
-            ControlResponse::Refused { reason } => {
+            ControlResponse::Refused { reason, .. } => {
                 assert!(reason.contains("never lowers"), "{reason}")
             }
             other => panic!("an activation lowered: {other:?}"),
@@ -5007,7 +5115,7 @@ mod tests {
         let mut rolled_back = speaking(node, "a", MIN_PEER_VERSION);
         rolled_back.incarnation = 3;
         match state.apply(&ControlCommand::ObserveMember(rolled_back)) {
-            ControlResponse::Refused { reason } => {
+            ControlResponse::Refused { reason, .. } => {
                 assert!(reason.contains("activated"), "{reason}")
             }
             other => panic!("a member below the activated wire was observed: {other:?}"),
@@ -5035,5 +5143,113 @@ mod tests {
         // the map carries the activation
         let map = crate::server::map::TabletMap::from_state(&state, None, &[]);
         assert_eq!(map.activated_wire, PROTOCOL_VERSION);
+    }
+
+    /// The kind a refusal carries, so an assertion reads the kind and not the sentence
+    ///
+    /// # Arguments
+    ///
+    /// * `response` - What the state machine answered
+    fn kind_of(response: &ControlResponse) -> RefusalKind {
+        match response {
+            ControlResponse::Refused { kind, .. } => *kind,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// Every refusal names its kind, and the kind is what the code is derived from
+    ///
+    /// Before this a refusal was a sentence and the control thread read the sentence to pick
+    /// a code, so every kind but a stale version reached the client as `Internal`
+    /// ([Resolved #98](../../../../docs/src/appendix/resolved/admin-refusal-kinds.md)). One
+    /// refusal of each kind the admin path can meet is driven here and read by kind alone.
+    #[test]
+    fn a_refusal_names_its_kind() {
+        // nothing bootstrapped yet, so there is nothing to observe a member of
+        let mut empty = ControlState::default();
+        let stranger = NodeId::mint();
+        assert_eq!(
+            kind_of(&empty.apply(&ControlCommand::ObserveMember(member(stranger, "z")))),
+            RefusalKind::NotInitialized
+        );
+        let (mut state, _, node) = bootstrapped();
+        // a second bootstrap would fork the cluster
+        let again = ControlCommand::Bootstrap {
+            cluster: ClusterId::mint(),
+            policy: Cluster::default().policy(),
+            member: member(NodeId::mint(), "b"),
+        };
+        assert_eq!(
+            kind_of(&state.apply(&again)),
+            RefusalKind::AlreadyInitialized
+        );
+        // a voter count outside the policy
+        let voters = ControlCommand::SetControlVoters {
+            op: Uuid::new_v4(),
+            principal: "alice".to_string(),
+            expected_version: 1,
+            count: 4,
+        };
+        assert_eq!(kind_of(&state.apply(&voters)), RefusalKind::BadVoterCount);
+        // a member the cluster does not have
+        let health = ControlCommand::SetHealth {
+            node: stranger,
+            health: MemberHealth::Down,
+            incarnation: 1,
+            episode: None,
+        };
+        assert_eq!(kind_of(&state.apply(&health)), RefusalKind::NotMember);
+        // the placement, refused for every reason it can be
+        let joiner = NodeId::mint();
+        state.apply(&ControlCommand::Admit(member(joiner, "b")));
+        let tables = vec![("Row".to_string(), TableId::of("Row"))];
+        let initialize = |expected_version, nodes: Vec<NodeId>| ControlCommand::Initialize {
+            op: Uuid::new_v4(),
+            principal: "alice".to_string(),
+            expected_version,
+            nodes,
+            tables: tables.clone(),
+        };
+        // written against a version the cluster has moved past
+        assert_eq!(
+            kind_of(&state.apply(&initialize(1, vec![node]))),
+            RefusalKind::StaleVersion
+        );
+        // with no node at all
+        assert_eq!(
+            kind_of(&state.apply(&initialize(2, Vec::new()))),
+            RefusalKind::Invalid
+        );
+        // on a member still joining
+        assert_eq!(
+            kind_of(&state.apply(&initialize(2, vec![node, joiner]))),
+            RefusalKind::NotUp
+        );
+        // naming a member twice
+        assert_eq!(
+            kind_of(&state.apply(&initialize(2, vec![node, node]))),
+            RefusalKind::Duplicate
+        );
+        // naming a stranger
+        assert_eq!(
+            kind_of(&state.apply(&initialize(2, vec![stranger]))),
+            RefusalKind::NotMember
+        );
+        // and once it is initialized, initializing it again
+        assert_eq!(
+            state.apply(&initialize(2, vec![node])),
+            ControlResponse::Applied {
+                topology_version: 3
+            }
+        );
+        assert_eq!(
+            kind_of(&state.apply(&initialize(3, vec![node]))),
+            RefusalKind::AlreadyInitialized
+        );
+        // a kind that crossed from a peer that predates it decodes to the default
+        let decoded: ControlResponse =
+            serde_json::from_str(r#"{"Refused":{"reason":"an old peer's refusal"}}"#)
+                .expect("a refusal without a kind still decodes");
+        assert_eq!(kind_of(&decoded), RefusalKind::Other);
     }
 }

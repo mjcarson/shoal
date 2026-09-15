@@ -261,9 +261,9 @@ driver is in process with node zero, as every cluster arm's is, and the record s
 - **The wasm explorer was not checked.** The `wasm32-unknown-unknown` target is not installed on
   the development host's toolchain; the native feature check passed, and the change to
   `shoal-top` is serde types alone.
-- **The fixture's port reservations sit in the ephemeral range.** A deferred node can lose its
-  port to an outbound connection under the full suite
-  ([item 102](../appendix/known-issues.md#102-a-deferred-fixture-node-can-lose-its-reserved-port-to-an-outbound-connection)).
+- ~~**The fixture's port reservations sit in the ephemeral range.** A deferred node can lose its
+  port to an outbound connection under the full suite.~~ The fixture's ports come from a block
+  below the floor since [Resolved #102](../appendix/resolved/fixture-port-block.md).
 
 ## Invariants to uphold
 

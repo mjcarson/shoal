@@ -156,6 +156,29 @@ pub enum ErrorCode {
     /// A checksum failed on it, or a scrub found it divergent, and it serves nothing until a
     /// verified repair or an operator lifts it ([F44](../../../../docs/src/features/repair.md)).
     Quarantined = 64,
+    /// The administrative request named a node that is not a member of this cluster
+    ///
+    /// This and the codes after it are the kinds an admin refusal carries beside its sentence,
+    /// so a client acts on the code rather than the wording
+    /// ([Resolved #98](../../../../docs/src/appendix/resolved/admin-refusal-kinds.md)).
+    NotMember = 65,
+    /// The administrative request named a member that is not up, and needed an up one
+    NotUp = 66,
+    /// The administrative request named a node, a set or a plan twice, or one already holding
+    /// what it would be given
+    Duplicate = 67,
+    /// The cluster, the placement or the restore the request would do is already done
+    AlreadyInitialized = 68,
+    /// The control voter count named is not one the policy allows
+    BadVoterCount = 69,
+    /// The administrative request is malformed as stated, whatever the cluster's state
+    InvalidRequest = 70,
+    /// The member named is in the wrong phase, or under the wrong grace, for the request
+    WrongPhase = 71,
+    /// The operation, group, table or tablet named is not one the cluster records
+    UnknownOperation = 72,
+    /// The wire version named cannot be activated, or is below what the request needs
+    WireVersion = 73,
 }
 
 impl ErrorCode {
@@ -203,6 +226,15 @@ impl ErrorCode {
             62 => ErrorCode::NotLeader,
             63 => ErrorCode::NotInitialized,
             64 => ErrorCode::Quarantined,
+            65 => ErrorCode::NotMember,
+            66 => ErrorCode::NotUp,
+            67 => ErrorCode::Duplicate,
+            68 => ErrorCode::AlreadyInitialized,
+            69 => ErrorCode::BadVoterCount,
+            70 => ErrorCode::InvalidRequest,
+            71 => ErrorCode::WrongPhase,
+            72 => ErrorCode::UnknownOperation,
+            73 => ErrorCode::WireVersion,
             // zero, and anything a newer peer knows about that we do not
             _ => ErrorCode::Unknown,
         }
@@ -235,6 +267,15 @@ impl ErrorCode {
             ErrorCode::NotLeader => "NotLeader",
             ErrorCode::NotInitialized => "NotInitialized",
             ErrorCode::Quarantined => "Quarantined",
+            ErrorCode::NotMember => "NotMember",
+            ErrorCode::NotUp => "NotUp",
+            ErrorCode::Duplicate => "Duplicate",
+            ErrorCode::AlreadyInitialized => "AlreadyInitialized",
+            ErrorCode::BadVoterCount => "BadVoterCount",
+            ErrorCode::InvalidRequest => "InvalidRequest",
+            ErrorCode::WrongPhase => "WrongPhase",
+            ErrorCode::UnknownOperation => "UnknownOperation",
+            ErrorCode::WireVersion => "WireVersion",
         }
     }
 }

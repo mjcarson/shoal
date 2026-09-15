@@ -1007,13 +1007,26 @@ pub struct TransportFacts {
     pub inflight_bytes: u64,
     /// How long a forwarded query waits before it is reported with an unknown outcome
     pub forward_timeout_ms: u64,
-    /// Every link the reporting shard held at the end of the run
+    /// The shards that answered for their links, in shard order
+    ///
+    /// Every shard of the node since
+    /// [Resolved #95](../../../docs/src/appendix/resolved/transport-view-every-shard.md); a
+    /// capture from before it recorded shard zero alone and reads back empty here.
+    #[serde(default)]
+    pub shards: Vec<usize>,
+    /// Every link every answering shard held at the end of the run
     pub links: Vec<LinkFacts>,
 }
 
 /// One outbound peer link at the end of a run
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkFacts {
+    /// The shard that held it
+    ///
+    /// Zero on a capture from before every shard was asked
+    /// ([Resolved #95](../../../docs/src/appendix/resolved/transport-view-every-shard.md)).
+    #[serde(default)]
+    pub shard: usize,
     /// The node it led to
     pub node: String,
     /// The lane it carried: `data`, `control` or `bulk`

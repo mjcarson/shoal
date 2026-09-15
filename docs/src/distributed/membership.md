@@ -215,8 +215,8 @@ into the leader at sixty-four members, and the first thing to bound at a hundred
 A member has no failure domain, so voters are not spread over one. The detector's seeding grace
 is a constant. The grace is the policy's, not per member, and there is no `SetPolicy`. Data
 loaded before `Initialize` stays on the bootstrapper. Only the leader's detector view is
-meaningful, and the admin refusal's code is derived from its reason text
-([item 98](../appendix/known-issues.md#98-an-admin-refusals-error-code-is-derived-from-its-reason-text)).
+meaningful. ~~The admin refusal's code is derived from its reason text~~ - a refusal carries
+its kind since [Resolved #98](../appendix/resolved/admin-refusal-kinds.md).
 A member isolated on every lane long enough to inflate its term trips a debug assertion when
 healed ([item 106](../appendix/known-issues.md#106-a-member-isolated-on-every-lane-long-enough-to-inflate-its-term-trips-an-openraft-debug-assertion-when-healed)).
 See [C15](open-issues.md).

@@ -24,7 +24,11 @@ mutation is relayed to the control thread, forwarded to the control leader, judg
 `expected_version` (`StaleVersion` if the topology moved under it), authorized against
 `cluster.admins` by the connection's SCRAM principal (`Unauthorized` naming who may), applied
 once by its `op` id (`Repeated { version }` the second time), logged with the principal, and
-answered `Applied { version }` with a record a later read follows.
+answered `Applied { version }` with a record a later read follows. A refusal is answered by
+the kind the state machine decided - `NotMember`, `NotUp`, `WrongPhase`, `Duplicate`,
+`AlreadyInitialized`, `NotInitialized`, `BadVoterCount`, `UnknownOperation`, `WireVersion`,
+`InvalidRequest`, a queued transition as `Unavailable` - with the sentence as the message
+([Resolved #98](../appendix/resolved/admin-refusal-kinds.md)).
 
 ```mermaid
 sequenceDiagram
@@ -245,9 +249,9 @@ Backup files land on each leader's disk with no shipping, encryption, retention 
 restore is once, whole, into an empty cluster - no point-in-time or single-table restore; a
 recovery is to one survivor. A quarantine is routed around per holder, not per table. One
 repair per shard at a time; a scheduled scrub refused stale is not retried. `shoalctl`'s tab
-reaches one node. Nothing issues a certificate. An admin refusal's code is derived from its
-reason text ([item 98](../appendix/known-issues.md#98-an-admin-refusals-error-code-is-derived-from-its-reason-text)).
-See [C15](open-issues.md).
+reaches one node. Nothing issues a certificate. ~~An admin refusal's code is derived from its
+reason text~~ - a refusal carries its kind since
+[Resolved #98](../appendix/resolved/admin-refusal-kinds.md). See [C15](open-issues.md).
 
 ## Invariants to uphold
 

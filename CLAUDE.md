@@ -43,6 +43,11 @@ cargo test -p shoal --features otel --test trace_propagation
 # and the same property on a program somebody runs
 cargo build -p shoalctl
 
+# the two feature-gated shoal-bench binaries are built by nobody else, and the one test behind a
+# feature that starts a server runs against a scratch copy of shoal.yml (item 97)
+cargo check -p shoal-bench --features stage-profile,hotpath --all-targets
+cargo test -p shoal-bench --features stage-profile --test stage_join
+
 # the protocol model (F36) is pure: no engine, no runtime, no shoal crate in its graph. it tests
 # while shoal-core does not compile, and `cargo tree -p shoal-model` must never mention glommio
 cargo test -p shoal-model
