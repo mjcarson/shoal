@@ -190,9 +190,11 @@ The checkpoint file is rewritten whole. `All` is polled from metrics. An isolate
 *inside* its lease still appends and answers `OutcomeUnknown` at the deadline. Leadership
 stays where an election put it. The identity watermark is replica-local, so two coordinators
 can answer one late retry differently, though neither applies it twice. A standalone node has
-no retry table. A volatile group's survivor trips a debug assertion when a majority loses its
-memory log at once ([item 109](../appendix/known-issues.md#109-a-volatile-groups-survivor-trips-an-openraft-debug-assertion-when-a-majority-loses-its-memory-log-at-once)).
-See [C15](open-issues.md).
+no retry table. ~~A volatile group's survivor trips a debug assertion when a majority loses its
+memory log at once~~ - an empty copy that held the group before waits to be fed by the
+survivor rather than electing with the other empty
+([Resolved #109](../appendix/resolved/volatile-majority-loss.md)); a group where every member
+lost its memory is new again after two election timeouts. See [C15](open-issues.md).
 
 ## Invariants to uphold
 

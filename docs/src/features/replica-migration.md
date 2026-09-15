@@ -279,11 +279,12 @@ request is recorded and runs when it can, and the record says what it waits behi
   pending marker; ~~M10's compatibility rules are where that is judged~~ judged at
   [F48](rolling-compatibility.md): the field is in both codecs, since every build in the
   negotiable range has it, and the three fields F48 added are what the version 4 codec leaves out.
-- **The volatile-group assertion the crash matrix found is not this milestone's.** Two voters
+- ~~**The volatile-group assertion the crash matrix found is not this milestone's.** Two voters
   of an ephemeral table's group losing their memory log at once elect a fresh leader whose log
   conflicts with the survivor's committed entries, which is that table's data gone by
-  definition and an openraft debug assertion on the survivor
-  ([item 109](../appendix/known-issues.md#109-a-volatile-groups-survivor-trips-an-openraft-debug-assertion-when-a-majority-loses-its-memory-log-at-once)).
+  definition and an openraft debug assertion on the survivor.~~ The empties no longer elect
+  each other over the survivor ([Resolved #109](../appendix/resolved/volatile-majority-loss.md)),
+  and the test here still names the persistent table's group so exactly one driver dies.
 
 ## Invariants to uphold
 
@@ -378,6 +379,6 @@ magnitude; the capture is the benchmark host's.
 [F39](membership.md), [F40](replication.md), [F42](primary-failover.md),
 [F43](node-recovery.md), [F44](repair.md),
 [Resolved #108](../appendix/resolved/cluster-arm-overrides-dropped.md),
-[item 109](../appendix/known-issues.md#109-a-volatile-groups-survivor-trips-an-openraft-debug-assertion-when-a-majority-loses-its-memory-log-at-once),
+[Resolved #109](../appendix/resolved/volatile-majority-loss.md),
 [O55](../appendix/optimizations.md#o55-a-learner-inside-the-retained-log-is-fed-a-snapshot-when-the-leaders-cached-cut-is-newer-than-its-purge-point).
 

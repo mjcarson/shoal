@@ -8877,6 +8877,130 @@ async fn volatile_replication_uses_common_encoding() -> Result<(), FixtureError>
     Ok(())
 }
 
+/// Two volatile voters lost at once do not kill the survivor's group (C5 M4)
+///
+/// [Item 109](../../docs/src/appendix/resolved/volatile-majority-loss.md): an ephemeral
+/// table's group keeps its log in memory, so two of its three voters restarted together come
+/// back empty together, elect each other - an empty log is as up to date as another - and the
+/// new leader appends at indexes the survivor has committed, which trips openraft's
+/// `has_log_id` on the survivor and leaves its core dead with the shard none the wiser. Rows
+/// are written through node zero; nodes one and two are killed at once and restarted at once;
+/// node zero's copy of every volatile group is still up afterwards - a core that died reports
+/// `core_dead` and is not up - the group elects, the rows written before the kill read back
+/// through node zero, and new rows are written and read on every node.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_volatile_voters_lost_at_once_do_not_kill_the_survivor() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .primary_failover_after(Duration::from_secs(1))
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await?;
+    for key in 300..320u64 {
+        client
+            .send_one(Row {
+                key,
+                data: format!("row {key}"),
+            })
+            .await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Row", Duration::from_secs(20))?;
+    // the term every volatile group is at, as the survivor sees it, before the loss
+    let terms_before: std::collections::BTreeMap<u64, u64> = {
+        let view = groups_of(&mut cluster, 0)?;
+        let mut terms = std::collections::BTreeMap::new();
+        for shard in view["shards"].as_array().into_iter().flatten() {
+            for group in shard["groups"].as_array().into_iter().flatten() {
+                if group["table_name"] == "Row" {
+                    terms.insert(
+                        group["group"].as_u64().unwrap_or_default(),
+                        group["term"].as_u64().unwrap_or_default(),
+                    );
+                }
+            }
+        }
+        terms
+    };
+    assert!(
+        !terms_before.is_empty(),
+        "the survivor holds no volatile group"
+    );
+    // two of every group's three voters lose their memory at once
+    cluster.kill(1)?;
+    cluster.kill(2)?;
+    cluster.restart(1, NodeKind::Server)?;
+    cluster.restart(2, NodeKind::Server)?;
+    cluster.wait_joined(&[1, 2])?;
+    // every group the survivor did not lead elects again - a term above the one before, with
+    // a leader - and the survivor's copies are alive throughout: a core that died would
+    // report so and be down. A group the survivor leads keeps its lead: the empties accept
+    // its appends, and it needs no election
+    let survivor = cluster.node_ids()[0].clone();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let view = groups_of(&mut cluster, 0)?;
+        let mut elected = 0;
+        let mut waiting = 0;
+        for shard in view["shards"].as_array().into_iter().flatten() {
+            for group in shard["groups"].as_array().into_iter().flatten() {
+                if group["table_name"] != "Row" {
+                    continue;
+                }
+                assert!(
+                    group["core_dead"].is_null(),
+                    "the survivor's copy of a volatile group died: {group}"
+                );
+                assert_eq!(group["up"], true, "{group}");
+                let id = group["group"].as_u64().unwrap_or_default();
+                let before = terms_before.get(&id).copied().unwrap_or_default();
+                let led_by_survivor = group["leader"]["node"] == survivor;
+                if !group["leader"].is_null()
+                    && (led_by_survivor || group["term"].as_u64().unwrap_or_default() > before)
+                {
+                    elected += 1;
+                } else {
+                    waiting += 1;
+                }
+            }
+        }
+        if waiting == 0 && elected > 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the volatile groups elected nobody after two voters came back empty: {view}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // every row written before the kill reads back through the survivor, and so do new ones
+    // written through it, on every node
+    for key in 300..320u64 {
+        let found = client.send_one(RowGet::new(vec![key])).await?;
+        assert!(
+            found.access::<Row>()?.is_some_and(|rows| rows.len() == 1),
+            "row {key} was lost with the two voters' memory"
+        );
+    }
+    for key in 320..330u64 {
+        client
+            .send_one(Row {
+                key,
+                data: format!("row {key}"),
+            })
+            .await?;
+    }
+    let rows = wait_digests_equal(&mut cluster, &[0, 1, 2], "Row", Duration::from_secs(30))?;
+    assert_eq!(rows["rows"].as_u64(), Some(30), "{rows}");
+    for node in 0..3 {
+        assert_eq!(cluster.node(node).failure(), None, "node {node} died");
+    }
+    Ok(())
+}
+
 /// `One` reads converge without exposing uncommitted state (C6 M4, P4)
 ///
 /// A follower cut off from the leader serves its committed, applied state - the old value -

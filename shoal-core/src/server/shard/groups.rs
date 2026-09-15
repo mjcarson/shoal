@@ -66,13 +66,19 @@ use crate::shared::protocol::read::SessionToken;
 use crate::shared::responses::ResponseError;
 use crate::shared::traits::{QuerySupport, TableNameSupport};
 use crate::storage::CompactionJob;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// How long a proposer waits before asking its own group again while its lease starts
 const LEASE_POLL: Duration = Duration::from_millis(20);
 
 /// How many deadline ticks pass between two sweeps of the WAL segments
 const REPORT_EVERY_TICKS: u32 = 10;
+
+/// How long the sweep waits for a group's core to answer whether it runs
+///
+/// A running core answers in microseconds and a dead one at once; the bound is for a core
+/// that is busy, which is asked again on the next sweep rather than waited on by the loop.
+const CORE_PROBE_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// One group this shard hosts
 pub(super) struct Group<D: ShoalDatabase> {
@@ -103,6 +109,110 @@ pub(super) struct Group<D: ShoalDatabase> {
     pub(super) snapshot_building: bool,
     /// Transfers waiting for the cut in flight
     pub(super) snapshot_waiting: Vec<oneshot::Sender<Result<Rc<BuiltSnapshot>, String>>>,
+    /// When this copy's handle came up, for the grace an empty volatile copy grants votes under
+    /// ([Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md))
+    pub(super) up_since: Option<Instant>,
+    /// Whether this shard held this volatile group's log before, in a run that is over
+    ///
+    /// Read from the `volatile/` markers under the shard's WAL directory at start and written
+    /// there the first time the group comes up. An empty volatile copy that held the group
+    /// before is empty because its memory went, not because the group is new, and is judged
+    /// so when it is asked for a vote and when it would initialize the group
+    /// ([Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md)).
+    pub(super) held_before: bool,
+    /// Why this copy's `RaftCore` is gone, if the sweep found it so
+    ///
+    /// A core that panicked leaves its handle answering nothing and its metrics as they were;
+    /// the sweep asks each handle a question only a running core answers and keeps the
+    /// answer here, so the report says the copy is down rather than what it last was
+    /// ([Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md)).
+    pub(super) core_dead: Option<String>,
+}
+
+/// The directory under a shard's WAL where every volatile group it ever held is marked
+const VOLATILE_DIR: &str = "volatile";
+
+/// Every volatile group this shard has held before, by the markers under its WAL directory
+///
+/// # Arguments
+///
+/// * `wal_dir` - The shard's WAL directory
+fn scan_held_volatile(wal_dir: &Path) -> HashSet<GroupId> {
+    let mut held = HashSet::new();
+    // every marker is named by its group; anything else in the directory is not one
+    if let Ok(entries) = std::fs::read_dir(wal_dir.join(VOLATILE_DIR)) {
+        for entry in entries.flatten() {
+            if let Some(group) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u64>().ok())
+            {
+                held.insert(GroupId(group));
+            }
+        }
+    }
+    held
+}
+
+/// Mark that this shard holds a volatile group, so a restart knows an empty copy lost its log
+///
+/// # Arguments
+///
+/// * `wal_dir` - The shard's WAL directory
+/// * `group` - The group
+async fn mark_held_volatile(wal_dir: &Path, group: GroupId) -> std::io::Result<()> {
+    let dir = wal_dir.join(VOLATILE_DIR);
+    std::fs::create_dir_all(&dir)?;
+    // an empty file named by the group, written the way every marker under the WAL is
+    crate::server::wal::write_atomic(&dir, &group.0.to_string(), Vec::new()).await
+}
+
+/// Whether an empty volatile copy grants a vote to the candidate asking
+///
+/// A volatile group's log lives in memory, so a member that restarts comes back with none. Two
+/// of three voters restarting at once come back empty together and can elect each other - an
+/// empty log is as up to date as another empty log - and the new leader then appends fresh
+/// entries at indexes the surviving third has committed, which trips openraft's `has_log_id`
+/// on the survivor. So a copy that is empty since its start grants nothing to a candidate
+/// whose log is as empty - none, or the bootstrap entry alone - and grants to one with a real
+/// log, which is the survivor, who then leads and feeds the empties. The grace bounds it: a
+/// group where every member lost its memory would otherwise elect nobody, so after two
+/// election timeouts without being fed an empty copy grants as any other would, and the
+/// ephemeral contract - a majority's memory lost is the data lost - is honoured explicitly
+/// ([Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md)).
+///
+/// A copy that never held the group has lost nothing, so it grants as openraft would: a fresh
+/// group's copies elect at once. The rule is for a copy that held the group in a run that is
+/// over, which is empty because its memory went.
+///
+/// # Arguments
+///
+/// * `volatile` - Whether the group's log is in memory
+/// * `restarted` - Whether this shard held the group before, so a memory log it had is gone
+/// * `own_last_index` - The last log index this copy holds, if any
+/// * `candidate_last_index` - The last log index the candidate holds, if any
+/// * `up_for` - How long this copy's handle has been up
+/// * `grace` - How long an empty copy holds out, two election timeouts
+#[must_use]
+pub(super) fn grants_to_empty_candidate(
+    volatile: bool,
+    restarted: bool,
+    own_last_index: Option<u64>,
+    candidate_last_index: Option<u64>,
+    up_for: Duration,
+    grace: Duration,
+) -> bool {
+    // a durable copy, a copy on a node that never lost anything, or one that holds a log,
+    // judges the candidate the way openraft does
+    if !volatile || !restarted || own_last_index.is_some_and(|index| index > 0) {
+        return true;
+    }
+    // a candidate with a real log is the survivor, and gets the vote
+    if candidate_last_index.is_some_and(|index| index > 0) {
+        return true;
+    }
+    // two empties: not until the grace says nobody is coming to feed this copy
+    up_for >= grace
 }
 
 /// An apply batch stopped on a partition read
@@ -348,6 +458,8 @@ where
             return Ok(());
         }
         replication.epoch += 1;
+        // the volatile groups this shard held in a run that is over, from the markers on disk
+        let held_volatile = scan_held_volatile(&replication.wal_dir);
         // the groups this executor hosts under the map, if the node is placed at all: every
         // group whose slot the hosting puts here ([F47](../../../../docs/src/features/local-rehome.md))
         let specs: Vec<GroupSpec> = if placed {
@@ -500,6 +612,9 @@ where
             }
             let state = Rc::new(RefCell::new(machine_state));
             let machine = GroupMachine::new(spec.id, state.clone(), tx.clone());
+            // a volatile group this shard held in a run that is over starts empty because
+            // its memory went, which is not how a new group starts
+            let held_before = store.is_volatile() && held_volatile.contains(&spec.id);
             let group = Group {
                 spec: spec.clone(),
                 table,
@@ -512,6 +627,9 @@ where
                 retired: Vec::new(),
                 snapshot_building: false,
                 snapshot_waiting: Vec::new(),
+                up_since: None,
+                held_before,
+                core_dead: None,
             };
             replication.groups.insert(spec.id, group);
             // the handle is built on a task of its own, since building it applies
@@ -520,7 +638,17 @@ where
                 network: replication.network.clone(),
             };
             let config = group_config(&cluster, failover_ms, spec.id);
-            spawn_group_start(tx.clone(), me, spec, config, network, store, machine, None);
+            spawn_group_start(
+                tx.clone(),
+                me,
+                spec,
+                config,
+                network,
+                store,
+                machine,
+                None,
+                held_before,
+            );
         }
         // the copies a move took from here retire, with their files, for the grace
         for (id, group, op) in retiring {
@@ -637,6 +765,7 @@ where
             slot.store.clone(),
             machine,
             Some(previous),
+            slot.held_before,
         );
         Ok(())
     }
@@ -711,6 +840,7 @@ where
             slot.store.clone(),
             machine,
             Some(previous),
+            slot.held_before,
         );
         Ok(())
     }
@@ -811,6 +941,19 @@ where
             (Some(slot), Ok(raft)) => {
                 event!(Level::INFO, msg = "a tablet group is up", group = %group, members = slot.spec.members.len());
                 slot.raft = Some(raft);
+                slot.up_since = Some(Instant::now());
+                // a volatile group is marked as held whenever it comes up here, so the next
+                // run of this shard knows an empty copy of it lost its log; what this run
+                // knows stays what the scan at its start said
+                if slot.store.is_volatile() {
+                    let wal_dir = replication.wal.dir();
+                    glommio::spawn_local(async move {
+                        if let Err(error) = mark_held_volatile(&wal_dir, group).await {
+                            event!(Level::WARN, msg = "could not mark a volatile group as held", group = %group, %error);
+                        }
+                    })
+                    .detach();
+                }
                 let waiting = std::mem::take(&mut slot.waiting);
                 for (meta, table, key, payload) in waiting {
                     self.propose_write(meta, table, key, payload).await?;
@@ -1561,6 +1704,14 @@ where
         let deadline = Duration::from_millis(u64::from(head.deadline_ms.max(1)));
         let all =
             self.map.get().write_consistency == crate::server::conf::cluster::Consistency::All;
+        // what a vote request is judged against before openraft sees it: whether this copy's
+        // log is in memory, whether this node has started before, and how long the copy has
+        // been up empty
+        let volatile = slot.store.is_volatile();
+        let restarted = slot.held_before;
+        let up_for = slot
+            .up_since
+            .map_or(Duration::ZERO, |since| since.elapsed());
         let _ = origin;
         glommio::spawn_local(async move {
             let answer = match head.kind {
@@ -1571,11 +1722,33 @@ where
                     },
                     Err(error) => ReplicateReply::error(head.id, format!("decoding append_entries: {error}")),
                 },
-                ReplicateKind::Vote => match postcard::from_bytes(&payload) {
-                    Ok(rpc) => match raft.vote(rpc).await {
-                        Ok(response) => encode_reply(head.id, &response),
-                        Err(error) => ReplicateReply::error(head.id, format!("vote: {error}")),
-                    },
+                ReplicateKind::Vote => match postcard::from_bytes::<openraft::raft::VoteRequest<DataConfig>>(&payload) {
+                    Ok(rpc) => {
+                        // an empty volatile copy grants nothing to a candidate as empty as
+                        // itself, so two members that lost their memory at once cannot elect
+                        // each other over a survivor that kept it
+                        // ([Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md))
+                        let (own_last, own_vote, grace) = {
+                            let metrics = raft.metrics();
+                            let metrics = metrics.borrow_watched();
+                            (
+                                metrics.last_log_index,
+                                metrics.vote.clone(),
+                                Duration::from_millis(raft.config().election_timeout_max * 2),
+                            )
+                        };
+                        let candidate_last = rpc.last_log_id.as_ref().map(|log_id| log_id.index);
+                        if !grants_to_empty_candidate(volatile, restarted, own_last, candidate_last, up_for, grace) {
+                            event!(Level::WARN, msg = "an empty volatile copy refused an empty candidate's vote", group = %group, candidate = %rpc.vote);
+                            let refused = openraft::raft::VoteResponse::<DataConfig>::new(own_vote, None, false);
+                            encode_reply(head.id, &refused)
+                        } else {
+                            match raft.vote(rpc).await {
+                                Ok(response) => encode_reply(head.id, &response),
+                                Err(error) => ReplicateReply::error(head.id, format!("vote: {error}")),
+                            }
+                        }
+                    }
                     Err(error) => ReplicateReply::error(head.id, format!("decoding vote: {error}")),
                 },
                 // the lead handed to this member, or to another it is told about
@@ -1657,6 +1830,44 @@ where
                 ..
             } => replication.network.down(node, &reason, &unsent),
             LinkEvent::Up { .. } => {}
+        }
+    }
+
+    /// Ask every group's handle whether its core still runs, and remember the ones that do not
+    ///
+    /// openraft's `RaftCore` is a task; one that panics - a debug assertion, say - ends with its
+    /// handle still held and its metrics frozen where they were, and nothing else says so. A
+    /// question only the core answers comes back `Fatal` from a dead one at once, since the
+    /// task it would wait on has finished. Run on the sweep, every so many ticks, so the cost
+    /// is a message per group every second or so and a dead core is reported within that.
+    pub(super) async fn probe_cores(&mut self) {
+        let Some(replication) = self.replication.as_mut() else {
+            return;
+        };
+        // the handles to ask, taken out of the borrow first
+        let handles: Vec<(GroupId, Raft<DataConfig, GroupMachine<D>>)> = replication
+            .groups
+            .iter()
+            .filter(|(_, slot)| slot.core_dead.is_none())
+            .filter_map(|(group, slot)| slot.raft.clone().map(|raft| (*group, raft)))
+            .collect();
+        for (group, raft) in handles {
+            // a live core answers in microseconds; a dead one answers Fatal without waiting on
+            // anything; a core busy past the bound is neither, and is asked again next sweep
+            let asked = glommio::timer::timeout(CORE_PROBE_TIMEOUT, async {
+                Ok(raft.is_initialized().await)
+            })
+            .await;
+            if let Ok(Err(fatal)) = asked {
+                event!(Level::ERROR, msg = "a tablet group's core is gone on this shard; the copy serves nothing until the process restarts", group = %group, %fatal);
+                if let Some(slot) = self
+                    .replication
+                    .as_mut()
+                    .and_then(|replication| replication.groups.get_mut(&group))
+                {
+                    slot.core_dead = Some(fatal.to_string());
+                }
+            }
         }
     }
 
@@ -2108,7 +2319,7 @@ where
                     purged: slot.store.purged_index().unwrap_or(0),
                     pending_bytes: slot.pending_bytes,
                     volatile: slot.store.is_volatile(),
-                    up: slot.raft.is_some(),
+                    up: slot.raft.is_some() && slot.core_dead.is_none(),
                     installing: state.installing,
                     voters: metrics
                         .as_ref()
@@ -2117,6 +2328,7 @@ where
                     learner: slot.spec.learner,
                     quarantined: state.quarantined.map(|quarantine| quarantine.reason),
                     bytes,
+                    core_dead: slot.core_dead.clone(),
                     term: metrics
                         .as_ref()
                         .map(|metrics| metrics.current_term)
@@ -2776,6 +2988,7 @@ const FIXTURE_SCRUB_TIMEOUT: Duration = Duration::from_secs(60);
 /// * `store` - Its log
 /// * `machine` - Its state machine
 /// * `previous` - The handle to shut down first, for a restart
+/// * `held_before` - Whether this is a volatile copy that held the group in a run that is over
 #[allow(clippy::too_many_arguments)]
 fn spawn_group_start<D: ShoalDatabase>(
     tx: AsyncSender<ServerMsg<D>>,
@@ -2786,6 +2999,7 @@ fn spawn_group_start<D: ShoalDatabase>(
     store: GroupStore,
     machine: GroupMachine<D>,
     previous: Option<Raft<DataConfig, GroupMachine<D>>>,
+    held_before: bool,
 ) {
     let addr = ShardAddr::new(me, spec.mine);
     // a learner is never the primary, whatever slot the target puts it in
@@ -2795,7 +3009,17 @@ fn spawn_group_start<D: ShoalDatabase>(
         if let Some(previous) = previous {
             let _ = previous.shutdown().await;
         }
-        let outcome = start_group(addr, spec, config, network, store, machine, primary).await;
+        let outcome = start_group(
+            addr,
+            spec,
+            config,
+            network,
+            store,
+            machine,
+            primary,
+            held_before,
+        )
+        .await;
         let _ = tx
             .send(ServerMsg::GroupUp {
                 group: network_group(&outcome),
@@ -2831,6 +3055,7 @@ fn network_group<D: ShoalDatabase>(
 /// * `store` - Its log store
 /// * `machine` - Its state machine
 /// * `primary` - Whether this shard is the placement primary, which elects first
+#[allow(clippy::too_many_arguments)]
 async fn start_group<D: ShoalDatabase>(
     me: ShardAddr,
     spec: GroupSpec,
@@ -2839,6 +3064,7 @@ async fn start_group<D: ShoalDatabase>(
     store: GroupStore,
     machine: GroupMachine<D>,
     primary: bool,
+    held_before: bool,
 ) -> Result<(GroupId, Raft<DataConfig, GroupMachine<D>>), (GroupId, String)> {
     let group = spec.id;
     let raft = Raft::<DataConfig, GroupMachine<D>>::new(me, config, network, store, machine)
@@ -2873,7 +3099,15 @@ async fn start_group<D: ShoalDatabase>(
         event!(Level::INFO, msg = "built a tablet group as its learner", group = %group, members = spec.members.len());
         return Ok((group, raft));
     }
-    if !initialized && (primary || spec.voters.len() == 1) {
+    // a volatile copy that held the group before and is empty now lost its memory, and does
+    // not initialize the group again as though it were new: the members that kept theirs
+    // lead and feed it, and if none did the head start below initializes it after the grace
+    // ([Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md))
+    let lost_memory = held_before && !initialized;
+    if lost_memory {
+        event!(Level::WARN, msg = "a volatile copy came back empty; it waits to be fed rather than initializing the group again", group = %group);
+    }
+    if !initialized && !lost_memory && (primary || spec.voters.len() == 1) {
         if let Err(error) = raft.initialize(members.clone()).await {
             event!(Level::DEBUG, msg = "a group was initialized already", group = %group, %error);
         }
@@ -2907,7 +3141,7 @@ async fn start_group<D: ShoalDatabase>(
         .detach();
         event!(Level::INFO, msg = "a returning leader waits out its old lease before standing", group = %group, lease_ms = lease.as_millis() as u64);
     }
-    if spec.voters.len() > 1 && !primary && !returning_leader {
+    if spec.voters.len() > 1 && (!primary || lost_memory) && !returning_leader {
         raft.runtime_config().elect(false);
         let head_start = Duration::from_millis(raft.config().election_timeout_max * 2);
         let handle = raft.clone();
@@ -3062,9 +3296,11 @@ async fn propose_through<D: ShoalDatabase>(
                         // a hop that landed here while nobody leads is refused at once: the
                         // node that hopped named this member from a stale hint, and waiting
                         // the election out would hold its client for the whole forwarded
-                        // deadline when a refusal lets it ask again elsewhere
+                        // deadline when a refusal lets it ask again elsewhere. A group that
+                        // has never voted is starting, not failing over, and a hop waits for
+                        // its first leader as it always did
                         // ([Resolved #103](../../../../docs/src/appendix/resolved/returning-leader.md))
-                        Lease::Electing if !may_hop => {
+                        Lease::Electing if !may_hop && has_voted(raft) => {
                             return ProposalOutcome::NotLeader(format!(
                                 "group {group} is electing on {me}; nobody leads it here yet"
                             ));
@@ -3104,6 +3340,21 @@ async fn propose_through<D: ShoalDatabase>(
     outcome
 }
 
+/// Whether a group has ever voted, as this copy knows it
+///
+/// A copy whose vote is at term zero is in a group electing its first leader; one past it is
+/// in a group that had a leader and is choosing another.
+///
+/// # Arguments
+///
+/// * `raft` - This copy's handle
+fn has_voted<D: ShoalDatabase>(raft: &Raft<DataConfig, GroupMachine<D>>) -> bool {
+    // the vote's term, which the first election moves off zero
+    let metrics = raft.metrics();
+    let voted = metrics.borrow_watched().vote.leader_id().term > 0;
+    voted
+}
+
 /// Encode an answer for the replication lane
 ///
 /// # Arguments
@@ -3121,4 +3372,109 @@ fn encode_reply<T: serde::Serialize>(id: u64, value: &T) -> ReplicateReply {
 #[allow(dead_code)]
 fn peer_client(id: u64) -> Uuid {
     Uuid::from_u64_pair(id, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::grants_to_empty_candidate;
+    use std::time::Duration;
+
+    /// An empty volatile copy that lost its memory grants no vote to a candidate as empty
+    ///
+    /// The rule of [Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md),
+    /// judged case by case: a durable copy grants as openraft would, a copy that never held the
+    /// group grants, a copy holding a log grants, a candidate with a real log is granted to,
+    /// two empties are not - until the grace says nobody is coming to feed this one.
+    #[test]
+    fn an_empty_volatile_copy_grants_no_vote_to_an_empty_candidate() {
+        let grace = Duration::from_secs(4);
+        let fresh = Duration::from_millis(100);
+        // a durable copy never judges: openraft does
+        assert!(grants_to_empty_candidate(
+            false, true, None, None, fresh, grace
+        ));
+        // a copy that never held the group is a fresh group's copy, and grants
+        assert!(grants_to_empty_candidate(
+            true, false, None, None, fresh, grace
+        ));
+        assert!(grants_to_empty_candidate(
+            true,
+            false,
+            None,
+            Some(0),
+            fresh,
+            grace
+        ));
+        // a copy that holds a log judges the candidate the way openraft does
+        assert!(grants_to_empty_candidate(
+            true,
+            true,
+            Some(8),
+            None,
+            fresh,
+            grace
+        ));
+        assert!(grants_to_empty_candidate(
+            true,
+            true,
+            Some(8),
+            Some(0),
+            fresh,
+            grace
+        ));
+        // an empty copy that lost its memory grants to the survivor with a real log
+        assert!(grants_to_empty_candidate(
+            true,
+            true,
+            None,
+            Some(8),
+            fresh,
+            grace
+        ));
+        assert!(grants_to_empty_candidate(
+            true,
+            true,
+            Some(0),
+            Some(1),
+            fresh,
+            grace
+        ));
+        // and not to another empty, whether it has nothing or the bootstrap entry alone
+        assert!(!grants_to_empty_candidate(
+            true, true, None, None, fresh, grace
+        ));
+        assert!(!grants_to_empty_candidate(
+            true,
+            true,
+            None,
+            Some(0),
+            fresh,
+            grace
+        ));
+        assert!(!grants_to_empty_candidate(
+            true,
+            true,
+            Some(0),
+            Some(0),
+            fresh,
+            grace
+        ));
+        // until the grace has passed with nobody feeding it: the whole group lost its memory
+        assert!(grants_to_empty_candidate(
+            true,
+            true,
+            None,
+            Some(0),
+            grace,
+            grace
+        ));
+        assert!(grants_to_empty_candidate(
+            true,
+            true,
+            None,
+            None,
+            grace * 2,
+            grace
+        ));
+    }
 }

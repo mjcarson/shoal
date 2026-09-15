@@ -397,8 +397,10 @@ list rather than from the diff:
 - **Apply-time expiry.** Expiry is judged on the coordinator's own replica; a replica that has
   forgotten more refuses more. Making the watermark deterministic across replicas would need it
   in the log.
-- **A volatile group that loses a majority's memory at once** elects an empty leader over a
-  full survivor ([item 109](known-issues.md#109-a-volatile-groups-survivor-trips-an-openraft-debug-assertion-when-a-majority-loses-its-memory-log-at-once)).
+- ~~**A volatile group that loses a majority's memory at once** elects an empty leader over a
+  full survivor.~~ An empty copy that held the group before neither initializes it again nor
+  grants to an empty candidate, so the survivor leads
+  ([Resolved #109](resolved/volatile-majority-loss.md)).
 
 **What F44 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:

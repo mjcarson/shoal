@@ -32,9 +32,9 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 107, 108, 110 and 111, and
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 107, 108, 109, 110 and 111, and
 why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ item 113 is the newest entry here and the newest number, and why 17, 33, 43, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 107, 108, 110 and 111 are on the resolved page. **111 never
+83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 107, 108, 109, 110 and 111 are on the resolved page. **111 never
 appeared here**: it was found by [F47](../features/local-rehome.md)'s crash matrix - a read
 landing while an archive closed panicked the executor - reproduced against the map alone and
 fixed in the same change ([Resolved #111](resolved/archive-removal-borrow.md)). **108 never
@@ -1799,41 +1799,6 @@ it by having a member that has lost its quorum for longer than a bound stop elec
 is also what keeps its term from inflating; the phi-accrual detector already knows the member
 is `Down` on the leader's side. Either way a fixture test that isolates a node for a minute
 on every lane and heals it belongs beside the M6 partition tests.
-
-### 109. A volatile group's survivor trips an openraft debug assertion when a majority loses its memory log at once
-
-`shoal-core/src/server/wal/memory.rs`, `shoal-core/src/server/shard/groups.rs` (`group_config`,
-`allow_log_reversion`); openraft `raft_state/log_state_reader.rs:25`, `has_log_id`
-
-An ephemeral table's group keeps its log in memory, so a member that restarts comes back with
-none; `allow_log_reversion` lets the leader feed it again ([Resolved #99](resolved/durable-log-reversion.md)).
-When two of a group's three voters restart at once they come back empty together and can
-elect each other - a candidate with an empty log wins against another with an empty log - and
-the new leader appends fresh entries at indexes the surviving third voter has *committed*.
-The survivor's `has_log_id` then meets a `prev_log_id` below its committed index with a
-different leader id and asserts `Some(log_id.to_ref()) <= self.committed().to_ref()`, a
-`debug_assert!`, so the group's `RaftCore` task panics on the survivor and the group is dead on
-that shard until the process restarts; the shard itself does not die, so the pool reports no
-failure. A release build compiles the assertion out and what the engine does past it - truncate
-the committed entries, presumably - has not been looked at. The data is gone either way: two of
-three memory logs lost at once is the ephemeral table's contract, and the survivor's committed
-entries were only ever committed under a quorum that no longer exists.
-
-**Established by running it**: the first shape of `migration_resumes_after_each_phase_failure`
-armed `MOVE_CRASH_AT` for any group on every node, so the drivers of both tables' groups - which
-commit each phase within milliseconds of each other on two different nodes - died together,
-twice in a row for the ephemeral table's group; the survivor's panic is the line above, in the
-fixture's debug build, and the move that followed never finished because the leader's
-replication to a dead `RaftCore` timed out forever. The test now names the persistent table's
-group so exactly one driver dies ([F45](../features/replica-migration.md#invariants-to-uphold)).
-
-**Fix direction:** a volatile group whose new leader's log is empty should not append past a
-follower's committed index without first truncating it under a rule the follower accepts - or,
-simpler, a volatile group that has lost a majority's memory should be restarted empty on every
-member, the way [F44](../features/repair.md)'s `QuarantineAction::Rebuild` restarts one, rather
-than let two empty members outvote a full one. Either way a fixture test that kills two voters
-of an ephemeral table's group at once and reads through the third afterwards belongs beside the
-M4 tests, and the shard should notice a group whose `RaftCore` is gone and report it.
 
 ### 112. `certificate_rotation_binds_identity` fails about half its runs alone on the development host
 
