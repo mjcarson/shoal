@@ -132,7 +132,9 @@ impl std::fmt::Debug for RequestBody {
     /// A bundle is tens of kibibytes of archive and printing it would bury whatever the caller
     /// was actually looking at.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RequestBody").field("len", &self.data.len()).finish()
+        f.debug_struct("RequestBody")
+            .field("len", &self.data.len())
+            .finish()
     }
 }
 
@@ -218,7 +220,11 @@ mod tests {
                 .expect("failed to read a body");
             // every byte of it is the byte that was sent
             assert_eq!(read.len(), len, "a body of {len} bytes changed length");
-            assert_eq!(&read[..], &sent[..], "a body of {len} bytes changed content");
+            assert_eq!(
+                &read[..],
+                &sent[..],
+                "a body of {len} bytes changed content"
+            );
         }
     }
 

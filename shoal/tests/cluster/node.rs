@@ -397,7 +397,17 @@ impl Node {
         allocation: Allocation,
         dir: &Path,
     ) -> Result<Self, FixtureError> {
-        Self::spawn_with(id, kind, allocation, dir, None, None, None, None, ChildOverrides::default())
+        Self::spawn_with(
+            id,
+            kind,
+            allocation,
+            dir,
+            None,
+            None,
+            None,
+            None,
+            ChildOverrides::default(),
+        )
     }
 
     /// Start a child, narrowing the cpus it may run on and staging a marker for it to find
@@ -430,7 +440,13 @@ impl Node {
         // cpu 0 when the machine had no core to give it
         let (control_cpu, control_shared) = match (kind, allocation.control) {
             (NodeKind::Server, Some(core)) => (
-                Some(topology.cores.get(&core).and_then(|cpus| cpus.first().copied()).unwrap_or(0)),
+                Some(
+                    topology
+                        .cores
+                        .get(&core)
+                        .and_then(|cpus| cpus.first().copied())
+                        .unwrap_or(0),
+                ),
                 false,
             ),
             (NodeKind::Server, None) => (Some(0), true),
@@ -491,11 +507,8 @@ impl Node {
                     for cpu in &cpus {
                         libc::CPU_SET(*cpu, &mut set);
                     }
-                    let rc = libc::sched_setaffinity(
-                        0,
-                        std::mem::size_of::<libc::cpu_set_t>(),
-                        &set,
-                    );
+                    let rc =
+                        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
                     if rc == 0 {
                         Ok(())
                     } else {
@@ -579,7 +592,9 @@ impl Node {
                     )));
                 }
                 Ok(ChildLine::Closed) | Err(RecvTimeoutError::Disconnected) => {
-                    return Err(FixtureError::NotReady(self.evidence_report("exited before it was ready")));
+                    return Err(FixtureError::NotReady(
+                        self.evidence_report("exited before it was ready"),
+                    ));
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     return Err(FixtureError::NotReady(
@@ -659,7 +674,10 @@ impl Node {
     /// What is known about a child that did not come up
     fn evidence_report(&self, what: &str) -> String {
         let evidence = self.evidence.lock().unwrap();
-        let mut report = format!("node {} ({:?}, pid {}) {what}", self.id, self.kind, self.pid);
+        let mut report = format!(
+            "node {} ({:?}, pid {}) {what}",
+            self.id, self.kind, self.pid
+        );
         if evidence.is_empty() {
             report.push_str("; it printed nothing");
         } else {

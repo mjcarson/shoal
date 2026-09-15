@@ -158,7 +158,8 @@ fn storage_fs(path: &Path) -> String {
     let mut best: Option<(usize, String)> = None;
     for line in mounts.lines() {
         let mut fields = line.split_whitespace();
-        let (Some(device), Some(point), Some(kind)) = (fields.next(), fields.next(), fields.next()) else {
+        let (Some(device), Some(point), Some(kind)) = (fields.next(), fields.next(), fields.next())
+        else {
             continue;
         };
         // a mount point is a prefix of the path at a component boundary
@@ -175,7 +176,10 @@ fn build_digest() -> String {
     std::env::current_exe()
         .ok()
         .and_then(|exe| std::fs::read(exe).ok())
-        .map_or_else(|| "unknown".to_string(), |bytes| format!("{:016x}", shoal::gxhash::gxhash64(&bytes, 0)))
+        .map_or_else(
+            || "unknown".to_string(),
+            |bytes| format!("{:016x}", shoal::gxhash::gxhash64(&bytes, 0)),
+        )
 }
 
 /// The real facts, read off the machine this is running on
@@ -210,11 +214,7 @@ impl RealFacts {
             .with_context(|| format!("running {program} {}", args.join(" ")))?;
         // a command that failed has no answer to give
         if !output.status.success() {
-            anyhow::bail!(
-                "{program} {} failed with {}",
-                args.join(" "),
-                output.status
-            );
+            anyhow::bail!("{program} {} failed with {}", args.join(" "), output.status);
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
@@ -547,11 +547,7 @@ fn scan_rustflags(config: &str) -> String {
             continue;
         };
         // the value is an array of quoted flags; take what is between the quotes, in order
-        let flags: Vec<&str> = value
-            .split('"')
-            .skip(1)
-            .step_by(2)
-            .collect();
+        let flags: Vec<&str> = value.split('"').skip(1).step_by(2).collect();
         if !flags.is_empty() {
             return flags.join(" ");
         }
@@ -615,7 +611,8 @@ mod tests {
     /// The flags are read out of the array, in order, ignoring comments
     #[test]
     fn rustflags_are_scanned_out_of_a_cargo_config() {
-        let config = "# rustflags = [\"-Cwrong\"]\n[build]\nrustflags = [\"-Ctarget-cpu=native\"]\n";
+        let config =
+            "# rustflags = [\"-Cwrong\"]\n[build]\nrustflags = [\"-Ctarget-cpu=native\"]\n";
         assert_eq!(scan_rustflags(config), "-Ctarget-cpu=native");
     }
 

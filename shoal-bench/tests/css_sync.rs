@@ -19,8 +19,7 @@ fn stylesheet() -> String {
         .parent()
         .expect("shoal-bench has a parent")
         .join("docs/theme/charts.css");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
+    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
 }
 
 /// Every colour literal the stylesheet selects on, for a given property

@@ -21,11 +21,11 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::task::JoinHandle;
-use std::time::{Duration, Instant};
 
 /// How much longer than its own deadline a client waits for a bundle before calling it unknown
 ///
@@ -55,28 +55,30 @@ pub use builder::{Deadlines, PoolConfig, ShoalBuilder};
 
 // the error types are protocol, not transport - `QuerySupport` and `shared::responses` both name
 // them, so they cannot live above the crate that defines those
-pub 
-
-use shoal_proto::shared::queries::Queries;
+pub use messages::SendOptions;
+use messages::{BatchStamps, ClientMsg, ClientStamps};
+pub use shoal_proto::client::{
+    ChannelError, ConnectError, Errors, FromShoal, QuerySuceededOpts, ShqlParseError,
+};
 use shoal_proto::shared::auth::scram::{ClientStep, ScramClient};
 use shoal_proto::shared::auth::{AuthError, Credentials};
-use shoal_proto::shared::protocol::admin::{self as proto_admin, AdminRequest, AdminResponse, TopologyFrame};
+use shoal_proto::shared::protocol::admin::{
+    self as proto_admin, AdminRequest, AdminResponse, TopologyFrame,
+};
 use shoal_proto::shared::protocol::auth::{self as proto_auth, AuthMechanism, AuthStatus};
 use shoal_proto::shared::protocol::error::{self, ErrorCode};
+pub use shoal_proto::shared::protocol::read::ReadLevel;
 use shoal_proto::shared::protocol::read::{self, SessionToken};
 use shoal_proto::shared::protocol::trace::TraceContext;
 use shoal_proto::shared::protocol::{self, handshake, MessageType, ProtocolError};
-use shoal_proto::shared::responses::{ArchivedResponseError, ArchivedRowGroup, ResponseActionNames};
+pub use shoal_proto::shared::queries::Queries;
+use shoal_proto::shared::responses::{
+    ArchivedResponseError, ArchivedRowGroup, ResponseActionNames,
+};
 use shoal_proto::shared::tls::{self as shared_tls, TlsClientOptions};
 use shoal_proto::shared::traits::{
     ExistsQuery, QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport,
 };
-pub use shoal_proto::client::{
-    ChannelError, ConnectError, Errors, FromShoal, QuerySuceededOpts, ShqlParseError,
-};
-use messages::{BatchStamps, ClientMsg, ClientStamps};
-pub use messages::SendOptions;
-pub use shoal_proto::shared::protocol::read::ReadLevel;
 
 /// Say that a send found nobody left to receive it
 ///
@@ -192,8 +194,14 @@ impl TopologyState {
     /// * `frame` - The frame a connection read
     fn install(&self, frame: TopologyFrame) {
         // under the lock, so two connections cannot race an older frame over a newer one
-        let mut held = self.frame.write().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if held.as_ref().is_some_and(|held| held.version >= frame.version) {
+        let mut held = self
+            .frame
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if held
+            .as_ref()
+            .is_some_and(|held| held.version >= frame.version)
+        {
             return;
         }
         let version = frame.version;
@@ -1155,11 +1163,8 @@ impl<S: QuerySupport> Shoal<S> {
         // the body, then the header that announces it
         let body = proto_admin::encode_body(&id, request)
             .map_err(|error| Errors::Config(format!("encoding an admin request: {error}")))?;
-        let preamble = protocol::client_preamble(
-            MessageType::Admin,
-            body.len(),
-            self.peer_max_frame_bytes(),
-        )?;
+        let preamble =
+            protocol::client_preamble(MessageType::Admin, body.len(), self.peer_max_frame_bytes())?;
         // write it over a pooled connection
         let outcome = async {
             let mut conn = self.pool.get().await.map_err(|e| {
@@ -1181,7 +1186,8 @@ impl<S: QuerySupport> Shoal<S> {
                     query_id: Some(id),
                     index: None,
                     code: ErrorCode::ConnectionLost,
-                    msg: "the connection this request was written to had already stopped".to_owned(),
+                    msg: "the connection this request was written to had already stopped"
+                        .to_owned(),
                 });
             }
             // wait for the answer, whichever shape it takes
@@ -1294,7 +1300,9 @@ impl<S: QuerySupport> Shoal<S> {
         queries: Queries<S>,
         options: &SendOptions,
     ) -> Result<ShoalResultStream<S>, Errors> {
-        self.send_stamped_with(queries, options).await.map(|(stream, _)| stream)
+        self.send_stamped_with(queries, options)
+            .await
+            .map(|(stream, _)| stream)
     }
 
     /// Send a query to our server, keeping what sending it cost
@@ -1343,7 +1351,8 @@ impl<S: QuerySupport> Shoal<S> {
         if let Some(identity) = options.identity {
             queries.id = identity;
         }
-        let (response_tx, response_rx) = self.track_response(&mut queries.id, options.identity.is_some())?;
+        let (response_tx, response_rx) =
+            self.track_response(&mut queries.id, options.identity.is_some())?;
         // archive our queries
         let archived = match rkyv::to_bytes::<_>(&queries) {
             Ok(archived) => archived,
@@ -1356,7 +1365,15 @@ impl<S: QuerySupport> Shoal<S> {
         };
         // record what serializing this bundle cost
         stamps.mark_serialized();
-        self.send_tracked(queries.id, &archived, options, stamps, response_tx, response_rx).await
+        self.send_tracked(
+            queries.id,
+            &archived,
+            options,
+            stamps,
+            response_tx,
+            response_rx,
+        )
+        .await
     }
 
     /// Send a bundle whose id is tracked and whose bytes are serialized, over a pooled connection
@@ -1561,14 +1578,23 @@ impl<S: QuerySupport> Shoal<S> {
                 let stamps = BatchStamps::entered_now();
                 let (response_tx, response_rx) = self.track_response(&mut id, true)?;
                 let (mut stream, _) = self
-                    .send_tracked(identity, &archived, options, stamps, response_tx, response_rx)
+                    .send_tracked(
+                        identity,
+                        &archived,
+                        options,
+                        stamps,
+                        response_tx,
+                        response_rx,
+                    )
                     .await?;
                 let mut responses = Vec::with_capacity(queries.queries.len());
                 while let Some(response) = stream.next().await? {
                     // a failure the server wrote as a response rather than as an error frame
                     // is a failure of this try all the same; a query that worked and found
                     // nothing is an answer
-                    if let Err(error @ Errors::Server { .. }) = response.suceeded(QuerySuceededOpts::default()) {
+                    if let Err(error @ Errors::Server { .. }) =
+                        response.suceeded(QuerySuceededOpts::default())
+                    {
                         return Err(error);
                     }
                     responses.push(response);
@@ -2192,7 +2218,8 @@ impl TcpProxy {
                 let msg_len = error::msg_len(frame.header)?;
                 // an error body is fixed bytes rather than an archive, so a plain vec is enough
                 // - there is nothing in it with an alignment requirement to protect
-                let mut rest = vec![0u8; msg_len + (error::ERROR_BODY_MIN - protocol::QUERY_ID_LEN)];
+                let mut rest =
+                    vec![0u8; msg_len + (error::ERROR_BODY_MIN - protocol::QUERY_ID_LEN)];
                 self.reader.read_exact(&mut rest).await?;
                 // pull the code and the message out of what we read
                 let (code, msg) = error::decode_error_tail(&rest)?;
@@ -2546,7 +2573,12 @@ impl<S: QuerySupport> ShoalResponse<S> {
     /// * `stamps` - When they arrived
     /// * `token` - The session token they carried, if any
     /// * `bundle` - The bundle they answer
-    pub(super) fn new(buff: AlignedVec, stamps: ClientStamps, token: Option<SessionToken>, bundle: Uuid) -> Result<Self, Errors>
+    pub(super) fn new(
+        buff: AlignedVec,
+        stamps: ClientStamps,
+        token: Option<SessionToken>,
+        bundle: Uuid,
+    ) -> Result<Self, Errors>
     where
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -2804,7 +2836,8 @@ where
                             // get this responses message
                             ClientMsg::Response(response, stamps, token) => {
                                 // wrap our response so we don't have to keep repaying access costs
-                                let response = ShoalResponse::<S>::new(response, stamps, token, self.id)?;
+                                let response =
+                                    ShoalResponse::<S>::new(response, stamps, token, self.id)?;
                                 // only bother to check our server sent end of stream if our queries are bounded
                                 let end = if self.unbounded_queries {
                                     // we have unbounded queries so set end to false
@@ -3397,12 +3430,15 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
 
 #[cfg(test)]
 mod tests {
-    use super::{endpoint_order, error, protocol, retriable, ClientMsg, ErrorCode, Errors, Frame, Span, TcpProxy, TopologyState, Waiter};
     use super::SendOptions;
-    use std::time::Duration;
+    use super::{
+        endpoint_order, error, protocol, retriable, ClientMsg, ErrorCode, Errors, Frame, Span,
+        TcpProxy, TopologyState, Waiter,
+    };
     use papaya::HashMap;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::io::AsyncWriteExt;
     use tokio::net::{TcpListener, TcpStream};
     use uuid::Uuid;
@@ -3441,16 +3477,25 @@ mod tests {
         ] {
             assert!(!retriable(&server(code)), "{code:?} is tried again");
         }
-        assert!(retriable(&Errors::IO(std::io::Error::other("the socket went"))));
+        assert!(retriable(&Errors::IO(std::io::Error::other(
+            "the socket went"
+        ))));
         assert!(retriable(&Errors::ConnectionPool("empty".to_string())));
-        assert!(!retriable(&Errors::Config("a caller's mistake".to_string())));
+        assert!(!retriable(&Errors::Config(
+            "a caller's mistake".to_string()
+        )));
         assert!(!retriable(&Errors::StreamAlreadyTerminated));
         // the options carry the identity and the budget, and neither is a wire section
         let id = uuid::Uuid::new_v4();
-        let options = SendOptions::new().identity(id).retry(Duration::from_secs(3));
+        let options = SendOptions::new()
+            .identity(id)
+            .retry(Duration::from_secs(3));
         assert_eq!(options.identity, Some(id));
         assert_eq!(options.retry, Some(Duration::from_secs(3)));
-        assert!(options.is_empty(), "an identity or a budget is not a read options section");
+        assert!(
+            options.is_empty(),
+            "an identity or a budget is not a read options section"
+        );
         assert_eq!(options.to_wire(), SendOptions::new().to_wire());
     }
 
@@ -3463,13 +3508,9 @@ mod tests {
     /// * `msg` - What to say about it
     fn error_frame(query_id: &Uuid, code: ErrorCode, msg: &str) -> Vec<u8> {
         // build the preamble that goes ahead of the message
-        let preamble = error::error_preamble(
-            query_id,
-            code,
-            msg.len(),
-            protocol::DEFAULT_MAX_FRAME_BYTES,
-        )
-        .expect("failed to build an error preamble");
+        let preamble =
+            error::error_preamble(query_id, code, msg.len(), protocol::DEFAULT_MAX_FRAME_BYTES)
+                .expect("failed to build an error preamble");
         // lay the message down behind it
         let mut frame = Vec::from(preamble);
         frame.extend_from_slice(msg.as_bytes());
@@ -3520,7 +3561,14 @@ mod tests {
             let channel_map = Arc::new(HashMap::with_capacity(1));
             let dead_conns = Arc::new(HashMap::with_capacity(1));
             let is_shutting_down = Arc::new(AtomicBool::new(false));
-            let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down, &Arc::new(TopologyState::new()));
+            let mut proxy = TcpProxy::new(
+                reader,
+                1,
+                &channel_map,
+                &dead_conns,
+                &is_shutting_down,
+                &Arc::new(TopologyState::new()),
+            );
             let frame = proxy
                 .read_frame()
                 .await
@@ -3591,7 +3639,14 @@ mod tests {
         let channel_map = Arc::new(HashMap::with_capacity(1));
         let dead_conns = Arc::new(HashMap::with_capacity(1));
         let is_shutting_down = Arc::new(AtomicBool::new(false));
-        let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down, &Arc::new(TopologyState::new()));
+        let mut proxy = TcpProxy::new(
+            reader,
+            1,
+            &channel_map,
+            &dead_conns,
+            &is_shutting_down,
+            &Arc::new(TopologyState::new()),
+        );
         let frame = proxy
             .read_frame()
             .await
@@ -3603,8 +3658,16 @@ mod tests {
             panic!("a response frame read back as something else");
         };
         assert_eq!(read_id, query_id);
-        assert_eq!(buff.len(), len, "a payload delivered in pieces changed length");
-        assert_eq!(&buff[..], &payload[..], "a payload delivered in pieces changed content");
+        assert_eq!(
+            buff.len(),
+            len,
+            "a payload delivered in pieces changed length"
+        );
+        assert_eq!(
+            &buff[..],
+            &payload[..],
+            "a payload delivered in pieces changed content"
+        );
     }
 
     /// A connection that closes mid payload fails rather than handing back what arrived
@@ -3628,7 +3691,9 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.expect("failed to accept");
             sock.write_all(&preamble).await.expect("failed to write");
-            sock.write_all(&vec![7u8; len / 2]).await.expect("failed to write");
+            sock.write_all(&vec![7u8; len / 2])
+                .await
+                .expect("failed to write");
             sock.flush().await.expect("failed to flush");
         });
         // the read has to fail rather than yield a frame carrying half a payload
@@ -3637,7 +3702,14 @@ mod tests {
         let channel_map = Arc::new(HashMap::with_capacity(1));
         let dead_conns = Arc::new(HashMap::with_capacity(1));
         let is_shutting_down = Arc::new(AtomicBool::new(false));
-        let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down, &Arc::new(TopologyState::new()));
+        let mut proxy = TcpProxy::new(
+            reader,
+            1,
+            &channel_map,
+            &dead_conns,
+            &is_shutting_down,
+            &Arc::new(TopologyState::new()),
+        );
         let error = proxy
             .read_frame()
             .await
@@ -3674,7 +3746,14 @@ mod tests {
         let channel_map = Arc::new(HashMap::with_capacity(1));
         let dead_conns = Arc::new(HashMap::with_capacity(1));
         let is_shutting_down = Arc::new(AtomicBool::new(false));
-        let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down, &Arc::new(TopologyState::new()));
+        let mut proxy = TcpProxy::new(
+            reader,
+            1,
+            &channel_map,
+            &dead_conns,
+            &is_shutting_down,
+            &Arc::new(TopologyState::new()),
+        );
         let error = proxy
             .read_frame()
             .await
@@ -3729,7 +3808,14 @@ mod tests {
             let channel_map = Arc::new(HashMap::with_capacity(1));
             let dead_conns = Arc::new(HashMap::with_capacity(1));
             let is_shutting_down = Arc::new(AtomicBool::new(false));
-            let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down, &Arc::new(TopologyState::new()));
+            let mut proxy = TcpProxy::new(
+                reader,
+                1,
+                &channel_map,
+                &dead_conns,
+                &is_shutting_down,
+                &Arc::new(TopologyState::new()),
+            );
             // the error frame reads back whole, naming its query and its code
             let first = proxy
                 .read_frame()
@@ -3789,19 +3875,24 @@ mod tests {
         let (reader, _writer) = stream.into_split();
         let channel_map = Arc::new(HashMap::with_capacity(1));
         let (tx, rx) = kanal::unbounded_async();
-        channel_map
-            .pin()
-            .insert(
-                query_id,
-                Waiter {
-                    conn: Some(1),
-                    tx,
-                    span: Span::current(),
-                },
-            );
+        channel_map.pin().insert(
+            query_id,
+            Waiter {
+                conn: Some(1),
+                tx,
+                span: Span::current(),
+            },
+        );
         let dead_conns = Arc::new(HashMap::with_capacity(1));
         let is_shutting_down = Arc::new(AtomicBool::new(false));
-        let proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down, &Arc::new(TopologyState::new()));
+        let proxy = TcpProxy::new(
+            reader,
+            1,
+            &channel_map,
+            &dead_conns,
+            &is_shutting_down,
+            &Arc::new(TopologyState::new()),
+        );
         tokio::spawn(proxy.start());
         // the failure arrives on that query's channel, with the code and message it was sent with
         let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
@@ -3847,19 +3938,24 @@ mod tests {
         let (reader, _writer) = stream.into_split();
         let channel_map = Arc::new(HashMap::with_capacity(1));
         let (tx, rx) = kanal::unbounded_async();
-        channel_map
-            .pin()
-            .insert(
-                known_id,
-                Waiter {
-                    conn: Some(1),
-                    tx,
-                    span: Span::current(),
-                },
-            );
+        channel_map.pin().insert(
+            known_id,
+            Waiter {
+                conn: Some(1),
+                tx,
+                span: Span::current(),
+            },
+        );
         let dead_conns = Arc::new(HashMap::with_capacity(1));
         let is_shutting_down = Arc::new(AtomicBool::new(false));
-        let proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down, &Arc::new(TopologyState::new()));
+        let proxy = TcpProxy::new(
+            reader,
+            1,
+            &channel_map,
+            &dead_conns,
+            &is_shutting_down,
+            &Arc::new(TopologyState::new()),
+        );
         tokio::spawn(proxy.start());
         // the second frame still arrives, which it could not do if the first had ended the loop
         let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
@@ -3919,7 +4015,14 @@ mod tests {
         // read that connection until it ends
         let dead_conns = Arc::new(HashMap::with_capacity(1));
         let is_shutting_down = Arc::new(AtomicBool::new(false));
-        let proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down, &Arc::new(TopologyState::new()));
+        let proxy = TcpProxy::new(
+            reader,
+            1,
+            &channel_map,
+            &dead_conns,
+            &is_shutting_down,
+            &Arc::new(TopologyState::new()),
+        );
         let _ = proxy.start().await;
         server.await.expect("the listener task panicked");
         // the query on the dead connection was told, rather than left waiting
@@ -3973,7 +4076,10 @@ mod endpoint_tests {
     #[test]
     fn a_turn_past_the_endpoint_count_still_names_an_endpoint() {
         assert_eq!(endpoint_order(5, 2).collect::<Vec<_>>(), vec![1, 0]);
-        assert_eq!(endpoint_order(usize::MAX, 2).collect::<Vec<_>>(), vec![1, 0]);
+        assert_eq!(
+            endpoint_order(usize::MAX, 2).collect::<Vec<_>>(),
+            vec![1, 0]
+        );
     }
 
     /// A client with one endpoint tries it once rather than looping on it

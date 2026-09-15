@@ -391,8 +391,11 @@ pub fn all() -> Vec<Grid> {
             .sum::<usize>()
             + WIDE_REPEATS
                 .iter()
-                .map(|repeat| repeat.widths.len() * sweep_of(repeat.knob).mixes.len()
-                    * sweep_of(repeat.knob).values.len())
+                .map(|repeat| {
+                    repeat.widths.len()
+                        * sweep_of(repeat.knob).mixes.len()
+                        * sweep_of(repeat.knob).values.len()
+                })
                 .sum::<usize>(),
     );
     for sweep in SWEEPS {
@@ -593,7 +596,11 @@ mod tests {
         for repeat in WIDE_REPEATS {
             let sweep = sweep_of(repeat.knob);
             assert_eq!(sweep.knob, repeat.knob);
-            assert!(!repeat.widths.is_empty(), "{} repeats at no width", repeat.knob);
+            assert!(
+                !repeat.widths.is_empty(),
+                "{} repeats at no width",
+                repeat.knob
+            );
             for width in repeat.widths {
                 assert_ne!(
                     *width, REFERENCE_WIDTH,
@@ -698,9 +705,7 @@ mod tests {
                 "latency_buffer" => {
                     Setting::LatencyBuffer(filesystem.latency_sensitive.buffer_size).label()
                 }
-                "latency_write_behind" => {
-                    filesystem.latency_sensitive.write_behind.to_string()
-                }
+                "latency_write_behind" => filesystem.latency_sensitive.write_behind.to_string(),
                 "intent_log" => {
                     Setting::IntentLog(filesystem.latency_sensitive.intent_log_size).label()
                 }
@@ -710,10 +715,14 @@ mod tests {
                 "throughput_write_behind" => {
                     filesystem.throughput_sensitive.write_behind.to_string()
                 }
-                "shards" => conf.resources.cores.expect("shoal.yml pins a core count").to_string(),
-                "memory" => crate::workloads::harness::conf::binary_size(
-                    conf.resources.memory as u64,
-                ),
+                "shards" => conf
+                    .resources
+                    .cores
+                    .expect("shoal.yml pins a core count")
+                    .to_string(),
+                "memory" => {
+                    crate::workloads::harness::conf::binary_size(conf.resources.memory as u64)
+                }
                 "frame" => Setting::Frame(conf.networking.max_frame_bytes).label(),
                 other => panic!("no shipped value is known for {other}"),
             }
@@ -734,7 +743,10 @@ mod tests {
     fn every_arm_asks_for_a_configured_server() {
         for arm in all() {
             let plan = arm.plan(Scale::Full);
-            let overrides = plan.server.overrides().expect("a configuration arm needs a server");
+            let overrides = plan
+                .server
+                .overrides()
+                .expect("a configuration arm needs a server");
             assert_eq!(fields_moved(overrides), 1, "{}", arm.id());
         }
     }

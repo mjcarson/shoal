@@ -3,7 +3,7 @@
 use quote::{format_ident, quote};
 use syn::{FieldsNamed, Ident};
 
-use crate::{DbHalf, tables::TableKinds, utils};
+use crate::{tables::TableKinds, utils, DbHalf};
 
 /// Information about a table field needed for code generation
 struct TableInfo {

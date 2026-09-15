@@ -58,8 +58,7 @@ pub fn run(store: &Store, args: &ExploreArgs, out: &Path) -> Result<i32> {
         super::build::wasm(store.root(), out)?;
     }
     let address = format!("{}:{}", args.addr, args.port);
-    let listener = TcpListener::bind(&address)
-        .with_context(|| format!("binding {address}"))?;
+    let listener = TcpListener::bind(&address).with_context(|| format!("binding {address}"))?;
     // print the forward as well as the address, because the machine that can serve this usually is
     // not the machine with the browser on it
     println!(
@@ -204,7 +203,10 @@ fn stale(root: &Path, out: &Path) -> Result<bool> {
     // any source newer than the bundle means the bundle no longer describes the explorer. mtimes
     // are the right comparison here and would be the wrong one for a capture, because this is a
     // build artifact in `target/` rather than something git has to reproduce
-    for entry in walkdir::WalkDir::new(root.join("shoal-top")).into_iter().flatten() {
+    for entry in walkdir::WalkDir::new(root.join("shoal-top"))
+        .into_iter()
+        .flatten()
+    {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -269,10 +271,7 @@ mod tests {
         // `WebAssembly.instantiateStreaming` refuses anything else, and says so in one console line
         // that does not mention the content type
         assert_eq!(content_type("shoal_top_bg.wasm"), "application/wasm");
-        assert_eq!(
-            content_type("index.html"),
-            "text/html; charset=utf-8"
-        );
+        assert_eq!(content_type("index.html"), "text/html; charset=utf-8");
         assert_eq!(content_type("index.json"), "application/json");
         assert_eq!(
             content_type("shoal_top.js"),

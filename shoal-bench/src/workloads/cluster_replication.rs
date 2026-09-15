@@ -76,7 +76,11 @@ pub const REPLICATED: u32 = 3;
 pub fn placement(replication_factor: u32) -> ConfOverrides {
     ConfOverrides {
         shards: Some(usize::from(NODE_SHARDS)),
-        cluster: Some(ClusterOverride::placed(replication_factor, NODES - 1, NODE_SHARDS)),
+        cluster: Some(ClusterOverride::placed(
+            replication_factor,
+            NODES - 1,
+            NODE_SHARDS,
+        )),
         ..ConfOverrides::default()
     }
 }
@@ -96,7 +100,9 @@ pub fn all() -> Vec<Grid> {
             summary: "the reference mixture served by three nodes replicating to nobody",
         },
         Grid {
-            sweep: Sweep::Replication { durability: "durable" },
+            sweep: Sweep::Replication {
+                durability: "durable",
+            },
             table: Table::Unsorted,
             read_pct: REFERENCE_MIX,
             rows: REFERENCE_WIDTH,
@@ -107,7 +113,9 @@ pub fn all() -> Vec<Grid> {
             summary: "the reference mixture with every write acknowledged by a durable majority of three",
         },
         Grid {
-            sweep: Sweep::Replication { durability: "volatile" },
+            sweep: Sweep::Replication {
+                durability: "volatile",
+            },
             table: Table::UnsortedMem,
             read_pct: REFERENCE_MIX,
             rows: REFERENCE_WIDTH,
@@ -122,7 +130,7 @@ pub fn all() -> Vec<Grid> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DURABLE_ID, NODES, NODES_ID, NODE_SHARDS, REPLICATED, VOLATILE_ID, all};
+    use super::{DURABLE_ID, NODE_SHARDS, NODES, NODES_ID, REPLICATED, VOLATILE_ID, all};
     use crate::workloads::grid::{Grid, Sweep, Table};
     use crate::workloads::workload::{ClusterOverride, ConfOverrides, Workload};
 
@@ -151,7 +159,12 @@ mod tests {
             let mut rest = arm.conf.clone();
             rest.shards = None;
             rest.cluster = None;
-            assert_eq!(rest, ConfOverrides::default(), "{} moved another field", arm.id());
+            assert_eq!(
+                rest,
+                ConfOverrides::default(),
+                "{} moved another field",
+                arm.id()
+            );
         }
         // the overhead arm is the control: the persistent table at a factor of one
         assert_eq!(arms[0].id(), NODES_ID);
@@ -161,10 +174,16 @@ mod tests {
         // durable is the same table at three, volatile the ephemeral one at three
         assert_eq!(arms[1].id(), DURABLE_ID);
         assert_eq!(arms[1].table, Table::Unsorted);
-        assert_eq!(arms[1].conf.cluster.as_ref().unwrap().replication_factor, REPLICATED);
+        assert_eq!(
+            arms[1].conf.cluster.as_ref().unwrap().replication_factor,
+            REPLICATED
+        );
         assert_eq!(arms[2].id(), VOLATILE_ID);
         assert_eq!(arms[2].table, Table::UnsortedMem);
-        assert_eq!(arms[2].conf.cluster.as_ref().unwrap().replication_factor, REPLICATED);
+        assert_eq!(
+            arms[2].conf.cluster.as_ref().unwrap().replication_factor,
+            REPLICATED
+        );
         assert_eq!(arms[1].conf.cluster, arms[2].conf.cluster);
     }
 
@@ -174,7 +193,9 @@ mod tests {
     fn infeasible_rf_policy_is_not_a_throughput_arm() {
         // three copies on one node: the map would serve one and admit at a quorum of two
         let alone = ClusterOverride::alone(3);
-        let refused = alone.feasibility().expect_err("three copies on one node is infeasible");
+        let refused = alone
+            .feasibility()
+            .expect_err("three copies on one node is infeasible");
         assert!(refused.contains("availability"), "{refused}");
         assert!(refused.contains("quorum of 2"), "{refused}");
         // three copies on two nodes is no better
@@ -185,7 +206,11 @@ mod tests {
         // and every arm this build declares is feasible, so no capture is taken at a settled factor
         for workload in crate::workloads::all() {
             let plan = workload.plan(crate::workloads::harness::seed::Scale::Smoke);
-            if let Some(cluster) = plan.server.overrides().and_then(|overrides| overrides.cluster.as_ref()) {
+            if let Some(cluster) = plan
+                .server
+                .overrides()
+                .and_then(|overrides| overrides.cluster.as_ref())
+            {
                 assert_eq!(cluster.feasibility(), Ok(()), "{}", workload.id());
             }
         }

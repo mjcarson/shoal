@@ -79,7 +79,12 @@ impl Admission for StateAdmission {
         }
         // a removed identity never comes back, by this door or any other
         // ([F49](../../../../docs/src/features/backup-and-recovery.md))
-        if state.tombstones.contains_key(&node) || state.members.get(&node).is_some_and(|member| member.phase == MemberPhase::Removed) {
+        if state.tombstones.contains_key(&node)
+            || state
+                .members
+                .get(&node)
+                .is_some_and(|member| member.phase == MemberPhase::Removed)
+        {
             return Verdict::Removed;
         }
         match state.members.get(&node) {
@@ -147,7 +152,11 @@ pub async fn control_acceptor(
         let mut stream = match listener.accept().await {
             Ok(stream) => stream,
             Err(error) => {
-                event!(Level::WARN, msg = "a control connection could not be accepted", ?error);
+                event!(
+                    Level::WARN,
+                    msg = "a control connection could not be accepted",
+                    ?error
+                );
                 continue;
             }
         };
@@ -229,7 +238,9 @@ async fn serve_control(
     let max_frame_bytes = local.borrow().max_frame_bytes;
     loop {
         // the header, or a clean end between requests, at the version the hello negotiated
-        let Some(header) = codec::read_header(&mut rx, max_frame_bytes, peer.negotiated.version).await? else {
+        let Some(header) =
+            codec::read_header(&mut rx, max_frame_bytes, peer.negotiated.version).await?
+        else {
             return Ok(());
         };
         let header = codec::expect(header, MessageType::ControlRequest)?;
@@ -245,41 +256,40 @@ async fn serve_control(
         };
         let payload = codec::read_vec(&mut rx, payload_len).await?;
         // a joiner may ask to join and ping, and nothing else
-        let (status, answer) = if peer.joining
-            && !matches!(head.kind, ControlKind::Join | ControlKind::Ping)
-        {
-            err(format!("a joiner may not send {}", head.kind.name()))
-        } else {
-            match head.kind {
-                // the consensus RPCs and pings, driven straight into the group
-                ControlKind::AppendEntries
-                | ControlKind::Vote
-                | ControlKind::Snapshot
-                | ControlKind::Ping => {
-                    let incarnation = local.borrow().incarnation;
-                    dispatch(head.kind, &payload, raft, machine, incarnation).await
-                }
-                // the membership RPCs, answered by the control loop
-                ControlKind::Join | ControlKind::StatusReport | ControlKind::Propose => {
-                    let (reply, answer) = oneshot::channel();
-                    let sent = inbound
-                        .send(Inbound {
-                            kind: head.kind,
-                            peer: peer.clone(),
-                            payload,
-                            reply,
-                        })
-                        .await;
-                    match sent {
-                        Ok(()) => match answer.await {
-                            Ok(answered) => answered,
-                            Err(_) => err("the control loop dropped the request".to_string()),
-                        },
-                        Err(_) => err("the control loop is gone".to_string()),
+        let (status, answer) =
+            if peer.joining && !matches!(head.kind, ControlKind::Join | ControlKind::Ping) {
+                err(format!("a joiner may not send {}", head.kind.name()))
+            } else {
+                match head.kind {
+                    // the consensus RPCs and pings, driven straight into the group
+                    ControlKind::AppendEntries
+                    | ControlKind::Vote
+                    | ControlKind::Snapshot
+                    | ControlKind::Ping => {
+                        let incarnation = local.borrow().incarnation;
+                        dispatch(head.kind, &payload, raft, machine, incarnation).await
+                    }
+                    // the membership RPCs, answered by the control loop
+                    ControlKind::Join | ControlKind::StatusReport | ControlKind::Propose => {
+                        let (reply, answer) = oneshot::channel();
+                        let sent = inbound
+                            .send(Inbound {
+                                kind: head.kind,
+                                peer: peer.clone(),
+                                payload,
+                                reply,
+                            })
+                            .await;
+                        match sent {
+                            Ok(()) => match answer.await {
+                                Ok(answered) => answered,
+                                Err(_) => err("the control loop dropped the request".to_string()),
+                            },
+                            Err(_) => err("the control loop is gone".to_string()),
+                        }
                     }
                 }
-            }
-        };
+            };
         // frame whatever it produced under the same id
         let response_head = ControlResponseHead {
             id: head.id,

@@ -84,10 +84,7 @@ pub fn run_capture(store: &Store, args: &RunArgs) -> Result<i32> {
         );
     }
     // where everything is going
-    let out = args
-        .out
-        .clone()
-        .unwrap_or_else(|| store.runs_dir());
+    let out = args.out.clone().unwrap_or_else(|| store.runs_dir());
     let conf = if args.conf.is_absolute() {
         args.conf.clone()
     } else {
@@ -142,8 +139,7 @@ pub fn run_capture(store: &Store, args: &RunArgs) -> Result<i32> {
     for dir in &storage_dirs {
         storage::check_wipeable(dir, args.force_wipe)?;
     }
-    std::fs::create_dir_all(&scratch)
-        .with_context(|| format!("creating {}", scratch.display()))?;
+    std::fs::create_dir_all(&scratch).with_context(|| format!("creating {}", scratch.display()))?;
     // anything criterion wrote before this instant is left over from an earlier capture
     let started = SystemTime::now();
     // execute, keeping the restore for afterwards whatever happens

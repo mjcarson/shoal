@@ -82,15 +82,15 @@ const SHARDS: usize = 12;
 /// here are taken through rkyv directly rather than through a trait that may not be there.
 trait Archivable:
     for<'a> Serialize<
-        rkyv::rancor::Strategy<
-            rkyv::ser::Serializer<
-                rkyv::util::AlignedVec,
-                rkyv::ser::allocator::ArenaHandle<'a>,
-                rkyv::ser::sharing::Share,
-            >,
-            rkyv::rancor::Error,
+    rkyv::rancor::Strategy<
+        rkyv::ser::Serializer<
+            rkyv::util::AlignedVec,
+            rkyv::ser::allocator::ArenaHandle<'a>,
+            rkyv::ser::sharing::Share,
         >,
-    >
+        rkyv::rancor::Error,
+    >,
+>
 {
 }
 
@@ -153,7 +153,11 @@ fn shards_of<T>(found: &[(&shoal::server::shard::ShardInfo, T)]) -> Vec<usize> {
     // keep only which shard each share went to; every shard of a standalone ring is local
     found
         .iter()
-        .map(|(shard, _)| shard.local_index().expect("a standalone ring has only local shards"))
+        .map(|(shard, _)| {
+            shard
+                .local_index()
+                .expect("a standalone ring has only local shards")
+        })
         .collect()
 }
 
@@ -166,7 +170,12 @@ fn shards_of<T>(found: &[(&shoal::server::shard::ShardInfo, T)]) -> Vec<usize> {
 fn both_ways_unsorted(
     ring: &Ring,
     query: &UnsortedQuery<FlatRow>,
-) -> (Vec<usize>, Vec<UnsortedQuery<FlatRow>>, Vec<usize>, Vec<UnsortedQuery<FlatRow>>) {
+) -> (
+    Vec<usize>,
+    Vec<UnsortedQuery<FlatRow>>,
+    Vec<usize>,
+    Vec<UnsortedQuery<FlatRow>>,
+) {
     // route it the old way, which narrows as it splits
     let mut split = Vec::new();
     query.split_by_shard(ring, &mut split);
@@ -185,7 +194,8 @@ fn both_ways_unsorted(
         .map(|(_, keys)| {
             // the query is deserialized on the shard that answers it, then narrowed
             let query: UnsortedQuery<FlatRow> =
-                rkyv::deserialize::<_, rkyv::rancor::Error>(archived).expect("a query deserializes");
+                rkyv::deserialize::<_, rkyv::rancor::Error>(archived)
+                    .expect("a query deserializes");
             match keys {
                 Some(keys) => query.narrow_to(keys),
                 None => query,
@@ -204,7 +214,12 @@ fn both_ways_unsorted(
 fn both_ways_sorted(
     ring: &Ring,
     query: &SortedQuery<TieredRow>,
-) -> (Vec<usize>, Vec<SortedQuery<TieredRow>>, Vec<usize>, Vec<SortedQuery<TieredRow>>) {
+) -> (
+    Vec<usize>,
+    Vec<SortedQuery<TieredRow>>,
+    Vec<usize>,
+    Vec<SortedQuery<TieredRow>>,
+) {
     // route it the old way, which narrows as it splits
     let mut split = Vec::new();
     query.split_by_shard(ring, &mut split);
@@ -223,7 +238,8 @@ fn both_ways_sorted(
         .map(|(_, keys)| {
             // the query is deserialized on the shard that answers it, then narrowed
             let query: SortedQuery<TieredRow> =
-                rkyv::deserialize::<_, rkyv::rancor::Error>(archived).expect("a query deserializes");
+                rkyv::deserialize::<_, rkyv::rancor::Error>(archived)
+                    .expect("a query deserializes");
             match keys {
                 Some(keys) => query.narrow_to(keys),
                 None => query,

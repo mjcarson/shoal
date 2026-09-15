@@ -12,8 +12,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Clear, Paragraph},
 };
-use shoal::traits::QuerySupport;
 use shoal::shared::queries::parser::{Completions, Suggestion};
+use shoal::traits::QuerySupport;
 use unicode_width::UnicodeWidthStr;
 
 use super::Tab;

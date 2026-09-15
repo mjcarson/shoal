@@ -406,8 +406,15 @@ mod tests {
         assert!(last("fold") < first("archives"), "{kinds:?}");
         assert!(last("archives") < first("reclaim"), "{kinds:?}");
         assert_eq!(last("finalize"), kinds.len() - 1, "{kinds:?}");
-        assert!(!kinds.contains(&"log"), "a standalone node has no logs to move: {kinds:?}");
-        assert_eq!(kinds.iter().filter(|k| **k == "fold").count(), 4, "two sources, two tables");
+        assert!(
+            !kinds.contains(&"log"),
+            "a standalone node has no logs to move: {kinds:?}"
+        );
+        assert_eq!(
+            kinds.iter().filter(|k| **k == "fold").count(),
+            4,
+            "two sources, two tables"
+        );
         assert_eq!(kinds.iter().filter(|k| **k == "reclaim").count(), 2);
         assert_eq!(manifest.report.tablets_moved, TABLET_COUNT / 2);
         assert_eq!(manifest.report.slots_moved, 0);
@@ -417,7 +424,11 @@ mod tests {
         let before = Hosting::identity(4);
         let after = before.plan(2, true).expect("a plan");
         let manifest = Manifest::plan(&before, &after, &tables, true);
-        let kinds: Vec<bool> = manifest.steps.iter().map(|step| matches!(step.kind, StepKind::Fold { .. })).collect();
+        let kinds: Vec<bool> = manifest
+            .steps
+            .iter()
+            .map(|step| matches!(step.kind, StepKind::Fold { .. }))
+            .collect();
         assert!(!kinds.contains(&true));
         let logs: Vec<(u16, u16)> = manifest
             .steps
@@ -431,7 +442,11 @@ mod tests {
         assert_eq!(manifest.report.slots_moved, 2);
         assert_eq!(manifest.dests_of(2), vec![0]);
         // the archives of every pair are between the logs and the folds
-        let archives = manifest.steps.iter().filter(|step| matches!(step.kind, StepKind::Archives { .. })).count();
+        let archives = manifest
+            .steps
+            .iter()
+            .filter(|step| matches!(step.kind, StepKind::Archives { .. }))
+            .count();
         assert_eq!(archives, 4, "two pairs, two tables");
         // a growth's donors are live and do not vanish
         let grown = Manifest::plan(&after, &before, &tables, true);
@@ -457,7 +472,9 @@ mod tests {
         manifest.write(dir.path()).expect("a write");
         assert!(!dir.path().join(MANIFEST_TEMP_FILE).exists());
         // read back, it resumes at the third step with what it had recorded
-        let found = Manifest::read(dir.path()).expect("a read").expect("a manifest");
+        let found = Manifest::read(dir.path())
+            .expect("a read")
+            .expect("a manifest");
         assert_eq!(found, manifest);
         assert_eq!(found.next_step(), Some(2));
         assert_eq!(found.steps[2].archive, Some(archive));
@@ -476,7 +493,11 @@ mod tests {
         // a manifest from another format is refused
         let mut future = manifest;
         future.format = MANIFEST_FORMAT + 1;
-        std::fs::write(Manifest::path(dir.path()), serde_json::to_vec(&future).expect("json")).expect("a write");
+        std::fs::write(
+            Manifest::path(dir.path()),
+            serde_json::to_vec(&future).expect("json"),
+        )
+        .expect("a write");
         assert!(Manifest::read(dir.path()).is_err());
     }
 

@@ -391,7 +391,12 @@ impl BackgroundKind {
     /// Whether this is a plan - a rebalance, a decommission or an expiry - rather than one operation
     #[must_use]
     pub const fn is_plan(&self) -> bool {
-        matches!(self, BackgroundKind::Rebalance | BackgroundKind::Decommission { .. } | BackgroundKind::Expire { .. })
+        matches!(
+            self,
+            BackgroundKind::Rebalance
+                | BackgroundKind::Decommission { .. }
+                | BackgroundKind::Expire { .. }
+        )
     }
 }
 
@@ -464,10 +469,7 @@ impl Measurement {
     pub fn record(&mut self, op: &str, elapsed: std::time::Duration) {
         // an operation's set is created the first time it is sampled, so a workload never has to
         // declare up front which operations it will end up recording
-        self.ops
-            .entry(op.to_string())
-            .or_default()
-            .record(elapsed);
+        self.ops.entry(op.to_string()).or_default().record(elapsed);
     }
 
     /// Adds to a counter, creating it on first use

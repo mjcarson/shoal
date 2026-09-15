@@ -88,7 +88,11 @@ fn block(ui: &mut egui::Ui, family: &FamilyText) {
     // the same four, in the same order, as `Family::preamble` prints them
     labelled(ui, "What this measures", &family.what_it_measures);
     labelled(ui, "How to read it", &family.how_to_read_it);
-    labelled(ui, "What would make it wrong", &family.what_would_make_it_wrong);
+    labelled(
+        ui,
+        "What would make it wrong",
+        &family.what_would_make_it_wrong,
+    );
     // last and never abbreviated. this is the one that earns its keep, and the explorer's freeform
     // selection makes it more necessary than the pages do
     labelled(ui, "What it cannot tell you", &family.what_it_cannot_say);

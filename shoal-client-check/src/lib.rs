@@ -55,7 +55,9 @@ pub struct MovieTitle {
 }
 
 /// A sorted table, so both table kinds are covered
-#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, DeepSizeOf)]
+#[derive(
+    Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, DeepSizeOf,
+)]
 #[rkyv(derive(Debug))]
 #[shoal_table(db = "CheckDb")]
 pub struct MovieByKeyword {

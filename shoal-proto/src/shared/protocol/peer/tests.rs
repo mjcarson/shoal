@@ -2,7 +2,9 @@
 
 use super::super::read::{ReadLevel, SessionToken};
 use super::super::trace::TraceContext;
-use super::super::{Header, MessageType, ProtocolError, HEADER_LEN, MIN_PEER_VERSION, PROTOCOL_VERSION};
+use super::super::{
+    Header, MessageType, ProtocolError, HEADER_LEN, MIN_PEER_VERSION, PROTOCOL_VERSION,
+};
 use super::*;
 
 /// A hello with every field set to something distinguishable
@@ -34,17 +36,27 @@ fn a_peer_hello_and_its_ack_round_trip() {
         assert_eq!(header.body_len(), PEER_HELLO_BODY_LEN);
         assert_eq!(PEER_HELLO_FRAME_LEN, HEADER_LEN + PEER_HELLO_BODY_LEN);
         // an ack carries the reason and everything else
-        for reason in [PeerRefusal::Accepted, PeerRefusal::WrongCluster, PeerRefusal::LaneRefused] {
+        for reason in [
+            PeerRefusal::Accepted,
+            PeerRefusal::WrongCluster,
+            PeerRefusal::LaneRefused,
+        ] {
             let ack = PeerHelloAck { hello, reason };
             assert_eq!(PeerHelloAck::decode(&ack.encode()).unwrap(), ack);
             let frame = ack.frame(1 << 20).unwrap();
             let header = Header::decode(frame[..HEADER_LEN].try_into().unwrap(), 1 << 20).unwrap();
             assert_eq!(header.kind, MessageType::PeerHelloAck);
             // a refusal is visible from the header alone
-            assert_eq!(header.flags.contains(super::super::Flags::REFUSED), !reason.is_accepted());
+            assert_eq!(
+                header.flags.contains(super::super::Flags::REFUSED),
+                !reason.is_accepted()
+            );
         }
     }
-    assert_eq!(a_hello(Lane::Data).negotiate(&a_hello(Lane::Data)), Some(PROTOCOL_VERSION));
+    assert_eq!(
+        a_hello(Lane::Data).negotiate(&a_hello(Lane::Data)),
+        Some(PROTOCOL_VERSION)
+    );
     // the hello frame is written at the floor, so a peer anywhere in the range reads it
     let frame = a_hello(Lane::Data).frame(1 << 20).unwrap();
     assert_eq!(frame[0], MIN_PEER_VERSION);
@@ -80,20 +92,42 @@ fn a_version_range_negotiates_to_the_highest_shared() {
     for ((our_min, our_max), (their_min, their_max), spoken) in table {
         let ours = ranged(our_min, our_max);
         let theirs = ranged(their_min, their_max);
-        assert_eq!(theirs.negotiate(&ours), spoken, "ours {our_min}..={our_max} theirs {their_min}..={their_max}");
+        assert_eq!(
+            theirs.negotiate(&ours),
+            spoken,
+            "ours {our_min}..={our_max} theirs {their_min}..={their_max}"
+        );
         // and the same from the other side
         assert_eq!(ours.negotiate(&theirs), spoken);
     }
     // the range this build advertises is the floor to the newest, and a pin lowers the top
     assert_eq!(PeerHello::range(None), (MIN_PEER_VERSION, PROTOCOL_VERSION));
-    assert_eq!(PeerHello::range(Some(MIN_PEER_VERSION)), (MIN_PEER_VERSION, MIN_PEER_VERSION));
-    assert_eq!(PeerHello::range(Some(PROTOCOL_VERSION + 3)), (MIN_PEER_VERSION, PROTOCOL_VERSION));
-    assert_eq!(PeerHello::range(Some(0)), (MIN_PEER_VERSION, MIN_PEER_VERSION));
+    assert_eq!(
+        PeerHello::range(Some(MIN_PEER_VERSION)),
+        (MIN_PEER_VERSION, MIN_PEER_VERSION)
+    );
+    assert_eq!(
+        PeerHello::range(Some(PROTOCOL_VERSION + 3)),
+        (MIN_PEER_VERSION, PROTOCOL_VERSION)
+    );
+    assert_eq!(
+        PeerHello::range(Some(0)),
+        (MIN_PEER_VERSION, MIN_PEER_VERSION)
+    );
     // the capabilities both act on are the intersection
-    let ours = PeerHello { capabilities: CAP_FORWARD_V1 | CAP_REPLICATION_V1, ..a_hello(Lane::Data) };
-    let theirs = PeerHello { capabilities: CAP_REPLICATION_V1 | CAP_MEMBERSHIP_V1, ..a_hello(Lane::Data) };
+    let ours = PeerHello {
+        capabilities: CAP_FORWARD_V1 | CAP_REPLICATION_V1,
+        ..a_hello(Lane::Data)
+    };
+    let theirs = PeerHello {
+        capabilities: CAP_REPLICATION_V1 | CAP_MEMBERSHIP_V1,
+        ..a_hello(Lane::Data)
+    };
     assert_eq!(theirs.common_capabilities(&ours), CAP_REPLICATION_V1);
-    assert_eq!(a_hello(Lane::Data).common_capabilities(&a_hello(Lane::Data)), CAPABILITIES);
+    assert_eq!(
+        a_hello(Lane::Data).common_capabilities(&a_hello(Lane::Data)),
+        CAPABILITIES
+    );
     // every capability this build defines is required of a peer
     assert_eq!(REQUIRED_CAPABILITIES & CAPABILITIES, REQUIRED_CAPABILITIES);
 }
@@ -170,7 +204,10 @@ fn some_entries() -> Vec<ForwardEntry> {
 fn a_forward_round_trips() {
     let entries = some_entries();
     let bytes = encode_entries(&entries).unwrap();
-    assert_eq!(bytes.len(), entries.iter().map(ForwardEntry::encoded_len).sum::<usize>());
+    assert_eq!(
+        bytes.len(),
+        entries.iter().map(ForwardEntry::encoded_len).sum::<usize>()
+    );
     assert_eq!(decode_entries(&bytes, 2).unwrap(), entries);
     let preamble = ForwardPreamble {
         bundle: [3; 16],
@@ -212,8 +249,14 @@ fn a_malformed_forward_is_refused_before_allocation() {
     // no entries, too many entries, entries past their byte bound
     for bad in [
         ForwardPreamble { entries: 0, ..good },
-        ForwardPreamble { entries: MAX_FORWARD_ENTRIES + 1, ..good },
-        ForwardPreamble { entries_len: MAX_FORWARD_ENTRIES_BYTES + 1, ..good },
+        ForwardPreamble {
+            entries: MAX_FORWARD_ENTRIES + 1,
+            ..good
+        },
+        ForwardPreamble {
+            entries_len: MAX_FORWARD_ENTRIES_BYTES + 1,
+            ..good
+        },
     ] {
         assert!(matches!(
             ForwardPreamble::decode(&bad.encode(), usize::MAX / 2),
@@ -227,7 +270,10 @@ fn a_malformed_forward_is_refused_before_allocation() {
     let mut longer = bytes.clone();
     longer.push(0);
     assert!(decode_entries(&longer, 2).is_err());
-    assert!(decode_entries(&bytes, 1).is_err(), "a count below the bytes is trailing bytes");
+    assert!(
+        decode_entries(&bytes, 1).is_err(),
+        "a count below the bytes is trailing bytes"
+    );
     let mut flagged = bytes.clone();
     flagged[16] |= 1 << 7;
     assert!(decode_entries(&flagged, 2).is_err());
@@ -246,7 +292,11 @@ fn a_malformed_forward_is_refused_before_allocation() {
 /// A forwarded answer's preamble round trips, and its error payload does too
 #[test]
 fn a_forwarded_answer_round_trips() {
-    for kind in [ForwardedKind::Whole, ForwardedKind::Share, ForwardedKind::Error] {
+    for kind in [
+        ForwardedKind::Whole,
+        ForwardedKind::Share,
+        ForwardedKind::Error,
+    ] {
         let preamble = ForwardedPreamble {
             bundle: [4; 16],
             index: u64::MAX - 1,
@@ -257,7 +307,10 @@ fn a_forwarded_answer_round_trips() {
             slot: 0,
             token: None,
         };
-        assert_eq!(ForwardedPreamble::decode(&preamble.encode()).unwrap(), preamble);
+        assert_eq!(
+            ForwardedPreamble::decode(&preamble.encode()).unwrap(),
+            preamble
+        );
     }
     let mut raw = ForwardedPreamble {
         bundle: [0; 16],
@@ -275,7 +328,10 @@ fn a_forwarded_answer_round_trips() {
         Err(ProtocolError::UnknownForwardedKind(4))
     );
     let payload = encode_error_payload(32, "the peer went away");
-    assert_eq!(decode_error_payload(&payload).unwrap(), (32, "the peer went away".to_string()));
+    assert_eq!(
+        decode_error_payload(&payload).unwrap(),
+        (32, "the peer went away".to_string())
+    );
     assert!(decode_error_payload(&[1]).is_err());
 }
 
@@ -302,7 +358,10 @@ fn control_heads_round_trip() {
     }
     .encode();
     raw[8] = 0;
-    assert_eq!(ControlRequestHead::decode(&raw), Err(ProtocolError::UnknownControlKind(0)));
+    assert_eq!(
+        ControlRequestHead::decode(&raw),
+        Err(ProtocolError::UnknownControlKind(0))
+    );
     for status in [ControlStatus::Ok, ControlStatus::Error] {
         let head = ControlResponseHead { id: 77, status };
         assert_eq!(ControlResponseHead::decode(&head.encode()), head);
@@ -314,7 +373,10 @@ fn control_heads_round_trip() {
     }
     .encode();
     raw[8] = 200;
-    assert_eq!(ControlResponseHead::decode(&raw).status, ControlStatus::Error);
+    assert_eq!(
+        ControlResponseHead::decode(&raw).status,
+        ControlStatus::Error
+    );
 }
 
 /// Snapshot heads round trip, fit their frames, and a chunk checks its bytes
@@ -327,7 +389,10 @@ fn snapshot_frames_round_trip_and_checksum() {
         total: 1 << 30,
         manifest_len: 10,
     };
-    assert_eq!(SnapshotBegin::decode(&begin.encode(), SNAPSHOT_BEGIN_LEN + 10).unwrap(), begin);
+    assert_eq!(
+        SnapshotBegin::decode(&begin.encode(), SNAPSHOT_BEGIN_LEN + 10).unwrap(),
+        begin
+    );
     assert!(SnapshotBegin::decode(&begin.encode(), SNAPSHOT_BEGIN_LEN + 9).is_err());
     let bytes = b"sixteen bytes!!!";
     let chunk = SnapshotChunk {
@@ -448,7 +513,10 @@ fn forward_entries_carry_read_plans_and_answers_carry_attempts() {
     flagged[26] = 1 << 4;
     assert!(ForwardedPreamble::decode(&flagged).is_err());
     // the read barrier kind is five
-    assert_eq!(ReplicateKind::from_byte(5).unwrap(), ReplicateKind::ReadBarrier);
+    assert_eq!(
+        ReplicateKind::from_byte(5).unwrap(),
+        ReplicateKind::ReadBarrier
+    );
     assert_eq!(ReplicateKind::ReadBarrier.as_byte(), 5);
     // and the capability bit is its own
     assert_eq!(CAP_READ_CONSISTENCY_V1, 1 << 5);

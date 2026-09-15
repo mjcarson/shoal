@@ -68,9 +68,7 @@ impl ControlPlacement {
         let location = online
             .iter()
             .find(|location| location.cpu == cpu)
-            .ok_or_else(|| {
-                std::io::Error::other(format!("cpu {cpu} is allowed but not online"))
-            })?;
+            .ok_or_else(|| std::io::Error::other(format!("cpu {cpu} is allowed but not online")))?;
         let core = location.core;
         let mut siblings: Vec<usize> = online
             .iter()
@@ -139,9 +137,8 @@ pub fn allowed_cpus() -> Result<Vec<usize>, ServerError> {
     // SAFETY: a zeroed `cpu_set_t` is a valid empty set, and `sched_getaffinity` of pid 0 fills
     // in the calling thread's mask, writing at most the size passed
     let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-    let rc = unsafe {
-        libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set)
-    };
+    let rc =
+        unsafe { libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) };
     if rc != 0 {
         return Err(ServerError::IO(std::io::Error::last_os_error()));
     }
@@ -180,7 +177,10 @@ mod tests {
         if !allowed.contains(&0) {
             assert!(matches!(
                 placement,
-                Err(ServerError::Shoal(ShoalError::ControlCoreNotAllowed { cpu: 0, .. }))
+                Err(ServerError::Shoal(ShoalError::ControlCoreNotAllowed {
+                    cpu: 0,
+                    ..
+                }))
             ));
             return;
         }

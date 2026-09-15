@@ -383,7 +383,11 @@ impl Transport {
     ///
     /// * `client` - The client to send on
     /// * `ctx` - The server, seed and scale this run was given
-    async fn drive_batched(&self, client: Arc<shoal::Shoal<BenchClient>>, ctx: &Context) -> Result<Measurement> {
+    async fn drive_batched(
+        &self,
+        client: Arc<shoal::Shoal<BenchClient>>,
+        ctx: &Context,
+    ) -> Result<Measurement> {
         let rows = ctx.scale.rows;
         let batch = self.size.query_batch() as u64;
         let total = self.size.queries(Self::scale_of(ctx));
@@ -651,7 +655,7 @@ impl Workload for Transport {
 
 #[cfg(test)]
 mod tests {
-    use super::{seed_batch, Mode, RowSize, Transport, Wire, LARGE_ROW_BYTES, SMALL_ROW_BYTES};
+    use super::{LARGE_ROW_BYTES, Mode, RowSize, SMALL_ROW_BYTES, Transport, Wire, seed_batch};
     use crate::model::macro_layer::Timing;
     use crate::workloads::harness::driver;
     use crate::workloads::harness::seed::Scale;
@@ -811,7 +815,10 @@ mod tests {
     #[test]
     fn a_seed_bundle_is_never_empty() {
         for row_bytes in [1, SMALL_ROW_BYTES, LARGE_ROW_BYTES, u64::from(u32::MAX)] {
-            assert!(seed_batch(row_bytes) >= 1, "{row_bytes} byte rows batch to nothing");
+            assert!(
+                seed_batch(row_bytes) >= 1,
+                "{row_bytes} byte rows batch to nothing"
+            );
         }
     }
 
@@ -828,7 +835,10 @@ mod tests {
         // and what the streaming modes may hold at once stays bounded in bytes rather than in
         // queries, which is the property that actually matters
         let held = RowSize::Large.in_flight() as u64 * RowSize::Large.row_bytes();
-        assert!(held <= 128 * 1024 * 1024, "the large arm may hold {held} bytes");
+        assert!(
+            held <= 128 * 1024 * 1024,
+            "the large arm may hold {held} bytes"
+        );
     }
 
     /// Only the single send mode reports a service time

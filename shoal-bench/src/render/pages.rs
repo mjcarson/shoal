@@ -212,10 +212,7 @@ mod tests {
     fn every_page_is_registered_exactly_once() {
         assert_eq!(PAGES.len(), Surface::ALL.len());
         for surface in Surface::ALL {
-            let found = PAGES
-                .iter()
-                .filter(|spec| spec.surface == surface)
-                .count();
+            let found = PAGES.iter().filter(|spec| spec.surface == surface).count();
             assert_eq!(found, 1, "{} is registered {found} times", surface.title());
         }
     }
@@ -317,7 +314,10 @@ mod tests {
     fn the_index_does_not_link_to_itself() {
         let rendered = header(Surface::Overview, &empty_page(), "intro");
         assert!(rendered.contains("[What has been captured](#what-has-been-captured)"));
-        assert!(!rendered.contains("](overview.md"), "the index links to itself");
+        assert!(
+            !rendered.contains("](overview.md"),
+            "the index links to itself"
+        );
         // and every other page still reaches it
         let other = header(Surface::Grid, &empty_page(), "intro");
         assert!(other.contains("](overview.md#what-has-been-captured)"));

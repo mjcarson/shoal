@@ -250,7 +250,10 @@ impl CrashPoint {
     /// * `name` - The name
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
-        CrashPoint::ALL.iter().copied().find(|point| point.name() == name)
+        CrashPoint::ALL
+            .iter()
+            .copied()
+            .find(|point| point.name() == name)
     }
 }
 
@@ -297,7 +300,11 @@ pub mod crash_point {
     #[must_use]
     pub fn armed() -> CrashPoint {
         let raw = ARMED.load(Ordering::Relaxed);
-        CrashPoint::ALL.iter().copied().find(|point| *point as u8 == raw).unwrap_or(CrashPoint::None)
+        CrashPoint::ALL
+            .iter()
+            .copied()
+            .find(|point| *point as u8 == raw)
+            .unwrap_or(CrashPoint::None)
     }
 
     /// Die here if this point is armed
@@ -335,10 +342,15 @@ mod tests {
             .map(|at| at * chunk)
             .take_while(|offset| *offset < bytes.len() as u64)
             .collect();
-        let slice = |offset: u64| &bytes[offset as usize..(offset + chunk).min(bytes.len() as u64) as usize];
+        let slice = |offset: u64| {
+            &bytes[offset as usize..(offset + chunk).min(bytes.len() as u64) as usize]
+        };
         // the first two chunks, in order
         for offset in &offsets[..2] {
-            assert_eq!(assembler.offer(*offset, slice(*offset).len() as u64), Offer::Write);
+            assert_eq!(
+                assembler.offer(*offset, slice(*offset).len() as u64),
+                Offer::Write
+            );
             assembler.advance(slice(*offset));
         }
         assert_eq!(assembler.next, 2 * chunk);
@@ -354,14 +366,21 @@ mod tests {
         assert_eq!(assembler.offer(chunk + 1, chunk), Offer::Dropped);
         // the rest in order, as a resume from the prefix would send them
         for offset in &offsets[2..] {
-            assert_eq!(assembler.offer(*offset, slice(*offset).len() as u64), Offer::Write);
+            assert_eq!(
+                assembler.offer(*offset, slice(*offset).len() as u64),
+                Offer::Write
+            );
             assembler.advance(slice(*offset));
         }
         assert!(assembler.complete());
         assert_eq!(assembler.chunks, offsets.len() as u64);
         // a chunk past the end is dropped
         assert_eq!(assembler.offer(bytes.len() as u64, 1), Offer::Dropped);
-        assert_eq!(assembler.checksum(), expected, "the prefix's checksum is the file's");
+        assert_eq!(
+            assembler.checksum(),
+            expected,
+            "the prefix's checksum is the file's"
+        );
         // the crash points round trip their names, in order
         for (at, point) in CrashPoint::ALL.iter().enumerate() {
             assert_eq!(CrashPoint::from_name(point.name()), Some(*point));

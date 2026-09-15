@@ -336,7 +336,9 @@ impl DirectoryLock {
             let error = std::io::Error::last_os_error();
             return match error.raw_os_error() {
                 Some(libc::EWOULDBLOCK) => {
-                    Err(ServerError::Shoal(ShoalError::StorageDirectoryLocked { path }))
+                    Err(ServerError::Shoal(ShoalError::StorageDirectoryLocked {
+                        path,
+                    }))
                 }
                 _ => Err(ServerError::IO(error)),
             };
@@ -585,30 +587,32 @@ impl StorageMeta {
                     (ClusterIntent::Join, MarkerMode::Joining) => {}
                     // a directory bootstrapped into a cluster, opened by a standalone config
                     (ClusterIntent::Standalone, MarkerMode::Cluster) => {
-                        return Err(ServerError::Shoal(ShoalError::ClusterDirectoryInStandalone {
-                            // a cluster directory always names its cluster
-                            cluster: found.cluster.unwrap_or_default(),
-                        }));
+                        return Err(ServerError::Shoal(
+                            ShoalError::ClusterDirectoryInStandalone {
+                                // a cluster directory always names its cluster
+                                cluster: found.cluster.unwrap_or_default(),
+                            },
+                        ));
                     }
                     // a standalone directory opened by a cluster config, which an export
                     // restored into a new cluster is for and nothing here can do
                     (ClusterIntent::Bootstrap | ClusterIntent::Join, MarkerMode::Standalone) => {
-                        return Err(ServerError::Shoal(ShoalError::StandaloneDirectoryInCluster {
-                            node: found.node,
-                        }));
+                        return Err(ServerError::Shoal(
+                            ShoalError::StandaloneDirectoryInCluster { node: found.node },
+                        ));
                     }
                     // a joiner's directory that was never admitted, asked to create a cluster of
                     // its own: that would turn a node meant for one cluster into another
                     (ClusterIntent::Bootstrap, MarkerMode::Joining) => {
-                        return Err(ServerError::Shoal(ShoalError::JoiningDirectoryBootstrapped {
-                            node: found.node,
-                        }));
+                        return Err(ServerError::Shoal(
+                            ShoalError::JoiningDirectoryBootstrapped { node: found.node },
+                        ));
                     }
                     // the same directory opened standalone, which is a node changing what it is
                     (ClusterIntent::Standalone, MarkerMode::Joining) => {
-                        return Err(ServerError::Shoal(ShoalError::JoiningDirectoryInStandalone {
-                            node: found.node,
-                        }));
+                        return Err(ServerError::Shoal(
+                            ShoalError::JoiningDirectoryInStandalone { node: found.node },
+                        ));
                     }
                 }
                 // a different layout would too, even at the same count: a cluster directory
@@ -877,7 +881,9 @@ mod tests {
         let third = StorageMeta::claim(dir.path(), 4, None, ClusterIntent::Standalone)
             .expect("failed to reopen a third time");
         assert_eq!(third.incarnation, 3);
-        let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
+        let found = StorageMeta::read(dir.path())
+            .expect("a marker")
+            .expect("a marker");
         assert_eq!(found.incarnation, 3);
     }
 
@@ -895,7 +901,9 @@ mod tests {
         );
         std::fs::write(StorageMeta::path(dir.path()), raw).expect("failed to stage our marker");
         // read, it is a member of its cluster with no starts counted
-        let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
+        let found = StorageMeta::read(dir.path())
+            .expect("a marker")
+            .expect("a marker");
         assert_eq!(found.mode, MarkerMode::Cluster);
         assert_eq!(found.incarnation, 0);
         assert_eq!(found.format, 3);
@@ -958,14 +966,19 @@ mod tests {
         // admission fills in the cluster, exactly once
         let cluster = ClusterId::mint();
         StorageMeta::adopt_cluster(dir.path(), cluster).expect("failed to adopt a cluster");
-        let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
+        let found = StorageMeta::read(dir.path())
+            .expect("a marker")
+            .expect("a marker");
         assert_eq!(found.cluster, Some(cluster));
         assert_eq!(found.mode, MarkerMode::Cluster);
         assert_eq!(found.node, joiner.node);
         assert_eq!(found.incarnation, 2);
         let error = StorageMeta::adopt_cluster(dir.path(), ClusterId::mint())
             .expect_err("a member adopted a second cluster");
-        assert!(matches!(error, ServerError::Shoal(ShoalError::MarkerNotJoining { .. })));
+        assert!(matches!(
+            error,
+            ServerError::Shoal(ShoalError::MarkerNotJoining { .. })
+        ));
         // and from then on it is a member, restarted with seeds or with bootstrap alike
         let member = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Join)
             .expect("failed to restart a joined member with its seeds");
@@ -976,7 +989,8 @@ mod tests {
             .expect("failed to restart a joined member as a bootstrapper");
         // a standalone directory never adopts one either
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
-        StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Standalone).expect("failed to claim");
+        StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Standalone)
+            .expect("failed to claim");
         assert!(StorageMeta::adopt_cluster(dir.path(), cluster).is_err());
         // and a standalone directory refuses a joiner's configuration, naming the migration
         let error = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Join)
@@ -1018,7 +1032,11 @@ mod tests {
         // ([F48](../../../docs/src/features/rolling-compatibility.md))
         let rendered = format!("{error}");
         assert!(rendered.contains("format 1"), "{rendered}");
-        assert!(rendered.contains("never migrated") && rendered.contains("restore a backup or an export"), "{rendered}");
+        assert!(
+            rendered.contains("never migrated")
+                && rendered.contains("restore a backup or an export"),
+            "{rendered}"
+        );
         // a format from the future is refused the same way
         let future = StorageMeta {
             format: META_FORMAT + 1,
@@ -1059,9 +1077,14 @@ mod tests {
         assert_eq!(again.node, first.node);
         assert_eq!(again.rehome, Some(PendingRehome { from: 4, to: 5 }));
         assert_eq!(again.physical, 5);
-        assert_eq!(again.slots, 5, "a standalone node's slots are its executors");
+        assert_eq!(
+            again.slots, 5,
+            "a standalone node's slots are its executors"
+        );
         // nothing moved on disk: the marker still says four until the rehome finalizes
-        let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
+        let found = StorageMeta::read(dir.path())
+            .expect("a marker")
+            .expect("a marker");
         assert_eq!(found.physical(), 4);
         assert_eq!(found.physical, None);
         // and a third claim at five finds the same rehome pending
@@ -1070,7 +1093,9 @@ mod tests {
         assert_eq!(third.rehome, Some(PendingRehome { from: 4, to: 5 }));
         // once the rehome finalizes, five is the ordinary restart and four is a rehome back
         StorageMeta::finish_rehome(dir.path(), 5).expect("failed to finish a rehome");
-        let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
+        let found = StorageMeta::read(dir.path())
+            .expect("a marker")
+            .expect("a marker");
         assert_eq!(found.physical, Some(5));
         assert_eq!(found.shards, 4);
         let settled = StorageMeta::claim(dir.path(), 5, None, ClusterIntent::Standalone)
@@ -1081,7 +1106,9 @@ mod tests {
         assert_eq!(back.rehome, Some(PendingRehome { from: 5, to: 4 }));
         // a rehome back to the origin count clears the field rather than recording it
         StorageMeta::finish_rehome(dir.path(), 4).expect("failed to finish a rehome");
-        let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
+        let found = StorageMeta::read(dir.path())
+            .expect("a marker")
+            .expect("a marker");
         assert_eq!(found.physical, None);
         // a manifest towards one count on disk refuses a start under another, by name
         let hosting = crate::server::hosting::Hosting::identity(4);
@@ -1092,7 +1119,11 @@ mod tests {
             .expect_err("a third count started over a rehome in progress");
         assert!(matches!(
             error,
-            ServerError::Shoal(ShoalError::RehomeInProgress { from: 4, to: 2, configured: 3 })
+            ServerError::Shoal(ShoalError::RehomeInProgress {
+                from: 4,
+                to: 2,
+                configured: 3
+            })
         ));
         // and resumes it under the count it was planned for
         let resumed = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Standalone)
@@ -1115,7 +1146,9 @@ mod tests {
             .expect("failed to bootstrap");
         assert_eq!(plain.slots, 2);
         assert_eq!(plain.physical, 2);
-        let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
+        let found = StorageMeta::read(dir.path())
+            .expect("a marker")
+            .expect("a marker");
         assert_eq!(found.shards, 2);
         assert_eq!(found.physical, None);
         // headroom: four slots on two cores, recorded as laid out on two
@@ -1125,7 +1158,9 @@ mod tests {
         assert_eq!(roomy.slots, 4);
         assert_eq!(roomy.physical, 2);
         assert_eq!(roomy.rehome, None);
-        let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
+        let found = StorageMeta::read(dir.path())
+            .expect("a marker")
+            .expect("a marker");
         assert_eq!(found.shards, 4);
         assert_eq!(found.physical, Some(2));
         // the same slots again is the ordinary restart, and no slots at all is too
@@ -1136,7 +1171,10 @@ mod tests {
             .expect_err("a slot change started");
         assert!(matches!(
             error,
-            ServerError::Shoal(ShoalError::SlotsFixed { claimed: 4, configured: 3 })
+            ServerError::Shoal(ShoalError::SlotsFixed {
+                claimed: 4,
+                configured: 3
+            })
         ));
         assert!(format!("{error}").contains("Replace"), "{error}");
         // growth up to the slots is a rehome; past them a refusal naming the ceiling
@@ -1157,7 +1195,10 @@ mod tests {
             error,
             ServerError::Shoal(ShoalError::SlotsBelowCores { slots: 2, cores: 4 })
         ));
-        assert!(StorageMeta::read(dir.path()).expect("a read").is_none(), "a refused claim wrote a marker");
+        assert!(
+            StorageMeta::read(dir.path()).expect("a read").is_none(),
+            "a refused claim wrote a marker"
+        );
         // a standalone node ignores slots: its slots are its cores
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
         let alone = StorageMeta::claim(dir.path(), 3, Some(8), ClusterIntent::Standalone)
@@ -1251,7 +1292,9 @@ mod tests {
             .expect("failed to bootstrap");
         // record a version
         StorageMeta::observe_topology(dir.path(), 3).expect("failed to observe a topology");
-        let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
+        let found = StorageMeta::read(dir.path())
+            .expect("a marker")
+            .expect("a marker");
         assert_eq!(found.topology, 3);
         // and nothing else moved
         assert_eq!(found.node, identity.node);
@@ -1289,8 +1332,8 @@ mod tests {
         assert!(first.path().ends_with(LOCK_FILE));
         // `flock` is per open file description, so a second descriptor in this process is as
         // much another holder as another process would be
-        let error =
-            DirectoryLock::acquire(dir.path()).expect_err("a second lock on one directory was taken");
+        let error = DirectoryLock::acquire(dir.path())
+            .expect_err("a second lock on one directory was taken");
         assert!(matches!(
             error,
             ServerError::Shoal(ShoalError::StorageDirectoryLocked { .. })

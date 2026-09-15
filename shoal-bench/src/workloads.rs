@@ -26,21 +26,21 @@
 
 pub mod cluster_background;
 pub mod cluster_backup;
-pub mod cluster_migration;
-pub mod cluster_rebalance;
-pub mod cluster_rehome;
 pub mod cluster_catchup;
 pub mod cluster_failover;
 pub mod cluster_hop;
+pub mod cluster_migration;
 pub mod cluster_overhead;
 pub mod cluster_reads;
+pub mod cluster_rebalance;
+pub mod cluster_rehome;
 pub mod cluster_replication;
 pub mod conf_sweep;
+pub mod encryption;
 pub mod fanout;
 pub mod fanout_ephemeral;
-pub mod grid;
 pub mod get_ephemeral;
-pub mod encryption;
+pub mod grid;
 pub mod harness;
 pub mod insert_ephemeral;
 pub mod insert_unsorted;

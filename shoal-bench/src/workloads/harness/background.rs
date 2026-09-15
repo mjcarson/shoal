@@ -16,12 +16,14 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use shoal::server::control::AdminSender;
 use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest};
 use shoal::shared::protocol::error::ErrorCode;
 
-use crate::model::macro_layer::{BackgroundFacts, BackupFacts, MigrationFacts, RebalanceFacts, SecondFacts, WindowFacts};
+use crate::model::macro_layer::{
+    BackgroundFacts, BackupFacts, MigrationFacts, RebalanceFacts, SecondFacts, WindowFacts,
+};
 use crate::workloads::workload::{BackgroundKind, BackgroundSpec, TimelineSample};
 
 /// How often the record is polled
@@ -145,7 +147,9 @@ fn ask(admin: &AdminSender, op: uuid::Uuid, kind: AdminKind, what: &str) -> Resu
         }) {
             Ok(response) => match response.outcome {
                 Ok(AdminOutcome::Applied { .. } | AdminOutcome::Repeated { .. }) => return Ok(()),
-                Err(error) if error.code() == ErrorCode::StaleVersion => std::thread::sleep(Duration::from_millis(100)),
+                Err(error) if error.code() == ErrorCode::StaleVersion => {
+                    std::thread::sleep(Duration::from_millis(100))
+                }
                 other => return Err(format!("the {what} was refused: {other:?}")),
             },
             Err(error) => return Err(format!("asking for the {what}: {error:?}")),
@@ -182,7 +186,10 @@ fn schedule(
     // once its grace elapses is what is polled ([F46](../../../../docs/src/features/capacity-rebalancing.md))
     if let BackgroundKind::Expire { node } = &spec.kind {
         let Some(node) = nodes.get(usize::try_from(*node).unwrap_or(usize::MAX)) else {
-            marks.error = Some(format!("the expiry names node {node}, and {} are staged", nodes.len()));
+            marks.error = Some(format!(
+                "the expiry names node {node}, and {} are staged",
+                nodes.len()
+            ));
             return marks;
         };
         let op = loop {
@@ -234,7 +241,10 @@ fn schedule(
                 nodes.get(usize::try_from(*from).unwrap_or(usize::MAX)),
                 nodes.get(usize::try_from(*to).unwrap_or(usize::MAX)),
             ) else {
-                marks.error = Some(format!("the move names nodes {from} and {to}, and {} are staged", nodes.len()));
+                marks.error = Some(format!(
+                    "the move names nodes {from} and {to}, and {} are staged",
+                    nodes.len()
+                ));
                 return marks;
             };
             AdminKind::Move {
@@ -246,7 +256,10 @@ fn schedule(
         BackgroundKind::Rebalance => AdminKind::Rebalance,
         BackgroundKind::Decommission { node, .. } => {
             let Some(node) = nodes.get(usize::try_from(*node).unwrap_or(usize::MAX)) else {
-                marks.error = Some(format!("the decommission names node {node}, and {} are staged", nodes.len()));
+                marks.error = Some(format!(
+                    "the decommission names node {node}, and {} are staged",
+                    nodes.len()
+                ));
                 return marks;
             };
             AdminKind::Decommission { node: *node }
@@ -273,7 +286,9 @@ fn schedule(
             BackgroundKind::Repair => AdminKind::RepairStatus { op },
             BackgroundKind::Move { .. } => AdminKind::MoveStatus { op },
             BackgroundKind::Backup => AdminKind::BackupStatus { op },
-            BackgroundKind::Rebalance | BackgroundKind::Decommission { .. } | BackgroundKind::Expire { .. } => {
+            BackgroundKind::Rebalance
+            | BackgroundKind::Decommission { .. }
+            | BackgroundKind::Expire { .. } => {
                 unreachable!("a plan is polled by its own record")
             }
         };
@@ -305,7 +320,8 @@ fn schedule(
         // a move's record carries what each group's transition cost
         // ([F45](../../../../docs/src/features/replica-migration.md))
         if matches!(spec.kind, BackgroundKind::Move { .. }) {
-            let mut phases: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+            let mut phases: std::collections::BTreeMap<String, u64> =
+                std::collections::BTreeMap::new();
             let (mut bytes, mut entries) = (0u64, 0u64);
             for group in groups.into_iter().flat_map(|groups| groups.values()) {
                 bytes += group["stats"]["bytes"].as_u64().unwrap_or(0);
@@ -321,14 +337,17 @@ fn schedule(
             marks.entries = entries;
             marks.outcome = match &record["outcome"] {
                 serde_json::Value::String(outcome) => Some(outcome.to_lowercase()),
-                serde_json::Value::Object(outcome) => outcome.keys().next().map(|key| key.to_lowercase()),
+                serde_json::Value::Object(outcome) => {
+                    outcome.keys().next().map(|key| key.to_lowercase())
+                }
                 _ => None,
             };
         }
         // a backup's record carries what each group's leader wrote, or why it did not
         // ([F49](../../../../docs/src/features/backup-and-recovery.md))
         if spec.kind == BackgroundKind::Backup {
-            let (mut written, mut skipped, mut failed, mut bytes, mut records) = (0u64, 0u64, 0u64, 0u64, 0u64);
+            let (mut written, mut skipped, mut failed, mut bytes, mut records) =
+                (0u64, 0u64, 0u64, 0u64, 0u64);
             for group in groups.into_iter().flat_map(|groups| groups.values()) {
                 let outcome = &group["outcome"];
                 if outcome["Written"].is_object() {
@@ -348,10 +367,16 @@ fn schedule(
             marks.records = records;
         }
         let done = match &spec.kind {
-            BackgroundKind::Repair => groups.is_some_and(|groups| !groups.is_empty() && groups.values().all(|group| group["phase"] == "Done")),
+            BackgroundKind::Repair => groups.is_some_and(|groups| {
+                !groups.is_empty() && groups.values().all(|group| group["phase"] == "Done")
+            }),
             BackgroundKind::Move { .. } => record["phase"] == "Done",
-            BackgroundKind::Backup => groups.is_some_and(|groups| !groups.is_empty() && groups.values().all(|group| group["phase"] == "Done")),
-            BackgroundKind::Rebalance | BackgroundKind::Decommission { .. } | BackgroundKind::Expire { .. } => true,
+            BackgroundKind::Backup => groups.is_some_and(|groups| {
+                !groups.is_empty() && groups.values().all(|group| group["phase"] == "Done")
+            }),
+            BackgroundKind::Rebalance
+            | BackgroundKind::Decommission { .. }
+            | BackgroundKind::Expire { .. } => true,
         };
         if done {
             marks.finished_at = Some(Instant::now());
@@ -369,7 +394,10 @@ fn schedule(
 ///
 /// * `admin` - How to ask
 /// * `node` - The member
-fn expiry_plan_of(admin: &AdminSender, node: shoal::shared::identity::NodeId) -> Result<Option<uuid::Uuid>, String> {
+fn expiry_plan_of(
+    admin: &AdminSender,
+    node: shoal::shared::identity::NodeId,
+) -> Result<Option<uuid::Uuid>, String> {
     let view = match admin.admin(AdminRequest {
         op: uuid::Uuid::new_v4(),
         expected_version: 0,
@@ -399,7 +427,12 @@ fn expiry_plan_of(admin: &AdminSender, node: shoal::shared::identity::NodeId) ->
 /// * `op` - The plan
 /// * `stopped` - Fires when the run is over
 /// * `marks` - The marks so far
-fn poll_plan(admin: &AdminSender, op: uuid::Uuid, stopped: &mpsc::Receiver<()>, mut marks: Marks) -> Marks {
+fn poll_plan(
+    admin: &AdminSender,
+    op: uuid::Uuid,
+    stopped: &mpsc::Receiver<()>,
+    mut marks: Marks,
+) -> Marks {
     loop {
         let record = match admin.admin(AdminRequest {
             op: uuid::Uuid::new_v4(),
@@ -420,7 +453,9 @@ fn poll_plan(admin: &AdminSender, op: uuid::Uuid, stopped: &mpsc::Receiver<()>, 
         };
         let steps = record["steps"].as_array();
         marks.steps = steps.map_or(0, |steps| steps.len() as u64);
-        marks.moved = steps.map_or(0, |steps| steps.iter().filter(|step| step["state"] == "Moved").count() as u64);
+        marks.moved = steps.map_or(0, |steps| {
+            steps.iter().filter(|step| step["state"] == "Moved").count() as u64
+        });
         marks.plan_bytes = steps.map_or(0, |steps| {
             steps
                 .iter()
@@ -431,7 +466,9 @@ fn poll_plan(admin: &AdminSender, op: uuid::Uuid, stopped: &mpsc::Receiver<()>, 
         marks.blocked = record["blocked"]["reason"].as_str().map(str::to_string);
         marks.outcome = match &record["outcome"] {
             serde_json::Value::String(outcome) => Some(outcome.to_lowercase()),
-            serde_json::Value::Object(outcome) => outcome.keys().next().map(|key| key.to_lowercase()),
+            serde_json::Value::Object(outcome) => {
+                outcome.keys().next().map(|key| key.to_lowercase())
+            }
             _ => None,
         };
         if record["phase"] == "Done" {
@@ -463,9 +500,22 @@ pub fn facts(
     partitions: u64,
     bytes: u64,
 ) -> BackgroundFacts {
-    let started_at = marks.started_at.map(|at| at.saturating_duration_since(started));
-    let finished_at = marks.finished_at.map(|at| at.saturating_duration_since(started));
-    cut(started_at, finished_at, marks.groups, marks.clean, timeline, run_for, partitions, bytes)
+    let started_at = marks
+        .started_at
+        .map(|at| at.saturating_duration_since(started));
+    let finished_at = marks
+        .finished_at
+        .map(|at| at.saturating_duration_since(started));
+    cut(
+        started_at,
+        finished_at,
+        marks.groups,
+        marks.clean,
+        timeline,
+        run_for,
+        partitions,
+        bytes,
+    )
 }
 
 /// The pure half of [`facts`], on durations from the start of the run
@@ -548,9 +598,18 @@ pub fn cut(
 /// * `timeline` - Every operation of the run, in the order it was sent
 /// * `run_for` - How long the run was scheduled for
 #[must_use]
-pub fn migration_facts(started: Instant, marks: &Marks, timeline: &[TimelineSample], run_for: Duration) -> MigrationFacts {
-    let started_at = marks.started_at.map(|at| at.saturating_duration_since(started));
-    let finished_at = marks.finished_at.map(|at| at.saturating_duration_since(started));
+pub fn migration_facts(
+    started: Instant,
+    marks: &Marks,
+    timeline: &[TimelineSample],
+    run_for: Duration,
+) -> MigrationFacts {
+    let started_at = marks
+        .started_at
+        .map(|at| at.saturating_duration_since(started));
+    let finished_at = marks
+        .finished_at
+        .map(|at| at.saturating_duration_since(started));
     migration_cut(started_at, finished_at, marks, timeline, run_for)
 }
 
@@ -572,7 +631,16 @@ pub fn migration_cut(
     run_for: Duration,
 ) -> MigrationFacts {
     // the windows and the series are cut exactly as a repair's are
-    let windows = cut(started_at, finished_at, marks.groups, 0, timeline, run_for, 0, 0);
+    let windows = cut(
+        started_at,
+        finished_at,
+        marks.groups,
+        0,
+        timeline,
+        run_for,
+        0,
+        0,
+    );
     MigrationFacts {
         started_ms: started_at.map(millis),
         finished_ms: finished_at.map(millis),
@@ -602,9 +670,18 @@ pub fn migration_cut(
 /// * `timeline` - Every operation of the run, in the order it was sent
 /// * `run_for` - How long the run was scheduled for
 #[must_use]
-pub fn backup_facts(started: Instant, marks: &Marks, timeline: &[TimelineSample], run_for: Duration) -> BackupFacts {
-    let started_at = marks.started_at.map(|at| at.saturating_duration_since(started));
-    let finished_at = marks.finished_at.map(|at| at.saturating_duration_since(started));
+pub fn backup_facts(
+    started: Instant,
+    marks: &Marks,
+    timeline: &[TimelineSample],
+    run_for: Duration,
+) -> BackupFacts {
+    let started_at = marks
+        .started_at
+        .map(|at| at.saturating_duration_since(started));
+    let finished_at = marks
+        .finished_at
+        .map(|at| at.saturating_duration_since(started));
     backup_cut(started_at, finished_at, marks, timeline, run_for)
 }
 
@@ -626,7 +703,16 @@ pub fn backup_cut(
     run_for: Duration,
 ) -> BackupFacts {
     // the windows and the series are cut exactly as a repair's are
-    let windows = cut(started_at, finished_at, marks.groups, 0, timeline, run_for, 0, 0);
+    let windows = cut(
+        started_at,
+        finished_at,
+        marks.groups,
+        0,
+        timeline,
+        run_for,
+        0,
+        0,
+    );
     BackupFacts {
         started_ms: started_at.map(millis),
         finished_ms: finished_at.map(millis),
@@ -655,9 +741,19 @@ pub fn backup_cut(
 /// * `timeline` - Every operation of the run, in the order it was sent
 /// * `run_for` - How long the run was scheduled for
 #[must_use]
-pub fn rebalance_facts(kind: &str, started: Instant, marks: &Marks, timeline: &[TimelineSample], run_for: Duration) -> RebalanceFacts {
-    let started_at = marks.started_at.map(|at| at.saturating_duration_since(started));
-    let finished_at = marks.finished_at.map(|at| at.saturating_duration_since(started));
+pub fn rebalance_facts(
+    kind: &str,
+    started: Instant,
+    marks: &Marks,
+    timeline: &[TimelineSample],
+    run_for: Duration,
+) -> RebalanceFacts {
+    let started_at = marks
+        .started_at
+        .map(|at| at.saturating_duration_since(started));
+    let finished_at = marks
+        .finished_at
+        .map(|at| at.saturating_duration_since(started));
     rebalance_cut(kind, started_at, finished_at, marks, timeline, run_for)
 }
 
@@ -681,8 +777,24 @@ pub fn rebalance_cut(
     run_for: Duration,
 ) -> RebalanceFacts {
     // the windows and the series are cut exactly as a repair's are
-    let windows = cut(started_at, finished_at, marks.steps, 0, timeline, run_for, 0, 0);
-    let p99_of = |name: &str| windows.windows.iter().find(|window| window.name == name).filter(|window| window.ops > 0).map(|window| window.p99_us);
+    let windows = cut(
+        started_at,
+        finished_at,
+        marks.steps,
+        0,
+        timeline,
+        run_for,
+        0,
+        0,
+    );
+    let p99_of = |name: &str| {
+        windows
+            .windows
+            .iter()
+            .find(|window| window.name == name)
+            .filter(|window| window.ops > 0)
+            .map(|window| window.p99_us)
+    };
     let p99_ratio_permille = match (p99_of("before"), p99_of("during")) {
         (Some(before), Some(during)) if before > 0 => Some(during.saturating_mul(1000) / before),
         _ => None,
@@ -765,17 +877,32 @@ mod tests {
         assert_eq!(facts.started_ms, Some(10_000));
         assert_eq!(facts.finished_ms, Some(20_000));
         assert_eq!(facts.seconds, Some(10));
-        assert_eq!((facts.groups, facts.clean, facts.partitions, facts.bytes), (4, 4, 1234, 56_789));
+        assert_eq!(
+            (facts.groups, facts.clean, facts.partitions, facts.bytes),
+            (4, 4, 1234, 56_789)
+        );
         // three windows cut at the marks, the middle one slower and holding the one failure
         assert_eq!(facts.windows.len(), 3);
-        let names: Vec<&str> = facts.windows.iter().map(|window| window.name.as_str()).collect();
+        let names: Vec<&str> = facts
+            .windows
+            .iter()
+            .map(|window| window.name.as_str())
+            .collect();
         assert_eq!(names, ["before", "during", "after"]);
         assert_eq!(facts.windows[0].ops, 100);
         assert_eq!(facts.windows[1].ops, 100);
         assert_eq!(facts.windows[2].ops, 100);
         assert_eq!(facts.windows[1].errors, 1);
-        assert!(facts.windows[1].p50_us > facts.windows[0].p50_us, "{:?}", facts.windows);
-        assert!(facts.windows[1].p50_us > facts.windows[2].p50_us, "{:?}", facts.windows);
+        assert!(
+            facts.windows[1].p50_us > facts.windows[0].p50_us,
+            "{:?}",
+            facts.windows
+        );
+        assert!(
+            facts.windows[1].p50_us > facts.windows[2].p50_us,
+            "{:?}",
+            facts.windows
+        );
         // one bucket per second, the slow ten visible
         assert_eq!(facts.series.len(), 30);
         assert!(facts.series[15].p50_us > facts.series[5].p50_us);
@@ -820,7 +947,10 @@ mod tests {
             op: None,
             error: None,
             outcome: Some("moved".to_string()),
-            phase_ms: vec![("catching_up".to_string(), 4000), ("learner".to_string(), 300)],
+            phase_ms: vec![
+                ("catching_up".to_string(), 4000),
+                ("learner".to_string(), 300),
+            ],
             bytes: 12_345,
             entries: 678,
             steps: 0,
@@ -832,7 +962,13 @@ mod tests {
             failed: 0,
             records: 0,
         };
-        let facts = super::migration_cut(Some(Duration::from_secs(10)), Some(Duration::from_secs(20)), &marks, &timeline, Duration::from_secs(30));
+        let facts = super::migration_cut(
+            Some(Duration::from_secs(10)),
+            Some(Duration::from_secs(20)),
+            &marks,
+            &timeline,
+            Duration::from_secs(30),
+        );
         assert_eq!(facts.started_ms, Some(10_000));
         assert_eq!(facts.finished_ms, Some(20_000));
         assert_eq!(facts.seconds, Some(10));
@@ -840,12 +976,26 @@ mod tests {
         assert_eq!(facts.outcome, "moved");
         assert_eq!(facts.phase_ms.len(), 2);
         assert_eq!((facts.bytes, facts.entries), (12_345, 678));
-        let names: Vec<&str> = facts.windows.iter().map(|window| window.name.as_str()).collect();
+        let names: Vec<&str> = facts
+            .windows
+            .iter()
+            .map(|window| window.name.as_str())
+            .collect();
         assert_eq!(names, ["before", "during", "after"]);
-        assert!(facts.windows[1].p50_us > facts.windows[0].p50_us, "{:?}", facts.windows);
+        assert!(
+            facts.windows[1].p50_us > facts.windows[0].p50_us,
+            "{:?}",
+            facts.windows
+        );
         assert_eq!(facts.series.len(), 30);
         // a run that ended before the move was done
-        let unfinished = super::migration_cut(Some(Duration::from_secs(10)), None, &marks, &timeline, Duration::from_secs(30));
+        let unfinished = super::migration_cut(
+            Some(Duration::from_secs(10)),
+            None,
+            &marks,
+            &timeline,
+            Duration::from_secs(30),
+        );
         assert_eq!(unfinished.outcome, "unfinished");
         assert_eq!(unfinished.seconds, None);
         assert_eq!(unfinished.windows[2].ops, 0);
@@ -896,22 +1046,46 @@ mod tests {
             failed: 0,
             records: 1_200,
         };
-        let facts = super::backup_cut(Some(Duration::from_secs(10)), Some(Duration::from_secs(20)), &marks, &timeline, Duration::from_secs(30));
+        let facts = super::backup_cut(
+            Some(Duration::from_secs(10)),
+            Some(Duration::from_secs(20)),
+            &marks,
+            &timeline,
+            Duration::from_secs(30),
+        );
         assert_eq!(facts.started_ms, Some(10_000));
         assert_eq!(facts.finished_ms, Some(20_000));
         assert_eq!(facts.seconds, Some(10));
-        assert_eq!((facts.groups, facts.written, facts.skipped, facts.failed), (6, 3, 3, 0));
+        assert_eq!(
+            (facts.groups, facts.written, facts.skipped, facts.failed),
+            (6, 3, 3, 0)
+        );
         assert_eq!((facts.bytes, facts.records), (45_678, 1_200));
-        let names: Vec<&str> = facts.windows.iter().map(|window| window.name.as_str()).collect();
+        let names: Vec<&str> = facts
+            .windows
+            .iter()
+            .map(|window| window.name.as_str())
+            .collect();
         assert_eq!(names, ["before", "during", "after"]);
-        assert!(facts.windows[1].p50_us > facts.windows[0].p50_us, "{:?}", facts.windows);
+        assert!(
+            facts.windows[1].p50_us > facts.windows[0].p50_us,
+            "{:?}",
+            facts.windows
+        );
         assert_eq!(facts.series.len(), 30);
         // the record round trips through the artifact's json
         let json = serde_json::to_value(&facts).expect("a backup record is json");
-        let back: crate::model::macro_layer::BackupFacts = serde_json::from_value(json).expect("a backup record loads");
+        let back: crate::model::macro_layer::BackupFacts =
+            serde_json::from_value(json).expect("a backup record loads");
         assert_eq!(back, facts);
         // a run that ended before the backup was done
-        let unfinished = super::backup_cut(Some(Duration::from_secs(10)), None, &marks, &timeline, Duration::from_secs(30));
+        let unfinished = super::backup_cut(
+            Some(Duration::from_secs(10)),
+            None,
+            &marks,
+            &timeline,
+            Duration::from_secs(30),
+        );
         assert_eq!(unfinished.seconds, None);
         assert_eq!(unfinished.windows[2].ops, 0);
         // a record from before the arm carries no backup block and loads
@@ -961,7 +1135,14 @@ mod tests {
             failed: 0,
             records: 0,
         };
-        let facts = super::rebalance_cut("decommission", Some(Duration::from_secs(10)), Some(Duration::from_secs(20)), &marks, &timeline, Duration::from_secs(30));
+        let facts = super::rebalance_cut(
+            "decommission",
+            Some(Duration::from_secs(10)),
+            Some(Duration::from_secs(20)),
+            &marks,
+            &timeline,
+            Duration::from_secs(30),
+        );
         assert_eq!(facts.kind, "decommission");
         assert_eq!(facts.started_ms, Some(10_000));
         assert_eq!(facts.finished_ms, Some(20_000));
@@ -969,9 +1150,17 @@ mod tests {
         assert_eq!((facts.steps, facts.moved, facts.bytes), (3, 3, 9_000));
         assert_eq!(facts.outcome, "completed");
         assert_eq!(facts.blocked, None);
-        let names: Vec<&str> = facts.windows.iter().map(|window| window.name.as_str()).collect();
+        let names: Vec<&str> = facts
+            .windows
+            .iter()
+            .map(|window| window.name.as_str())
+            .collect();
         assert_eq!(names, ["before", "during", "after"]);
-        assert!(facts.windows[1].p99_us > facts.windows[0].p99_us, "{:?}", facts.windows);
+        assert!(
+            facts.windows[1].p99_us > facts.windows[0].p99_us,
+            "{:?}",
+            facts.windows
+        );
         assert_eq!(facts.series.len(), 30);
         // the ratio is during over before, in thousandths: 900 over 300
         assert_eq!(facts.p99_ratio_permille, Some(3000));
@@ -984,13 +1173,32 @@ mod tests {
             blocked: Some("tablet 0: every up member holds the set".to_string()),
             ..marks.clone()
         };
-        let unfinished = super::rebalance_cut("capacity_blocked", Some(Duration::from_secs(10)), None, &blocked, &timeline, Duration::from_secs(30));
+        let unfinished = super::rebalance_cut(
+            "capacity_blocked",
+            Some(Duration::from_secs(10)),
+            None,
+            &blocked,
+            &timeline,
+            Duration::from_secs(30),
+        );
         assert_eq!(unfinished.outcome, "unfinished");
         assert_eq!(unfinished.seconds, None);
-        assert!(unfinished.blocked.as_deref().is_some_and(|reason| reason.contains("every up member")));
+        assert!(
+            unfinished
+                .blocked
+                .as_deref()
+                .is_some_and(|reason| reason.contains("every up member"))
+        );
         assert_eq!(unfinished.windows[2].ops, 0);
         // no ratio without a during window
-        let never = super::rebalance_cut("rebalance", None, None, &marks, &timeline, Duration::from_secs(30));
+        let never = super::rebalance_cut(
+            "rebalance",
+            None,
+            None,
+            &marks,
+            &timeline,
+            Duration::from_secs(30),
+        );
         assert_eq!(never.p99_ratio_permille, None);
         // a record from before the arms carries no rebalance block and loads
         let older: crate::model::macro_layer::ClusterFacts =

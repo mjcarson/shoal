@@ -43,7 +43,9 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-use super::{AuthError, CredentialStore, Principal, StoredCredential, DEFAULT_ITERATIONS, SALT_LEN};
+use super::{
+    AuthError, CredentialStore, Principal, StoredCredential, DEFAULT_ITERATIONS, SALT_LEN,
+};
 use crate::shared::protocol::auth::AuthMechanism;
 
 /// The number of random bytes a nonce is drawn from
@@ -376,8 +378,8 @@ impl ScramClient {
             return Err(AuthError::OutOfOrder);
         }
         // the challenge is text, and a challenge that is not is not one we can read
-        let server_first =
-            std::str::from_utf8(input).map_err(|_| AuthError::Malformed("challenge is not utf-8"))?;
+        let server_first = std::str::from_utf8(input)
+            .map_err(|_| AuthError::Malformed("challenge is not utf-8"))?;
         // pull the three fields a server first message has to carry
         let combined_nonce =
             attribute(server_first, 'r').ok_or(AuthError::Malformed("challenge has no nonce"))?;
@@ -439,8 +441,9 @@ impl ScramClient {
         if attribute(server_final, 'e').is_some() {
             return Err(AuthError::BadCredentials);
         }
-        let signature = attribute(server_final, 'v')
-            .ok_or(AuthError::Malformed("server final message has no signature"))?;
+        let signature = attribute(server_final, 'v').ok_or(AuthError::Malformed(
+            "server final message has no signature",
+        ))?;
         let signature = STANDARD
             .decode(signature)
             .map_err(|_| AuthError::Malformed("server signature is not base64"))?;
@@ -596,8 +599,8 @@ impl<'a> ScramServer<'a> {
             .rsplit_once(",p=")
             .ok_or(AuthError::Malformed("final message has no proof"))?;
         // the client has to repeat the nonce we extended, which is what binds the two messages
-        let echoed =
-            attribute(without_proof, 'r').ok_or(AuthError::Malformed("final message has no nonce"))?;
+        let echoed = attribute(without_proof, 'r')
+            .ok_or(AuthError::Malformed("final message has no nonce"))?;
         if echoed != combined_nonce {
             return Err(AuthError::NonceMismatch);
         }

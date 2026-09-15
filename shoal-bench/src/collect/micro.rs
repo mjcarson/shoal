@@ -215,7 +215,11 @@ mod tests {
             148.0,
         );
         let capture = collect(dir.path(), "2026-08-09T00:00:00Z", None).expect("it collects");
-        assert!(capture.benchmarks.contains_key("partition_sorted/insert/16"));
+        assert!(
+            capture
+                .benchmarks
+                .contains_key("partition_sorted/insert/16")
+        );
     }
 
     /// Without that record the directory path stands in for the name

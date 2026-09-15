@@ -1611,10 +1611,9 @@ impl Index {
             Metric::BytesPerSec => point.bytes_per_sec,
             Metric::WallClock => point.wall_clock_ns.map(|ns| ns as f64),
             Metric::Spread => point.spread_pct,
-            Metric::Latency { op, percentile } => point
-                .ops
-                .get(op)
-                .map(|stats| stats.at(*percentile) as f64),
+            Metric::Latency { op, percentile } => {
+                point.ops.get(op).map(|stats| stats.at(*percentile) as f64)
+            }
         }
     }
 
@@ -1666,9 +1665,7 @@ impl Index {
             if capture.cpu_model != head.cpu_model && !differs.iter().any(|seen| seen == "cpu") {
                 differs.push("cpu".to_string());
             }
-            if capture.governor != head.governor
-                && !differs.iter().any(|seen| seen == "governor")
-            {
+            if capture.governor != head.governor && !differs.iter().any(|seen| seen == "governor") {
                 differs.push("governor".to_string());
             }
             if capture.rustc != head.rustc && !differs.iter().any(|seen| seen == "rustc") {
@@ -1724,12 +1721,7 @@ impl Index {
     /// * `workload` - Which workload, as an index into [`Index::workloads`]
     /// * `metric` - What is on the value axis
     /// * `axis` - What is on the key axis
-    pub fn workload_units(
-        &self,
-        workload: u32,
-        metric: &Metric,
-        axis: Axis,
-    ) -> Option<AxisUnits> {
+    pub fn workload_units(&self, workload: u32, metric: &Metric, axis: Axis) -> Option<AxisUnits> {
         self.newest_point(workload)
             .and_then(|point| self.units(point, metric, axis))
     }
@@ -1972,7 +1964,10 @@ impl Index {
         };
         // the three facts that can be the axis are each written unless they are
         if sweep != SweepAxis::RowBytes {
-            key.push(format!("{} rows", crate::fmt::bytes_axis(scale.row_bytes as f64)));
+            key.push(format!(
+                "{} rows",
+                crate::fmt::bytes_axis(scale.row_bytes as f64)
+            ));
         }
         if sweep != SweepAxis::ReadShare {
             key.push(match scale.read_pct {
@@ -2037,11 +2032,23 @@ impl Index {
         });
         // the six settings a sweep moves one at a time, absent meaning the server's own default
         let optional: [(&str, Option<String>); 6] = [
-            ("latency buffer", conf.latency_buffer_size.map(|at| at.to_string())),
-            ("latency write behind", conf.latency_write_behind.map(|at| at.to_string())),
+            (
+                "latency buffer",
+                conf.latency_buffer_size.map(|at| at.to_string()),
+            ),
+            (
+                "latency write behind",
+                conf.latency_write_behind.map(|at| at.to_string()),
+            ),
             ("intent log", conf.intent_log_size.clone()),
-            ("throughput buffer", conf.throughput_buffer_size.map(|at| at.to_string())),
-            ("throughput write behind", conf.throughput_write_behind.map(|at| at.to_string())),
+            (
+                "throughput buffer",
+                conf.throughput_buffer_size.map(|at| at.to_string()),
+            ),
+            (
+                "throughput write behind",
+                conf.throughput_write_behind.map(|at| at.to_string()),
+            ),
             ("max frame", conf.max_frame_bytes.map(|at| at.to_string())),
         ];
         for (name, value) in optional {
@@ -2260,7 +2267,9 @@ impl Source for Index {
                         // sorted on the key, with ties left alone, so the line is drawn along the
                         // axis
                         points.sort_by(|left, right| {
-                            left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal)
+                            left.0
+                                .partial_cmp(&right.0)
+                                .unwrap_or(std::cmp::Ordering::Equal)
                         });
                         series.push(Series {
                             name: match &line.name {
@@ -2449,18 +2458,27 @@ mod tests {
             ..base.clone()
         };
         let scales = vec![
-            cell(25, "persistent_unsorted"),                                  // 0
-            cell(75, "persistent_unsorted"),                                  // 1
-            cell(25, "persistent_sorted"),                                    // 2
-            cell(75, "persistent_sorted"),                                    // 3
-            ScaleFactsLite { scale: "smoke".to_string(), ..base.clone() },     // 4
-            ScaleFactsLite { row_profile: Some("mixed".to_string()), ..base.clone() }, // 5
-            ScaleFactsLite { read_pct: None, ..base.clone() },                 // 6
-            width(64, 20_000),                                                 // 7
-            width(4096, 64),                                                   // 8
-            base.clone(),                                                      // 9
-            base.clone(),                                                      // 10
-            base.clone(),                                                      // 11
+            cell(25, "persistent_unsorted"), // 0
+            cell(75, "persistent_unsorted"), // 1
+            cell(25, "persistent_sorted"),   // 2
+            cell(75, "persistent_sorted"),   // 3
+            ScaleFactsLite {
+                scale: "smoke".to_string(),
+                ..base.clone()
+            }, // 4
+            ScaleFactsLite {
+                row_profile: Some("mixed".to_string()),
+                ..base.clone()
+            }, // 5
+            ScaleFactsLite {
+                read_pct: None,
+                ..base.clone()
+            }, // 6
+            width(64, 20_000),               // 7
+            width(4096, 64),                 // 8
+            base.clone(),                    // 9
+            base.clone(),                    // 10
+            base.clone(),                    // 11
         ];
         let workloads = vec![
             "macro/grid/unsorted/r25/1024",
@@ -2480,7 +2498,10 @@ mod tests {
             "macro/grid/unsorted/r50/1024/write-only",
         ]
         .into_iter()
-        .map(|id| Workload { id: id.to_string(), family: None })
+        .map(|id| Workload {
+            id: id.to_string(),
+            family: None,
+        })
         .collect::<Vec<_>>();
         // one latency summary, so the percentile metrics have something to read
         let stats = |p99: u64| OpStats {
@@ -2664,11 +2685,17 @@ mod tests {
         let series = index.series(&selection);
         assert_eq!(series.len(), 2);
         // the workload both captures measured has two values
-        let first = series.iter().find(|line| line.name.ends_with("r25/1024")).unwrap();
+        let first = series
+            .iter()
+            .find(|line| line.name.ends_with("r25/1024"))
+            .unwrap();
         assert_eq!(first.points, vec![(0.0, Some(100.0)), (1.0, Some(150.0))]);
         // the one only the first capture measured keeps its position and reports no value there,
         // which is what draws a gap rather than a drop to the origin
-        let second = series.iter().find(|line| line.name.ends_with("r75/1024")).unwrap();
+        let second = series
+            .iter()
+            .find(|line| line.name.ends_with("r75/1024"))
+            .unwrap();
         assert_eq!(second.points, vec![(0.0, Some(200.0)), (1.0, None)]);
     }
 
@@ -2677,7 +2704,11 @@ mod tests {
         let index = fixture();
         // the workloads are ticked in the reverse of their read share, which is what a reader
         // clicking around produces
-        let selection = pick(&[1, 0], Metric::OpsPerSec, Axis::Sweep(SweepAxis::ReadShare));
+        let selection = pick(
+            &[1, 0],
+            Metric::OpsPerSec,
+            Axis::Sweep(SweepAxis::ReadShare),
+        );
         let series = index.series(&selection);
         assert_eq!(series.len(), 1);
         // and the line is still drawn left to right along the axis
@@ -2737,7 +2768,10 @@ mod tests {
             series.len(),
             2,
             "expected one curve per table, got {:?}",
-            series.iter().map(|line| line.name.as_str()).collect::<Vec<_>>()
+            series
+                .iter()
+                .map(|line| line.name.as_str())
+                .collect::<Vec<_>>()
         );
         for line in &series {
             assert_eq!(line.points.len(), 2, "{} has the wrong arms", line.name);
@@ -2765,7 +2799,10 @@ mod tests {
         // one arm stamped per query and one stamped per batch, at the same metric
         let selection = pick(
             &[0, 9],
-            Metric::Latency { op: "read".to_string(), percentile: Percentile::P99 },
+            Metric::Latency {
+                op: "read".to_string(),
+                percentile: Percentile::P99,
+            },
             Axis::Sweep(SweepAxis::ReadShare),
         );
         let series = index.series(&selection);
@@ -2818,8 +2855,11 @@ mod tests {
         // it has no share to sit at, which is not a share of zero, so it is not on this chart and
         // does not get to decide what is
         assert_eq!(drawn(&series), 2, "an arm with no share reached the axis");
-        assert!(index.workload_units(6, &Metric::OpsPerSec, Axis::Sweep(SweepAxis::ReadShare))
-            .is_some_and(|units| units.key.is_none()));
+        assert!(
+            index
+                .workload_units(6, &Metric::OpsPerSec, Axis::Sweep(SweepAxis::ReadShare))
+                .is_some_and(|units| units.key.is_none())
+        );
     }
 
     #[test]
@@ -2883,7 +2923,10 @@ mod tests {
             );
         }
         // what they share is still there, so the intersection narrows rather than empties
-        assert!(both.contains(&Metric::OpsPerSec), "a metric both carry was dropped");
+        assert!(
+            both.contains(&Metric::OpsPerSec),
+            "a metric both carry was dropped"
+        );
         // and one of them alone keeps its own operation
         assert!(
             index.metrics_for(&[11]).contains(&Metric::Latency {
@@ -2929,7 +2972,10 @@ mod tests {
         // under the cursor as boxes are ticked
         let whole = index.corpus_metrics();
         let narrowed = index.metrics_for(&[0]);
-        assert!(narrowed.len() < whole.len(), "the fixture no longer narrows anything");
+        assert!(
+            narrowed.len() < whole.len(),
+            "the fixture no longer narrows anything"
+        );
         let mut walk = whole.iter();
         for metric in &narrowed {
             assert!(
@@ -2956,7 +3002,11 @@ mod tests {
         assert_eq!(series.len(), 1, "the row count split the sweep");
         assert_eq!(
             series[0].points,
-            vec![(64.0, Some(800.0)), (1024.0, Some(1000.0)), (4096.0, Some(900.0))]
+            vec![
+                (64.0, Some(800.0)),
+                (1024.0, Some(1000.0)),
+                (4096.0, Some(900.0))
+            ]
         );
     }
 
@@ -3104,7 +3154,11 @@ mod tests {
             Metric::OpsPerSec,
             Axis::Sweep(SweepAxis::ReadShare),
         ));
-        assert_eq!(series.len(), 2, "the two workloads were folded into one line");
+        assert_eq!(
+            series.len(),
+            2,
+            "the two workloads were folded into one line"
+        );
         // and each of them draws its own measurement at that position rather than sharing one
         for line in &series {
             assert_eq!(line.points.len(), 1);

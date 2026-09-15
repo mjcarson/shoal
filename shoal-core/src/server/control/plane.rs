@@ -46,20 +46,22 @@ use serde::{Deserialize, Serialize};
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
+use super::backup::BackupRecord;
 use super::cores::ControlPlacement;
 use super::detector::Detector;
 use super::listener::{control_acceptor, err, ok, Inbound};
 use super::network::{PeerNetwork, RpcFailure};
-use super::store::{self, ControlStateMachine, CONTROL_DIR};
-use super::backup::BackupRecord;
 use super::plan::{PlanOutcome, PlanPhase, PlanRecord, PlanUpdate, StepState};
 use super::planner::{self, NodeInput, PlanInput, SetInput};
 use super::repair::{QuarantinedCopy, RepairMode};
+use super::store::{self, ControlStateMachine, CONTROL_DIR};
 use super::types::{
     ControlCommand, ControlConfig, ControlResponse, ControlState, MemberHealth, MemberPhase,
     MemberRecord, MemberRole, MemberState, Tombstone,
 };
-use crate::server::conf::cluster::{BootstrapPolicy, DialOverride, Migration, Rebalance, Transport};
+use crate::server::conf::cluster::{
+    BootstrapPolicy, DialOverride, Migration, Rebalance, Transport,
+};
 use crate::server::conf::Conf;
 use crate::server::errors::ShoalError;
 use crate::server::map::{QuorumShortfall, TabletMap};
@@ -271,9 +273,10 @@ impl AdminSender {
             .map_err(|_| ServerError::ControlFailed {
                 error: "the control thread is not answering".to_string(),
             })?;
-        rx.recv_timeout(PROPOSE_TIMEOUT + REQUEST_TIMEOUT).map_err(|_| ServerError::ControlFailed {
-            error: "the control thread did not answer an admin request".to_string(),
-        })
+        rx.recv_timeout(PROPOSE_TIMEOUT + REQUEST_TIMEOUT)
+            .map_err(|_| ServerError::ControlFailed {
+                error: "the control thread did not answer an admin request".to_string(),
+            })
     }
 }
 
@@ -798,8 +801,11 @@ impl ControlHandle {
     ///
     /// Fails if the control thread is gone or the peer did not answer.
     pub fn vote_probe(&self, node: NodeId) -> Result<VoteProbe, ServerError> {
-        self.ask(|reply| ControlRequest::VoteProbe { node, reply }, "a vote probe")?
-            .map_err(|error| ServerError::ControlFailed { error })
+        self.ask(
+            |reply| ControlRequest::VoteProbe { node, reply },
+            "a vote probe",
+        )?
+        .map_err(|error| ServerError::ControlFailed { error })
     }
 
     /// The cluster as this node sees it
@@ -839,7 +845,10 @@ impl ControlHandle {
     ///
     /// Fails if the control thread is gone.
     pub fn attach_sink(&self, sink: MapSink) -> Result<(), ServerError> {
-        self.ask(|ack| ControlRequest::AttachSink(sink, ack), "a sink attachment")
+        self.ask(
+            |ack| ControlRequest::AttachSink(sink, ack),
+            "a sink attachment",
+        )
     }
 
     /// Make an administrative request as the process itself
@@ -1090,7 +1099,9 @@ impl Core {
                     state_name: member.state_name().to_string(),
                     weight: member.record.effective_weight(),
                     grace_remaining_ms: match (&member.grace, grace_ms) {
-                        (Some(grace), Some(total)) if !grace.expired => Some(total.saturating_sub(grace.elapsed_ms)),
+                        (Some(grace), Some(total)) if !grace.expired => {
+                            Some(total.saturating_sub(grace.elapsed_ms))
+                        }
                         _ => None,
                     },
                     free_bytes: capacity.map(|capacity| capacity.free_bytes),
@@ -1214,8 +1225,14 @@ impl Core {
     /// * `principal` - Who asked, if the connection authenticated
     /// * `state` - The applied state
     fn is_admin(&self, principal: &Option<String>, state: &ControlState) -> bool {
-        let admins = state.policy.as_ref().map(|policy| policy.admins.clone()).unwrap_or_default();
-        principal.as_ref().is_some_and(|principal| admins.contains(principal))
+        let admins = state
+            .policy
+            .as_ref()
+            .map(|policy| policy.admins.clone())
+            .unwrap_or_default();
+        principal
+            .as_ref()
+            .is_some_and(|principal| admins.contains(principal))
     }
 
     /// The refusal a principal that is not an admin is answered
@@ -1225,12 +1242,18 @@ impl Core {
     /// * `principal` - Who asked, if the connection authenticated
     /// * `state` - The applied state
     fn not_admin(&self, principal: &Option<String>, state: &ControlState) -> AdminError {
-        let admins = state.policy.as_ref().map(|policy| policy.admins.clone()).unwrap_or_default();
+        let admins = state
+            .policy
+            .as_ref()
+            .map(|policy| policy.admins.clone())
+            .unwrap_or_default();
         AdminError::new(
             ErrorCode::Unauthorized,
             format!(
                 "{} may not change the cluster; cluster.admins names {admins:?}",
-                principal.as_deref().unwrap_or("an unauthenticated connection")
+                principal
+                    .as_deref()
+                    .unwrap_or("an unauthenticated connection")
             ),
         )
     }
@@ -1344,11 +1367,13 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
     // a control node that asked for TLS refuses to start if the kernel cannot do kTLS, the
     // same as a shard listener; the material itself was read by the pool into the holder
     if tls.is_encrypted() && !crate::shared::tls::ktls::is_available() {
-        return Err(crate::shared::tls::TlsError::UlpUnavailable(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "the 'tls' kernel module is not loaded",
-        ))
-        .into());
+        return Err(
+            crate::shared::tls::TlsError::UlpUnavailable(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "the 'tls' kernel module is not loaded",
+            ))
+            .into(),
+        );
     }
     // the network the group drives its peers with, dialling committed records
     let network = PeerNetwork::new(local.clone(), dial, tls.clone(), transport.clone());
@@ -1366,9 +1391,12 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
     // the one channel every event arrives on
     let (tx, rx) = kanal::unbounded_async::<Event>();
     // a fresh bootstrap creates its group and its cluster before anything else can see it
-    let initialized = raft.is_initialized().await.map_err(|error| ServerError::ControlFailed {
-        error: format!("{error}"),
-    })?;
+    let initialized = raft
+        .is_initialized()
+        .await
+        .map_err(|error| ServerError::ControlFailed {
+            error: format!("{error}"),
+        })?;
     let fresh_bootstrap = bootstrap && !initialized && recovered.cluster.is_none();
     if fresh_bootstrap {
         let mut members = BTreeMap::new();
@@ -1399,7 +1427,9 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
                 error: format!("writing the bootstrap: {error}"),
             })?;
         match response.data {
-            ControlResponse::Applied { topology_version } => observe(&root, topology_version).await?,
+            ControlResponse::Applied { topology_version } => {
+                observe(&root, topology_version).await?
+            }
             other => {
                 return Err(ServerError::ControlFailed {
                     error: format!("the control group refused the bootstrap: {other:?}"),
@@ -1441,9 +1471,10 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         }));
     }
     // bind the control listener and drive inbound RPCs into this node's group, on this executor
-    let listener = crate::server::peer::bind_reusable(bind).map_err(|error| ServerError::ControlFailed {
-        error: format!("binding the control listener on {bind}: {error}"),
-    })?;
+    let listener =
+        crate::server::peer::bind_reusable(bind).map_err(|error| ServerError::ControlFailed {
+            error: format!("binding the control listener on {bind}: {error}"),
+        })?;
     let (inbound_tx, inbound_rx) = kanal::unbounded_async::<Inbound>();
     let acceptor = glommio::spawn_local(control_acceptor(
         listener,
@@ -1506,7 +1537,10 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
     };
     let ping_timer = {
         let tx = tx.clone();
-        let interval = transport.ping_interval.duration().max(Duration::from_millis(10));
+        let interval = transport
+            .ping_interval
+            .duration()
+            .max(Duration::from_millis(10));
         glommio::spawn_local(async move {
             loop {
                 glommio::timer::sleep(interval).await;
@@ -1609,9 +1643,11 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
     metrics_task.cancel().await;
     report_timer.cancel().await;
     ping_timer.cancel().await;
-    raft.shutdown().await.map_err(|error| ServerError::ControlFailed {
-        error: format!("stopping the group: {error}"),
-    })?;
+    raft.shutdown()
+        .await
+        .map_err(|error| ServerError::ControlFailed {
+            error: format!("stopping the group: {error}"),
+        })?;
     outcome
 }
 
@@ -1632,16 +1668,24 @@ impl Core {
             Event::Promoted(learner, outcome) => {
                 self.promoting = false;
                 match outcome {
-                    Ok(()) => event!(Level::INFO, msg = "promoted a learner to voter", node = %learner),
-                    Err(error) => event!(Level::WARN, msg = "a promotion failed", node = %learner, error),
+                    Ok(()) => {
+                        event!(Level::INFO, msg = "promoted a learner to voter", node = %learner)
+                    }
+                    Err(error) => {
+                        event!(Level::WARN, msg = "a promotion failed", node = %learner, error)
+                    }
                 }
                 self.maybe_promote();
             }
             Event::Readdressed(node, outcome) => {
                 self.readdressing = false;
                 match outcome {
-                    Ok(()) => event!(Level::INFO, msg = "wrote a member's new addresses into the membership", %node),
-                    Err(error) => event!(Level::WARN, msg = "a member's new addresses were not written into the membership", %node, error),
+                    Ok(()) => {
+                        event!(Level::INFO, msg = "wrote a member's new addresses into the membership", %node)
+                    }
+                    Err(error) => {
+                        event!(Level::WARN, msg = "a member's new addresses were not written into the membership", %node, error)
+                    }
                 }
                 self.maybe_readdress();
             }
@@ -1749,7 +1793,9 @@ impl Core {
                 let network = self.network.clone();
                 let machine = self.machine.clone();
                 glommio::spawn_local(async move {
-                    let outcome = propose(&raft, &network, &machine, command).await.map_err(|error| format!("{error:?}"));
+                    let outcome = propose(&raft, &network, &machine, command)
+                        .await
+                        .map_err(|error| format!("{error:?}"));
                     let _ = reply.send(outcome);
                 })
                 .detach();
@@ -1762,13 +1808,21 @@ impl Core {
                     self.shards_failed.push(shard);
                     self.shards_failed.sort_unstable();
                 }
-                event!(Level::WARN, msg = "a shard died", shard = health.shard, error = health.error);
+                event!(
+                    Level::WARN,
+                    msg = "a shard died",
+                    shard = health.shard,
+                    error = health.error
+                );
                 // say so at once rather than on the next tick
                 self.report();
             }
             ControlRequest::StaleReport(reply) => {
                 // a report behind the last one, as a replay or a reordered delivery would be
-                let _ = reply.send(self.send_report(self.member.incarnation, Some(self.report_seq.saturating_sub(1))));
+                let _ = reply.send(self.send_report(
+                    self.member.incarnation,
+                    Some(self.report_seq.saturating_sub(1)),
+                ));
             }
             ControlRequest::Shutdown => return Ok(false),
         }
@@ -1786,9 +1840,10 @@ impl Core {
             ControlKind::Propose => self.handle_propose(inbound),
             ControlKind::StatusReport => self.handle_report(inbound),
             _ => {
-                let _ = inbound
-                    .reply
-                    .send(err(format!("{} is not a membership rpc", inbound.kind.name())));
+                let _ = inbound.reply.send(err(format!(
+                    "{} is not a membership rpc",
+                    inbound.kind.name()
+                )));
             }
         }
     }
@@ -1858,7 +1913,10 @@ impl Core {
         // a removed identity never comes back, by this door or any other: a replacement
         // joins as a new identity ([F46](../../../../docs/src/features/capacity-rebalancing.md))
         let removed = state.tombstones.contains_key(&request.member.node)
-            || state.members.get(&request.member.node).is_some_and(|existing| existing.phase == MemberPhase::Removed);
+            || state
+                .members
+                .get(&request.member.node)
+                .is_some_and(|existing| existing.phase == MemberPhase::Removed);
         if removed {
             let _ = inbound.reply.send(ok(&JoinResponse::Refused {
                 reason: format!(
@@ -1875,7 +1933,8 @@ impl Core {
         if let Some(existing) = state.members.get(&request.member.node) {
             let committed = existing.record.incarnation;
             let offered = request.member.incarnation;
-            let same_run = offered == committed && existing.record.control == request.member.control;
+            let same_run =
+                offered == committed && existing.record.control == request.member.control;
             if offered < committed || (offered == committed && !same_run) {
                 let _ = inbound.reply.send(ok(&JoinResponse::Refused {
                     reason: format!(
@@ -1958,13 +2017,17 @@ impl Core {
         let command: ControlCommand = match serde_json::from_slice(&inbound.payload) {
             Ok(command) => command,
             Err(error) => {
-                let _ = inbound.reply.send(err(format!("decoding a proposal: {error}")));
+                let _ = inbound
+                    .reply
+                    .send(err(format!("decoding a proposal: {error}")));
                 return;
             }
         };
         // a bootstrap is never proposed through anybody
         if matches!(command, ControlCommand::Bootstrap { .. }) {
-            let _ = inbound.reply.send(err("a bootstrap cannot be proposed".to_string()));
+            let _ = inbound
+                .reply
+                .send(err("a bootstrap cannot be proposed".to_string()));
             return;
         }
         if !self.is_leader {
@@ -1976,8 +2039,20 @@ impl Core {
         // an activation is judged by what this leader knows every member's build speaks,
         // never by the proposer's claim ([F48](../../../../docs/src/features/rolling-compatibility.md))
         let command = match command {
-            ControlCommand::Activate { op, principal, expected_version, wire, .. } => match self.wires_known(wire) {
-                Ok(members) => ControlCommand::Activate { op, principal, expected_version, wire, members },
+            ControlCommand::Activate {
+                op,
+                principal,
+                expected_version,
+                wire,
+                ..
+            } => match self.wires_known(wire) {
+                Ok(members) => ControlCommand::Activate {
+                    op,
+                    principal,
+                    expected_version,
+                    wire,
+                    members,
+                },
                 Err(reason) => {
                     let _ = inbound.reply.send(err(reason));
                     return;
@@ -2014,7 +2089,9 @@ impl Core {
         let report: StatusReport = match serde_json::from_slice(&inbound.payload) {
             Ok(report) => report,
             Err(error) => {
-                let _ = inbound.reply.send(err(format!("decoding a report: {error}")));
+                let _ = inbound
+                    .reply
+                    .send(err(format!("decoding a report: {error}")));
                 return;
             }
         };
@@ -2047,22 +2124,39 @@ impl Core {
                 .detector
                 .observe(report.node, report.incarnation, report.seq, Instant::now())
             {
-                let _ = inbound.reply.send(ok(&serde_json::json!({ "seq": report.seq, "stale": true })));
+                let _ = inbound
+                    .reply
+                    .send(ok(&serde_json::json!({ "seq": report.seq, "stale": true })));
                 return;
             }
             // a fresh report from a member the cluster holds down is the evidence it is back
             if member.health == MemberHealth::Down {
-                self.propose_health(report.node, MemberHealth::Up, member.record.incarnation, None);
+                self.propose_health(
+                    report.node,
+                    MemberHealth::Up,
+                    member.record.incarnation,
+                    None,
+                );
             }
             // what it says about its capacity is kept in memory for the planner, never committed
             // ([F46](../../../../docs/src/features/capacity-rebalancing.md))
-            self.note_capacity(report.node, report.incarnation, report.free_bytes, &report.group_bytes);
+            self.note_capacity(
+                report.node,
+                report.incarnation,
+                report.free_bytes,
+                &report.group_bytes,
+            );
             // and the wire version its running build speaks, which an activation is judged by
             // ([F48](../../../../docs/src/features/rolling-compatibility.md))
-            self.wires.insert(report.node, report.wire_max.max(MIN_PEER_VERSION));
+            self.wires
+                .insert(report.node, report.wire_max.max(MIN_PEER_VERSION));
             // a change in the member's quarantined copies is committed, so every node routes
             // around them ([F44](../../../../docs/src/features/repair.md))
-            let copies: Vec<QuarantinedCopy> = report.quarantined.iter().map(QuarantinedCopy::from_member).collect();
+            let copies: Vec<QuarantinedCopy> = report
+                .quarantined
+                .iter()
+                .map(QuarantinedCopy::from_member)
+                .collect();
             if member.quarantined != copies {
                 let raft = self.raft.clone();
                 let network = self.network.clone();
@@ -2093,7 +2187,9 @@ impl Core {
                 .detach();
             }
         }
-        let _ = inbound.reply.send(ok(&serde_json::json!({ "seq": report.seq })));
+        let _ = inbound
+            .reply
+            .send(ok(&serde_json::json!({ "seq": report.seq })));
     }
 
     /// Answer an administrative request
@@ -2133,25 +2229,33 @@ impl Core {
                 return;
             }
             AdminKind::Detector => {
-                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(serde_json::json!({
-                    "local": self.reachability,
-                    "leader": self.leader,
-                    "is_leader": self.is_leader,
-                    "stale_ignored": self.detector.stale_ignored,
-                    "members": self.detector.view(Instant::now()),
-                })))));
+                let _ = call
+                    .reply
+                    .send(answer(Ok(AdminOutcome::Read(serde_json::json!({
+                        "local": self.reachability,
+                        "leader": self.leader,
+                        "is_leader": self.is_leader,
+                        "stale_ignored": self.detector.stale_ignored,
+                        "members": self.detector.view(Instant::now()),
+                    })))));
                 return;
             }
             AdminKind::Initialize { nodes } => ControlCommand::Initialize {
                 op: call.request.op,
-                principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                principal: call
+                    .principal
+                    .clone()
+                    .unwrap_or_else(|| "process".to_string()),
                 expected_version: call.request.expected_version,
                 nodes: nodes.clone(),
                 tables: self.tables.clone(),
             },
             AdminKind::SetControlVoters { count } => ControlCommand::SetControlVoters {
                 op: call.request.op,
-                principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                principal: call
+                    .principal
+                    .clone()
+                    .unwrap_or_else(|| "process".to_string()),
                 expected_version: call.request.expected_version,
                 count: *count,
             },
@@ -2161,7 +2265,10 @@ impl Core {
                 let Some((_, id)) = self.tables.iter().find(|(name, _)| name == table) else {
                     let _ = call.reply.send(answer(Err(AdminError::new(
                         ErrorCode::Internal,
-                        format!("no table is named {table}; the schema serves {:?}", self.tables.iter().map(|(name, _)| name).collect::<Vec<_>>()),
+                        format!(
+                            "no table is named {table}; the schema serves {:?}",
+                            self.tables.iter().map(|(name, _)| name).collect::<Vec<_>>()
+                        ),
                     ))));
                     return;
                 };
@@ -2172,14 +2279,19 @@ impl Core {
                     Some(other) => {
                         let _ = call.reply.send(answer(Err(AdminError::new(
                             ErrorCode::UnsupportedReadLevel,
-                            format!("{other} is not a read level; one or quorum, or nothing to clear"),
+                            format!(
+                                "{other} is not a read level; one or quorum, or nothing to clear"
+                            ),
                         ))));
                         return;
                     }
                 };
                 ControlCommand::SetTableReadPolicy {
                     op: call.request.op,
-                    principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                    principal: call
+                        .principal
+                        .clone()
+                        .unwrap_or_else(|| "process".to_string()),
                     expected_version: call.request.expected_version,
                     table: *id,
                     level,
@@ -2188,8 +2300,13 @@ impl Core {
             // the record of a repair, as the applied state holds it
             AdminKind::RepairStatus { op } => {
                 let outcome = match state.repairs.get(op) {
-                    Some(record) => Ok(AdminOutcome::Read(serde_json::to_value(record).unwrap_or_default())),
-                    None => Err(AdminError::new(ErrorCode::Internal, format!("no repair operation {op} is recorded"))),
+                    Some(record) => Ok(AdminOutcome::Read(
+                        serde_json::to_value(record).unwrap_or_default(),
+                    )),
+                    None => Err(AdminError::new(
+                        ErrorCode::Internal,
+                        format!("no repair operation {op} is recorded"),
+                    )),
                 };
                 let _ = call.reply.send(answer(outcome));
                 return;
@@ -2205,7 +2322,10 @@ impl Core {
                 let Some((_, id)) = self.tables.iter().find(|(name, _)| name == table) else {
                     let _ = call.reply.send(answer(Err(AdminError::new(
                         ErrorCode::Internal,
-                        format!("no table is named {table}; the schema serves {:?}", self.tables.iter().map(|(name, _)| name).collect::<Vec<_>>()),
+                        format!(
+                            "no table is named {table}; the schema serves {:?}",
+                            self.tables.iter().map(|(name, _)| name).collect::<Vec<_>>()
+                        ),
                     ))));
                     return;
                 };
@@ -2218,7 +2338,10 @@ impl Core {
                 };
                 ControlCommand::Repair {
                     op: call.request.op,
-                    principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                    principal: call
+                        .principal
+                        .clone()
+                        .unwrap_or_else(|| "process".to_string()),
                     expected_version: call.request.expected_version,
                     table: *id,
                     tablet: *tablet,
@@ -2231,8 +2354,13 @@ impl Core {
             // ([F45](../../../../docs/src/features/replica-migration.md))
             AdminKind::MoveStatus { op } => {
                 let outcome = match state.moves.get(op) {
-                    Some(record) => Ok(AdminOutcome::Read(serde_json::to_value(record).unwrap_or_default())),
-                    None => Err(AdminError::new(ErrorCode::Internal, format!("no move operation {op} is recorded"))),
+                    Some(record) => Ok(AdminOutcome::Read(
+                        serde_json::to_value(record).unwrap_or_default(),
+                    )),
+                    None => Err(AdminError::new(
+                        ErrorCode::Internal,
+                        format!("no move operation {op} is recorded"),
+                    )),
                 };
                 let _ = call.reply.send(answer(outcome));
                 return;
@@ -2240,7 +2368,10 @@ impl Core {
             // a move is judged whole by the state machine, against the map it derives
             AdminKind::Move { tablet, from, to } => ControlCommand::Move {
                 op: call.request.op,
-                principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                principal: call
+                    .principal
+                    .clone()
+                    .unwrap_or_else(|| "process".to_string()),
                 expected_version: call.request.expected_version,
                 tablet: *tablet,
                 from: *from,
@@ -2250,27 +2381,39 @@ impl Core {
             // ([F46](../../../../docs/src/features/capacity-rebalancing.md))
             AdminKind::Decommission { node } => ControlCommand::Decommission {
                 op: call.request.op,
-                principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                principal: call
+                    .principal
+                    .clone()
+                    .unwrap_or_else(|| "process".to_string()),
                 expected_version: call.request.expected_version,
                 node: *node,
             },
             AdminKind::Remove { node, replacement } => ControlCommand::Remove {
                 op: call.request.op,
-                principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                principal: call
+                    .principal
+                    .clone()
+                    .unwrap_or_else(|| "process".to_string()),
                 expected_version: call.request.expected_version,
                 node: *node,
                 replacement: *replacement,
             },
             AdminKind::Maintenance { node, suspend } => ControlCommand::Maintenance {
                 op: call.request.op,
-                principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                principal: call
+                    .principal
+                    .clone()
+                    .unwrap_or_else(|| "process".to_string()),
                 expected_version: call.request.expected_version,
                 node: *node,
                 suspend: *suspend,
             },
             AdminKind::Rebalance => ControlCommand::Rebalance {
                 op: call.request.op,
-                principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                principal: call
+                    .principal
+                    .clone()
+                    .unwrap_or_else(|| "process".to_string()),
                 expected_version: call.request.expected_version,
             },
             // a backup: the table resolved by name here, the rest judged whole by the state
@@ -2283,7 +2426,10 @@ impl Core {
                         None => {
                             let _ = call.reply.send(answer(Err(AdminError::new(
                                 ErrorCode::Internal,
-                                format!("no table is named {name}; the schema serves {:?}", self.tables.iter().map(|(name, _)| name).collect::<Vec<_>>()),
+                                format!(
+                                    "no table is named {name}; the schema serves {:?}",
+                                    self.tables.iter().map(|(name, _)| name).collect::<Vec<_>>()
+                                ),
                             ))));
                             return;
                         }
@@ -2291,7 +2437,10 @@ impl Core {
                 };
                 ControlCommand::Backup {
                     op: call.request.op,
-                    principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                    principal: call
+                        .principal
+                        .clone()
+                        .unwrap_or_else(|| "process".to_string()),
                     expected_version: call.request.expected_version,
                     table,
                     path: path.clone(),
@@ -2299,8 +2448,13 @@ impl Core {
             }
             AdminKind::BackupStatus { op } => {
                 let outcome = match state.backups.get(op) {
-                    Some(record) => Ok(AdminOutcome::Read(serde_json::to_value(record).unwrap_or_default())),
-                    None => Err(AdminError::new(ErrorCode::Internal, format!("no backup operation {op} is recorded"))),
+                    Some(record) => Ok(AdminOutcome::Read(
+                        serde_json::to_value(record).unwrap_or_default(),
+                    )),
+                    None => Err(AdminError::new(
+                        ErrorCode::Internal,
+                        format!("no backup operation {op} is recorded"),
+                    )),
                 };
                 let _ = call.reply.send(answer(outcome));
                 return;
@@ -2308,19 +2462,24 @@ impl Core {
             AdminKind::Backups => {
                 let mut backups: Vec<&BackupRecord> = state.backups.values().collect();
                 backups.sort_by_key(|record| record.requested_at);
-                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(serde_json::to_value(backups).unwrap_or_default()))));
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(
+                    serde_json::to_value(backups).unwrap_or_default(),
+                ))));
                 return;
             }
             // a restore: the manifests read here, on this node, and the schema judged here;
             // the coverage and the once-per-cluster rule are the state machine's
             AdminKind::Restore { path } => {
-                let (source, source_schema, files) = match crate::server::control::backup::scan_backup(Path::new(path)) {
-                    Ok(scanned) => scanned,
-                    Err(reason) => {
-                        let _ = call.reply.send(answer(Err(AdminError::new(ErrorCode::Internal, reason))));
-                        return;
-                    }
-                };
+                let (source, source_schema, files) =
+                    match crate::server::control::backup::scan_backup(Path::new(path)) {
+                        Ok(scanned) => scanned,
+                        Err(reason) => {
+                            let _ = call
+                                .reply
+                                .send(answer(Err(AdminError::new(ErrorCode::Internal, reason))));
+                            return;
+                        }
+                    };
                 if source_schema != self.member.schema_id {
                     let _ = call.reply.send(answer(Err(AdminError::new(
                         ErrorCode::Internal,
@@ -2333,7 +2492,10 @@ impl Core {
                 }
                 ControlCommand::Restore {
                     op: call.request.op,
-                    principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                    principal: call
+                        .principal
+                        .clone()
+                        .unwrap_or_else(|| "process".to_string()),
                     expected_version: call.request.expected_version,
                     path: path.clone(),
                     source,
@@ -2343,14 +2505,21 @@ impl Core {
             }
             AdminKind::RestoreStatus { op } => {
                 let outcome = match state.restores.get(op) {
-                    Some(record) => Ok(AdminOutcome::Read(serde_json::to_value(record).unwrap_or_default())),
-                    None => Err(AdminError::new(ErrorCode::Internal, format!("no restore operation {op} is recorded"))),
+                    Some(record) => Ok(AdminOutcome::Read(
+                        serde_json::to_value(record).unwrap_or_default(),
+                    )),
+                    None => Err(AdminError::new(
+                        ErrorCode::Internal,
+                        format!("no restore operation {op} is recorded"),
+                    )),
                 };
                 let _ = call.reply.send(answer(outcome));
                 return;
             }
             AdminKind::Recoveries => {
-                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(serde_json::to_value(&state.recoveries).unwrap_or_default()))));
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(
+                    serde_json::to_value(&state.recoveries).unwrap_or_default(),
+                ))));
                 return;
             }
             // a reload is this node's alone: the material read again and swapped whole, or
@@ -2358,15 +2527,22 @@ impl Core {
             // nothing to commit ([F50](../../../../docs/src/features/cluster-operations.md))
             AdminKind::ReloadTls => {
                 if !call.trusted && !self.is_admin(&call.principal, &state) {
-                    let _ = call.reply.send(answer(Err(self.not_admin(&call.principal, &state))));
+                    let _ = call
+                        .reply
+                        .send(answer(Err(self.not_admin(&call.principal, &state))));
                     return;
                 }
                 let outcome = match self.tls.reload() {
                     Ok(report) => {
                         event!(Level::INFO, msg = "reloaded the peer certificate", chain = report.chain, authorities = report.authorities, own_identity = ?report.own_identity);
-                        Ok(AdminOutcome::Read(serde_json::to_value(report).unwrap_or_default()))
+                        Ok(AdminOutcome::Read(
+                            serde_json::to_value(report).unwrap_or_default(),
+                        ))
                     }
-                    Err(error) => Err(AdminError::new(ErrorCode::Internal, format!("the certificate was not reloaded: {error}"))),
+                    Err(error) => Err(AdminError::new(
+                        ErrorCode::Internal,
+                        format!("the certificate was not reloaded: {error}"),
+                    )),
                 };
                 let _ = call.reply.send(answer(outcome));
                 return;
@@ -2389,14 +2565,19 @@ impl Core {
                 let members = match self.wires_known(*wire) {
                     Ok(members) => members,
                     Err(reason) if self.is_leader => {
-                        let _ = call.reply.send(answer(Err(AdminError::new(ErrorCode::Internal, reason))));
+                        let _ = call
+                            .reply
+                            .send(answer(Err(AdminError::new(ErrorCode::Internal, reason))));
                         return;
                     }
                     Err(_) => self.wires_heard(),
                 };
                 ControlCommand::Activate {
                     op: call.request.op,
-                    principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                    principal: call
+                        .principal
+                        .clone()
+                        .unwrap_or_else(|| "process".to_string()),
                     expected_version: call.request.expected_version,
                     wire: *wire,
                     members,
@@ -2405,8 +2586,13 @@ impl Core {
             // the record of a plan, as the applied state holds it
             AdminKind::PlanStatus { op } => {
                 let outcome = match state.plans.get(op) {
-                    Some(record) => Ok(AdminOutcome::Read(serde_json::to_value(record).unwrap_or_default())),
-                    None => Err(AdminError::new(ErrorCode::Internal, format!("no plan {op} is recorded"))),
+                    Some(record) => Ok(AdminOutcome::Read(
+                        serde_json::to_value(record).unwrap_or_default(),
+                    )),
+                    None => Err(AdminError::new(
+                        ErrorCode::Internal,
+                        format!("no plan {op} is recorded"),
+                    )),
                 };
                 let _ = call.reply.send(answer(outcome));
                 return;
@@ -2414,13 +2600,17 @@ impl Core {
             AdminKind::Plans => {
                 let mut plans: Vec<&PlanRecord> = state.plans.values().collect();
                 plans.sort_by_key(|record| record.requested_at);
-                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(serde_json::to_value(plans).unwrap_or_default()))));
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(
+                    serde_json::to_value(plans).unwrap_or_default(),
+                ))));
                 return;
             }
         };
         // a mutation needs a principal the committed policy names, unless the process itself asks
         if !call.trusted && !self.is_admin(&call.principal, &state) {
-            let _ = call.reply.send(answer(Err(self.not_admin(&call.principal, &state))));
+            let _ = call
+                .reply
+                .send(answer(Err(self.not_admin(&call.principal, &state))));
             return;
         }
         // an operation seen before is answered as it was the first time, before the version
@@ -2432,7 +2622,10 @@ impl Core {
                 ControlResponse::Applied { topology_version } => Ok(AdminOutcome::Repeated {
                     version: *topology_version,
                 }),
-                other => Err(AdminError::new(ErrorCode::Internal, format!("repeated: {other:?}"))),
+                other => Err(AdminError::new(
+                    ErrorCode::Internal,
+                    format!("repeated: {other:?}"),
+                )),
             };
             let _ = call.reply.send(answer(outcome));
             return;
@@ -2493,7 +2686,10 @@ impl Core {
                         },
                         format!("repeated: {reason}"),
                     )),
-                    other => Err(AdminError::new(ErrorCode::Internal, format!("repeated: {other:?}"))),
+                    other => Err(AdminError::new(
+                        ErrorCode::Internal,
+                        format!("repeated: {other:?}"),
+                    )),
                 },
                 Ok(ControlResponse::Refused { reason }) => Err(AdminError::new(
                     if reason.contains("stale version") {
@@ -2506,10 +2702,13 @@ impl Core {
                 Ok(ControlResponse::Fenced { .. }) => {
                     Err(AdminError::new(ErrorCode::Internal, "fenced".to_string()))
                 }
-                Ok(ControlResponse::Removed { node }) => {
-                    Err(AdminError::new(ErrorCode::Internal, format!("{node} is a removed identity")))
+                Ok(ControlResponse::Removed { node }) => Err(AdminError::new(
+                    ErrorCode::Internal,
+                    format!("{node} is a removed identity"),
+                )),
+                Err(ProposeError::NoLeader) => {
+                    Err(AdminError::new(ErrorCode::NotLeader, quorum_hint))
                 }
-                Err(ProposeError::NoLeader) => Err(AdminError::new(ErrorCode::NotLeader, quorum_hint)),
                 Err(ProposeError::Failed(msg)) => Err(AdminError::new(ErrorCode::Internal, msg)),
             };
             let version = machine.state().topology_version;
@@ -2563,14 +2762,19 @@ impl Core {
             let version = state.topology_version;
             glommio::spawn_local(async move {
                 if let Err(error) = observe(&root, version).await {
-                    event!(Level::WARN, msg = "could not record the topology version", ?error);
+                    event!(
+                        Level::WARN,
+                        msg = "could not record the topology version",
+                        ?error
+                    );
                 }
             })
             .detach();
         }
         // where every member is dialled now, so a member that moved is reached at its new
         // address from the next RPC on ([F50](../../../../docs/src/features/cluster-operations.md))
-        self.network.note_addresses(state.members.values().map(|member| &member.record));
+        self.network
+            .note_addresses(state.members.values().map(|member| &member.record));
         self.publish();
         self.maybe_observe();
         self.maybe_promote();
@@ -2609,7 +2813,10 @@ impl Core {
             self.last_plan = None;
             let now = Instant::now();
             for (node, member) in &self.machine.state().members {
-                if *node != self.node && member.health == MemberHealth::Up && member.phase != MemberPhase::Removed {
+                if *node != self.node
+                    && member.health == MemberHealth::Up
+                    && member.phase != MemberPhase::Removed
+                {
                     self.detector.seed(*node, member.record.incarnation, now);
                 }
             }
@@ -2646,7 +2853,10 @@ impl Core {
     /// # Arguments
     ///
     /// * `outcome` - What it produced
-    fn handle_observed(&mut self, outcome: Result<ControlResponse, ProposeError>) -> Result<(), ServerError> {
+    fn handle_observed(
+        &mut self,
+        outcome: Result<ControlResponse, ProposeError>,
+    ) -> Result<(), ServerError> {
         self.observing = false;
         match outcome {
             Ok(ControlResponse::Applied { .. } | ControlResponse::Repeated { .. }) => {
@@ -2656,12 +2866,16 @@ impl Core {
                 self.publish();
                 Ok(())
             }
-            Ok(ControlResponse::Fenced { committed, offered, .. }) => Err(ServerError::Shoal(ShoalError::Fenced {
+            Ok(ControlResponse::Fenced {
+                committed, offered, ..
+            }) => Err(ServerError::Shoal(ShoalError::Fenced {
                 node: self.node,
                 committed,
                 ours: offered,
             })),
-            Ok(ControlResponse::Removed { node }) => Err(ServerError::Shoal(ShoalError::Removed { node })),
+            Ok(ControlResponse::Removed { node }) => {
+                Err(ServerError::Shoal(ShoalError::Removed { node }))
+            }
             Ok(ControlResponse::Refused { reason }) => {
                 event!(Level::WARN, msg = "the observation was refused", reason);
                 self.observe_after = Some(Instant::now() + OBSERVE_BACKOFF);
@@ -2700,7 +2914,10 @@ impl Core {
     /// # Arguments
     ///
     /// * `outcome` - The cluster and the leader that admitted this node, or why not
-    async fn handle_joined(&mut self, outcome: Result<(ClusterId, NodeId), String>) -> Result<(), ServerError> {
+    async fn handle_joined(
+        &mut self,
+        outcome: Result<(ClusterId, NodeId), String>,
+    ) -> Result<(), ServerError> {
         match outcome {
             Ok((cluster, leader)) => {
                 // the cluster is known now, before the leader's first append arrives
@@ -2728,7 +2945,9 @@ impl Core {
             return;
         };
         // no promotion while a joint configuration is uncommitted
-        if metrics.membership_config.membership() != metrics.committed_membership_config.membership() {
+        if metrics.membership_config.membership()
+            != metrics.committed_membership_config.membership()
+        {
             return;
         }
         let state = self.machine.state();
@@ -2747,7 +2966,11 @@ impl Core {
             .find(|(node, member)| {
                 member.is_placeable()
                     && !voters.contains(node)
-                    && metrics.membership_config.membership().nodes().any(|(id, _)| id == *node)
+                    && metrics
+                        .membership_config
+                        .membership()
+                        .nodes()
+                        .any(|(id, _)| id == *node)
             })
             .map(|(node, member)| (*node, member.record.clone()));
         let Some((learner, record)) = candidate else {
@@ -2779,7 +3002,9 @@ impl Core {
         let Some(metrics) = &self.metrics else {
             return;
         };
-        if metrics.membership_config.membership() != metrics.committed_membership_config.membership() {
+        if metrics.membership_config.membership()
+            != metrics.committed_membership_config.membership()
+        {
             return;
         }
         let state = self.machine.state();
@@ -2791,8 +3016,13 @@ impl Core {
             .find_map(|(node, named)| {
                 let member = state.members.get(node)?;
                 let record = &member.record;
-                let differs = record.control != named.control || record.data != named.data || record.client != named.client;
-                (differs && member.phase != MemberPhase::Removed && record.incarnation >= named.incarnation).then(|| (*node, record.clone()))
+                let differs = record.control != named.control
+                    || record.data != named.data
+                    || record.client != named.client;
+                (differs
+                    && member.phase != MemberPhase::Removed
+                    && record.incarnation >= named.incarnation)
+                    .then(|| (*node, record.clone()))
             });
         let Some((node, record)) = moved else {
             return;
@@ -2802,7 +3032,10 @@ impl Core {
         let tx = self.tx.clone();
         glommio::spawn_local(async move {
             let outcome = raft
-                .change_membership(ChangeMembers::SetNodes(BTreeMap::from([(node, record)])), false)
+                .change_membership(
+                    ChangeMembers::SetNodes(BTreeMap::from([(node, record)])),
+                    false,
+                )
                 .await
                 .map(|_| ())
                 .map_err(|error| format!("{error}"));
@@ -2898,7 +3131,12 @@ impl Core {
             }
             let phi = self.detector.phi(node, now).unwrap_or(0.0);
             event!(Level::WARN, msg = "a member fell silent", %node, phi);
-            self.propose_health(node, MemberHealth::Down, member.record.incarnation, Some(Uuid::new_v4()));
+            self.propose_health(
+                node,
+                MemberHealth::Down,
+                member.record.incarnation,
+                Some(Uuid::new_v4()),
+            );
         }
     }
 
@@ -2910,7 +3148,13 @@ impl Core {
     /// * `health` - What to set it to
     /// * `incarnation` - The run the evidence is about
     /// * `episode` - The down episode this opens, if it opens one
-    fn propose_health(&mut self, node: NodeId, health: MemberHealth, incarnation: u64, episode: Option<Uuid>) {
+    fn propose_health(
+        &mut self,
+        node: NodeId,
+        health: MemberHealth,
+        incarnation: u64,
+        episode: Option<Uuid>,
+    ) {
         if !self.health_in_flight.insert(node) {
             return;
         }
@@ -2937,14 +3181,22 @@ impl Core {
     ///
     /// * `node` - The member
     /// * `outcome` - What the group answered
-    fn handle_health_proposed(&mut self, node: NodeId, outcome: Result<ControlResponse, ProposeError>) {
+    fn handle_health_proposed(
+        &mut self,
+        node: NodeId,
+        outcome: Result<ControlResponse, ProposeError>,
+    ) {
         self.health_in_flight.remove(&node);
         match outcome {
             Ok(ControlResponse::Applied { topology_version }) => {
                 event!(Level::INFO, msg = "a member's health was committed", %node, topology_version);
             }
-            Ok(other) => event!(Level::DEBUG, msg = "a health verdict changed nothing", %node, ?other),
-            Err(error) => event!(Level::DEBUG, msg = "a health verdict did not commit", %node, %error),
+            Ok(other) => {
+                event!(Level::DEBUG, msg = "a health verdict changed nothing", %node, ?other)
+            }
+            Err(error) => {
+                event!(Level::DEBUG, msg = "a health verdict did not commit", %node, %error)
+            }
         }
     }
 
@@ -2979,7 +3231,11 @@ impl Core {
                 .filter(|(_, reach)| reach.misses == 0)
                 .map(|(node, reach)| (*node, reach.rtt_us))
                 .collect(),
-            quarantined: self.quarantined.iter().map(QuarantinedCopy::to_member).collect(),
+            quarantined: self
+                .quarantined
+                .iter()
+                .map(QuarantinedCopy::to_member)
+                .collect(),
             free_bytes,
             group_bytes,
             wire_max: self.member.wire_max,
@@ -3039,7 +3295,10 @@ impl Core {
         for (node, member) in &state.members {
             // a removed member is gone, and so is a tombstoned one still draining: an identity
             // refused at every door is never going to answer
-            if *node == self.node || member.phase == MemberPhase::Removed || state.tombstones.contains_key(node) {
+            if *node == self.node
+                || member.phase == MemberPhase::Removed
+                || state.tombstones.contains_key(node)
+            {
                 continue;
             }
             let record = member.record.clone();
@@ -3122,7 +3381,9 @@ impl Core {
             .state()
             .members
             .values()
-            .filter(|member| member.phase != MemberPhase::Removed && !members.contains_key(&member.record.node))
+            .filter(|member| {
+                member.phase != MemberPhase::Removed && !members.contains_key(&member.record.node)
+            })
             .map(|member| member.record.node.to_string())
             .collect();
         if unheard.is_empty() {
@@ -3146,17 +3407,22 @@ impl Core {
     /// * `incarnation` - The incarnation it reported at
     /// * `free_bytes` - The free bytes on its storage
     /// * `group_bytes` - The bytes each of its groups holds
-    fn note_capacity(&mut self, node: NodeId, incarnation: u64, free_bytes: u64, group_bytes: &[(u64, u64)]) {
+    fn note_capacity(
+        &mut self,
+        node: NodeId,
+        incarnation: u64,
+        free_bytes: u64,
+        group_bytes: &[(u64, u64)],
+    ) {
         let capacity = NodeCapacity {
             free_bytes,
             group_bytes: group_bytes.iter().copied().collect(),
             at: Instant::now(),
             incarnation,
         };
-        let moved = self
-            .capacity
-            .get(&node)
-            .is_none_or(|known| known.free_bytes != capacity.free_bytes || known.group_bytes != capacity.group_bytes);
+        let moved = self.capacity.get(&node).is_none_or(|known| {
+            known.free_bytes != capacity.free_bytes || known.group_bytes != capacity.group_bytes
+        });
         if moved {
             self.capacity_moved = true;
         }
@@ -3176,21 +3442,34 @@ impl Core {
             return;
         }
         let state = self.machine.state();
-        let Some(grace) = state.policy.as_ref().and_then(|policy| policy.auto_remove_after) else {
+        let Some(grace) = state
+            .policy
+            .as_ref()
+            .and_then(|policy| policy.auto_remove_after)
+        else {
             return;
         };
         let grace = grace.duration();
         let grace_ms = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX);
-        let every = (grace / 8).min(GRACE_COMMIT_CAP).max(Duration::from_millis(10));
+        let every = (grace / 8)
+            .min(GRACE_COMMIT_CAP)
+            .max(Duration::from_millis(10));
         let now = Instant::now();
         // forget counts of members no longer under a grace this leader should count
         self.grace_seen.retain(|node, local| {
-            state.members.get(node).and_then(|member| member.grace.as_ref()).is_some_and(|grace| {
-                grace.episode == local.episode && !grace.suspended && !grace.expired
-            })
+            state
+                .members
+                .get(node)
+                .and_then(|member| member.grace.as_ref())
+                .is_some_and(|grace| {
+                    grace.episode == local.episode && !grace.suspended && !grace.expired
+                })
         });
         for (node, member) in &state.members {
-            if *node == self.node || member.health != MemberHealth::Down || member.phase == MemberPhase::Removed {
+            if *node == self.node
+                || member.health != MemberHealth::Down
+                || member.phase == MemberPhase::Removed
+            {
                 continue;
             }
             let Some(committed) = member.grace.as_ref() else {
@@ -3247,7 +3526,11 @@ impl Core {
     ///
     /// * `node` - The member
     /// * `outcome` - What the group answered
-    fn handle_grace_proposed(&mut self, node: NodeId, outcome: Result<ControlResponse, ProposeError>) {
+    fn handle_grace_proposed(
+        &mut self,
+        node: NodeId,
+        outcome: Result<ControlResponse, ProposeError>,
+    ) {
         self.grace_in_flight.remove(&node);
         match outcome {
             Ok(ControlResponse::Applied { .. }) => {
@@ -3258,7 +3541,8 @@ impl Core {
                     .members
                     .get(&node)
                     .and_then(|member| member.grace.as_ref().map(|grace| grace.elapsed_ms));
-                if let (Some(local), Some(committed)) = (self.grace_seen.get_mut(&node), committed) {
+                if let (Some(local), Some(committed)) = (self.grace_seen.get_mut(&node), committed)
+                {
                     local.committed_ms = committed;
                     local.since = Instant::now();
                 }
@@ -3333,7 +3617,12 @@ impl Core {
     /// * `state` - The applied state
     /// * `map` - The map it derives
     /// * `record` - The plan
-    fn next_plan_update(&mut self, state: &ControlState, map: &TabletMap, record: &PlanRecord) -> Option<PlanUpdate> {
+    fn next_plan_update(
+        &mut self,
+        state: &ControlState,
+        map: &TabletMap,
+        record: &PlanRecord,
+    ) -> Option<PlanUpdate> {
         // a step whose move is done is moved or failed, whichever the move says
         for step in record.live_steps() {
             if step.state != StepState::Moving {
@@ -3345,7 +3634,9 @@ impl Core {
             match state.moves.get(&op) {
                 Some(moved) if moved.is_done() => {
                     let outcome = match &moved.outcome {
-                        Some(super::migrate::MoveOutcome::Failed { reason }) => StepState::Failed { reason: reason.clone() },
+                        Some(super::migrate::MoveOutcome::Failed { reason }) => StepState::Failed {
+                            reason: reason.clone(),
+                        },
                         _ => StepState::Moved,
                     };
                     return Some(PlanUpdate::Step {
@@ -3370,7 +3661,12 @@ impl Core {
         // a pending step under the caps becomes a move, unless its set is already moving
         // under another plan: two plans draining two members of one set each take a turn
         let in_flight = self.moves_in_flight(state);
-        let busy: BTreeSet<u16> = state.moves.values().filter(|moved| !moved.is_done()).map(|moved| moved.tablets[0]).collect();
+        let busy: BTreeSet<u16> = state
+            .moves
+            .values()
+            .filter(|moved| !moved.is_done())
+            .map(|moved| moved.tablets[0])
+            .collect();
         let cap = self.rebalance.moves_per_node;
         for step in record.live_steps() {
             if step.state != StepState::Pending {
@@ -3379,7 +3675,10 @@ impl Core {
             if busy.contains(&step.tablet) {
                 continue;
             }
-            let as_source = in_flight.iter().filter(|(from, _)| *from == step.from).count();
+            let as_source = in_flight
+                .iter()
+                .filter(|(from, _)| *from == step.from)
+                .count();
             let as_destination = in_flight.iter().filter(|(_, to)| *to == step.to).count();
             if as_source >= cap as usize || as_destination >= cap as usize {
                 continue;
@@ -3398,7 +3697,10 @@ impl Core {
             return None;
         }
         // nothing is moving: plan what is left, from the sets as they are served now
-        if record.live_steps().any(|step| step.state == StepState::Moving) {
+        if record
+            .live_steps()
+            .any(|step| step.state == StepState::Moving)
+        {
             return None;
         }
         let input = self.plan_input(state, map, record, &in_flight);
@@ -3411,15 +3713,24 @@ impl Core {
         }
         if let Some(reason) = output.blocked {
             // blocked, and pending steps that cannot be issued are nothing to wait for
-            let same = record.blocked.as_ref().is_some_and(|blocked| blocked.reason == reason);
-            return if same { None } else { Some(PlanUpdate::Blocked(Some(reason))) };
+            let same = record
+                .blocked
+                .as_ref()
+                .is_some_and(|blocked| blocked.reason == reason);
+            return if same {
+                None
+            } else {
+                Some(PlanUpdate::Blocked(Some(reason)))
+            };
         }
         // nothing to plan: a drain that moved everything finishes, a rebalance is done
         match record.kind.drains() {
             Some(_) => Some(PlanUpdate::Finishing),
             None => Some(PlanUpdate::Done(if record.steps.is_empty() {
                 PlanOutcome::Nothing {
-                    reason: output.nothing.unwrap_or_else(|| "nothing to move".to_string()),
+                    reason: output
+                        .nothing
+                        .unwrap_or_else(|| "nothing to move".to_string()),
                 }
             } else {
                 record.completed()
@@ -3449,7 +3760,13 @@ impl Core {
     /// * `map` - The map it derives
     /// * `record` - The plan
     /// * `in_flight` - The moves not done
-    fn plan_input(&self, state: &ControlState, map: &TabletMap, record: &PlanRecord, in_flight: &[(NodeId, NodeId)]) -> PlanInput {
+    fn plan_input(
+        &self,
+        state: &ControlState,
+        map: &TabletMap,
+        record: &PlanRecord,
+        in_flight: &[(NodeId, NodeId)],
+    ) -> PlanInput {
         let draining = record.kind.drains();
         let nodes: BTreeMap<NodeId, NodeInput> = state
             .members
@@ -3479,7 +3796,13 @@ impl Core {
         let busy_tablets: BTreeSet<u16> = record
             .live_steps()
             .map(|step| step.tablet)
-            .chain(state.moves.values().filter(|moved| !moved.is_done()).map(|moved| moved.tablets[0]))
+            .chain(
+                state
+                    .moves
+                    .values()
+                    .filter(|moved| !moved.is_done())
+                    .map(|moved| moved.tablets[0]),
+            )
             .chain(
                 state
                     .open_plans()
@@ -3498,7 +3821,10 @@ impl Core {
                     .iter()
                     .map(|member| {
                         let held = self.capacity.get(&member.node).map_or(0, |capacity| {
-                            groups.iter().map(|group| capacity.group_bytes.get(group).copied().unwrap_or(0)).sum()
+                            groups
+                                .iter()
+                                .map(|group| capacity.group_bytes.get(group).copied().unwrap_or(0))
+                                .sum()
                         });
                         (member.node, held)
                     })
@@ -3569,11 +3895,16 @@ impl Core {
                 Some(mut command) => {
                     let mut answer = None;
                     for _ in 0..PLAN_MOVE_RETRIES {
-                        if let ControlCommand::Move { expected_version, .. } = &mut command {
+                        if let ControlCommand::Move {
+                            expected_version, ..
+                        } = &mut command
+                        {
                             *expected_version = machine.state().topology_version;
                         }
                         match propose(&raft, &network, &machine, command.clone()).await {
-                            Ok(ControlResponse::Refused { reason }) if reason.contains("stale version") => {
+                            Ok(ControlResponse::Refused { reason })
+                                if reason.contains("stale version") =>
+                            {
                                 glommio::timer::sleep(LEASE_POLL).await;
                                 answer = Some(Ok(ControlResponse::Refused { reason }));
                             }
@@ -3584,9 +3915,13 @@ impl Core {
                         }
                     }
                     match answer {
-                        Some(Ok(ControlResponse::Applied { .. } | ControlResponse::Repeated { .. })) => update,
+                        Some(Ok(
+                            ControlResponse::Applied { .. } | ControlResponse::Repeated { .. },
+                        )) => update,
                         Some(Ok(other)) => match update {
-                            PlanUpdate::Step { tablet, op: moved, .. } => PlanUpdate::Step {
+                            PlanUpdate::Step {
+                                tablet, op: moved, ..
+                            } => PlanUpdate::Step {
                                 tablet,
                                 op: moved,
                                 state: StepState::Failed {
@@ -3600,7 +3935,12 @@ impl Core {
                             return;
                         }
                         None => {
-                            let _ = tx.send(Event::PlanProposed(op, Err(ProposeError::Failed("no move was proposed".to_string())))).await;
+                            let _ = tx
+                                .send(Event::PlanProposed(
+                                    op,
+                                    Err(ProposeError::Failed("no move was proposed".to_string())),
+                                ))
+                                .await;
                             return;
                         }
                     }
@@ -3633,8 +3973,12 @@ impl Core {
                 self.last_plan = None;
                 self.drive_plans(true);
             }
-            Ok(other) => event!(Level::DEBUG, msg = "a plan's progress changed nothing", plan = %op, ?other),
-            Err(error) => event!(Level::DEBUG, msg = "a plan's progress did not commit", plan = %op, %error),
+            Ok(other) => {
+                event!(Level::DEBUG, msg = "a plan's progress changed nothing", plan = %op, ?other)
+            }
+            Err(error) => {
+                event!(Level::DEBUG, msg = "a plan's progress did not commit", plan = %op, %error)
+            }
         }
     }
 
@@ -3660,7 +4004,9 @@ impl Core {
             return;
         };
         // no membership change while one is half way through
-        if metrics.membership_config.membership() != metrics.committed_membership_config.membership() {
+        if metrics.membership_config.membership()
+            != metrics.committed_membership_config.membership()
+        {
             self.finishing.remove(&op);
             return;
         }
@@ -3676,16 +4022,27 @@ impl Core {
                 if node == me {
                     let successor = membership.voter_ids().find(|voter| *voter != me);
                     let Some(successor) = successor else {
-                        return Err("this node is the member being removed and the only voter".to_string());
+                        return Err(
+                            "this node is the member being removed and the only voter".to_string()
+                        );
                     };
                     raft.trigger()
                         .transfer_leader(successor)
                         .await
                         .map_err(|error| format!("handing the lead to {successor}: {error}"))?;
-                    return Err(format!("this node is the member being removed; the lead was handed to {successor}"));
+                    return Err(format!(
+                        "this node is the member being removed; the lead was handed to {successor}"
+                    ));
                 }
                 // the tombstone first, while the member still hears the log
-                match propose(&raft, &network, &machine, ControlCommand::Tombstone { node, op: Some(op) }).await {
+                match propose(
+                    &raft,
+                    &network,
+                    &machine,
+                    ControlCommand::Tombstone { node, op: Some(op) },
+                )
+                .await
+                {
                     Ok(ControlResponse::Applied { .. }) => {}
                     Ok(other) => return Err(format!("the tombstone was refused: {other:?}")),
                     Err(error) => return Err(format!("the tombstone did not commit: {error}")),
@@ -3726,7 +4083,12 @@ impl Core {
         match outcome {
             Ok(()) => {
                 event!(Level::INFO, msg = "a member was removed from the cluster", %node, plan = %op);
-                let done = self.machine.state().plans.get(&op).map(PlanRecord::completed);
+                let done = self
+                    .machine
+                    .state()
+                    .plans
+                    .get(&op)
+                    .map(PlanRecord::completed);
                 if let Some(done) = done {
                     self.propose_plan(op, PlanUpdate::Done(done));
                 }
@@ -3739,7 +4101,12 @@ impl Core {
                     .state()
                     .plans
                     .get(&op)
-                    .and_then(|record| record.blocked.as_ref().map(|blocked| blocked.reason == reason))
+                    .and_then(|record| {
+                        record
+                            .blocked
+                            .as_ref()
+                            .map(|blocked| blocked.reason == reason)
+                    })
                     .unwrap_or(false);
                 if !same {
                     self.propose_plan(op, PlanUpdate::Blocked(Some(reason)));
@@ -3868,7 +4235,10 @@ pub async fn propose(
                 }
             }
             let peer = network.peer(&network.addr_of(&record));
-            match peer.rpc(ControlKind::Propose, payload.clone(), PROPOSE_TIMEOUT).await {
+            match peer
+                .rpc(ControlKind::Propose, payload.clone(), PROPOSE_TIMEOUT)
+                .await
+            {
                 Ok(answer) => match serde_json::from_slice::<ProposeResponse>(&answer) {
                     Ok(ProposeResponse::Applied(response)) => return Ok(response),
                     Ok(ProposeResponse::NotLeader { leader: next }) => {
@@ -3881,12 +4251,20 @@ pub async fn propose(
                             leader_record(raft, machine).filter(|record| record.node != me)
                         });
                         // a hint naming this node goes through its own group, above
-                        if hint.is_none() && raft.metrics().borrow_watched().current_leader == Some(me) {
-                            hint = machine.state().members.get(&me).map(|member| member.record.clone());
+                        if hint.is_none()
+                            && raft.metrics().borrow_watched().current_leader == Some(me)
+                        {
+                            hint = machine
+                                .state()
+                                .members
+                                .get(&me)
+                                .map(|member| member.record.clone());
                         }
                     }
                     Err(error) => {
-                        return Err(ProposeError::Failed(format!("decoding a proposal's answer: {error}")))
+                        return Err(ProposeError::Failed(format!(
+                            "decoding a proposal's answer: {error}"
+                        )))
                     }
                 },
                 Err(RpcFailure::Remote(msg)) => return Err(ProposeError::Failed(msg)),
@@ -3922,7 +4300,13 @@ fn leader_record(
         .membership()
         .get_node(&id)
         .cloned()
-        .or_else(|| machine.state().members.get(&id).map(|member| member.record.clone()))
+        .or_else(|| {
+            machine
+                .state()
+                .members
+                .get(&id)
+                .map(|member| member.record.clone())
+        })
 }
 
 /// Catch a learner up and make it a voter
@@ -3987,10 +4371,17 @@ async fn join(
         while let Some(target) = targets.first().cloned() {
             targets.remove(0);
             let peer = network.peer(&target);
-            match peer.rpc(ControlKind::Join, request.clone(), JOIN_RPC_TIMEOUT).await {
+            match peer
+                .rpc(ControlKind::Join, request.clone(), JOIN_RPC_TIMEOUT)
+                .await
+            {
                 Ok(answer) => match serde_json::from_slice::<JoinResponse>(&answer) {
-                    Ok(JoinResponse::Admitted { cluster, leader, .. }) => return Ok((cluster, leader)),
-                    Ok(JoinResponse::Redirect { leader: Some(record) }) => {
+                    Ok(JoinResponse::Admitted {
+                        cluster, leader, ..
+                    }) => return Ok((cluster, leader)),
+                    Ok(JoinResponse::Redirect {
+                        leader: Some(record),
+                    }) => {
                         // a seed that is not the leader names it; dial it next, expecting it
                         let mut addr = network.addr_of(&record);
                         addr.node = None;
@@ -4000,10 +4391,16 @@ async fn join(
                     Ok(JoinResponse::Redirect { leader: None }) => {
                         last = format!("{} knows no leader yet", target.control);
                     }
-                    Ok(JoinResponse::Refused { reason, retry: true }) => {
+                    Ok(JoinResponse::Refused {
+                        reason,
+                        retry: true,
+                    }) => {
                         last = format!("{} refused for now: {reason}", target.control);
                     }
-                    Ok(JoinResponse::Refused { reason, retry: false }) => return Err(reason),
+                    Ok(JoinResponse::Refused {
+                        reason,
+                        retry: false,
+                    }) => return Err(reason),
                     Err(error) => last = format!("decoding {}'s answer: {error}", target.control),
                 },
                 Err(error) => last = format!("{}: {error}", target.control),
@@ -4013,7 +4410,9 @@ async fn join(
         glommio::timer::sleep(backoff).await;
         backoff = (backoff * 2).min(transport.reconnect_max.duration());
     }
-    Err(format!("no seed admitted this node within {JOIN_TIMEOUT:?}: {last}"))
+    Err(format!(
+        "no seed admitted this node within {JOIN_TIMEOUT:?}: {last}"
+    ))
 }
 
 /// Record a topology version in the marker, off the executor thread

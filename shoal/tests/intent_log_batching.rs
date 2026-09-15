@@ -16,8 +16,8 @@ use rkyv::{Archive, Deserialize, Serialize};
 use shoal::server::conf::Conf;
 use shoal::shared::queries::Queries;
 use shoal::storage::FileSystem;
-use shoal::traits::PartitionKeySupport;
 use shoal::tables::PersistentUnsortedTable;
+use shoal::traits::PartitionKeySupport;
 use shoal_derive::{db, ShoalUnsortedTable};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -83,7 +83,11 @@ fn wide_row_config(temp_dir: &TempDir) -> Conf {
     // one shard, so every row lands in one intent log we can then read
     let mut conf = utils::build_single_shard_config(temp_dir);
     // pin the staging buffer to the shipped floor, which is half of one of our rows
-    conf.storage.default.filesystem.latency_sensitive.buffer_size = BUFFER_FLOOR;
+    conf.storage
+        .default
+        .filesystem
+        .latency_sensitive
+        .buffer_size = BUFFER_FLOOR;
     conf
 }
 

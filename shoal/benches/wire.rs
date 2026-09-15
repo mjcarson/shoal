@@ -37,7 +37,8 @@ use shoal::shared::responses::{GetRows, Response as ShoalResponse};
 use shoal::shared::row_ref::RowRef;
 use shoal::shared::traits::{PartitionKeySupport, RkyvSupport};
 use shoal::{
-    FileSystem, PersistentSortedTable, PersistentUnsortedTable, ShoalSortedTable, ShoalUnsortedTable,
+    FileSystem, PersistentSortedTable, PersistentUnsortedTable, ShoalSortedTable,
+    ShoalUnsortedTable,
 };
 
 /// The bundle sizes the request groups are run at
@@ -102,7 +103,9 @@ pub struct TitleByKeyword {
 /// key: every existing `wire_codec` identifier names a measurement taken over a thirty byte row, so
 /// widening that row would keep all thirty nine names and change what every one of them measured.
 /// The frozen baseline would then be compared against numbers describing something else.
-#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, DeepSizeOf)]
+#[derive(
+    Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, DeepSizeOf,
+)]
 #[rkyv(derive(Debug))]
 #[shoal_table(db = "WireDb")]
 pub struct WideRow {
@@ -170,7 +173,9 @@ fn wide_bundle(width: usize) -> Queries<WireDbClient> {
 ///
 /// * `width` - How many bytes of payload each row carries
 fn wide_response(width: usize) -> WireDbResponseKinds {
-    let found = (0..WIDTH_ROWS).map(|index| wide(index, width)).collect::<Vec<_>>();
+    let found = (0..WIDTH_ROWS)
+        .map(|index| wide(index, width))
+        .collect::<Vec<_>>();
     // one partition, which is what the width axis is about - the group sweep varies that
     let found = shoal::shared::responses::GetRows::single(0, found);
     WireDbResponseKinds::WideRow(shoal::shared::responses::Response {
@@ -242,7 +247,8 @@ fn check_original_archive_sizes() {
         "a bundle of ten inserts changed size, so every wire_codec/request/* identifier now \
          measures something else"
     );
-    let response = rkyv::to_bytes::<rkyv::rancor::Error>(&response(256)).expect("failed to archive");
+    let response =
+        rkyv::to_bytes::<rkyv::rancor::Error>(&response(256)).expect("failed to archive");
     assert_eq!(
         response.len(),
         RESPONSE_256_BYTES,
@@ -516,15 +522,19 @@ fn bench_width_request_decode(c: &mut Criterion) {
                 black_box(Queries::<WireDbClient>::access(black_box(&archived[..])).unwrap())
             });
         });
-        group.bench_with_input(BenchmarkId::new("access_unchecked", width), &width, |b, _| {
-            b.iter(|| {
-                black_box(unsafe {
-                    rkyv::access_unchecked::<<Queries<WireDbClient> as Archive>::Archived>(
-                        black_box(&archived[..]),
-                    )
-                })
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("access_unchecked", width),
+            &width,
+            |b, _| {
+                b.iter(|| {
+                    black_box(unsafe {
+                        rkyv::access_unchecked::<<Queries<WireDbClient> as Archive>::Archived>(
+                            black_box(&archived[..]),
+                        )
+                    })
+                });
+            },
+        );
         // and the full deserialize, which is the entry O1 is about
         group.bench_with_input(BenchmarkId::new("deserialize", width), &width, |b, _| {
             b.iter(|| {
@@ -729,7 +739,10 @@ fn gathered(partitions: usize) -> (GetRows<TitleByKeyword>, Vec<u64>) {
     }
     // the order the query named its partitions in
     let order = (0..partitions as u64).collect();
-    (merged.expect("a gathered response has at least one share"), order)
+    (
+        merged.expect("a gathered response has at least one share"),
+        order,
+    )
 }
 
 /// Put a gathered response back in order the way it was done before the index existed
@@ -790,21 +803,25 @@ fn bench_response_gather(c: &mut Criterion) {
             );
         });
         // and the shape that ranks the groups, which hashes nothing
-        group.bench_with_input(BenchmarkId::new("groups", partitions), &partitions, |b, _| {
-            b.iter_batched(
-                || GetRows {
-                    rows: merged.rows.clone(),
-                    groups: merged.groups.clone(),
-                },
-                |mut found| {
-                    found.order_by(|partition| {
-                        black_box(&order).iter().position(|key| *key == partition)
-                    });
-                    found
-                },
-                criterion::BatchSize::LargeInput,
-            );
-        });
+        group.bench_with_input(
+            BenchmarkId::new("groups", partitions),
+            &partitions,
+            |b, _| {
+                b.iter_batched(
+                    || GetRows {
+                        rows: merged.rows.clone(),
+                        groups: merged.groups.clone(),
+                    },
+                    |mut found| {
+                        found.order_by(|partition| {
+                            black_box(&order).iter().position(|key| *key == partition)
+                        });
+                        found
+                    },
+                    criterion::BatchSize::LargeInput,
+                );
+            },
+        );
     }
     group.finish();
 }
@@ -846,8 +863,7 @@ fn bench_response_build(c: &mut Criterion) {
         // and the shape it answers with now: pointed at where they lie, then serialized
         group.bench_with_input(BenchmarkId::new("borrowed", rows), &rows, |b, _| {
             b.iter(|| {
-                let found =
-                    GetRows::single(0, black_box(&owned).iter().map(RowRef::new).collect());
+                let found = GetRows::single(0, black_box(&owned).iter().map(RowRef::new).collect());
                 black_box(rkyv::to_bytes::<rkyv::rancor::Error>(&found).unwrap())
             });
         });
@@ -897,4 +913,3 @@ criterion_group!(
     bench_width_response_body,
 );
 criterion_main!(wire_codec);
-

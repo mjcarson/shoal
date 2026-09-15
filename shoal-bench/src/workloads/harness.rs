@@ -14,10 +14,10 @@
 //! - A workload that panics or hangs costs its own run instead of the rest of the capture.
 
 pub mod background;
+pub mod catchup;
 pub mod cluster;
 pub mod conf;
 pub mod driver;
-pub mod catchup;
 pub mod fault;
 pub mod keys;
 pub mod metrics;
@@ -29,7 +29,7 @@ pub mod timer;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use shoal::{Shoal, ShoalPool};
 
 use crate::model::macro_layer::{ClusterFacts, MacroCaptureV2, WorkloadCapture};
@@ -186,25 +186,28 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // shared because a fault arm's thread kills one and starts it again mid-run
     // ([F42](../../../docs/src/features/primary-failover.md))
     let peers = std::sync::Arc::new(std::sync::Mutex::new(match &staged {
-        Some(staged) => cluster::spawn_peers(
-            staged,
-            workload.id(),
-            &request.conf,
-            request.scale.as_str(),
-        )?,
+        Some(staged) => {
+            cluster::spawn_peers(staged, workload.id(), &request.conf, request.scale.as_str())?
+        }
         None => Vec::new(),
     }));
     // a fault is done to a placed peer, so an arm asking for one without peers is refused
     // before its server starts
     let fault = workload.fault(request.scale);
     if fault.is_some() && staged.is_none() {
-        bail!("{} asks for a fault and places no peers to inject it into", workload.id());
+        bail!(
+            "{} asks for a fault and places no peers to inject it into",
+            workload.id()
+        );
     }
     // a background repair is asked of a placed cluster's control plane, so the same refusal
     // ([F44](../../docs/src/features/repair.md))
     let background_spec = workload.background(request.scale);
     if background_spec.is_some() && staged.is_none() {
-        bail!("{} asks for a background repair and places no peers to run it over", workload.id());
+        bail!(
+            "{} asks for a background repair and places no peers to run it over",
+            workload.id()
+        );
     }
     // start the shards and wait until they answer - or, for a server somebody else started,
     // only wait until it answers
@@ -251,9 +254,16 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
                             &conf.storage.default.filesystem.latency_sensitive.path,
                         )];
                         if let Ok(peers) = peers.lock() {
-                            environments.extend(peers.iter().filter_map(|peer| peer.environment.clone()));
+                            environments
+                                .extend(peers.iter().filter_map(|peer| peer.environment.clone()));
                         }
-                        Some(cluster::placed_facts(staged, pool, conf, facts, environments)?)
+                        Some(cluster::placed_facts(
+                            staged,
+                            pool,
+                            conf,
+                            facts,
+                            environments,
+                        )?)
                     }
                     None => Some(facts),
                 }
@@ -284,7 +294,10 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // ([F47](../../docs/src/features/local-rehome.md))
     if seeded.is_ok() && plan.server.restarts() {
         stop(pool.take())?;
-        let restart_shards = plan.server.overrides().and_then(|overrides| overrides.restart_shards);
+        let restart_shards = plan
+            .server
+            .overrides()
+            .and_then(|overrides| overrides.restart_shards);
         let restart_conf = match (conf.clone(), restart_shards) {
             (Some(mut conf), Some(shards)) => {
                 conf.resources.cores = Some(shards);
@@ -332,18 +345,34 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // a background arm's repair is asked for on its schedule and polled until the run ends;
     // the integrity counters before the run are what its cost is read against. Only a repair
     // reads them: a plan's arm may have killed a node for good, which has no report to give
-    let reads_integrity = matches!(background_spec.as_ref().map(|spec| &spec.kind), Some(crate::workloads::workload::BackgroundKind::Repair));
+    let reads_integrity = matches!(
+        background_spec.as_ref().map(|spec| &spec.kind),
+        Some(crate::workloads::workload::BackgroundKind::Repair)
+    );
     // a node the arm kills and never starts again is not asked for a report afterwards
-    let dead = fault.as_ref().filter(|spec| !spec.restart).map(|spec| spec.node);
-    let integrity_before = match (reads_integrity, pool.as_ref(), conf.as_ref(), staged.as_ref()) {
-        (true, Some(pool), Some(conf), Some(staged)) => Some(cluster::integrity_sum(&cluster::node_reports(staged, pool, conf, &runtime, None)?)),
+    let dead = fault
+        .as_ref()
+        .filter(|spec| !spec.restart)
+        .map(|spec| spec.node);
+    let integrity_before = match (
+        reads_integrity,
+        pool.as_ref(),
+        conf.as_ref(),
+        staged.as_ref(),
+    ) {
+        (true, Some(pool), Some(conf), Some(staged)) => Some(cluster::integrity_sum(
+            &cluster::node_reports(staged, pool, conf, &runtime, None)?,
+        )),
         _ => None,
     };
     let background_injected = match (&background_spec, pool.as_ref(), seeded.is_ok()) {
         (Some(spec), Some(pool), true) => {
-            let admin = pool
-                .admin_sender()
-                .with_context(|| format!("{} asks for a background operation on a node with no control plane", workload.id()))?;
+            let admin = pool.admin_sender().with_context(|| {
+                format!(
+                    "{} asks for a background operation on a node with no control plane",
+                    workload.id()
+                )
+            })?;
             let nodes = staged
                 .as_ref()
                 .map(|staged| {
@@ -359,9 +388,27 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
             // a backup's files go under the workload's own storage root, which the next run wipes
             let backup_dir = conf
                 .as_ref()
-                .map(|conf| conf.storage.default.filesystem.latency_sensitive.path.join("backup"))
-                .with_context(|| format!("{} asks for a background operation with no configuration", workload.id()))?;
-            Some(background::inject(spec, admin, run_started, nodes, backup_dir)?)
+                .map(|conf| {
+                    conf.storage
+                        .default
+                        .filesystem
+                        .latency_sensitive
+                        .path
+                        .join("backup")
+                })
+                .with_context(|| {
+                    format!(
+                        "{} asks for a background operation with no configuration",
+                        workload.id()
+                    )
+                })?;
+            Some(background::inject(
+                spec,
+                admin,
+                run_started,
+                nodes,
+                backup_dir,
+            )?)
         }
         _ => None,
     };
@@ -377,23 +424,38 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // the reports
     let marks = injected.map(fault::Injected::finish).transpose();
     // and the background repair's, which stops its polling
-    let background_marks = background_injected.map(background::Injected::finish).transpose();
-    let integrity_after = match (reads_integrity, pool.as_ref(), conf.as_ref(), staged.as_ref()) {
-        (true, Some(pool), Some(conf), Some(staged)) => Some(cluster::integrity_sum(&cluster::node_reports(staged, pool, conf, &runtime, dead)?)),
+    let background_marks = background_injected
+        .map(background::Injected::finish)
+        .transpose();
+    let integrity_after = match (
+        reads_integrity,
+        pool.as_ref(),
+        conf.as_ref(),
+        staged.as_ref(),
+    ) {
+        (true, Some(pool), Some(conf), Some(staged)) => Some(cluster::integrity_sum(
+            &cluster::node_reports(staged, pool, conf, &runtime, dead)?,
+        )),
         _ => None,
     };
     // what the links did during the run, and where every replica ended, read before the
     // servers that hold them stop
-    if let (Some(facts), Some(pool), Some(conf), Some(staged)) =
-        (cluster_facts.as_mut(), pool.as_ref(), conf.as_ref(), staged.as_ref())
-    {
+    if let (Some(facts), Some(pool), Some(conf), Some(staged)) = (
+        cluster_facts.as_mut(),
+        pool.as_ref(),
+        conf.as_ref(),
+        staged.as_ref(),
+    ) {
         facts.transport = Some(cluster::transport_facts(pool, conf)?);
         let reports = cluster::node_reports(staged, pool, conf, &runtime, dead)?;
         let replicas = cluster::replica_facts(&reports);
         facts.outcomes = Some(cluster::outcome_facts(&replicas));
         facts.replicas = replicas;
         // a read arm records what its reads waited on ([F41](../../docs/src/features/read-consistency.md))
-        facts.reads = staged.read.as_ref().map(|arm| cluster::read_facts(arm, &reports));
+        facts.reads = staged
+            .read
+            .as_ref()
+            .map(|arm| cluster::read_facts(arm, &reports));
     }
     // stop the server whatever happened, so a failing run does not leave shards holding cores
     stop(pool)?;
@@ -402,9 +464,12 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // ([F42](../../docs/src/features/primary-failover.md))
     if let (Some(spec), Some(facts)) = (&fault, cluster_facts.as_mut()) {
         let marks = marks?.context("the fault arm ran without its fault")?;
-        let started = measured
-            .started
-            .with_context(|| format!("{} injects a fault but its driver keeps no timeline", workload.id()))?;
+        let started = measured.started.with_context(|| {
+            format!(
+                "{} injects a fault but its driver keeps no timeline",
+                workload.id()
+            )
+        })?;
         facts.fault = Some(fault::facts(
             "kill",
             spec.node,
@@ -415,33 +480,59 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
         ));
         // and how the returning node caught up, if the arm asked for it to be watched
         if let (Some(samples), Some(restarted)) = (&marks.catchup, marks.restarted_at) {
-            facts.catchup = Some(catchup::cut(restarted.saturating_duration_since(started), samples));
+            facts.catchup = Some(catchup::cut(
+                restarted.saturating_duration_since(started),
+                samples,
+            ));
         }
     }
     // a background arm cuts what its client saw at the repair's marks
     // ([F44](../../docs/src/features/repair.md))
     if let (Some(spec), Some(facts)) = (&background_spec, cluster_facts.as_mut()) {
         let marks = background_marks?.context("the background arm ran without its operation")?;
-        let started = measured
-            .started
-            .with_context(|| format!("{} runs a background operation but its driver keeps no timeline", workload.id()))?;
+        let started = measured.started.with_context(|| {
+            format!(
+                "{} runs a background operation but its driver keeps no timeline",
+                workload.id()
+            )
+        })?;
         match spec.kind {
             crate::workloads::workload::BackgroundKind::Repair => {
                 let (partitions, bytes) = match (integrity_before, integrity_after) {
-                    (Some(before), Some(after)) => (after.0.saturating_sub(before.0), after.1.saturating_sub(before.1)),
+                    (Some(before), Some(after)) => (
+                        after.0.saturating_sub(before.0),
+                        after.1.saturating_sub(before.1),
+                    ),
                     _ => (0, 0),
                 };
-                facts.background = Some(background::facts(started, &marks, &measured.timeline, spec.run_for, partitions, bytes));
+                facts.background = Some(background::facts(
+                    started,
+                    &marks,
+                    &measured.timeline,
+                    spec.run_for,
+                    partitions,
+                    bytes,
+                ));
             }
             // a migration arm records the move's marks, phases and transfer the same way
             // ([F45](../../docs/src/features/replica-migration.md))
             crate::workloads::workload::BackgroundKind::Move { .. } => {
-                facts.migration = Some(background::migration_facts(started, &marks, &measured.timeline, spec.run_for));
+                facts.migration = Some(background::migration_facts(
+                    started,
+                    &marks,
+                    &measured.timeline,
+                    spec.run_for,
+                ));
             }
             // a backup arm records the backup's marks, files and bytes the same way
             // ([F49](../../docs/src/features/backup-and-recovery.md))
             crate::workloads::workload::BackgroundKind::Backup => {
-                facts.backup = Some(background::backup_facts(started, &marks, &measured.timeline, spec.run_for));
+                facts.backup = Some(background::backup_facts(
+                    started,
+                    &marks,
+                    &measured.timeline,
+                    spec.run_for,
+                ));
             }
             // a rebalance arm records its plan's marks, steps and blocked reason the same way
             // ([F46](../../docs/src/features/capacity-rebalancing.md))
@@ -453,10 +544,19 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
                 let kind = match &spec.kind {
                     crate::workloads::workload::BackgroundKind::Rebalance => "rebalance",
                     crate::workloads::workload::BackgroundKind::Expire { .. } => "expiry",
-                    crate::workloads::workload::BackgroundKind::Decommission { blocked: true, .. } => "capacity_blocked",
+                    crate::workloads::workload::BackgroundKind::Decommission {
+                        blocked: true,
+                        ..
+                    } => "capacity_blocked",
                     _ => "decommission",
                 };
-                facts.rebalance = Some(background::rebalance_facts(kind, started, &marks, &measured.timeline, spec.run_for));
+                facts.rebalance = Some(background::rebalance_facts(
+                    kind,
+                    started,
+                    &marks,
+                    &measured.timeline,
+                    spec.run_for,
+                ));
             }
         }
     }
@@ -485,7 +585,10 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // mixture records `read`, and a guard that knew only the first would let every read arm of the
     // grid report an empty table as a fast one
     let timed_reads = measured.ops.contains_key("get") || measured.ops.contains_key("read");
-    if timed_reads && workload.expects_rows() && measured.counters.get("retrieved").copied() == Some(0) {
+    if timed_reads
+        && workload.expects_rows()
+        && measured.counters.get("retrieved").copied() == Some(0)
+    {
         bail!(
             "{} timed gets but retrieved no rows, so its samples measure lookups that found nothing",
             workload.id()
@@ -568,13 +671,13 @@ fn probe(
         // cloned per attempt, since the probe is an `Fn` and may be called several times
         let tls = tls.clone();
         async move {
-        // a real query against a key no workload generates, so it is answered out of an empty
-        // table and costs nothing measurable
-        //
-        // an exists rather than a get, because the probe is asking whether the server can answer
-        // and not whether the row is there. `send_one` treats a get that found nothing as a
-        // failed query, so an empty table would look like an unready server and the probe would
-        // time out against a server that was working perfectly.
+            // a real query against a key no workload generates, so it is answered out of an empty
+            // table and costs nothing measurable
+            //
+            // an exists rather than a get, because the probe is asking whether the server can answer
+            // and not whether the row is there. `send_one` treats a get that found nothing as a
+            // failed query, so an empty table would look like an unready server and the probe would
+            // time out against a server that was working perfectly.
             let options = match tls {
                 Some(tls) => shoal::client::ClientOptions::new().tls(tls),
                 None => shoal::client::ClientOptions::new(),
@@ -778,7 +881,8 @@ mod rehome_tests {
         // and round trips through the artifact's json under its own key
         let json = serde_json::to_value(&facts).expect("json");
         assert_eq!(json["millis"], 1234);
-        let back: crate::model::macro_layer::RehomeFacts = serde_json::from_value(json).expect("back");
+        let back: crate::model::macro_layer::RehomeFacts =
+            serde_json::from_value(json).expect("back");
         assert_eq!(back, facts);
         // a capture from before the record reads back with none
         let older: crate::model::macro_layer::ClusterFacts = serde_json::from_str(

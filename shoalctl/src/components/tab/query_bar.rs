@@ -59,7 +59,11 @@ pub async fn run<S: QuerySupport>(
     };
     // send this query result to the app to be rendered
     app_tx
-        .send(AppEvent::QueryResult { tab_id, table_name, result })
+        .send(AppEvent::QueryResult {
+            tab_id,
+            table_name,
+            result,
+        })
         .await
         .unwrap();
 }

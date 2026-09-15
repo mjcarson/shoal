@@ -138,7 +138,7 @@ fn percentile(sorted: &[Duration], percentile: f64) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use super::{percentile, Samples};
+    use super::{Samples, percentile};
     use std::time::Duration;
 
     /// Builds 100 samples of 1ms through 100ms

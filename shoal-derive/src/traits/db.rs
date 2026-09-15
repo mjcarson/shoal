@@ -333,17 +333,21 @@ pub fn add(
         }
     });
     // build our write command arms: the table, the partition key and the serialized intent
-    let write_command_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
-        let field_ident = field.ident.as_ref().unwrap();
-        let row_ident = utils::extract_inner_table_ident(&field.ty)
-            .expect("Failed to extract inner table ident");
-        quote! {
-            #query_ident::#row_ident(query) => self
-                .#field_ident
-                .build_intent(query)
-                .map(|(key, payload)| (#table_names_ident::#variant_ident, key, payload)),
-        }
-    });
+    let write_command_arms = fields
+        .named
+        .iter()
+        .zip(variants)
+        .map(|(field, variant_ident)| {
+            let field_ident = field.ident.as_ref().unwrap();
+            let row_ident = utils::extract_inner_table_ident(&field.ty)
+                .expect("Failed to extract inner table ident");
+            quote! {
+                #query_ident::#row_ident(query) => self
+                    .#field_ident
+                    .build_intent(query)
+                    .map(|(key, payload)| (#table_names_ident::#variant_ident, key, payload)),
+            }
+        });
     // build our apply command arms
     let apply_command_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
         let field_ident = field.ident.as_ref().unwrap();
@@ -376,21 +380,29 @@ pub fn add(
         }
     });
     // build our compaction sink arms
-    let compaction_sink_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
-        let field_ident = field.ident.as_ref().unwrap();
-        quote! {
-            if let Some(sink) = self.#field_ident.compaction_sink() {
-                sinks.push((#table_names_ident::#variant_ident, sink));
+    let compaction_sink_arms = fields
+        .named
+        .iter()
+        .zip(variants)
+        .map(|(field, variant_ident)| {
+            let field_ident = field.ident.as_ref().unwrap();
+            quote! {
+                if let Some(sink) = self.#field_ident.compaction_sink() {
+                    sinks.push((#table_names_ident::#variant_ident, sink));
+                }
             }
-        }
-    });
+        });
     // build our digest arms
-    let digest_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
-        let field_ident = field.ident.as_ref().unwrap();
-        quote! {
-            #table_names_ident::#variant_ident => self.#field_ident.digest().await,
-        }
-    });
+    let digest_arms = fields
+        .named
+        .iter()
+        .zip(variants)
+        .map(|(field, variant_ident)| {
+            let field_ident = field.ident.as_ref().unwrap();
+            quote! {
+                #table_names_ident::#variant_ident => self.#field_ident.digest().await,
+            }
+        });
     // build our canonical cut arms
     let canonical_cut_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
         let field_ident = field.ident.as_ref().unwrap();
@@ -406,12 +418,16 @@ pub fn add(
         }
     });
     // build our evict tablets arms
-    let evict_tablets_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
-        let field_ident = field.ident.as_ref().unwrap();
-        quote! {
-            #table_names_ident::#variant_ident => self.#field_ident.evict_tablets(tablets),
-        }
-    });
+    let evict_tablets_arms = fields
+        .named
+        .iter()
+        .zip(variants)
+        .map(|(field, variant_ident)| {
+            let field_ident = field.ident.as_ref().unwrap();
+            quote! {
+                #table_names_ident::#variant_ident => self.#field_ident.evict_tablets(tablets),
+            }
+        });
     // build our install partitions arms
     let install_partitions_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
         let field_ident = field.ident.as_ref().unwrap();

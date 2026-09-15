@@ -25,7 +25,9 @@
 //! ([`PeerHello::common_capabilities`]). The hello frame itself is written at
 //! [`MIN_PEER_VERSION`] so that any peer in the range reads it.
 
-use super::super::{Flags, Header, MessageType, ProtocolError, HEADER_LEN, MIN_PEER_VERSION, PROTOCOL_VERSION};
+use super::super::{
+    Flags, Header, MessageType, ProtocolError, HEADER_LEN, MIN_PEER_VERSION, PROTOCOL_VERSION,
+};
 use super::{bytes16_at, u16_at, u32_at, u64_at, Lane, PeerRefusal};
 
 /// The size of a peer hello body in bytes
@@ -193,7 +195,11 @@ impl PeerHello {
     #[must_use]
     pub const fn negotiate(&self, ours: &PeerHello) -> Option<u8> {
         // the highest version both read
-        let version = if self.wire_max < ours.wire_max { self.wire_max } else { ours.wire_max };
+        let version = if self.wire_max < ours.wire_max {
+            self.wire_max
+        } else {
+            ours.wire_max
+        };
         // which has to be one both read
         if version >= self.wire_min && version >= ours.wire_min {
             Some(version)
@@ -223,7 +229,11 @@ impl PeerHello {
             Some(pin) if pin < PROTOCOL_VERSION => pin,
             _ => PROTOCOL_VERSION,
         };
-        let max = if max < MIN_PEER_VERSION { MIN_PEER_VERSION } else { max };
+        let max = if max < MIN_PEER_VERSION {
+            MIN_PEER_VERSION
+        } else {
+            max
+        };
         (MIN_PEER_VERSION, max)
     }
 }
@@ -289,7 +299,13 @@ fn frame_of(
         Flags::NONE
     };
     // the hello is written at the floor, so a peer anywhere in the range reads it
-    let header = Header::at(MIN_PEER_VERSION, kind, flags, PEER_HELLO_BODY_LEN, max_frame_bytes)?;
+    let header = Header::at(
+        MIN_PEER_VERSION,
+        kind,
+        flags,
+        PEER_HELLO_BODY_LEN,
+        max_frame_bytes,
+    )?;
     let mut frame = [0u8; PEER_HELLO_FRAME_LEN];
     frame[..HEADER_LEN].copy_from_slice(&header.encode());
     frame[HEADER_LEN..].copy_from_slice(&body);

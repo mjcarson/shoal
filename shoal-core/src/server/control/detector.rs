@@ -184,7 +184,8 @@ impl Detector {
             }
             // the first report ever from this member
             None => {
-                self.members.insert(node, Samples::first(incarnation, seq, now));
+                self.members
+                    .insert(node, Samples::first(incarnation, seq, now));
                 true
             }
         }
@@ -215,7 +216,10 @@ impl Detector {
     pub fn suspects(&self, now: Instant) -> Vec<NodeId> {
         self.members
             .keys()
-            .filter(|node| self.phi(**node, now).is_some_and(|phi| phi > self.threshold))
+            .filter(|node| {
+                self.phi(**node, now)
+                    .is_some_and(|phi| phi > self.threshold)
+            })
             .copied()
             .collect()
     }
@@ -265,7 +269,11 @@ impl Detector {
             .collect();
         let count = intervals.len().max(1) as f64;
         let mean = intervals.iter().sum::<f64>() / count;
-        let variance = intervals.iter().map(|interval| (interval - mean).powi(2)).sum::<f64>() / count;
+        let variance = intervals
+            .iter()
+            .map(|interval| (interval - mean).powi(2))
+            .sum::<f64>()
+            / count;
         let floor = expected / 4.0;
         (mean, variance.sqrt().max(floor))
     }
@@ -342,7 +350,8 @@ fn erfc(x: f64) -> f64 {
     let t = 1.0 / (1.0 + 0.327_591_1 * x);
     let poly = t
         * (0.254_829_592
-            + t * (-0.284_496_736 + t * (1.421_413_741 + t * (-1.453_152_027 + t * 1.061_405_429))));
+            + t * (-0.284_496_736
+                + t * (1.421_413_741 + t * (-1.453_152_027 + t * 1.061_405_429))));
     let erf = 1.0 - poly * (-x * x).exp();
     1.0 - sign * erf
 }
@@ -367,7 +376,10 @@ mod tests {
         assert_eq!(phi(0.0, 100.0, 25.0), 0.0);
         assert!(phi(100.0, 100.0, 25.0) < 1.0);
         let at_three_sigma = phi(175.0, 100.0, 25.0);
-        assert!(at_three_sigma > 2.0 && at_three_sigma < 4.0, "{at_three_sigma}");
+        assert!(
+            at_three_sigma > 2.0 && at_three_sigma < 4.0,
+            "{at_three_sigma}"
+        );
         assert!(phi(250.0, 100.0, 25.0) > 8.0);
         assert!(phi(100_000.0, 100.0, 25.0) <= PHI_CAP);
         assert!((erfc(0.0) - 1.0).abs() < 1e-6);
@@ -401,8 +413,12 @@ mod tests {
         assert!(view[0].phi > 8.0);
         // a newer run starts over: calm at the expected pace, suspected once silent for long
         assert!(detector.observe(node, 2, 1, now + step * 10));
-        assert!(detector.phi(node, now + step * 11).is_some_and(|phi| phi < 1.0));
-        assert!(detector.phi(node, now + step * 20).is_some_and(|phi| phi > 8.0));
+        assert!(detector
+            .phi(node, now + step * 11)
+            .is_some_and(|phi| phi < 1.0));
+        assert!(detector
+            .phi(node, now + step * 20)
+            .is_some_and(|phi| phi > 8.0));
         // and a forgotten member is gone
         detector.forget(node);
         assert!(detector.view(now).is_empty());
@@ -429,7 +445,10 @@ mod tests {
         assert_eq!(view[0].samples, 1);
         assert!(view[0].phi < 1.0, "{}", view[0].phi);
         // and suspected once the silence is long by any measure
-        assert_eq!(detector.suspects(start + Duration::from_millis(1100)), vec![node]);
+        assert_eq!(
+            detector.suspects(start + Duration::from_millis(1100)),
+            vec![node]
+        );
         assert!(detector.view(start + Duration::from_millis(1100))[0].phi > 8.0);
     }
 
@@ -442,14 +461,23 @@ mod tests {
         let start = Instant::now();
         detector.seed(node, 1, start);
         // inside the grace: no suspicion, whatever the silence
-        assert!(detector.suspects(start + Duration::from_millis(400)).is_empty());
+        assert!(detector
+            .suspects(start + Duration::from_millis(400))
+            .is_empty());
         // well past it: suspected
-        assert_eq!(detector.suspects(start + Duration::from_millis(900)), vec![node]);
+        assert_eq!(
+            detector.suspects(start + Duration::from_millis(900)),
+            vec![node]
+        );
         // a real report replaces the seed, and the member is judged at the expected pace
         assert!(detector.observe(node, 1, 7, start + Duration::from_millis(450)));
         assert!(!detector.view(start)[0].seeded);
-        assert!(detector.phi(node, start + Duration::from_millis(500)).is_some_and(|phi| phi < 1.0));
-        assert!(detector.phi(node, start + Duration::from_secs(5)).is_some_and(|phi| phi > 8.0));
+        assert!(detector
+            .phi(node, start + Duration::from_millis(500))
+            .is_some_and(|phi| phi < 1.0));
+        assert!(detector
+            .phi(node, start + Duration::from_secs(5))
+            .is_some_and(|phi| phi > 8.0));
         // a reset forgets everything
         detector.reset();
         assert!(detector.view(start).is_empty());

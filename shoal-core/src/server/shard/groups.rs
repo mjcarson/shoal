@@ -44,16 +44,20 @@ use crate::server::database::ShoalDatabase;
 use crate::server::map::GroupSpec;
 use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::peer::{LinkEvent, ReplicateReply};
-use crate::server::replication::snapshot::{self, BuiltSnapshot, SnapshotManifest, SnapshotProvenance, SnapshotWriter, SNAPSHOTS_DIR};
+use crate::server::replication::snapshot::{
+    self, BuiltSnapshot, SnapshotManifest, SnapshotProvenance, SnapshotWriter, SNAPSHOTS_DIR,
+};
 use crate::server::replication::{
-    ApplyOutcome, BarrierAnswer, CommandResult, DataConfig, GroupMachine, GroupNetwork, GroupReport, IntegrityStats,
-    Lease, MachineState, ProposalOutcome, Remembered, ReplicationVerb, ResultKind, RpcFailure, ShardNetwork, ShardPeer,
-    ShardReplication, SnapshotStats,
+    ApplyOutcome, BarrierAnswer, CommandResult, DataConfig, GroupMachine, GroupNetwork,
+    GroupReport, IntegrityStats, Lease, MachineState, ProposalOutcome, Remembered, ReplicationVerb,
+    ResultKind, RpcFailure, ShardNetwork, ShardPeer, ShardReplication, SnapshotStats,
 };
 use crate::server::ring::Ring;
 use crate::server::stage_profile::{StageDurability, StageOp, Stamp};
 use crate::server::tables::ApplyStep;
-use crate::server::wal::{Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, ShardWal};
+use crate::server::wal::{
+    Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, ShardWal,
+};
 use crate::server::ServerError;
 use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
 use crate::shared::protocol::error::ErrorCode;
@@ -61,8 +65,8 @@ use crate::shared::protocol::peer::{Command, ReplicateKind, ReplicateRequestHead
 use crate::shared::protocol::read::SessionToken;
 use crate::shared::responses::ResponseError;
 use crate::shared::traits::{QuerySupport, TableNameSupport};
-use std::path::PathBuf;
 use crate::storage::CompactionJob;
+use std::path::PathBuf;
 
 /// How long a proposer waits before asking its own group again while its lease starts
 const LEASE_POLL: Duration = Duration::from_millis(20);
@@ -192,11 +196,13 @@ pub(super) struct Replication<D: ShoalDatabase> {
     /// ([F49](../../../../docs/src/features/backup-and-recovery.md))
     pub(super) driving_backups: HashSet<(Uuid, GroupId)>,
     /// The phase each backup driver here committed last, which the map may be behind on
-    pub(super) driven_backups: HashMap<(Uuid, GroupId), crate::server::control::backup::BackupPhase>,
+    pub(super) driven_backups:
+        HashMap<(Uuid, GroupId), crate::server::control::backup::BackupPhase>,
     /// The group restores this shard is driving right now, by operation and group
     pub(super) driving_restores: HashSet<(Uuid, GroupId)>,
     /// The phase each restore driver here committed last, which the map may be behind on
-    pub(super) driven_restores: HashMap<(Uuid, GroupId), crate::server::control::backup::RestorePhase>,
+    pub(super) driven_restores:
+        HashMap<(Uuid, GroupId), crate::server::control::backup::RestorePhase>,
 }
 
 impl<D: ShoalDatabase> Shard<D>
@@ -219,7 +225,10 @@ where
     /// # Arguments
     ///
     /// * `network` - The replication network the peer listener built
-    pub(super) async fn open_replication(&mut self, network: ShardNetwork) -> Result<(), ServerError> {
+    pub(super) async fn open_replication(
+        &mut self,
+        network: ShardNetwork,
+    ) -> Result<(), ServerError> {
         let Some(setup) = self.peer_setup.clone() else {
             return Ok(());
         };
@@ -372,13 +381,21 @@ where
         let mut retiring = Vec::new();
         for id in gone {
             if let Some(mut group) = replication.groups.remove(&id) {
-                orphaned.extend(std::mem::take(&mut group.waiting).into_iter().map(|waiting| (id, waiting)));
+                orphaned.extend(
+                    std::mem::take(&mut group.waiting)
+                        .into_iter()
+                        .map(|waiting| (id, waiting)),
+                );
                 // the member the move took is the slot that hosted the group here
                 let my_addr = group.spec.me(me);
                 let moved = map
                     .moves
                     .iter()
-                    .find(|record| record.from == my_addr && record.groups.contains_key(&id) && record.is_published())
+                    .find(|record| {
+                        record.from == my_addr
+                            && record.groups.contains_key(&id)
+                            && record.is_published()
+                    })
                     .map(|record| record.op);
                 if let Some(op) = moved {
                     retiring.push((id, group, op));
@@ -447,7 +464,9 @@ where
             if !store.is_volatile() && replication.wal.last_log_id_of(spec.id).is_none() {
                 let held = match &checkpoint {
                     Some(point) => Some(format!("checkpoint {}", point.index)),
-                    None if table_map.holds_any(table, &spec.tablets) => Some("archives".to_string()),
+                    None if table_map.holds_any(table, &spec.tablets) => {
+                        Some("archives".to_string())
+                    }
                     None => None,
                 };
                 if let Some(held) = held {
@@ -467,7 +486,10 @@ where
             let mut machine_state = MachineState::at(checkpoint, membership, seed);
             // what the checkpoint says this copy had forgotten
             // ([F45](../../../../docs/src/features/replica-migration.md))
-            machine_state.expired_before = replication.checkpoint.get(spec.id).map_or(0, |point| point.expired_before);
+            machine_state.expired_before = replication
+                .checkpoint
+                .get(spec.id)
+                .map_or(0, |point| point.expired_before);
             // a received snapshot past the checkpoint, which openraft installs as it builds
             // the group ([F43](../../../../docs/src/features/node-recovery.md))
             machine_state.pending_install = replication.pending_installs.remove(&spec.id);
@@ -506,11 +528,13 @@ where
         }
         // the writes that waited on a group this node no longer hosts are refused by name
         for (id, (meta, table, key, _)) in orphaned {
-            let outcome = ProposalOutcome::NotLeader(format!("group {id} left this node before it was up"));
+            let outcome =
+                ProposalOutcome::NotLeader(format!("group {id} left this node before it was up"));
             // truncation cannot happen: a tablet id is twelve bits
             #[allow(clippy::cast_possible_truncation)]
             let tablet = Ring::tablet_of(key) as u16;
-            self.answer_proposal(meta, table, tablet, None, outcome, 0).await?;
+            self.answer_proposal(meta, table, tablet, None, outcome, 0)
+                .await?;
         }
         Ok(())
     }
@@ -529,7 +553,12 @@ where
     /// * `group` - The group
     /// * `path` - The verified file
     /// * `manifest` - What it is
-    pub(super) fn restart_group_for_install(&mut self, group: GroupId, path: PathBuf, manifest: SnapshotManifest) -> Result<(), String> {
+    pub(super) fn restart_group_for_install(
+        &mut self,
+        group: GroupId,
+        path: PathBuf,
+        manifest: SnapshotManifest,
+    ) -> Result<(), String> {
         let me = self.node_id();
         let cluster = self.conf.cluster.clone().unwrap_or_default();
         let map = self.map.get();
@@ -551,10 +580,20 @@ where
         // the state a restart would find: the checkpoint, and the file pending past it
         let (checkpoint, membership, quarantined, expired_before) = {
             let state = slot.state.borrow();
-            (state.checkpoint.clone(), state.checkpoint_membership.clone(), state.quarantined, state.expired_before)
+            (
+                state.checkpoint.clone(),
+                state.checkpoint_membership.clone(),
+                state.quarantined,
+                state.expired_before,
+            )
         };
-        let seed = match checkpoint.as_ref().and_then(|point| replication.checkpoint.get(group).map(|file| (point, file))) {
-            Some((point, file)) if file.applied.as_ref() == Some(point) => replication.retries.seed_for(group, file),
+        let seed = match checkpoint
+            .as_ref()
+            .and_then(|point| replication.checkpoint.get(group).map(|file| (point, file)))
+        {
+            Some((point, file)) if file.applied.as_ref() == Some(point) => {
+                replication.retries.seed_for(group, file)
+            }
             _ => Vec::new(),
         };
         let mut machine_state = MachineState::at(checkpoint.clone(), membership, seed);
@@ -589,7 +628,16 @@ where
             network: replication.network.clone(),
         };
         let machine = GroupMachine::new(group, state, tx.clone());
-        spawn_group_start(tx, me, slot.spec.clone(), config, network, slot.store.clone(), machine, Some(previous));
+        spawn_group_start(
+            tx,
+            me,
+            slot.spec.clone(),
+            config,
+            network,
+            slot.store.clone(),
+            machine,
+            Some(previous),
+        );
         Ok(())
     }
 
@@ -614,14 +662,20 @@ where
             return Err(format!("group {group} is not hosted on this shard"));
         };
         if !slot.store.is_volatile() {
-            return Err(format!("group {group} is durable; a durable copy is repaired by a snapshot"));
+            return Err(format!(
+                "group {group} is durable; a durable copy is repaired by a snapshot"
+            ));
         }
         let Some(previous) = slot.raft.take() else {
             return Err(format!("group {group} is still starting"));
         };
         let table = slot.table;
         let tablets = slot.spec.tablets.clone();
-        let state = Rc::new(RefCell::new(MachineState::at(None, StoredMembership::default(), Vec::new())));
+        let state = Rc::new(RefCell::new(MachineState::at(
+            None,
+            StoredMembership::default(),
+            Vec::new(),
+        )));
         slot.state = state.clone();
         slot.snapshot = None;
         slot.snapshot_building = false;
@@ -648,7 +702,16 @@ where
             network: replication.network.clone(),
         };
         let machine = GroupMachine::new(group, state, tx.clone());
-        spawn_group_start(tx, me, slot.spec.clone(), config, network, slot.store.clone(), machine, Some(previous));
+        spawn_group_start(
+            tx,
+            me,
+            slot.spec.clone(),
+            config,
+            network,
+            slot.store.clone(),
+            machine,
+            Some(previous),
+        );
         Ok(())
     }
 
@@ -663,7 +726,11 @@ where
     ///
     /// * `group` - The group
     /// * `boundary` - The install's boundary
-    pub(super) fn rehand_segments(&mut self, group: GroupId, boundary: u64) -> Result<(), ServerError> {
+    pub(super) fn rehand_segments(
+        &mut self,
+        group: GroupId,
+        boundary: u64,
+    ) -> Result<(), ServerError> {
         let sinks: HashMap<D::TableNames, kanal::AsyncSender<CompactionJob>> =
             self.tables.compaction_sinks().into_iter().collect();
         let Some(replication) = self.replication.as_mut() else {
@@ -687,14 +754,23 @@ where
             if last.index <= boundary {
                 continue;
             }
-            let mut frames = replication.wal.frames_in(segment.generation, &[(group, boundary)]);
+            let mut frames = replication
+                .wal
+                .frames_in(segment.generation, &[(group, boundary)]);
             if frames.is_empty() {
                 continue;
             }
             frames.sort_by_key(|frame| frame.index);
-            let refs: Vec<(u64, u32)> = frames.iter().map(|frame| (frame.offset, frame.len)).collect();
+            let refs: Vec<(u64, u32)> = frames
+                .iter()
+                .map(|frame| (frame.offset, frame.len))
+                .collect();
             // the segment is compacting again for this table, so it is not deleted meanwhile
-            replication.compacting.entry(segment.generation).or_default().insert(table);
+            replication
+                .compacting
+                .entry(segment.generation)
+                .or_default()
+                .insert(table);
             let job = CompactionJob::Segment {
                 path: replication.wal.segment_path(segment.generation),
                 generation: segment.generation,
@@ -702,7 +778,9 @@ where
                 positions: vec![(group, last.clone())],
             };
             if sink.try_send(job).is_err() {
-                return Err(ServerError::GlommioGeneric(format!("{table}'s compactor is not taking jobs")));
+                return Err(ServerError::GlommioGeneric(format!(
+                    "{table}'s compactor is not taking jobs"
+                )));
             }
             handed += 1;
         }
@@ -791,12 +869,18 @@ where
     ///
     /// * `batch` - The batch
     /// * `resumed` - Whether the front command already asked for a read, and applies without one
-    async fn run_apply(&mut self, mut batch: ParkedApply, mut resumed: bool) -> Result<(), ServerError> {
+    async fn run_apply(
+        &mut self,
+        mut batch: ParkedApply,
+        mut resumed: bool,
+    ) -> Result<(), ServerError> {
         while let Some((entry, responder)) = batch.entries.pop_front() {
             let log_id = entry.log_id.clone();
             let group = batch.group;
             // the group the entry belongs to, which a batch for a dropped group no longer has
-            let Some((table, generation, state, volatile)) = self.group_apply_context(group, log_id.index) else {
+            let Some((table, generation, state, volatile)) =
+                self.group_apply_context(group, log_id.index)
+            else {
                 // a dropped group's batch is let go: its responders fail, its machine's apply
                 // returns, and the handle being shut down is what asked for both
                 return Ok(());
@@ -805,14 +889,18 @@ where
                 // a blank or a membership entry moves the applied position and nothing else
                 EntryPayload::Blank => None,
                 EntryPayload::Membership(membership) => {
-                    state.borrow_mut().note_membership(StoredMembership::new(Some(log_id.clone()), membership.clone()));
+                    state.borrow_mut().note_membership(StoredMembership::new(
+                        Some(log_id.clone()),
+                        membership.clone(),
+                    ));
                     None
                 }
                 EntryPayload::Normal(command) if command.scrub_op().is_some() => {
                     // a scrub: take the canonical cut at this index, and write nothing
                     // ([F44](../../../../docs/src/features/repair.md))
                     let op = command.scrub_op().expect("a scrub names its operation");
-                    self.apply_scrub(group, table, op, log_id.index, &state).await;
+                    self.apply_scrub(group, table, op, log_id.index, &state)
+                        .await;
                     Some(ApplyOutcome::Applied(CommandResult {
                         kind: ResultKind::Scrub,
                         ok: true,
@@ -828,7 +916,10 @@ where
                         Some(_) => Some(ApplyOutcome::Refused(
                             "the request identity was reused with a different payload".to_string(),
                         )),
-                        None => match self.tables.apply_command(table, command, generation, resumed) {
+                        None => match self
+                            .tables
+                            .apply_command(table, command, generation, resumed)
+                        {
                             ApplyStep::Done(result) => {
                                 event!(Level::DEBUG, msg = "applied a command", group = %group, index = log_id.index, table = %table, ok = result.ok);
                                 let remembered = Remembered {
@@ -843,7 +934,8 @@ where
                             ApplyStep::NeedsLoad(partition) => {
                                 // the read is asked for and the batch waits where it stands
                                 let span = Span::current();
-                                let coming = self.tables.request_load(table, partition, &span).await?;
+                                let coming =
+                                    self.tables.request_load(table, partition, &span).await?;
                                 batch.entries.push_front((entry, responder));
                                 if coming {
                                     self.replication
@@ -898,7 +990,11 @@ where
     ///
     /// * `group` - The group
     /// * `index` - The entry's index
-    fn group_apply_context(&self, group: GroupId, index: u64) -> Option<(D::TableNames, u64, Rc<RefCell<MachineState>>, bool)> {
+    fn group_apply_context(
+        &self,
+        group: GroupId,
+        index: u64,
+    ) -> Option<(D::TableNames, u64, Rc<RefCell<MachineState>>, bool)> {
         let replication = self.replication.as_ref()?;
         let slot = replication.groups.get(&group)?;
         // the generation the entry's frame is in, or the active one for a volatile group
@@ -906,7 +1002,12 @@ where
             .wal
             .generation_of(group, index)
             .unwrap_or_else(|| replication.wal.active_generation());
-        Some((slot.table, generation, slot.state.clone(), slot.store.is_volatile()))
+        Some((
+            slot.table,
+            generation,
+            slot.state.clone(),
+            slot.store.is_volatile(),
+        ))
     }
 
     /// Apply a scrub: hash the resident half on the loop, and read the archived half on a task
@@ -922,7 +1023,14 @@ where
     /// * `op` - The operation
     /// * `index` - The index the scrub was applied at
     /// * `state` - The group's machine state
-    async fn apply_scrub(&mut self, group: GroupId, table: D::TableNames, op: Uuid, index: u64, state: &Rc<RefCell<MachineState>>) {
+    async fn apply_scrub(
+        &mut self,
+        group: GroupId,
+        table: D::TableNames,
+        op: Uuid,
+        index: u64,
+        state: &Rc<RefCell<MachineState>>,
+    ) {
         let schema_id = <D::ClientType as QuerySupport>::SCHEMA_ID;
         // the tablets the group serves, as the map placed them
         let tablets: Vec<u16> = self
@@ -940,14 +1048,19 @@ where
             Ok(cut) => cut,
             Err(error) => {
                 event!(Level::ERROR, msg = "a scrub could not take its cut", group = %group, op = %op, error = ?error);
-                state.borrow_mut().record_digest(op, crate::server::replication::DigestAnswer::Unknown);
+                state
+                    .borrow_mut()
+                    .record_digest(op, crate::server::replication::DigestAnswer::Unknown);
                 return;
             }
         };
         event!(Level::INFO, msg = "applied a scrub", group = %group, op = %op, index, resident = cut.resident.len(), archived = cut.archived.len());
         let tx = self.shard_local_tx.clone();
         glommio::spawn_local(async move {
-            let outcome = cut.finish(schema_id, &tablets, index).await.map_err(|error| format!("{error:?}"));
+            let outcome = cut
+                .finish(schema_id, &tablets, index)
+                .await
+                .map_err(|error| format!("{error:?}"));
             let _ = tx.send(ServerMsg::Digested { group, op, outcome }).await;
         })
         .detach();
@@ -960,7 +1073,12 @@ where
     /// * `group` - The group
     /// * `op` - The operation
     /// * `outcome` - The report, or why there is none
-    pub(super) fn handle_digested(&mut self, group: GroupId, op: Uuid, outcome: Result<crate::server::replication::DigestReport, String>) {
+    pub(super) fn handle_digested(
+        &mut self,
+        group: GroupId,
+        op: Uuid,
+        outcome: Result<crate::server::replication::DigestReport, String>,
+    ) {
         let Some(replication) = self.replication.as_mut() else {
             return;
         };
@@ -972,11 +1090,15 @@ where
                 event!(Level::INFO, msg = "a scrub's digest is in", group = %group, op = %op, boundary = report.boundary, digest = format!("{:016x}", report.digest), partitions = report.partitions, rows = report.rows, integrity = ?report.integrity, unverified = report.unverified);
                 replication.integrity.scrub_bytes += report.bytes;
                 replication.integrity.scrub_partitions += report.partitions;
-                slot.state.borrow_mut().record_digest(op, crate::server::replication::DigestAnswer::Report(report));
+                slot.state
+                    .borrow_mut()
+                    .record_digest(op, crate::server::replication::DigestAnswer::Report(report));
             }
             Err(error) => {
                 event!(Level::ERROR, msg = "a scrub's cut could not be read", group = %group, op = %op, error);
-                slot.state.borrow_mut().record_digest(op, crate::server::replication::DigestAnswer::Unknown);
+                slot.state
+                    .borrow_mut()
+                    .record_digest(op, crate::server::replication::DigestAnswer::Unknown);
             }
         }
     }
@@ -1045,16 +1167,33 @@ where
         let node = self.node_id();
         let Some(replication) = self.replication.as_mut() else {
             return self
-                .answer_proposal(meta, table, tablet, None, ProposalOutcome::Failed("this node hosts no tablet groups".to_string()), 0)
+                .answer_proposal(
+                    meta,
+                    table,
+                    tablet,
+                    None,
+                    ProposalOutcome::Failed("this node hosts no tablet groups".to_string()),
+                    0,
+                )
                 .await;
         };
-        let Some(id) = replication.tablets.get(&(table.table_id(), tablet)).copied() else {
-            let outcome = ProposalOutcome::NotLeader(format!("no group serves tablet {tablet} of {table} on this node"));
-            return self.answer_proposal(meta, table, tablet, None, outcome, 0).await;
+        let Some(id) = replication
+            .tablets
+            .get(&(table.table_id(), tablet))
+            .copied()
+        else {
+            let outcome = ProposalOutcome::NotLeader(format!(
+                "no group serves tablet {tablet} of {table} on this node"
+            ));
+            return self
+                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .await;
         };
         let Some(group) = replication.groups.get_mut(&id) else {
             let outcome = ProposalOutcome::NotLeader(format!("group {id} is not hosted here"));
-            return self.answer_proposal(meta, table, tablet, None, outcome, 0).await;
+            return self
+                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .await;
         };
         // a group whose handle is still being built takes the write once it is up
         if group.raft.is_none() {
@@ -1068,15 +1207,21 @@ where
                 "{} bytes are proposed and unanswered for group {id}, past the {} byte bound",
                 group.pending_bytes, cluster.replication.pending_bytes
             ));
-            return self.answer_proposal(meta, table, tablet, None, outcome, 0).await;
+            return self
+                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .await;
         }
-        if group.store.is_volatile() && group.store.bytes() + bytes > cluster.replication.volatile_log_bytes {
+        if group.store.is_volatile()
+            && group.store.bytes() + bytes > cluster.replication.volatile_log_bytes
+        {
             let outcome = ProposalOutcome::Shed(format!(
                 "the volatile logs hold {} bytes, past the {} byte bound",
                 group.store.bytes(),
                 cluster.replication.volatile_log_bytes
             ));
-            return self.answer_proposal(meta, table, tablet, None, outcome, 0).await;
+            return self
+                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .await;
         }
         // an identity older than the group promises to remember is refused before anything
         // is proposed, so the log never carries a retry that might be a second effect
@@ -1088,12 +1233,18 @@ where
         // truncation cannot happen: a retry window is minutes, not weeks
         #[allow(clippy::cast_possible_truncation)]
         let window_ms = cluster.replication.retry_window.duration().as_millis() as u64;
-        if group.state.borrow().is_expired(&request, super::migrate::now_ms(), window_ms) {
+        if group
+            .state
+            .borrow()
+            .is_expired(&request, super::migrate::now_ms(), window_ms)
+        {
             let outcome = ProposalOutcome::Expired(format!(
                 "the identity of this write is older than the {:?} retry window, or older than an identity group {id} has forgotten; a retry this late is not answered its first result",
                 cluster.replication.retry_window.duration()
             ));
-            return self.answer_proposal(meta, table, tablet, None, outcome, 0).await;
+            return self
+                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .await;
         }
         group.pending_bytes += bytes;
         let command = Command {
@@ -1111,11 +1262,26 @@ where
         // shorter - a forwarded write counts down from the origin's budget, never up from a
         // fresh one ([C2](../../../../docs/src/distributed/transport.md))
         let bundle_left = Duration::from_nanos(meta.read.deadline.since(Stamp::now()));
-        let deadline = cluster.replication.write_timeout.duration().min(bundle_left);
-        let all = self.map.get().write_consistency == crate::server::conf::cluster::Consistency::All;
+        let deadline = cluster
+            .replication
+            .write_timeout
+            .duration()
+            .min(bundle_left);
+        let all =
+            self.map.get().write_consistency == crate::server::conf::cluster::Consistency::All;
         let tx = self.shard_local_tx.clone();
         glommio::spawn_local(async move {
-            let outcome = propose_through(raft.as_ref(), &network, id, me, command, deadline, true, all).await;
+            let outcome = propose_through(
+                raft.as_ref(),
+                &network,
+                id,
+                me,
+                command,
+                deadline,
+                true,
+                all,
+            )
+            .await;
             let _ = tx
                 .send(ServerMsg::Proposed {
                     meta,
@@ -1163,7 +1329,10 @@ where
             }
             match &outcome {
                 ProposalOutcome::Unknown(_) => replication.stats.unknown += 1,
-                ProposalOutcome::Shed(_) | ProposalOutcome::NotLeader(_) | ProposalOutcome::Failed(_) | ProposalOutcome::Expired(_) => {
+                ProposalOutcome::Shed(_)
+                | ProposalOutcome::NotLeader(_)
+                | ProposalOutcome::Failed(_)
+                | ProposalOutcome::Expired(_) => {
                     replication.stats.rejected += 1;
                 }
                 ProposalOutcome::Answered {
@@ -1206,22 +1375,48 @@ where
             ProposalOutcome::Answered {
                 outcome: ApplyOutcome::Refused(msg),
                 ..
-            } => D::ClientType::failed(table, id, index, end, ResponseError::new(ErrorCode::Internal, msg)),
-            ProposalOutcome::Shed(msg) => {
-                D::ClientType::failed(table, id, index, end, ResponseError::new(ErrorCode::Shedding, msg))
-            }
-            ProposalOutcome::NotLeader(msg) => {
-                D::ClientType::failed(table, id, index, end, ResponseError::new(ErrorCode::NotLeader, msg))
-            }
-            ProposalOutcome::Unknown(msg) => {
-                D::ClientType::failed(table, id, index, end, ResponseError::new(ErrorCode::OutcomeUnknown, msg))
-            }
-            ProposalOutcome::Failed(msg) => {
-                D::ClientType::failed(table, id, index, end, ResponseError::new(ErrorCode::Unavailable, msg))
-            }
-            ProposalOutcome::Expired(msg) => {
-                D::ClientType::failed(table, id, index, end, ResponseError::new(ErrorCode::IdentityExpired, msg))
-            }
+            } => D::ClientType::failed(
+                table,
+                id,
+                index,
+                end,
+                ResponseError::new(ErrorCode::Internal, msg),
+            ),
+            ProposalOutcome::Shed(msg) => D::ClientType::failed(
+                table,
+                id,
+                index,
+                end,
+                ResponseError::new(ErrorCode::Shedding, msg),
+            ),
+            ProposalOutcome::NotLeader(msg) => D::ClientType::failed(
+                table,
+                id,
+                index,
+                end,
+                ResponseError::new(ErrorCode::NotLeader, msg),
+            ),
+            ProposalOutcome::Unknown(msg) => D::ClientType::failed(
+                table,
+                id,
+                index,
+                end,
+                ResponseError::new(ErrorCode::OutcomeUnknown, msg),
+            ),
+            ProposalOutcome::Failed(msg) => D::ClientType::failed(
+                table,
+                id,
+                index,
+                end,
+                ResponseError::new(ErrorCode::Unavailable, msg),
+            ),
+            ProposalOutcome::Expired(msg) => D::ClientType::failed(
+                table,
+                id,
+                index,
+                end,
+                ResponseError::new(ErrorCode::IdentityExpired, msg),
+            ),
         };
         meta.stamps.mark_exec_done();
         let span = meta.span.clone();
@@ -1238,7 +1433,8 @@ where
         }
         // the token rides the answer to a client that asked for one, and the answer head to a
         // peer that forwarded the write
-        self.reply_with_token(client, id, span, meta.stamps, response, token).await
+        self.reply_with_token(client, id, span, meta.stamps, response, token)
+            .await
     }
 
     /// Answer a replication request a peer sent this shard
@@ -1261,22 +1457,32 @@ where
         let group = GroupId(head.group);
         let node = self.node_id();
         let Some(replication) = self.replication.as_ref() else {
-            let _ = reply.try_send(ReplicateReply::error(head.id, "this node hosts no tablet groups"));
+            let _ = reply.try_send(ReplicateReply::error(
+                head.id,
+                "this node hosts no tablet groups",
+            ));
             return;
         };
         // whether a retired copy is gone is asked of a shard that may not host the group at all
         // ([F45](../../../../docs/src/features/replica-migration.md))
         if head.kind == ReplicateKind::Retired {
-            let gone = !replication.groups.contains_key(&group) && !replication.retired.contains_key(&group);
+            let gone = !replication.groups.contains_key(&group)
+                && !replication.retired.contains_key(&group);
             let _ = reply.try_send(encode_reply(head.id, &gone));
             return;
         }
         let Some(slot) = replication.groups.get(&group) else {
-            let _ = reply.try_send(ReplicateReply::error(head.id, format!("group {group} is not hosted on this shard")));
+            let _ = reply.try_send(ReplicateReply::error(
+                head.id,
+                format!("group {group} is not hosted on this shard"),
+            ));
             return;
         };
         let Some(raft) = slot.raft.clone() else {
-            let _ = reply.try_send(ReplicateReply::error(head.id, format!("group {group} is still starting")));
+            let _ = reply.try_send(ReplicateReply::error(
+                head.id,
+                format!("group {group} is still starting"),
+            ));
             return;
         };
         // a snapshot rpc is the receiver's: judged on the loop against what it holds
@@ -1288,23 +1494,36 @@ where
         // a quarantine is the holding shard's to persist, on the loop, and answered once it is
         // ([F44](../../../../docs/src/features/repair.md))
         if head.kind == ReplicateKind::Quarantine {
-            match postcard::from_bytes::<crate::server::control::repair::QuarantineAction>(&payload) {
+            match postcard::from_bytes::<crate::server::control::repair::QuarantineAction>(&payload)
+            {
                 Ok(action) => {
                     let tx = self.shard_local_tx.clone();
                     glommio::spawn_local(async move {
                         let (done_tx, done) = oneshot::channel();
-                        let _ = tx.send(ServerMsg::Quarantine { group, action, reply: Some(done_tx) }).await;
+                        let _ = tx
+                            .send(ServerMsg::Quarantine {
+                                group,
+                                action,
+                                reply: Some(done_tx),
+                            })
+                            .await;
                         let answer = match done.await {
                             Ok(Ok(())) => encode_reply(head.id, &()),
                             Ok(Err(error)) => ReplicateReply::error(head.id, error),
-                            Err(_) => ReplicateReply::error(head.id, "the quarantine was dropped".to_string()),
+                            Err(_) => ReplicateReply::error(
+                                head.id,
+                                "the quarantine was dropped".to_string(),
+                            ),
                         };
                         let _ = reply.send(answer).await;
                     })
                     .detach();
                 }
                 Err(error) => {
-                    let _ = reply.try_send(ReplicateReply::error(head.id, format!("decoding a quarantine: {error}")));
+                    let _ = reply.try_send(ReplicateReply::error(
+                        head.id,
+                        format!("decoding a quarantine: {error}"),
+                    ));
                 }
             }
             return;
@@ -1312,7 +1531,12 @@ where
         // how far this copy has applied is answered from what the loop holds
         // ([F45](../../../../docs/src/features/replica-migration.md))
         if head.kind == ReplicateKind::Applied {
-            let applied = slot.state.borrow().applied.as_ref().map_or(0, |log_id| log_id.index);
+            let applied = slot
+                .state
+                .borrow()
+                .applied
+                .as_ref()
+                .map_or(0, |log_id| log_id.index);
             let _ = reply.try_send(encode_reply(head.id, &applied));
             return;
         }
@@ -1320,8 +1544,14 @@ where
         // ([F44](../../../../docs/src/features/repair.md))
         if head.kind == ReplicateKind::Digest {
             let answer = match <[u8; 16]>::try_from(payload.as_slice()) {
-                Ok(bytes) => encode_reply(head.id, &slot.state.borrow().digest_of(Uuid::from_bytes(bytes))),
-                Err(_) => ReplicateReply::error(head.id, "a digest request names no operation".to_string()),
+                Ok(bytes) => encode_reply(
+                    head.id,
+                    &slot.state.borrow().digest_of(Uuid::from_bytes(bytes)),
+                ),
+                Err(_) => ReplicateReply::error(
+                    head.id,
+                    "a digest request names no operation".to_string(),
+                ),
             };
             let _ = reply.try_send(answer);
             return;
@@ -1329,7 +1559,8 @@ where
         let network = replication.network.clone();
         let me = slot.spec.me(node);
         let deadline = Duration::from_millis(u64::from(head.deadline_ms.max(1)));
-        let all = self.map.get().write_consistency == crate::server::conf::cluster::Consistency::All;
+        let all =
+            self.map.get().write_consistency == crate::server::conf::cluster::Consistency::All;
         let _ = origin;
         glommio::spawn_local(async move {
             let answer = match head.kind {
@@ -1411,10 +1642,20 @@ where
             return;
         };
         match event {
-            LinkEvent::Frame { node, head, payload, .. } => {
+            LinkEvent::Frame {
+                node,
+                head,
+                payload,
+                ..
+            } => {
                 replication.network.answered(node, &head, payload.to_vec());
             }
-            LinkEvent::Down { node, reason, unsent, .. } => replication.network.down(node, &reason, &unsent),
+            LinkEvent::Down {
+                node,
+                reason,
+                unsent,
+                ..
+            } => replication.network.down(node, &reason, &unsent),
             LinkEvent::Up { .. } => {}
         }
     }
@@ -1437,7 +1678,10 @@ where
             }
             if segment.handed {
                 // handed and compacted: gone once every group in it purged past it
-                let compacting = replication.compacting.get(&segment.generation).is_some_and(|tables| !tables.is_empty());
+                let compacting = replication
+                    .compacting
+                    .get(&segment.generation)
+                    .is_some_and(|tables| !tables.is_empty());
                 let purged = segment.last.iter().all(|(group, last)| {
                     replication.groups.get(group).is_none_or(|slot| {
                         slot.state.borrow().checkpoint_index() >= last.index
@@ -1475,19 +1719,27 @@ where
             for group in segment.last.keys() {
                 if let Some(slot) = replication.groups.get(group) {
                     let since = slot.state.borrow().checkpoint_index();
-                    by_table.entry(slot.table).or_default().push((*group, since));
+                    by_table
+                        .entry(slot.table)
+                        .or_default()
+                        .push((*group, since));
                 }
             }
             let mut tables = HashSet::new();
             for (table, groups) in by_table {
                 let mut frames = replication.wal.frames_in(segment.generation, &groups);
                 frames.sort_by_key(|frame| (frame.group, frame.index));
-                let refs: Vec<(u64, u32)> = frames.iter().map(|frame| (frame.offset, frame.len)).collect();
+                let refs: Vec<(u64, u32)> = frames
+                    .iter()
+                    .map(|frame| (frame.offset, frame.len))
+                    .collect();
                 // where each group stands once these frames are merged, for a snapshot cut
                 // after them ([F43](../../../../docs/src/features/node-recovery.md))
                 let positions: Vec<(GroupId, crate::server::wal::WalLogId)> = groups
                     .iter()
-                    .filter_map(|(group, _)| segment.last.get(group).map(|last| (*group, last.clone())))
+                    .filter_map(|(group, _)| {
+                        segment.last.get(group).map(|last| (*group, last.clone()))
+                    })
                     .collect();
                 match sinks.get(&table) {
                     Some(sink) if !refs.is_empty() => {
@@ -1506,7 +1758,12 @@ where
                 }
             }
             replication.wal.mark_handed(segment.generation);
-            event!(Level::DEBUG, msg = "handed a wal segment to the compactors", generation = segment.generation, tables = tables.len());
+            event!(
+                Level::DEBUG,
+                msg = "handed a wal segment to the compactors",
+                generation = segment.generation,
+                tables = tables.len()
+            );
             if tables.is_empty() {
                 compacted_now.push(segment.generation);
             }
@@ -1515,7 +1772,12 @@ where
         for generation in deletions {
             replication.compacting.remove(&generation);
             if let Err(error) = replication.wal.delete_segment(generation).await {
-                event!(Level::WARN, msg = "failed to delete a purged wal segment", generation, ?error);
+                event!(
+                    Level::WARN,
+                    msg = "failed to delete a purged wal segment",
+                    generation,
+                    ?error
+                );
             }
         }
         // a segment with nothing to compact moves every checkpoint in it now
@@ -1535,11 +1797,20 @@ where
     /// them. A member behind the forced purge point falls to the snapshot path; nothing pins
     /// the leader's log for a follower ([F43](../../../../docs/src/features/node-recovery.md)).
     fn enforce_retention(&mut self) {
-        let budget = self.conf.cluster.as_ref().map_or(u64::MAX, |cluster| cluster.replication.retained_bytes);
+        let budget = self
+            .conf
+            .cluster
+            .as_ref()
+            .map_or(u64::MAX, |cluster| cluster.replication.retained_bytes);
         let Some(replication) = self.replication.as_mut() else {
             return;
         };
-        let sealed: Vec<_> = replication.wal.segments().into_iter().filter(|segment| segment.sealed).collect();
+        let sealed: Vec<_> = replication
+            .wal
+            .segments()
+            .into_iter()
+            .filter(|segment| segment.sealed)
+            .collect();
         let mut held: u64 = sealed.iter().map(|segment| segment.bytes).sum();
         if held <= budget {
             return;
@@ -1552,17 +1823,24 @@ where
             }
             held = held.saturating_sub(segment.bytes);
             for (group, last) in &segment.last {
-                let Some(slot) = replication.groups.get(group) else { continue };
+                let Some(slot) = replication.groups.get(group) else {
+                    continue;
+                };
                 let (checkpoint, purged) = {
                     let state = slot.state.borrow();
-                    (state.checkpoint_index(), slot.store.purged_index().unwrap_or(0))
+                    (
+                        state.checkpoint_index(),
+                        slot.store.purged_index().unwrap_or(0),
+                    )
                 };
                 // a group not yet compacted past the segment cannot purge it; one purged past
                 // it already is not what pins it
                 if checkpoint < last.index || purged >= last.index {
                     continue;
                 }
-                let Some(raft) = slot.raft.clone() else { continue };
+                let Some(raft) = slot.raft.clone() else {
+                    continue;
+                };
                 forced += 1;
                 event!(
                     Level::WARN,
@@ -1708,7 +1986,9 @@ where
                 Ok(()) => file.write(&dir).await.map_err(|error| error.to_string()),
                 Err(error) => Err(format!("the retry sidecar could not be written: {error}")),
             };
-            let _ = tx.send(ServerMsg::CheckpointWritten { version, outcome }).await;
+            let _ = tx
+                .send(ServerMsg::CheckpointWritten { version, outcome })
+                .await;
         })
         .detach();
         true
@@ -1720,13 +2000,19 @@ where
     ///
     /// * `version` - Which write
     /// * `outcome` - Whether it landed
-    pub(super) fn handle_checkpoint_written(&mut self, version: u64, outcome: Result<(), String>) -> Result<(), ServerError> {
+    pub(super) fn handle_checkpoint_written(
+        &mut self,
+        version: u64,
+        outcome: Result<(), String>,
+    ) -> Result<(), ServerError> {
         let Some(replication) = self.replication.as_mut() else {
             return Ok(());
         };
         replication.checkpoint_writing = false;
         if let Err(error) = outcome {
-            return Err(ServerError::GlommioGeneric(format!("the checkpoint file could not be written: {error}")));
+            return Err(ServerError::GlommioGeneric(format!(
+                "the checkpoint file could not be written: {error}"
+            )));
         }
         if version == replication.checkpoint_version && !replication.checkpoint_dirty {
             // every group's checkpoint is on disk as it stands, and a group whose checkpoint
@@ -1782,10 +2068,19 @@ where
             .map(|slot| {
                 let state = slot.state.borrow();
                 let bytes = tablet_bytes.get(&slot.table).map_or(0, |per_tablet| {
-                    slot.spec.tablets.iter().map(|tablet| per_tablet.get(usize::from(*tablet)).copied().unwrap_or(0)).sum()
+                    slot.spec
+                        .tablets
+                        .iter()
+                        .map(|tablet| per_tablet.get(usize::from(*tablet)).copied().unwrap_or(0))
+                        .sum()
                 });
-                let metrics = slot.raft.as_ref().map(|raft| raft.metrics().borrow_watched().clone());
-                let leader = metrics.as_ref().and_then(|metrics| metrics.current_leader.clone());
+                let metrics = slot
+                    .raft
+                    .as_ref()
+                    .map(|raft| raft.metrics().borrow_watched().clone());
+                let leader = metrics
+                    .as_ref()
+                    .and_then(|metrics| metrics.current_leader.clone());
                 GroupReport {
                     group: slot.spec.id,
                     table: slot.spec.table,
@@ -1798,7 +2093,12 @@ where
                     applied: state.applied_index(),
                     committed: metrics
                         .as_ref()
-                        .and_then(|metrics| metrics.cluster_committed.as_ref().map(|log_id| log_id.index))
+                        .and_then(|metrics| {
+                            metrics
+                                .cluster_committed
+                                .as_ref()
+                                .map(|log_id| log_id.index)
+                        })
                         .unwrap_or(0),
                     last_log: metrics
                         .as_ref()
@@ -1869,7 +2169,12 @@ where
             return;
         }
         if let Some(control) = &self.control {
-            if control.try_send(crate::server::control::ControlRequest::Replication(report.clone())).is_ok() {
+            if control
+                .try_send(crate::server::control::ControlRequest::Replication(
+                    report.clone(),
+                ))
+                .is_ok()
+            {
                 replication.last_report = Some(report);
             }
         }
@@ -1928,11 +2233,18 @@ where
                         .groups
                         .values()
                         .filter(|slot| slot.spec.table == table)
-                        .map(|slot| (slot.spec.id.to_string(), slot.state.borrow().applied_index()))
+                        .map(|slot| {
+                            (
+                                slot.spec.id.to_string(),
+                                slot.state.borrow().applied_index(),
+                            )
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
-            return Some(Ok(serde_json::json!({ "rows": rows, "hash": hash, "groups": groups })));
+            return Some(Ok(
+                serde_json::json!({ "rows": rows, "hash": hash, "groups": groups }),
+            ));
         }
         let Some(replication) = self.replication.as_mut() else {
             return Some(Err("this node hosts no tablet groups".to_string()));
@@ -1940,7 +2252,9 @@ where
         let reply = reply.clone();
         let answer: Result<serde_json::Value, String> = match verb {
             // answered above, before the groups were needed
-            ReplicationVerb::Digest { .. } => unreachable!("a digest is answered before the groups are looked up"),
+            ReplicationVerb::Digest { .. } => {
+                unreachable!("a digest is answered before the groups are looked up")
+            }
             ReplicationVerb::Rotate => {
                 replication.wal.rotate();
                 let _ = replication.wal.flush().await;
@@ -1951,8 +2265,15 @@ where
                     return Some(Err(format!("{error:?}")));
                 }
                 let replication = self.replication.as_ref().expect("still here");
-                let handed = replication.wal.segments().iter().filter(|segment| segment.handed).count();
-                Ok(serde_json::json!({ "handed": handed, "segments": replication.wal.segments().len() }))
+                let handed = replication
+                    .wal
+                    .segments()
+                    .iter()
+                    .filter(|segment| segment.handed)
+                    .count();
+                Ok(
+                    serde_json::json!({ "handed": handed, "segments": replication.wal.segments().len() }),
+                )
             }
             ReplicationVerb::Stall { group } => {
                 replication.wal.stall(group);
@@ -2105,7 +2426,12 @@ where
             (
                 state.checkpoint.clone(),
                 memberships,
-                state.dedup.iter().rev().map(|(request, remembered)| (*request, *remembered)).collect::<Vec<_>>(),
+                state
+                    .dedup
+                    .iter()
+                    .rev()
+                    .map(|(request, remembered)| (*request, *remembered))
+                    .collect::<Vec<_>>(),
                 state.expired_before,
             )
         };
@@ -2122,7 +2448,11 @@ where
             // a volatile group's rows are the ephemeral table's resident partitions, cut here
             // where they are all visible, and written on a task of its own
             let Some(boundary) = at_least else {
-                self.handle_snapshot_built(group, Err(format!("group {group} has applied nothing to cut"))).await?;
+                self.handle_snapshot_built(
+                    group,
+                    Err(format!("group {group} has applied nothing to cut")),
+                )
+                .await?;
                 return Ok(());
             };
             let records = self.tables.snapshot_partitions(table, &tablets);
@@ -2134,9 +2464,21 @@ where
             let tx = self.shard_local_tx.clone();
             let table_id = table.table_id();
             glommio::spawn_local(async move {
-                let outcome = write_volatile_snapshot(&dir, group, table_id, schema_id, boundary, membership, tablets, records, remembered, expired_before, provenance)
-                    .await
-                    .map_err(|error| format!("{error:?}"));
+                let outcome = write_volatile_snapshot(
+                    &dir,
+                    group,
+                    table_id,
+                    schema_id,
+                    boundary,
+                    membership,
+                    tablets,
+                    records,
+                    remembered,
+                    expired_before,
+                    provenance,
+                )
+                .await
+                .map_err(|error| format!("{error:?}"));
                 let _ = tx.send(ServerMsg::SnapshotBuilt { group, outcome }).await;
             })
             .detach();
@@ -2150,7 +2492,11 @@ where
             .find(|(name, _)| *name == table)
             .map(|(_, sink)| sink);
         let Some(sink) = sink else {
-            self.handle_snapshot_built(group, Err(format!("{table} has no compactor to cut a snapshot with"))).await?;
+            self.handle_snapshot_built(
+                group,
+                Err(format!("{table} has no compactor to cut a snapshot with")),
+            )
+            .await?;
             return Ok(());
         };
         sink.send(CompactionJob::Snapshot {
@@ -2222,7 +2568,10 @@ where
         let mut gone = Vec::new();
         for slot in replication.groups.values_mut() {
             // a strong count of one is this registry's own handle
-            let (free, held): (Vec<_>, Vec<_>) = slot.retired.drain(..).partition(|built| Rc::strong_count(built) == 1);
+            let (free, held): (Vec<_>, Vec<_>) = slot
+                .retired
+                .drain(..)
+                .partition(|built| Rc::strong_count(built) == 1);
             slot.retired = held;
             gone.extend(free);
         }
@@ -2300,7 +2649,13 @@ async fn write_volatile_snapshot(
 ) -> std::io::Result<(PathBuf, SnapshotManifest)> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join(snapshot::snapshot_name(group, boundary.index));
-    let header = provenance.header(table, group, boundary.index, records.len() as u64, schema_id);
+    let header = provenance.header(
+        table,
+        group,
+        boundary.index,
+        records.len() as u64,
+        schema_id,
+    );
     let mut writer = SnapshotWriter::create(&path, header).await?;
     for (key, bytes) in &records {
         writer.record(*key, bytes).await?;
@@ -2308,21 +2663,21 @@ async fn write_volatile_snapshot(
     let (total, checksum) = writer.finish(&remembered).await?;
     snapshot::sync_dir(dir).await?;
     let manifest = SnapshotManifest {
-            group,
-            table,
-            schema_id,
-            boundary,
-            membership,
-            tablets,
-            records: records.len() as u64,
-            total,
-            checksum,
-            retries: u32::try_from(remembered.len()).unwrap_or(u32::MAX),
-            expired_before,
-            cluster: ClusterId::default(),
-            origin: NodeId::default(),
-            created_ms: 0,
-        };
+        group,
+        table,
+        schema_id,
+        boundary,
+        membership,
+        tablets,
+        records: records.len() as u64,
+        total,
+        checksum,
+        retries: u32::try_from(remembered.len()).unwrap_or(u32::MAX),
+        expired_before,
+        cluster: ClusterId::default(),
+        origin: NodeId::default(),
+        created_ms: 0,
+    };
     // stamped with where and when it was cut
     Ok((path, provenance.stamp(manifest, &header)))
 }
@@ -2345,7 +2700,12 @@ pub fn membership_as_of(
     memberships
         .iter()
         .rev()
-        .find(|membership| membership.log_id().as_ref().is_none_or(|log_id| log_id.index <= boundary))
+        .find(|membership| {
+            membership
+                .log_id()
+                .as_ref()
+                .is_none_or(|log_id| log_id.index <= boundary)
+        })
         .cloned()
         .unwrap_or_default()
 }
@@ -2364,7 +2724,11 @@ pub fn membership_as_of(
 /// * `cluster` - The cluster block
 /// * `failover_ms` - The failover base, in milliseconds: the map's, or the block's until a map carries one
 /// * `group` - The group
-fn group_config(cluster: &crate::server::conf::Cluster, failover_ms: u64, group: GroupId) -> Arc<Config> {
+fn group_config(
+    cluster: &crate::server::conf::Cluster,
+    failover_ms: u64,
+    group: GroupId,
+) -> Arc<Config> {
     let base = failover_ms.max(100);
     let config = Config {
         cluster_name: format!("group-{group}"),
@@ -2378,7 +2742,8 @@ fn group_config(cluster: &crate::server::conf::Cluster, failover_ms: u64, group:
         // snapshot of any size completes in ([F43](../../../../docs/src/features/node-recovery.md))
         // truncation cannot happen: a transfer's budget is minutes, not weeks
         #[allow(clippy::cast_possible_truncation)]
-        install_snapshot_timeout: cluster.replication.snapshot_timeout.duration().as_millis() as u64,
+        install_snapshot_timeout: cluster.replication.snapshot_timeout.duration().as_millis()
+            as u64,
         // a follower whose log is shorter than what it acknowledged lost its disk: the
         // follower is the one that is wrong, and the leader resets its progress and feeds it
         // again - from the log, or past the purge point from a snapshot - rather than stopping
@@ -2442,7 +2807,9 @@ fn spawn_group_start<D: ShoalDatabase>(
 /// # Arguments
 ///
 /// * `outcome` - What starting the group came to
-fn network_group<D: ShoalDatabase>(outcome: &Result<(GroupId, Raft<DataConfig, GroupMachine<D>>), (GroupId, String)>) -> GroupId {
+fn network_group<D: ShoalDatabase>(
+    outcome: &Result<(GroupId, Raft<DataConfig, GroupMachine<D>>), (GroupId, String)>,
+) -> GroupId {
     match outcome {
         Ok((group, _)) => *group,
         Err((group, _)) => *group,
@@ -2481,11 +2848,20 @@ async fn start_group<D: ShoalDatabase>(
     // lead at once and the timer retries until its peers have the group up
     let initialized = match raft.is_initialized().await {
         Ok(initialized) => initialized,
-        Err(error) => return Err((group, format!("asking whether the group is initialized: {error}"))),
+        Err(error) => {
+            return Err((
+                group,
+                format!("asking whether the group is initialized: {error}"),
+            ))
+        }
     };
     // the membership a fresh group starts with: the members that can vote, since one the
     // cluster tombstoned would be waited on forever
-    let members: BTreeMap<ShardAddr, ShardAddr> = spec.voters.iter().map(|member| (*member, *member)).collect();
+    let members: BTreeMap<ShardAddr, ShardAddr> = spec
+        .voters
+        .iter()
+        .map(|member| (*member, *member))
+        .collect();
     // a learner initializes nothing and elects nobody: the group exists on its members, and
     // the leader's replication is what brings this copy up
     // ([F45](../../../../docs/src/features/replica-migration.md))
@@ -2545,13 +2921,17 @@ async fn propose_through<D: ShoalDatabase>(
     all: bool,
 ) -> ProposalOutcome {
     let Some(raft) = raft else {
-        return ProposalOutcome::NotLeader(format!("group {group} is still starting on this shard"));
+        return ProposalOutcome::NotLeader(format!(
+            "group {group} is still starting on this shard"
+        ));
     };
     let started = Instant::now();
     let outcome = loop {
         let remaining = deadline.saturating_sub(started.elapsed());
         if remaining.is_zero() {
-            return ProposalOutcome::NotLeader(format!("no leader of group {group} took the write within the deadline"));
+            return ProposalOutcome::NotLeader(format!(
+                "no leader of group {group} took the write within the deadline"
+            ));
         }
         // a lease that lapsed is a definite refusal before anything is appended: openraft would
         // refuse the write with an empty hint, and waiting for "a leader" on a handle that
@@ -2562,10 +2942,17 @@ async fn propose_through<D: ShoalDatabase>(
                 Lease::length(raft)
             ));
         }
-        let written = glommio::timer::timeout(remaining, async { Ok(raft.client_write(command.clone()).await) }).await;
+        let written = glommio::timer::timeout(remaining, async {
+            Ok(raft.client_write(command.clone()).await)
+        })
+        .await;
         match written {
             // the leader took it and did not commit it in time: it may yet
-            Err(_) => return ProposalOutcome::Unknown(format!("group {group} did not commit the write within the deadline")),
+            Err(_) => {
+                return ProposalOutcome::Unknown(format!(
+                    "group {group} did not commit the write within the deadline"
+                ))
+            }
             Ok(Ok(response)) => {
                 let index = response.log_id.index;
                 // `All` waits, after the commit, until every voter's matched index covers
@@ -2612,14 +2999,19 @@ async fn propose_through<D: ShoalDatabase>(
                     // the leader is elsewhere: one hop, and no more
                     Some(leader) => {
                         if !may_hop {
-                            return ProposalOutcome::NotLeader(format!("group {group} is led by {leader}, not here"));
+                            return ProposalOutcome::NotLeader(format!(
+                                "group {group} is led by {leader}, not here"
+                            ));
                         }
                         let remaining = deadline.saturating_sub(started.elapsed());
                         let peer = ShardPeer::new(leader, network.clone());
                         break match peer.propose(group, command.encode(), remaining).await {
-                            Ok(bytes) => postcard::from_bytes::<ProposalOutcome>(&bytes).unwrap_or_else(|error| {
-                                ProposalOutcome::Failed(format!("decoding the leader's answer: {error}"))
-                            }),
+                            Ok(bytes) => postcard::from_bytes::<ProposalOutcome>(&bytes)
+                                .unwrap_or_else(|error| {
+                                    ProposalOutcome::Failed(format!(
+                                        "decoding the leader's answer: {error}"
+                                    ))
+                                }),
                             Err(RpcFailure::NotSent(msg)) => ProposalOutcome::NotLeader(msg),
                             Err(RpcFailure::Remote(msg)) => ProposalOutcome::Failed(msg),
                             Err(RpcFailure::Unreachable(msg)) => ProposalOutcome::Unknown(msg),
@@ -2635,7 +3027,9 @@ async fn propose_through<D: ShoalDatabase>(
                                 Lease::length(raft)
                             ));
                         }
-                        Lease::NotStarted | Lease::Leads | Lease::Elsewhere(_) => glommio::timer::sleep(LEASE_POLL).await,
+                        Lease::NotStarted | Lease::Leads | Lease::Elsewhere(_) => {
+                            glommio::timer::sleep(LEASE_POLL).await
+                        }
                         Lease::Electing => {
                             let remaining = deadline.saturating_sub(started.elapsed());
                             let elected = raft
@@ -2643,13 +3037,17 @@ async fn propose_through<D: ShoalDatabase>(
                                 .metrics(|metrics| metrics.current_leader.is_some(), "a leader")
                                 .await;
                             if elected.is_err() {
-                                return ProposalOutcome::NotLeader(format!("group {group} elected no leader within the deadline"));
+                                return ProposalOutcome::NotLeader(format!(
+                                    "group {group} elected no leader within the deadline"
+                                ));
                             }
                         }
                     },
                 }
             }
-            Ok(Err(error)) => return ProposalOutcome::Failed(format!("writing to group {group}: {error}")),
+            Ok(Err(error)) => {
+                return ProposalOutcome::Failed(format!("writing to group {group}: {error}"))
+            }
         }
     };
     // a write is acknowledged once this shard's own replica has applied it, so a read that

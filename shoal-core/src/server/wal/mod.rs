@@ -112,9 +112,14 @@ pub fn checksum_of(bytes: &[u8]) -> u64 {
 fn io<T>(error: glommio::GlommioError<T>) -> io::Error {
     match error {
         glommio::GlommioError::IoError(error) => error,
-        glommio::GlommioError::EnhancedIoError { source, op, path, .. } => io::Error::new(
+        glommio::GlommioError::EnhancedIoError {
+            source, op, path, ..
+        } => io::Error::new(
             source.kind(),
-            format!("{op} {}: {source}", path.map(|p| p.display().to_string()).unwrap_or_default()),
+            format!(
+                "{op} {}: {source}",
+                path.map(|p| p.display().to_string()).unwrap_or_default()
+            ),
         ),
         other => io::Error::other(other.to_string()),
     }
@@ -312,7 +317,8 @@ impl WalInner {
     /// * `loc` - The location
     fn is_durable(&self, loc: &Loc) -> bool {
         loc.generation < self.durable.0
-            || (loc.generation == self.durable.0 && loc.offset + u64::from(loc.len) <= self.durable.1)
+            || (loc.generation == self.durable.0
+                && loc.offset + u64::from(loc.len) <= self.durable.1)
     }
 
     /// The batch to append into, opening one at the tail if none is open
@@ -370,12 +376,18 @@ impl WalInner {
                 }
             }
             if log.committed.is_some() {
-                if let Ok(frame) = frame::encode_marker(frame::FrameKind::Committed, *group, log.committed.as_ref()) {
+                if let Ok(frame) = frame::encode_marker(
+                    frame::FrameKind::Committed,
+                    *group,
+                    log.committed.as_ref(),
+                ) {
                     frames.push(frame);
                 }
             }
             if log.purged.is_some() {
-                if let Ok(frame) = frame::encode_marker(frame::FrameKind::Purged, *group, log.purged.as_ref()) {
+                if let Ok(frame) =
+                    frame::encode_marker(frame::FrameKind::Purged, *group, log.purged.as_ref())
+                {
                     frames.push(frame);
                 }
             }
@@ -436,10 +448,13 @@ impl WalInner {
                 command,
             },
         );
-        let segment = self.segments.entry(loc.generation).or_insert_with(|| SegmentView {
-            generation: loc.generation,
-            ..SegmentView::default()
-        });
+        let segment = self
+            .segments
+            .entry(loc.generation)
+            .or_insert_with(|| SegmentView {
+                generation: loc.generation,
+                ..SegmentView::default()
+            });
         let last = segment.last.entry(group).or_insert_with(|| log_id.clone());
         if log_id.index >= last.index {
             *last = log_id.clone();
@@ -483,7 +498,12 @@ impl WalInner {
                 _ => {}
             }
             self.cache_order.pop_front();
-            if self.groups.get_mut(&group).and_then(|log| log.cache.remove(&index)).is_some() {
+            if self
+                .groups
+                .get_mut(&group)
+                .and_then(|log| log.cache.remove(&index))
+                .is_some()
+            {
                 self.cache_bytes = self.cache_bytes.saturating_sub(len);
             }
         }
@@ -512,17 +532,14 @@ impl WalInner {
         }
         // the segments those frames were in have to say what the group's last entry is now
         for generation in touched {
-            let last = self
-                .groups
-                .get(&group)
-                .and_then(|log| {
-                    log.index
-                        .iter()
-                        .filter(|(_, slot)| slot.loc.generation == generation)
-                        .map(|(index, _)| *index)
-                        .max()
-                        .and_then(|index| log.log_id_at(index))
-                });
+            let last = self.groups.get(&group).and_then(|log| {
+                log.index
+                    .iter()
+                    .filter(|(_, slot)| slot.loc.generation == generation)
+                    .map(|(index, _)| *index)
+                    .max()
+                    .and_then(|index| log.log_id_at(index))
+            });
             if let Some(segment) = self.segments.get_mut(&generation) {
                 match last {
                     Some(last) => {
@@ -712,7 +729,11 @@ impl GroupCheckpoint {
                 .iter()
                 .map(|config| config.iter().copied().collect())
                 .collect(),
-            members: membership.membership().nodes().map(|(addr, _)| *addr).collect(),
+            members: membership
+                .membership()
+                .nodes()
+                .map(|(addr, _)| *addr)
+                .collect(),
             retries_at: 0,
             retry_floor: 0,
             expired_before: 0,
@@ -746,8 +767,13 @@ impl GroupCheckpoint {
     /// The membership as openraft holds it
     #[must_use]
     pub fn membership(&self) -> StoredMembershipOf<DataConfig> {
-        let configs: Vec<BTreeSet<ShardAddr>> = self.configs.iter().map(|config| config.iter().copied().collect()).collect();
-        let nodes: BTreeMap<ShardAddr, ShardAddr> = self.members.iter().map(|addr| (*addr, *addr)).collect();
+        let configs: Vec<BTreeSet<ShardAddr>> = self
+            .configs
+            .iter()
+            .map(|config| config.iter().copied().collect())
+            .collect();
+        let nodes: BTreeMap<ShardAddr, ShardAddr> =
+            self.members.iter().map(|addr| (*addr, *addr)).collect();
         // a configuration read back from a file this node wrote is one openraft accepted
         let membership = Membership::new(configs, nodes).unwrap_or_default();
         StoredMembership::new(self.membership_at.clone(), membership)
@@ -875,11 +901,15 @@ impl Retries {
         // a sidecar from before F44 has no magic and no checksum, and is read as it was
         let Some(rest) = bytes.strip_prefix(RETRIES_MAGIC) else {
             event!(Level::WARN, msg = "read a retry sidecar with no checksum", path = %path.display());
-            return postcard::from_bytes(&bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
+            return postcard::from_bytes(&bytes)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
         };
         // the checksum follows the magic, and the payload has to hash to it
         if rest.len() < 8 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{} is too short to hold its checksum", path.display())));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} is too short to hold its checksum", path.display()),
+            ));
         }
         let expected = u64::from_le_bytes(rest[..8].try_into().expect("eight bytes"));
         let found = checksum_of(&rest[8..]);
@@ -889,7 +919,8 @@ impl Retries {
                 format!("{} does not hash to its checksum: expected {expected:016x}, found {found:016x}", path.display()),
             ));
         }
-        postcard::from_bytes(&rest[8..]).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        postcard::from_bytes(&rest[8..])
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
     /// Write the retry sidecar atomically: the magic, a checksum, then the entries
@@ -898,7 +929,8 @@ impl Retries {
     ///
     /// * `dir` - The WAL directory
     pub async fn write(&self, dir: &Path) -> io::Result<()> {
-        let payload = postcard::to_allocvec(self).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let payload = postcard::to_allocvec(self)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         // the magic says a checksum follows, and the checksum says what the payload has to be
         let mut bytes = Vec::with_capacity(16 + payload.len());
         bytes.extend_from_slice(RETRIES_MAGIC);
@@ -919,7 +951,11 @@ impl Retries {
     /// * `group` - The group
     /// * `point` - The checkpoint it starts from
     #[must_use]
-    pub fn seed_for(&self, group: GroupId, point: &GroupCheckpoint) -> Vec<(RequestId, Remembered)> {
+    pub fn seed_for(
+        &self,
+        group: GroupId,
+        point: &GroupCheckpoint,
+    ) -> Vec<(RequestId, Remembered)> {
         // a checkpoint from before the sidecar existed names no sidecar
         if point.retries_at == 0 {
             return Vec::new();
@@ -956,7 +992,11 @@ impl Future for NextBatch {
             inner.writing = true;
             return Poll::Ready(Some(batch));
         }
-        if inner.open.as_ref().is_some_and(|batch| !batch.bytes.is_empty() || !batch.waiters.is_empty()) {
+        if inner
+            .open
+            .as_ref()
+            .is_some_and(|batch| !batch.bytes.is_empty() || !batch.waiters.is_empty())
+        {
             let batch = inner.open.take().expect("checked above");
             inner.writing = true;
             return Poll::Ready(Some(batch));
@@ -988,7 +1028,10 @@ async fn writer(inner: Rc<RefCell<WalInner>>) {
     {
         let dir = inner.borrow().dir.clone();
         // a batch in a new generation seals the file before it
-        if file.as_ref().is_some_and(|(generation, _)| *generation != batch.generation) {
+        if file
+            .as_ref()
+            .is_some_and(|(generation, _)| *generation != batch.generation)
+        {
             let (sealed, old) = file.take().expect("checked above");
             let synced = old.fdatasync().await.map_err(io);
             let _ = old.close().await;
@@ -1022,7 +1065,11 @@ async fn writer(inner: Rc<RefCell<WalInner>>) {
         let written = if batch.bytes.is_empty() {
             Ok(())
         } else {
-            handle.write_at(batch.bytes.clone(), batch.base).await.map(|_| ()).map_err(io)
+            handle
+                .write_at(batch.bytes.clone(), batch.base)
+                .await
+                .map(|_| ())
+                .map_err(io)
         };
         let synced = match written {
             Ok(()) => handle.fdatasync().await.map_err(io),
@@ -1338,11 +1385,18 @@ impl ShardWal {
     pub async fn delete_segment(&self, generation: u64) -> io::Result<()> {
         let (path, reader) = {
             let mut inner = self.inner.borrow_mut();
-            if inner.segments.get(&generation).is_none_or(|segment| !segment.sealed) {
+            if inner
+                .segments
+                .get(&generation)
+                .is_none_or(|segment| !segment.sealed)
+            {
                 return Ok(());
             }
             inner.segments.remove(&generation);
-            (inner.dir.join(segment_name(generation)), inner.readers.remove(&generation))
+            (
+                inner.dir.join(segment_name(generation)),
+                inner.readers.remove(&generation),
+            )
         };
         if let Some(reader) = reader {
             let _ = reader.close().await;
@@ -1452,7 +1506,11 @@ impl ShardWal {
     /// * `group` - The group
     #[must_use]
     pub fn last_log_id_of(&self, group: GroupId) -> Option<WalLogId> {
-        self.inner.borrow().groups.get(&group).and_then(GroupLog::last_log_id)
+        self.inner
+            .borrow()
+            .groups
+            .get(&group)
+            .and_then(GroupLog::last_log_id)
     }
 
     #[must_use]
@@ -1481,7 +1539,11 @@ impl ShardWal {
     /// * `group` - The group
     #[must_use]
     pub fn vote_of(&self, group: GroupId) -> Option<Vote> {
-        self.inner.borrow().groups.get(&group).and_then(|log| log.vote.clone())
+        self.inner
+            .borrow()
+            .groups
+            .get(&group)
+            .and_then(|log| log.vote.clone())
     }
 
     /// The indexes a group's log holds, for a test
@@ -1505,7 +1567,12 @@ impl ShardWal {
     ///
     /// * `frame` - The frame
     /// * `callback` - A flush callback to complete once the frame is durable, if any
-    fn stage(&self, frame: &[u8], group: GroupId, callback: Option<IOFlushed<DataConfig>>) -> io::Result<Loc> {
+    fn stage(
+        &self,
+        frame: &[u8],
+        group: GroupId,
+        callback: Option<IOFlushed<DataConfig>>,
+    ) -> io::Result<Loc> {
         let mut inner = self.inner.borrow_mut();
         if let Some(error) = &inner.error {
             return Err(io::Error::other(error.clone()));
@@ -1566,8 +1633,14 @@ impl ShardWal {
             Some(reader) => reader,
             None => BufferedFile::open(&path).await.map_err(io)?,
         };
-        let read = reader.read_at(loc.offset, loc.len as usize).await.map_err(io);
-        self.inner.borrow_mut().readers.insert(loc.generation, reader);
+        let read = reader
+            .read_at(loc.offset, loc.len as usize)
+            .await
+            .map_err(io);
+        self.inner
+            .borrow_mut()
+            .readers
+            .insert(loc.generation, reader);
         let bytes = read?;
         match frame::decode_at(&bytes, 0) {
             Some((frame::Frame::Entry { entry, .. }, _)) => Ok(entry),
@@ -1623,7 +1696,10 @@ impl GroupStore {
                 .groups
                 .get(&self.group)
                 .and_then(|log| log.purged.as_ref().map(|log_id| log_id.index)),
-            Backend::Memory(memory) => memory.log_state(self.group).last_purged_log_id.map(|log_id| log_id.index),
+            Backend::Memory(memory) => memory
+                .log_state(self.group)
+                .last_purged_log_id
+                .map(|log_id| log_id.index),
         }
     }
 
@@ -1681,7 +1757,9 @@ impl RaftLogReader<DataConfig> for GroupStore {
                         .collect::<Vec<_>>();
                     let cached = indexes
                         .iter()
-                        .filter_map(|(index, _)| log.cache.get(index).map(|entry| (*index, entry.clone())))
+                        .filter_map(|(index, _)| {
+                            log.cache.get(index).map(|entry| (*index, entry.clone()))
+                        })
                         .collect();
                     (indexes, cached)
                 };
@@ -1701,7 +1779,12 @@ impl RaftLogReader<DataConfig> for GroupStore {
     async fn read_vote(&mut self) -> Result<Option<Vote>, io::Error> {
         Ok(match &self.backend {
             Backend::Memory(memory) => memory.vote(self.group),
-            Backend::Shared(wal) => wal.inner.borrow().groups.get(&self.group).and_then(|log| log.vote.clone()),
+            Backend::Shared(wal) => wal
+                .inner
+                .borrow()
+                .groups
+                .get(&self.group)
+                .and_then(|log| log.vote.clone()),
         })
     }
 }
@@ -1755,7 +1838,11 @@ impl RaftLogStorage<DataConfig> for GroupStore {
         match &self.backend {
             Backend::Memory(memory) => memory.save_committed(self.group, committed),
             Backend::Shared(wal) => {
-                let frame = frame::encode_marker(frame::FrameKind::Committed, self.group, committed.as_ref())?;
+                let frame = frame::encode_marker(
+                    frame::FrameKind::Committed,
+                    self.group,
+                    committed.as_ref(),
+                )?;
                 wal.stage(&frame, self.group, None)?;
                 wal.inner.borrow_mut().group(self.group).committed = committed;
             }
@@ -1777,7 +1864,11 @@ impl RaftLogStorage<DataConfig> for GroupStore {
     }
 
     /// Append entries into the open batch, completing the callback once they are durable
-    async fn append<I>(&mut self, entries: I, callback: IOFlushed<DataConfig>) -> Result<(), io::Error>
+    async fn append<I>(
+        &mut self,
+        entries: I,
+        callback: IOFlushed<DataConfig>,
+    ) -> Result<(), io::Error>
     where
         I: IntoIterator<Item = Entry> + OptionalSend,
         I::IntoIter: OptionalSend,
@@ -1826,7 +1917,11 @@ impl RaftLogStorage<DataConfig> for GroupStore {
                 Ok(())
             }
             Backend::Shared(wal) => {
-                let frame = frame::encode_marker(frame::FrameKind::Truncate, self.group, last_log_id.as_ref())?;
+                let frame = frame::encode_marker(
+                    frame::FrameKind::Truncate,
+                    self.group,
+                    last_log_id.as_ref(),
+                )?;
                 wal.stage_and_wait(&frame, self.group).await?;
                 wal.inner
                     .borrow_mut()
@@ -1847,12 +1942,17 @@ impl RaftLogStorage<DataConfig> for GroupStore {
                 // a purge never moves the boundary backwards
                 let purged = {
                     let inner = wal.inner.borrow();
-                    match inner.groups.get(&self.group).and_then(|log| log.purged.clone()) {
+                    match inner
+                        .groups
+                        .get(&self.group)
+                        .and_then(|log| log.purged.clone())
+                    {
                         Some(existing) if existing.index >= log_id.index => existing,
                         _ => log_id,
                     }
                 };
-                let frame = frame::encode_marker(frame::FrameKind::Purged, self.group, Some(&purged))?;
+                let frame =
+                    frame::encode_marker(frame::FrameKind::Purged, self.group, Some(&purged))?;
                 wal.stage(&frame, self.group, None)?;
                 let mut inner = wal.inner.borrow_mut();
                 let index = purged.index;

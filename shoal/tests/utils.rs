@@ -13,17 +13,15 @@ use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::{Archive, Deserialize};
 use shoal::client::{Errors, Shoal};
-use shoal::server::conf::{
-    Auth, Conf, DefaultStorageSettings, Networking, Resources, Storage,
-};
+use shoal::server::conf::{Auth, Conf, DefaultStorageSettings, Networking, Resources, Storage};
 use shoal::server::ServerError;
 use shoal::shared::queries::Queries;
 use shoal::shared::tls::TlsClientOptions;
-use shoal::ShoalDatabase;
 use shoal::shared::traits::QuerySupport;
 use shoal::storage::fs::conf::{
     FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
 };
+use shoal::ShoalDatabase;
 use shoal::ShoalPool;
 use std::time::Duration;
 use tempfile::TempDir;

@@ -58,7 +58,9 @@ impl PlanKind {
     pub fn drains(&self) -> Option<NodeId> {
         match self {
             PlanKind::Rebalance => None,
-            PlanKind::Decommission { node } | PlanKind::Remove { node, .. } | PlanKind::Expiry { node, .. } => Some(*node),
+            PlanKind::Decommission { node }
+            | PlanKind::Remove { node, .. }
+            | PlanKind::Expiry { node, .. } => Some(*node),
         }
     }
 
@@ -285,7 +287,11 @@ impl PlanRecord {
     /// The outcome a plan whose every step moved comes to
     #[must_use]
     pub fn completed(&self) -> PlanOutcome {
-        let moved: Vec<&PlanStep> = self.steps.iter().filter(|step| step.state == StepState::Moved).collect();
+        let moved: Vec<&PlanStep> = self
+            .steps
+            .iter()
+            .filter(|step| step.state == StepState::Moved)
+            .collect();
         PlanOutcome::Completed {
             moved: u32::try_from(moved.len()).unwrap_or(u32::MAX),
             bytes: moved.iter().map(|step| step.bytes).sum(),
@@ -328,10 +334,18 @@ mod tests {
     #[test]
     fn a_plan_record_reads_its_steps() {
         let (a, b) = (NodeId::mint(), NodeId::mint());
-        let mut record = PlanRecord::new(Uuid::nil(), PlanKind::Decommission { node: a }, "alice", 3);
+        let mut record =
+            PlanRecord::new(Uuid::nil(), PlanKind::Decommission { node: a }, "alice", 3);
         assert_eq!(record.kind.drains(), Some(a));
         assert_eq!(record.kind.replacement(), None);
-        assert_eq!(PlanKind::Remove { node: a, replacement: Some(b) }.replacement(), Some(b));
+        assert_eq!(
+            PlanKind::Remove {
+                node: a,
+                replacement: Some(b)
+            }
+            .replacement(),
+            Some(b)
+        );
         assert_eq!(PlanKind::Rebalance.drains(), None);
         assert!(!record.is_done());
         let step = |tablet, state| PlanStep {
@@ -345,17 +359,39 @@ mod tests {
         record.steps = vec![
             step(0, StepState::Moved),
             step(1, StepState::Moving),
-            step(2, StepState::Failed { reason: "x".to_string() }),
-            step(2, StepState::Failed { reason: "y".to_string() }),
+            step(
+                2,
+                StepState::Failed {
+                    reason: "x".to_string(),
+                },
+            ),
+            step(
+                2,
+                StepState::Failed {
+                    reason: "y".to_string(),
+                },
+            ),
             step(3, StepState::Pending),
         ];
         let live: Vec<u16> = record.live_steps().map(|step| step.tablet).collect();
         assert_eq!(live, vec![1, 3]);
         assert_eq!(record.failures_of(2), 2);
         assert_eq!(record.failures_of(0), 0);
-        assert_eq!(record.completed(), PlanOutcome::Completed { moved: 1, bytes: 10 });
+        assert_eq!(
+            record.completed(),
+            PlanOutcome::Completed {
+                moved: 1,
+                bytes: 10
+            }
+        );
         // every name is distinct
-        let names = [PlanPhase::Planned, PlanPhase::Running, PlanPhase::Blocked, PlanPhase::Finishing, PlanPhase::Done];
+        let names = [
+            PlanPhase::Planned,
+            PlanPhase::Running,
+            PlanPhase::Blocked,
+            PlanPhase::Finishing,
+            PlanPhase::Done,
+        ];
         let mut spelled: Vec<&str> = names.iter().map(PlanPhase::name).collect();
         spelled.dedup();
         assert_eq!(spelled.len(), names.len());

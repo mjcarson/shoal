@@ -82,7 +82,11 @@ pub enum ServerError {
     /// `ready` of `of` shards had bound and joined; the rest were still starting, or wedged. A
     /// shard that failed outright is reported as [`ServerError::ShardFailed`] instead, so this
     /// is only ever the slow case.
-    ReadyTimeout { ready: usize, of: usize, timeout: Duration },
+    ReadyTimeout {
+        ready: usize,
+        of: usize,
+        timeout: Duration,
+    },
     /// The control plane failed to start, or died after it had
     ///
     /// Carried as text for the reason [`ServerError::ShardFailed`] is: it crossed from the
@@ -311,7 +315,12 @@ pub enum ShoalError {
     /// for a record the read came back short on, which is a torn record rather than a
     /// flipped byte. Named by archive and partition so an operator can find the copy and
     /// the repair can quarantine the group holding it.
-    CorruptArchive { archive: Uuid, partition_id: u64, expected: u64, found: u64 },
+    CorruptArchive {
+        archive: Uuid,
+        partition_id: u64,
+        expected: u64,
+        found: u64,
+    },
     /// A table was not found in the archive map (corrupt or missing map)
     TableMapMissing,
     /// This node has no shards, so nothing could own any data
@@ -336,14 +345,21 @@ pub enum ShoalError {
     ///
     /// The manifest is resumed only by the count it was planned for; a start under a third
     /// count is refused rather than planned over an unfinished move.
-    RehomeInProgress { from: usize, to: usize, configured: usize },
+    RehomeInProgress {
+        from: usize,
+        to: usize,
+        configured: usize,
+    },
     /// This storage directorys marker was written in a format we cannot read
     ///
     /// Every other field in the marker only means what we think it means if we agree
     /// about the shape it was written in, so an unreadable format has to be refused
     /// before the shard count inside it is trusted. `supported` is what this build reads, so
     /// the message can say what would be accepted as well as what was not.
-    StorageFormatMismatch { found: u32, supported: &'static [u32] },
+    StorageFormatMismatch {
+        found: u32,
+        supported: &'static [u32],
+    },
     /// This storage directory lays its data out under a shard layout this build does not
     ///
     /// The same refusal as a shard count mismatch, one level up: the layout says how tablets
@@ -378,7 +394,10 @@ pub enum ShoalError {
     /// A peer proved it belongs to a cluster other than the one this directory is in
     ///
     /// `expected` is `None` for a standalone directory, which belongs to no cluster at all.
-    WrongCluster { found: ClusterId, expected: Option<ClusterId> },
+    WrongCluster {
+        found: ClusterId,
+        expected: Option<ClusterId>,
+    },
     /// A topology version was observed that is older than the one already recorded
     ///
     /// The marker's topology field is a high water mark, and a recovery that resumed from an
@@ -403,7 +422,10 @@ pub enum ShoalError {
     ///
     /// Refused at startup rather than accepted and ignored, so a configuration never claims a
     /// property the server does not have.
-    NotImplemented { setting: String, milestone: &'static str },
+    NotImplemented {
+        setting: String,
+        milestone: &'static str,
+    },
     /// Something asked the control plane, and there is no control plane
     ///
     /// A standalone server runs no control thread and no group; the topology it would report
@@ -418,7 +440,11 @@ pub enum ShoalError {
     ///
     /// A peer routes to a shard on this node from the count the cluster recorded, so a count
     /// that differs from the truth would name shards that do not exist or leave some unowned.
-    PlacementShardCount { node: NodeId, entry: u16, actual: usize },
+    PlacementShardCount {
+        node: NodeId,
+        entry: u16,
+        actual: usize,
+    },
     /// A contact names a shard on another node, and was handed to the node local mesh
     ///
     /// The mesh carries messages between this node's shards and nothing else; a remote contact
@@ -431,22 +457,41 @@ pub enum ShoalError {
     /// Under `cluster.tls.bind_identity` a leaf carries `shoal-node://<id>` and the hello has
     /// to agree with it; `certified` is what the leaf said, or none
     /// ([F50](../../../docs/src/features/cluster-operations.md)).
-    CertificateIdentity { claimed: NodeId, certified: Option<NodeId> },
+    CertificateIdentity {
+        claimed: NodeId,
+        certified: Option<NodeId>,
+    },
     /// A peer's hello named an identity other than the one this node dialled or placed
     PeerIdentity { expected: NodeId, found: NodeId },
     /// A peer's hello named a shard count other than the placement's
-    PeerShardCount { node: NodeId, placed: u16, claimed: u16 },
+    PeerShardCount {
+        node: NodeId,
+        placed: u16,
+        claimed: u16,
+    },
     /// A peer's hello named a schema other than this node's
-    PeerSchema { node: NodeId, ours: u64, theirs: u64 },
+    PeerSchema {
+        node: NodeId,
+        ours: u64,
+        theirs: u64,
+    },
     /// A peer's hello named a lane this listener does not serve
     PeerLane { node: NodeId, lane: Lane },
     /// A peer's hello carried an incarnation the cluster has superseded
-    PeerFenced { node: NodeId, committed: u64, offered: u64 },
+    PeerFenced {
+        node: NodeId,
+        committed: u64,
+        offered: u64,
+    },
     /// A peer's newest wire version is below the one the cluster has activated
     ///
     /// The activation is the rollback boundary: past it a member speaking only an older
     /// version is refused at every door ([F48](../../../docs/src/features/rolling-compatibility.md)).
-    BelowActivatedWire { node: NodeId, activated: u8, offered: u8 },
+    BelowActivatedWire {
+        node: NodeId,
+        activated: u8,
+        offered: u8,
+    },
     /// A peer belongs to the cluster this one was restored from, whose identities are retired
     ///
     /// A restore is into a new cluster; the old cluster's members are refused by name rather
@@ -458,12 +503,20 @@ pub enum ShoalError {
     /// The other half of the same rule: a build or a pin that cannot speak the activated
     /// version cannot serve this cluster, so the pool refuses to start rather than run a
     /// member every peer refuses.
-    WireBelowActivated { node: NodeId, activated: u8, ours: u8 },
+    WireBelowActivated {
+        node: NodeId,
+        activated: u8,
+        ours: u8,
+    },
     /// This node's own incarnation has been superseded by a later start of it
     ///
     /// The fencing rule's other half: a run the cluster has replaced stops serving, since two
     /// runs of one identity cannot both be the replica it names.
-    Fenced { node: NodeId, committed: u64, ours: u64 },
+    Fenced {
+        node: NodeId,
+        committed: u64,
+        ours: u64,
+    },
     /// This node's identity has been removed from the cluster and tombstoned
     ///
     /// A removed member never rejoins under its identity, at any incarnation and from any
@@ -475,7 +528,11 @@ pub enum ShoalError {
     /// A joiner was refused admission, and why
     JoinRefused { reason: String },
     /// A lane's queue to a peer is at its byte bound, so nothing more was accepted for it
-    PeerQueueFull { node: NodeId, lane: Lane, bound: usize },
+    PeerQueueFull {
+        node: NodeId,
+        lane: Lane,
+        bound: usize,
+    },
     /// A peer link is down and the frame was never written to it
     PeerUnavailable { node: NodeId, lane: Lane },
     /// The peer handshake did not finish, and what stopped it

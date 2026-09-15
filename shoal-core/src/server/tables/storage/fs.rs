@@ -39,20 +39,20 @@ use reader::IntentLogReader;
 use stream::StreamWriter;
 
 use super::{CompactionJob, FlushProgress, IntentReadSupport, RecoveryStats, StorageSupport};
-use crate::server::replication::ArchivedCut;
-use crate::storage::fs::map::ArchiveEntry;
-use uuid::Uuid;
 use crate::server::conf::TableSettings;
+use crate::server::database::ShoalDatabase;
 use crate::server::messages::ServerMsg;
+use crate::server::replication::ArchivedCut;
 use crate::server::stage_profile::StageDurability;
 #[cfg(feature = "stage-profile")]
 use crate::server::stage_profile::StageStamps;
 use crate::server::{Conf, ServerError};
-use crate::server::database::ShoalDatabase;
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, TableNameSupport};
+use crate::storage::fs::map::ArchiveEntry;
 use crate::storage::{ArchiveMapKinds, FilteredFullArchiveMap, FullArchiveMap, LoaderMsg, Loaders};
 use crate::tables::partitions::{MaybeLoaded, PartitionSupport, ValidatedArchive};
 use loader::FsLoader;
+use uuid::Uuid;
 
 /// Find inactive intent log files for this shard, sorted by generation ascending
 ///
@@ -393,7 +393,11 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     /// * `shard_name` - The name of the shard whose logs are folded
     /// * `shard_table_name` - The table, as the shard's messages name it
     /// * `conf` - The Shoal config
-    #[instrument(name = "FileSystem::fold_intents", skip(shard_table_name, conf), err(Debug))]
+    #[instrument(
+        name = "FileSystem::fold_intents",
+        skip(shard_table_name, conf),
+        err(Debug)
+    )]
     async fn fold_intents<P: IntentReadSupport<R> + 'static, R: PartitionKeySupport + 'static>(
         shard_name: &str,
         shard_table_name: D::TableNames,
@@ -413,7 +417,7 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         >,
         for<'a> <P::Intent as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        >
+        >,
     {
         // this table's settings, and so where its logs and archives are
         let table_conf = Self::get_settings::<R>(conf)?;
@@ -513,13 +517,21 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         //
         // truncation cannot happen: a tablet id is twelve bits
         #[allow(clippy::cast_possible_truncation)]
-        let tablets: Vec<u16> = (0..crate::server::ring::TABLET_COUNT).map(|tablet| tablet as u16).collect();
+        let tablets: Vec<u16> = (0..crate::server::ring::TABLET_COUNT)
+            .map(|tablet| tablet as u16)
+            .collect();
         let manifest = SnapshotManifest {
             group,
             table,
             schema_id,
             // index zero under the origin's first slot: an export is before any log
-            boundary: openraft::LogId::new(crate::server::wal::LeaderId::new(0, crate::shared::identity::ShardAddr::new(provenance.origin, 0)), 0),
+            boundary: openraft::LogId::new(
+                crate::server::wal::LeaderId::new(
+                    0,
+                    crate::shared::identity::ShardAddr::new(provenance.origin, 0),
+                ),
+                0,
+            ),
             membership: openraft::StoredMembership::default(),
             tablets,
             records: entries.len() as u64,
@@ -877,7 +889,11 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     }
 
     /// Where every archived partition of some tablets lives, with a handle per archive
-    async fn archived_cut(&self, tablets: &[u16], resident: &HashSet<u64>) -> Result<ArchivedCut, ServerError> {
+    async fn archived_cut(
+        &self,
+        tablets: &[u16],
+        resident: &HashSet<u64>,
+    ) -> Result<ArchivedCut, ServerError> {
         // every entry of the tablets the map names that is not resident, in key order; the
         // borrow ends before any handle is opened
         let mut entries: Vec<ArchiveEntry> = self
@@ -935,7 +951,10 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         // that is not the error worth reporting: the join below returns the one that killed it,
         // which names the file it could not read rather than the channel nobody was listening on
         if self.intent_tx.send(CompactionJob::Shutdown).await.is_err() {
-            event!(Level::WARN, msg = "the compactor was gone before shutdown reached it");
+            event!(
+                Level::WARN,
+                msg = "the compactor was gone before shutdown reached it"
+            );
         }
         // wait for all of our tasks to complete
         while let Some(task) = self.tasks.next().await {

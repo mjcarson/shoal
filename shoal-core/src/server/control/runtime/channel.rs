@@ -17,7 +17,9 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
-use openraft_rt::{Mpsc, MpscReceiver, MpscSender, MpscWeakSender, OptionalSend, SendError, TryRecvError};
+use openraft_rt::{
+    Mpsc, MpscReceiver, MpscSender, MpscWeakSender, OptionalSend, SendError, TryRecvError,
+};
 
 /// The channel's state, shared by every handle to it
 struct Shared<T> {
@@ -146,7 +148,10 @@ impl<T> Future for Send<T> {
     /// Queue the value if there is room and a receiver, or wait for room
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // the value comes out first, and goes back in if this poll cannot place it
-        let msg = self.msg.take().expect("a send is polled once it has completed");
+        let msg = self
+            .msg
+            .take()
+            .expect("a send is polled once it has completed");
         let mut shared = self.shared.borrow_mut();
         // a value nobody will ever receive goes back to the caller
         if !shared.receiver_alive {

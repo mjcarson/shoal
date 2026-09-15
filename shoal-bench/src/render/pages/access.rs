@@ -5,8 +5,8 @@
 
 use anyhow::Result;
 
-use crate::registry::Layer;
 use crate::fmt;
+use crate::registry::Layer;
 use crate::render::arms::{self, Arm};
 use crate::render::chart::bars;
 use crate::render::chart::sweep::{self, Unit};
@@ -32,7 +32,10 @@ pub fn build(page: &Page) -> Result<String> {
         "Two sweeps over the shape of the load rather than the shape of the data: which keys the \
          reads ask for, and how many queries are outstanding while they ask.",
     );
-    let Some(capture) = page.current_for(Layer::Macro).and_then(|current| current.macro_layer.as_ref()) else {
+    let Some(capture) = page
+        .current_for(Layer::Macro)
+        .and_then(|current| current.macro_layer.as_ref())
+    else {
         out.push_str(&nothing_measured("a key distribution or a load depth"));
         out.push_str(&footer(Surface::Access));
         return Ok(out);

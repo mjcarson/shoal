@@ -42,7 +42,10 @@ use tempfile::TempDir;
 
 pub use cores::{Allocation, ClusterPlan, CoreClaim, Topology};
 pub use link::{Link, LinkState};
-pub use node::{ChildOverrides, ChildRequest, Endpoints, Node, NodeKind, StagedCluster, CHILD_ENV, FAILED_LINE, READY_LINE, REPLY_LINE};
+pub use node::{
+    ChildOverrides, ChildRequest, Endpoints, Node, NodeKind, StagedCluster, CHILD_ENV, FAILED_LINE,
+    READY_LINE, REPLY_LINE,
+};
 
 /// What can go wrong starting or driving a cluster
 #[derive(Debug)]
@@ -743,7 +746,11 @@ impl ClusterBuilder {
         let topology = Topology::detect();
         let mut plan = self.plan(&topology)?;
         // one directory per node, alive as long as the cluster
-        let dirs: Vec<TempDir> = self.nodes.iter().map(|_| crate::utils::test_dir()).collect();
+        let dirs: Vec<TempDir> = self
+            .nodes
+            .iter()
+            .map(|_| crate::utils::test_dir())
+            .collect();
         // a membership cluster needs its identities and ports decided before any child starts,
         // so node zero's marker names the cluster, every joiner's names its node, and every
         // joiner knows node zero's control address
@@ -765,9 +772,13 @@ impl ClusterBuilder {
                             continue;
                         }
                         let real_data: SocketAddr =
-                            format!("127.0.0.1:{}", staged.per_node[to].data_port).parse().unwrap();
+                            format!("127.0.0.1:{}", staged.per_node[to].data_port)
+                                .parse()
+                                .unwrap();
                         let real_control: SocketAddr =
-                            format!("127.0.0.1:{}", staged.per_node[to].control_port).parse().unwrap();
+                            format!("127.0.0.1:{}", staged.per_node[to].control_port)
+                                .parse()
+                                .unwrap();
                         let dlink = Link::start(real_data).await?;
                         let clink = Link::start(real_control).await?;
                         let peer = staged.per_node[to].node.clone();
@@ -796,7 +807,9 @@ impl ClusterBuilder {
                 continue;
             }
             let allocation = plan.nodes[id].1.clone();
-            let cluster = staged.as_ref().and_then(|staged| staged.per_node.get(id).cloned());
+            let cluster = staged
+                .as_ref()
+                .and_then(|staged| staged.per_node.get(id).cloned());
             let durability = self
                 .durability
                 .iter()
@@ -818,7 +831,9 @@ impl ClusterBuilder {
             )?));
         }
         // hold the port reservations until every child has bound, so nothing else takes them
-        let reservations = staged.as_mut().map(|staged| std::mem::take(&mut staged.reservations));
+        let reservations = staged
+            .as_mut()
+            .map(|staged| std::mem::take(&mut staged.reservations));
         plan.endpoints = vec![Endpoints::unbound(); self.nodes.len()];
         for (id, node) in nodes.iter_mut().enumerate() {
             if let Some(node) = node {
@@ -913,9 +928,15 @@ impl Pki {
         let ca_key = rcgen::KeyPair::generate().expect("a ca key");
         let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("ca params");
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        params.distinguished_name.push(rcgen::DnType::CommonName, "shoal fixture authority");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "shoal fixture authority");
         let ca = params.self_signed(&ca_key).expect("a ca certificate");
-        Pki { ca, ca_key, previous: None }
+        Pki {
+            ca,
+            ca_key,
+            previous: None,
+        }
     }
 
     /// Issue a leaf for the loopback address, naming a node if one is given
@@ -925,13 +946,19 @@ impl Pki {
     /// * `node` - The node the leaf names through its `shoal-node://` URI, or none
     fn issue(&self, node: Option<&str>) -> (String, String) {
         let key = rcgen::KeyPair::generate().expect("a node key");
-        let mut params = rcgen::CertificateParams::new(vec!["localhost".to_owned(), "127.0.0.1".to_owned()]).expect("leaf params");
+        let mut params =
+            rcgen::CertificateParams::new(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])
+                .expect("leaf params");
         if let Some(node) = node {
-            params
-                .subject_alt_names
-                .push(rcgen::SanType::URI(format!("shoal-node://{node}").try_into().expect("a uri san")));
+            params.subject_alt_names.push(rcgen::SanType::URI(
+                format!("shoal-node://{node}")
+                    .try_into()
+                    .expect("a uri san"),
+            ));
         }
-        let cert = params.signed_by(&key, &self.ca, &self.ca_key).expect("a node certificate");
+        let cert = params
+            .signed_by(&key, &self.ca, &self.ca_key)
+            .expect("a node certificate");
         (cert.pem(), key.serialize_pem())
     }
 
@@ -1016,7 +1043,9 @@ impl Cluster {
     ///
     /// * `id` - Its id, from zero in the order the builder added it
     pub fn node(&self, id: usize) -> &Node {
-        self.nodes[id].as_ref().unwrap_or_else(|| panic!("node {id} is not started"))
+        self.nodes[id]
+            .as_ref()
+            .unwrap_or_else(|| panic!("node {id} is not started"))
     }
 
     /// A node, to signal
@@ -1025,7 +1054,9 @@ impl Cluster {
     ///
     /// * `id` - Its id
     pub fn node_mut(&mut self, id: usize) -> &mut Node {
-        self.nodes[id].as_mut().unwrap_or_else(|| panic!("node {id} is not started"))
+        self.nodes[id]
+            .as_mut()
+            .unwrap_or_else(|| panic!("node {id} is not started"))
     }
 
     /// Whether a node is running
@@ -1054,9 +1085,9 @@ impl Cluster {
     /// * `from` - The sending node
     /// * `to` - The receiving node
     pub fn link(&self, from: usize, to: usize) -> &Link {
-        self.links
-            .get(&(from, to))
-            .unwrap_or_else(|| panic!("no link from {from} to {to}; was the cluster built with links?"))
+        self.links.get(&(from, to)).unwrap_or_else(|| {
+            panic!("no link from {from} to {to}; was the cluster built with links?")
+        })
     }
 
     /// The proxy one node dials another's data lane through, for a test to delay or cut
@@ -1066,9 +1097,9 @@ impl Cluster {
     /// * `from` - The dialling node
     /// * `to` - The node whose data lane it dials
     pub fn data_link(&self, from: usize, to: usize) -> &Link {
-        self.data_links
-            .get(&(from, to))
-            .unwrap_or_else(|| panic!("no data link from {from} to {to}; was the cluster built with lane links?"))
+        self.data_links.get(&(from, to)).unwrap_or_else(|| {
+            panic!("no data link from {from} to {to}; was the cluster built with lane links?")
+        })
     }
 
     /// The proxy one node dials another's control lane through
@@ -1078,9 +1109,9 @@ impl Cluster {
     /// * `from` - The dialling node
     /// * `to` - The node whose control lane it dials
     pub fn control_link(&self, from: usize, to: usize) -> &Link {
-        self.control_links
-            .get(&(from, to))
-            .unwrap_or_else(|| panic!("no control link from {from} to {to}; was the cluster built with lane links?"))
+        self.control_links.get(&(from, to)).unwrap_or_else(|| {
+            panic!("no control link from {from} to {to}; was the cluster built with lane links?")
+        })
     }
 
     /// Every proxy into a node's data lane, from every other node
@@ -1226,7 +1257,11 @@ impl Cluster {
             self._dirs[id].path(),
             None,
             None,
-            if kind == NodeKind::Server { staged } else { None },
+            if kind == NodeKind::Server {
+                staged
+            } else {
+                None
+            },
             None,
             overrides,
         )?;
@@ -1246,7 +1281,12 @@ impl Cluster {
     /// * `id` - Its id
     /// * `kind` - What to restart it as
     /// * `cores` - How many executors to run
-    pub fn restart_with_cores(&mut self, id: usize, kind: NodeKind, cores: usize) -> Result<(), FixtureError> {
+    pub fn restart_with_cores(
+        &mut self,
+        id: usize,
+        kind: NodeKind,
+        cores: usize,
+    ) -> Result<(), FixtureError> {
         let staged = self.staged.get(id).cloned();
         self.restart_with_overrides(
             id,
@@ -1268,7 +1308,11 @@ impl Cluster {
     ///
     /// * `id` - Its id
     /// * `version` - The newest version to advertise, or none for the build's newest
-    pub fn restart_with_wire(&mut self, id: usize, version: Option<u8>) -> Result<(), FixtureError> {
+    pub fn restart_with_wire(
+        &mut self,
+        id: usize,
+        version: Option<u8>,
+    ) -> Result<(), FixtureError> {
         self.staged[id].wire_version = version;
         let staged = self.staged.get(id).cloned();
         self.restart_with_overrides(id, NodeKind::Server, staged, ChildOverrides::default())
@@ -1281,7 +1325,11 @@ impl Cluster {
     ///
     /// * `id` - Its id
     /// * `exe` - The binary, or none for this one
-    pub fn restart_with_binary(&mut self, id: usize, exe: Option<std::path::PathBuf>) -> Result<(), FixtureError> {
+    pub fn restart_with_binary(
+        &mut self,
+        id: usize,
+        exe: Option<std::path::PathBuf>,
+    ) -> Result<(), FixtureError> {
         let staged = self.staged.get(id).cloned();
         self.restart_with_overrides(
             id,
@@ -1300,7 +1348,11 @@ impl Cluster {
     ///
     /// * `id` - Its id
     /// * `seeds` - The control addresses to give it
-    pub fn restart_with_seeds(&mut self, id: usize, seeds: Vec<String>) -> Result<(), FixtureError> {
+    pub fn restart_with_seeds(
+        &mut self,
+        id: usize,
+        seeds: Vec<String>,
+    ) -> Result<(), FixtureError> {
         let mut staged = self.staged[id].clone();
         staged.seeds = seeds;
         self.restart_with(id, NodeKind::Server, Some(staged))
@@ -1365,11 +1417,13 @@ impl Cluster {
     /// * `id` - The node whose files are rewritten
     /// * `node` - The node the leaf names, or none for a leaf with no node in it
     pub fn reissue_leaf(&self, id: usize, node: Option<&str>) -> Result<(), FixtureError> {
-        let pki = self.pki.as_ref().ok_or_else(|| FixtureError::ChildFailed("the peer lanes are plaintext".to_string()))?;
-        let paths = self.staged[id]
-            .tls
-            .clone()
-            .ok_or_else(|| FixtureError::ChildFailed(format!("node {id} was staged with no tls")))?;
+        let pki = self
+            .pki
+            .as_ref()
+            .ok_or_else(|| FixtureError::ChildFailed("the peer lanes are plaintext".to_string()))?;
+        let paths = self.staged[id].tls.clone().ok_or_else(|| {
+            FixtureError::ChildFailed(format!("node {id} was staged with no tls"))
+        })?;
         let (cert, key) = pki.issue(node);
         std::fs::write(&paths.cert, cert)?;
         std::fs::write(&paths.key, key)?;
@@ -1397,7 +1451,10 @@ impl Cluster {
     /// Mint a new authority and keep the old one beside it, so a bundle names both
     /// ([F50](../../../docs/src/features/cluster-operations.md))
     pub fn rotate_authority(&mut self) -> Result<(), FixtureError> {
-        let pki = self.pki.as_mut().ok_or_else(|| FixtureError::ChildFailed("the peer lanes are plaintext".to_string()))?;
+        let pki = self
+            .pki
+            .as_mut()
+            .ok_or_else(|| FixtureError::ChildFailed("the peer lanes are plaintext".to_string()))?;
         let fresh = Pki::mint();
         let old = std::mem::replace(&mut pki.ca, fresh.ca);
         pki.ca_key = fresh.ca_key;
@@ -1407,7 +1464,10 @@ impl Cluster {
 
     /// Forget the previous authority, so the bundle names the current one alone
     pub fn retire_previous_authority(&mut self) -> Result<(), FixtureError> {
-        let pki = self.pki.as_mut().ok_or_else(|| FixtureError::ChildFailed("the peer lanes are plaintext".to_string()))?;
+        let pki = self
+            .pki
+            .as_mut()
+            .ok_or_else(|| FixtureError::ChildFailed("the peer lanes are plaintext".to_string()))?;
         pki.previous = None;
         Ok(())
     }
@@ -1418,11 +1478,13 @@ impl Cluster {
     ///
     /// * `id` - The node
     pub fn write_authorities(&self, id: usize) -> Result<(), FixtureError> {
-        let pki = self.pki.as_ref().ok_or_else(|| FixtureError::ChildFailed("the peer lanes are plaintext".to_string()))?;
-        let paths = self.staged[id]
-            .tls
-            .clone()
-            .ok_or_else(|| FixtureError::ChildFailed(format!("node {id} was staged with no tls")))?;
+        let pki = self
+            .pki
+            .as_ref()
+            .ok_or_else(|| FixtureError::ChildFailed("the peer lanes are plaintext".to_string()))?;
+        let paths = self.staged[id].tls.clone().ok_or_else(|| {
+            FixtureError::ChildFailed(format!("node {id} was staged with no tls"))
+        })?;
         std::fs::write(&paths.ca, pki.bundle())?;
         Ok(())
     }
@@ -1456,12 +1518,27 @@ impl Cluster {
     /// * `id` - The node to clone
     /// * `dir` - The copy of its directory
     /// * `ports` - The data and control ports the clone binds
-    pub fn spawn_clone_at(&self, id: usize, dir: &std::path::Path, ports: (u16, u16)) -> Result<Node, FixtureError> {
+    pub fn spawn_clone_at(
+        &self,
+        id: usize,
+        dir: &std::path::Path,
+        ports: (u16, u16),
+    ) -> Result<Node, FixtureError> {
         let mut staged = self.staged[id].clone();
         staged.data_port = ports.0;
         staged.control_port = ports.1;
         let allocation = self.plan.nodes[id].1.clone();
-        Node::spawn_with(id, NodeKind::Server, allocation, dir, None, None, Some(staged), None, ChildOverrides::default())
+        Node::spawn_with(
+            id,
+            NodeKind::Server,
+            allocation,
+            dir,
+            None,
+            None,
+            Some(staged),
+            None,
+            ChildOverrides::default(),
+        )
     }
 
     /// Start a second process of a node on a copy of its directory, with fresh ports
@@ -1483,7 +1560,17 @@ impl Cluster {
         // the clone runs on the original's allocation, so it runs the shard count the
         // directory was written by; the two share those cores, which a fencing test can afford
         let allocation = self.plan.nodes[id].1.clone();
-        let node = Node::spawn_with(id, NodeKind::Server, allocation, dir, None, None, Some(staged), None, ChildOverrides::default())?;
+        let node = Node::spawn_with(
+            id,
+            NodeKind::Server,
+            allocation,
+            dir,
+            None,
+            None,
+            Some(staged),
+            None,
+            ChildOverrides::default(),
+        )?;
         drop((data_sock, control_sock));
         Ok(node)
     }
@@ -1529,7 +1616,9 @@ impl Cluster {
     /// * `ids` - The nodes, in placement order
     pub fn initialize(&mut self, ids: &[usize]) -> Result<u64, FixtureError> {
         let list: Vec<String> = ids.iter().map(usize::to_string).collect();
-        let reply = self.node_mut(ids[0]).command(&format!("INITIALIZE {}", list.join(" ")))?;
+        let reply = self
+            .node_mut(ids[0])
+            .command(&format!("INITIALIZE {}", list.join(" ")))?;
         let version = reply["ok"]["version"].as_u64().ok_or_else(|| {
             FixtureError::ChildFailed(format!("the initialization was not applied: {reply}"))
         })?;
@@ -1569,10 +1658,9 @@ impl Cluster {
     /// * `id` - The node to ask
     pub fn members(&mut self, id: usize) -> Result<serde_json::Value, FixtureError> {
         let reply = self.node_mut(id).command("MEMBERS")?;
-        reply
-            .get("ok")
-            .cloned()
-            .ok_or_else(|| FixtureError::ChildFailed(format!("node {id} answered MEMBERS with {reply}")))
+        reply.get("ok").cloned().ok_or_else(|| {
+            FixtureError::ChildFailed(format!("node {id} answered MEMBERS with {reply}"))
+        })
     }
 
     /// The node id a node names as the control leader, if it names one
@@ -1609,7 +1697,9 @@ impl Cluster {
         let deadline = Instant::now() + self.ready_timeout;
         loop {
             let members = self.members(id)?;
-            if members["voters"].as_array().is_some_and(|list| list.len() == voters)
+            if members["voters"]
+                .as_array()
+                .is_some_and(|list| list.len() == voters)
                 && members["joint"] == false
             {
                 return Ok(());
@@ -1706,12 +1796,19 @@ impl Cluster {
 
     /// The client endpoint of every running node
     pub fn client_endpoints(&self) -> Vec<SocketAddr> {
-        self.nodes.iter().flatten().map(|node| node.endpoints.client).collect()
+        self.nodes
+            .iter()
+            .flatten()
+            .map(|node| node.endpoints.client)
+            .collect()
     }
 
     /// The node ids, in index order, as the children know them
     pub fn node_ids(&self) -> Vec<String> {
-        self.staged.first().map(|staged| staged.peers.clone()).unwrap_or_default()
+        self.staged
+            .first()
+            .map(|staged| staged.peers.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -1804,7 +1901,11 @@ fn build_membership_cluster(
         // the shard count is the data cores the allocator gave this node, or the slots the
         // test asked it to claim above them ([F47](../../../docs/src/features/local-rehome.md))
         let cores = plan.nodes[id].1.data.len().max(1);
-        let shards = builder.slots.iter().find(|(node, _)| *node == id).map_or(cores, |(_, slots)| *slots);
+        let shards = builder
+            .slots
+            .iter()
+            .find(|(node, _)| *node == id)
+            .map_or(cores, |(_, slots)| *slots);
         shard_counts.push(shards);
         let (data_sock, data_port) = reserve_port()?;
         let (control_sock, control_port) = reserve_port()?;
@@ -1858,16 +1959,27 @@ fn build_membership_cluster(
             },
             peers: peers.clone(),
             dial: Vec::new(),
-            slots: builder.slots.iter().find(|(node, _)| *node == id).map(|(_, slots)| *slots),
-            wire_version: builder.wire_versions.iter().find(|(node, _)| *node == id).map(|(_, version)| *version),
+            slots: builder
+                .slots
+                .iter()
+                .find(|(node, _)| *node == id)
+                .map(|(_, slots)| *slots),
+            wire_version: builder
+                .wire_versions
+                .iter()
+                .find(|(node, _)| *node == id)
+                .map(|(_, version)| *version),
             replication_factor: builder.replication_factor,
             control_voters: builder.control_voters,
             admins: builder.admins.clone(),
             auth: builder.auth.clone(),
             detector_interval_ms: builder.detector_interval_ms,
-            trace_file: builder
-                .trace
-                .then(|| dir.path().join("trace.jsonl").to_string_lossy().into_owned()),
+            trace_file: builder.trace.then(|| {
+                dir.path()
+                    .join("trace.jsonl")
+                    .to_string_lossy()
+                    .into_owned()
+            }),
             failover_ms: Some(builder.failover_ms),
             write_timeout_ms: builder.write_timeout_ms,
             pending_bytes: builder.pending_bytes,
@@ -1890,14 +2002,30 @@ fn build_membership_cluster(
             retry_window_ms: builder.retry_window_ms,
             move_crash_at: None,
             auto_remove_after_ms: builder.auto_remove_after_ms,
-            weight: builder.weights.iter().find(|(node, _)| *node == id).map(|(_, weight)| *weight),
-            stream_bytes_per_sec: builder.stream_budgets.iter().find(|(node, _, _)| *node == id).map(|(_, bytes, _)| *bytes),
-            concurrent_streams: builder.stream_budgets.iter().find(|(node, _, _)| *node == id).map(|(_, _, streams)| *streams),
+            weight: builder
+                .weights
+                .iter()
+                .find(|(node, _)| *node == id)
+                .map(|(_, weight)| *weight),
+            stream_bytes_per_sec: builder
+                .stream_budgets
+                .iter()
+                .find(|(node, _, _)| *node == id)
+                .map(|(_, bytes, _)| *bytes),
+            concurrent_streams: builder
+                .stream_budgets
+                .iter()
+                .find(|(node, _, _)| *node == id)
+                .map(|(_, _, streams)| *streams),
             disk_reserve: builder.disk_reserve,
             moves_per_node: builder.moves_per_node,
             plan_interval_ms: builder.plan_interval_ms,
             tls: pki.as_ref().map(|_| tls_paths(dir.path())),
         });
     }
-    Ok(StagedPlan { per_node, reservations, pki })
+    Ok(StagedPlan {
+        per_node,
+        reservations,
+        pki,
+    })
 }

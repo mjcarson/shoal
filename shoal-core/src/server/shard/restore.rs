@@ -40,8 +40,13 @@ use crate::server::control::plane::ControlRequest;
 use crate::server::control::repair::{Quarantine, QuarantineAction, QuarantineReason};
 use crate::server::control::types::{ControlCommand, ControlResponse};
 use crate::server::replication::network::RepairSend;
-use crate::server::replication::snapshot::{self, SnapshotManifest, SnapshotProvenance, SnapshotReader, SnapshotWriter, SNAPSHOTS_DIR};
-use crate::server::replication::{DataConfig, DigestIntegrity, GroupMachine, GroupPeer, MachineState, Remembered, ShardNetwork, ShardPeer};
+use crate::server::replication::snapshot::{
+    self, SnapshotManifest, SnapshotProvenance, SnapshotReader, SnapshotWriter, SNAPSHOTS_DIR,
+};
+use crate::server::replication::{
+    DataConfig, DigestIntegrity, GroupMachine, GroupPeer, MachineState, Remembered, ShardNetwork,
+    ShardPeer,
+};
 use crate::server::ring::Ring;
 use crate::server::ShoalDatabase;
 use crate::shared::identity::{ClusterId, GroupId, ShardAddr, TableId};
@@ -126,10 +131,13 @@ impl<D: ShoalDatabase> RestoreContext<D> {
                 .try_send(ControlRequest::Propose { command, reply })
                 .map_err(|_| "the control thread is not taking proposals".to_string())?;
             let remaining = PROGRESS_TIMEOUT.saturating_sub(started.elapsed());
-            let answered = glommio::timer::timeout(remaining, async { Ok(rx.as_async().recv().await) }).await;
+            let answered =
+                glommio::timer::timeout(remaining, async { Ok(rx.as_async().recv().await) }).await;
             last = match answered {
                 Ok(Ok(Ok(ControlResponse::Applied { .. }))) => return Ok(()),
-                Ok(Ok(Ok(ControlResponse::Refused { reason }))) => return Err(format!("the progress was refused: {reason}")),
+                Ok(Ok(Ok(ControlResponse::Refused { reason }))) => {
+                    return Err(format!("the progress was refused: {reason}"))
+                }
                 Ok(Ok(Ok(other))) => format!("the progress was not applied: {other:?}"),
                 Ok(Ok(Err(error))) => error,
                 Ok(Err(_)) => "the control thread dropped the proposal".to_string(),
@@ -137,7 +145,9 @@ impl<D: ShoalDatabase> RestoreContext<D> {
             };
             glommio::timer::sleep(Duration::from_millis(500)).await;
         }
-        Err(format!("the progress was not committed within {PROGRESS_TIMEOUT:?}: {last}"))
+        Err(format!(
+            "the progress was not committed within {PROGRESS_TIMEOUT:?}: {last}"
+        ))
     }
 
     /// A progress at a phase, driven here, with the files and no outcome
@@ -172,11 +182,16 @@ impl<D: ShoalDatabase> RestoreContext<D> {
                 })
                 .await
                 .map_err(|error| format!("{error:?}"))?;
-            return done.await.unwrap_or_else(|_| Err("the loop dropped the quarantine".to_string()));
+            return done
+                .await
+                .unwrap_or_else(|_| Err("the loop dropped the quarantine".to_string()));
         }
         let peer = ShardPeer::new(member, self.network.clone());
         let payload = postcard::to_allocvec(&action).map_err(|error| error.to_string())?;
-        match peer.quarantine(self.group, payload, QUARANTINE_TIMEOUT).await {
+        match peer
+            .quarantine(self.group, payload, QUARANTINE_TIMEOUT)
+            .await
+        {
             Ok(_) => Ok(()),
             Err(failure) => Err(format!("{member} did not take the quarantine: {failure}")),
         }
@@ -186,12 +201,17 @@ impl<D: ShoalDatabase> RestoreContext<D> {
     ///
     /// The restart built a new state for the group, so the driver's copy is stale from then on
     /// and the verifying scrub reads this one.
-    async fn handle_after_restart(&self) -> Result<(Raft<DataConfig, GroupMachine<D>>, Rc<RefCell<MachineState>>), String> {
+    async fn handle_after_restart(
+        &self,
+    ) -> Result<(Raft<DataConfig, GroupMachine<D>>, Rc<RefCell<MachineState>>), String> {
         let started = Instant::now();
         loop {
             let (reply, rx) = oneshot::channel();
             self.loop_tx
-                .send(ServerMsg::GroupHandle { group: self.group, reply })
+                .send(ServerMsg::GroupHandle {
+                    group: self.group,
+                    reply,
+                })
                 .await
                 .map_err(|error| format!("{error:?}"))?;
             if let Ok(Some((raft, state))) = rx.await {
@@ -199,12 +219,20 @@ impl<D: ShoalDatabase> RestoreContext<D> {
                 let leader = raft.metrics().borrow_watched().current_leader;
                 match leader {
                     Some(leader) if leader == self.me => return Ok((raft, state)),
-                    Some(leader) => return Err(format!("{NOT_LEADER}group {} after its restart: the leader is {leader}", self.group)),
+                    Some(leader) => {
+                        return Err(format!(
+                            "{NOT_LEADER}group {} after its restart: the leader is {leader}",
+                            self.group
+                        ))
+                    }
                     None => {}
                 }
             }
             if started.elapsed() > RESTART_TIMEOUT {
-                return Err(format!("group {} did not come back from its install within {RESTART_TIMEOUT:?}", self.group));
+                return Err(format!(
+                    "group {} did not come back from its install within {RESTART_TIMEOUT:?}",
+                    self.group
+                ));
             }
             glommio::timer::sleep(Duration::from_millis(200)).await;
         }
@@ -258,7 +286,9 @@ pub async fn drive_group_restore<D: ShoalDatabase>(context: RestoreContext<D>) {
 /// # Arguments
 ///
 /// * `context` - Everything the driver needs
-async fn drive_inner<D: ShoalDatabase>(context: &RestoreContext<D>) -> Result<RestorePhase, String> {
+async fn drive_inner<D: ShoalDatabase>(
+    context: &RestoreContext<D>,
+) -> Result<RestorePhase, String> {
     // an ephemeral table's group holds nothing a restore could keep
     if context.volatile {
         context
@@ -276,7 +306,18 @@ async fn drive_inner<D: ShoalDatabase>(context: &RestoreContext<D>) -> Result<Re
     // loading: the copies have to hold nothing
     if context.phase.rank() <= RestorePhase::Loading.rank() {
         context.commit(context.at(RestorePhase::Loading)).await?;
-        let scrub = scrub_group(&raft, &context.network, context.me, context.state.clone(), context.table, context.group, &context.members, Uuid::new_v4(), context.timeout).await?;
+        let scrub = scrub_group(
+            &raft,
+            &context.network,
+            context.me,
+            context.state.clone(),
+            context.table,
+            context.group,
+            &context.members,
+            Uuid::new_v4(),
+            context.timeout,
+        )
+        .await?;
         for (member, report) in &scrub.reports {
             match report {
                 Ok(report) if report.rows > 0 => {
@@ -286,7 +327,11 @@ async fn drive_inner<D: ShoalDatabase>(context: &RestoreContext<D>) -> Result<Re
                     ));
                 }
                 Ok(_) => {}
-                Err(error) => return Err(format!("{member} did not report before the restore: {error}")),
+                Err(error) => {
+                    return Err(format!(
+                        "{member} did not report before the restore: {error}"
+                    ))
+                }
             }
         }
     }
@@ -295,7 +340,18 @@ async fn drive_inner<D: ShoalDatabase>(context: &RestoreContext<D>) -> Result<Re
     if context.phase.rank() <= RestorePhase::Installing.rank() {
         context.commit(context.at(RestorePhase::Installing)).await?;
         // the boundary: an entry of this run's, so every install is judged against it
-        let nudge = scrub_group(&raft, &context.network, context.me, context.state.clone(), context.table, context.group, &context.members, Uuid::new_v4(), context.timeout).await?;
+        let nudge = scrub_group(
+            &raft,
+            &context.network,
+            context.me,
+            context.state.clone(),
+            context.table,
+            context.group,
+            &context.members,
+            Uuid::new_v4(),
+            context.timeout,
+        )
+        .await?;
         let (path, manifest) = build_restore_file(context, nudge.log_id).await?;
         event!(Level::INFO, msg = "built a group's restore file", op = %context.op, group = %context.group, boundary = manifest.boundary.index, records = manifest.records, bytes = manifest.total);
         // every copy quarantined under the operation, so the install path takes the file
@@ -313,12 +369,28 @@ async fn drive_inner<D: ShoalDatabase>(context: &RestoreContext<D>) -> Result<Re
         }
         // every other member over the bulk lane
         let vote = raft.metrics().borrow_watched().vote.clone();
-        for member in context.members.iter().filter(|member| **member != context.me) {
+        for member in context
+            .members
+            .iter()
+            .filter(|member| **member != context.me)
+        {
             let mut peer = GroupPeer::for_repair(context.group, *member, context.network.clone());
-            match peer.repair_snapshot(vote.clone(), path.clone(), manifest.clone(), context.op, context.snapshot_timeout).await? {
+            match peer
+                .repair_snapshot(
+                    vote.clone(),
+                    path.clone(),
+                    manifest.clone(),
+                    context.op,
+                    context.snapshot_timeout,
+                )
+                .await?
+            {
                 RepairSend::Installed => {}
                 RepairSend::Behind { checkpoint } => {
-                    return Err(format!("{member}'s checkpoint {checkpoint} is past the restore boundary {}", manifest.boundary.index));
+                    return Err(format!(
+                        "{member}'s checkpoint {checkpoint} is past the restore boundary {}",
+                        manifest.boundary.index
+                    ));
                 }
             }
         }
@@ -341,23 +413,57 @@ async fn drive_inner<D: ShoalDatabase>(context: &RestoreContext<D>) -> Result<Re
         context.commit(context.at(RestorePhase::Verifying)).await?;
     }
     // verifying: every member holds one verified digest, and the quarantines are lifted
-    let scrub = scrub_group(&raft, &context.network, context.me, state, context.table, context.group, &context.members, Uuid::new_v4(), context.timeout).await?;
+    let scrub = scrub_group(
+        &raft,
+        &context.network,
+        context.me,
+        state,
+        context.table,
+        context.group,
+        &context.members,
+        Uuid::new_v4(),
+        context.timeout,
+    )
+    .await?;
     let mut digests = Vec::with_capacity(context.members.len());
     for (member, report) in &scrub.reports {
         match report {
-            Ok(report) if report.integrity == DigestIntegrity::Verified => digests.push((*member, report.digest, report.rows)),
-            Ok(report) => return Err(format!("{member}'s restored copy did not verify: {:?}", report.integrity)),
-            Err(error) => return Err(format!("{member} did not report after the restore: {error}")),
+            Ok(report) if report.integrity == DigestIntegrity::Verified => {
+                digests.push((*member, report.digest, report.rows))
+            }
+            Ok(report) => {
+                return Err(format!(
+                    "{member}'s restored copy did not verify: {:?}",
+                    report.integrity
+                ))
+            }
+            Err(error) => {
+                return Err(format!(
+                    "{member} did not report after the restore: {error}"
+                ))
+            }
         }
     }
     if digests.windows(2).any(|pair| pair[0].1 != pair[1].1) {
         return Err(format!("the restored copies disagree: {digests:?}"));
     }
     for member in &context.members {
-        context.quarantine(*member, QuarantineAction::Lift { op: Some(context.op) }).await?;
+        context
+            .quarantine(
+                *member,
+                QuarantineAction::Lift {
+                    op: Some(context.op),
+                },
+            )
+            .await?;
     }
     let (boundary, records, bytes, retries) = installed.as_ref().map_or((0, 0, 0, 0), |manifest| {
-        (manifest.boundary.index, manifest.records, manifest.total, manifest.retries)
+        (
+            manifest.boundary.index,
+            manifest.records,
+            manifest.total,
+            manifest.retries,
+        )
     });
     event!(Level::INFO, msg = "restored a group", op = %context.op, group = %context.group, boundary, records, verified = scrub.boundary);
     context
@@ -385,7 +491,10 @@ async fn drive_inner<D: ShoalDatabase>(context: &RestoreContext<D>) -> Result<Re
 ///
 /// * `context` - The driver's context, which names the files and the tablets
 /// * `boundary` - The log id the file is cut at
-async fn build_restore_file<D: ShoalDatabase>(context: &RestoreContext<D>, boundary: crate::server::wal::WalLogId) -> Result<(PathBuf, SnapshotManifest), String> {
+async fn build_restore_file<D: ShoalDatabase>(
+    context: &RestoreContext<D>,
+    boundary: crate::server::wal::WalLogId,
+) -> Result<(PathBuf, SnapshotManifest), String> {
     let mut records: Vec<(u64, Vec<u8>)> = Vec::new();
     let mut remembered: Vec<(RequestId, Remembered)> = Vec::new();
     let mut expired_before = 0u64;
@@ -395,13 +504,29 @@ async fn build_restore_file<D: ShoalDatabase>(context: &RestoreContext<D>, bound
         // the file has to be what its manifest says, byte for byte
         snapshot::verify(&file, &manifest.to_snapshot())
             .await
-            .map_err(|error| format!("{} does not verify against its manifest: {error}", file.display()))?;
+            .map_err(|error| {
+                format!(
+                    "{} does not verify against its manifest: {error}",
+                    file.display()
+                )
+            })?;
         if manifest.table != context.table {
-            return Err(format!("{} holds table {}, not {}", file.display(), manifest.table, context.table));
+            return Err(format!(
+                "{} holds table {}, not {}",
+                file.display(),
+                manifest.table,
+                context.table
+            ));
         }
         expired_before = expired_before.max(manifest.expired_before);
-        let mut reader = SnapshotReader::open(&file).await.map_err(|error| format!("opening {}: {error}", file.display()))?;
-        while let Some((key, bytes)) = reader.next_record().await.map_err(|error| format!("reading {}: {error}", file.display()))? {
+        let mut reader = SnapshotReader::open(&file)
+            .await
+            .map_err(|error| format!("opening {}: {error}", file.display()))?;
+        while let Some((key, bytes)) = reader
+            .next_record()
+            .await
+            .map_err(|error| format!("reading {}: {error}", file.display()))?
+        {
             // a tablet id is twelve bits, so it fits a u16
             #[allow(clippy::cast_possible_truncation)]
             let tablet = Ring::tablet_of(key) as u16;
@@ -409,22 +534,49 @@ async fn build_restore_file<D: ShoalDatabase>(context: &RestoreContext<D>, bound
                 records.push((key, bytes));
             }
         }
-        remembered.extend(reader.trailer().await.map_err(|error| format!("reading the trailer of {}: {error}", file.display()))?);
-        reader.close().await.map_err(|error| format!("closing {}: {error}", file.display()))?;
+        remembered.extend(
+            reader
+                .trailer()
+                .await
+                .map_err(|error| format!("reading the trailer of {}: {error}", file.display()))?,
+        );
+        reader
+            .close()
+            .await
+            .map_err(|error| format!("closing {}: {error}", file.display()))?;
     }
     records.sort_by_key(|(key, _)| *key);
     remembered.sort_by_key(|(_, remembered)| remembered.applied);
     // the file, at this group's boundary, under this cluster's provenance
     std::fs::create_dir_all(&context.snapshots_dir).map_err(|error| format!("{error}"))?;
-    let path = context.snapshots_dir.join(format!("restore-{}-{}.snap", context.group, boundary.index));
-    let provenance = SnapshotProvenance::at(context.cluster, context.me.node, context.activated_wire);
-    let header = provenance.header(context.table, context.group, boundary.index, records.len() as u64, context.schema_id);
-    let mut writer = SnapshotWriter::create(&path, header).await.map_err(|error| format!("creating {}: {error}", path.display()))?;
+    let path = context
+        .snapshots_dir
+        .join(format!("restore-{}-{}.snap", context.group, boundary.index));
+    let provenance =
+        SnapshotProvenance::at(context.cluster, context.me.node, context.activated_wire);
+    let header = provenance.header(
+        context.table,
+        context.group,
+        boundary.index,
+        records.len() as u64,
+        context.schema_id,
+    );
+    let mut writer = SnapshotWriter::create(&path, header)
+        .await
+        .map_err(|error| format!("creating {}: {error}", path.display()))?;
     for (key, bytes) in &records {
-        writer.record(*key, bytes).await.map_err(|error| format!("writing {}: {error}", path.display()))?;
+        writer
+            .record(*key, bytes)
+            .await
+            .map_err(|error| format!("writing {}: {error}", path.display()))?;
     }
-    let (total, checksum) = writer.finish(&remembered).await.map_err(|error| format!("finishing {}: {error}", path.display()))?;
-    snapshot::sync_dir(&context.snapshots_dir).await.map_err(|error| format!("{error}"))?;
+    let (total, checksum) = writer
+        .finish(&remembered)
+        .await
+        .map_err(|error| format!("finishing {}: {error}", path.display()))?;
+    snapshot::sync_dir(&context.snapshots_dir)
+        .await
+        .map_err(|error| format!("{error}"))?;
     // the membership as of the boundary, from this shard's copy
     let membership = {
         let state = context.state.borrow();
@@ -458,8 +610,10 @@ async fn build_restore_file<D: ShoalDatabase>(context: &RestoreContext<D>, bound
 /// * `file` - The `.snap`
 fn read_manifest(file: &Path) -> Result<BackupManifest, String> {
     let path = super::backup::manifest_path(file);
-    let bytes = std::fs::read(&path).map_err(|error| format!("reading {}: {error}", path.display()))?;
-    serde_json::from_slice(&bytes).map_err(|error| format!("{} is not a backup manifest: {error}", path.display()))
+    let bytes =
+        std::fs::read(&path).map_err(|error| format!("reading {}: {error}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("{} is not a backup manifest: {error}", path.display()))
 }
 
 impl<D: ShoalDatabase> super::Shard<D>

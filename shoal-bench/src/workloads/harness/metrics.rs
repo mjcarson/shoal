@@ -20,14 +20,14 @@
 
 use std::time::Duration;
 
-use opentelemetry::metrics::{Counter, Gauge, Meter, MeterProvider as _};
 use opentelemetry::KeyValue;
+use opentelemetry::metrics::{Counter, Gauge, Meter, MeterProvider as _};
 use opentelemetry_otlp::{WithExportConfig, WithHttpConfig};
-use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use shoal::Conf;
 use shoal::server::conf::OtlpMetrics;
-use shoal::tracing::{event, Level};
+use shoal::tracing::{Level, event};
 
 use crate::model::macro_layer::MacroCaptureV2;
 
@@ -186,7 +186,8 @@ impl Meters {
                 attributes.push(KeyValue::new("durability", conf.durability.clone()));
             }
             // the throughput figures, both of them, because they answer different questions
-            self.rows_per_sec.record(workload.rows_per_sec(), &attributes);
+            self.rows_per_sec
+                .record(workload.rows_per_sec(), &attributes);
             if let Some(ops) = workload.ops_per_sec() {
                 self.ops_per_sec.record(ops, &attributes);
             }

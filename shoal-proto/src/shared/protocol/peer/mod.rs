@@ -253,18 +253,28 @@ impl std::fmt::Display for PeerRefusal {
             PeerRefusal::IdentityMismatch => write!(f, "identity does not match the membership"),
             PeerRefusal::NoCommonVersion => write!(f, "no wire version in common"),
             PeerRefusal::SchemaMismatch => write!(f, "schema mismatch"),
-            PeerRefusal::ShardCountMismatch => write!(f, "shard count does not match the membership"),
+            PeerRefusal::ShardCountMismatch => {
+                write!(f, "shard count does not match the membership")
+            }
             PeerRefusal::LaneRefused => write!(f, "lane not served on this listener"),
             PeerRefusal::Unauthorized => write!(f, "not authorized"),
             PeerRefusal::Fenced => write!(f, "fenced by a later start of the same node"),
             PeerRefusal::DuplicateIdentity => {
-                write!(f, "the cluster already holds this identity at this incarnation or later")
+                write!(
+                    f,
+                    "the cluster already holds this identity at this incarnation or later"
+                )
             }
             PeerRefusal::BelowActivatedWire => {
                 write!(f, "the newest wire version this build speaks is below the one the cluster activated")
             }
-            PeerRefusal::Removed => write!(f, "this identity was removed from the cluster and cannot return"),
-            PeerRefusal::CapabilityMissing => write!(f, "a capability every member acts on is missing"),
+            PeerRefusal::Removed => write!(
+                f,
+                "this identity was removed from the cluster and cannot return"
+            ),
+            PeerRefusal::CapabilityMissing => {
+                write!(f, "a capability every member acts on is missing")
+            }
             PeerRefusal::NotJoinable => write!(f, "this node cannot admit a joiner here"),
             PeerRefusal::Unrecognized => write!(f, "refused for a reason this build does not know"),
         }

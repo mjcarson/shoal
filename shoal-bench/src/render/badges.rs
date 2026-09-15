@@ -143,7 +143,10 @@ mod tests {
             fields: vec!["governor performance vs powersave".to_string()],
         })
         .expect("an incomparable environment is badged");
-        assert!(rendered.contains("governor performance vs powersave"), "{rendered}");
+        assert!(
+            rendered.contains("governor performance vs powersave"),
+            "{rendered}"
+        );
     }
 
     /// An instrumented layer says so wherever it is drawn

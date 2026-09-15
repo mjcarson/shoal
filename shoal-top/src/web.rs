@@ -62,7 +62,8 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
 async fn fetch_index() -> Result<Index, JsValue> {
     // one request, to a path the server always serves from the same directory as the bundle
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
-    let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str("index.json")).await?;
+    let response =
+        wasm_bindgen_futures::JsFuture::from(window.fetch_with_str("index.json")).await?;
     let response: web_sys::Response = response.dyn_into()?;
     // a non `2xx` here is almost always the server having been started without an index built, so
     // it is worth saying which of the two went wrong

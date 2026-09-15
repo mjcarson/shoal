@@ -92,7 +92,11 @@ mod tests {
         assert_eq!(twin.conf, ConfOverrides::default());
         let mut without = arm.conf.clone();
         without.cluster = None;
-        assert_eq!(without, ConfOverrides::default(), "the arm moved a field besides the block");
+        assert_eq!(
+            without,
+            ConfOverrides::default(),
+            "the arm moved a field besides the block"
+        );
         assert!(arm.conf.cluster.is_some());
     }
 }

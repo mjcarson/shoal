@@ -42,12 +42,13 @@ use anyhow::Result;
 
 use crate::model::macro_layer::Timing;
 use crate::workloads::cluster_failover::Failover;
-use crate::workloads::cluster_replication::{placement, REPLICATED};
-use crate::workloads::grid::{Grid, Sweep, Table, DEPTH, REFERENCE_MIX, REFERENCE_WIDTH};
+use crate::workloads::cluster_replication::{REPLICATED, placement};
+use crate::workloads::grid::{DEPTH, Grid, REFERENCE_MIX, REFERENCE_WIDTH, Sweep, Table};
 use crate::workloads::harness::keys::KeyDistribution;
 use crate::workloads::harness::seed::Scale;
 use crate::workloads::workload::{
-    BoxFuture, ConfOverrides, Context, FaultSpec, Measurement, RetentionOverride, Workload, WorkloadPlan,
+    BoxFuture, ConfOverrides, Context, FaultSpec, Measurement, RetentionOverride, Workload,
+    WorkloadPlan,
 };
 
 /// The log arm's identifier
@@ -150,7 +151,9 @@ impl Workload for Catchup {
         // the kill arm's twin, under this identity and retention, so the plan is the twin's
         // with one thing moved
         let twin = Grid {
-            sweep: Sweep::Replication { durability: "durable" },
+            sweep: Sweep::Replication {
+                durability: "durable",
+            },
             table: Table::Unsorted,
             read_pct: REFERENCE_MIX,
             rows: REFERENCE_WIDTH,
@@ -198,7 +201,7 @@ impl Workload for Catchup {
 
 #[cfg(test)]
 mod tests {
-    use super::{all, LOG_ID, SNAPSHOT_ID, SNAPSHOT_CHECKPOINT_ENTRIES, SNAPSHOT_RETAINED_ENTRIES};
+    use super::{LOG_ID, SNAPSHOT_CHECKPOINT_ENTRIES, SNAPSHOT_ID, SNAPSHOT_RETAINED_ENTRIES, all};
     use crate::workloads::cluster_failover::{self, KILL_ID};
     use crate::workloads::harness::seed::Scale;
     use crate::workloads::workload::Workload;
@@ -213,11 +216,26 @@ mod tests {
         assert_eq!(arms[1].id(), SNAPSHOT_ID);
         // registry order: the log arm before the snapshot arm, both after the kill arm
         let ids = crate::workload_ids::IDS;
-        let kill = ids.iter().position(|id| *id == KILL_ID).expect("the kill arm is registered");
-        let log = ids.iter().position(|id| *id == LOG_ID).expect("the log arm is registered");
-        let snapshot = ids.iter().position(|id| *id == SNAPSHOT_ID).expect("the snapshot arm is registered");
-        assert!(kill < log && log < snapshot, "the catch-up arms are not appended after the kill arm");
-        let kill = cluster_failover::all().into_iter().next().expect("the kill arm exists");
+        let kill = ids
+            .iter()
+            .position(|id| *id == KILL_ID)
+            .expect("the kill arm is registered");
+        let log = ids
+            .iter()
+            .position(|id| *id == LOG_ID)
+            .expect("the log arm is registered");
+        let snapshot = ids
+            .iter()
+            .position(|id| *id == SNAPSHOT_ID)
+            .expect("the snapshot arm is registered");
+        assert!(
+            kill < log && log < snapshot,
+            "the catch-up arms are not appended after the kill arm"
+        );
+        let kill = cluster_failover::all()
+            .into_iter()
+            .next()
+            .expect("the kill arm exists");
         for scale in [Scale::Smoke, Scale::Full] {
             for arm in &arms {
                 // the plan is the kill arm's: placement, factor, rows, depth and mixture, the
@@ -231,7 +249,10 @@ mod tests {
                 assert_eq!(mine_overrides.shards, theirs_overrides.shards);
                 let mine_cluster = mine_overrides.cluster.as_ref().expect("a placement");
                 let theirs_cluster = theirs_overrides.cluster.as_ref().expect("a placement");
-                assert_eq!(mine_cluster.replication_factor, theirs_cluster.replication_factor);
+                assert_eq!(
+                    mine_cluster.replication_factor,
+                    theirs_cluster.replication_factor
+                );
                 assert_eq!(mine_cluster.peers, theirs_cluster.peers);
                 // the same fault, and the returning node watched
                 assert_eq!(arm.fault(scale), kill.fault(scale));
@@ -242,12 +263,32 @@ mod tests {
         // the log arm keeps the defaults; the snapshot arm's retention is below them
         let log = all()[0].plan(Scale::Full);
         let snapshot = all()[1].plan(Scale::Full);
-        let log_retention = log.server.overrides().unwrap().cluster.as_ref().unwrap().retention;
-        let snapshot_retention = snapshot.server.overrides().unwrap().cluster.as_ref().unwrap().retention;
+        let log_retention = log
+            .server
+            .overrides()
+            .unwrap()
+            .cluster
+            .as_ref()
+            .unwrap()
+            .retention;
+        let snapshot_retention = snapshot
+            .server
+            .overrides()
+            .unwrap()
+            .cluster
+            .as_ref()
+            .unwrap()
+            .retention;
         assert_eq!(log_retention, None);
         let snapshot_retention = snapshot_retention.expect("the snapshot arm moves the retention");
-        assert_eq!(snapshot_retention.checkpoint_entries, SNAPSHOT_CHECKPOINT_ENTRIES);
-        assert_eq!(snapshot_retention.retained_entries, SNAPSHOT_RETAINED_ENTRIES);
+        assert_eq!(
+            snapshot_retention.checkpoint_entries,
+            SNAPSHOT_CHECKPOINT_ENTRIES
+        );
+        assert_eq!(
+            snapshot_retention.retained_entries,
+            SNAPSHOT_RETAINED_ENTRIES
+        );
         let defaults = shoal::server::conf::cluster::Replication::default();
         assert!(snapshot_retention.checkpoint_entries < defaults.checkpoint_entries);
         assert!(snapshot_retention.retained_entries < defaults.retained_entries);

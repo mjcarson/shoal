@@ -377,7 +377,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{Arm, table_kinds, table_label};
-    use crate::model::macro_layer::{MACRO_VERSION, MacroCaptureV2, ScaleFacts, Timing, WorkloadCapture};
+    use crate::model::macro_layer::{
+        MACRO_VERSION, MacroCaptureV2, ScaleFacts, Timing, WorkloadCapture,
+    };
 
     /// Builds a capture holding one workload with the given facts
     ///
@@ -435,8 +437,14 @@ mod tests {
     #[test]
     fn the_ladder_is_not_a_grid_cell() {
         let capture = capture(&[
-            ("macro/grid/unsorted/r50/1024", facts(50, 1024, "persistent_unsorted")),
-            ("macro/grid/depth/32", facts(50, 1024, "persistent_unsorted")),
+            (
+                "macro/grid/unsorted/r50/1024",
+                facts(50, 1024, "persistent_unsorted"),
+            ),
+            (
+                "macro/grid/depth/32",
+                facts(50, 1024, "persistent_unsorted"),
+            ),
         ]);
         let grid = super::grid(&capture);
         assert_eq!(grid.len(), 1);

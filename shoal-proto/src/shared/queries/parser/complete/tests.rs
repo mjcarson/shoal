@@ -43,7 +43,10 @@ fn walks_the_opening_keywords() {
 #[test]
 fn keywords_are_case_insensitive() {
     assert_eq!(at_end("select * from ").expecting, Expecting::Table);
-    assert_eq!(at_end("SeLeCt * FrOm Movie WhErE ").expecting, Expecting::Field);
+    assert_eq!(
+        at_end("SeLeCt * FrOm Movie WhErE ").expecting,
+        Expecting::Field
+    );
 }
 
 #[test]
@@ -189,7 +192,10 @@ fn a_finished_query_expects_nothing() {
 #[test]
 fn a_malformed_query_expects_nothing() {
     assert_eq!(at_end("DELETE * FROM Movie ").expecting, Expecting::Nothing);
-    assert_eq!(at_end("SELECT * * FROM Movie ").expecting, Expecting::Nothing);
+    assert_eq!(
+        at_end("SELECT * * FROM Movie ").expecting,
+        Expecting::Nothing
+    );
 }
 
 #[test]

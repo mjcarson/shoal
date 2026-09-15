@@ -73,7 +73,9 @@ impl Hosting {
         #[allow(clippy::cast_possible_truncation)]
         let hosts = (0..n).map(|slot| slot as u16).collect();
         #[allow(clippy::cast_possible_truncation)]
-        let tablets = (0..TABLET_COUNT).map(|tablet| (tablet % n.max(1)) as u16).collect();
+        let tablets = (0..TABLET_COUNT)
+            .map(|tablet| (tablet % n.max(1)) as u16)
+            .collect();
         Hosting {
             format: HOSTING_FORMAT,
             slots: n,
@@ -175,7 +177,9 @@ impl Hosting {
         };
         // a node with no executors or no slots hosts nothing
         if self.physical == 0 || self.slots == 0 {
-            return Err(invalid("the hosting names no executors or no slots".to_string()));
+            return Err(invalid(
+                "the hosting names no executors or no slots".to_string(),
+            ));
         }
         // one host per slot and one owner per tablet
         if self.hosts.len() != self.slots {
@@ -192,13 +196,21 @@ impl Hosting {
             )));
         }
         // each on an executor the node runs
-        if let Some(host) = self.hosts.iter().find(|host| usize::from(**host) >= self.physical) {
+        if let Some(host) = self
+            .hosts
+            .iter()
+            .find(|host| usize::from(**host) >= self.physical)
+        {
             return Err(invalid(format!(
                 "the hosting puts a slot on executor {host} and the node runs {}",
                 self.physical
             )));
         }
-        if let Some(owner) = self.tablets.iter().find(|owner| usize::from(**owner) >= self.physical) {
+        if let Some(owner) = self
+            .tablets
+            .iter()
+            .find(|owner| usize::from(**owner) >= self.physical)
+        {
             return Err(invalid(format!(
                 "the hosting puts a tablet on executor {owner} and the node runs {}",
                 self.physical
@@ -218,7 +230,9 @@ impl Hosting {
     #[must_use]
     pub fn host_of_slot(&self, slot: u16) -> usize {
         // the executor the table names, or zero for a slot past the count
-        self.hosts.get(usize::from(slot)).map_or(0, |host| usize::from(*host))
+        self.hosts
+            .get(usize::from(slot))
+            .map_or(0, |host| usize::from(*host))
     }
 
     /// The executor owning a tablet, on a standalone node
@@ -229,7 +243,9 @@ impl Hosting {
     #[must_use]
     pub fn owner_of_tablet(&self, tablet: usize) -> usize {
         // the executor the table names, or zero for a tablet past the count
-        self.tablets.get(tablet).map_or(0, |owner| usize::from(*owner))
+        self.tablets
+            .get(tablet)
+            .map_or(0, |owner| usize::from(*owner))
     }
 
     /// The slots each executor hosts, indexed by executor
@@ -289,10 +305,12 @@ impl Hosting {
         }
         // a cluster node cannot run more executors than it has slots to give them
         if cluster && to > self.slots {
-            return Err(ServerError::Shoal(super::errors::ShoalError::CoresExceedSlots {
-                cores: to,
-                slots: self.slots,
-            }));
+            return Err(ServerError::Shoal(
+                super::errors::ShoalError::CoresExceedSlots {
+                    cores: to,
+                    slots: self.slots,
+                },
+            ));
         }
         let mut after = self.clone();
         after.physical = to;
@@ -424,7 +442,10 @@ mod tests {
             assert_eq!(hosting.physical, n);
             assert_eq!(hosting.slots, n);
             for slot in 0..n {
-                assert_eq!(hosting.host_of_slot(u16::try_from(slot).expect("a u16")), slot);
+                assert_eq!(
+                    hosting.host_of_slot(u16::try_from(slot).expect("a u16")),
+                    slot
+                );
             }
             for tablet in 0..TABLET_COUNT {
                 assert_eq!(hosting.owner_of_tablet(tablet), tablet % n);
@@ -441,15 +462,25 @@ mod tests {
         let four = Hosting::identity(4);
         let three = four.plan(3, false).expect("a plan");
         assert_eq!(three.physical, 3);
-        assert_eq!(three.slots, 3, "a standalone node's slots are its executors");
+        assert_eq!(
+            three.slots, 3,
+            "a standalone node's slots are its executors"
+        );
         let counts = three.tablets_per_executor();
         assert_eq!(counts.iter().sum::<usize>(), TABLET_COUNT);
-        let (max, min) = (*counts.iter().max().expect("counts"), *counts.iter().min().expect("counts"));
+        let (max, min) = (
+            *counts.iter().max().expect("counts"),
+            *counts.iter().min().expect("counts"),
+        );
         assert!(max - min <= 1, "{counts:?}");
         // a tablet that was not on the vanished executor did not move
         for tablet in 0..TABLET_COUNT {
             if four.owner_of_tablet(tablet) < 3 {
-                assert_eq!(three.owner_of_tablet(tablet), four.owner_of_tablet(tablet), "tablet {tablet} moved");
+                assert_eq!(
+                    three.owner_of_tablet(tablet),
+                    four.owner_of_tablet(tablet),
+                    "tablet {tablet} moved"
+                );
             }
         }
         // the moves are the vanished executor's tablets and nothing else
@@ -467,11 +498,17 @@ mod tests {
         let counts = five.tablets_per_executor();
         assert_eq!(counts.len(), 5);
         assert!(counts.iter().all(|count| *count > 0), "{counts:?}");
-        let (max, min) = (*counts.iter().max().expect("counts"), *counts.iter().min().expect("counts"));
+        let (max, min) = (
+            *counts.iter().max().expect("counts"),
+            *counts.iter().min().expect("counts"),
+        );
         assert!(max - min <= 1, "{counts:?}");
         // only the donors' tablets moved, and only onto the new executors
         for (tablet, from, to) in three.moves_to(&five, false) {
-            assert!(from < 3 && to >= 3, "a growth moved tablet {tablet} from {from} to {to}");
+            assert!(
+                from < 3 && to >= 3,
+                "a growth moved tablet {tablet} from {from} to {to}"
+            );
         }
         // cluster, per slot: four slots on four executors down to two, and back up
         let four = Hosting::identity(4);
@@ -482,7 +519,10 @@ mod tests {
         assert_eq!(two.slots_by_executor(), vec![vec![0, 2], vec![1, 3]]);
         // the tablets follow the slots through the one node rule
         for tablet in 0..TABLET_COUNT {
-            assert_eq!(two.owner_of_tablet(tablet), two.host_of_slot(u16::try_from(tablet % 4).expect("a u16")));
+            assert_eq!(
+                two.owner_of_tablet(tablet),
+                two.host_of_slot(u16::try_from(tablet % 4).expect("a u16"))
+            );
         }
         assert_eq!(four.moves_to(&two, true), vec![(2, 2, 0), (3, 3, 1)]);
         let back = two.plan(4, true).expect("a plan");
@@ -492,7 +532,9 @@ mod tests {
         // a growth past the slots is refused by name, and a count of zero too
         assert!(matches!(
             four.plan(5, true),
-            Err(ServerError::Shoal(super::super::errors::ShoalError::CoresExceedSlots { cores: 5, slots: 4 }))
+            Err(ServerError::Shoal(
+                super::super::errors::ShoalError::CoresExceedSlots { cores: 5, slots: 4 }
+            ))
         ));
         assert!(four.plan(0, true).is_err());
         assert!(four.plan(0, false).is_err());
@@ -509,15 +551,25 @@ mod tests {
     fn a_hosting_file_round_trips() {
         let dir = tempfile::tempdir().expect("a temp dir");
         assert!(Hosting::read(dir.path()).expect("a read").is_none());
-        assert_eq!(Hosting::read_or_identity(dir.path(), 3).expect("a read"), Hosting::identity(3));
+        assert_eq!(
+            Hosting::read_or_identity(dir.path(), 3).expect("a read"),
+            Hosting::identity(3)
+        );
         let planned = Hosting::identity(4).plan(2, true).expect("a plan");
         planned.write(dir.path()).expect("a write");
-        assert_eq!(Hosting::read(dir.path()).expect("a read"), Some(planned.clone()));
+        assert_eq!(
+            Hosting::read(dir.path()).expect("a read"),
+            Some(planned.clone())
+        );
         assert!(!dir.path().join(HOSTING_TEMP_FILE).exists());
         // a table naming an executor the node does not run is refused
         let mut torn = planned;
         torn.hosts[0] = 9;
-        std::fs::write(Hosting::path(dir.path()), serde_json::to_vec(&torn).expect("json")).expect("a write");
+        std::fs::write(
+            Hosting::path(dir.path()),
+            serde_json::to_vec(&torn).expect("json"),
+        )
+        .expect("a write");
         assert!(Hosting::read(dir.path()).is_err());
     }
 }

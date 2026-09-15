@@ -276,7 +276,11 @@ fn check_key(tablet: TabletId, key: Key, records: &[&Record]) -> Result<(), Orac
         if results.windows(2).any(|pair| pair[0] != pair[1]) {
             return Err(OracleError::InconsistentRetry { id, results });
         }
-        let invoke = attempts.iter().map(|attempt| attempt.invoke).min().unwrap_or(0);
+        let invoke = attempts
+            .iter()
+            .map(|attempt| attempt.invoke)
+            .min()
+            .unwrap_or(0);
         let complete = attempts
             .iter()
             .filter(|attempt| matches!(attempt.outcome, Some(Outcome::Ok(_))))
@@ -410,13 +414,19 @@ fn describe(ops: &[LogicalOp], reads: &[ReadOp]) -> String {
             };
             (
                 op.invoke,
-                format!("op {} {:?} invoked {} {necessity}", op.id.0, op.op, op.invoke),
+                format!(
+                    "op {} {:?} invoked {} {necessity}",
+                    op.id.0, op.op, op.invoke
+                ),
             )
         })
         .chain(reads.iter().map(|read| {
             (
                 read.complete,
-                format!("read {} completed {} saw {:?}", read.id.0, read.complete, read.value),
+                format!(
+                    "read {} completed {} saw {:?}",
+                    read.id.0, read.complete, read.value
+                ),
             )
         }))
         .collect();
@@ -483,16 +493,31 @@ mod tests {
         );
         ledger.complete(other, 4, saw(Some(9)));
         let error = check(&ledger).unwrap_err();
-        assert!(matches!(error, OracleError::NotLinearizable { key: Key(2), .. }), "{error:?}");
+        assert!(
+            matches!(error, OracleError::NotLinearizable { key: Key(2), .. }),
+            "{error:?}"
+        );
     }
 
     /// The bound refuses a key with too much history rather than running forever
     #[test]
     fn too_many_operations_is_refused() {
         let rows: Vec<_> = (0..40)
-            .map(|n| (n, 0, insert(n), u64::from(n), u64::from(n) + 1, Outcome::Unknown))
+            .map(|n| {
+                (
+                    n,
+                    0,
+                    insert(n),
+                    u64::from(n),
+                    u64::from(n) + 1,
+                    Outcome::Unknown,
+                )
+            })
             .collect();
         let error = check(&ledger(&rows)).unwrap_err();
-        assert!(matches!(error, OracleError::TooManyOps { count: 40, .. }), "{error:?}");
+        assert!(
+            matches!(error, OracleError::TooManyOps { count: 40, .. }),
+            "{error:?}"
+        );
     }
 }

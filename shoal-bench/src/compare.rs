@@ -170,7 +170,11 @@ fn print_micro_text(comparison: &micro::MicroComparison) {
             before,
             after,
             fmt::signed_pct(row.pct),
-            if row.significant { "" } else { "(within noise)" }
+            if row.significant {
+                ""
+            } else {
+                "(within noise)"
+            }
         );
     }
     // then anything present on only one side, which a join would otherwise hide
@@ -185,7 +189,10 @@ fn print_micro_text(comparison: &micro::MicroComparison) {
 fn print_set_differences(comparison: &micro::MicroComparison) {
     // a benchmark that silently vanished from a comparison is how a regression gets missed
     if !comparison.only_in_baseline.is_empty() {
-        println!("  not in this run: {}", comparison.only_in_baseline.join(", "));
+        println!(
+            "  not in this run: {}",
+            comparison.only_in_baseline.join(", ")
+        );
     }
     if !comparison.only_in_run.is_empty() {
         println!("  new in this run: {}", comparison.only_in_run.join(", "));
@@ -223,12 +230,7 @@ fn print_micro_markdown(comparison: &micro::MicroComparison) {
 /// * `run` - The capture being judged
 /// * `baseline` - What to judge it against
 /// * `format` - How to print the result
-fn compare_macro_against(
-    store: &Store,
-    run: &str,
-    baseline: &str,
-    format: Format,
-) -> Result<bool> {
+fn compare_macro_against(store: &Store, run: &str, baseline: &str, format: Format) -> Result<bool> {
     // both sides need a macro artifact. a baseline that is only a micro capture - which
     // `trailing` is - simply has no macro layer to compare against.
     let Some((run_path, run_capture)) = store.resolve_macro(run)? else {

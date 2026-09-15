@@ -74,9 +74,17 @@ fn format_ascii_table(headers: &[&str], rows: &[Vec<String>]) -> String {
     // add each data row
     for (row_idx, row) in rows.iter().enumerate() {
         let mut row_str = String::from("|");
-        row_str.push_str(&format!(" {:<width$} |", row_idx + 1, width = num_col_width));
+        row_str.push_str(&format!(
+            " {:<width$} |",
+            row_idx + 1,
+            width = num_col_width
+        ));
         for (col_idx, value) in row.iter().enumerate() {
-            row_str.push_str(&format!(" {:<width$} |", value, width = col_widths[col_idx]));
+            row_str.push_str(&format!(
+                " {:<width$} |",
+                value,
+                width = col_widths[col_idx]
+            ));
         }
         output.push_str(&row_str);
         output.push('\n');
@@ -485,7 +493,12 @@ where
     /// Handle a single query result
     ///
     /// Called by the main event loop when a query result is received.
-    pub fn handle_result(&mut self, tab_id: Uuid, table_name: S::TableNames, result: QueryResult<S>) {
+    pub fn handle_result(
+        &mut self,
+        tab_id: Uuid,
+        table_name: S::TableNames,
+        result: QueryResult<S>,
+    ) {
         // Find the tab with matching tab_id
         if let Some(tab) = self.tabs.tabs.iter_mut().find(|t| t.id == tab_id) {
             match result {
@@ -511,7 +524,11 @@ where
     ///
     /// * `tab_id` - The tab
     /// * `model` - The model the poll built, or why it could not
-    async fn handle_cluster_frame(&mut self, tab_id: Uuid, model: Result<crate::cluster::ClusterModel, String>) {
+    async fn handle_cluster_frame(
+        &mut self,
+        tab_id: Uuid,
+        model: Result<crate::cluster::ClusterModel, String>,
+    ) {
         let Some(tab) = self.tabs.tabs.iter_mut().find(|t| t.id == tab_id) else {
             return;
         };
@@ -544,7 +561,12 @@ where
     /// * `tab_id` - The tab
     /// * `outcome` - The lines to show, or the error
     /// * `follow` - The record to follow, if any
-    fn handle_admin_outcome(&mut self, tab_id: Uuid, outcome: Result<Vec<String>, String>, follow: Option<(Uuid, crate::cluster::Follow)>) {
+    fn handle_admin_outcome(
+        &mut self,
+        tab_id: Uuid,
+        outcome: Result<Vec<String>, String>,
+        follow: Option<(Uuid, crate::cluster::Follow)>,
+    ) {
         let Some(tab) = self.tabs.tabs.iter_mut().find(|t| t.id == tab_id) else {
             return;
         };
@@ -636,7 +658,8 @@ where
             self.query_input
                 .render(frame, chunks[1], self.tabs.get_active(), self.query_focused);
         // draw whatever went wrong with that query under it
-        self.error_bar.render(frame, chunks[2], self.tabs.get_active());
+        self.error_bar
+            .render(frame, chunks[2], self.tabs.get_active());
 
         // Compute pane rectangles for the content section
         self.hypertile.compute_layout(chunks[3]);
@@ -693,13 +716,21 @@ where
                         AppEvent::Terminal(terminal_event) => {
                             self.handle_event(terminal_event).await;
                         }
-                        AppEvent::QueryResult { tab_id, table_name, result } => {
+                        AppEvent::QueryResult {
+                            tab_id,
+                            table_name,
+                            result,
+                        } => {
                             self.handle_result(tab_id, table_name, result);
                         }
                         AppEvent::ClusterFrame { tab_id, model } => {
                             self.handle_cluster_frame(tab_id, model).await;
                         }
-                        AppEvent::AdminOutcome { tab_id, outcome, follow } => {
+                        AppEvent::AdminOutcome {
+                            tab_id,
+                            outcome,
+                            follow,
+                        } => {
                             self.handle_admin_outcome(tab_id, outcome, follow);
                         }
                     }

@@ -64,8 +64,12 @@ async fn handshaken(addr: &str) -> Result<TcpStream, TestError> {
         mechanisms: AuthMechanisms::NONE,
         caps: 0,
     };
-    sock.write_all(&hello.frame(protocol::DEFAULT_MAX_FRAME_BYTES).expect("a hello frame"))
-        .await?;
+    sock.write_all(
+        &hello
+            .frame(protocol::DEFAULT_MAX_FRAME_BYTES)
+            .expect("a hello frame"),
+    )
+    .await?;
     sock.flush().await?;
     // read the ack and check we were let in
     let mut frame = [0u8; handshake::HANDSHAKE_FRAME_LEN];
@@ -82,8 +86,7 @@ async fn handshaken(addr: &str) -> Result<TcpStream, TestError> {
 /// are answered after their fsync, into a channel whose relay has already ended. The server has
 /// to keep every shard, and a client that connects afterwards has to be answered.
 #[tokio::test]
-async fn a_client_that_leaves_before_its_answers_does_not_end_the_shard() -> Result<(), TestError>
-{
+async fn a_client_that_leaves_before_its_answers_does_not_end_the_shard() -> Result<(), TestError> {
     let temp_dir = utils::test_dir();
     let conf = utils::build_config(&temp_dir);
     let mut pool = ShoalPool::<TestDb>::start(conf)?;
@@ -120,7 +123,11 @@ async fn a_client_that_leaves_before_its_answers_does_not_end_the_shard() -> Res
     // the shard death the whole while so the failure is a message rather than a hang
     for _ in 0..30 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_eq!(pool.failure(), None, "a shard died answering a client that had left");
+        assert_eq!(
+            pool.failure(),
+            None,
+            "a shard died answering a client that had left"
+        );
     }
     // and a client that arrives afterwards is answered by every shard
     let connected = tokio::time::timeout(
@@ -143,8 +150,12 @@ async fn a_client_that_leaves_before_its_answers_does_not_end_the_shard() -> Res
                     data: "still here".to_owned(),
                 })
                 .await?;
-            let response = client.send_one(TestRecordGet::new(vec![u64::MAX - key])).await?;
-            let rows = response.access::<TestRecord>()?.expect("a get that found nothing");
+            let response = client
+                .send_one(TestRecordGet::new(vec![u64::MAX - key]))
+                .await?;
+            let rows = response
+                .access::<TestRecord>()?
+                .expect("a get that found nothing");
             assert_eq!(rows.len(), 1);
         }
         Ok::<(), TestError>(())

@@ -358,7 +358,14 @@ impl SnapshotProvenance {
     /// * `records` - How many records follow
     /// * `schema_id` - The schema's fingerprint, which a version 2 header carries
     #[must_use]
-    pub fn header(&self, table: TableId, group: GroupId, boundary: u64, records: u64, schema_id: u64) -> SnapshotHeader {
+    pub fn header(
+        &self,
+        table: TableId,
+        group: GroupId,
+        boundary: u64,
+        records: u64,
+        schema_id: u64,
+    ) -> SnapshotHeader {
         let mut header = SnapshotHeader::v1(table, group, boundary, records);
         if self.file_version == SNAPSHOT_VERSION_2 {
             header.version = SNAPSHOT_VERSION_2;
@@ -485,7 +492,10 @@ impl SnapshotHeader {
     pub fn len_of(raw: &[u8]) -> io::Result<usize> {
         // the magic and the version first, so a foreign file is refused by name
         if raw.len() < SNAPSHOT_HEADER_LEN || &raw[..8] != SNAPSHOT_MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "not a snapshot file: the magic is wrong"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "not a snapshot file: the magic is wrong",
+            ));
         }
         match raw[8] {
             SNAPSHOT_VERSION => Ok(SNAPSHOT_HEADER_LEN),
@@ -505,14 +515,20 @@ impl SnapshotHeader {
     pub fn decode(raw: &[u8]) -> io::Result<Self> {
         let len = Self::len_of(raw)?;
         if raw.len() < len {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the snapshot header is cut short"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the snapshot header is cut short",
+            ));
         }
         let word = |at: usize| u64::from_le_bytes(raw[at..at + 8].try_into().expect("eight bytes"));
-        let mut header = SnapshotHeader::v1(TableId(word(9)), GroupId(word(17)), word(25), word(33));
+        let mut header =
+            SnapshotHeader::v1(TableId(word(9)), GroupId(word(17)), word(25), word(33));
         header.version = raw[8];
         // the version 2 fields, when the file has them
         if header.version == SNAPSHOT_VERSION_2 {
-            header.cluster = ClusterId(uuid::Uuid::from_bytes(raw[41..57].try_into().expect("sixteen bytes")));
+            header.cluster = ClusterId(uuid::Uuid::from_bytes(
+                raw[41..57].try_into().expect("sixteen bytes"),
+            ));
             header.schema_id = word(57);
             header.created_ms = word(65);
         }
@@ -668,7 +684,8 @@ impl SnapshotWriter {
                 self.promised, self.records
             )));
         }
-        let trailer = postcard::to_allocvec(retries).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let trailer = postcard::to_allocvec(retries)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         // truncation cannot happen: the retry table is bounded at a few thousand entries
         #[allow(clippy::cast_possible_truncation)]
         let len = trailer.len() as u32;
@@ -751,7 +768,10 @@ impl SnapshotReader {
                 if self.pos >= self.size {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
-                        format!("the snapshot file ends at {} bytes, before a record was whole", self.size),
+                        format!(
+                            "the snapshot file ends at {} bytes, before a record was whole",
+                            self.size
+                        ),
                     ));
                 }
                 let want = BUFFER_BYTES.min((self.size - self.pos) as usize);
@@ -794,12 +814,15 @@ impl SnapshotReader {
     /// Fails if records remain, the file ends early, or the trailer does not decode.
     pub async fn trailer(&mut self) -> io::Result<Vec<(RequestId, Remembered)>> {
         if self.read < self.header.records {
-            return Err(io::Error::other("the trailer was asked for before every record was read"));
+            return Err(io::Error::other(
+                "the trailer was asked for before every record was read",
+            ));
         }
         let len = self.take(4).await?;
         let len = u32::from_le_bytes(len.as_slice().try_into().expect("four bytes"));
         let bytes = self.take(len as usize).await?;
-        postcard::from_bytes(&bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        postcard::from_bytes(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
     /// Close the file
@@ -825,7 +848,10 @@ pub async fn verify(path: &Path, manifest: &SnapshotManifest) -> io::Result<()> 
         let _ = file.close().await;
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("the snapshot file is {size} bytes and the manifest says {}", manifest.total),
+            format!(
+                "the snapshot file is {size} bytes and the manifest says {}",
+                manifest.total
+            ),
         ));
     }
     // every byte through the hasher, a buffer at a time
@@ -838,12 +864,18 @@ pub async fn verify(path: &Path, manifest: &SnapshotManifest) -> io::Result<()> 
         if pos == 0 {
             if read.len() < SNAPSHOT_HEADER_LEN {
                 let _ = file.close().await;
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "the snapshot file is shorter than a header"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "the snapshot file is shorter than a header",
+                ));
             }
             let len = SnapshotHeader::len_of(&read)?;
             if read.len() < len {
                 let _ = file.close().await;
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "the snapshot file is shorter than its header"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "the snapshot file is shorter than its header",
+                ));
             }
             header = Some(SnapshotHeader::decode(&read[..len])?);
         }
@@ -855,14 +887,23 @@ pub async fn verify(path: &Path, manifest: &SnapshotManifest) -> io::Result<()> 
     if checksum != manifest.checksum {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("the snapshot file hashes to {checksum:016x} and the manifest says {:016x}", manifest.checksum),
+            format!(
+                "the snapshot file hashes to {checksum:016x} and the manifest says {:016x}",
+                manifest.checksum
+            ),
         ));
     }
     // and the header has to name what the manifest names
     let Some(header) = header else {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "the snapshot file is empty"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the snapshot file is empty",
+        ));
     };
-    if header.group != manifest.group || header.table != manifest.table || header.boundary != manifest.boundary.index {
+    if header.group != manifest.group
+        || header.table != manifest.table
+        || header.boundary != manifest.boundary.index
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -877,13 +918,19 @@ pub async fn verify(path: &Path, manifest: &SnapshotManifest) -> io::Result<()> 
         if manifest.cluster != ClusterId::default() && header.cluster != manifest.cluster {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("the snapshot file was cut in cluster {} and the manifest says {}", header.cluster, manifest.cluster),
+                format!(
+                    "the snapshot file was cut in cluster {} and the manifest says {}",
+                    header.cluster, manifest.cluster
+                ),
             ));
         }
         if header.schema_id != manifest.schema_id {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("the snapshot file was cut from schema {:#018x} and the manifest says {:#018x}", header.schema_id, manifest.schema_id),
+                format!(
+                    "the snapshot file was cut from schema {:#018x} and the manifest says {:#018x}",
+                    header.schema_id, manifest.schema_id
+                ),
             ));
         }
     }
@@ -979,13 +1026,22 @@ impl SnapshotRpc {
         }
         // the version 4 shape, field for field
         let older = match self {
-            SnapshotRpc::Begin { vote, stream, manifest, repair } => SnapshotRpcV4::Begin {
+            SnapshotRpc::Begin {
+                vote,
+                stream,
+                manifest,
+                repair,
+            } => SnapshotRpcV4::Begin {
                 vote: vote.clone(),
                 stream: *stream,
                 manifest: manifest.to_v4(),
                 repair: *repair,
             },
-            SnapshotRpc::End { stream, total, checksum } => SnapshotRpcV4::End {
+            SnapshotRpc::End {
+                stream,
+                total,
+                checksum,
+            } => SnapshotRpcV4::End {
                 stream: *stream,
                 total: *total,
                 checksum: *checksum,
@@ -1006,13 +1062,26 @@ impl SnapshotRpc {
         }
         // the version 4 shape, lifted into this build's with its new fields unset
         Ok(match postcard::from_bytes::<SnapshotRpcV4>(bytes)? {
-            SnapshotRpcV4::Begin { vote, stream, manifest, repair } => SnapshotRpc::Begin {
+            SnapshotRpcV4::Begin {
+                vote,
+                stream,
+                manifest,
+                repair,
+            } => SnapshotRpc::Begin {
                 vote,
                 stream,
                 manifest: manifest.into_manifest(),
                 repair,
             },
-            SnapshotRpcV4::End { stream, total, checksum } => SnapshotRpc::End { stream, total, checksum },
+            SnapshotRpcV4::End {
+                stream,
+                total,
+                checksum,
+            } => SnapshotRpc::End {
+                stream,
+                total,
+                checksum,
+            },
         })
     }
 }
@@ -1057,13 +1126,14 @@ mod tests {
     use openraft::{AsyncRuntime as _, LogId, StoredMembership};
 
     use super::{
-        verify, ManifestV4, SnapshotHeader, SnapshotManifest, SnapshotReader, SnapshotRpc, SnapshotWriter,
-        SNAPSHOT_HEADER_LEN, SNAPSHOT_HEADER_LEN_V2, SNAPSHOT_MAGIC, SNAPSHOT_VERSION_2,
+        verify, ManifestV4, SnapshotHeader, SnapshotManifest, SnapshotReader, SnapshotRpc,
+        SnapshotWriter, SNAPSHOT_HEADER_LEN, SNAPSHOT_HEADER_LEN_V2, SNAPSHOT_MAGIC,
+        SNAPSHOT_VERSION_2,
     };
-    use crate::server::wal::Vote;
     use crate::server::control::runtime::GlommioRuntime;
     use crate::server::replication::{CommandResult, Remembered, ResultKind};
     use crate::server::wal::LeaderId;
+    use crate::server::wal::Vote;
     use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
     use crate::shared::protocol::peer::RequestId;
 
@@ -1091,10 +1161,19 @@ mod tests {
                 },
             )];
             // three records of different sizes, one larger than the read buffer
-            let records: Vec<(u64, Vec<u8>)> = vec![(1, vec![1u8; 10]), (2, vec![2u8; 3 * 1024 * 1024]), (3, Vec::new())];
-            let mut writer = SnapshotWriter::create(&path, header).await.expect("failed to create");
+            let records: Vec<(u64, Vec<u8>)> = vec![
+                (1, vec![1u8; 10]),
+                (2, vec![2u8; 3 * 1024 * 1024]),
+                (3, Vec::new()),
+            ];
+            let mut writer = SnapshotWriter::create(&path, header)
+                .await
+                .expect("failed to create");
             for (key, bytes) in &records {
-                writer.record(*key, bytes).await.expect("failed to write a record");
+                writer
+                    .record(*key, bytes)
+                    .await
+                    .expect("failed to write a record");
             }
             let (total, checksum) = writer.finish(&retries).await.expect("failed to finish");
             assert_eq!(total, std::fs::metadata(&path).expect("the file").len());
@@ -1114,7 +1193,9 @@ mod tests {
                 origin: NodeId::default(),
                 created_ms: 0,
             };
-            verify(&path, &manifest).await.expect("the file does not verify");
+            verify(&path, &manifest)
+                .await
+                .expect("the file does not verify");
             // the checksum is the same however the bytes are chunked
             let bytes = std::fs::read(&path).expect("the file");
             for chunk in [1usize, 7, 4096, 65_536, 100_000, bytes.len()] {
@@ -1132,7 +1213,10 @@ mod tests {
                 read.push(record);
             }
             assert_eq!(read, records);
-            assert_eq!(reader.trailer().await.expect("failed to read the trailer"), retries);
+            assert_eq!(
+                reader.trailer().await.expect("failed to read the trailer"),
+                retries
+            );
             reader.close().await.expect("failed to close");
             // a wrong boundary in the manifest is refused, as is a wrong checksum
             let mut wrong = manifest.clone();
@@ -1147,7 +1231,9 @@ mod tests {
             bytes.truncate(bytes.len() - 5);
             std::fs::write(&torn, &bytes).expect("the torn file");
             assert!(verify(&torn, &manifest).await.is_err());
-            let mut reader = SnapshotReader::open(&torn).await.expect("the torn header is whole");
+            let mut reader = SnapshotReader::open(&torn)
+                .await
+                .expect("the torn header is whole");
             let mut count = 0;
             let outcome = loop {
                 match reader.next_record().await {
@@ -1156,7 +1242,10 @@ mod tests {
                     Err(error) => break Err(error),
                 }
             };
-            assert!(outcome.is_err(), "a torn file read whole after {count} records");
+            assert!(
+                outcome.is_err(),
+                "a torn file read whole after {count} records"
+            );
             // a foreign file is refused at its magic, and a wrong version by name
             let foreign = dir.path().join("foreign.snap");
             let mut raw = header.encode();
@@ -1171,7 +1260,9 @@ mod tests {
             assert_eq!(header.encode().len(), SNAPSHOT_HEADER_LEN);
             // a writer that promises more records than it writes, or fewer, is refused
             let short = dir.path().join("short.snap");
-            let writer = SnapshotWriter::create(&short, header).await.expect("failed to create");
+            let writer = SnapshotWriter::create(&short, header)
+                .await
+                .expect("failed to create");
             assert!(writer.finish(&[]).await.is_err());
         });
     }
@@ -1201,9 +1292,14 @@ mod tests {
                 let provenance = SnapshotProvenance::at(cluster, origin, wire);
                 let header = provenance.header(table, group, 7, records.len() as u64, 0x1234);
                 let path = dir.path().join(format!("{group}-{wire}.snap"));
-                let mut writer = SnapshotWriter::create(&path, header).await.expect("failed to create");
+                let mut writer = SnapshotWriter::create(&path, header)
+                    .await
+                    .expect("failed to create");
                 for (key, bytes) in &records {
-                    writer.record(*key, bytes).await.expect("failed to write a record");
+                    writer
+                        .record(*key, bytes)
+                        .await
+                        .expect("failed to write a record");
                 }
                 let (total, checksum) = writer.finish(&[]).await.expect("failed to finish");
                 let manifest = provenance.stamp(
@@ -1236,7 +1332,11 @@ mod tests {
             assert!(header_past.created_ms > 0);
             assert_eq!(header_below.version, super::SNAPSHOT_VERSION);
             assert_eq!(header_below.cluster, ClusterId::default());
-            assert_eq!(std::fs::metadata(past).expect("the file").len(), std::fs::metadata(below).expect("the file").len() + (SNAPSHOT_HEADER_LEN_V2 - SNAPSHOT_HEADER_LEN) as u64);
+            assert_eq!(
+                std::fs::metadata(past).expect("the file").len(),
+                std::fs::metadata(below).expect("the file").len()
+                    + (SNAPSHOT_HEADER_LEN_V2 - SNAPSHOT_HEADER_LEN) as u64
+            );
             // and the file itself says so when opened, with no manifest in hand
             let reader = SnapshotReader::open(past).await.expect("the file opens");
             assert_eq!(reader.header().cluster, cluster);
@@ -1248,7 +1348,10 @@ mod tests {
                 assert_eq!(manifest.origin, origin);
                 assert!(manifest.created_ms > 0);
             }
-            assert_eq!(manifest_past.created_ms, header_past.created_ms, "the manifest's time is the header's");
+            assert_eq!(
+                manifest_past.created_ms, header_past.created_ms,
+                "the manifest's time is the header's"
+            );
             // the backup manifest beside a file rebuilds one the file verifies against, and
             // names what a restore judges before a byte is trusted
             let op = uuid::Uuid::new_v4();
@@ -1259,14 +1362,25 @@ mod tests {
             assert_eq!(beside.boundary, 7);
             assert_eq!(beside.term, 3);
             let json = serde_json::to_vec(&beside).expect("a backup manifest is json");
-            let loaded: BackupManifest = serde_json::from_slice(&json).expect("a backup manifest loads");
+            let loaded: BackupManifest =
+                serde_json::from_slice(&json).expect("a backup manifest loads");
             assert_eq!(loaded, beside);
-            verify(past, &loaded.to_snapshot()).await.expect("the file verifies against the manifest beside it");
-            verify(below, &BackupManifest::of(op, "Note", manifest_below).to_snapshot()).await.expect("the version 1 file verifies too");
+            verify(past, &loaded.to_snapshot())
+                .await
+                .expect("the file verifies against the manifest beside it");
+            verify(
+                below,
+                &BackupManifest::of(op, "Note", manifest_below).to_snapshot(),
+            )
+            .await
+            .expect("the version 1 file verifies too");
             // a manifest naming another cluster does not verify a file cut past the activation
             let mut foreign = loaded.clone();
             foreign.cluster = ClusterId::mint();
-            assert!(verify(past, &foreign.to_snapshot()).await.is_err(), "a file was verified under another cluster's manifest");
+            assert!(
+                verify(past, &foreign.to_snapshot()).await.is_err(),
+                "a file was verified under another cluster's manifest"
+            );
         });
     }
 
@@ -1315,7 +1429,8 @@ mod tests {
         assert_eq!(back, manifest);
         // a pending marker written before F48 - the v4 shape as json - still loads with defaults
         let json = serde_json::to_vec(&v4).expect("a v4 manifest as json");
-        let loaded: SnapshotManifest = serde_json::from_slice(&json).expect("an older marker loads");
+        let loaded: SnapshotManifest =
+            serde_json::from_slice(&json).expect("an older marker loads");
         assert_eq!(loaded.cluster, ClusterId::default());
         assert_eq!(loaded.to_v4(), v4);
         // a version 2 header carries the cluster, the schema and the time, and round trips
@@ -1323,7 +1438,10 @@ mod tests {
         assert_eq!(header.version, SNAPSHOT_VERSION_2);
         let raw = header.encode();
         assert_eq!(raw.len(), SNAPSHOT_HEADER_LEN_V2);
-        assert_eq!(SnapshotHeader::len_of(&raw).expect("a v2 header's length"), SNAPSHOT_HEADER_LEN_V2);
+        assert_eq!(
+            SnapshotHeader::len_of(&raw).expect("a v2 header's length"),
+            SNAPSHOT_HEADER_LEN_V2
+        );
         let decoded = SnapshotHeader::decode(&raw).expect("a v2 header decodes");
         assert_eq!(decoded, header);
         assert_eq!(decoded.cluster, cluster);
@@ -1332,7 +1450,10 @@ mod tests {
         let v1 = SnapshotHeader::v1(header.table, header.group, header.boundary, header.records);
         let raw = v1.encode();
         assert_eq!(raw.len(), SNAPSHOT_HEADER_LEN);
-        assert_eq!(SnapshotHeader::decode(&raw).expect("a v1 header decodes"), v1);
+        assert_eq!(
+            SnapshotHeader::decode(&raw).expect("a v1 header decodes"),
+            v1
+        );
         // a v2 header cut short is refused, not read as a v1
         assert!(SnapshotHeader::decode(&header.encode()[..SNAPSHOT_HEADER_LEN]).is_err());
         // a begin encoded for a v4 link is the v4 shape and decodes back with defaults; one
@@ -1362,7 +1483,14 @@ mod tests {
         if let Ok(SnapshotRpc::Begin { manifest: read, .. }) = SnapshotRpc::decode_at(&at_5, 4) {
             assert_ne!(read, manifest);
         }
-        let end = SnapshotRpc::End { stream: [1u8; 16], total: 5, checksum: 6 };
-        assert_eq!(end.encode_at(4).expect("an end at 4"), end.encode_at(5).expect("an end at 5"));
+        let end = SnapshotRpc::End {
+            stream: [1u8; 16],
+            total: 5,
+            checksum: 6,
+        };
+        assert_eq!(
+            end.encode_at(4).expect("an end at 4"),
+            end.encode_at(5).expect("an end at 5")
+        );
     }
 }

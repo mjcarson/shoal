@@ -163,9 +163,13 @@ fn cluster_pki(dir: &std::path::Path, node: &str) -> PeerTlsOptions {
         rcgen::CertificateParams::new(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])
             .expect("node params");
     params.subject_alt_names.push(rcgen::SanType::URI(
-        format!("shoal-node://{node}").try_into().expect("a uri san"),
+        format!("shoal-node://{node}")
+            .try_into()
+            .expect("a uri san"),
     ));
-    let cert = params.signed_by(&key, &ca, &ca_key).expect("a node certificate");
+    let cert = params
+        .signed_by(&key, &ca, &ca_key)
+        .expect("a node certificate");
     let options = PeerTlsOptions {
         cert: dir.join("node.pem"),
         key: dir.join("node.key"),
@@ -254,26 +258,42 @@ fn a_peer_certificate_names_its_node_and_a_reload_swaps_whole() {
     let node = "5f3c9a1e-0000-4000-8000-000000000001";
     let options = cluster_pki(dir.path(), node);
     // the name, off the leaf
-    let leaf = load_certs(&options.cert).expect("the chain loads").remove(0);
-    assert_eq!(node_identity_of(leaf.as_ref()).expect("the leaf parses"), Some(NodeId(node.parse().expect("a uuid"))));
+    let leaf = load_certs(&options.cert)
+        .expect("the chain loads")
+        .remove(0);
+    assert_eq!(
+        node_identity_of(leaf.as_ref()).expect("the leaf parses"),
+        Some(NodeId(node.parse().expect("a uuid")))
+    );
     // a leaf with a host name and no node name names no node
     let key = rcgen::KeyPair::generate().expect("a key");
     let unnamed = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
         .expect("params")
         .self_signed(&key)
         .expect("a certificate");
-    assert_eq!(node_identity_of(unnamed.der().as_ref()).expect("the leaf parses"), None);
+    assert_eq!(
+        node_identity_of(unnamed.der().as_ref()).expect("the leaf parses"),
+        None
+    );
     // a uri of another scheme, or of the scheme with no uuid, names no node either
     let mut params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]).expect("params");
-    params.subject_alt_names.push(rcgen::SanType::URI("https://example.com/".try_into().expect("a uri")));
-    params.subject_alt_names.push(rcgen::SanType::URI("shoal-node://not-a-uuid".try_into().expect("a uri")));
+    params.subject_alt_names.push(rcgen::SanType::URI(
+        "https://example.com/".try_into().expect("a uri"),
+    ));
+    params.subject_alt_names.push(rcgen::SanType::URI(
+        "shoal-node://not-a-uuid".try_into().expect("a uri"),
+    ));
     let other = params.self_signed(&key).expect("a certificate");
-    assert_eq!(node_identity_of(other.der().as_ref()).expect("the leaf parses"), None);
+    assert_eq!(
+        node_identity_of(other.der().as_ref()).expect("the leaf parses"),
+        None
+    );
     // bytes that are not a certificate are an error, not an absence
     assert!(node_identity_of(b"not a certificate").is_err());
     // both ends of a handshake report the peer's name once it is done
     let name = ServerName::try_from("localhost").unwrap();
-    let mut client = TlsClientHandshake::client(peer_client_config(&options).unwrap(), name).unwrap();
+    let mut client =
+        TlsClientHandshake::client(peer_client_config(&options).unwrap(), name).unwrap();
     let mut accept = TlsServerHandshake::server(peer_server_config(&options).unwrap()).unwrap();
     pump(&mut client, &mut accept).unwrap();
     let expected = PeerIdentity::Node(NodeId(node.parse().expect("a uuid")));
@@ -288,17 +308,30 @@ fn a_peer_certificate_names_its_node_and_a_reload_swaps_whole() {
     let reissued = cluster_pki(dir.path(), other_node);
     assert_eq!(reissued.cert, options.cert, "the pki is rewritten in place");
     let report = holder.reload().expect("the reload succeeds");
-    assert_eq!(report.own_identity, Some(NodeId(other_node.parse().expect("a uuid"))));
+    assert_eq!(
+        report.own_identity,
+        Some(NodeId(other_node.parse().expect("a uuid")))
+    );
     assert_eq!((report.chain, report.authorities), (1, 1));
     let after_client = holder.client().expect("a client config");
     let after_server = holder.server().expect("a server config");
-    assert!(!Arc::ptr_eq(&before_client, &after_client) && !Arc::ptr_eq(&before_server, &after_server));
+    assert!(
+        !Arc::ptr_eq(&before_client, &after_client) && !Arc::ptr_eq(&before_server, &after_server)
+    );
     // bad material reloads nothing: the pair stays what the last good reload made it
     std::fs::write(&options.key, b"not a key").expect("write");
     assert!(holder.reload().is_err());
-    assert!(Arc::ptr_eq(&after_client, &holder.client().expect("a client config")));
-    assert!(Arc::ptr_eq(&after_server, &holder.server().expect("a server config")));
+    assert!(Arc::ptr_eq(
+        &after_client,
+        &holder.client().expect("a client config")
+    ));
+    assert!(Arc::ptr_eq(
+        &after_server,
+        &holder.server().expect("a server config")
+    ));
     // plaintext lanes have nothing to reload
     let plaintext = PeerTlsHolder::build(None).expect("an empty holder");
-    assert!(!plaintext.is_encrypted() && plaintext.client().is_none() && plaintext.reload().is_err());
+    assert!(
+        !plaintext.is_encrypted() && plaintext.client().is_none() && plaintext.reload().is_err()
+    );
 }

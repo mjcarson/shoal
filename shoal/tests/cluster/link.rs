@@ -58,7 +58,12 @@ impl Link {
         let addr = listener.local_addr()?;
         let state = Arc::new(Mutex::new(LinkState::Pass));
         let streams: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
-        let acceptor = tokio::spawn(accept_loop(listener, target, state.clone(), streams.clone()));
+        let acceptor = tokio::spawn(accept_loop(
+            listener,
+            target,
+            state.clone(),
+            streams.clone(),
+        ));
         Ok(Self {
             addr,
             target,
@@ -187,7 +192,11 @@ async fn forward(mut inbound: TcpStream, target: SocketAddr, state: LinkState) {
 /// * `from` - The side to read
 /// * `to` - The side to write
 /// * `rate` - Bytes per second
-async fn trickle(mut from: tokio::net::tcp::OwnedReadHalf, mut to: tokio::net::tcp::OwnedWriteHalf, rate: u64) {
+async fn trickle(
+    mut from: tokio::net::tcp::OwnedReadHalf,
+    mut to: tokio::net::tcp::OwnedWriteHalf,
+    rate: u64,
+) {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let mut buffer = vec![0u8; 4096];
     loop {

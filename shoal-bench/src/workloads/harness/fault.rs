@@ -111,7 +111,10 @@ pub fn inject(
     }
     let position = usize::try_from(spec.node).unwrap_or(usize::MAX);
     if position >= staged.nodes.len() {
-        bail!("{id} asks to kill node {}, which the placement does not have", spec.node);
+        bail!(
+            "{id} asks to kill node {}, which the placement does not have",
+            spec.node
+        );
     }
     let spec = spec.clone();
     let staged = staged.clone();
@@ -120,7 +123,18 @@ pub fn inject(
     let scale = scale.to_string();
     let handle = std::thread::Builder::new()
         .name("fault".to_string())
-        .spawn(move || schedule(&spec, &peers, &staged, &id, &conf, &scale, started, watch_until))
+        .spawn(move || {
+            schedule(
+                &spec,
+                &peers,
+                &staged,
+                &id,
+                &conf,
+                &scale,
+                started,
+                watch_until,
+            )
+        })
         .context("failed to start the fault thread")?;
     Ok(Injected { handle })
 }
@@ -160,7 +174,8 @@ fn schedule(
         match peers.iter_mut().find(|peer| peer.index == spec.node) {
             Some(peer) => {
                 if let Err(error) = peer.kill() {
-                    marks.error = Some(format!("node {} could not be killed: {error:#}", spec.node));
+                    marks.error =
+                        Some(format!("node {} could not be killed: {error:#}", spec.node));
                     return marks;
                 }
             }
@@ -183,7 +198,10 @@ fn schedule(
     let respawned = match cluster::spawn_peer(staged, spec.node, id, conf, scale) {
         Ok(peer) => peer,
         Err(error) => {
-            marks.error = Some(format!("node {} could not be started again: {error:#}", spec.node));
+            marks.error = Some(format!(
+                "node {} could not be started again: {error:#}",
+                spec.node
+            ));
             return marks;
         }
     };
@@ -199,7 +217,10 @@ fn schedule(
     }
     // and wait until it holds the placement again, on a runtime of this thread's own since the
     // harness's is busy driving the run
-    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
         Ok(runtime) => runtime,
         Err(error) => {
             marks.error = Some(format!("no runtime for the readiness wait: {error}"));
@@ -215,7 +236,12 @@ fn schedule(
     if let Some(until) = watch_until {
         match super::catchup::sample(staged, spec.node, started, until, &runtime) {
             Ok(samples) => marks.catchup = Some(samples),
-            Err(error) => marks.error = Some(format!("node {} could not be watched: {error:#}", spec.node)),
+            Err(error) => {
+                marks.error = Some(format!(
+                    "node {} could not be watched: {error:#}",
+                    spec.node
+                ))
+            }
         }
     }
     marks
@@ -257,7 +283,9 @@ pub fn facts(
     run_for: Duration,
 ) -> FaultFacts {
     // the marks, on the driver's axis; a kill that never happened is at the end of the run
-    let at = marks.killed_at.map_or(run_for, |killed| killed.saturating_duration_since(started));
+    let at = marks
+        .killed_at
+        .map_or(run_for, |killed| killed.saturating_duration_since(started));
     let restarted_at = marks
         .restarted_at
         .map(|restarted| restarted.saturating_duration_since(started));
@@ -359,12 +387,20 @@ pub fn cut(
 /// * `from` - Where it starts, inclusive
 /// * `to` - Where it ends, exclusive
 /// * `timeline` - Every operation of the run
-pub(super) fn window(name: &str, from: Duration, to: Duration, timeline: &[TimelineSample]) -> WindowFacts {
+pub(super) fn window(
+    name: &str,
+    from: Duration,
+    to: Duration,
+    timeline: &[TimelineSample],
+) -> WindowFacts {
     // an operation is in the window it was sent in
     let mut ops = 0u64;
     let mut errors = 0u64;
     let mut samples = Samples::default();
-    for sample in timeline.iter().filter(|sample| sample.at >= from && sample.at < to) {
+    for sample in timeline
+        .iter()
+        .filter(|sample| sample.at >= from && sample.at < to)
+    {
         ops += 1;
         if sample.ok {
             samples.record(sample.elapsed);
@@ -460,7 +496,11 @@ mod tests {
         assert_eq!(facts.outage_ms, Some(2_900));
         assert_eq!(facts.sustained_ms, SUSTAINED.as_millis() as u64);
         // three windows, each with its own distribution
-        let names: Vec<&str> = facts.windows.iter().map(|window| window.name.as_str()).collect();
+        let names: Vec<&str> = facts
+            .windows
+            .iter()
+            .map(|window| window.name.as_str())
+            .collect();
         assert_eq!(names, ["before", "during", "after"]);
         let before = &facts.windows[0];
         let during = &facts.windows[1];
@@ -506,16 +546,34 @@ mod tests {
     /// A run the client never saw fail has no outage, and its windows are cut at the kill
     #[test]
     fn a_fault_nobody_noticed_has_no_outage() {
-        let timeline: Vec<_> = (0..50u64).map(|tick| sample(tick * 100, 200, true)).collect();
-        let facts = cut("kill", 2, Duration::from_secs(2), None, &timeline, Duration::from_secs(5));
+        let timeline: Vec<_> = (0..50u64)
+            .map(|tick| sample(tick * 100, 200, true))
+            .collect();
+        let facts = cut(
+            "kill",
+            2,
+            Duration::from_secs(2),
+            None,
+            &timeline,
+            Duration::from_secs(5),
+        );
         assert_eq!(facts.first_failure_ms, None);
         assert_eq!(facts.recovered_ms, None);
         assert_eq!(facts.outage_ms, None);
         assert_eq!(facts.restarted_at_ms, None);
         // before is up to the kill, during is the rest, after is empty
-        assert_eq!((facts.windows[0].from_ms, facts.windows[0].to_ms), (0, 2_000));
-        assert_eq!((facts.windows[1].from_ms, facts.windows[1].to_ms), (2_000, 5_000));
-        assert_eq!((facts.windows[2].from_ms, facts.windows[2].to_ms), (5_000, 5_000));
+        assert_eq!(
+            (facts.windows[0].from_ms, facts.windows[0].to_ms),
+            (0, 2_000)
+        );
+        assert_eq!(
+            (facts.windows[1].from_ms, facts.windows[1].to_ms),
+            (2_000, 5_000)
+        );
+        assert_eq!(
+            (facts.windows[2].from_ms, facts.windows[2].to_ms),
+            (5_000, 5_000)
+        );
         assert_eq!(facts.windows[2].ops, 0);
         assert_eq!(facts.series.len(), 5);
     }
@@ -526,7 +584,14 @@ mod tests {
         let timeline: Vec<_> = (0..50u64)
             .map(|tick| sample(tick * 100, 200, tick < 30))
             .collect();
-        let facts = cut("kill", 1, Duration::from_secs(3), None, &timeline, Duration::from_secs(5));
+        let facts = cut(
+            "kill",
+            1,
+            Duration::from_secs(3),
+            None,
+            &timeline,
+            Duration::from_secs(5),
+        );
         assert_eq!(facts.first_failure_ms, Some(3_000));
         assert_eq!(facts.recovered_ms, None);
         assert_eq!(facts.outage_ms, None);

@@ -147,7 +147,10 @@ impl ForwardPreamble {
     ///
     /// * `raw` - The preamble bytes
     /// * `body_len` - The number of bytes the frame's header said follow it
-    pub fn decode(raw: &[u8; FORWARD_PREAMBLE_LEN], body_len: usize) -> Result<Self, ProtocolError> {
+    pub fn decode(
+        raw: &[u8; FORWARD_PREAMBLE_LEN],
+        body_len: usize,
+    ) -> Result<Self, ProtocolError> {
         let preamble = ForwardPreamble {
             bundle: bytes16_at(raw, BUNDLE_AT),
             attempt: u64_at(raw, ATTEMPT_AT),
@@ -159,23 +162,33 @@ impl ForwardPreamble {
         };
         // a forward that has already been forwarded is a routing loop, not a query
         if preamble.hops != 0 {
-            return Err(ProtocolError::MalformedForward("a forward arrived with a hop count"));
+            return Err(ProtocolError::MalformedForward(
+                "a forward arrived with a hop count",
+            ));
         }
         // no entries is a frame with nothing to do, which no node ever writes
         if preamble.entries == 0 {
-            return Err(ProtocolError::MalformedForward("a forward names no entries"));
+            return Err(ProtocolError::MalformedForward(
+                "a forward names no entries",
+            ));
         }
         if preamble.entries > MAX_FORWARD_ENTRIES {
-            return Err(ProtocolError::MalformedForward("a forward names too many entries"));
+            return Err(ProtocolError::MalformedForward(
+                "a forward names too many entries",
+            ));
         }
         // the entries have to fit their bound before anything is sized by them
         if preamble.entries_len > MAX_FORWARD_ENTRIES_BYTES {
-            return Err(ProtocolError::MalformedForward("a forward's entries pass their bound"));
+            return Err(ProtocolError::MalformedForward(
+                "a forward's entries pass their bound",
+            ));
         }
         // and the frame has to hold the preamble, the entries and at least a bundle's worth
         let fixed = FORWARD_PREAMBLE_LEN + preamble.entries_len as usize;
         if body_len <= fixed {
-            return Err(ProtocolError::MalformedForward("a forward's frame cannot hold its bundle"));
+            return Err(ProtocolError::MalformedForward(
+                "a forward's frame cannot hold its bundle",
+            ));
         }
         Ok(preamble)
     }
@@ -225,7 +238,11 @@ impl ForwardEntry {
     pub fn encoded_len(&self) -> usize {
         // the fixed fields, the context and the plan if there are any, and eight bytes a key
         ENTRY_FIXED_LEN
-            + if self.trace.is_some() { TRACE_CONTEXT_LEN } else { 0 }
+            + if self.trace.is_some() {
+                TRACE_CONTEXT_LEN
+            } else {
+                0
+            }
             + self.read.as_ref().map_or(0, EntryRead::encoded_len)
             + self.keys.len() * 8
     }
@@ -290,20 +307,32 @@ impl ForwardEntry {
 /// Refuses a set that would not decode: too many entries, or an entry with too many keys.
 pub fn encode_entries(entries: &[ForwardEntry]) -> Result<Vec<u8>, ProtocolError> {
     if entries.is_empty() || entries.len() > MAX_FORWARD_ENTRIES as usize {
-        return Err(ProtocolError::MalformedForward("an entry count outside its bound"));
+        return Err(ProtocolError::MalformedForward(
+            "an entry count outside its bound",
+        ));
     }
     let mut out = Vec::with_capacity(entries.iter().map(ForwardEntry::encoded_len).sum());
     for entry in entries {
         if entry.keys.len() > MAX_FORWARD_KEYS as usize {
-            return Err(ProtocolError::MalformedForward("an entry with too many keys"));
+            return Err(ProtocolError::MalformedForward(
+                "an entry with too many keys",
+            ));
         }
-        if entry.read.as_ref().is_some_and(|read| read.tokens.len() > MAX_SESSION_TOKENS) {
-            return Err(ProtocolError::MalformedForward("an entry with too many session tokens"));
+        if entry
+            .read
+            .as_ref()
+            .is_some_and(|read| read.tokens.len() > MAX_SESSION_TOKENS)
+        {
+            return Err(ProtocolError::MalformedForward(
+                "an entry with too many session tokens",
+            ));
         }
         entry.encode_into(&mut out);
     }
     if out.len() > MAX_FORWARD_ENTRIES_BYTES as usize {
-        return Err(ProtocolError::MalformedForward("entries past their byte bound"));
+        return Err(ProtocolError::MalformedForward(
+            "entries past their byte bound",
+        ));
     }
     Ok(out)
 }
@@ -336,15 +365,21 @@ pub fn decode_entries(raw: &[u8], count: u16) -> Result<Vec<ForwardEntry>, Proto
         at += ENTRY_FIXED_LEN;
         // a flag this build does not know is an entry it cannot act on
         if flags & !(FLAG_END | FLAG_GATHER | FLAG_TRACE | FLAG_READ) != 0 {
-            return Err(ProtocolError::MalformedForward("an entry sets an unknown flag"));
+            return Err(ProtocolError::MalformedForward(
+                "an entry sets an unknown flag",
+            ));
         }
         if keys_len > MAX_FORWARD_KEYS {
-            return Err(ProtocolError::MalformedForward("an entry names too many keys"));
+            return Err(ProtocolError::MalformedForward(
+                "an entry names too many keys",
+            ));
         }
         // the context, if the flags say one is there
         let trace = if flags & FLAG_TRACE != 0 {
             let Some(bytes) = raw.get(at..at + TRACE_CONTEXT_LEN) else {
-                return Err(ProtocolError::MalformedForward("a trace context is cut short"));
+                return Err(ProtocolError::MalformedForward(
+                    "a trace context is cut short",
+                ));
             };
             let mut fixed = [0u8; TRACE_CONTEXT_LEN];
             fixed.copy_from_slice(bytes);
@@ -360,17 +395,23 @@ pub fn decode_entries(raw: &[u8], count: u16) -> Result<Vec<ForwardEntry>, Proto
             };
             // a plan names a level, never inherits one: resolution happened on the coordinator
             let Some(level) = ReadLevel::from_byte(fixed[0])? else {
-                return Err(ProtocolError::MalformedForward("a read plan names no level"));
+                return Err(ProtocolError::MalformedForward(
+                    "a read plan names no level",
+                ));
             };
             let tokens = usize::from(fixed[1]);
             if tokens > MAX_SESSION_TOKENS {
-                return Err(ProtocolError::MalformedForward("a read plan names too many tokens"));
+                return Err(ProtocolError::MalformedForward(
+                    "a read plan names too many tokens",
+                ));
             }
             let slot = u16_at(fixed, 2);
             at += ENTRY_READ_FIXED_LEN;
             let token_bytes = tokens * SESSION_TOKEN_LEN;
             let Some(bytes) = raw.get(at..at + token_bytes) else {
-                return Err(ProtocolError::MalformedForward("a read plan's tokens are cut short"));
+                return Err(ProtocolError::MalformedForward(
+                    "a read plan's tokens are cut short",
+                ));
             };
             let mut decoded = Vec::with_capacity(tokens);
             for chunk in bytes.chunks_exact(SESSION_TOKEN_LEN) {
@@ -390,7 +431,9 @@ pub fn decode_entries(raw: &[u8], count: u16) -> Result<Vec<ForwardEntry>, Proto
         // and the keys, each of which is a scalar read out in this host's endianness
         let keys_bytes = keys_len as usize * 8;
         let Some(key_bytes) = raw.get(at..at + keys_bytes) else {
-            return Err(ProtocolError::MalformedForward("an entry's keys are cut short"));
+            return Err(ProtocolError::MalformedForward(
+                "an entry's keys are cut short",
+            ));
         };
         let keys = key_bytes
             .chunks_exact(8)
@@ -411,7 +454,9 @@ pub fn decode_entries(raw: &[u8], count: u16) -> Result<Vec<ForwardEntry>, Proto
     }
     // trailing bytes are a preamble that lied about its entries
     if at != raw.len() {
-        return Err(ProtocolError::MalformedForward("entries do not fill their bytes"));
+        return Err(ProtocolError::MalformedForward(
+            "entries do not fill their bytes",
+        ));
     }
     Ok(entries)
 }
@@ -492,7 +537,11 @@ impl ForwardedPreamble {
         body[16..24].copy_from_slice(&self.index.to_le_bytes());
         body[24] = self.kind.as_byte();
         body[25] = self.served;
-        body[26] = if self.token.is_some() { FORWARDED_FLAG_TOKEN } else { 0 };
+        body[26] = if self.token.is_some() {
+            FORWARDED_FLAG_TOKEN
+        } else {
+            0
+        };
         // five reserved bytes stay zero
         body[32..40].copy_from_slice(&self.attempt.to_le_bytes());
         body[40..42].copy_from_slice(&self.slot.to_le_bytes());
@@ -516,7 +565,9 @@ impl ForwardedPreamble {
         let flags = raw[26];
         // a flag this build does not know is an answer it cannot act on
         if flags & !FORWARDED_FLAG_TOKEN != 0 {
-            return Err(ProtocolError::MalformedForward("an answer sets an unknown flag"));
+            return Err(ProtocolError::MalformedForward(
+                "an answer sets an unknown flag",
+            ));
         }
         let token = if flags & FORWARDED_FLAG_TOKEN != 0 {
             let mut fixed = [0u8; SESSION_TOKEN_LEN];
@@ -561,7 +612,9 @@ pub fn encode_error_payload(code: u16, msg: &str) -> Vec<u8> {
 /// * `raw` - The payload bytes
 pub fn decode_error_payload(raw: &[u8]) -> Result<(u16, String), ProtocolError> {
     if raw.len() < 2 {
-        return Err(ProtocolError::MalformedForward("an error answer has no code"));
+        return Err(ProtocolError::MalformedForward(
+            "an error answer has no code",
+        ));
     }
     let code = u16_at(raw, 0);
     let msg = String::from_utf8_lossy(&raw[2..]).into_owned();

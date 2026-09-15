@@ -420,31 +420,47 @@ impl NodeReplication {
         NodeReplication {
             groups: shards.iter().map(|shard| shard.groups.len()).sum(),
             leading: shards.iter().map(ShardReplication::leading).sum(),
-            lag_max: shards.iter().map(ShardReplication::lag_max).max().unwrap_or(0),
+            lag_max: shards
+                .iter()
+                .map(ShardReplication::lag_max)
+                .max()
+                .unwrap_or(0),
             pending_bytes: shards.iter().map(|shard| shard.pending_bytes).sum(),
             volatile_bytes: shards.iter().map(|shard| shard.volatile_bytes).sum(),
             unknown_outcomes: shards.iter().map(|shard| shard.unknown_outcomes).sum(),
             rejected: shards.iter().map(|shard| shard.rejected).sum(),
-            reads: shards.iter().fold(ReadStats::default(), |mut folded, shard| {
-                folded.absorb(&shard.reads);
-                folded
-            }),
-            snapshots: shards.iter().fold(SnapshotStats::default(), |mut folded, shard| {
-                folded.absorb(&shard.snapshots);
-                folded
-            }),
+            reads: shards
+                .iter()
+                .fold(ReadStats::default(), |mut folded, shard| {
+                    folded.absorb(&shard.reads);
+                    folded
+                }),
+            snapshots: shards
+                .iter()
+                .fold(SnapshotStats::default(), |mut folded, shard| {
+                    folded.absorb(&shard.snapshots);
+                    folded
+                }),
             installing: shards
                 .iter()
                 .map(|shard| shard.groups.iter().filter(|group| group.installing).count())
                 .sum(),
             quarantined: shards
                 .iter()
-                .map(|shard| shard.groups.iter().filter(|group| group.quarantined.is_some()).count())
+                .map(|shard| {
+                    shard
+                        .groups
+                        .iter()
+                        .filter(|group| group.quarantined.is_some())
+                        .count()
+                })
                 .sum(),
-            integrity: shards.iter().fold(IntegrityStats::default(), |mut folded, shard| {
-                folded.absorb(&shard.integrity);
-                folded
-            }),
+            integrity: shards
+                .iter()
+                .fold(IntegrityStats::default(), |mut folded, shard| {
+                    folded.absorb(&shard.integrity);
+                    folded
+                }),
             shards,
         }
     }

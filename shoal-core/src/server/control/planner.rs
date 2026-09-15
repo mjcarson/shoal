@@ -187,7 +187,13 @@ impl Ledger {
 /// * `set` - The set
 /// * `candidate` - The member
 /// * `bytes` - The set's size
-fn infeasible(input: &PlanInput, ledger: &Ledger, set: &SetInput, candidate: NodeId, bytes: u64) -> Option<String> {
+fn infeasible(
+    input: &PlanInput,
+    ledger: &Ledger,
+    set: &SetInput,
+    candidate: NodeId,
+    bytes: u64,
+) -> Option<String> {
     let Some(node) = input.nodes.get(&candidate) else {
         return Some(format!("{candidate} is not a member"));
     };
@@ -207,7 +213,10 @@ fn infeasible(input: &PlanInput, ledger: &Ledger, set: &SetInput, candidate: Nod
         }
     }
     if *ledger.destinations.get(&candidate).unwrap_or(&0) >= input.moves_per_node {
-        return Some(format!("{candidate} already has {} moves onto it", input.moves_per_node));
+        return Some(format!(
+            "{candidate} already has {} moves onto it",
+            input.moves_per_node
+        ));
     }
     None
 }
@@ -238,7 +247,11 @@ fn drain(node: NodeId, replacement: Option<NodeId>, input: &PlanInput) -> PlanOu
     let mut output = PlanOutput::default();
     let mut blocked: Vec<String> = Vec::new();
     // the sets the member holds, in tablet order
-    let mut sets: Vec<&SetInput> = input.sets.iter().filter(|set| set.members.contains(&node)).collect();
+    let mut sets: Vec<&SetInput> = input
+        .sets
+        .iter()
+        .filter(|set| set.members.contains(&node))
+        .collect();
     sets.sort_by_key(|set| set.tablet);
     if sets.is_empty() {
         output.nothing = Some(format!("{node} holds no replica set"));
@@ -250,7 +263,10 @@ fn drain(node: NodeId, replacement: Option<NodeId>, input: &PlanInput) -> PlanOu
             continue;
         }
         if set.failures >= REPLAN_FAILURES {
-            blocked.push(format!("tablet {}: its move failed {} times", set.tablet, set.failures));
+            blocked.push(format!(
+                "tablet {}: its move failed {} times",
+                set.tablet, set.failures
+            ));
             continue;
         }
         // the source cap: one more move from this member has to fit
@@ -267,9 +283,15 @@ fn drain(node: NodeId, replacement: Option<NodeId>, input: &PlanInput) -> PlanOu
                     .nodes
                     .iter()
                     .filter(|(candidate, _)| **candidate != node)
-                    .filter(|(candidate, _)| infeasible(input, &ledger, set, **candidate, bytes).is_none())
+                    .filter(|(candidate, _)| {
+                        infeasible(input, &ledger, set, **candidate, bytes).is_none()
+                    })
                     .map(|(candidate, member)| (*candidate, ledger.load(*candidate, member.weight)))
-                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)))
+                    .min_by(|a, b| {
+                        a.1.partial_cmp(&b.1)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(a.0.cmp(&b.0))
+                    })
                     .map(|(candidate, _)| candidate)
             });
         match chosen {
@@ -303,12 +325,20 @@ fn drain(node: NodeId, replacement: Option<NodeId>, input: &PlanInput) -> PlanOu
 /// * `set` - The set
 /// * `node` - The member being drained
 /// * `bytes` - The set's size
-fn why_blocked(input: &PlanInput, ledger: &Ledger, set: &SetInput, node: NodeId, bytes: u64) -> String {
+fn why_blocked(
+    input: &PlanInput,
+    ledger: &Ledger,
+    set: &SetInput,
+    node: NodeId,
+    bytes: u64,
+) -> String {
     // the members outside the set that are eligible at all
     let outside: Vec<NodeId> = input
         .nodes
         .iter()
-        .filter(|(candidate, member)| **candidate != node && member.eligible && !set.members.contains(candidate))
+        .filter(|(candidate, member)| {
+            **candidate != node && member.eligible && !set.members.contains(candidate)
+        })
         .map(|(candidate, _)| *candidate)
         .collect();
     if outside.is_empty() {
@@ -344,13 +374,22 @@ fn rebalance(input: &PlanInput) -> PlanOutput {
         return output;
     }
     // at N = RF every member holds every set and no move exists
-    let holds_everything = eligible.iter().all(|node| input.sets.iter().all(|set| set.members.contains(node)));
+    let holds_everything = eligible
+        .iter()
+        .all(|node| input.sets.iter().all(|set| set.members.contains(node)));
     if holds_everything && !input.sets.is_empty() {
-        output.nothing = Some("every member holds every set; the replication factor is the member count".to_string());
+        output.nothing = Some(
+            "every member holds every set; the replication factor is the member count".to_string(),
+        );
         return output;
     }
     let targets = targets(input, &eligible, &ledger);
-    let mut busy: BTreeSet<u16> = input.sets.iter().filter(|set| set.busy).map(|set| set.tablet).collect();
+    let mut busy: BTreeSet<u16> = input
+        .sets
+        .iter()
+        .filter(|set| set.busy)
+        .map(|set| set.tablet)
+        .collect();
     // one step at a time, from the most over to the best under, until no move improves things
     loop {
         // the source: the eligible member most over its target, past the hysteresis
@@ -358,14 +397,24 @@ fn rebalance(input: &PlanInput) -> PlanOutput {
             .iter()
             .filter(|node| *ledger.sources.get(node).unwrap_or(&0) < input.moves_per_node)
             .map(|node| (*node, over(&ledger, &targets, *node)))
-            .filter(|(node, over)| *over > input.hysteresis * targets.get(node).copied().unwrap_or(0.0))
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal).then(b.0.cmp(&a.0)));
+            .filter(|(node, over)| {
+                *over > input.hysteresis * targets.get(node).copied().unwrap_or(0.0)
+            })
+            .max_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(b.0.cmp(&a.0))
+            });
         let Some((source, source_over)) = source else {
             break;
         };
         // the best move: the set and destination whose move brings both ends closest
         let mut best: Option<(u16, NodeId, u64, f64)> = None;
-        for set in input.sets.iter().filter(|set| set.members.contains(&source) && !busy.contains(&set.tablet)) {
+        for set in input
+            .sets
+            .iter()
+            .filter(|set| set.members.contains(&source) && !busy.contains(&set.tablet))
+        {
             if set.failures >= REPLAN_FAILURES {
                 continue;
             }
@@ -388,7 +437,8 @@ fn rebalance(input: &PlanInput) -> PlanOutput {
                     continue;
                 }
                 let better = best.is_none_or(|(tablet, node, _, gain)| {
-                    improvement > gain || (improvement == gain && (set.tablet, *candidate) < (tablet, node))
+                    improvement > gain
+                        || (improvement == gain && (set.tablet, *candidate) < (tablet, node))
                 });
                 if better {
                     best = Some((set.tablet, *candidate, bytes, improvement));
@@ -411,7 +461,8 @@ fn rebalance(input: &PlanInput) -> PlanOutput {
         output.steps.push(step);
     }
     if output.steps.is_empty() {
-        output.nothing = Some("every member is within the hysteresis of its feasible target".to_string());
+        output.nothing =
+            Some("every member is within the hysteresis of its feasible target".to_string());
     }
     output
 }
@@ -438,11 +489,18 @@ fn over(ledger: &Ledger, targets: &BTreeMap<NodeId, f64>, node: NodeId) -> f64 {
 /// * `input` - What the planner was given
 /// * `eligible` - The members with a target
 /// * `ledger` - The load so far
-fn targets(input: &PlanInput, eligible: &BTreeSet<NodeId>, ledger: &Ledger) -> BTreeMap<NodeId, f64> {
+fn targets(
+    input: &PlanInput,
+    eligible: &BTreeSet<NodeId>,
+    ledger: &Ledger,
+) -> BTreeMap<NodeId, f64> {
     // the bytes held across every member, and the most any one member could hold
     // precision is not a concern for a target
     #[allow(clippy::cast_precision_loss)]
-    let total: f64 = eligible.iter().map(|node| *ledger.held.get(node).unwrap_or(&0) as f64).sum();
+    let total: f64 = eligible
+        .iter()
+        .map(|node| *ledger.held.get(node).unwrap_or(&0) as f64)
+        .sum();
     #[allow(clippy::cast_precision_loss)]
     let everything: f64 = input.sets.iter().map(|set| set.size(None) as f64).sum();
     let mut targets: BTreeMap<NodeId, f64> = BTreeMap::new();
@@ -450,7 +508,10 @@ fn targets(input: &PlanInput, eligible: &BTreeSet<NodeId>, ledger: &Ledger) -> B
     let mut open: BTreeSet<NodeId> = eligible.clone();
     // water-fill: a member whose share passes the cap is capped, and the rest share what is left
     loop {
-        let weight: f64 = open.iter().map(|node| f64::from(input.nodes[node].weight.max(1))).sum();
+        let weight: f64 = open
+            .iter()
+            .map(|node| f64::from(input.nodes[node].weight.max(1)))
+            .sum();
         if weight <= 0.0 || open.is_empty() {
             break;
         }
@@ -531,38 +592,65 @@ mod tests {
         let n = nodes(4);
         let (a, b, c, d) = (n[0], n[1], n[2], n[3]);
         // three sets over three of four members, as three placed at a factor of three are
-        let sets = vec![set(0, &[a, b, c], 100), set(1, &[b, c, a], 100), set(2, &[c, a, b], 100)];
+        let sets = vec![
+            set(0, &[a, b, c], 100),
+            set(1, &[b, c, a], 100),
+            set(2, &[c, a, b], 100),
+        ];
         // a drain of b: every set goes to d, the only member outside them, under the cap
         let mut drain_b = input(&n, sets.clone());
         drain_b.moves_per_node = 3;
         let out = plan(&PlanKind::Decommission { node: b }, &drain_b);
         assert_eq!(out.steps.len(), 3, "{out:?}");
-        assert!(out.steps.iter().all(|step| step.from == b && step.to == d && step.bytes == 100));
+        assert!(out
+            .steps
+            .iter()
+            .all(|step| step.from == b && step.to == d && step.bytes == 100));
         assert_eq!(out.blocked, None);
         assert_eq!(out.nothing, None);
         // under a cap of one, one step is planned and the rest wait for the next round
-        let out = plan(&PlanKind::Decommission { node: b }, &input(&n, sets.clone()));
+        let out = plan(
+            &PlanKind::Decommission { node: b },
+            &input(&n, sets.clone()),
+        );
         assert_eq!(out.steps.len(), 1);
         assert_eq!(out.blocked, None);
         // a member with no sets is nothing
-        let out = plan(&PlanKind::Decommission { node: d }, &input(&n, sets.clone()));
+        let out = plan(
+            &PlanKind::Decommission { node: d },
+            &input(&n, sets.clone()),
+        );
         assert!(out.steps.is_empty());
         assert!(out.nothing.is_some());
         // at N = RF a drain is blocked naming the missing member, and every set is named
         let three = vec![set(0, &[a, b, c], 100), set(1, &[b, c, a], 100)];
         let mut drain_c = input(&[a, b, c], three.clone());
         drain_c.moves_per_node = 2;
-        let out = plan(&PlanKind::Remove { node: c, replacement: None }, &drain_c);
+        let out = plan(
+            &PlanKind::Remove {
+                node: c,
+                replacement: None,
+            },
+            &drain_c,
+        );
         assert!(out.steps.is_empty());
         let blocked = out.blocked.expect("blocked");
         assert!(blocked.contains("a further member is needed"), "{blocked}");
-        assert!(blocked.contains("tablet 0") && blocked.contains("tablet 1"), "{blocked}");
+        assert!(
+            blocked.contains("tablet 0") && blocked.contains("tablet 1"),
+            "{blocked}"
+        );
         // the disk reserve blocks by name, and a member with no report is taken at its word
         let mut short = input(&n, sets.clone());
         short.nodes.get_mut(&d).unwrap().free_bytes = Some(50);
         let out = plan(&PlanKind::Decommission { node: b }, &short);
         assert!(out.steps.is_empty());
-        assert!(out.blocked.as_deref().is_some_and(|reason| reason.contains("disk reserve")), "{out:?}");
+        assert!(
+            out.blocked
+                .as_deref()
+                .is_some_and(|reason| reason.contains("disk reserve")),
+            "{out:?}"
+        );
         short.nodes.get_mut(&d).unwrap().free_bytes = None;
         let out = plan(&PlanKind::Decommission { node: b }, &short);
         assert_eq!(out.steps.len(), 1);
@@ -571,7 +659,12 @@ mod tests {
         busy.in_flight = vec![(a, d)];
         let out = plan(&PlanKind::Decommission { node: b }, &busy);
         assert!(out.steps.is_empty());
-        assert!(out.blocked.as_deref().is_some_and(|reason| reason.contains("moves onto it")), "{out:?}");
+        assert!(
+            out.blocked
+                .as_deref()
+                .is_some_and(|reason| reason.contains("moves onto it")),
+            "{out:?}"
+        );
         // a busy set is skipped and a set that failed too often is blocked by name
         let mut failed = input(&n, sets.clone());
         failed.moves_per_node = 3;
@@ -580,35 +673,76 @@ mod tests {
         let out = plan(&PlanKind::Decommission { node: b }, &failed);
         assert_eq!(out.steps.len(), 1);
         assert_eq!(out.steps[0].tablet, 2);
-        assert!(out.blocked.as_deref().is_some_and(|reason| reason.contains("failed")), "{out:?}");
+        assert!(
+            out.blocked
+                .as_deref()
+                .is_some_and(|reason| reason.contains("failed")),
+            "{out:?}"
+        );
         // the replacement is chosen first when it is feasible; a fifth member with less load
         // would otherwise win
         let five = nodes(5);
         let (a, b, c, d, e) = (five[0], five[1], five[2], five[3], five[4]);
-        let sets5 = vec![set(0, &[a, b, c], 100), set(1, &[b, c, d], 100), set(2, &[c, d, a], 100)];
-        let out = plan(&PlanKind::Remove { node: b, replacement: Some(d) }, &input(&five, sets5.clone()));
+        let sets5 = vec![
+            set(0, &[a, b, c], 100),
+            set(1, &[b, c, d], 100),
+            set(2, &[c, d, a], 100),
+        ];
+        let out = plan(
+            &PlanKind::Remove {
+                node: b,
+                replacement: Some(d),
+            },
+            &input(&five, sets5.clone()),
+        );
         assert_eq!(out.steps[0].to, d, "{out:?}");
-        let out = plan(&PlanKind::Remove { node: b, replacement: None }, &input(&five, sets5.clone()));
-        assert_eq!(out.steps[0].to, e, "the least loaded member is chosen: {out:?}");
+        let out = plan(
+            &PlanKind::Remove {
+                node: b,
+                replacement: None,
+            },
+            &input(&five, sets5.clone()),
+        );
+        assert_eq!(
+            out.steps[0].to, e,
+            "the least loaded member is chosen: {out:?}"
+        );
         // a replacement inside the set is not used for that set
-        let out = plan(&PlanKind::Remove { node: b, replacement: Some(c) }, &input(&five, sets5));
+        let out = plan(
+            &PlanKind::Remove {
+                node: b,
+                replacement: Some(c),
+            },
+            &input(&five, sets5),
+        );
         assert_eq!(out.steps[0].to, e, "{out:?}");
         // a rebalance at 3:1:1:1 over three placed and one spare: the heavy member holds
         // everything, the three light ones end within a set of each other
         let n = nodes(4);
         let (a, b, c, d) = (n[0], n[1], n[2], n[3]);
-        let sets = vec![set(0, &[a, b, c], 100), set(1, &[b, c, a], 100), set(2, &[c, a, b], 100)];
+        let sets = vec![
+            set(0, &[a, b, c], 100),
+            set(1, &[b, c, a], 100),
+            set(2, &[c, a, b], 100),
+        ];
         let mut weighted = input(&n, sets.clone());
         weighted.nodes.get_mut(&a).unwrap().weight = 3;
         weighted.moves_per_node = 3;
         let out = plan(&PlanKind::Rebalance, &weighted);
         assert_eq!(out.steps.len(), 2, "{out:?}");
-        assert!(out.steps.iter().all(|step| step.to == d && step.from != a), "{out:?}");
+        assert!(
+            out.steps.iter().all(|step| step.to == d && step.from != a),
+            "{out:?}"
+        );
         let sources: BTreeSet<NodeId> = out.steps.iter().map(|step| step.from).collect();
         assert_eq!(sources, [b, c].into_iter().collect());
         assert_eq!(out.nothing, None);
         // applied, the same input is nothing: no oscillation
-        let after = vec![set(0, &[a, d, c], 100), set(1, &[b, d, a], 100), set(2, &[c, a, b], 100)];
+        let after = vec![
+            set(0, &[a, d, c], 100),
+            set(1, &[b, d, a], 100),
+            set(2, &[c, a, b], 100),
+        ];
         let mut settled = weighted.clone();
         settled.sets = after;
         let out = plan(&PlanKind::Rebalance, &settled);
@@ -623,9 +757,18 @@ mod tests {
         // at N = RF a rebalance is nothing, naming the constraint
         let out = plan(&PlanKind::Rebalance, &input(&[a, b, c], sets.clone()));
         assert!(out.steps.is_empty());
-        assert!(out.nothing.as_deref().is_some_and(|reason| reason.contains("every member holds every set")), "{out:?}");
+        assert!(
+            out.nothing
+                .as_deref()
+                .is_some_and(|reason| reason.contains("every member holds every set")),
+            "{out:?}"
+        );
         // unmeasured sets count as one byte each, so a cluster with nothing archived still balances by count
-        let empty = vec![set(0, &[a, b, c], 0), set(1, &[b, c, a], 0), set(2, &[c, a, b], 0)];
+        let empty = vec![
+            set(0, &[a, b, c], 0),
+            set(1, &[b, c, a], 0),
+            set(2, &[c, a, b], 0),
+        ];
         let out = plan(&PlanKind::Rebalance, &input(&n, empty).with_cap(3));
         assert_eq!(out.steps.len(), 2, "{out:?}");
         // the same input in another order plans the same steps

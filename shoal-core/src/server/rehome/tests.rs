@@ -57,7 +57,9 @@ fn key_on(tablet: u64, salt: u64) -> u64 {
 async fn write_records(conf: &Conf, executor: u16, keys: &[u64]) {
     let settings = super::table_settings(conf, "T");
     settings.setup_paths("T").await.expect("paths");
-    let map = ArchiveMap::new(&shard_name(executor), "T", &settings).await.expect("a map");
+    let map = ArchiveMap::new(&shard_name(executor), "T", &settings)
+        .await
+        .expect("a map");
     let active = *map.active.borrow();
     let mut writer = map.get_active_writer().await.expect("a writer");
     for key in keys {
@@ -105,7 +107,16 @@ fn a_redone_archives_step_removes_its_partial_archive() {
         let at = manifest
             .steps
             .iter()
-            .position(|step| matches!(step.kind, StepKind::Archives { source: 1, dest: 0, .. }))
+            .position(|step| {
+                matches!(
+                    step.kind,
+                    StepKind::Archives {
+                        source: 1,
+                        dest: 0,
+                        ..
+                    }
+                )
+            })
             .expect("an archives step");
         let partial = Uuid::new_v4();
         let settings = super::table_settings(&conf, "T");
@@ -115,34 +126,56 @@ fn a_redone_archives_step_removes_its_partial_archive() {
         manifest.write(dir.path()).expect("a manifest");
         // redone: the partial goes, the copy is made into a fresh archive
         let slots = Slots::default();
-        let (records, bytes) = archives_step(&mut manifest, at, &conf, dir.path(), &slots, 1, 0, "T")
-            .await
-            .expect("the step");
+        let (records, bytes) =
+            archives_step(&mut manifest, at, &conf, dir.path(), &slots, 1, 0, "T")
+                .await
+                .expect("the step");
         assert_eq!(records, 6);
         assert!(bytes > 0);
-        assert!(!partial_path.exists(), "the partial archive was not removed");
-        let recorded = manifest.steps[at].archive.expect("the archive is on the manifest");
+        assert!(
+            !partial_path.exists(),
+            "the partial archive was not removed"
+        );
+        let recorded = manifest.steps[at]
+            .archive
+            .expect("the archive is on the manifest");
         assert_ne!(recorded, partial);
         // the destination names every moved key and its own, in the recorded archive
-        let dst = ArchiveMap::new("Shard-0", "T", &settings).await.expect("a map");
+        let dst = ArchiveMap::new("Shard-0", "T", &settings)
+            .await
+            .expect("a map");
         assert!(dst.all_archives.borrow().contains(&recorded));
         for key in &keys {
-            let entry = dst.find_partition(*key).unwrap_or_else(|| panic!("key {key:x} did not move"));
+            let entry = dst
+                .find_partition(*key)
+                .unwrap_or_else(|| panic!("key {key:x} did not move"));
             assert_eq!(entry.archive, recorded);
             let payload = dst.read_record(&entry).await.expect("a read");
             assert_eq!(&payload[..], key.to_le_bytes().repeat(4).as_slice());
         }
-        assert!(dst.find_partition(key_on(2, 9)).is_some(), "the destination's own record was lost");
+        assert!(
+            dst.find_partition(key_on(2, 9)).is_some(),
+            "the destination's own record was lost"
+        );
         dst.close_all().await.expect("a close");
         // begun a third time, the finished copy is recognized and skipped, and its records
         // still count as moved, since the run that copied them never wrote its count down
         let (records, _) = archives_step(&mut manifest, at, &conf, dir.path(), &slots, 1, 0, "T")
             .await
             .expect("the step");
-        assert_eq!(records, 6, "a finished archives step did not count its records");
-        assert_eq!(manifest.steps[at].archive, Some(recorded), "a skipped step changed its archive");
+        assert_eq!(
+            records, 6,
+            "a finished archives step did not count its records"
+        );
+        assert_eq!(
+            manifest.steps[at].archive,
+            Some(recorded),
+            "a skipped step changed its archive"
+        );
         // the source is untouched until the reclaim
-        let src = ArchiveMap::new("Shard-1", "T", &settings).await.expect("a map");
+        let src = ArchiveMap::new("Shard-1", "T", &settings)
+            .await
+            .expect("a map");
         assert_eq!(src.to_archive.borrow().len(), 6);
         src.close_all().await.expect("a close");
     });
@@ -198,42 +231,72 @@ fn a_redone_log_step_skips_a_group_already_moved() {
         slots.groups.insert(staying, 0);
         // the source's WAL: five entries, a vote and a checkpoint for the moving group
         let src_dir = dir.path().join(WAL_DIR).join("Shard-1");
-        let wal = ShardWal::open(&src_dir, 1 << 24, 1 << 20).await.expect("a wal");
+        let wal = ShardWal::open(&src_dir, 1 << 24, 1 << 20)
+            .await
+            .expect("a wal");
         let mut store = wal.store(moving);
-        store.blocking_append((1..=5).map(normal).collect::<Vec<_>>()).await.expect("an append");
+        store
+            .blocking_append((1..=5).map(normal).collect::<Vec<_>>())
+            .await
+            .expect("an append");
         use openraft::storage::RaftLogStorage as _;
         let vote = openraft::Vote::new(3, ShardAddr::from(1));
         store.save_vote(&vote).await.expect("a vote");
-        store.save_committed(Some(log_id(4))).await.expect("a commit");
+        store
+            .save_committed(Some(log_id(4)))
+            .await
+            .expect("a commit");
         store.purge(log_id(2)).await.expect("a purge");
         wal.flush().await.expect("a flush");
         wal.close().await.expect("a close");
         let mut checkpoint = Checkpoint::default();
-        checkpoint.groups.insert(moving.to_string(), GroupCheckpoint::new(Some(log_id(2)), &Default::default()));
+        checkpoint.groups.insert(
+            moving.to_string(),
+            GroupCheckpoint::new(Some(log_id(2)), &Default::default()),
+        );
         checkpoint.write(&src_dir).await.expect("a checkpoint");
         // the first move
-        let (groups, dropped) = log_step(&manifest, &conf, dir.path(), &slots, 1, 0).await.expect("the step");
+        let (groups, dropped) = log_step(&manifest, &conf, dir.path(), &slots, 1, 0)
+            .await
+            .expect("the step");
         assert_eq!((groups, dropped), (1, 0));
         let dst_dir = dir.path().join(WAL_DIR).join("Shard-0");
-        let view = super::group_log_view(&dst_dir, moving).await.expect("a view");
+        let view = super::group_log_view(&dst_dir, moving)
+            .await
+            .expect("a view");
         assert_eq!(view.last, Some(5));
         assert_eq!(view.purged, Some(2));
         assert!(view.voted);
         assert!(view.checkpointed);
-        let dst = ShardWal::open(&dst_dir, 1 << 24, 1 << 20).await.expect("a wal");
+        let dst = ShardWal::open(&dst_dir, 1 << 24, 1 << 20)
+            .await
+            .expect("a wal");
         assert_eq!(dst.indexes_of(moving), vec![3, 4, 5]);
         assert_eq!(dst.vote_of(moving), Some(vote.clone()));
-        assert!(dst.groups().iter().all(|group| *group != staying), "a group of another slot moved");
+        assert!(
+            dst.groups().iter().all(|group| *group != staying),
+            "a group of another slot moved"
+        );
         dst.close().await.expect("a close");
         // the second: the destination is at the source's last index and nothing is appended
-        let (groups, _) = log_step(&manifest, &conf, dir.path(), &slots, 1, 0).await.expect("the step");
+        let (groups, _) = log_step(&manifest, &conf, dir.path(), &slots, 1, 0)
+            .await
+            .expect("the step");
         assert_eq!(groups, 1, "a redone step still counts the group it checked");
-        let dst = ShardWal::open(&dst_dir, 1 << 24, 1 << 20).await.expect("a wal");
-        assert_eq!(dst.indexes_of(moving), vec![3, 4, 5], "a redone log step duplicated entries");
+        let dst = ShardWal::open(&dst_dir, 1 << 24, 1 << 20)
+            .await
+            .expect("a wal");
+        assert_eq!(
+            dst.indexes_of(moving),
+            vec![3, 4, 5],
+            "a redone log step duplicated entries"
+        );
         assert_eq!(dst.vote_of(moving), Some(vote));
         dst.close().await.expect("a close");
         // the source still has its log until the reclaim
-        let src = ShardWal::open(&src_dir, 1 << 24, 1 << 20).await.expect("a wal");
+        let src = ShardWal::open(&src_dir, 1 << 24, 1 << 20)
+            .await
+            .expect("a wal");
         assert_eq!(src.indexes_of(moving), vec![3, 4, 5]);
         src.close().await.expect("a close");
     });
@@ -249,25 +312,43 @@ fn a_manifest_for_another_target_is_refused() {
     // a rehome to two planned and on disk
     let before = Hosting::identity(4);
     let after = before.plan(2, true).expect("a plan");
-    Manifest::plan(&before, &after, &["T".to_string()], true).write(dir.path()).expect("a manifest");
+    Manifest::plan(&before, &after, &["T".to_string()], true)
+        .write(dir.path())
+        .expect("a manifest");
     // three is neither where the files are nor where they are going
-    let error = StorageMeta::claim(dir.path(), 3, None, ClusterIntent::Bootstrap).expect_err("a third count started");
+    let error = StorageMeta::claim(dir.path(), 3, None, ClusterIntent::Bootstrap)
+        .expect_err("a third count started");
     assert!(
         matches!(
             error,
-            crate::server::ServerError::Shoal(crate::server::errors::ShoalError::RehomeInProgress { from: 4, to: 2, configured: 3 })
+            crate::server::ServerError::Shoal(
+                crate::server::errors::ShoalError::RehomeInProgress {
+                    from: 4,
+                    to: 2,
+                    configured: 3
+                }
+            )
         ),
         "{error:?}"
     );
     assert!(format!("{error}").contains("start with 2 cores"), "{error}");
     // and so is four, even though the files are still there: the plan has to finish first
-    let error = StorageMeta::claim(dir.path(), 4, None, ClusterIntent::Bootstrap).expect_err("the origin count started");
+    let error = StorageMeta::claim(dir.path(), 4, None, ClusterIntent::Bootstrap)
+        .expect_err("the origin count started");
     assert!(matches!(
         error,
-        crate::server::ServerError::Shoal(crate::server::errors::ShoalError::RehomeInProgress { to: 2, configured: 4, .. })
+        crate::server::ServerError::Shoal(crate::server::errors::ShoalError::RehomeInProgress {
+            to: 2,
+            configured: 4,
+            ..
+        })
     ));
     // two resumes it
-    let resumed = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Bootstrap).expect("the planned count was refused");
-    assert_eq!(resumed.rehome, Some(crate::server::meta::PendingRehome { from: 4, to: 2 }));
+    let resumed = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Bootstrap)
+        .expect("the planned count was refused");
+    assert_eq!(
+        resumed.rehome,
+        Some(crate::server::meta::PendingRehome { from: 4, to: 2 })
+    );
     assert_eq!(resumed.slots, 4);
 }

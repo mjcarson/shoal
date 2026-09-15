@@ -32,7 +32,9 @@ fn main() {
     eprintln!();
     eprintln!("    #[tokio::main]");
     eprintln!("    async fn main() -> color_eyre::Result<()> {{");
-    eprintln!("        let shoal = Arc::new(Shoal::<MyDbClient>::new(\"127.0.0.1:12000\").await?);");
+    eprintln!(
+        "        let shoal = Arc::new(Shoal::<MyDbClient>::new(\"127.0.0.1:12000\").await?);"
+    );
     eprintln!("        shoalctl::run(shoal).await");
     eprintln!("    }}");
     std::process::exit(1);

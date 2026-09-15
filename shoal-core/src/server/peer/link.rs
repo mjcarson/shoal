@@ -60,7 +60,9 @@ use super::Lane;
 use crate::server::conf::cluster::Transport;
 use crate::server::ServerError;
 use crate::shared::identity::NodeId;
-use crate::shared::protocol::peer::{CONTROL_HEAD_LEN, FORWARDED_PREAMBLE_LEN, REPLICATE_RESPONSE_HEAD_LEN};
+use crate::shared::protocol::peer::{
+    CONTROL_HEAD_LEN, FORWARDED_PREAMBLE_LEN, REPLICATE_RESPONSE_HEAD_LEN,
+};
 use crate::shared::protocol::{Header, MessageType, HEADER_LEN};
 use crate::shared::tls::{PeerIdentity, PeerTlsHolder};
 
@@ -307,7 +309,11 @@ struct Queue {
 impl Queue {
     /// Take every queued frame's key, emptying the queue
     fn drain_keys(&mut self) -> Vec<FrameKey> {
-        let keys = self.frames.drain(..).map(|frame| frame.key).collect::<Vec<_>>();
+        let keys = self
+            .frames
+            .drain(..)
+            .map(|frame| frame.key)
+            .collect::<Vec<_>>();
         self.dropped_frames += keys.len() as u64;
         self.queued_bytes = 0;
         keys
@@ -441,7 +447,9 @@ impl Link {
     #[must_use]
     pub fn negotiated(&self) -> Negotiated {
         let queue = self.queue.borrow();
-        queue.negotiated.unwrap_or_else(|| Negotiated::floor(protocol_default_max()))
+        queue
+            .negotiated
+            .unwrap_or_else(|| Negotiated::floor(protocol_default_max()))
     }
 
     /// Whether the link's owner let it go, after which nothing queued is ever written
@@ -612,7 +620,10 @@ async fn run<F: Fn(LinkEvent) + 'static>(
                 event!(Level::WARN, msg = "a peer link could not be made", %node, %lane, ?error);
                 // a refusal at the hello is the peer's verdict, carried apart from the text
                 let refused = match &error {
-                    ServerError::Shoal(crate::server::errors::ShoalError::PeerRefused { reason, .. }) => Some(*reason),
+                    ServerError::Shoal(crate::server::errors::ShoalError::PeerRefused {
+                        reason,
+                        ..
+                    }) => Some(*reason),
                     _ => None,
                 };
                 on_event(LinkEvent::Down {
@@ -632,7 +643,9 @@ async fn run<F: Fn(LinkEvent) + 'static>(
                 glommio::timer::sleep(floor).await;
                 let rest = wait.saturating_sub(floor);
                 if !rest.is_zero() {
-                    let wanted = Wanted { queue: queue.clone() };
+                    let wanted = Wanted {
+                        queue: queue.clone(),
+                    };
                     let _ = glommio::timer::timeout(rest, async { Ok(wanted.await) }).await;
                 }
                 if queue.borrow().closed {
@@ -659,8 +672,17 @@ async fn run<F: Fn(LinkEvent) + 'static>(
         // carry frames both ways until either direction fails
         let (rx, tx) = stream.split();
         let max_frame_bytes = settings.local.borrow().max_frame_bytes;
-        let outcome = carry(rx, tx, &queue, node, lane, max_frame_bytes, negotiated.version, &on_event)
-            .await;
+        let outcome = carry(
+            rx,
+            tx,
+            &queue,
+            node,
+            lane,
+            max_frame_bytes,
+            negotiated.version,
+            &on_event,
+        )
+        .await;
         // whatever was still queued was never written
         let unsent = {
             let mut q = queue.borrow_mut();
@@ -715,8 +737,15 @@ async fn connect(settings: &Settings) -> Result<(TcpStream, u64, Negotiated), Se
     };
     // then say who we are and check who answered, as we are right now
     let local = settings.local.borrow().clone();
-    let (peer, negotiated) =
-        handshake::dial(&mut stream, &local, settings.lane, &settings.entry, &certified, settings.tls.binds_identity()).await?;
+    let (peer, negotiated) = handshake::dial(
+        &mut stream,
+        &local,
+        settings.lane,
+        &settings.entry,
+        &certified,
+        settings.tls.binds_identity(),
+    )
+    .await?;
     Ok((stream, peer.incarnation, negotiated))
 }
 
@@ -771,7 +800,8 @@ async fn carry<F: Fn(LinkEvent) + 'static>(
         loop {
             let Some(header) = codec::read_header(&mut rx, max_frame_bytes, version).await? else {
                 return Err::<(), ServerError>(
-                    std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the peer closed").into(),
+                    std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the peer closed")
+                        .into(),
                 );
             };
             // the head's length is the kind's to say, and only answers come back on a link
@@ -780,11 +810,13 @@ async fn carry<F: Fn(LinkEvent) + 'static>(
                 MessageType::ControlResponse => CONTROL_HEAD_LEN,
                 MessageType::ReplicateResponse => REPLICATE_RESPONSE_HEAD_LEN,
                 other => {
-                    return Err(crate::shared::protocol::ProtocolError::UnexpectedMessageType {
-                        expected: MessageType::Forwarded,
-                        got: other,
-                    }
-                    .into());
+                    return Err(
+                        crate::shared::protocol::ProtocolError::UnexpectedMessageType {
+                            expected: MessageType::Forwarded,
+                            got: other,
+                        }
+                        .into(),
+                    );
                 }
             };
             // a frame that cannot hold its own head is not one

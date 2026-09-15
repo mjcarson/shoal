@@ -31,7 +31,10 @@ use crate::model::macro_layer::Timing;
 use crate::workloads::cluster_failover::Failover;
 use crate::workloads::cluster_replication::NODE_SHARDS;
 use crate::workloads::harness::seed::Scale;
-use crate::workloads::workload::{BackgroundKind, BackgroundSpec, BoxFuture, Context, Measurement, ServerNeed, Workload, WorkloadPlan};
+use crate::workloads::workload::{
+    BackgroundKind, BackgroundSpec, BoxFuture, Context, Measurement, ServerNeed, Workload,
+    WorkloadPlan,
+};
 
 /// The arm's identifier
 pub const MOVE_ID: &str = "macro/cluster/migration/move";
@@ -64,7 +67,9 @@ impl Migration {
     /// The arm
     #[must_use]
     pub fn new() -> Self {
-        Migration { twin: Failover::new() }
+        Migration {
+            twin: Failover::new(),
+        }
     }
 }
 
@@ -110,7 +115,9 @@ impl Workload for Migration {
     fn plan(&self, scale: Scale) -> WorkloadPlan {
         let mut plan = self.twin.plan(scale);
         // a fourth member, joined and placed on by nothing, for the move to bring in
-        if let ServerNeed::Fresh(overrides) | ServerNeed::RestartAfterSeed(overrides) = &mut plan.server {
+        if let ServerNeed::Fresh(overrides) | ServerNeed::RestartAfterSeed(overrides) =
+            &mut plan.server
+        {
             if let Some(cluster) = overrides.cluster.as_mut() {
                 cluster.spares = vec![NODE_SHARDS];
                 // the source's grace, short enough for the move to be done inside the run
@@ -160,7 +167,7 @@ impl Workload for Migration {
 
 #[cfg(test)]
 mod tests {
-    use super::{all, MOVE_FROM, MOVE_ID, MOVE_TO};
+    use super::{MOVE_FROM, MOVE_ID, MOVE_TO, all};
     use crate::workloads::cluster_background::REPAIR_ID;
     use crate::workloads::cluster_failover::{self, KILL_ID};
     use crate::workloads::harness::seed::Scale;
@@ -174,11 +181,26 @@ mod tests {
         assert_eq!(arms.len(), 1);
         assert_eq!(arms[0].id(), MOVE_ID);
         let ids = crate::workload_ids::IDS;
-        let kill = ids.iter().position(|id| *id == KILL_ID).expect("the kill arm is registered");
-        let background = ids.iter().position(|id| *id == REPAIR_ID).expect("the background arm is registered");
-        let migration = ids.iter().position(|id| *id == MOVE_ID).expect("the migration arm is registered");
-        assert!(kill < background && background < migration, "the migration arm is not appended after the background arm");
-        let kill = cluster_failover::all().into_iter().next().expect("the kill arm exists");
+        let kill = ids
+            .iter()
+            .position(|id| *id == KILL_ID)
+            .expect("the kill arm is registered");
+        let background = ids
+            .iter()
+            .position(|id| *id == REPAIR_ID)
+            .expect("the background arm is registered");
+        let migration = ids
+            .iter()
+            .position(|id| *id == MOVE_ID)
+            .expect("the migration arm is registered");
+        assert!(
+            kill < background && background < migration,
+            "the migration arm is not appended after the background arm"
+        );
+        let kill = cluster_failover::all()
+            .into_iter()
+            .next()
+            .expect("the kill arm exists");
         for scale in [Scale::Smoke, Scale::Full] {
             let mine = arms[0].plan(scale);
             let theirs = kill.plan(scale);
@@ -189,7 +211,10 @@ mod tests {
             assert_eq!(mine_overrides.shards, theirs_overrides.shards);
             let mine_cluster = mine_overrides.cluster.as_ref().expect("a placement");
             let theirs_cluster = theirs_overrides.cluster.as_ref().expect("a placement");
-            assert_eq!(mine_cluster.replication_factor, theirs_cluster.replication_factor);
+            assert_eq!(
+                mine_cluster.replication_factor,
+                theirs_cluster.replication_factor
+            );
             assert_eq!(mine_cluster.peers, theirs_cluster.peers);
             // one spare beside the placement, with the peers' shard count, and a short grace
             assert_eq!(mine_cluster.spares, vec![theirs_cluster.peers[0]]);
@@ -203,12 +228,22 @@ mod tests {
             assert!(!arms[0].catchup());
             let spec = arms[0].background(scale).expect("the arm asks for a move");
             assert!(spec.at < spec.run_for);
-            assert_eq!(spec.run_for, kill.fault(scale).expect("the kill arm's schedule").run_for);
+            assert_eq!(
+                spec.run_for,
+                kill.fault(scale).expect("the kill arm's schedule").run_for
+            );
             match spec.kind {
                 BackgroundKind::Move { from, to, .. } => {
                     assert_eq!((from, to), (MOVE_FROM, MOVE_TO));
-                    assert!((from as usize) < mine_cluster.nodes(), "the source is not a placed node");
-                    assert_eq!(to as usize, mine_cluster.members() - 1, "the destination is not the spare");
+                    assert!(
+                        (from as usize) < mine_cluster.nodes(),
+                        "the source is not a placed node"
+                    );
+                    assert_eq!(
+                        to as usize,
+                        mine_cluster.members() - 1,
+                        "the destination is not the spare"
+                    );
                 }
                 other => panic!("the migration arm asks for {other:?}"),
             }

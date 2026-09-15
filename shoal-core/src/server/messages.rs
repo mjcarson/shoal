@@ -12,11 +12,11 @@ use std::rc::Rc;
 use super::request_body::RequestBody;
 use super::shard::ShardContact;
 use super::stage_profile::{StageStamps, Stamp};
+use crate::server::database::ShoalDatabase;
 use crate::shared::protocol::read::{ReadLevel, SessionToken};
 use crate::shared::responses::{Response, ResponseError};
 use crate::shared::row_ref::RowRef;
-use crate::server::database::ShoalDatabase;
-use crate::shared::traits::{QuerySupport};
+use crate::shared::traits::QuerySupport;
 
 /// How one query, or one share of it, is to be served as a read
 ///
@@ -227,9 +227,8 @@ pub struct ReadWaits {
 /// The lifetime is universal on purpose: the rows a reply borrows live only as long as the scan
 /// that found them, and a sealer bound to one particular borrow could not be called with the one
 /// the scan actually produces.
-pub type SealReply<P> = for<'row> fn(
-    Response<RowRef<'row, P>>,
-) -> Result<AlignedVec<16>, rkyv::rancor::Error>;
+pub type SealReply<P> =
+    for<'row> fn(Response<RowRef<'row, P>>) -> Result<AlignedVec<16>, rkyv::rancor::Error>;
 
 /// What a query produced, and whether it is still a value or already bytes
 ///
@@ -248,7 +247,6 @@ pub enum Answer<R> {
     /// An answer that is still a value, for a share to merge or a client to be answered with
     Open(R),
 }
-
 
 /// Whether an answer is whole or one shard's share of a split query
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -658,14 +656,22 @@ where
         /// The group
         group: crate::shared::identity::GroupId,
         /// Where the file goes
-        reply: futures_channel::oneshot::Sender<Result<std::rc::Rc<crate::server::replication::BuiltSnapshot>, String>>,
+        reply: futures_channel::oneshot::Sender<
+            Result<std::rc::Rc<crate::server::replication::BuiltSnapshot>, String>,
+        >,
     },
     /// A snapshot file was cut, by the compactor or by the loop's own task
     SnapshotBuilt {
         /// The group
         group: crate::shared::identity::GroupId,
         /// The file and its manifest, or why there is none
-        outcome: Result<(std::path::PathBuf, crate::server::replication::SnapshotManifest), String>,
+        outcome: Result<
+            (
+                std::path::PathBuf,
+                crate::server::replication::SnapshotManifest,
+            ),
+            String,
+        >,
     },
     /// A chunk of a snapshot stream, relayed from the bulk lane to the shard hosting the group
     ///
@@ -721,7 +727,13 @@ where
         /// The group
         group: crate::shared::identity::GroupId,
         /// The trailer, or why the install failed
-        outcome: Result<Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>, String>,
+        outcome: Result<
+            Vec<(
+                crate::shared::protocol::peer::RequestId,
+                crate::server::replication::Remembered,
+            )>,
+            String,
+        >,
     },
     /// A volatile group's snapshot file was read, for the loop to put into its ephemeral table
     SnapshotRecords {
@@ -732,7 +744,10 @@ where
         outcome: Result<
             (
                 Vec<(u64, Vec<u8>)>,
-                Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>,
+                Vec<(
+                    crate::shared::protocol::peer::RequestId,
+                    crate::server::replication::Remembered,
+                )>,
             ),
             String,
         >,
@@ -810,7 +825,10 @@ where
         #[allow(clippy::type_complexity)]
         reply: futures_channel::oneshot::Sender<
             Option<(
-                openraft::Raft<crate::server::replication::DataConfig, crate::server::replication::GroupMachine<D>>,
+                openraft::Raft<
+                    crate::server::replication::DataConfig,
+                    crate::server::replication::GroupMachine<D>,
+                >,
                 std::rc::Rc<std::cell::RefCell<crate::server::replication::MachineState>>,
             )>,
         >,
@@ -899,7 +917,9 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
                 panic!("A forwarded bundle is only ever handed to the shard that accepted it")
             }
             // a link's events go to the shard that owns the link and nowhere else
-            ServerMsg::Peer(_) => panic!("A peer event is only ever sent to the shard that owns the link"),
+            ServerMsg::Peer(_) => {
+                panic!("A peer event is only ever sent to the shard that owns the link")
+            }
             ServerMsg::BulkProbe { node, bytes } => ServerMsg::BulkProbe {
                 node: *node,
                 bytes: *bytes,
@@ -954,21 +974,43 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             ServerMsg::Fail => panic!("A failure is asked of one shard"),
             // everything a tablet group sends its own shard stays on that shard
             ServerMsg::Apply { .. } => panic!("An apply batch is for the shard hosting the group"),
-            ServerMsg::Proposed { .. } => panic!("A proposal's outcome is for the shard that proposed it"),
-            ServerMsg::Replication { .. } => panic!("A replication request is for the shard the head names"),
+            ServerMsg::Proposed { .. } => {
+                panic!("A proposal's outcome is for the shard that proposed it")
+            }
+            ServerMsg::Replication { .. } => {
+                panic!("A replication request is for the shard the head names")
+            }
             ServerMsg::GroupUp { .. } => panic!("A group handle is for the shard that built it"),
-            ServerMsg::ReadReady { .. } => panic!("A ready read is for the shard that waited on it"),
+            ServerMsg::ReadReady { .. } => {
+                panic!("A ready read is for the shard that waited on it")
+            }
             ServerMsg::GroupsDown => panic!("A groups-down notice is for one shard"),
             ServerMsg::WalSealed { .. } => panic!("A sealed segment is the writing shard's"),
-            ServerMsg::SegmentCompacted { .. } => panic!("A compacted segment is the writing shard's"),
-            ServerMsg::CheckpointWritten { .. } => panic!("A checkpoint write is the writing shard's"),
-            ServerMsg::BuildSnapshot { .. } => panic!("A snapshot is built for the shard hosting the group"),
-            ServerMsg::InstallSnapshot { .. } => panic!("A snapshot is installed on the shard hosting the group"),
-            ServerMsg::SnapshotBytes { .. } => panic!("A snapshot chunk goes to the shard hosting its group"),
+            ServerMsg::SegmentCompacted { .. } => {
+                panic!("A compacted segment is the writing shard's")
+            }
+            ServerMsg::CheckpointWritten { .. } => {
+                panic!("A checkpoint write is the writing shard's")
+            }
+            ServerMsg::BuildSnapshot { .. } => {
+                panic!("A snapshot is built for the shard hosting the group")
+            }
+            ServerMsg::InstallSnapshot { .. } => {
+                panic!("A snapshot is installed on the shard hosting the group")
+            }
+            ServerMsg::SnapshotBytes { .. } => {
+                panic!("A snapshot chunk goes to the shard hosting its group")
+            }
             ServerMsg::BulkLaneEnded { node } => ServerMsg::BulkLaneEnded { node: *node },
-            ServerMsg::SnapshotInstalled { .. } => panic!("An installed snapshot is the installing shard's"),
-            ServerMsg::SnapshotRecords { .. } => panic!("A snapshot's records are the installing shard's"),
-            ServerMsg::SnapshotCleaned { .. } => panic!("A cleaned install is the installing shard's"),
+            ServerMsg::SnapshotInstalled { .. } => {
+                panic!("An installed snapshot is the installing shard's")
+            }
+            ServerMsg::SnapshotRecords { .. } => {
+                panic!("A snapshot's records are the installing shard's")
+            }
+            ServerMsg::SnapshotCleaned { .. } => {
+                panic!("A cleaned install is the installing shard's")
+            }
             ServerMsg::Digested { .. } => panic!("A digest is the scrubbing shard's"),
             ServerMsg::Quarantine { .. } => panic!("A quarantine is the holding shard's"),
             ServerMsg::RepairDone { .. } => panic!("A repair driver is one shard's"),

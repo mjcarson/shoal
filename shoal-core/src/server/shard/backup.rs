@@ -31,11 +31,15 @@ use tracing::{event, Level};
 use uuid::Uuid;
 
 use super::ServerMsg;
-use crate::server::control::backup::{BackupManifest, BackupOutcome, BackupPhase, GroupBackup, BACKUP_MANIFEST_SUFFIX};
+use crate::server::control::backup::{
+    BackupManifest, BackupOutcome, BackupPhase, GroupBackup, BACKUP_MANIFEST_SUFFIX,
+};
 use crate::server::control::plane::ControlRequest;
 use crate::server::control::types::{ControlCommand, ControlResponse};
 use crate::server::replication::snapshot::{self, SnapshotManifest};
-use crate::server::replication::{BuiltSnapshot, DataConfig, GroupMachine, MachineState, ShardNetwork};
+use crate::server::replication::{
+    BuiltSnapshot, DataConfig, GroupMachine, MachineState, ShardNetwork,
+};
 use crate::server::ShoalDatabase;
 use crate::shared::identity::{ClusterId, GroupId, ShardAddr, TableId};
 use crate::shared::protocol::peer::Command;
@@ -106,10 +110,13 @@ impl<D: ShoalDatabase> BackupContext<D> {
                 .try_send(ControlRequest::Propose { command, reply })
                 .map_err(|_| "the control thread is not taking proposals".to_string())?;
             let remaining = PROGRESS_TIMEOUT.saturating_sub(started.elapsed());
-            let answered = glommio::timer::timeout(remaining, async { Ok(rx.as_async().recv().await) }).await;
+            let answered =
+                glommio::timer::timeout(remaining, async { Ok(rx.as_async().recv().await) }).await;
             last = match answered {
                 Ok(Ok(Ok(ControlResponse::Applied { .. }))) => return Ok(()),
-                Ok(Ok(Ok(ControlResponse::Refused { reason }))) => return Err(format!("the progress was refused: {reason}")),
+                Ok(Ok(Ok(ControlResponse::Refused { reason }))) => {
+                    return Err(format!("the progress was refused: {reason}"))
+                }
                 Ok(Ok(Ok(other))) => format!("the progress was not applied: {other:?}"),
                 Ok(Ok(Err(error))) => error,
                 Ok(Err(_)) => "the control thread dropped the proposal".to_string(),
@@ -117,7 +124,9 @@ impl<D: ShoalDatabase> BackupContext<D> {
             };
             glommio::timer::sleep(Duration::from_millis(500)).await;
         }
-        Err(format!("the progress was not committed within {PROGRESS_TIMEOUT:?}: {last}"))
+        Err(format!(
+            "the progress was not committed within {PROGRESS_TIMEOUT:?}: {last}"
+        ))
     }
 
     /// Whether this shard still leads the group
@@ -141,16 +150,26 @@ impl<D: ShoalDatabase> BackupContext<D> {
         let started = Instant::now();
         while self.state.borrow().checkpoint_index() <= past {
             if started.elapsed() > self.timeout {
-                return Err(format!("the checkpoint did not pass {past} within {:?}", self.timeout));
+                return Err(format!(
+                    "the checkpoint did not pass {past} within {:?}",
+                    self.timeout
+                ));
             }
             let written = glommio::timer::timeout(self.timeout, async {
-                Ok(self.raft.client_write(Command::scrub(self.table, Uuid::new_v4())).await)
+                Ok(self
+                    .raft
+                    .client_write(Command::scrub(self.table, Uuid::new_v4()))
+                    .await)
             })
             .await;
             match written {
                 Ok(Ok(_)) => {}
                 Ok(Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward)))) => {
-                    return Err(format!("{NOT_LEADER}group {}: the leader is {:?}", self.group, forward.leader_node.or(forward.leader_id)));
+                    return Err(format!(
+                        "{NOT_LEADER}group {}: the leader is {:?}",
+                        self.group,
+                        forward.leader_node.or(forward.leader_id)
+                    ));
                 }
                 Ok(Err(error)) => return Err(format!("proposing a nudge: {error}")),
                 Err(_) => return Err("the nudge did not commit in time".to_string()),
@@ -163,7 +182,9 @@ impl<D: ShoalDatabase> BackupContext<D> {
             let _ = done.await;
             // the compactor's merge moves the checkpoint on its own time
             let waited = Instant::now();
-            while self.state.borrow().checkpoint_index() <= past && waited.elapsed() < Duration::from_secs(5) {
+            while self.state.borrow().checkpoint_index() <= past
+                && waited.elapsed() < Duration::from_secs(5)
+            {
                 glommio::timer::sleep(Duration::from_millis(100)).await;
             }
         }
@@ -217,7 +238,10 @@ pub async fn drive_group_backup<D: ShoalDatabase>(context: BackupContext<D>) {
 async fn drive_inner<D: ShoalDatabase>(context: &BackupContext<D>) -> Result<(), String> {
     let me = context.me.node;
     if !context.leads() {
-        return Err(format!("{NOT_LEADER}group {} is led elsewhere", context.group));
+        return Err(format!(
+            "{NOT_LEADER}group {} is led elsewhere",
+            context.group
+        ));
     }
     // an ephemeral table's group holds nothing a restart keeps, so a backup of it would be a
     // file nothing could ever restore into a group that had lost it
@@ -249,10 +273,12 @@ async fn drive_inner<D: ShoalDatabase>(context: &BackupContext<D>) -> Result<(),
     let applied = context.state.borrow().applied_index();
     context.advance_past(applied).await?;
     // the group's snapshot at or past its checkpoint, held so the sweep cannot delete it
-    let built: Rc<BuiltSnapshot> = glommio::timer::timeout(context.timeout, async { Ok(context.network.build(context.group).await) })
-        .await
-        .map_err(|_| format!("the cut did not land within {:?}", context.timeout))?
-        .map_err(|error| format!("cutting the snapshot: {error}"))?;
+    let built: Rc<BuiltSnapshot> = glommio::timer::timeout(context.timeout, async {
+        Ok(context.network.build(context.group).await)
+    })
+    .await
+    .map_err(|_| format!("the cut did not land within {:?}", context.timeout))?
+    .map_err(|error| format!("cutting the snapshot: {error}"))?;
     let boundary = built.manifest.boundary.index;
     context
         .commit(GroupBackup {
@@ -263,13 +289,23 @@ async fn drive_inner<D: ShoalDatabase>(context: &BackupContext<D>) -> Result<(),
         })
         .await?;
     // the copy, under <path>/<op>/<table>/, with its manifest beside it
-    let dir = context.path.join(context.op.to_string()).join(&context.table_name);
+    let dir = context
+        .path
+        .join(context.op.to_string())
+        .join(&context.table_name);
     let name = snapshot::snapshot_name(context.group, boundary);
     let target = dir.join(&name);
     let remaining = context.timeout.saturating_sub(started.elapsed());
     let manifest = built.manifest.clone().stamped(context.cluster, me);
     glommio::timer::timeout(remaining, async {
-        Ok(write_backup(&built.path, &target, &manifest, context.op, &context.table_name).await)
+        Ok(write_backup(
+            &built.path,
+            &target,
+            &manifest,
+            context.op,
+            &context.table_name,
+        )
+        .await)
     })
     .await
     .map_err(|_| format!("the copy did not finish within {:?}", context.timeout))?
@@ -305,8 +341,16 @@ async fn drive_inner<D: ShoalDatabase>(context: &BackupContext<D>) -> Result<(),
 /// * `manifest` - The snapshot's manifest, stamped with the cluster and the node that cut it
 /// * `op` - The backup operation
 /// * `table_name` - The table's name
-async fn write_backup(from: &Path, to: &Path, manifest: &SnapshotManifest, op: Uuid, table_name: &str) -> std::io::Result<()> {
-    let dir = to.parent().ok_or_else(|| std::io::Error::other("a backup file has a parent"))?;
+async fn write_backup(
+    from: &Path,
+    to: &Path,
+    manifest: &SnapshotManifest,
+    op: Uuid,
+    table_name: &str,
+) -> std::io::Result<()> {
+    let dir = to
+        .parent()
+        .ok_or_else(|| std::io::Error::other("a backup file has a parent"))?;
     std::fs::create_dir_all(dir)?;
     // the bytes, a buffer at a time, into a temporary beside the target
     let tmp = to.with_extension("snap.tmp");

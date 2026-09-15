@@ -7,17 +7,25 @@ use std::rc::Rc;
 
 use futures::{Stream, StreamExt as _};
 use openraft::entry::RaftEntry as _;
-use openraft::vote::RaftLeaderId as _;
 use openraft::storage::{EntryResponder, RaftLogStorage, RaftSnapshotBuilder, RaftStateMachine};
 use openraft::testing::log::StoreBuilder;
 use openraft::type_config::alias::{SnapshotMetaOf, SnapshotOf, StoredMembershipOf};
 use openraft::type_config::TypeConfigExt as _;
-use openraft::{AsyncRuntime as _, EntryPayload, LogId, OptionalSend, Snapshot, SnapshotMeta, StorageError, StoredMembership};
+use openraft::vote::RaftLeaderId as _;
+use openraft::{
+    AsyncRuntime as _, EntryPayload, LogId, OptionalSend, Snapshot, SnapshotMeta, StorageError,
+    StoredMembership,
+};
 
 use super::frame::{Entry, LeaderId, WalLogId};
-use super::{Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, ShardWal, CHECKPOINT_FILE, RETRIES_FILE, RETRIES_MAGIC};
+use super::{
+    Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, ShardWal,
+    CHECKPOINT_FILE, RETRIES_FILE, RETRIES_MAGIC,
+};
 use crate::server::control::runtime::GlommioRuntime;
-use crate::server::replication::{ApplyOutcome, CommandResult, DataConfig, MachineState, Remembered, ResultKind};
+use crate::server::replication::{
+    ApplyOutcome, CommandResult, DataConfig, MachineState, Remembered, ResultKind,
+};
 use crate::shared::identity::{GroupId, ShardAddr, TableId};
 use crate::shared::protocol::peer::{Command, RequestId};
 
@@ -46,7 +54,9 @@ impl RaftSnapshotBuilder<DataConfig> for MemMachine {
     type SnapshotData = Cursor<Vec<u8>>;
 
     /// A snapshot of where the machine stands
-    async fn build_snapshot(&mut self) -> Result<SnapshotOf<DataConfig, Cursor<Vec<u8>>>, io::Error> {
+    async fn build_snapshot(
+        &mut self,
+    ) -> Result<SnapshotOf<DataConfig, Cursor<Vec<u8>>>, io::Error> {
         let mut inner = self.inner.borrow_mut();
         let snapshot = Snapshot {
             meta: SnapshotMeta {
@@ -65,7 +75,9 @@ impl RaftStateMachine<DataConfig> for MemMachine {
     type SnapshotBuilder = MemMachine;
 
     /// What has been applied, and the membership as of then
-    async fn applied_state(&mut self) -> Result<(Option<WalLogId>, StoredMembershipOf<DataConfig>), io::Error> {
+    async fn applied_state(
+        &mut self,
+    ) -> Result<(Option<WalLogId>, StoredMembershipOf<DataConfig>), io::Error> {
         let inner = self.inner.borrow();
         Ok((inner.applied.clone(), inner.membership.clone()))
     }
@@ -81,7 +93,8 @@ impl RaftStateMachine<DataConfig> for MemMachine {
             {
                 let mut inner = self.inner.borrow_mut();
                 if let EntryPayload::Membership(membership) = &entry.payload {
-                    inner.membership = StoredMembership::new(Some(log_id.clone()), membership.clone());
+                    inner.membership =
+                        StoredMembership::new(Some(log_id.clone()), membership.clone());
                 }
                 inner.applied = Some(log_id);
             }
@@ -101,7 +114,11 @@ impl RaftStateMachine<DataConfig> for MemMachine {
     }
 
     /// Take a snapshot's position as the applied state
-    async fn install_snapshot(&mut self, meta: &SnapshotMetaOf<DataConfig>, snapshot: Cursor<Vec<u8>>) -> Result<(), io::Error> {
+    async fn install_snapshot(
+        &mut self,
+        meta: &SnapshotMetaOf<DataConfig>,
+        snapshot: Cursor<Vec<u8>>,
+    ) -> Result<(), io::Error> {
         let mut inner = self.inner.borrow_mut();
         inner.applied = meta.last_log_id.clone();
         inner.membership = meta.last_membership.clone();
@@ -113,7 +130,9 @@ impl RaftStateMachine<DataConfig> for MemMachine {
     }
 
     /// The last snapshot
-    async fn get_current_snapshot(&mut self) -> Result<Option<SnapshotOf<DataConfig, Cursor<Vec<u8>>>>, io::Error> {
+    async fn get_current_snapshot(
+        &mut self,
+    ) -> Result<Option<SnapshotOf<DataConfig, Cursor<Vec<u8>>>>, io::Error> {
         Ok(self.inner.borrow().snapshot.clone())
     }
 }
@@ -123,7 +142,9 @@ struct SharedBuilder;
 
 impl StoreBuilder<DataConfig, GroupStore, MemMachine, tempfile::TempDir> for SharedBuilder {
     /// A fresh store, and the directory that has to outlive it
-    async fn build(&self) -> Result<(tempfile::TempDir, GroupStore, MemMachine), StorageError<DataConfig>> {
+    async fn build(
+        &self,
+    ) -> Result<(tempfile::TempDir, GroupStore, MemMachine), StorageError<DataConfig>> {
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
         let wal = ShardWal::open(&dir.path().join("wal"), 1 << 20, 1 << 20)
             .await
@@ -138,7 +159,11 @@ struct VolatileBuilder;
 impl StoreBuilder<DataConfig, GroupStore, MemMachine, ()> for VolatileBuilder {
     /// A fresh store over memory
     async fn build(&self) -> Result<((), GroupStore, MemMachine), StorageError<DataConfig>> {
-        Ok(((), MemoryWal::new().store(GroupId(7)), MemMachine::default()))
+        Ok((
+            (),
+            MemoryWal::new().store(GroupId(7)),
+            MemMachine::default(),
+        ))
     }
 }
 
@@ -185,7 +210,10 @@ fn normal(index: u64, size: usize) -> Entry {
 /// Append entries to a store and wait for them to be durable
 async fn append_durably(store: &mut GroupStore, entries: Vec<Entry>) {
     use openraft::storage::RaftLogStorageExt as _;
-    store.blocking_append(entries).await.expect("failed to append");
+    store
+        .blocking_append(entries)
+        .await
+        .expect("failed to append");
 }
 
 /// Several forced rotations never lose a completion, and every entry reads back from its segment
@@ -222,7 +250,9 @@ fn rotation_preserves_pending_replication_requirements() {
                 expected += 1;
                 let completed = completed.clone();
                 glommio::spawn_local(async move {
-                    rx.await.expect("the completion was dropped").expect("the flush failed");
+                    rx.await
+                        .expect("the completion was dropped")
+                        .expect("the flush failed");
                     *completed.borrow_mut() += 1;
                 })
                 .detach();
@@ -233,10 +263,18 @@ fn rotation_preserves_pending_replication_requirements() {
             wal.flush().await.expect("failed to flush after rotating");
         }
         // every completion fired once
-        assert_eq!(*completed.borrow(), expected, "a completion was lost or doubled");
+        assert_eq!(
+            *completed.borrow(),
+            expected,
+            "a completion was lost or doubled"
+        );
         // every entry's frame is in the generation it was appended in
         for (group, index, generation) in &generations {
-            assert_eq!(wal.generation_of(*group, *index), Some(*generation), "{group}:{index}");
+            assert_eq!(
+                wal.generation_of(*group, *index),
+                Some(*generation),
+                "{group}:{index}"
+            );
         }
         // four sealed segments, each naming the last entry of every group in it
         let segments = wal.segments();
@@ -244,7 +282,10 @@ fn rotation_preserves_pending_replication_requirements() {
         assert_eq!(sealed.len(), 4, "{segments:?}");
         for (round, segment) in sealed.iter().enumerate() {
             for (at, group) in groups.iter().enumerate() {
-                let last = segment.last.get(group).expect("every group wrote into every segment");
+                let last = segment
+                    .last
+                    .get(group)
+                    .expect("every group wrote into every segment");
                 assert_eq!(last.index, (round as u64 + 1) * 10 + at as u64);
             }
         }
@@ -257,7 +298,9 @@ fn rotation_preserves_pending_replication_requirements() {
                 let index = (round as u64 + 1) * 10 + at as u64;
                 assert_eq!(entry.log_id(), log_id(1, index));
                 match &entry.payload {
-                    EntryPayload::Normal(command) => assert_eq!(command.payload, vec![index as u8; 500]),
+                    EntryPayload::Normal(command) => {
+                        assert_eq!(command.payload, vec![index as u8; 500])
+                    }
                     other => panic!("not a normal entry: {other:?}"),
                 }
             }
@@ -282,7 +325,9 @@ fn table_streams_recover_independently_without_holes() {
         let path = dir.path().join("wal");
         let (a, b) = (GroupId(11), GroupId(22));
         {
-            let wal = ShardWal::open(&path, 1 << 30, 1 << 20).await.expect("failed to open");
+            let wal = ShardWal::open(&path, 1 << 30, 1 << 20)
+                .await
+                .expect("failed to open");
             let mut store_a = wal.store(a);
             let mut store_b = wal.store(b);
             // group a's completions are held: its bytes still land, its acks do not
@@ -291,7 +336,10 @@ fn table_streams_recover_independently_without_holes() {
             for index in 1..=6u64 {
                 let (tx, rx) = DataConfig::oneshot::<Result<(), io::Error>>();
                 store_a
-                    .append(vec![normal(index, 64)], openraft::storage::IOFlushed::<DataConfig>::signal(tx))
+                    .append(
+                        vec![normal(index, 64)],
+                        openraft::storage::IOFlushed::<DataConfig>::signal(tx),
+                    )
                     .await
                     .expect("failed to append to a");
                 held.push(rx);
@@ -301,24 +349,45 @@ fn table_streams_recover_independently_without_holes() {
             // b's completions fired; a's are held
             assert_eq!(wal.held(), 6);
             for rx in &mut held {
-                assert!(rx.try_recv().expect("the sender is alive").is_none(), "a held completion fired");
+                assert!(
+                    rx.try_recv().expect("the sender is alive").is_none(),
+                    "a held completion fired"
+                );
             }
             // a vote per group, durable before it is answered
             store_a
-                .save_vote(&openraft::vote::RaftVote::from_leader_id(LeaderId::new(3, ShardAddr::from(1)), false))
+                .save_vote(&openraft::vote::RaftVote::from_leader_id(
+                    LeaderId::new(3, ShardAddr::from(1)),
+                    false,
+                ))
                 .await
                 .expect("failed to save a's vote");
             store_b
-                .save_vote(&openraft::vote::RaftVote::from_leader_id(LeaderId::new(5, ShardAddr::from(2)), true))
+                .save_vote(&openraft::vote::RaftVote::from_leader_id(
+                    LeaderId::new(5, ShardAddr::from(2)),
+                    true,
+                ))
                 .await
                 .expect("failed to save b's vote");
             // b truncates its tail and appends again at the same index, which supersedes
-            store_b.truncate_after(Some(log_id(1, 4))).await.expect("failed to truncate");
-            append_durably(&mut store_b, vec![Entry::new_normal(log_id(2, 5), normal(5, 8).payload_command())]).await;
+            store_b
+                .truncate_after(Some(log_id(1, 4)))
+                .await
+                .expect("failed to truncate");
+            append_durably(
+                &mut store_b,
+                vec![Entry::new_normal(
+                    log_id(2, 5),
+                    normal(5, 8).payload_command(),
+                )],
+            )
+            .await;
             wal.close().await.expect("failed to close");
             // dropped with a's completions still held
         }
-        let wal = ShardWal::open(&path, 1 << 30, 1 << 20).await.expect("failed to reopen");
+        let wal = ShardWal::open(&path, 1 << 30, 1 << 20)
+            .await
+            .expect("failed to reopen");
         // each group's log is its own contiguous prefix
         assert_eq!(wal.indexes_of(a), vec![1, 2, 3, 4, 5, 6]);
         assert_eq!(wal.indexes_of(b), vec![1, 2, 3, 4, 5]);
@@ -327,10 +396,18 @@ fn table_streams_recover_independently_without_holes() {
         {
             use openraft::storage::RaftLogReader as _;
             // a's entries are a's, b's are b's, and b's re-appended fifth is the newer one
-            let entries_a = store_a.try_get_log_entries(..).await.expect("failed to read a");
+            let entries_a = store_a
+                .try_get_log_entries(..)
+                .await
+                .expect("failed to read a");
             assert_eq!(entries_a.len(), 6);
-            assert!(entries_a.iter().all(|entry| entry.log_id().leader_id.term == 1));
-            let entries_b = store_b.try_get_log_entries(..).await.expect("failed to read b");
+            assert!(entries_a
+                .iter()
+                .all(|entry| entry.log_id().leader_id.term == 1));
+            let entries_b = store_b
+                .try_get_log_entries(..)
+                .await
+                .expect("failed to read b");
             assert_eq!(entries_b.len(), 5);
             assert_eq!(entries_b[4].log_id(), log_id(2, 5));
             match &entries_b[4].payload {
@@ -338,8 +415,22 @@ fn table_streams_recover_independently_without_holes() {
                 other => panic!("not a normal entry: {other:?}"),
             }
             // and the votes came back
-            assert_eq!(store_a.read_vote().await.unwrap().map(|vote| vote.leader_id.term), Some(3));
-            assert_eq!(store_b.read_vote().await.unwrap().map(|vote| vote.leader_id.term), Some(5));
+            assert_eq!(
+                store_a
+                    .read_vote()
+                    .await
+                    .unwrap()
+                    .map(|vote| vote.leader_id.term),
+                Some(3)
+            );
+            assert_eq!(
+                store_b
+                    .read_vote()
+                    .await
+                    .unwrap()
+                    .map(|vote| vote.leader_id.term),
+                Some(5)
+            );
         }
         let state_a = store_a.get_log_state().await.expect("a's state");
         assert_eq!(state_a.last_log_id, Some(log_id(1, 6)));
@@ -364,14 +455,24 @@ fn checkpoint_file_round_trips_membership() {
             Some(log_id(1, 0)),
             openraft::Membership::new(
                 vec![members(&[1, 2, 3])],
-                members(&[1, 2, 3, 4]).into_iter().map(|addr| (addr, addr)).collect::<std::collections::BTreeMap<_, _>>(),
+                members(&[1, 2, 3, 4])
+                    .into_iter()
+                    .map(|addr| (addr, addr))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
             )
             .expect("a valid membership"),
         );
         let mut file = Checkpoint::default();
-        file.groups.insert(GroupId(7).to_string(), GroupCheckpoint::new(Some(log_id(2, 9)), &membership));
-        file.write(dir.path()).await.expect("failed to write the checkpoint");
-        let read = Checkpoint::read(dir.path()).await.expect("failed to read the checkpoint");
+        file.groups.insert(
+            GroupId(7).to_string(),
+            GroupCheckpoint::new(Some(log_id(2, 9)), &membership),
+        );
+        file.write(dir.path())
+            .await
+            .expect("failed to write the checkpoint");
+        let read = Checkpoint::read(dir.path())
+            .await
+            .expect("failed to read the checkpoint");
         assert_eq!(read, file);
         let point = read.get(GroupId(7)).expect("the group's checkpoint");
         assert_eq!(point.applied, Some(log_id(2, 9)));
@@ -397,7 +498,10 @@ fn retry_table_survives_the_purge_point() {
             Some(log_id(1, 0)),
             openraft::Membership::new(
                 vec![members(&[1, 2, 3])],
-                members(&[1, 2, 3]).into_iter().map(|addr| (addr, addr)).collect::<std::collections::BTreeMap<_, _>>(),
+                members(&[1, 2, 3])
+                    .into_iter()
+                    .map(|addr| (addr, addr))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
             )
             .expect("a valid membership"),
         );
@@ -420,7 +524,13 @@ fn retry_table_survives_the_purge_point() {
         state.dedup.put(request(3), remembered(9, true));
         assert_eq!(state.retry_floor(), 3);
         let through = state.remembered_through(5);
-        assert_eq!(through, vec![(request(1), remembered(3, true)), (request(2), remembered(5, false))]);
+        assert_eq!(
+            through,
+            vec![
+                (request(1), remembered(3, true)),
+                (request(2), remembered(5, false))
+            ]
+        );
         // the sidecar and the checkpoint that names it round trip
         let mut retries = Retries::default();
         retries.groups.insert(
@@ -430,16 +540,25 @@ fn retry_table_survives_the_purge_point() {
                 entries: through,
             },
         );
-        retries.write(dir.path()).await.expect("failed to write the sidecar");
+        retries
+            .write(dir.path())
+            .await
+            .expect("failed to write the sidecar");
         let mut file = Checkpoint::default();
         file.groups.insert(
             GroupId(7).to_string(),
             GroupCheckpoint::new(Some(log_id(2, 5)), &membership).retries(5, state.retry_floor()),
         );
-        file.write(dir.path()).await.expect("failed to write the checkpoint");
-        let read_retries = Retries::read(dir.path()).await.expect("failed to read the sidecar");
+        file.write(dir.path())
+            .await
+            .expect("failed to write the checkpoint");
+        let read_retries = Retries::read(dir.path())
+            .await
+            .expect("failed to read the sidecar");
         assert_eq!(read_retries, retries);
-        let read = Checkpoint::read(dir.path()).await.expect("failed to read the checkpoint");
+        let read = Checkpoint::read(dir.path())
+            .await
+            .expect("failed to read the checkpoint");
         assert_eq!(read, file);
         let point = read.get(GroupId(7)).expect("the group's checkpoint");
         assert_eq!((point.retries_at, point.retry_floor), (5, 3));
@@ -447,7 +566,10 @@ fn retry_table_survives_the_purge_point() {
         let seed = read_retries.seed_for(GroupId(7), point);
         assert_eq!(seed.len(), 2);
         let mut seeded = MachineState::at(Some(log_id(2, 5)), membership.clone(), seed);
-        assert_eq!(seeded.dedup.get(&request(2)).copied(), Some(remembered(5, false)));
+        assert_eq!(
+            seeded.dedup.get(&request(2)).copied(),
+            Some(remembered(5, false))
+        );
         assert_eq!(seeded.dedup.get(&request(3)), None);
         assert_eq!(seeded.retry_floor(), 3);
         // a checkpoint from before the sidecar existed - the same file without the two
@@ -468,7 +590,10 @@ fn retry_table_survives_the_purge_point() {
         assert!(read_retries.seed_for(GroupId(7), &other).is_empty());
         // and a missing sidecar is an empty one
         let empty = tempfile::tempdir().expect("failed to build a temp dir");
-        assert_eq!(Retries::read(empty.path()).await.expect("failed to read"), Retries::default());
+        assert_eq!(
+            Retries::read(empty.path()).await.expect("failed to read"),
+            Retries::default()
+        );
     });
 }
 
@@ -487,7 +612,9 @@ fn frames_at_or_below_the_checkpoint_are_not_handed_again() {
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
         let path = dir.path().join("wal");
         let group = GroupId(4);
-        let wal = ShardWal::open(&path, 1 << 30, 1 << 20).await.expect("failed to open");
+        let wal = ShardWal::open(&path, 1 << 30, 1 << 20)
+            .await
+            .expect("failed to open");
         let mut store = wal.store(group);
         // three entries in the first segment, three in the second
         append_durably(&mut store, (1..=3).map(|index| normal(index, 64)).collect()).await;
@@ -499,21 +626,50 @@ fn frames_at_or_below_the_checkpoint_are_not_handed_again() {
         // the judgement, on the live index and again on one rebuilt from the files
         let judge = |wal: &ShardWal| {
             let indexes = |generation: u64, since: u64| -> Vec<u64> {
-                wal.frames_in(generation, &[(group, since)]).iter().map(|frame| frame.index).collect()
+                wal.frames_in(generation, &[(group, since)])
+                    .iter()
+                    .map(|frame| frame.index)
+                    .collect()
             };
-            assert_eq!(indexes(1, 0), vec![1, 2, 3], "nothing checkpointed: every frame is handed");
-            assert_eq!(indexes(1, 2), vec![3], "the checkpoint at two leaves the third");
-            assert_eq!(indexes(1, 3), Vec::<u64>::new(), "a segment below the checkpoint hands nothing");
-            assert_eq!(indexes(2, 3), vec![4, 5, 6], "the next segment is whole above it");
-            assert_eq!(indexes(2, 6), Vec::<u64>::new(), "and nothing once the checkpoint passed it");
+            assert_eq!(
+                indexes(1, 0),
+                vec![1, 2, 3],
+                "nothing checkpointed: every frame is handed"
+            );
+            assert_eq!(
+                indexes(1, 2),
+                vec![3],
+                "the checkpoint at two leaves the third"
+            );
+            assert_eq!(
+                indexes(1, 3),
+                Vec::<u64>::new(),
+                "a segment below the checkpoint hands nothing"
+            );
+            assert_eq!(
+                indexes(2, 3),
+                vec![4, 5, 6],
+                "the next segment is whole above it"
+            );
+            assert_eq!(
+                indexes(2, 6),
+                Vec::<u64>::new(),
+                "and nothing once the checkpoint passed it"
+            );
             // the sealed segments know their size, which the retention budget reads
-            let sealed: Vec<_> = wal.segments().into_iter().filter(|segment| segment.sealed).collect();
+            let sealed: Vec<_> = wal
+                .segments()
+                .into_iter()
+                .filter(|segment| segment.sealed)
+                .collect();
             assert_eq!(sealed.len(), 2);
             assert!(sealed.iter().all(|segment| segment.bytes > 0), "{sealed:?}");
         };
         judge(&wal);
         wal.close().await.expect("failed to close");
-        let reopened = ShardWal::open(&path, 1 << 30, 1 << 20).await.expect("failed to reopen");
+        let reopened = ShardWal::open(&path, 1 << 30, 1 << 20)
+            .await
+            .expect("failed to reopen");
         judge(&reopened);
         reopened.close().await.expect("failed to close");
     });
@@ -534,12 +690,17 @@ fn markers_survive_the_deletion_of_their_segment() {
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
         let path = dir.path().join("wal");
         let group = GroupId(9);
-        let wal = ShardWal::open(&path, 1 << 30, 1 << 20).await.expect("failed to open");
+        let wal = ShardWal::open(&path, 1 << 30, 1 << 20)
+            .await
+            .expect("failed to open");
         let mut store = wal.store(group);
         append_durably(&mut store, (1..=6).map(|index| normal(index, 32)).collect()).await;
         let vote = openraft::Vote::new(3, ShardAddr::from(2));
         store.save_vote(&vote).await.expect("failed to vote");
-        store.save_committed(Some(log_id(1, 6))).await.expect("failed to record the commit");
+        store
+            .save_committed(Some(log_id(1, 6)))
+            .await
+            .expect("failed to record the commit");
         store.purge(log_id(1, 4)).await.expect("failed to purge");
         wal.flush().await.expect("failed to flush");
         // two rotations, and the segments the markers were first written in deleted
@@ -548,19 +709,41 @@ fn markers_survive_the_deletion_of_their_segment() {
         wal.rotate();
         wal.flush().await.expect("failed to flush after rotating");
         for generation in [1, 2] {
-            wal.delete_segment(generation).await.expect("failed to delete a sealed segment");
+            wal.delete_segment(generation)
+                .await
+                .expect("failed to delete a sealed segment");
         }
         assert_eq!(wal.segments().len(), 1, "{:?}", wal.segments());
         wal.close().await.expect("failed to close");
         // reopened, the markers are what they were
-        let reopened = ShardWal::open(&path, 1 << 30, 1 << 20).await.expect("failed to reopen");
+        let reopened = ShardWal::open(&path, 1 << 30, 1 << 20)
+            .await
+            .expect("failed to reopen");
         let mut store = reopened.store(group);
-        assert_eq!(store.purged_index(), Some(4), "the purge point was forgotten");
-        assert_eq!(reopened.vote_of(group), Some(vote), "the vote was forgotten");
-        assert_eq!(store.read_committed().await.expect("failed to read"), Some(log_id(1, 6)));
-        let state = store.get_log_state().await.expect("failed to read the log state");
+        assert_eq!(
+            store.purged_index(),
+            Some(4),
+            "the purge point was forgotten"
+        );
+        assert_eq!(
+            reopened.vote_of(group),
+            Some(vote),
+            "the vote was forgotten"
+        );
+        assert_eq!(
+            store.read_committed().await.expect("failed to read"),
+            Some(log_id(1, 6))
+        );
+        let state = store
+            .get_log_state()
+            .await
+            .expect("failed to read the log state");
         assert_eq!(state.last_purged_log_id, Some(log_id(1, 4)));
-        assert_eq!(state.last_log_id, Some(log_id(1, 4)), "the entries above the purge point were in a deleted segment");
+        assert_eq!(
+            state.last_log_id,
+            Some(log_id(1, 4)),
+            "the entries above the purge point were in a deleted segment"
+        );
         reopened.close().await.expect("failed to close");
     });
 }
@@ -575,43 +758,88 @@ fn a_forgotten_group_leaves_no_log_behind() {
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
         let path = dir.path().join("wal");
         let (retired, kept) = (GroupId(11), GroupId(12));
-        let wal = ShardWal::open(&path, 1 << 30, 1 << 20).await.expect("failed to open");
+        let wal = ShardWal::open(&path, 1 << 30, 1 << 20)
+            .await
+            .expect("failed to open");
         let mut retiring = wal.store(retired);
         let mut keeping = wal.store(kept);
         // both groups' frames in one segment, with a vote and a commit for the one retiring
-        append_durably(&mut retiring, (1..=5).map(|index| normal(index, 32)).collect()).await;
-        append_durably(&mut keeping, (1..=3).map(|index| normal(index, 32)).collect()).await;
-        retiring.save_vote(&openraft::Vote::new(2, ShardAddr::from(1))).await.expect("failed to vote");
-        retiring.save_committed(Some(log_id(1, 5))).await.expect("failed to record the commit");
+        append_durably(
+            &mut retiring,
+            (1..=5).map(|index| normal(index, 32)).collect(),
+        )
+        .await;
+        append_durably(
+            &mut keeping,
+            (1..=3).map(|index| normal(index, 32)).collect(),
+        )
+        .await;
+        retiring
+            .save_vote(&openraft::Vote::new(2, ShardAddr::from(1)))
+            .await
+            .expect("failed to vote");
+        retiring
+            .save_committed(Some(log_id(1, 5)))
+            .await
+            .expect("failed to record the commit");
         wal.flush().await.expect("failed to flush");
         let generation = wal.active_generation();
-        assert_eq!(wal.frames_in(generation, &[(retired, 0), (kept, 0)]).len(), 8);
+        assert_eq!(
+            wal.frames_in(generation, &[(retired, 0), (kept, 0)]).len(),
+            8
+        );
         // forgotten: the state is gone, the segment no longer names it, the other group's frames stay
         wal.forget(retired).expect("failed to forget");
         wal.flush().await.expect("failed to flush the marker");
-        assert!(wal.frames_in(generation, &[(retired, 0)]).is_empty(), "a forgotten group's frames were handed");
+        assert!(
+            wal.frames_in(generation, &[(retired, 0)]).is_empty(),
+            "a forgotten group's frames were handed"
+        );
         assert_eq!(wal.frames_in(generation, &[(kept, 0)]).len(), 3);
-        let segment = wal.segments().into_iter().find(|segment| segment.generation == generation).expect("the segment");
-        assert!(!segment.last.contains_key(&retired), "the segment still names the forgotten group");
+        let segment = wal
+            .segments()
+            .into_iter()
+            .find(|segment| segment.generation == generation)
+            .expect("the segment");
+        assert!(
+            !segment.last.contains_key(&retired),
+            "the segment still names the forgotten group"
+        );
         assert!(segment.last.contains_key(&kept));
         assert_eq!(wal.vote_of(retired), None);
         assert_eq!(wal.last_log_id_of(retired), None);
         wal.close().await.expect("failed to close");
         // reopened, the marker holds: nothing of the group is rebuilt from the frames before it
-        let reopened = ShardWal::open(&path, 1 << 30, 1 << 20).await.expect("failed to reopen");
+        let reopened = ShardWal::open(&path, 1 << 30, 1 << 20)
+            .await
+            .expect("failed to reopen");
         let mut store = reopened.store(retired);
         assert_eq!(reopened.vote_of(retired), None, "the vote came back");
-        assert_eq!(store.read_committed().await.expect("failed to read"), None, "the commit came back");
-        let state = store.get_log_state().await.expect("failed to read the log state");
+        assert_eq!(
+            store.read_committed().await.expect("failed to read"),
+            None,
+            "the commit came back"
+        );
+        let state = store
+            .get_log_state()
+            .await
+            .expect("failed to read the log state");
         assert_eq!(state.last_log_id, None, "the entries came back");
-        assert_eq!(reopened.last_log_id_of(kept).map(|log_id| log_id.index), Some(3), "the other group lost its log");
+        assert_eq!(
+            reopened.last_log_id_of(kept).map(|log_id| log_id.index),
+            Some(3),
+            "the other group lost its log"
+        );
         assert!(reopened.frames_in(generation, &[(retired, 0)]).is_empty());
         assert_eq!(reopened.frames_in(generation, &[(kept, 0)]).len(), 3);
         // a copy of the group added again starts clean and its new frames are its own
         let mut again = reopened.store(retired);
         append_durably(&mut again, vec![normal(1, 32)]).await;
         reopened.flush().await.expect("failed to flush");
-        assert_eq!(reopened.last_log_id_of(retired).map(|log_id| log_id.index), Some(1));
+        assert_eq!(
+            reopened.last_log_id_of(retired).map(|log_id| log_id.index),
+            Some(1)
+        );
         reopened.close().await.expect("failed to close");
     });
 }
@@ -650,28 +878,47 @@ fn checkpoint_and_retries_are_checksummed() {
             Some(log_id(1, 0)),
             openraft::Membership::new(
                 vec![members(&[1, 2, 3])],
-                members(&[1, 2, 3]).into_iter().map(|addr| (addr, addr)).collect::<std::collections::BTreeMap<_, _>>(),
+                members(&[1, 2, 3])
+                    .into_iter()
+                    .map(|addr| (addr, addr))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
             )
             .expect("a valid membership"),
         );
         // a checkpoint written by this build carries a checksum and reads back
         let mut file = Checkpoint::default();
-        file.groups.insert(GroupId(7).to_string(), GroupCheckpoint::new(Some(log_id(2, 9)), &membership));
-        file.write(dir.path()).await.expect("failed to write the checkpoint");
+        file.groups.insert(
+            GroupId(7).to_string(),
+            GroupCheckpoint::new(Some(log_id(2, 9)), &membership),
+        );
+        file.write(dir.path())
+            .await
+            .expect("failed to write the checkpoint");
         let text = std::fs::read_to_string(dir.path().join(CHECKPOINT_FILE)).expect("the file");
         assert!(text.contains("\"checksum\""), "{text}");
-        assert_eq!(Checkpoint::read(dir.path()).await.expect("failed to read"), file);
+        assert_eq!(
+            Checkpoint::read(dir.path()).await.expect("failed to read"),
+            file
+        );
         // a flipped digit in the index it names is refused by name
         let torn = text.replacen("\"index\": 9", "\"index\": 8", 1);
         assert_ne!(torn, text);
         std::fs::write(dir.path().join(CHECKPOINT_FILE), torn).expect("failed to rewrite");
-        let error = Checkpoint::read(dir.path()).await.expect_err("a torn checkpoint was read");
+        let error = Checkpoint::read(dir.path())
+            .await
+            .expect_err("a torn checkpoint was read");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("does not hash to its checksum"), "{error}");
+        assert!(
+            error.to_string().contains("does not hash to its checksum"),
+            "{error}"
+        );
         // a file from before checksums has none and is read as it was
         let legacy = serde_json::to_vec_pretty(&file).expect("json");
         std::fs::write(dir.path().join(CHECKPOINT_FILE), legacy).expect("failed to rewrite");
-        assert_eq!(Checkpoint::read(dir.path()).await.expect("failed to read"), file);
+        assert_eq!(
+            Checkpoint::read(dir.path()).await.expect("failed to read"),
+            file
+        );
         // the sidecar the same way
         let mut retries = Retries::default();
         retries.groups.insert(
@@ -694,20 +941,34 @@ fn checkpoint_and_retries_are_checksummed() {
                 )],
             },
         );
-        retries.write(dir.path()).await.expect("failed to write the sidecar");
+        retries
+            .write(dir.path())
+            .await
+            .expect("failed to write the sidecar");
         let bytes = std::fs::read(dir.path().join(RETRIES_FILE)).expect("the file");
         assert!(bytes.starts_with(RETRIES_MAGIC));
-        assert_eq!(Retries::read(dir.path()).await.expect("failed to read"), retries);
+        assert_eq!(
+            Retries::read(dir.path()).await.expect("failed to read"),
+            retries
+        );
         // a flipped byte in its payload is refused
         let mut torn = bytes.clone();
         let last = torn.len() - 1;
         torn[last] ^= 0x01;
         std::fs::write(dir.path().join(RETRIES_FILE), torn).expect("failed to rewrite");
-        let error = Retries::read(dir.path()).await.expect_err("a torn sidecar was read");
+        let error = Retries::read(dir.path())
+            .await
+            .expect_err("a torn sidecar was read");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("does not hash to its checksum"), "{error}");
+        assert!(
+            error.to_string().contains("does not hash to its checksum"),
+            "{error}"
+        );
         // and a sidecar from before checksums is the bare postcard, read as it was
         std::fs::write(dir.path().join(RETRIES_FILE), &bytes[16..]).expect("failed to rewrite");
-        assert_eq!(Retries::read(dir.path()).await.expect("failed to read"), retries);
+        assert_eq!(
+            Retries::read(dir.path()).await.expect("failed to read"),
+            retries
+        );
     });
 }

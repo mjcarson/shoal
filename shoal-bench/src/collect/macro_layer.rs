@@ -33,7 +33,10 @@ use crate::model::macro_layer::{MacroCaptureV2, WorkloadCapture, WorkloadRun};
 ///
 /// * `runs` - Each workload's result files, in the order the runs were taken
 /// * `label` - The name this capture is being taken under
-pub fn collect(runs: &BTreeMap<String, Vec<PathBuf>>, label: Option<String>) -> Result<MacroCaptureV2> {
+pub fn collect(
+    runs: &BTreeMap<String, Vec<PathBuf>>,
+    label: Option<String>,
+) -> Result<MacroCaptureV2> {
     // a capture with no workloads is not a capture
     if runs.is_empty() {
         bail!("the macro layer produced no runs to fold together");
@@ -327,8 +330,14 @@ mod tests {
         // each kept the middle of its own runs, which are different runs of the capture
         assert_eq!(folded.workloads["macro/a"].median_wall_clock_ns(), 2_000);
         assert_eq!(folded.workloads["macro/b"].median_wall_clock_ns(), 50_000);
-        assert_eq!(folded.workloads["macro/a"].stat_ns("insert", "p99"), Some(200));
-        assert_eq!(folded.workloads["macro/b"].stat_ns("insert", "p99"), Some(500));
+        assert_eq!(
+            folded.workloads["macro/a"].stat_ns("insert", "p99"),
+            Some(200)
+        );
+        assert_eq!(
+            folded.workloads["macro/b"].stat_ns("insert", "p99"),
+            Some(500)
+        );
     }
 
     /// A run file holding a different workload is refused rather than folded in
@@ -341,7 +350,13 @@ mod tests {
         let mut runs = BTreeMap::new();
         runs.insert(
             "macro/a".to_string(),
-            vec![write_run_as(dir.path(), "wrong.json", "macro/b", 1_000, 100)],
+            vec![write_run_as(
+                dir.path(),
+                "wrong.json",
+                "macro/b",
+                1_000,
+                100,
+            )],
         );
         let error = collect(&runs, None).expect_err("a mismatched run is an error");
         assert!(format!("{error}").contains("macro/b"), "{error}");

@@ -254,8 +254,9 @@ impl Encryption {
     /// a capture gives it, so the order here is the order that list declares and neither may be
     /// reshuffled to read better.
     pub fn all() -> Vec<Encryption> {
-        let mut built =
-            Vec::with_capacity(ROW_WIDTHS.len() * DEPTHS.len() * 2 + CLIENT_WIDTHS.len() * CLIENT_COUNTS.len() * 2);
+        let mut built = Vec::with_capacity(
+            ROW_WIDTHS.len() * DEPTHS.len() * 2 + CLIENT_WIDTHS.len() * CLIENT_COUNTS.len() * 2,
+        );
         // the depth sweep: one client, load depth varying, at every row width
         for wire in [Wire::Plain, Wire::Tls] {
             for row_bytes in ROW_WIDTHS {

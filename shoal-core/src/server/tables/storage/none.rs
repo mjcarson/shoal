@@ -28,7 +28,6 @@
 use glommio::io::ReadResult;
 use glommio::TaskQueueHandle;
 use kanal::{AsyncReceiver, AsyncSender};
-use tracing::Span;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
@@ -40,14 +39,15 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use tracing::Span;
 
 use super::{FlushProgress, IntentReadSupport, RecoveryStats, StorageSupport};
+use crate::server::database::ShoalDatabase;
 use crate::server::messages::ServerMsg;
 use crate::server::stage_profile::StageDurability;
 #[cfg(feature = "stage-profile")]
 use crate::server::stage_profile::StageStamps;
 use crate::server::{Conf, ServerError};
-use crate::server::database::ShoalDatabase;
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, TableNameSupport};
 use crate::storage::{FullArchiveMap, LoaderMsg, Loaders};
 use crate::tables::partitions::{MaybeLoaded, PartitionSupport};
@@ -204,7 +204,7 @@ impl<D: ShoalDatabase> StorageSupport for NoStorage<D> {
         >,
         for<'a> <P::Intent as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        >
+        >,
     {
         // an ephemeral table has nothing on disk to fold
         Ok(0)

@@ -200,13 +200,16 @@ impl<D: ShoalDatabase> MoveContext<D> {
                 .try_send(ControlRequest::Propose { command, reply })
                 .map_err(|_| "the control thread is not taking proposals".to_string())?;
             let remaining = PROGRESS_TIMEOUT.saturating_sub(started.elapsed());
-            let answered = glommio::timer::timeout(remaining, async { Ok(rx.as_async().recv().await) }).await;
+            let answered =
+                glommio::timer::timeout(remaining, async { Ok(rx.as_async().recv().await) }).await;
             last = match answered {
                 Ok(Ok(Ok(ControlResponse::Applied { .. }))) => {
                     crash_point::hit(&progress.phase, self.group);
                     return Ok(());
                 }
-                Ok(Ok(Ok(ControlResponse::Refused { reason }))) => return Err(format!("the progress was refused: {reason}")),
+                Ok(Ok(Ok(ControlResponse::Refused { reason }))) => {
+                    return Err(format!("the progress was refused: {reason}"))
+                }
                 Ok(Ok(Ok(other))) => format!("the progress was not applied: {other:?}"),
                 Ok(Ok(Err(error))) => error,
                 Ok(Err(_)) => "the control thread dropped the proposal".to_string(),
@@ -214,7 +217,9 @@ impl<D: ShoalDatabase> MoveContext<D> {
             };
             glommio::timer::sleep(Duration::from_millis(500)).await;
         }
-        Err(format!("the progress was not committed within {PROGRESS_TIMEOUT:?}: {last}"))
+        Err(format!(
+            "the progress was not committed within {PROGRESS_TIMEOUT:?}: {last}"
+        ))
     }
 
     /// Whether this shard still leads the group
@@ -226,7 +231,12 @@ impl<D: ShoalDatabase> MoveContext<D> {
     fn committed_nodes(&self) -> BTreeSet<ShardAddr> {
         let watch = self.raft.metrics();
         let metrics = watch.borrow_watched();
-        metrics.committed_membership_config.membership().nodes().map(|(addr, _)| *addr).collect()
+        metrics
+            .committed_membership_config
+            .membership()
+            .nodes()
+            .map(|(addr, _)| *addr)
+            .collect()
     }
 
     /// The group's committed voters, and whether the committed configuration is joint
@@ -307,7 +317,10 @@ pub async fn drive_group<D: ShoalDatabase>(context: MoveContext<D>) {
 ///
 /// * `context` - Everything the driver needs
 /// * `progress` - Where the group stands, moved as the phases go
-async fn drive_group_inner<D: ShoalDatabase>(context: &MoveContext<D>, progress: &mut GroupMove) -> Result<(), String> {
+async fn drive_group_inner<D: ShoalDatabase>(
+    context: &MoveContext<D>,
+    progress: &mut GroupMove,
+) -> Result<(), String> {
     let me = context.me.node;
     // the voters proposed: the record's target, less any member the group's committed
     // configuration does not name. a move adds its destination and nothing else, so a member
@@ -346,7 +359,9 @@ async fn drive_group_inner<D: ShoalDatabase>(context: &MoveContext<D>, progress:
         if me == context.from.node {
             let successor = target
                 .iter()
-                .find(|member| **member != context.to && **member != context.me && !context.is_down(**member))
+                .find(|member| {
+                    **member != context.to && **member != context.me && !context.is_down(**member)
+                })
                 .copied()
                 .ok_or_else(|| "no member of the target is up to take the lead".to_string())?;
             event!(Level::INFO, msg = "this leader is the move's source; transferring the lead before reconfiguring", op = %context.op, group = %context.group, to = %successor);
@@ -358,7 +373,10 @@ async fn drive_group_inner<D: ShoalDatabase>(context: &MoveContext<D>, progress:
                 .transfer_leader(successor)
                 .await
                 .map_err(|error| format!("transferring the lead to {successor}: {error}"))?;
-            return Err(format!("{NOT_LEADER}group {}: the lead was handed to {successor}", context.group));
+            return Err(format!(
+                "{NOT_LEADER}group {}: the lead was handed to {successor}",
+                context.group
+            ));
         }
         step(progress, MovePhase::Reconfiguring);
         context.commit(progress).await?;
@@ -372,7 +390,9 @@ async fn drive_group_inner<D: ShoalDatabase>(context: &MoveContext<D>, progress:
     }
     // the activation barrier: the destination's own apply past the uniform membership
     if progress.phase.rank() < MovePhase::Activated.rank() {
-        let config = progress.config.ok_or_else(|| "a configured group records no uniform index".to_string())?;
+        let config = progress
+            .config
+            .ok_or_else(|| "a configured group records no uniform index".to_string())?;
         activate(context, config).await?;
         step(progress, MovePhase::Activated);
         context.commit(progress).await?;
@@ -405,9 +425,17 @@ async fn drive_group_inner<D: ShoalDatabase>(context: &MoveContext<D>, progress:
 /// * `phase` - The phase entered
 fn step(progress: &mut GroupMove, phase: MovePhase) {
     let now = now_ms();
-    let started = if progress.stats.since == 0 { now } else { progress.stats.since };
+    let started = if progress.stats.since == 0 {
+        now
+    } else {
+        progress.stats.since
+    };
     let spent = now.saturating_sub(started);
-    *progress.stats.phase_ms.entry(progress.phase.name().to_string()).or_default() += spent;
+    *progress
+        .stats
+        .phase_ms
+        .entry(progress.phase.name().to_string())
+        .or_default() += spent;
     progress.stats.since = now;
     progress.phase = phase;
 }
@@ -416,7 +444,9 @@ fn step(progress: &mut GroupMove, phase: MovePhase) {
 pub(super) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 /// Add the destination as a learner, which a repeat re-adds harmlessly
@@ -425,14 +455,21 @@ pub(super) fn now_ms() -> u64 {
 ///
 /// * `context` - The driver
 async fn add_learner<D: ShoalDatabase>(context: &MoveContext<D>) -> Result<(), String> {
-    match context.raft.add_learner(context.to, context.to, false).await {
+    match context
+        .raft
+        .add_learner(context.to, context.to, false)
+        .await
+    {
         Ok(_) => Ok(()),
         Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward))) => Err(format!(
             "{NOT_LEADER}group {}: the leader is {:?}",
             context.group,
             forward.leader_node.or(forward.leader_id)
         )),
-        Err(error) => Err(format!("adding {} as a learner of group {}: {error}", context.to, context.group)),
+        Err(error) => Err(format!(
+            "adding {} as a learner of group {}: {error}",
+            context.to, context.group
+        )),
     }
 }
 
@@ -445,14 +482,23 @@ async fn add_learner<D: ShoalDatabase>(context: &MoveContext<D>) -> Result<(), S
 ///
 /// * `context` - The driver
 /// * `progress` - The progress, charged as the catch-up goes
-async fn catch_up<D: ShoalDatabase>(context: &MoveContext<D>, progress: &mut GroupMove) -> Result<(), String> {
+async fn catch_up<D: ShoalDatabase>(
+    context: &MoveContext<D>,
+    progress: &mut GroupMove,
+) -> Result<(), String> {
     let started = Instant::now();
     loop {
         if !context.leads() {
-            return Err(format!("{NOT_LEADER}group {}: the lead was lost while the destination caught up", context.group));
+            return Err(format!(
+                "{NOT_LEADER}group {}: the lead was lost while the destination caught up",
+                context.group
+            ));
         }
         if started.elapsed() > context.timeout {
-            return Err(format!("{} did not catch up within {:?}", context.to, context.timeout));
+            return Err(format!(
+                "{} did not catch up within {:?}",
+                context.to, context.timeout
+            ));
         }
         let (matched, last) = context.destination_lag();
         progress.stats.bytes = context.network.bytes_sent_to(context.group, context.to);
@@ -483,15 +529,22 @@ async fn catch_up<D: ShoalDatabase>(context: &MoveContext<D>, progress: &mut Gro
 ///
 /// * `context` - The driver
 /// * `target` - The voters the group ends with
-async fn reconfigure<D: ShoalDatabase>(context: &MoveContext<D>, target: &BTreeSet<ShardAddr>) -> Result<u64, String> {
+async fn reconfigure<D: ShoalDatabase>(
+    context: &MoveContext<D>,
+    target: &BTreeSet<ShardAddr>,
+) -> Result<u64, String> {
     let started = Instant::now();
     loop {
         if started.elapsed() > context.timeout {
-            return Err(format!("the membership transition did not commit within {:?}", context.timeout));
+            return Err(format!(
+                "the membership transition did not commit within {:?}",
+                context.timeout
+            ));
         }
         let (voters, joint, index) = context.committed_voters();
         if voters == *target && !joint {
-            let index = index.ok_or_else(|| "a committed membership records no index".to_string())?;
+            let index =
+                index.ok_or_else(|| "a committed membership records no index".to_string())?;
             event!(Level::INFO, msg = "the uniform membership naming the target is committed", op = %context.op, group = %context.group, index);
             return Ok(index);
         }
@@ -506,10 +559,17 @@ async fn reconfigure<D: ShoalDatabase>(context: &MoveContext<D>, target: &BTreeS
                 ))
             }
             // a change still uncommitted is waited for, not failed
-            Err(RaftError::APIError(ClientWriteError::ChangeMembershipError(ChangeMembershipError::InProgress(_)))) => {
+            Err(RaftError::APIError(ClientWriteError::ChangeMembershipError(
+                ChangeMembershipError::InProgress(_),
+            ))) => {
                 glommio::timer::sleep(POLL).await;
             }
-            Err(error) => return Err(format!("changing the membership of group {}: {error}", context.group)),
+            Err(error) => {
+                return Err(format!(
+                    "changing the membership of group {}: {error}",
+                    context.group
+                ))
+            }
         }
         glommio::timer::sleep(POLL).await;
     }
@@ -526,16 +586,25 @@ async fn activate<D: ShoalDatabase>(context: &MoveContext<D>, config: u64) -> Re
     let peer = ShardPeer::new(context.to, context.network.clone());
     loop {
         if !context.leads() {
-            return Err(format!("{NOT_LEADER}group {}: the lead was lost while the destination activated", context.group));
+            return Err(format!(
+                "{NOT_LEADER}group {}: the lead was lost while the destination activated",
+                context.group
+            ));
         }
         if started.elapsed() > context.timeout {
-            return Err(format!("{} did not apply the uniform membership at {config} within {:?}", context.to, context.timeout));
+            return Err(format!(
+                "{} did not apply the uniform membership at {config} within {:?}",
+                context.to, context.timeout
+            ));
         }
         // durable on the destination first, by the leader's own replication
         let (matched, _) = context.destination_lag();
         if matched.is_some_and(|matched| matched >= config) {
             // then applied there, by its own word
-            match peer.applied(context.group, context.op, config, PROBE_TIMEOUT).await {
+            match peer
+                .applied(context.group, context.op, config, PROBE_TIMEOUT)
+                .await
+            {
                 Ok(applied) if applied >= config => {
                     event!(Level::INFO, msg = "the destination applied the uniform membership", op = %context.op, group = %context.group, to = %context.to, applied, config);
                     return Ok(());
@@ -620,8 +689,16 @@ where
         let Some(control) = self.control.clone() else {
             return;
         };
-        let incarnation = self.local.as_ref().map_or(0, |local| local.borrow().incarnation);
-        let migration = self.conf.cluster.as_ref().map(|cluster| cluster.migration.clone()).unwrap_or_default();
+        let incarnation = self
+            .local
+            .as_ref()
+            .map_or(0, |local| local.borrow().incarnation);
+        let migration = self
+            .conf
+            .cluster
+            .as_ref()
+            .map(|cluster| cluster.migration.clone())
+            .unwrap_or_default();
         let loop_tx = self.shard_local_tx.clone();
         let map_cell = self.map.clone();
         let Some(replication) = self.replication.as_mut() else {
@@ -723,7 +800,11 @@ struct RetiredMarker {
 /// * `wal_dir` - The shard's WAL directory
 /// * `group` - The group
 /// * `copy` - The retired copy
-pub async fn write_retired(wal_dir: &std::path::Path, group: GroupId, copy: &RetiredCopy) -> std::io::Result<()> {
+pub async fn write_retired(
+    wal_dir: &std::path::Path,
+    group: GroupId,
+    copy: &RetiredCopy,
+) -> std::io::Result<()> {
     let dir = wal_dir.join(RETIRED_DIR);
     std::fs::create_dir_all(&dir)?;
     let marker = RetiredMarker {
@@ -733,7 +814,8 @@ pub async fn write_retired(wal_dir: &std::path::Path, group: GroupId, copy: &Ret
         volatile: copy.volatile,
         at_ms: now_ms().saturating_sub(u64::try_from(copy.at.elapsed().as_millis()).unwrap_or(0)),
     };
-    let bytes = postcard::to_allocvec(&marker).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let bytes = postcard::to_allocvec(&marker)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     crate::server::wal::write_atomic(&dir, &format!("{group}"), bytes).await
 }
 
@@ -754,8 +836,14 @@ pub async fn clear_retired(wal_dir: &std::path::Path, group: GroupId) -> std::io
     let directory = glommio::io::Directory::open(wal_dir.join(RETIRED_DIR))
         .await
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    directory.sync().await.map_err(|error| std::io::Error::other(error.to_string()))?;
-    directory.close().await.map_err(|error| std::io::Error::other(error.to_string()))?;
+    directory
+        .sync()
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    directory
+        .close()
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(())
 }
 
@@ -792,7 +880,11 @@ pub fn scan_retired(wal_dir: &std::path::Path) -> std::collections::HashMap<Grou
                 reclaiming: false,
             },
             None => {
-                tracing::event!(tracing::Level::ERROR, msg = "a retired marker does not decode; the copy is held retired by name", group = name);
+                tracing::event!(
+                    tracing::Level::ERROR,
+                    msg = "a retired marker does not decode; the copy is held retired by name",
+                    group = name
+                );
                 RetiredCopy {
                     table: crate::shared::identity::TableId(0),
                     tablets: Vec::new(),
@@ -829,7 +921,12 @@ where
     /// * `group` - The group
     /// * `slot` - The copy, taken out of the groups
     /// * `op` - The move that retired it
-    pub(super) async fn retire_group(&mut self, group: GroupId, slot: super::groups::Group<D>, op: Uuid) -> Result<(), ServerError> {
+    pub(super) async fn retire_group(
+        &mut self,
+        group: GroupId,
+        slot: super::groups::Group<D>,
+        op: Uuid,
+    ) -> Result<(), ServerError> {
         use crate::shared::traits::TableNameSupport as _;
         let table = slot.table;
         let tablets = slot.spec.tablets.clone();
@@ -887,8 +984,13 @@ where
             .conf
             .cluster
             .as_ref()
-            .map_or(Duration::from_secs(300), |cluster| cluster.migration.retire_after.duration());
-        let sinks: std::collections::HashMap<crate::shared::identity::TableId, kanal::AsyncSender<crate::storage::CompactionJob>> = {
+            .map_or(Duration::from_secs(300), |cluster| {
+                cluster.migration.retire_after.duration()
+            });
+        let sinks: std::collections::HashMap<
+            crate::shared::identity::TableId,
+            kanal::AsyncSender<crate::storage::CompactionJob>,
+        > = {
             use crate::shared::traits::TableNameSupport as _;
             self.tables
                 .compaction_sinks()
@@ -937,7 +1039,11 @@ where
     ///
     /// * `group` - The group
     /// * `outcome` - Whether the drop landed
-    pub(super) async fn handle_tablets_dropped(&mut self, group: GroupId, outcome: Result<u64, String>) -> Result<(), ServerError> {
+    pub(super) async fn handle_tablets_dropped(
+        &mut self,
+        group: GroupId,
+        outcome: Result<u64, String>,
+    ) -> Result<(), ServerError> {
         match outcome {
             Ok(removed) => {
                 event!(Level::INFO, msg = "a retired copy's archived partitions are gone", group = %group, removed);
@@ -945,7 +1051,11 @@ where
             }
             Err(error) => {
                 event!(Level::ERROR, msg = "a retired copy's partitions could not be dropped; trying again next sweep", group = %group, error);
-                if let Some(copy) = self.replication.as_mut().and_then(|replication| replication.retired.get_mut(&group)) {
+                if let Some(copy) = self
+                    .replication
+                    .as_mut()
+                    .and_then(|replication| replication.retired.get_mut(&group))
+                {
                     copy.reclaiming = false;
                 }
                 Ok(())
@@ -969,7 +1079,11 @@ where
         let snapshots = wal_dir.join(crate::server::replication::snapshot::SNAPSHOTS_DIR);
         if let Ok(entries) = std::fs::read_dir(&snapshots) {
             for entry in entries.flatten() {
-                if entry.file_name().to_string_lossy().starts_with(&format!("{group}-")) {
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{group}-"))
+                {
                     let _ = std::fs::remove_file(entry.path());
                 }
             }
@@ -1027,22 +1141,49 @@ where
             "tablet {tablet} of {table} is not served on this node at map version {version}: its copy retired here or was never here"
         );
         if meta.from_peer {
-            let payload = crate::shared::protocol::peer::encode_error_payload(ErrorCode::StaleTopology.as_u16(), &msg);
+            let payload = crate::shared::protocol::peer::encode_error_payload(
+                ErrorCode::StaleTopology.as_u16(),
+                &msg,
+            );
             let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
             aligned.extend_from_slice(&payload);
             // a share answers under the gather's client, index and route; a whole answer under its own
             let (client, id, index, end, route) = match &gathered_meta {
-                Some(gathered) => (gathered.client, gathered.id, gathered.index, gathered.end, (gathered.read.attempt, gathered.read.slot)),
-                None => (meta.client, meta.id, meta.index, meta.end, (meta.read.attempt, 0)),
+                Some(gathered) => (
+                    gathered.client,
+                    gathered.id,
+                    gathered.index,
+                    gathered.end,
+                    (gathered.read.attempt, gathered.read.slot),
+                ),
+                None => (
+                    meta.client,
+                    meta.id,
+                    meta.index,
+                    meta.end,
+                    (meta.read.attempt, 0),
+                ),
             };
             meta.stamps.mark_exec_done();
             meta.stamps.mark_replied();
             return self
-                .reply_sealed(client, id, index, end, crate::server::messages::ReplyKind::Stale, span, meta.stamps, aligned, None, route)
+                .reply_sealed(
+                    client,
+                    id,
+                    index,
+                    end,
+                    crate::server::messages::ReplyKind::Stale,
+                    span,
+                    meta.stamps,
+                    aligned,
+                    None,
+                    route,
+                )
                 .await;
         }
         let error = crate::shared::responses::ResponseError::new(ErrorCode::StaleTopology, msg);
-        self.answer_read_failure(meta, query, span, gathered_meta, error).await
+        self.answer_read_failure(meta, query, span, gathered_meta, error)
+            .await
     }
 
     /// Whether a group on this shard serves a table's tablet
@@ -1053,9 +1194,11 @@ where
     /// * `tablet` - The tablet
     pub(super) fn serves_tablet(&self, table: D::TableNames, tablet: u16) -> bool {
         use crate::shared::traits::TableNameSupport as _;
-        self.replication
-            .as_ref()
-            .is_some_and(|replication| replication.tablets.contains_key(&(table.table_id(), tablet)))
+        self.replication.as_ref().is_some_and(|replication| {
+            replication
+                .tablets
+                .contains_key(&(table.table_id(), tablet))
+        })
     }
 
     /// The tablet of a query no group on this shard serves, if there is one
@@ -1067,7 +1210,10 @@ where
     /// # Arguments
     ///
     /// * `query` - The query
-    pub(super) fn stale_tablet(&self, query: &<D::ClientType as QuerySupport>::QueryKinds) -> Option<u16> {
+    pub(super) fn stale_tablet(
+        &self,
+        query: &<D::ClientType as QuerySupport>::QueryKinds,
+    ) -> Option<u16> {
         use crate::shared::traits::{ShoalQuerySupport as _, TableNameSupport as _};
         let replication = self.replication.as_ref()?;
         let table = D::ClientType::query_table_name(query).table_id();

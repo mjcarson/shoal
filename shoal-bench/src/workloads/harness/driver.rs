@@ -32,9 +32,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
+use shoal::Shoal;
 use shoal::client::{QuerySuceededOpts, SendOptions};
 use shoal::shared::responses::ResponseActionNames;
-use shoal::Shoal;
 
 use crate::workloads::schema::BenchClient;
 use crate::workloads::workload::{Measurement, TimelineSample};
@@ -133,7 +133,15 @@ where
         "the in flight gate must be well above the batch size"
     );
     // the shape every workload but the transport pair wants
-    drive_with(client, batches, op, warmup, StreamMode::Unordered, IN_FLIGHT).await
+    drive_with(
+        client,
+        batches,
+        op,
+        warmup,
+        StreamMode::Unordered,
+        IN_FLIGHT,
+    )
+    .await
 }
 
 /// Runs a stream of batches at the server over a named stream mode and gate
@@ -258,7 +266,10 @@ where
         }
     }
     // close the stream so the server stops holding its channel open
-    queries_tx.close().await.context("failed to close a stream")?;
+    queries_tx
+        .close()
+        .await
+        .context("failed to close a stream")?;
     Ok(measured)
 }
 

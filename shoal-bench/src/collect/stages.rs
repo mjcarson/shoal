@@ -50,7 +50,10 @@ pub fn collect(wrote: &[PathBuf], into: &Path) -> Result<StageReports> {
         // a report with no workload name cannot be keyed, and silently filing it under a guess
         // would put one workload's breakdown under another's name
         let workload = report.workload.clone().ok_or_else(|| {
-            anyhow::anyhow!("{} does not say which workload it describes", path.display())
+            anyhow::anyhow!(
+                "{} does not say which workload it describes",
+                path.display()
+            )
         })?;
         // and two reports claiming one workload is a run that was planned twice, which would leave
         // the artifact describing whichever ran last - the defect this whole change is about
@@ -163,7 +166,10 @@ mod tests {
             Some(name) => format!(r#""workload":"{name}","#),
             None => String::new(),
         };
-        let path = dir.join(format!("stages-{}.json", workload.unwrap_or("anon").replace('/', "-")));
+        let path = dir.join(format!(
+            "stages-{}.json",
+            workload.unwrap_or("anon").replace('/', "-")
+        ));
         std::fs::write(
             &path,
             format!(
@@ -276,7 +282,10 @@ mod tests {
         assert_eq!(artifact.join().joined, 200_000);
         // the emptiest report is what decides, and it names itself
         let err = check(&into).expect_err("a layer is only as good as its emptiest report");
-        assert!(format!("{err}").contains("macro/grid/unsorted/r50/1024"), "{err}");
+        assert!(
+            format!("{err}").contains("macro/grid/unsorted/r50/1024"),
+            "{err}"
+        );
     }
 
     /// Every report is described, not just whichever one the sum came from
@@ -290,7 +299,10 @@ mod tests {
         let into = dir.path().join("L.stages.json");
         collect(&wrote, &into).expect("it collects");
         let described = check(&into).expect("both joined");
-        assert!(described.contains("macro/grid/unsorted/r50/1024"), "{described}");
+        assert!(
+            described.contains("macro/grid/unsorted/r50/1024"),
+            "{described}"
+        );
         assert!(described.contains("macro/insert_unsorted"), "{described}");
     }
 

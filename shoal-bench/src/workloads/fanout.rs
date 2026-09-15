@@ -48,7 +48,7 @@ use anyhow::Result;
 use crate::model::macro_layer::{ScaleFacts, Timing};
 use crate::workloads::harness::driver::{self, Batch};
 use crate::workloads::harness::seed::{Scale, Seeded};
-use crate::workloads::schema::{sort_key, BenchClient, Event, EventGet};
+use crate::workloads::schema::{BenchClient, Event, EventGet, sort_key};
 use crate::workloads::workload::{
     BoxFuture, ConfOverrides, Context, Measurement, ServerNeed, Workload, WorkloadPlan,
 };
@@ -116,8 +116,9 @@ impl Fanout {
         // `workload_ids::IDS` declares and therefore the order a capture runs them in
         for residency in [Residency::Resident, Residency::Evicted] {
             for keys in KEY_COUNTS {
-                let id: &'static str =
-                    Box::leak(format!("macro/fanout/{}/{keys}", residency.as_str()).into_boxed_str());
+                let id: &'static str = Box::leak(
+                    format!("macro/fanout/{}/{keys}", residency.as_str()).into_boxed_str(),
+                );
                 built.push(Fanout {
                     residency,
                     keys,
@@ -286,8 +287,7 @@ impl Workload for Fanout {
                     // layout order
                     let named: Vec<u64> = (0..keys)
                         .map(|offset| {
-                            (index.wrapping_mul(keys).wrapping_add(offset))
-                                .wrapping_mul(stride)
+                            (index.wrapping_mul(keys).wrapping_add(offset)).wrapping_mul(stride)
                                 % partitions
                         })
                         .collect();
@@ -303,7 +303,7 @@ impl Workload for Fanout {
 
 #[cfg(test)]
 mod tests {
-    use super::{Fanout, Residency, KEY_COUNTS};
+    use super::{Fanout, KEY_COUNTS, Residency};
     use crate::model::macro_layer::Timing;
     use crate::workloads::harness::seed::Scale;
     use crate::workloads::workload::Workload;

@@ -16,13 +16,13 @@ use rkyv::{Archive, Deserialize, Serialize};
 use std::hint::black_box;
 use std::ops::Bound;
 
+use shoal::server::tables::bench_exports::{
+    MaybeLoaded, RowSink, SeekBytes, SortedPartition, ValidatedArchive,
+};
 use shoal::shared::queries::{SortRange, SortSelect, SortedExists, SortedGet};
 use shoal::shared::traits::RkyvSupport;
 use shoal::traits::ShoalProjection;
 use shoal::{FileSystem, PersistentSortedTable, ShoalSortedTable};
-use shoal::server::tables::bench_exports::{
-    MaybeLoaded, RowSink, SeekBytes, SortedPartition, ValidatedArchive,
-};
 
 /// The partition sizes every scan benchmark is run at
 ///
@@ -295,21 +295,25 @@ fn bench_archived_scan(c: &mut Criterion) {
         // why: `access` validates the whole buffer before anything can be sought in it, so a
         // cold get pays for the size of the partition it landed in even when it wants one row
         // of it. The seek that follows is the cheap half. See `codec/access` for the split.
-        group.bench_with_input(BenchmarkId::new("access_and_one_row", size), &size, |b, _| {
-            b.iter(|| {
-                // access the archive the way a cold read does
-                let access =
-                    <SortedPartition<TitleByKeyword> as RkyvSupport>::access(black_box(&raw))
-                        .unwrap();
-                // walk to the one row this get named and project it out of the archive
-                let mut found: Vec<TitleByKeyword> = Vec::with_capacity(1);
-                for row in access.live_row_values() {
-                    found.push(<TitleByKeyword as ShoalProjection>::from_archived(row));
-                    break;
-                }
-                black_box(found)
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("access_and_one_row", size),
+            &size,
+            |b, _| {
+                b.iter(|| {
+                    // access the archive the way a cold read does
+                    let access =
+                        <SortedPartition<TitleByKeyword> as RkyvSupport>::access(black_box(&raw))
+                            .unwrap();
+                    // walk to the one row this get named and project it out of the archive
+                    let mut found: Vec<TitleByKeyword> = Vec::with_capacity(1);
+                    for row in access.live_row_values() {
+                        found.push(<TitleByKeyword as ShoalProjection>::from_archived(row));
+                        break;
+                    }
+                    black_box(found)
+                });
+            },
+        );
         // walking a whole archive, which is what an unbounded cold get does
         group.throughput(Throughput::Elements(size as u64));
         group.bench_with_input(BenchmarkId::new("walk_all", size), &size, |b, &size| {
@@ -433,7 +437,11 @@ fn bench_maybe_loaded(c: &mut Criterion) {
             b.iter_batched(
                 // each iteration needs its own buffer, since the constructor takes it
                 || raw.clone(),
-                |raw| black_box(ValidatedArchive::<SortedPartition<TitleByKeyword>, _>::new(raw)),
+                |raw| {
+                    black_box(ValidatedArchive::<SortedPartition<TitleByKeyword>, _>::new(
+                        raw,
+                    ))
+                },
                 BatchSize::SmallInput,
             );
         });
@@ -503,17 +511,13 @@ fn bench_partition_codec(c: &mut Criterion) {
         let archived = <SortedPartition<TitleByKeyword> as RkyvSupport>::serialize(&partition);
         group.throughput(Throughput::Bytes(archived.len() as u64));
         // serializing is what a compaction pays per partition it rewrites
-        group.bench_with_input(
-            BenchmarkId::new("serialize", size),
-            &size,
-            |b, _| {
-                b.iter(|| {
-                    black_box(<SortedPartition<TitleByKeyword> as RkyvSupport>::serialize(
-                        black_box(&partition),
-                    ))
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("serialize", size), &size, |b, _| {
+            b.iter(|| {
+                black_box(<SortedPartition<TitleByKeyword> as RkyvSupport>::serialize(
+                    black_box(&partition),
+                ))
+            });
+        });
         // accessing is what a cold read pays before it can seek at all
         group.bench_with_input(BenchmarkId::new("access", size), &size, |b, _| {
             b.iter(|| {

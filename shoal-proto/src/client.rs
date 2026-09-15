@@ -4,8 +4,8 @@
 //! the client crate without making the protocol depend on it. Nothing here touches a socket or
 //! a runtime.
 
-use rkyv::Archive;
 use rkyv::option::ArchivedOption;
+use rkyv::Archive;
 
 use crate::shared::responses::ArchivedGetRows;
 use crate::shared::traits::QuerySupport;

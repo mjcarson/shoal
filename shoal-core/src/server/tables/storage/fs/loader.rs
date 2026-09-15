@@ -10,11 +10,11 @@ use glommio::{Task, TaskQueueHandle};
 use kanal::{AsyncReceiver, AsyncSender};
 use tracing::{event, instrument, Level, Span};
 
+use crate::server::database::ShoalDatabase;
 use crate::server::messages::{LoadedPartition, LoadedPartitionKinds, ServerMsg};
 use crate::server::{ServerError, ShoalError};
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::responses::ResponseError;
-use crate::server::database::ShoalDatabase;
 use crate::storage::fs::ArchiveMap;
 use crate::storage::{FilteredFullArchiveMap, LoaderMsg};
 
@@ -350,8 +350,14 @@ impl<D: ShoalDatabase> FsLoader<D> {
         let task = glommio::spawn_local_into(
             async move {
                 // try to load this partition from disk
-                read_partition(table_name, partition_id, table_map, read_span, shard_local_tx)
-                    .await
+                read_partition(
+                    table_name,
+                    partition_id,
+                    table_map,
+                    read_span,
+                    shard_local_tx,
+                )
+                .await
             },
             self.medium_priority,
         )?;
@@ -411,8 +417,9 @@ impl<D: ShoalDatabase> FsLoader<D> {
                     span,
                 } => {
                     // try to spawn this task, under the span of the query that asked for it
-                    if let Err(error) =
-                        self.spawn_task(table_name, partition_id, span.clone()).await
+                    if let Err(error) = self
+                        .spawn_task(table_name, partition_id, span.clone())
+                        .await
                     {
                         // this read never started, so nothing else is going to tell our shard
                         // about it and the queries parked on it would wait forever

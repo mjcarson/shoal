@@ -146,8 +146,11 @@ pub fn draw(spec: &Spec, series: &[Series]) -> Result<String> {
     // sorted by x so the line is drawn left to right rather than folding back on itself
     let mut shown: Vec<Series> = series.iter().take(MAX_SERIES).cloned().collect();
     for line in &mut shown {
-        line.points
-            .sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+        line.points.sort_by(|left, right| {
+            left.0
+                .partial_cmp(&right.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
     let dropped = series.len().saturating_sub(shown.len());
     let (min_x, max_x) = span(&shown, spec.x_axis, |point| point.0)?;
@@ -506,8 +509,11 @@ mod tests {
         let points: Vec<(f64, f64)> = (1..=40)
             .map(|step| (f64::from(step) * 10.0, f64::from(step)))
             .collect();
-        let svg = draw(&spec(Axis::Linear, Axis::Linear), &[series("many", &points)])
-            .expect("it draws");
+        let svg = draw(
+            &spec(Axis::Linear, Axis::Linear),
+            &[series("many", &points)],
+        )
+        .expect("it draws");
         assert!(!svg.contains("NaN"));
         // forty labels would not fit, so far fewer than forty were drawn
         assert!(
@@ -553,7 +559,10 @@ mod tests {
     fn a_flat_series_still_draws() {
         let svg = draw(
             &spec(Axis::Linear, Axis::Linear),
-            &[series("flat", &[(0.0, 100.0), (50.0, 100.0), (100.0, 100.0)])],
+            &[series(
+                "flat",
+                &[(0.0, 100.0), (50.0, 100.0), (100.0, 100.0)],
+            )],
         )
         .expect("it draws");
         assert!(!svg.contains("NaN"));
@@ -571,7 +580,10 @@ mod tests {
             })
             .collect();
         let svg = draw(&spec(Axis::Linear, Axis::Linear), &lines).expect("it draws");
-        assert!(svg.contains("3 further series not drawn"), "the tail was not declared");
+        assert!(
+            svg.contains("3 further series not drawn"),
+            "the tail was not declared"
+        );
     }
 
     /// Nothing to draw is an error rather than an empty chart

@@ -62,7 +62,10 @@ impl Sample {
     /// * `reference` - What node zero said at about the same time
     #[must_use]
     pub fn of(at: Duration, report: &NodeReplication, reference: &NodeReplication) -> Self {
-        let all_up = report.shards.iter().all(|shard| shard.groups.iter().all(|group| group.up));
+        let all_up = report
+            .shards
+            .iter()
+            .all(|shard| shard.groups.iter().all(|group| group.up));
         let applied = report
             .shards
             .iter()
@@ -72,13 +75,24 @@ impl Sample {
         let committed: std::collections::HashMap<_, u64> = reference
             .shards
             .iter()
-            .flat_map(|shard| shard.groups.iter().map(|group| (group.group, group.committed)))
+            .flat_map(|shard| {
+                shard
+                    .groups
+                    .iter()
+                    .map(|group| (group.group, group.committed))
+            })
             .collect();
         let lag_max = report
             .shards
             .iter()
             .flat_map(|shard| shard.groups.iter())
-            .map(|group| committed.get(&group.group).copied().unwrap_or(0).saturating_sub(group.applied))
+            .map(|group| {
+                committed
+                    .get(&group.group)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_sub(group.applied)
+            })
             .max()
             .unwrap_or(0);
         Sample {
@@ -151,7 +165,11 @@ pub fn sample(
 /// * `runtime` - A runtime to read it on
 /// * `addr` - The endpoint
 /// * `index` - The node, for the error
-fn read_report(runtime: &tokio::runtime::Runtime, addr: &str, index: u32) -> Result<NodeReplication> {
+fn read_report(
+    runtime: &tokio::runtime::Runtime,
+    addr: &str,
+    index: u32,
+) -> Result<NodeReplication> {
     let value = runtime.block_on(async {
         let client = shoal::Shoal::<crate::workloads::schema::BenchClient>::new(addr)
             .await
@@ -169,7 +187,8 @@ fn read_report(runtime: &tokio::runtime::Runtime, addr: &str, index: u32) -> Res
             other => bail!("node {index} refused a replication read: {other:?}"),
         }
     })?;
-    serde_json::from_value(value).with_context(|| format!("node {index}'s replication report did not parse"))
+    serde_json::from_value(value)
+        .with_context(|| format!("node {index}'s replication report did not parse"))
 }
 
 /// Cut a returning node's samples into its record
@@ -195,7 +214,9 @@ pub fn cut(restarted_at: Duration, samples: &[Sample]) -> CatchupFacts {
     let snapshot_bytes = last.map_or(0, |sample| sample.snapshot_bytes);
     let snapshots = last.map_or(0, |sample| sample.snapshots);
     let snapshot_entries = last.map_or(0, |sample| sample.snapshot_entries);
-    let grown = last.zip(first).map_or(0, |(last, first)| last.applied.saturating_sub(first.applied));
+    let grown = last.zip(first).map_or(0, |(last, first)| {
+        last.applied.saturating_sub(first.applied)
+    });
     let by = match (converged, snapshots) {
         (None, _) => "none",
         (Some(_), 0) => "log",
@@ -227,11 +248,19 @@ pub fn cut(restarted_at: Duration, samples: &[Sample]) -> CatchupFacts {
 mod tests {
     use std::time::Duration;
 
-    use super::{cut, Sample};
+    use super::{Sample, cut};
     use crate::model::macro_layer::{CatchupFacts, ClusterFacts, FaultFacts};
 
     /// A sample at a second with the given lag and counters
-    fn at(second: u64, lag: u64, installing: u64, snapshot_bytes: u64, snapshots: u64, snapshot_entries: u64, applied: u64) -> Sample {
+    fn at(
+        second: u64,
+        lag: u64,
+        installing: u64,
+        snapshot_bytes: u64,
+        snapshots: u64,
+        snapshot_entries: u64,
+        applied: u64,
+    ) -> Sample {
         Sample {
             at: Duration::from_secs(second),
             lag_max: lag,
@@ -274,16 +303,33 @@ mod tests {
         let back: CatchupFacts = serde_json::from_str(&json).expect("loads");
         assert_eq!(back, facts);
         // a log catch-up converges with no snapshot; a single converged sample is not held
-        let by_log = cut(Duration::from_secs(10), &[at(10, 12, 0, 0, 0, 0, 100), at(11, 0, 0, 0, 0, 0, 112), at(12, 0, 0, 0, 0, 0, 112)]);
+        let by_log = cut(
+            Duration::from_secs(10),
+            &[
+                at(10, 12, 0, 0, 0, 0, 100),
+                at(11, 0, 0, 0, 0, 0, 112),
+                at(12, 0, 0, 0, 0, 0, 112),
+            ],
+        );
         assert_eq!(by_log.by, "log");
         assert_eq!(by_log.converged_ms, Some(11_000));
         assert_eq!(by_log.log_entries, 12);
-        let flicker = cut(Duration::from_secs(10), &[at(10, 12, 0, 0, 0, 0, 100), at(11, 0, 0, 0, 0, 0, 112), at(12, 3, 0, 0, 0, 0, 115)]);
+        let flicker = cut(
+            Duration::from_secs(10),
+            &[
+                at(10, 12, 0, 0, 0, 0, 100),
+                at(11, 0, 0, 0, 0, 0, 112),
+                at(12, 3, 0, 0, 0, 0, 115),
+            ],
+        );
         assert_eq!(flicker.by, "none");
         assert_eq!(flicker.converged_ms, None);
         assert_eq!(flicker.seconds_to_converge, None);
         // a run that ended with a backlog says so, and keeps what it saw
-        let backlog = cut(Duration::from_secs(20), &[at(20, 900, 0, 0, 0, 0, 10), at(21, 950, 0, 0, 0, 0, 20)]);
+        let backlog = cut(
+            Duration::from_secs(20),
+            &[at(20, 900, 0, 0, 0, 0, 10), at(21, 950, 0, 0, 0, 0, 20)],
+        );
         assert_eq!(backlog.by, "none");
         assert_eq!(backlog.series.len(), 2);
         assert_eq!(backlog.log_entries, 10);

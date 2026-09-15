@@ -289,9 +289,8 @@ pub trait QuerySupport: 'static + Sized {
     /// # Arguments
     ///
     /// * `archived` - The archived query to get the table name for
-    fn archived_query_table(
-        archived: &<Self::QueryKinds as Archive>::Archived,
-    ) -> Self::TableNames;
+    fn archived_query_table(archived: &<Self::QueryKinds as Archive>::Archived)
+        -> Self::TableNames;
 
     /// Build the failure a query is answered with when nothing else can answer it
     ///

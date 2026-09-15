@@ -271,7 +271,9 @@ fn messages_out_of_order_are_refused() {
     // a client that is challenged before it has said anything
     let mut client = ScramClient::new("reader", "hunter2");
     assert_eq!(
-        client.step(b"r=abc,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096").unwrap_err(),
+        client
+            .step(b"r=abc,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096")
+            .unwrap_err(),
         AuthError::OutOfOrder
     );
     // a client that is let in before it has proved anything

@@ -143,7 +143,8 @@ pub fn nearest(columns: &[Column], at: f64) -> Option<usize> {
         .min_by(|(_, left), (_, right)| {
             let left = (left.position - at).abs();
             let right = (right.position - at).abs();
-            left.partial_cmp(&right).unwrap_or(std::cmp::Ordering::Equal)
+            left.partial_cmp(&right)
+                .unwrap_or(std::cmp::Ordering::Equal)
         })
         .map(|(at, _)| at)
 }
@@ -166,8 +167,12 @@ pub fn hit(plot_ui: &egui_plot::PlotUi<'_>, columns: &[Column]) -> Option<usize>
     // and how near it is, measured on the screen. in the key's own quantity `REACH` would mean one
     // thing on a sweep of row widths and another on a sweep of read shares
     let transform = plot_ui.transform();
-    let column_at = transform.position_from_point(&PlotPoint::new(column.position, 0.0)).x;
-    let pointer_at = transform.position_from_point(&PlotPoint::new(pointer.x, 0.0)).x;
+    let column_at = transform
+        .position_from_point(&PlotPoint::new(column.position, 0.0))
+        .x;
+    let pointer_at = transform
+        .position_from_point(&PlotPoint::new(pointer.x, 0.0))
+        .x;
     ((column_at - pointer_at).abs() <= REACH).then_some(at)
 }
 
@@ -199,7 +204,9 @@ pub fn rows(series: &[Series], key: f64) -> Vec<Row> {
     // there is no value to rank it by. a stable sort, so two lines at one value keep the order the
     // chart drew them in
     rows.sort_by(|left, right| match (left.value, right.value) {
-        (Some(left), Some(right)) => right.partial_cmp(&left).unwrap_or(std::cmp::Ordering::Equal),
+        (Some(left), Some(right)) => right
+            .partial_cmp(&left)
+            .unwrap_or(std::cmp::Ordering::Equal),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
@@ -277,14 +284,20 @@ mod tests {
         // a line is drawn at the quantity it measured
         let drawn = columns(Chart::Line, &groups, 4, false);
         assert_eq!(
-            drawn.iter().map(|column| column.position).collect::<Vec<_>>(),
+            drawn
+                .iter()
+                .map(|column| column.position)
+                .collect::<Vec<_>>(),
             vec![64.0, 1024.0, 4096.0]
         );
         // and a bar group at the centre of the slot its index buys it, which is the same
         // arithmetic `plot::draw_bars` lays the bars themselves out with
         let drawn = columns(Chart::Bars, &groups, 4, false);
         assert_eq!(
-            drawn.iter().map(|column| column.position).collect::<Vec<_>>(),
+            drawn
+                .iter()
+                .map(|column| column.position)
+                .collect::<Vec<_>>(),
             vec![1.5, 6.5, 11.5]
         );
         // either way the key is what was recorded, because that is what the readout is headed with
@@ -299,7 +312,10 @@ mod tests {
     fn a_logarithmic_axis_places_a_column_at_its_logarithm() {
         let drawn = columns(Chart::Line, &[100.0, 1000.0], 1, true);
         assert_eq!(
-            drawn.iter().map(|column| column.position).collect::<Vec<_>>(),
+            drawn
+                .iter()
+                .map(|column| column.position)
+                .collect::<Vec<_>>(),
             vec![2.0, 3.0]
         );
         // the key is untouched, so the caption still says `1,000` rather than `3`

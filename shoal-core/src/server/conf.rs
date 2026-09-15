@@ -1015,7 +1015,8 @@ mod tests {
     /// every benchmark that believed it had isolated cores had not.
     fn misspelled_resource_key_is_rejected() {
         // load a config with the historical typo in it
-        let (_dir, conf) = load("resources:\n  memory: \"4Gi\"\n  exluded_cores: [12, 13, 14, 15]\n");
+        let (_dir, conf) =
+            load("resources:\n  memory: \"4Gi\"\n  exluded_cores: [12, 13, 14, 15]\n");
         // that config must not load at all
         let error = conf.expect_err("a misspelled resource key was accepted");
         // and the error must name the key that was wrong
@@ -1030,7 +1031,8 @@ mod tests {
     /// The correctly spelled key still loads and still excludes those cores
     fn exclude_cores_is_honored() {
         // load a config that spells the key correctly
-        let (_dir, conf) = load("resources:\n  memory: \"4Gi\"\n  exclude_cores: [12, 13, 14, 15]\n");
+        let (_dir, conf) =
+            load("resources:\n  memory: \"4Gi\"\n  exclude_cores: [12, 13, 14, 15]\n");
         let conf = conf.expect("a correctly spelled config failed to load");
         // the cores we asked to exclude should have been parsed
         assert_eq!(conf.resources.exclude_cores, vec![12, 13, 14, 15]);
@@ -1119,7 +1121,8 @@ mod tests {
         let cpus = resources.cpus().expect("failed to build a cpuset");
         // none of the cpus in it may live on an excluded core
         assert!(
-            cpus.into_iter().all(|location| location.core != 1 && location.core != 2),
+            cpus.into_iter()
+                .all(|location| location.core != 1 && location.core != 2),
             "an excluded core survived into the cpuset"
         );
     }
@@ -1159,10 +1162,16 @@ mod tests {
     fn a_config_without_a_query_deadline_gets_the_default() {
         let (_dir, conf) = load("resources:\n  memory: \"4Gi\"\n");
         let conf = conf.expect("a config with no networking section failed to load");
-        assert_eq!(conf.networking.query_deadline.duration(), std::time::Duration::from_secs(10));
+        assert_eq!(
+            conf.networking.query_deadline.duration(),
+            std::time::Duration::from_secs(10)
+        );
         let (_dir, conf) = load("networking:\n  query_deadline: 2s\n");
         let conf = conf.expect("a config naming a query deadline failed to load");
-        assert_eq!(conf.networking.query_deadline.duration(), std::time::Duration::from_secs(2));
+        assert_eq!(
+            conf.networking.query_deadline.duration(),
+            std::time::Duration::from_secs(2)
+        );
     }
 
     #[test]
@@ -1360,7 +1369,10 @@ mod tests {
             .remote
             .expect("the remote sink was dropped")
             .otlp();
-        assert_eq!(otlp.headers.get("X-Scope-OrgID").map(String::as_str), Some("Shoal"));
+        assert_eq!(
+            otlp.headers.get("X-Scope-OrgID").map(String::as_str),
+            Some("Shoal")
+        );
         assert_eq!(otlp.batch_delay_ms, Some(500));
     }
 
@@ -1406,7 +1418,10 @@ mod tests {
             .timeout_secs(3)
             .batch_delay_ms(250)
             .max_queue_size(64);
-        assert_eq!(otlp.headers.get("X-Scope-OrgID").map(String::as_str), Some("Shoal"));
+        assert_eq!(
+            otlp.headers.get("X-Scope-OrgID").map(String::as_str),
+            Some("Shoal")
+        );
         assert_eq!(otlp.timeout_secs, Some(3));
         assert_eq!(otlp.batch_delay_ms, Some(250));
         assert_eq!(otlp.max_queue_size, Some(64));
@@ -1454,7 +1469,10 @@ mod tests {
         );
         let conf = conf.expect("a config naming a metrics sink failed to load");
         // the explicit sink is the one that wins, on a different host to prove it was not derived
-        let metrics = conf.tracing.metrics_sink().expect("the metrics sink was dropped");
+        let metrics = conf
+            .tracing
+            .metrics_sink()
+            .expect("the metrics sink was dropped");
         assert_eq!(metrics.endpoint, "http://collector:4318/v1/metrics");
         assert_eq!(metrics.interval_secs, Some(5));
     }
@@ -1471,9 +1489,15 @@ mod tests {
             "resources:\n  memory: \"4Gi\"\ntracing:\n  remote:\n    Otlp:\n      endpoint: \"http://127.0.0.1:4318/v1/traces\"\n      headers:\n        X-Scope-OrgID: Shoal\n",
         );
         let conf = conf.expect("a config naming only a trace sink failed to load");
-        let metrics = conf.tracing.metrics_sink().expect("no metrics sink was derived");
+        let metrics = conf
+            .tracing
+            .metrics_sink()
+            .expect("no metrics sink was derived");
         assert_eq!(metrics.endpoint, "http://127.0.0.1:4318/v1/metrics");
-        assert_eq!(metrics.headers.get("X-Scope-OrgID").map(String::as_str), Some("Shoal"));
+        assert_eq!(
+            metrics.headers.get("X-Scope-OrgID").map(String::as_str),
+            Some("Shoal")
+        );
         // and a config naming no sink at all derives nothing, which is what leaves it uninstalled
         assert!(super::Tracing::default().metrics_sink().is_none());
     }

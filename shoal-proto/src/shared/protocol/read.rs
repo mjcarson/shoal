@@ -47,7 +47,8 @@ pub const MAX_SESSION_TOKENS: usize = 16;
 pub const READ_OPTIONS_HEAD_LEN: usize = 16;
 
 /// The most bytes a read options section can be
-pub const MAX_READ_OPTIONS_LEN: usize = READ_OPTIONS_HEAD_LEN + MAX_SESSION_TOKENS * SESSION_TOKEN_LEN;
+pub const MAX_READ_OPTIONS_LEN: usize =
+    READ_OPTIONS_HEAD_LEN + MAX_SESSION_TOKENS * SESSION_TOKEN_LEN;
 
 /// The version of the read options head this build writes and reads
 const READ_OPTIONS_VERSION: u8 = 1;
@@ -184,9 +185,13 @@ impl SessionToken {
         cluster.copy_from_slice(&raw[8..24]);
         Ok(SessionToken {
             cluster: ClusterId(uuid::Uuid::from_bytes(cluster)),
-            table: TableId(u64::from_le_bytes(raw[24..32].try_into().expect("eight bytes"))),
+            table: TableId(u64::from_le_bytes(
+                raw[24..32].try_into().expect("eight bytes"),
+            )),
             tablet: u16::from_le_bytes([raw[2], raw[3]]),
-            group: GroupId(u64::from_le_bytes(raw[32..40].try_into().expect("eight bytes"))),
+            group: GroupId(u64::from_le_bytes(
+                raw[32..40].try_into().expect("eight bytes"),
+            )),
             index: u64::from_le_bytes(raw[40..48].try_into().expect("eight bytes")),
         })
     }
@@ -287,7 +292,9 @@ impl ReadOptions {
     /// Refuses bytes that are not a whole number of tokens, or a token this build cannot read.
     pub fn decode_tokens(&mut self, raw: &[u8]) -> Result<(), ProtocolError> {
         if raw.len() % SESSION_TOKEN_LEN != 0 {
-            return Err(ProtocolError::MalformedReadOptions("tokens do not fill their bytes"));
+            return Err(ProtocolError::MalformedReadOptions(
+                "tokens do not fill their bytes",
+            ));
         }
         for chunk in raw.chunks_exact(SESSION_TOKEN_LEN) {
             let mut fixed = [0u8; SESSION_TOKEN_LEN];
@@ -311,14 +318,18 @@ impl ReadOptions {
     /// Refuses a buffer that is not exactly one section.
     pub fn decode(raw: &[u8]) -> Result<Self, ProtocolError> {
         let Some(head) = raw.get(..READ_OPTIONS_HEAD_LEN) else {
-            return Err(ProtocolError::MalformedReadOptions("a read options head is cut short"));
+            return Err(ProtocolError::MalformedReadOptions(
+                "a read options head is cut short",
+            ));
         };
         let mut fixed = [0u8; READ_OPTIONS_HEAD_LEN];
         fixed.copy_from_slice(head);
         let (mut options, token_bytes) = Self::decode_head(&fixed)?;
         let rest = &raw[READ_OPTIONS_HEAD_LEN..];
         if rest.len() != token_bytes {
-            return Err(ProtocolError::MalformedReadOptions("a read options head does not describe its tokens"));
+            return Err(ProtocolError::MalformedReadOptions(
+                "a read options head does not describe its tokens",
+            ));
         }
         options.decode_tokens(rest)?;
         Ok(options)

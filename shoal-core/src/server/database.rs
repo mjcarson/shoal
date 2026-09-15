@@ -21,12 +21,12 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
-use uuid::Uuid;
 use tracing::Span;
+use uuid::Uuid;
 
 use crate::server::messages::{Answer, LoadedPartitionKinds, QueryMetadata, ServerMsg};
-use crate::server::replication::PendingDigest;
 use crate::server::replication::CommandResult;
+use crate::server::replication::PendingDigest;
 use crate::server::routing::{ArchivedShardRouting, ShardRouting};
 use crate::server::tables::ApplyStep;
 use crate::server::{Conf, ServerError};
@@ -69,10 +69,8 @@ where
     /// deserialized query, kept as the reference the tests check that against. A
     /// `#[shoal::db(client)]` schema implements neither, which is what keeps them - and
     /// therefore the ring and the shard - out of a client build.
-    type ClientType: QuerySupport<
-            QueryKinds: ShardRouting + ArchivedShardRouting,
-            TableNames = Self::TableNames,
-        > + Sized;
+    type ClientType: QuerySupport<QueryKinds: ShardRouting + ArchivedShardRouting, TableNames = Self::TableNames>
+        + Sized;
 
     /// The different tables in this database
     type TableNames: TableNameSupport;
@@ -361,7 +359,11 @@ where
     /// * `table` - The table
     /// * `tablets` - The tablets
     #[allow(async_fn_in_trait)]
-    async fn canonical_cut(&self, table: Self::TableNames, tablets: &[u16]) -> Result<PendingDigest, ServerError>;
+    async fn canonical_cut(
+        &self,
+        table: Self::TableNames,
+        tablets: &[u16],
+    ) -> Result<PendingDigest, ServerError>;
 
     /// Every resident partition of some tablets of a table, as its key and archived bytes
     ///
@@ -396,7 +398,12 @@ where
     /// * `table` - The table
     /// * `tablets` - The tablets
     /// * `records` - The partitions, as their keys and archived bytes
-    fn install_partitions(&mut self, table: Self::TableNames, tablets: &[u16], records: Vec<(u64, Vec<u8>)>) -> Result<(), ServerError>;
+    fn install_partitions(
+        &mut self,
+        table: Self::TableNames,
+        tablets: &[u16],
+        records: Vec<(u64, Vec<u8>)>,
+    ) -> Result<(), ServerError>;
 
     /// The table a stable identity names, if the schema has it
     ///
@@ -420,7 +427,11 @@ where
     /// * `table` - The table
     /// * `conf` - The Shoal config
     #[allow(async_fn_in_trait)]
-    async fn fold_intents(shard_name: &str, table: Self::TableNames, conf: &Conf) -> Result<u64, ServerError>;
+    async fn fold_intents(
+        shard_name: &str,
+        table: Self::TableNames,
+        conf: &Conf,
+    ) -> Result<u64, ServerError>;
 
     /// Write every archived partition some shards hold of a table as one snapshot file
     ///

@@ -1,16 +1,16 @@
 //! A partition is a collection of data in shoal accesible by a partition key
 
+use crate::server::tables::persistent::RowSink;
 use deepsize2::DeepSizeOf;
 use glommio::io::ReadResult;
 use gxhash::GxHashSet;
-use crate::server::tables::persistent::RowSink;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
+use rkyv::util::AlignedVec;
 use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
-use rkyv::util::AlignedVec;
 use rkyv::with::Skip;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -101,8 +101,9 @@ impl<P, B: StableBytes> ValidatedArchive<P, B> {
     pub fn new(raw: B) -> Result<Self, rkyv::rancor::Error>
     where
         P: RkyvSupport,
-        for<'a> <P as Archive>::Archived:
-            CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+        for<'a> <P as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >,
     {
         // validate every byte of this archive, which is the only time it is validated
         P::access(&raw)?;
@@ -1192,35 +1193,37 @@ where
             //
             // only this arm is measured. the loaded arm above is already counted by
             // SortedPartition::get, and measuring both here would double count it.
-            MaybeLoaded::Accessible(read) => hotpath::measure_block!("MaybeLoaded::get_archived", {
-                // this partition came from disk so access it in place
-                let access = read.archived();
-                // put this gets keys in the form this archives keys are in, once per query
-                let seek = seek.get_or_insert_with(|| SeekBytes::new(&params.sort_select));
-                // visit the rows this get selected, however it chose to select them
-                match &params.sort_select {
-                    // this get asked for the whole archive, so walk it (tombstones skipped)
-                    SortSelect::All => {
-                        Self::collect_archived(params, access.live_row_values(), found);
-                    }
-                    // this get named its rows, so seek each of them instead of walking to it
-                    SortSelect::Keys(_) => {
-                        let rows = seek
-                            .keys()
-                            .filter_map(|raw| Self::seek_archived(access, raw));
-                        Self::collect_archived(params, rows, found);
-                    }
-                    // this get bounded its rows, so seek to the lower bound and walk up
-                    SortSelect::Range(range) => {
-                        // a range that cannot contain a key holds no rows, and panics a seek
-                        if range.is_empty() {
-                            return;
+            MaybeLoaded::Accessible(read) => {
+                hotpath::measure_block!("MaybeLoaded::get_archived", {
+                    // this partition came from disk so access it in place
+                    let access = read.archived();
+                    // put this gets keys in the form this archives keys are in, once per query
+                    let seek = seek.get_or_insert_with(|| SeekBytes::new(&params.sort_select));
+                    // visit the rows this get selected, however it chose to select them
+                    match &params.sort_select {
+                        // this get asked for the whole archive, so walk it (tombstones skipped)
+                        SortSelect::All => {
+                            Self::collect_archived(params, access.live_row_values(), found);
                         }
-                        let rows = Self::archived_rows_in_range(access, range, seek);
-                        Self::collect_archived(params, rows, found);
+                        // this get named its rows, so seek each of them instead of walking to it
+                        SortSelect::Keys(_) => {
+                            let rows = seek
+                                .keys()
+                                .filter_map(|raw| Self::seek_archived(access, raw));
+                            Self::collect_archived(params, rows, found);
+                        }
+                        // this get bounded its rows, so seek to the lower bound and walk up
+                        SortSelect::Range(range) => {
+                            // a range that cannot contain a key holds no rows, and panics a seek
+                            if range.is_empty() {
+                                return;
+                            }
+                            let rows = Self::archived_rows_in_range(access, range, seek);
+                            Self::collect_archived(params, rows, found);
+                        }
                     }
-                }
-            }),
+                })
+            }
         }
     }
 
@@ -1293,13 +1296,10 @@ where
             Self::archived_bound(&range.end, seek.end()),
         );
         // seek to this ranges lower bound and walk in sort order until its upper one
-        access
-            .rows
-            .range(bounds)
-            .filter_map(|(_, row)| match row {
-                ArchivedMaybeRow::Row(row) => Some(row),
-                ArchivedMaybeRow::Tombstone => None,
-            })
+        access.rows.range(bounds).filter_map(|(_, row)| match row {
+            ArchivedMaybeRow::Row(row) => Some(row),
+            ArchivedMaybeRow::Tombstone => None,
+        })
     }
 }
 
@@ -1321,13 +1321,13 @@ where
 mod tests {
     use super::{MaybeLoaded, MaybeRow, SortedPartition, UnsortedPartition, ValidatedArchive};
     use crate::server::tables::persistent::sorted::replay_update;
-    use crate::server::tables::persistent::RowSink;
     use crate::server::tables::persistent::unsorted::UnsortedIntents;
+    use crate::server::tables::persistent::RowSink;
     use crate::shared::queries::parser::{FieldRole, TypeValidator};
-    use crate::shared::rearchive::Rearchive;
-    use crate::shared::row_ref::RowRef;
     use crate::shared::queries::{SortRange, SortSelect, SortedExists, SortedGet, SortedUpdate};
     use crate::shared::queries::{UnsortedGet, UnsortedUpdate};
+    use crate::shared::rearchive::Rearchive;
+    use crate::shared::row_ref::RowRef;
     use crate::shared::traits::{
         PartitionKeySupport, RkyvSupport, ShoalProjection, ShoalSortedTable, ShoalTableSupport,
         ShoalUnsortedTable, TableSchemaSupport,
@@ -1437,7 +1437,6 @@ mod tests {
 
     impl RkyvSupport for TestProjectionKind {}
 
-
     /// What each field of a [`TestRow`] produced on its way back out of an archive
     ///
     /// This is written by hand here because the table derives cannot run inside `shoal-core` —
@@ -1473,8 +1472,14 @@ mod tests {
             <S as rkyv::rancor::Fallible>::Error: rkyv::rancor::Source,
         {
             Ok(TestRowArchivedResolver {
-                partition_key: <String as Rearchive>::serialize_archived(&archived.partition_key, serializer)?,
-                sort_key: <String as Rearchive>::serialize_archived(&archived.sort_key, serializer)?,
+                partition_key: <String as Rearchive>::serialize_archived(
+                    &archived.partition_key,
+                    serializer,
+                )?,
+                sort_key: <String as Rearchive>::serialize_archived(
+                    &archived.sort_key,
+                    serializer,
+                )?,
                 data: <String as Rearchive>::serialize_archived(&archived.data, serializer)?,
             })
         }
@@ -1493,12 +1498,19 @@ mod tests {
         ) {
             // split the place the row belongs in into one place per field
             rkyv::munge::munge!(let ArchivedTestRow { partition_key, sort_key, data } = out);
-            <String as Rearchive>::resolve_archived(&archived.partition_key, resolver.partition_key, partition_key);
-            <String as Rearchive>::resolve_archived(&archived.sort_key, resolver.sort_key, sort_key);
+            <String as Rearchive>::resolve_archived(
+                &archived.partition_key,
+                resolver.partition_key,
+                partition_key,
+            );
+            <String as Rearchive>::resolve_archived(
+                &archived.sort_key,
+                resolver.sort_key,
+                sort_key,
+            );
             <String as Rearchive>::resolve_archived(&archived.data, resolver.data, data);
         }
     }
-
 
     /// Read the keys naming a row out of whichever form a sink pointed at
     ///
@@ -1615,7 +1627,6 @@ mod tests {
         }
     }
 
-
     /// What each field of a [`SortKeyOnly`] produced on its way back out of an archive
     ///
     /// This is written by hand here because the table derives cannot run inside `shoal-core` —
@@ -1649,8 +1660,14 @@ mod tests {
             <S as rkyv::rancor::Fallible>::Error: rkyv::rancor::Source,
         {
             Ok(SortKeyOnlyArchivedResolver {
-                partition_key: <String as Rearchive>::serialize_archived(&archived.partition_key, serializer)?,
-                sort_key: <String as Rearchive>::serialize_archived(&archived.sort_key, serializer)?,
+                partition_key: <String as Rearchive>::serialize_archived(
+                    &archived.partition_key,
+                    serializer,
+                )?,
+                sort_key: <String as Rearchive>::serialize_archived(
+                    &archived.sort_key,
+                    serializer,
+                )?,
             })
         }
 
@@ -1668,8 +1685,16 @@ mod tests {
         ) {
             // split the place the row belongs in into one place per field
             rkyv::munge::munge!(let ArchivedSortKeyOnly { partition_key, sort_key } = out);
-            <String as Rearchive>::resolve_archived(&archived.partition_key, resolver.partition_key, partition_key);
-            <String as Rearchive>::resolve_archived(&archived.sort_key, resolver.sort_key, sort_key);
+            <String as Rearchive>::resolve_archived(
+                &archived.partition_key,
+                resolver.partition_key,
+                partition_key,
+            );
+            <String as Rearchive>::resolve_archived(
+                &archived.sort_key,
+                resolver.sort_key,
+                sort_key,
+            );
         }
     }
 
@@ -2015,9 +2040,7 @@ mod tests {
     fn get_with_sort_keys(sort_keys: &[&str], limit: Option<usize>) -> SortedGet<TestRow> {
         SortedGet {
             partition_keys: vec![0],
-            sort_select: SortSelect::Keys(
-                sort_keys.iter().map(|key| (*key).to_owned()).collect(),
-            ),
+            sort_select: SortSelect::Keys(sort_keys.iter().map(|key| (*key).to_owned()).collect()),
             filters: None,
             limit,
             projection: TestProjectionKind::Full,
@@ -2090,9 +2113,7 @@ mod tests {
     fn exists_with_sort_keys(sort_keys: &[&str]) -> SortedExists<TestRow> {
         SortedExists {
             partition_keys: vec![0],
-            sort_select: SortSelect::Keys(
-                sort_keys.iter().map(|key| (*key).to_owned()).collect(),
-            ),
+            sort_select: SortSelect::Keys(sort_keys.iter().map(|key| (*key).to_owned()).collect()),
             filters: None,
         }
     }
@@ -2110,10 +2131,7 @@ mod tests {
         let params = get_with_sort_keys(&["c"], None);
         partition.get(&params, &mut found);
         // only the row we named comes back
-        let sort_keys = found
-            .iter()
-            .map(|row| row.sort_key())
-            .collect::<Vec<_>>();
+        let sort_keys = found.iter().map(|row| row.sort_key()).collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["c"]);
     }
 
@@ -2127,10 +2145,7 @@ mod tests {
         let params = get_with_sort_keys(&["b", "d"], None);
         partition.get(&params, &mut found);
         // both of the rows we named come back and nothing else does
-        let sort_keys = found
-            .iter()
-            .map(|row| row.sort_key())
-            .collect::<Vec<_>>();
+        let sort_keys = found.iter().map(|row| row.sort_key()).collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["b", "d"]);
     }
 
@@ -2209,10 +2224,7 @@ mod tests {
         let params = get_with_sort_keys(&["a", "b", "c"], Some(2));
         partition.get(&params, &mut found);
         // the limit takes the first rows we named
-        let sort_keys = found
-            .iter()
-            .map(|row| row.sort_key())
-            .collect::<Vec<_>>();
+        let sort_keys = found.iter().map(|row| row.sort_key()).collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["a", "b"]);
     }
 
@@ -2585,10 +2597,7 @@ mod tests {
         let params = projected(get_with_limit(None));
         partition.get(&params, &mut found);
         // every row comes back, projected, in sort order
-        let sort_keys = found
-            .iter()
-            .map(|row| row.sort_key())
-            .collect::<Vec<_>>();
+        let sort_keys = found.iter().map(|row| row.sort_key()).collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["a", "b", "c"]);
     }
 
@@ -2730,10 +2739,7 @@ mod tests {
         let params = projected(get_with_sort_keys(&["b", "d"], None));
         partition.get(&params, &mut found);
         // the rows we named come back and no others
-        let sort_keys = found
-            .iter()
-            .map(|row| row.sort_key())
-            .collect::<Vec<_>>();
+        let sort_keys = found.iter().map(|row| row.sort_key()).collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["b", "d"]);
     }
 
@@ -2751,10 +2757,7 @@ mod tests {
         let params = projected(get_with_range(range, None));
         partition.get(&params, &mut found);
         // only the rows inside the range come back
-        let sort_keys = found
-            .iter()
-            .map(|row| row.sort_key())
-            .collect::<Vec<_>>();
+        let sort_keys = found.iter().map(|row| row.sort_key()).collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["c", "d"]);
     }
 
@@ -2771,10 +2774,7 @@ mod tests {
         let params = projected(get_with_limit(Some(2)));
         partition.get(&params, &mut found);
         // the limit takes the first rows in sort order
-        let sort_keys = found
-            .iter()
-            .map(|row| row.sort_key())
-            .collect::<Vec<_>>();
+        let sort_keys = found.iter().map(|row| row.sort_key()).collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["a", "b"]);
     }
 
@@ -2789,10 +2789,7 @@ mod tests {
         let params = projected(get_with_limit(None));
         partition.get(&params, &mut found);
         // the deleted row is not projected into the answer
-        let sort_keys = found
-            .iter()
-            .map(|row| row.sort_key())
-            .collect::<Vec<_>>();
+        let sort_keys = found.iter().map(|row| row.sort_key()).collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["a", "c"]);
     }
 
@@ -3063,10 +3060,7 @@ mod tests {
         let params = projected(get_with_limit(None));
         partition.get(&params, &mut seek, &mut found);
         // every row was projected, and the projection kept its keys
-        let sort_keys = found
-            .iter()
-            .map(|row| row.sort_key())
-            .collect::<Vec<_>>();
+        let sort_keys = found.iter().map(|row| row.sort_key()).collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["a", "b", "c"]);
         assert_eq!(found.iter().next().unwrap().partition_key(), "partition");
     }

@@ -281,7 +281,10 @@ fn the_schema_id_is_the_fingerprint_without_the_version() {
     // the id is neither empty nor the fingerprint, because the fingerprint mixes the version
     assert_ne!(base::WireClient::SCHEMA_ID, 0);
     assert_ne!(base::WireClient::SCHEMA_ID, fingerprint::SEED);
-    assert_ne!(base::WireClient::SCHEMA_ID, base::WireClient::SCHEMA_FINGERPRINT);
+    assert_ne!(
+        base::WireClient::SCHEMA_ID,
+        base::WireClient::SCHEMA_FINGERPRINT
+    );
     // and it is exactly the same walk, with one mix taken out: replaying the fingerprint's walk
     // from the id's seed position reproduces neither, so the check is on the structure it sees
     let ids = [
@@ -292,7 +295,11 @@ fn the_schema_id_is_the_fingerprint_without_the_version() {
     ];
     for (i, a) in ids.iter().enumerate() {
         for (j, b) in ids.iter().enumerate() {
-            assert_eq!(i == j, a == b, "schemas {i} and {j} disagree with their ids");
+            assert_eq!(
+                i == j,
+                a == b,
+                "schemas {i} and {j} disagree with their ids"
+            );
         }
     }
 }
@@ -320,8 +327,16 @@ fn table_ids_are_stable_across_a_reorder_and_distinct_by_name() {
     assert_ne!(TableId::of("Row"), TableId::of("Rows"));
     // the ids are frozen: a stream on disk is named by one, so a change to the hash or its seed
     // is a change to what every persisted table is called (F39)
-    assert_eq!(TableId::of("Row").0, 9_298_178_980_900_292_585, "TableId::of(\"Row\") moved");
-    assert_eq!(TableId::of("Note").0, 5_620_453_994_926_889_807, "TableId::of(\"Note\") moved");
+    assert_eq!(
+        TableId::of("Row").0,
+        9_298_178_980_900_292_585,
+        "TableId::of(\"Row\") moved"
+    );
+    assert_eq!(
+        TableId::of("Note").0,
+        5_620_453_994_926_889_807,
+        "TableId::of(\"Note\") moved"
+    );
     assert_ne!(
         <base::WireClient as QuerySupport>::SCHEMA_ID,
         <reordered::WireClient as QuerySupport>::SCHEMA_ID

@@ -91,10 +91,7 @@ pub(crate) fn apply_failure<P>(
 ///
 /// * `table` - The table the unreadable partition belongs to
 /// * `partition_id` - The partition that could not be read
-pub(crate) fn corrupt_archive<T: std::fmt::Display>(
-    table: T,
-    partition_id: u64,
-) -> ResponseError {
+pub(crate) fn corrupt_archive<T: std::fmt::Display>(table: T, partition_id: u64) -> ResponseError {
     ResponseError::new(
         ErrorCode::CorruptArchive,
         format!("partition {partition_id} of {table} could not be read"),
@@ -361,8 +358,7 @@ impl<'a, P: ShoalProjection> RowSink<'a, P> {
         // the moment a row can be pointed at, where each row lives stops being implied by its
         // position and has to be recorded - so catch `found` up with what `scratch` already holds
         if !self.mixed {
-            self.found
-                .extend((0..self.scratch.len()).map(Found::Built));
+            self.found.extend((0..self.scratch.len()).map(Found::Built));
             self.mixed = true;
         }
         self.found.push(Found::Resident(row));
@@ -377,12 +373,14 @@ impl<'a, P: ShoalProjection> RowSink<'a, P> {
     /// # Arguments
     ///
     /// * `archived` - The archived row to answer with, where it lies
-    pub fn push_archived(&mut self, archived: &'a <<P as ShoalProjection>::Row as Archive>::Archived) {
+    pub fn push_archived(
+        &mut self,
+        archived: &'a <<P as ShoalProjection>::Row as Archive>::Archived,
+    ) {
         // the moment a row can be pointed at, where each row lives stops being implied by its
         // position and has to be recorded - so catch `found` up with what `scratch` already holds
         if !self.mixed {
-            self.found
-                .extend((0..self.scratch.len()).map(Found::Built));
+            self.found.extend((0..self.scratch.len()).map(Found::Built));
             self.mixed = true;
         }
         self.found.push(Found::InArchive(archived));
@@ -477,7 +475,10 @@ impl<'a, P: ShoalProjection> RowSink<'a, P> {
                 Found::Built(at) => RowRef::new(&self.scratch[*at]),
             })
         });
-        built.into_iter().flatten().chain(placed.into_iter().flatten())
+        built
+            .into_iter()
+            .flatten()
+            .chain(placed.into_iter().flatten())
     }
 
     /// Take every row this get found as an owned row, cloning the ones it borrowed

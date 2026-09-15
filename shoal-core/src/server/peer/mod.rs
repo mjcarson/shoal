@@ -38,7 +38,6 @@ pub mod tls;
 #[cfg(test)]
 mod tests;
 
-
 use crate::server::conf::cluster::{DialOverride, Transport};
 use crate::shared::identity::NodeId;
 
@@ -63,7 +62,11 @@ pub use handshake::Local;
 pub fn bind_reusable(addr: std::net::SocketAddr) -> std::io::Result<glommio::net::TcpListener> {
     use std::os::fd::{FromRawFd, IntoRawFd};
     // the same socket glommio would build, with the address reuse it leaves off
-    let domain = if addr.is_ipv6() { socket2::Domain::IPV6 } else { socket2::Domain::IPV4 };
+    let domain = if addr.is_ipv6() {
+        socket2::Domain::IPV6
+    } else {
+        socket2::Domain::IPV4
+    };
     let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
     socket.set_reuse_address(true)?;
     socket.set_reuse_port(true)?;

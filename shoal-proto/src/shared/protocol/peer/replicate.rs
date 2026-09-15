@@ -350,12 +350,16 @@ impl Command {
     pub fn decode(raw: &[u8]) -> Result<Self, ProtocolError> {
         // the head has to be there whole before any of it is read
         if raw.len() < COMMAND_HEAD_LEN {
-            return Err(ProtocolError::MalformedCommand("a command is shorter than its head"));
+            return Err(ProtocolError::MalformedCommand(
+                "a command is shorter than its head",
+            ));
         }
         let len = u32_at(raw, 34) as usize;
         // the payload's length has to fit the ceiling and the bytes that actually follow
         if len > MAX_COMMAND_PAYLOAD {
-            return Err(ProtocolError::MalformedCommand("a command's payload passes the ceiling"));
+            return Err(ProtocolError::MalformedCommand(
+                "a command's payload passes the ceiling",
+            ));
         }
         if raw.len() != COMMAND_HEAD_LEN + len {
             return Err(ProtocolError::MalformedCommand(
@@ -474,7 +478,10 @@ mod tests {
         assert_eq!(raw.len(), COMMAND_HEAD_LEN + 5);
         assert_eq!(Command::decode(&raw).unwrap(), command);
         // an empty payload is a legal command
-        assert_eq!(Command::decode(&a_command(&[]).encode()).unwrap(), a_command(&[]));
+        assert_eq!(
+            Command::decode(&a_command(&[]).encode()).unwrap(),
+            a_command(&[])
+        );
         // the digest follows the payload alone
         assert_eq!(command.digest(), a_command(&[1, 2, 3, 200, 255]).digest());
         assert_ne!(command.digest(), a_command(&[1, 2, 3]).digest());

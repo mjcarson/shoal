@@ -232,8 +232,8 @@ impl StageReports {
             return Ok(reports);
         }
         // and then the one report a capture used to write
-        let single: StageReport = serde_json::from_str(raw)
-            .map_err(|err| format!("{}: {err}", path.display()))?;
+        let single: StageReport =
+            serde_json::from_str(raw).map_err(|err| format!("{}: {err}", path.display()))?;
         single.check_version(path)?;
         let name = single
             .workload
@@ -335,8 +335,14 @@ mod tests {
     #[test]
     fn several_reports_read_as_several() {
         let artifact = StageReports::new(BTreeMap::from([
-            ("macro/grid/unsorted/r50/1024".to_string(), report(Some("a"), 3)),
-            ("macro/grid/unsorted/r50/8192".to_string(), report(Some("b"), 4)),
+            (
+                "macro/grid/unsorted/r50/1024".to_string(),
+                report(Some("a"), 3),
+            ),
+            (
+                "macro/grid/unsorted/r50/8192".to_string(),
+                report(Some("b"), 4),
+            ),
         ]));
         let raw = serde_json::to_string(&artifact).expect("serializes");
         let read = StageReports::read(&raw, std::path::Path::new("new.json")).expect("reads");
@@ -352,14 +358,23 @@ mod tests {
     #[test]
     fn the_primary_report_is_the_write_path_one() {
         let with_legacy = StageReports::new(BTreeMap::from([
-            ("macro/grid/unsorted/r50/1024".to_string(), report(Some("a"), 1)),
+            (
+                "macro/grid/unsorted/r50/1024".to_string(),
+                report(Some("a"), 1),
+            ),
             (LEGACY_STAGE_WORKLOAD.to_string(), report(Some("b"), 2)),
         ]));
         assert_eq!(with_legacy.primary().expect("one").join.joined, 2);
         // and without it, the first by identifier rather than whichever the map yields first
         let without = StageReports::new(BTreeMap::from([
-            ("macro/grid/unsorted/r50/8192".to_string(), report(Some("a"), 9)),
-            ("macro/grid/unsorted/r50/1024".to_string(), report(Some("b"), 8)),
+            (
+                "macro/grid/unsorted/r50/8192".to_string(),
+                report(Some("a"), 9),
+            ),
+            (
+                "macro/grid/unsorted/r50/1024".to_string(),
+                report(Some("b"), 8),
+            ),
         ]));
         assert_eq!(without.primary().expect("one").join.joined, 8);
     }

@@ -96,7 +96,10 @@ fn a_tables_fields_are_described() {
     let fields = <CheckDbClient as QuerySupport>::table_fields("Movie")
         .expect("a declared table describes itself");
     let names: Vec<&str> = fields.iter().map(|field| field.name).collect();
-    assert!(names.contains(&"id"), "the partition key is missing: {names:?}");
+    assert!(
+        names.contains(&"id"),
+        "the partition key is missing: {names:?}"
+    );
     assert!(names.contains(&"title"), "a filter is missing: {names:?}");
     // and a table nobody declared describes nothing
     assert!(<CheckDbClient as QuerySupport>::table_fields("Nonexistent").is_none());

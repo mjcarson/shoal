@@ -18,7 +18,7 @@
 
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 /// How long to wait between connection attempts
 ///
@@ -96,9 +96,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::wait_until_answering;
-    use anyhow::{bail, Result};
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use anyhow::{Result, bail};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     /// A server that answers immediately is not waited on
     #[tokio::test]
@@ -107,7 +107,10 @@ mod tests {
         let result = wait_until_answering("127.0.0.1:1", |_| async { Ok(()) }).await;
         assert!(result.is_ok());
         // no sleep should have been paid, so this is far below one poll interval
-        assert!(started.elapsed() < super::POLL, "a ready server was slept on");
+        assert!(
+            started.elapsed() < super::POLL,
+            "a ready server was slept on"
+        );
     }
 
     /// A server that comes up late is waited for rather than failed on

@@ -109,7 +109,11 @@ async fn round_trip(client: &Shoal<AuthDbClient>) -> Result<Vec<String>, TestErr
         .await?;
     // then read it back
     let mut stream = client
-        .send(client.query().add(AuthRecordGet::new(vec!["key".to_owned()])))
+        .send(
+            client
+                .query()
+                .add(AuthRecordGet::new(vec!["key".to_owned()])),
+        )
         .await?;
     let mut rows = Vec::new();
     while let Some(response) = stream.next().await? {
@@ -151,7 +155,10 @@ async fn the_wrong_password_is_refused() -> Result<(), TestError> {
     // the server answered before it closed, which is what makes this legible rather than a reset
     match refused {
         Errors::Handshake(ConnectError::AuthFailed { msg }) => {
-            assert!(!msg.is_empty(), "the server refused without saying anything");
+            assert!(
+                !msg.is_empty(),
+                "the server refused without saying anything"
+            );
         }
         other => panic!("a wrong password was reported as something else: {other:?}"),
     }
@@ -369,8 +376,8 @@ async fn a_refusal_is_flagged_in_its_header() -> Result<(), TestError> {
     // and the body says the same thing in its status byte
     let mut body = vec![0u8; header.body_len()];
     hostile.read_exact(&mut body).await?;
-    let (status, msg) =
-        proto_auth::decode_auth_response_body(&body).expect("the server sent a body we cannot read");
+    let (status, msg) = proto_auth::decode_auth_response_body(&body)
+        .expect("the server sent a body we cannot read");
     assert_eq!(status, AuthStatus::Failed);
     assert!(!msg.is_empty());
     Ok(())

@@ -18,8 +18,8 @@
 
 use anyhow::Result;
 
-use crate::registry::Layer;
 use crate::fmt;
+use crate::registry::Layer;
 use crate::render::arms::{self, Arm};
 use crate::render::chart::bars;
 use crate::render::chart::sweep::{self, Unit};
@@ -57,7 +57,10 @@ pub fn build(page: &Page) -> Result<String> {
          mixture, 1 KiB rows, the persistent unsorted table - with exactly one field of the server \
          configuration moved. What it answers is what that field is worth.",
     );
-    let Some(capture) = page.current_for(Layer::Macro).and_then(|current| current.macro_layer.as_ref()) else {
+    let Some(capture) = page
+        .current_for(Layer::Macro)
+        .and_then(|current| current.macro_layer.as_ref())
+    else {
         out.push_str(&nothing_measured("a configuration sweep"));
         out.push_str(&footer(Surface::Configuration));
         return Ok(out);
@@ -271,7 +274,10 @@ fn storage(sweeps: &[(String, u32, Vec<Arm<'_>>)]) -> Result<String> {
     ];
     // a chart of one bar per group says nothing, and a group with no measurement at either end
     // would be drawn as two gaps
-    if series.iter().any(|line| line.values.iter().any(Option::is_some)) {
+    if series
+        .iter()
+        .any(|line| line.values.iter().any(Option::is_some))
+    {
         out.push_str(&bars::draw(
             &bars::Spec {
                 id: "chart-conf-storage-spread".to_string(),
@@ -457,7 +463,13 @@ fn memory_note(picked: &[&(String, u32, Vec<Arm<'_>>)]) -> String {
             let ratio = |pair: &[(f64, &str, f64)]| pair[0].2 / pair[1].2.max(f64::MIN_POSITIVE);
             ratio(left).total_cmp(&ratio(right))
         })
-        .map(|pair| (pair[0].1, pair[1].1, pair[0].2 / pair[1].2.max(f64::MIN_POSITIVE)));
+        .map(|pair| {
+            (
+                pair[0].1,
+                pair[1].1,
+                pair[0].2 / pair[1].2.max(f64::MIN_POSITIVE),
+            )
+        });
     match step {
         // a step under a tenth is the axis being flat, which is a finding of its own
         Some((below, above, ratio)) if ratio > 1.1 => format!(
@@ -580,7 +592,11 @@ mod tests {
     /// recommendation table with nothing to say it had.
     #[test]
     fn a_knob_the_order_does_not_name_is_appended() {
-        let sweeps = vec![sweep("memory", 50), sweep("brand_new_knob", 50), sweep("shards", 50)];
+        let sweeps = vec![
+            sweep("memory", 50),
+            sweep("brand_new_knob", 50),
+            sweep("shards", 50),
+        ];
         let picked = in_order_with_rest(&sweeps, &["shards", "memory"]);
         let names: Vec<&str> = picked.iter().map(|(name, _, _)| name.as_str()).collect();
         assert_eq!(names, vec!["shards", "memory", "brand_new_knob"]);

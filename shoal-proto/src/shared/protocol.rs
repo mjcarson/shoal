@@ -117,7 +117,8 @@ pub const MIN_PEER_VERSION: u8 = 4;
 pub const CLIENT_WIRE_VERSION: u8 = 4;
 
 // the floor sits at or below the client lane, which sits at or below the newest version
-const _: () = assert!(MIN_PEER_VERSION <= CLIENT_WIRE_VERSION && CLIENT_WIRE_VERSION <= PROTOCOL_VERSION);
+const _: () =
+    assert!(MIN_PEER_VERSION <= CLIENT_WIRE_VERSION && CLIENT_WIRE_VERSION <= PROTOCOL_VERSION);
 
 /// The size of the frame header in bytes
 pub const HEADER_LEN: usize = 8;
@@ -661,7 +662,11 @@ impl RawHeader {
     /// * `newest` - The newest version this connection reads
     /// * `max_frame_bytes` - The largest frame we are willing to allocate for
     #[inline]
-    pub const fn validate_at(self, newest: u8, max_frame_bytes: u32) -> Result<Header, ProtocolError> {
+    pub const fn validate_at(
+        self,
+        newest: u8,
+        max_frame_bytes: u32,
+    ) -> Result<Header, ProtocolError> {
         // refuse a version we do not speak before we try to make sense of anything else
         if self.version < MIN_PEER_VERSION || self.version > newest {
             return Err(ProtocolError::UnsupportedVersion {
@@ -992,7 +997,13 @@ pub fn response_preamble(
     payload_len: usize,
     max_frame_bytes: u32,
 ) -> Result<[u8; RESPONSE_PREAMBLE_LEN], ProtocolError> {
-    server_preamble(MessageType::Response, Flags::NONE, query_id, payload_len, max_frame_bytes)
+    server_preamble(
+        MessageType::Response,
+        Flags::NONE,
+        query_id,
+        payload_len,
+        max_frame_bytes,
+    )
 }
 
 /// Build the header and query id that go ahead of any frame a server writes under a query id
@@ -1205,11 +1216,16 @@ pub fn request_preamble_with(
 ) -> Result<RequestHead, ProtocolError> {
     // a bundle with no options is framed exactly as it was before they existed
     let Some(options) = options.filter(|options| !options.is_empty()) else {
-        return request_preamble_traced(trace, payload_len, max_frame_bytes).map(RequestHead::Fixed);
+        return request_preamble_traced(trace, payload_len, max_frame_bytes)
+            .map(RequestHead::Fixed);
     };
     // the section and the context are both part of the body, so both count towards the length
     let section = options.encode()?;
-    let trace_len = if trace.is_some() { TRACE_CONTEXT_LEN } else { 0 };
+    let trace_len = if trace.is_some() {
+        TRACE_CONTEXT_LEN
+    } else {
+        0
+    };
     let body_len = payload_len
         .checked_add(trace_len)
         .and_then(|len| len.checked_add(section.len()))

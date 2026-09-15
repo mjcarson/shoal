@@ -8,13 +8,13 @@
 use anyhow::Result;
 
 use crate::fmt;
+use crate::registry::Layer;
 use crate::render::badges;
 use crate::render::chart;
 use crate::render::family::Surface;
 use crate::render::page::Page;
 use crate::render::pages::{caption, footer, header, nothing_measured};
 use crate::render::tables;
-use crate::registry::Layer;
 
 /// Builds the attribution page
 ///

@@ -1,6 +1,6 @@
 //! Generate the FromShoal trait implementation for a type
 
-use quote::{quote};
+use quote::quote;
 use syn::Ident;
 
 /// Extend a token stream with a FromShoal implementation
@@ -48,4 +48,3 @@ pub fn add(
         }
     );
 }
-

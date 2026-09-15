@@ -89,7 +89,11 @@ fn partition_keys_hash_to_frozen_values() {
         ("", 0x57b5_8cc6_750e_034c, 1403),
         ("a", 0x5d74_a57f_5e73_eb79, 1495),
         ("shoal", 0x7498_3e29_46f5_ce66, 1865),
-        ("the quick brown fox jumps over the lazy dog", 0x8239_6b81_d80f_bddd, 2083),
+        (
+            "the quick brown fox jumps over the lazy dog",
+            0x8239_6b81_d80f_bddd,
+            2083,
+        ),
     ];
     for (key, expected, tablet) in cases_text {
         let hash = ByText::get_partition_key_from_values(&(*key).to_string());

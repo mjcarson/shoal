@@ -110,7 +110,10 @@ where
         let server = self.conf.networking.query_deadline.duration();
         let server_ns = server.as_nanos().min(u128::from(u64::MAX)) as u64;
         // the bundle's, if it named one and it is shorter
-        let budget_ns = match options.map(|options| options.deadline_ms).filter(|ms| *ms > 0) {
+        let budget_ns = match options
+            .map(|options| options.deadline_ms)
+            .filter(|ms| *ms > 0)
+        {
             Some(ms) => server_ns.min(u64::from(ms) * 1_000_000),
             None => server_ns,
         };
@@ -182,7 +185,10 @@ where
         if let Some(foreign) = tokens.iter().find(|token| token.cluster != cluster) {
             return Err(ResponseError::new(
                 ErrorCode::WrongCluster,
-                format!("a session token names cluster {}, and this node is in {cluster}", foreign.cluster),
+                format!(
+                    "a session token names cluster {}, and this node is in {cluster}",
+                    foreign.cluster
+                ),
             ));
         }
         // the level: the bundle's, then the table's, then the cluster's
@@ -228,7 +234,10 @@ where
         // the groups the read's tablets are served by on this shard, with the lowest index
         // each has to have applied before the read is served past its tokens
         let Some(replication) = self.replication.as_ref() else {
-            let outcome = Err(ResponseError::new(ErrorCode::Unavailable, "this node hosts no tablet groups"));
+            let outcome = Err(ResponseError::new(
+                ErrorCode::Unavailable,
+                "this node hosts no tablet groups",
+            ));
             return self.post_read_ready(meta, query, span, gathered_meta, outcome);
         };
         let table = D::ClientType::query_table_name(&query);
@@ -284,7 +293,10 @@ where
                 .get(&group)
                 .and_then(|slot| slot.raft.clone().map(|raft| (raft, slot.spec.me(node))))
             else {
-                let outcome = Err(ResponseError::new(ErrorCode::Unavailable, format!("group {group} is still starting")));
+                let outcome = Err(ResponseError::new(
+                    ErrorCode::Unavailable,
+                    format!("group {group} is still starting"),
+                ));
                 return self.post_read_ready(meta, query, span, gathered_meta, outcome);
             };
             // this node's member of the group is the slot hosting it, which is this executor's
@@ -304,7 +316,11 @@ where
             };
             let mut outcome = Ok(());
             for (group, raft, bound, me) in rafts {
-                match wait_on_group(&raft, &network, group, me, level, bound, deadline, &mut waits).await {
+                match wait_on_group(
+                    &raft, &network, group, me, level, bound, deadline, &mut waits,
+                )
+                .await
+                {
                     Ok(()) => {}
                     Err(error) => {
                         outcome = Err(error);
@@ -394,7 +410,8 @@ where
                 }
                 self.read_stats.barrier_hops += waits.barrier_hops;
                 self.read_stats.barrier_wait_ns_total += waits.barrier_ns;
-                self.read_stats.barrier_wait_ns_max = self.read_stats.barrier_wait_ns_max.max(waits.barrier_ns);
+                self.read_stats.barrier_wait_ns_max =
+                    self.read_stats.barrier_wait_ns_max.max(waits.barrier_ns);
                 self.read_stats.record_apply_wait(waits.apply_ns);
                 if waits.session {
                     self.read_stats.session_waits += 1;
@@ -407,7 +424,9 @@ where
                 if error.code() == ErrorCode::Timeout {
                     self.read_stats.timeouts += 1;
                 }
-                return self.answer_read_failure(meta, query, span, gathered_meta, error).await;
+                return self
+                    .answer_read_failure(meta, query, span, gathered_meta, error)
+                    .await;
             }
         }
         // and the read runs, with nothing left to wait on
@@ -432,11 +451,14 @@ where
         error: ResponseError,
     ) -> Result<(), ServerError> {
         let table = D::ClientType::query_table_name(&query);
-        let response = <D::ClientType as QuerySupport>::failed(table, meta.id, meta.index, meta.end, error);
+        let response =
+            <D::ClientType as QuerySupport>::failed(table, meta.id, meta.index, meta.end, error);
         meta.stamps.mark_exec_done();
         // a share of a split query fails its slot on the shard collecting it
         let Some(gathered_meta) = gathered_meta else {
-            return self.reply(meta.client, meta.id, span, meta.stamps, response).await;
+            return self
+                .reply(meta.client, meta.id, span, meta.stamps, response)
+                .await;
         };
         let contact = gathered_meta
             .gather
@@ -476,9 +498,8 @@ where
     fn policy_level(&self, table: D::TableNames) -> ReadLevel {
         // the table's own level from the committed state, else the cluster's default
         match self.map.get().read_level_of(table.table_id()) {
-            crate::server::conf::cluster::Consistency::Quorum | crate::server::conf::cluster::Consistency::All => {
-                ReadLevel::Quorum
-            }
+            crate::server::conf::cluster::Consistency::Quorum
+            | crate::server::conf::cluster::Consistency::All => ReadLevel::Quorum,
             crate::server::conf::cluster::Consistency::One => ReadLevel::One,
         }
     }
@@ -502,7 +523,11 @@ where
                 response,
                 failed,
             } => {
-                let msg = ServerMsg::Gathered { meta, response, failed };
+                let msg = ServerMsg::Gathered {
+                    meta,
+                    response,
+                    failed,
+                };
                 self.comms.send(&contact, msg).await
             }
             // down the peer connection the query came in on
@@ -516,8 +541,19 @@ where
                 archived,
                 route,
             } => {
-                self.reply_sealed(client, id, index, end, ReplyKind::Share, span, stamps, archived, None, route)
-                    .await
+                self.reply_sealed(
+                    client,
+                    id,
+                    index,
+                    end,
+                    ReplyKind::Share,
+                    span,
+                    stamps,
+                    archived,
+                    None,
+                    route,
+                )
+                .await
             }
         }
     }
@@ -528,7 +564,12 @@ where
         let Some(held) = self.held.take() else {
             return Ok(());
         };
-        event!(Level::INFO, msg = "releasing held shares", shares = held.shares.len(), dup = held.dup);
+        event!(
+            Level::INFO,
+            msg = "releasing held shares",
+            shares = held.shares.len(),
+            dup = held.dup
+        );
         for share in held.shares {
             // a duplicate is the same share sent twice: a local one goes through its bytes
             // and back, since a response is not otherwise cloneable, a remote one is
@@ -592,7 +633,10 @@ where
         match verb {
             // hold every share for a while, then post the release to the loop
             ReadVerb::HoldShares { ms, dup } => {
-                self.held = Some(HeldShares { dup, shares: Vec::new() });
+                self.held = Some(HeldShares {
+                    dup,
+                    shares: Vec::new(),
+                });
                 let tx = self.shard_local_tx.clone();
                 glommio::spawn_local(async move {
                     glommio::timer::sleep(std::time::Duration::from_millis(ms)).await;
@@ -622,9 +666,17 @@ where
             ReadVerb::StallShard { ms } => {
                 glommio::spawn_local(async move {
                     glommio::timer::sleep(std::time::Duration::from_millis(50)).await;
-                    event!(Level::WARN, msg = "stalling this shard's executor, as the fixture asked", ms);
+                    event!(
+                        Level::WARN,
+                        msg = "stalling this shard's executor, as the fixture asked",
+                        ms
+                    );
                     std::thread::sleep(std::time::Duration::from_millis(ms));
-                    event!(Level::WARN, msg = "the shard's executor is running again", ms);
+                    event!(
+                        Level::WARN,
+                        msg = "the shard's executor is running again",
+                        ms
+                    );
                 })
                 .detach();
                 Ok(serde_json::json!({ "stalling": true, "ms": ms }))
@@ -661,10 +713,17 @@ where
                     gather.slots.len()
                 ),
             );
-            let response = <D::ClientType as QuerySupport>::failed(gather.table, bundle, index, gather.end, error);
+            let response = <D::ClientType as QuerySupport>::failed(
+                gather.table,
+                bundle,
+                index,
+                gather.end,
+                error,
+            );
             let mut stamps = gather.stamps;
             stamps.mark_exec_done();
-            self.reply(gather.client, bundle, gather.span, stamps, response).await?;
+            self.reply(gather.client, bundle, gather.span, stamps, response)
+                .await?;
         }
         Ok(())
     }
@@ -772,18 +831,23 @@ async fn read_barrier<D: ShoalDatabase>(
                     ));
                 }
                 // ask this shard's own handle first: if it leads, the heartbeat round is its own
-                let asked = glommio::timer::timeout(left, async { Ok(raft.get_read_linearizer(ReadPolicy::ReadIndex).await) }).await;
+                let asked = glommio::timer::timeout(left, async {
+                    Ok(raft.get_read_linearizer(ReadPolicy::ReadIndex).await)
+                })
+                .await;
                 match asked {
                     Err(_) => {
                         return Err(ResponseError::new(
                             ErrorCode::Timeout,
-                            format!("group {group} did not confirm a read barrier within the deadline"),
+                            format!(
+                                "group {group} did not confirm a read barrier within the deadline"
+                            ),
                         ))
                     }
                     Ok(Ok(linearizer)) => return Ok((linearizer.read_log_id().index(), hopped)),
-                    Ok(Err(RaftError::APIError(LinearizableReadError::ForwardToLeader(forward)))) => {
-                        forward.leader_node.or(forward.leader_id)
-                    }
+                    Ok(Err(RaftError::APIError(LinearizableReadError::ForwardToLeader(
+                        forward,
+                    )))) => forward.leader_node.or(forward.leader_id),
                     Ok(Err(RaftError::APIError(LinearizableReadError::QuorumNotEnough(short)))) => {
                         return Err(ResponseError::new(
                             ErrorCode::QuorumUnavailable,
@@ -791,7 +855,10 @@ async fn read_barrier<D: ShoalDatabase>(
                         ))
                     }
                     Ok(Err(RaftError::Fatal(fatal))) => {
-                        return Err(ResponseError::new(ErrorCode::Unavailable, format!("group {group} is stopped: {fatal}")))
+                        return Err(ResponseError::new(
+                            ErrorCode::Unavailable,
+                            format!("group {group} is stopped: {fatal}"),
+                        ))
                     }
                 }
             }

@@ -24,11 +24,11 @@ use super::read::{
 };
 use super::trace::{TraceContext, TRACE_CONTEXT_LEN, TRACE_CONTEXT_VERSION};
 use super::{
-    decode_request, decode_response, decode_server_frame, request_preamble, request_preamble_traced,
-    request_preamble_with, response_preamble, server_preamble, Flags, Header, MessageType,
-    ProtocolError, RawHeader, RequestHead, HEADER_LEN, MAX_REQUEST_PREAMBLE_LEN,
-    CLIENT_WIRE_VERSION, MIN_PEER_VERSION, PROTOCOL_VERSION, QUERY_ID_LEN, REQUEST_PREAMBLE_LEN,
-    RESPONSE_PREAMBLE_LEN,
+    decode_request, decode_response, decode_server_frame, request_preamble,
+    request_preamble_traced, request_preamble_with, response_preamble, server_preamble, Flags,
+    Header, MessageType, ProtocolError, RawHeader, RequestHead, CLIENT_WIRE_VERSION, HEADER_LEN,
+    MAX_REQUEST_PREAMBLE_LEN, MIN_PEER_VERSION, PROTOCOL_VERSION, QUERY_ID_LEN,
+    REQUEST_PREAMBLE_LEN, RESPONSE_PREAMBLE_LEN,
 };
 
 /// Every message type this build knows, so a test can walk all of them
@@ -121,7 +121,9 @@ fn a_header_below_the_floor_is_refused_and_one_in_range_is_kept() {
         assert_eq!(decoded.version, version);
     }
     // one below the floor is refused naming the newest this build reads
-    let mut raw = Header::new(MessageType::Queries, Flags::NONE, 8, ROOMY).unwrap().encode();
+    let mut raw = Header::new(MessageType::Queries, Flags::NONE, 8, ROOMY)
+        .unwrap()
+        .encode();
     raw[0] = MIN_PEER_VERSION - 1;
     assert_eq!(
         Header::decode(&raw, ROOMY).unwrap_err(),
@@ -133,7 +135,9 @@ fn a_header_below_the_floor_is_refused_and_one_in_range_is_kept() {
     // a negotiated ceiling refuses what is above it and keeps what is at it
     raw[0] = PROTOCOL_VERSION;
     assert_eq!(
-        RawHeader::decode(&raw).validate_at(MIN_PEER_VERSION, ROOMY).unwrap_err(),
+        RawHeader::decode(&raw)
+            .validate_at(MIN_PEER_VERSION, ROOMY)
+            .unwrap_err(),
         ProtocolError::UnsupportedVersion {
             got: PROTOCOL_VERSION,
             ours: MIN_PEER_VERSION,
@@ -141,7 +145,10 @@ fn a_header_below_the_floor_is_refused_and_one_in_range_is_kept() {
     );
     raw[0] = MIN_PEER_VERSION;
     assert_eq!(
-        RawHeader::decode(&raw).validate_at(MIN_PEER_VERSION, ROOMY).unwrap().version,
+        RawHeader::decode(&raw)
+            .validate_at(MIN_PEER_VERSION, ROOMY)
+            .unwrap()
+            .version,
         MIN_PEER_VERSION
     );
     // the client lane writes inside the range
@@ -627,8 +634,14 @@ fn an_error_frames_query_id_sits_where_a_responses_does() {
     let response = response_preamble(&query_id, 64, ROOMY).unwrap();
     let error = error_preamble(&query_id, ErrorCode::Internal, 8, ROOMY).unwrap();
     // both put the id in the sixteen bytes after the header, and both write it the same way
-    assert_eq!(&response[HEADER_LEN..HEADER_LEN + QUERY_ID_LEN], query_id.as_bytes());
-    assert_eq!(&error[HEADER_LEN..HEADER_LEN + QUERY_ID_LEN], query_id.as_bytes());
+    assert_eq!(
+        &response[HEADER_LEN..HEADER_LEN + QUERY_ID_LEN],
+        query_id.as_bytes()
+    );
+    assert_eq!(
+        &error[HEADER_LEN..HEADER_LEN + QUERY_ID_LEN],
+        query_id.as_bytes()
+    );
     // so the preamble a client reads is the same size whichever one arrived
     assert_eq!(RESPONSE_PREAMBLE_LEN, HEADER_LEN + QUERY_ID_LEN);
     assert!(ERROR_PREAMBLE_LEN > RESPONSE_PREAMBLE_LEN);
@@ -687,8 +700,13 @@ fn a_message_over_the_message_bound_is_refused() {
         ProtocolError::FrameTooLarge { .. }
     ));
     // and a message exactly on the bound is still accepted, in both directions
-    let preamble =
-        error_preamble(&Uuid::new_v4(), ErrorCode::Internal, MAX_ERROR_MSG_LEN, ROOMY).unwrap();
+    let preamble = error_preamble(
+        &Uuid::new_v4(),
+        ErrorCode::Internal,
+        MAX_ERROR_MSG_LEN,
+        ROOMY,
+    )
+    .unwrap();
     assert_eq!(
         decode_error(&preamble, ROOMY).unwrap().msg_len,
         MAX_ERROR_MSG_LEN
@@ -812,7 +830,11 @@ fn an_auth_frame_round_trips() {
 /// An auth response round trips, and a refusal is flagged in its header as well as its body
 #[test]
 fn an_auth_response_round_trips() {
-    for status in [AuthStatus::Challenge, AuthStatus::Success, AuthStatus::Failed] {
+    for status in [
+        AuthStatus::Challenge,
+        AuthStatus::Success,
+        AuthStatus::Failed,
+    ] {
         let payload = b"r=abc,s=def,i=4096";
         let frame = encode_auth_response(status, payload, ROOMY).unwrap();
         let mut header_bytes = [0u8; HEADER_LEN];
@@ -1102,7 +1124,10 @@ fn read_options_and_tokens_round_trip_on_the_wire() {
     // and a token of a version this build does not read is refused
     let mut unknown = raw;
     unknown[0] = 2;
-    assert_eq!(SessionToken::decode(&unknown).unwrap_err(), ProtocolError::UnknownSessionTokenVersion(2));
+    assert_eq!(
+        SessionToken::decode(&unknown).unwrap_err(),
+        ProtocolError::UnknownSessionTokenVersion(2)
+    );
     // the head alone: a level, a deadline, no tokens
     let head_only = ReadOptions {
         level: Some(ReadLevel::Quorum),
@@ -1119,24 +1144,39 @@ fn read_options_and_tokens_round_trip_on_the_wire() {
         tokens: (0..MAX_SESSION_TOKENS as u64).map(a_token).collect(),
     };
     let bytes = full.encode().unwrap();
-    assert_eq!(bytes.len(), READ_OPTIONS_HEAD_LEN + MAX_SESSION_TOKENS * SESSION_TOKEN_LEN);
+    assert_eq!(
+        bytes.len(),
+        READ_OPTIONS_HEAD_LEN + MAX_SESSION_TOKENS * SESSION_TOKEN_LEN
+    );
     assert_eq!(ReadOptions::decode(&bytes).unwrap(), full);
     // a seventeenth is refused on the way out and on the way in
     let mut over = full.clone();
     over.tokens.push(a_token(99));
-    assert_eq!(over.encode().unwrap_err(), ProtocolError::TooManySessionTokens(17));
+    assert_eq!(
+        over.encode().unwrap_err(),
+        ProtocolError::TooManySessionTokens(17)
+    );
     let mut counted = bytes.clone();
     counted[2] = 17;
     let mut head = [0u8; READ_OPTIONS_HEAD_LEN];
     head.copy_from_slice(&counted[..READ_OPTIONS_HEAD_LEN]);
-    assert_eq!(ReadOptions::decode_head(&head).unwrap_err(), ProtocolError::TooManySessionTokens(17));
+    assert_eq!(
+        ReadOptions::decode_head(&head).unwrap_err(),
+        ProtocolError::TooManySessionTokens(17)
+    );
     // a head version and a level byte this build does not know are refused too
     let mut versioned = head;
     versioned[0] = 9;
-    assert_eq!(ReadOptions::decode_head(&versioned).unwrap_err(), ProtocolError::UnknownReadOptionsVersion(9));
+    assert_eq!(
+        ReadOptions::decode_head(&versioned).unwrap_err(),
+        ProtocolError::UnknownReadOptionsVersion(9)
+    );
     let mut levelled = head;
     levelled[1] = 7;
-    assert_eq!(ReadOptions::decode_head(&levelled).unwrap_err(), ProtocolError::UnknownReadLevel(7));
+    assert_eq!(
+        ReadOptions::decode_head(&levelled).unwrap_err(),
+        ProtocolError::UnknownReadLevel(7)
+    );
     // zero is inherit and the two named levels are themselves
     assert_eq!(ReadLevel::from_byte(0).unwrap(), None);
     assert_eq!(ReadLevel::from_byte(1).unwrap(), Some(ReadLevel::One));
@@ -1148,7 +1188,9 @@ fn read_options_and_tokens_round_trip_on_the_wire() {
         deadline_ms: 10,
         tokens: vec![a_token(1), a_token(2)],
     };
-    let RequestHead::Extended(framed) = request_preamble_with(Some(&context), Some(&options), 4096, ROOMY).unwrap() else {
+    let RequestHead::Extended(framed) =
+        request_preamble_with(Some(&context), Some(&options), 4096, ROOMY).unwrap()
+    else {
         panic!("options were dropped");
     };
     let mut header_bytes = [0u8; REQUEST_PREAMBLE_LEN];
@@ -1156,28 +1198,47 @@ fn read_options_and_tokens_round_trip_on_the_wire() {
     let header = decode_request(&header_bytes, ROOMY).unwrap();
     assert!(header.flags.contains(Flags::TRACE_CONTEXT));
     assert!(header.has_read_options());
-    assert_eq!(header.body_len(), 4096 + TRACE_CONTEXT_LEN + options.encoded_len());
+    assert_eq!(
+        header.body_len(),
+        4096 + TRACE_CONTEXT_LEN + options.encoded_len()
+    );
     let mut context_bytes = [0u8; TRACE_CONTEXT_LEN];
-    context_bytes.copy_from_slice(&framed[REQUEST_PREAMBLE_LEN..REQUEST_PREAMBLE_LEN + TRACE_CONTEXT_LEN]);
+    context_bytes
+        .copy_from_slice(&framed[REQUEST_PREAMBLE_LEN..REQUEST_PREAMBLE_LEN + TRACE_CONTEXT_LEN]);
     assert_eq!(TraceContext::decode(&context_bytes).unwrap(), context);
     let section = &framed[REQUEST_PREAMBLE_LEN + TRACE_CONTEXT_LEN..];
     assert_eq!(ReadOptions::decode(section).unwrap(), options);
     assert_eq!(header.payload_len_after(section.len()).unwrap(), 4096);
     // and one without a context puts the section straight after the header
-    let RequestHead::Extended(framed) = request_preamble_with(None, Some(&options), 16, ROOMY).unwrap() else {
+    let RequestHead::Extended(framed) =
+        request_preamble_with(None, Some(&options), 16, ROOMY).unwrap()
+    else {
         panic!("options were dropped");
     };
-    assert_eq!(ReadOptions::decode(&framed[REQUEST_PREAMBLE_LEN..]).unwrap(), options);
+    assert_eq!(
+        ReadOptions::decode(&framed[REQUEST_PREAMBLE_LEN..]).unwrap(),
+        options
+    );
     // no options, or empty ones, is the preamble a client wrote before options existed
     let plain = request_preamble_traced(None, 4096, ROOMY).unwrap();
-    assert_eq!(request_preamble_with(None, None, 4096, ROOMY).unwrap(), RequestHead::Fixed(plain));
+    assert_eq!(
+        request_preamble_with(None, None, 4096, ROOMY).unwrap(),
+        RequestHead::Fixed(plain)
+    );
     assert_eq!(
         request_preamble_with(None, Some(&ReadOptions::default()), 4096, ROOMY).unwrap(),
         RequestHead::Fixed(plain)
     );
     // a response frame with a token says so, and the client sizes the token ahead of the payload
     let query_id = Uuid::new_v4();
-    let preamble = server_preamble(MessageType::Response, Flags::SESSION_TOKEN, &query_id, SESSION_TOKEN_LEN + 64, ROOMY).unwrap();
+    let preamble = server_preamble(
+        MessageType::Response,
+        Flags::SESSION_TOKEN,
+        &query_id,
+        SESSION_TOKEN_LEN + 64,
+        ROOMY,
+    )
+    .unwrap();
     let frame = decode_server_frame(&preamble, ROOMY).unwrap();
     assert_eq!(frame.token_len(), SESSION_TOKEN_LEN);
     assert_eq!(frame.payload_len().unwrap(), 64);
@@ -1187,9 +1248,19 @@ fn read_options_and_tokens_round_trip_on_the_wire() {
     assert_eq!(frame.token_len(), 0);
     assert_eq!(frame.payload_len().unwrap(), 64);
     // and a flagged frame too short to hold a token is refused
-    let preamble = server_preamble(MessageType::Response, Flags::SESSION_TOKEN, &query_id, 8, ROOMY).unwrap();
+    let preamble = server_preamble(
+        MessageType::Response,
+        Flags::SESSION_TOKEN,
+        &query_id,
+        8,
+        ROOMY,
+    )
+    .unwrap();
     let frame = decode_server_frame(&preamble, ROOMY).unwrap();
-    assert!(matches!(frame.payload_len().unwrap_err(), ProtocolError::BodyTooShort { .. }));
+    assert!(matches!(
+        frame.payload_len().unwrap_err(),
+        ProtocolError::BodyTooShort { .. }
+    ));
     // the capability byte is offset fourteen in both handshake bodies, and zero is none
     let hello = Hello {
         schema_fingerprint: 1,

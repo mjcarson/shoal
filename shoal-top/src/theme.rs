@@ -115,7 +115,11 @@ pub const INTERVAL_ALPHA: u8 = 48;
 pub fn palette(ui: &egui::Ui) -> &'static Palette {
     // read off the visuals rather than off a stored flag, so a theme switched mid frame is drawn
     // in the palette it switched to rather than the one the last frame used
-    if ui.visuals().dark_mode { &DARK } else { &LIGHT }
+    if ui.visuals().dark_mode {
+        &DARK
+    } else {
+        &LIGHT
+    }
 }
 
 /// The colour a series at this position is drawn in
@@ -173,7 +177,8 @@ pub fn line_style(at: usize) -> egui_plot::LineStyle {
 /// * `at` - The curve's position among the ones sharing its colour
 pub fn series_marker(at: usize) -> Option<egui_plot::MarkerShape> {
     // the first curve of a colour is the bare line, and every one after it takes a shape
-    at.checked_sub(1).map(|found| MARKERS[found % MARKERS.len()])
+    at.checked_sub(1)
+        .map(|found| MARKERS[found % MARKERS.len()])
 }
 
 /// The same colour at the transparency an interval band is filled with

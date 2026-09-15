@@ -265,9 +265,15 @@ mod tests {
         let uniform = share(KeyDistribution::Uniform);
         let zipfian = share(KeyDistribution::Zipfian);
         // uniform puts about one percent of its traffic on one percent of its keys
-        assert!(uniform < 0.05, "uniform put {uniform} on the hot one percent");
+        assert!(
+            uniform < 0.05,
+            "uniform put {uniform} on the hot one percent"
+        );
         // and YCSB's theta puts a large majority of it there
-        assert!(zipfian > 0.4, "zipfian put only {zipfian} on the hot one percent");
+        assert!(
+            zipfian > 0.4,
+            "zipfian put only {zipfian} on the hot one percent"
+        );
     }
 
     /// The recency chooser favours the newest keys, which is what makes it a recency chooser

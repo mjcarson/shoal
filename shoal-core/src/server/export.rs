@@ -79,8 +79,17 @@ pub struct ExportReport {
 ///
 /// Fails naming what was wrong; a refused export writes nothing to either directory.
 #[instrument(name = "export::export_standalone", skip_all, err(Debug))]
-pub fn export_standalone<S: ShoalDatabase>(conf: &Conf, target: &Path) -> Result<ExportReport, ServerError> {
-    let source = conf.storage.default.filesystem.latency_sensitive.path.clone();
+pub fn export_standalone<S: ShoalDatabase>(
+    conf: &Conf,
+    target: &Path,
+) -> Result<ExportReport, ServerError> {
+    let source = conf
+        .storage
+        .default
+        .filesystem
+        .latency_sensitive
+        .path
+        .clone();
     // the configuration is the source's: a standalone node's, or the tables and roots it
     // names are not the source's
     if conf.cluster.is_some() {
@@ -91,7 +100,10 @@ pub fn export_standalone<S: ShoalDatabase>(conf: &Conf, target: &Path) -> Result
     // the source: a standalone node's, stopped
     let _source_lock = DirectoryLock::acquire(&source)?;
     let marker = StorageMeta::read(&source)?.ok_or_else(|| {
-        ServerError::Shoal(ShoalError::InvalidConfig(format!("{} holds no storage marker; nothing to export", source.display())))
+        ServerError::Shoal(ShoalError::InvalidConfig(format!(
+            "{} holds no storage marker; nothing to export",
+            source.display()
+        )))
     })?;
     if marker.mode != MarkerMode::Standalone || marker.cluster.is_some() {
         return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
@@ -110,7 +122,10 @@ pub fn export_standalone<S: ShoalDatabase>(conf: &Conf, target: &Path) -> Result
         }
     }
     // every persistent table under the default root, since one under its own is not exported
-    let tables: Vec<String> = S::persistent_tables().iter().map(|table| (*table).to_string()).collect();
+    let tables: Vec<String> = S::persistent_tables()
+        .iter()
+        .map(|table| (*table).to_string())
+        .collect();
     for table in &tables {
         if conf.storage.tables.contains_key(table) {
             return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
@@ -141,7 +156,9 @@ pub fn export_standalone<S: ShoalDatabase>(conf: &Conf, target: &Path) -> Result
     let conf_owned = conf.clone();
     let target_owned = target.to_path_buf();
     // the fold and the export, on an executor of their own
-    let executor = LocalExecutorBuilder::new(Placement::Unbound).name("shoal-export").make()?;
+    let executor = LocalExecutorBuilder::new(Placement::Unbound)
+        .name("shoal-export")
+        .make()?;
     let (rows_folded, exported, bytes_written) = executor.run(async move {
         // every executor's intent logs of every table, into the source's archives
         let mut folded = 0u64;
@@ -159,9 +176,21 @@ pub fn export_standalone<S: ShoalDatabase>(conf: &Conf, target: &Path) -> Result
             let group = GroupId::of(table_id, &[]);
             let dir = target_owned.join(table_name);
             let file = dir.join(super::replication::snapshot::snapshot_name(group, 0));
-            let manifest = S::export_archives(&shard_names, *table, &conf_owned, &file, &provenance, group, schema_id).await?;
+            let manifest = S::export_archives(
+                &shard_names,
+                *table,
+                &conf_owned,
+                &file,
+                &provenance,
+                group,
+                schema_id,
+            )
+            .await?;
             let beside = BackupManifest::of(op, table_name, &manifest);
-            std::fs::write(super::shard::backup::manifest_path(&file), serde_json::to_vec_pretty(&beside)?)?;
+            std::fs::write(
+                super::shard::backup::manifest_path(&file),
+                serde_json::to_vec_pretty(&beside)?,
+            )?;
             let written = std::fs::File::open(super::shard::backup::manifest_path(&file))?;
             written.sync_all()?;
             bytes += manifest.total;

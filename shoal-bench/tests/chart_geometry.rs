@@ -30,7 +30,9 @@ fn repo() -> Store {
 ///
 /// * `svg` - The chart
 fn height(svg: &str) -> f64 {
-    let at = svg.find("viewBox=\"0 0 ").expect("every chart has a viewBox");
+    let at = svg
+        .find("viewBox=\"0 0 ")
+        .expect("every chart has a viewBox");
     let rest = &svg[at + 13..];
     let end = rest.find('"').expect("the viewBox is terminated");
     rest[..end]
@@ -52,7 +54,10 @@ fn texts(svg: &str) -> Vec<(f64, f64, String)> {
     // walk every text element, pulling its anchor and its content
     while let Some(next) = svg[at..].find("<text ") {
         let start = at + next;
-        let end = svg[start..].find("</text>").map(|e| start + e).unwrap_or(svg.len());
+        let end = svg[start..]
+            .find("</text>")
+            .map(|e| start + e)
+            .unwrap_or(svg.len());
         let element = &svg[start..end];
         let attr = |name: &str| -> Option<f64> {
             let needle = format!("{name}=\"");
@@ -126,15 +131,16 @@ fn every_chart() -> Vec<(String, String)> {
     for label in store.labels().expect("labels are readable") {
         if let Some((_, capture)) = store.resolve_macro(&label).expect("macro reads") {
             for (id, workload) in &capture.workloads {
-                per_workload.entry(id.clone()).or_default().push(
-                    chart::macro_wall_clock::Point {
+                per_workload
+                    .entry(id.clone())
+                    .or_default()
+                    .push(chart::macro_wall_clock::Point {
                         label: label.clone(),
                         median_ns: workload.median_wall_clock_ns() as f64,
                         interval_ns: workload
                             .wall_clock_interval_ns()
                             .map(|(low, high)| (low as f64, high as f64)),
-                    },
-                );
+                    });
             }
         }
     }
@@ -278,7 +284,11 @@ fn no_two_labels_share_an_anchor() {
             left.0
                 .partial_cmp(&right.0)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then(left.1.partial_cmp(&right.1).unwrap_or(std::cmp::Ordering::Equal))
+                .then(
+                    left.1
+                        .partial_cmp(&right.1)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
         });
         for pair in anchors.windows(2) {
             let (left, right) = (&pair[0], &pair[1]);

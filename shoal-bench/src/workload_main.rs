@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
 use mimalloc::MiMalloc;
 
@@ -99,7 +99,10 @@ fn serve(args: &ServeArgs) -> Result<()> {
     // the same resolution `run` performs, so the served configuration is the workload's own
     let plan = workload.plan(args.scale);
     let Some(overrides) = plan.server.overrides() else {
-        bail!("{} drives engine internals in process and has no server to serve", args.id);
+        bail!(
+            "{} drives engine internals in process and has no server to serve",
+            args.id
+        );
     };
     let conf = harness::conf::resolve(&args.conf, workload.id(), overrides, args.port)?;
     // a staged node applies its own description on top: storage one level down, its ports, its
@@ -108,7 +111,13 @@ fn serve(args: &ServeArgs) -> Result<()> {
         Some(path) => harness::cluster::apply(conf, &harness::cluster::load(path)?)?,
         None => conf,
     };
-    let storage = conf.storage.default.filesystem.latency_sensitive.path.clone();
+    let storage = conf
+        .storage
+        .default
+        .filesystem
+        .latency_sensitive
+        .path
+        .clone();
     // which node this is, off its staged file; a server with none is node zero of nothing
     let index = match &args.staged {
         Some(path) => harness::cluster::load(path)?.index,
@@ -122,7 +131,10 @@ fn serve(args: &ServeArgs) -> Result<()> {
         .ready(harness::ready::TIMEOUT)
         .map_err(|error| anyhow::anyhow!("a shard failed to start: {error:?}"))?;
     let environment = shoal_bench::fingerprint::node_environment(index, &storage);
-    println!("{SERVE_READY_LINE} {addr} {}", serde_json::to_string(&environment)?);
+    println!(
+        "{SERVE_READY_LINE} {addr} {}",
+        serde_json::to_string(&environment)?
+    );
     use std::io::Write as _;
     std::io::stdout().flush()?;
     // hold the server up until killed, reporting a shard that dies rather than serving on
@@ -328,8 +340,10 @@ fn run(args: &RunArgs) -> Result<()> {
                 Some(path) => {
                     let text = std::fs::read_to_string(path)
                         .with_context(|| format!("failed to read {}", path.display()))?;
-                    Some(serde_json::from_str(&text)
-                        .with_context(|| format!("failed to parse {}", path.display()))?)
+                    Some(
+                        serde_json::from_str(&text)
+                            .with_context(|| format!("failed to parse {}", path.display()))?,
+                    )
                 }
                 None => None,
             },
@@ -381,7 +395,7 @@ fn main() {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{trace_options, RunArgs, WORKLOAD_SERVICE_NAME};
+    use super::{RunArgs, WORKLOAD_SERVICE_NAME, trace_options};
     use shoal_bench::workloads::harness::seed::Scale;
 
     /// Builds the arguments one run would have been given
@@ -440,7 +454,10 @@ mod tests {
                 .find(|(name, _)| name == key)
                 .map(|(_, value)| value.clone())
         };
-        assert_eq!(found("shoal.workload").as_deref(), Some("macro/grid/unsorted/r50/1024"));
+        assert_eq!(
+            found("shoal.workload").as_deref(),
+            Some("macro/grid/unsorted/r50/1024")
+        );
         assert_eq!(found("shoal.label").as_deref(), Some("trace-check"));
         assert_eq!(found("shoal.scale").as_deref(), Some("full"));
         assert_eq!(found("shoal.seed").as_deref(), Some("42"));

@@ -44,14 +44,26 @@ fn protocol_model_preserves_acknowledged_history() {
     }
     // and it held under something, not under nothing
     assert!(coverage.elections > 0, "no election happened: {coverage:?}");
-    assert!(coverage.truncations > 0, "no log was ever truncated: {coverage:?}");
+    assert!(
+        coverage.truncations > 0,
+        "no log was ever truncated: {coverage:?}"
+    );
     assert!(coverage.crashes > 0, "no node crashed: {coverage:?}");
     assert!(coverage.pauses > 0, "no node paused: {coverage:?}");
-    assert!(coverage.duplicates > 0, "no message was duplicated: {coverage:?}");
+    assert!(
+        coverage.duplicates > 0,
+        "no message was duplicated: {coverage:?}"
+    );
     assert!(coverage.retries > 0, "no attempt was retried: {coverage:?}");
-    assert!(coverage.unknown_outcomes > 0, "no outcome was unknown: {coverage:?}");
+    assert!(
+        coverage.unknown_outcomes > 0,
+        "no outcome was unknown: {coverage:?}"
+    );
     assert!(coverage.commits > 0, "nothing was committed: {coverage:?}");
-    assert!(coverage.strong_reads > 0, "no strong read completed: {coverage:?}");
+    assert!(
+        coverage.strong_reads > 0,
+        "no strong read completed: {coverage:?}"
+    );
     // every way of breaking it is caught, by the property it breaks
     let saved = Schedule::load_all();
     for (name, policy, property) in Policy::unsafe_knobs() {
@@ -92,7 +104,10 @@ fn protocol_model_preserves_acknowledged_history() {
         .iter()
         .find(|(_, schedule)| schedule.name.starts_with("stale_report_"))
         .expect("the stale report schedule is saved");
-    assert_eq!(stale.expected.as_ref().map(|v| v.property), Some(Property::P5));
+    assert_eq!(
+        stale.expected.as_ref().map(|v| v.property),
+        Some(Property::P5)
+    );
     let election = Policy::unsafe_knobs()
         .into_iter()
         .find(|(name, _, _)| *name == "election_by_heartbeat_max_report")
@@ -100,7 +115,10 @@ fn protocol_model_preserves_acknowledged_history() {
         .unwrap();
     let literal = stale_report_schedule(99, election);
     assert_eq!(literal.name, "stale_report_b100_c101_ab102");
-    let expected = literal.expected.as_ref().expect("the stale report loses a write");
+    let expected = literal
+        .expected
+        .as_ref()
+        .expect("the stale report loses a write");
     assert_eq!(expected.property, Property::P5);
     assert!(
         expected.detail.contains("ends at 101") && expected.detail.contains("ends at 102"),
@@ -117,8 +135,14 @@ fn protocol_model_preserves_acknowledged_history() {
     );
     let world = World::replay_world(&safe);
     let tablet = safe.params.tablets[0];
-    assert!(world.group(NodeId(2), tablet).is_leader(), "B did not take over");
-    assert!(!world.group(NodeId(3), tablet).is_leader(), "C led with a short log");
+    assert!(
+        world.group(NodeId(2), tablet).is_leader(),
+        "B did not take over"
+    );
+    assert!(
+        !world.group(NodeId(3), tablet).is_leader(),
+        "C led with a short log"
+    );
     assert_eq!(world.checker.committed_index(tablet).0, 102);
 }
 
@@ -145,9 +169,17 @@ fn saved_protocol_schedule_reproduces_failure() {
     // minimized, it is a subsequence that fails the same way
     let small = minimize(&schedule);
     assert!(small.events.len() <= schedule.events.len());
-    assert!(is_subsequence(&small.events, &schedule.events), "minimization reordered events");
-    let found = World::replay(&small).violation.expect("the minimized schedule still fails");
-    assert!(found.same_failure(&target), "minimized to a different failure: {found}");
+    assert!(
+        is_subsequence(&small.events, &schedule.events),
+        "minimization reordered events"
+    );
+    let found = World::replay(&small)
+        .violation
+        .expect("the minimized schedule still fails");
+    assert!(
+        found.same_failure(&target),
+        "minimized to a different failure: {found}"
+    );
     // and one-minimal: no single event can go
     for index in 0..small.events.len() {
         let mut shorter = small.clone();
@@ -155,7 +187,10 @@ fn saved_protocol_schedule_reproduces_failure() {
         let still = World::replay(&shorter)
             .violation
             .is_some_and(|found| found.same_failure(&target));
-        assert!(!still, "event {index} of the minimized schedule was not needed");
+        assert!(
+            !still,
+            "event {index} of the minimized schedule was not needed"
+        );
     }
     // the trip through JSON changes nothing
     let back = Schedule::from_json(&small.to_json()).expect("the schedule parses");
@@ -170,7 +205,12 @@ fn saved_protocol_schedule_reproduces_failure() {
             .clone()
             .unwrap_or_else(|| panic!("{} records no violation", path.display()));
         let found = World::replay(&schedule).violation;
-        assert_eq!(found, Some(expected), "{} replays differently", path.display());
+        assert_eq!(
+            found,
+            Some(expected),
+            "{} replays differently",
+            path.display()
+        );
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             text.trim_end(),
@@ -194,10 +234,17 @@ fn strong_reads_are_linearizable_and_the_cached_leader_knob_is_not() {
     let mut strong_reads = 0;
     for seed in 0..SAFE_SEEDS {
         let outcome = World::replay(&generate("strong", seed, &params, Policy::safe()));
-        assert!(outcome.violation.is_none(), "seed {seed}: {}", outcome.violation.unwrap());
+        assert!(
+            outcome.violation.is_none(),
+            "seed {seed}: {}",
+            outcome.violation.unwrap()
+        );
         strong_reads += outcome.coverage.strong_reads;
     }
-    assert!(strong_reads > 0, "no strong read completed under the safe rule");
+    assert!(
+        strong_reads > 0,
+        "no strong read completed under the safe rule"
+    );
     // the knob is named, deviates in its own name, and breaks the property it is filed under
     let (name, policy, property) = Policy::unsafe_knobs()
         .into_iter()
@@ -211,7 +258,9 @@ fn strong_reads_are_linearizable_and_the_cached_leader_knob_is_not() {
         .iter()
         .find(|(_, schedule)| schedule.policy.deviations() == vec![name])
         .expect("a saved schedule for the barrier knob");
-    let found = World::replay(schedule).violation.unwrap_or_else(|| panic!("{} found nothing", path.display()));
+    let found = World::replay(schedule)
+        .violation
+        .unwrap_or_else(|| panic!("{} found nothing", path.display()));
     assert_eq!(found.property, Property::Linearizable, "{found}");
     assert_eq!(Some(found), schedule.expected);
 }
@@ -220,7 +269,10 @@ fn strong_reads_are_linearizable_and_the_cached_leader_knob_is_not() {
 fn is_subsequence<T: PartialEq>(small: &[T], big: &[T]) -> bool {
     let mut position = 0;
     for event in small {
-        match big[position..].iter().position(|candidate| candidate == event) {
+        match big[position..]
+            .iter()
+            .position(|candidate| candidate == event)
+        {
             Some(offset) => position += offset + 1,
             None => return false,
         }
@@ -236,7 +288,12 @@ fn is_subsequence<T: PartialEq>(small: &[T], big: &[T]) -> bool {
 #[test]
 fn history_oracle_distinguishes_unknown_and_rejected() {
     let key = Key(1);
-    let insert = |v: u32| ClientOp::Mutate(MutationOp::Insert { key, value: Value(v) });
+    let insert = |v: u32| {
+        ClientOp::Mutate(MutationOp::Insert {
+            key,
+            value: Value(v),
+        })
+    };
     let delete = || ClientOp::Mutate(MutationOp::Delete { key });
     let read = || ClientOp::Read {
         key,
@@ -249,7 +306,11 @@ fn history_oracle_distinguishes_unknown_and_rejected() {
         (1, 0, insert(7), 1, 2, Outcome::Unknown),
         (2, 0, read(), 3, 4, saw(Some(7))),
     ]);
-    assert_eq!(check(&history), Ok(()), "an unknown insert may have taken effect");
+    assert_eq!(
+        check(&history),
+        Ok(()),
+        "an unknown insert may have taken effect"
+    );
     // (b) a rejected insert, then a read that sees it: it never happened
     let history = ledger(&[
         (1, 0, insert(7), 1, 2, Outcome::Rejected),
@@ -287,7 +348,10 @@ fn history_oracle_distinguishes_unknown_and_rejected() {
         (1, 1, insert(7), 3, 4, applied(false)),
     ]);
     assert!(
-        matches!(check(&history), Err(OracleError::InconsistentRetry { id: OpId(1), .. })),
+        matches!(
+            check(&history),
+            Err(OracleError::InconsistentRetry { id: OpId(1), .. })
+        ),
         "a retry was allowed a different result"
     );
     // (f) an unknown insert that never took effect, then an insert that succeeds as if absent
@@ -296,7 +360,11 @@ fn history_oracle_distinguishes_unknown_and_rejected() {
         (2, 0, insert(8), 3, 4, applied(true)),
         (3, 0, read(), 5, 6, saw(Some(8))),
     ]);
-    assert_eq!(check(&history), Ok(()), "an unknown insert may have taken no effect");
+    assert_eq!(
+        check(&history),
+        Ok(()),
+        "an unknown insert may have taken no effect"
+    );
     // (g) delete and reinsert, with a stale One read between them seeing the old value
     let history = ledger(&[
         (1, 0, insert(7), 1, 2, applied(true)),
@@ -305,7 +373,11 @@ fn history_oracle_distinguishes_unknown_and_rejected() {
         (4, 0, read(), 7, 8, saw(Some(7))),
         (5, 0, read(), 9, 10, saw(Some(9))),
     ]);
-    assert_eq!(check(&history), Ok(()), "a stale committed-prefix read was refused");
+    assert_eq!(
+        check(&history),
+        Ok(()),
+        "a stale committed-prefix read was refused"
+    );
 }
 
 /// A ledger on one tablet from (id, retry, op, invoke, complete, outcome)
@@ -336,10 +408,21 @@ fn the_stale_report_schedule_loses_the_write_at_any_size() {
         let violation = schedule.expected.expect("the write is lost");
         assert_eq!(violation.property, Property::P5, "{violation}");
         assert!(
-            violation.detail.contains(&format!("ends at {}", prefix + 2))
-                && violation.detail.contains(&format!("ends at {}", prefix + 3)),
+            violation
+                .detail
+                .contains(&format!("ends at {}", prefix + 2))
+                && violation
+                    .detail
+                    .contains(&format!("ends at {}", prefix + 3)),
             "{violation}"
         );
-        assert_eq!(schedule.events.iter().filter(|e| matches!(e, shoal_model::Event::Crash { node: NodeId(1) })).count(), 1);
+        assert_eq!(
+            schedule
+                .events
+                .iter()
+                .filter(|e| matches!(e, shoal_model::Event::Crash { node: NodeId(1) }))
+                .count(),
+            1
+        );
     }
 }

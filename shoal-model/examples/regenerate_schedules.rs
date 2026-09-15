@@ -35,11 +35,20 @@ fn main() {
         };
         let before = schedule.events.len();
         let small = minimize(&schedule);
-        let expected = small.expected.as_ref().expect("a minimized failure still fails");
-        assert_eq!(expected.property, property, "{name} violated the wrong property");
+        let expected = small
+            .expected
+            .as_ref()
+            .expect("a minimized failure still fails");
+        assert_eq!(
+            expected.property, property,
+            "{name} violated the wrong property"
+        );
         println!(
             "{name}: seed {} failed {} at {} events, minimized to {}",
-            schedule.seed, expected.property, before, small.events.len()
+            schedule.seed,
+            expected.property,
+            before,
+            small.events.len()
         );
         small.save(&dir.join(format!("{name}.json")));
     }
@@ -52,7 +61,15 @@ fn main() {
         .map(|(_, policy, _)| policy)
         .expect("the election knob");
     let schedule = stale_report_schedule(3, policy);
-    let expected = schedule.expected.as_ref().expect("the stale report loses a write");
-    println!("{}: {} at {} events", schedule.name, expected, schedule.events.len());
+    let expected = schedule
+        .expected
+        .as_ref()
+        .expect("the stale report loses a write");
+    println!(
+        "{}: {} at {} events",
+        schedule.name,
+        expected,
+        schedule.events.len()
+    );
     schedule.save(&dir.join(format!("{}.json", schedule.name)));
 }

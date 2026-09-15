@@ -107,8 +107,17 @@ async fn cycle_and_read(
         let found = client.send_one(TestRecordGet::new(vec![key(at)])).await?;
         let rows = found.access::<TestRecord>()?;
         let rows = rows.unwrap_or_else(|| panic!("row {at} did not read back at {cores} cores"));
-        assert_eq!(rows.len(), 1, "row {at} read back {} rows at {cores} cores", rows.len());
-        assert_eq!(rows[0].data, format!("data-{at}"), "row {at} read back wrong at {cores} cores");
+        assert_eq!(
+            rows.len(),
+            1,
+            "row {at} read back {} rows at {cores} cores",
+            rows.len()
+        );
+        assert_eq!(
+            rows[0].data,
+            format!("data-{at}"),
+            "row {at} read back wrong at {cores} cores"
+        );
     }
     // what the start did to the files, and the hosting it runs under
     let report = pool.rehome().cloned();
@@ -142,18 +151,31 @@ async fn a_changed_core_count_rehomes_and_reads_back() -> Result<(), TestError> 
     let temp_dir = utils::test_dir();
     // written and read at two cores, which is no rehome at all
     let report = cycle_and_read(&temp_dir, 2, true).await?;
-    assert!(report.is_none(), "a fresh directory ran a rehome: {report:?}");
+    assert!(
+        report.is_none(),
+        "a fresh directory ran a rehome: {report:?}"
+    );
     // grown to three: two donors deal a third of their tablets to the new executor
-    let report = cycle_and_read(&temp_dir, 3, false).await?.expect("a growth ran no rehome");
+    let report = cycle_and_read(&temp_dir, 3, false)
+        .await?
+        .expect("a growth ran no rehome");
     assert_eq!((report.from, report.to), (2, 3));
-    assert!(report.tablets_moved > 0, "a growth moved no tablets: {report:?}");
+    assert!(
+        report.tablets_moved > 0,
+        "a growth moved no tablets: {report:?}"
+    );
     assert!(report.records > 0, "a growth copied no records: {report:?}");
     assert_eq!(report.steps_redone, 0);
     // the same count again is the ordinary restart
     let report = cycle_and_read(&temp_dir, 3, false).await?;
-    assert!(report.is_none(), "a settled directory ran a rehome: {report:?}");
+    assert!(
+        report.is_none(),
+        "a settled directory ran a rehome: {report:?}"
+    );
     // shrunk to one: two executors vanish and the survivor holds every row
-    let report = cycle_and_read(&temp_dir, 1, false).await?.expect("a shrink ran no rehome");
+    let report = cycle_and_read(&temp_dir, 1, false)
+        .await?
+        .expect("a shrink ran no rehome");
     assert_eq!((report.from, report.to), (3, 1));
     assert!(report.tablets_moved > 0);
     assert!(report.records > 0, "a shrink copied no records: {report:?}");

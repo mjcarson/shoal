@@ -25,8 +25,8 @@
 
 use std::path::PathBuf;
 
-use crate::registry::criterion_list;
 use crate::registry::Layer;
+use crate::registry::criterion_list;
 
 /// Where a step's standard output should go
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -405,17 +405,23 @@ pub fn cluster_ports(id: &str, nodes: u16) -> anyhow::Result<Vec<NodePorts>> {
     // the single-node range ends where the last declared workload's port is
     let single_node_top = u32::from(BASE_PORT) + crate::workload_ids::IDS.len() as u32;
     if nodes == 0 || nodes > MAX_CLUSTER_NODES {
-        anyhow::bail!("{id}: a cluster arm runs between 1 and {MAX_CLUSTER_NODES} nodes, not {nodes}");
+        anyhow::bail!(
+            "{id}: a cluster arm runs between 1 and {MAX_CLUSTER_NODES} nodes, not {nodes}"
+        );
     }
     if last > u32::from(u16::MAX) {
         anyhow::bail!("{id}: its cluster ports would pass {} at {last}", u16::MAX);
     }
     if first <= single_node_top {
-        anyhow::bail!("{id}: its cluster ports at {first} overlap the single-node range ending at {single_node_top}");
+        anyhow::bail!(
+            "{id}: its cluster ports at {first} overlap the single-node range ending at {single_node_top}"
+        );
     }
     // and never in the ephemeral range, where an outbound link's TIME_WAIT can take a port
     if last >= u32::from(EPHEMERAL_PORT_FLOOR) {
-        anyhow::bail!("{id}: its cluster ports at {last} reach the ephemeral range at {EPHEMERAL_PORT_FLOOR}");
+        anyhow::bail!(
+            "{id}: its cluster ports at {last} reach the ephemeral range at {EPHEMERAL_PORT_FLOOR}"
+        );
     }
     Ok((0..nodes)
         .map(|node| {
@@ -443,9 +449,7 @@ pub const MAX_CLUSTER_NODES: u16 = 8;
 fn scratch_result(inputs: &PlanInputs, id: &str, run: u32) -> PathBuf {
     // the workload is in the name, so a leftover file from another workload cannot be folded into
     // this one's numbers - and `collect` refuses one anyway, by reading which workload it holds
-    inputs
-        .scratch
-        .join(format!("run-{}-{run}.json", slug(id)))
+    inputs.scratch.join(format!("run-{}-{run}.json", slug(id)))
 }
 
 /// The workloads one instrumented layer should run
@@ -763,7 +767,10 @@ mod tests {
             vec![
                 "building",
                 "micro benchmarks",
-                &format!("macro benchmarks, {} workload(s) x 5 runs", crate::workload_ids::IDS.len()),
+                &format!(
+                    "macro benchmarks, {} workload(s) x 5 runs",
+                    crate::workload_ids::IDS.len()
+                ),
                 "hotpath profile (separate build, attribution only)",
                 "stage profile (separate build, attribution only)",
             ]
@@ -776,9 +783,15 @@ mod tests {
         let plan = build_plan(&inputs(&Layer::ALL));
         // it exists
         let restore = plan.restore.as_ref().expect("a full capture restores");
-        assert_eq!(restore.args, vec!["build", "--release", "--bin", "shoal-workload"]);
+        assert_eq!(
+            restore.args,
+            vec!["build", "--release", "--bin", "shoal-workload"]
+        );
         // it is the last thing in the plan
-        assert_eq!(commands(&plan).last().map(String::as_str), Some(restore.display().as_str()));
+        assert_eq!(
+            commands(&plan).last().map(String::as_str),
+            Some(restore.display().as_str())
+        );
         // and no phase contains it, so an error truncating the phase list cannot skip it
         assert!(
             plan.phases
@@ -827,7 +840,11 @@ mod tests {
                 .any(|step| matches!(step, Step::WipeStorage(_)))
         );
         // and the workload binary is never built, since no workload is run
-        assert!(!commands(&plan).iter().any(|line| line.contains("--bin shoal-workload")));
+        assert!(
+            !commands(&plan)
+                .iter()
+                .any(|line| line.contains("--bin shoal-workload"))
+        );
     }
 
     /// A full micro selection passes no filter, so the invocation is the one always used
@@ -944,14 +961,20 @@ mod tests {
         // every declared workload at the largest cluster, every port above the single-node range
         // and distinct across nodes
         let mut all = std::collections::BTreeSet::new();
-        for id in crate::workload_ids::IDS.iter().filter(|id| id.starts_with("macro/cluster/")) {
+        for id in crate::workload_ids::IDS
+            .iter()
+            .filter(|id| id.starts_with("macro/cluster/"))
+        {
             let ports = cluster_ports(id, MAX_CLUSTER_NODES).expect("the block fits");
             assert_eq!(ports.len(), usize::from(MAX_CLUSTER_NODES));
             for node in ports {
                 for port in [node.client, node.data, node.control, node.spare] {
                     assert!(port > single_node_top, "{id} was given {port}");
                     // below the ephemeral range, where a dialled link's TIME_WAIT could take it
-                    assert!(port < EPHEMERAL_PORT_FLOOR, "{id} was given {port}, an ephemeral port");
+                    assert!(
+                        port < EPHEMERAL_PORT_FLOOR,
+                        "{id} was given {port}, an ephemeral port"
+                    );
                     assert!(all.insert(port), "{id} shares port {port} with another arm");
                 }
             }
@@ -1006,7 +1029,11 @@ mod tests {
                 }
             }
         }
-        assert_eq!(written.len(), 2, "a stage run was planned without an artifact");
+        assert_eq!(
+            written.len(),
+            2,
+            "a stage run was planned without an artifact"
+        );
         let mut unique = written.clone();
         unique.sort();
         unique.dedup();
@@ -1076,7 +1103,10 @@ mod tests {
             .collect();
         assert_eq!(runs.len(), crate::registry::PROFILED_WORKLOADS.len());
         for id in crate::registry::PROFILED_WORKLOADS {
-            assert!(runs.iter().any(|line| line.contains(id)), "{id} is not profiled");
+            assert!(
+                runs.iter().any(|line| line.contains(id)),
+                "{id} is not profiled"
+            );
         }
     }
 

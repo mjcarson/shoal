@@ -8,8 +8,8 @@
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
-use shoal::shared::protocol::error::{self, ErrorCode};
 use shoal::shared::protocol::auth::AuthMechanisms;
+use shoal::shared::protocol::error::{self, ErrorCode};
 use shoal::shared::protocol::{self, handshake};
 use shoal::shared::queries::Queries;
 use shoal::shared::traits::QuerySupport;
@@ -105,7 +105,10 @@ async fn handshaken_with_bound(addr: &str, max_frame_bytes: u32) -> Result<TcpSt
 ///
 /// * `sock` - The connection to write to
 /// * `queries` - The bundle to send
-async fn send_bundle(sock: &mut TcpStream, queries: &Queries<TestDbClient>) -> Result<(), TestError> {
+async fn send_bundle(
+    sock: &mut TcpStream,
+    queries: &Queries<TestDbClient>,
+) -> Result<(), TestError> {
     // archive the bundle and build the header that goes ahead of it
     let archived =
         rkyv::to_bytes::<rkyv::rancor::Error>(queries).expect("failed to archive a bundle");
@@ -160,7 +163,8 @@ async fn a_response_too_large_to_frame_is_answered_with_an_error_naming_the_quer
     // open a raw connection that says it will only take a small frame
     let mut sock = handshaken_with_bound(&addr, TINY_FRAME_BYTES).await?;
     // ask it for the row we just wrote, which cannot possibly fit
-    let queries = Queries::<TestDbClient>::default().add(TestRecordGet::new(vec!["big".to_owned()]));
+    let queries =
+        Queries::<TestDbClient>::default().add(TestRecordGet::new(vec!["big".to_owned()]));
     let query_id = queries.id;
     send_bundle(&mut sock, &queries).await?;
     // what comes back is an error frame rather than a closed socket
@@ -208,7 +212,8 @@ async fn a_response_too_large_to_frame_leaves_the_connection_serving() -> Result
         .await?;
     // ask for it over a connection that cannot carry it, and take the failure
     let mut sock = handshaken_with_bound(&addr, TINY_FRAME_BYTES).await?;
-    let queries = Queries::<TestDbClient>::default().add(TestRecordGet::new(vec!["big".to_owned()]));
+    let queries =
+        Queries::<TestDbClient>::default().add(TestRecordGet::new(vec!["big".to_owned()]));
     send_bundle(&mut sock, &queries).await?;
     let (header, _) = read_frame(&mut sock).await?;
     assert_eq!(header.kind, protocol::MessageType::Error.as_byte());

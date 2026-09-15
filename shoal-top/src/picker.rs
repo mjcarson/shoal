@@ -107,7 +107,10 @@ fn workloads(ui: &mut egui::Ui, state: &mut Explorer) {
             continue;
         }
         // find the group this workload belongs in, or start it
-        match groups.iter_mut().find(|(family, _)| *family == workload.family) {
+        match groups
+            .iter_mut()
+            .find(|(family, _)| *family == workload.family)
+        {
             Some((_, members)) => members.push(at as u32),
             None => groups.push((workload.family, vec![at as u32])),
         }
@@ -307,7 +310,9 @@ fn select_all(state: &mut Explorer, members: &[u32]) {
 fn captures(ui: &mut egui::Ui, state: &mut Explorer) {
     // which captures carry the current metric at all, worked out once for the whole list rather
     // than once per row
-    let answering = state.index.captures_answering(&state.metric, &state.workloads);
+    let answering = state
+        .index
+        .captures_answering(&state.metric, &state.workloads);
     // what that answer was taken over, which is the half of it a reader cannot guess from the row
     let reason = match state.workloads.is_empty() {
         true => format!(

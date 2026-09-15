@@ -204,7 +204,11 @@ impl BackupManifest {
     /// * `table_name` - The table's name
     /// * `manifest` - The cut's manifest, stamped
     #[must_use]
-    pub fn of(op: Uuid, table_name: &str, manifest: &crate::server::replication::SnapshotManifest) -> Self {
+    pub fn of(
+        op: Uuid,
+        table_name: &str,
+        manifest: &crate::server::replication::SnapshotManifest,
+    ) -> Self {
         BackupManifest {
             op,
             cluster: manifest.cluster,
@@ -231,7 +235,10 @@ impl BackupManifest {
     #[must_use]
     pub fn to_snapshot(&self) -> crate::server::replication::SnapshotManifest {
         use openraft::vote::RaftLeaderId as _;
-        let leader = crate::server::wal::LeaderId::new(self.term, crate::shared::identity::ShardAddr::new(self.origin, 0));
+        let leader = crate::server::wal::LeaderId::new(
+            self.term,
+            crate::shared::identity::ShardAddr::new(self.origin, 0),
+        );
         crate::server::replication::SnapshotManifest {
             group: self.group,
             table: self.table,
@@ -428,7 +435,8 @@ pub struct RecoveryRecord {
 pub fn scan_backup(dir: &std::path::Path) -> Result<(ClusterId, u64, Vec<BackupFile>), String> {
     // every manifest under the directory, in name order so the judgment is deterministic
     let mut manifests = Vec::new();
-    walk_manifests(dir, dir, &mut manifests).map_err(|error| format!("reading {}: {error}", dir.display()))?;
+    walk_manifests(dir, dir, &mut manifests)
+        .map_err(|error| format!("reading {}: {error}", dir.display()))?;
     manifests.sort();
     if manifests.is_empty() {
         return Err(format!("{} holds no backup manifests", dir.display()));
@@ -437,13 +445,17 @@ pub fn scan_backup(dir: &std::path::Path) -> Result<(ClusterId, u64, Vec<BackupF
     let mut schema: Option<u64> = None;
     let mut files = Vec::with_capacity(manifests.len());
     for (name, path) in manifests {
-        let bytes = std::fs::read(&path).map_err(|error| format!("reading {}: {error}", path.display()))?;
-        let manifest: BackupManifest =
-            serde_json::from_slice(&bytes).map_err(|error| format!("{} is not a backup manifest: {error}", path.display()))?;
+        let bytes =
+            std::fs::read(&path).map_err(|error| format!("reading {}: {error}", path.display()))?;
+        let manifest: BackupManifest = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("{} is not a backup manifest: {error}", path.display()))?;
         // every file of one backup was cut in one cluster from one schema
         match cluster {
             Some(seen) if seen != manifest.cluster => {
-                return Err(format!("{name} was cut in cluster {} and the rest in {seen}", manifest.cluster));
+                return Err(format!(
+                    "{name} was cut in cluster {} and the rest in {seen}",
+                    manifest.cluster
+                ));
             }
             _ => cluster = Some(manifest.cluster),
         }
@@ -465,7 +477,11 @@ pub fn scan_backup(dir: &std::path::Path) -> Result<(ClusterId, u64, Vec<BackupF
             records: manifest.records,
         });
     }
-    Ok((cluster.unwrap_or_default(), schema.unwrap_or_default(), files))
+    Ok((
+        cluster.unwrap_or_default(),
+        schema.unwrap_or_default(),
+        files,
+    ))
 }
 
 /// Collect every `.snap.json` under a directory, named by its `.snap` relative to the root
@@ -475,7 +491,11 @@ pub fn scan_backup(dir: &std::path::Path) -> Result<(ClusterId, u64, Vec<BackupF
 /// * `root` - The backup directory
 /// * `dir` - The directory being walked
 /// * `found` - Where the manifests go
-fn walk_manifests(root: &std::path::Path, dir: &std::path::Path, found: &mut Vec<(String, std::path::PathBuf)>) -> std::io::Result<()> {
+fn walk_manifests(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    found: &mut Vec<(String, std::path::PathBuf)>,
+) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -518,7 +538,11 @@ fn walk_manifests(root: &std::path::Path, dir: &std::path::Path, found: &mut Vec
 /// # Errors
 ///
 /// Names the first file, table or tablet that breaks the rule.
-pub fn judge_coverage(files: &[BackupFile], tables: &[(String, TableId)], tablets: u16) -> Result<BTreeMap<TableId, BTreeMap<u16, String>>, String> {
+pub fn judge_coverage(
+    files: &[BackupFile],
+    tables: &[(String, TableId)],
+    tablets: u16,
+) -> Result<BTreeMap<TableId, BTreeMap<u16, String>>, String> {
     if files.is_empty() {
         return Err("the backup holds no files".to_string());
     }
@@ -546,8 +570,14 @@ pub fn judge_coverage(files: &[BackupFile], tables: &[(String, TableId)], tablet
     for (table, covered) in &coverage {
         for tablet in 0..tablets {
             if !covered.contains_key(&tablet) {
-                let name = tables.iter().find(|(_, id)| id == table).map(|(name, _)| name.as_str()).unwrap_or("?");
-                return Err(format!("tablet {tablet} of table {name} is in no file of the backup"));
+                let name = tables
+                    .iter()
+                    .find(|(_, id)| id == table)
+                    .map(|(name, _)| name.as_str())
+                    .unwrap_or("?");
+                return Err(format!(
+                    "tablet {tablet} of table {name} is in no file of the backup"
+                ));
             }
         }
     }
@@ -573,28 +603,55 @@ mod tests {
     /// A restore refuses a gap, an overlap and a foreign table, and accepts exact coverage
     #[test]
     fn a_restore_refuses_gaps_overlaps_and_a_foreign_table() {
-        let tables = vec![("Note".to_string(), TableId::of("Note")), ("Row".to_string(), TableId::of("Row"))];
+        let tables = vec![
+            ("Note".to_string(), TableId::of("Note")),
+            ("Row".to_string(), TableId::of("Row")),
+        ];
         // exact coverage of one table over four tablets, in two files
-        let files = vec![file("a.snap", "Note", vec![0, 2]), file("b.snap", "Note", vec![1, 3])];
+        let files = vec![
+            file("a.snap", "Note", vec![0, 2]),
+            file("b.snap", "Note", vec![1, 3]),
+        ];
         let coverage = judge_coverage(&files, &tables, 4).expect("exact coverage is accepted");
         assert_eq!(coverage.len(), 1);
         assert_eq!(coverage[&TableId::of("Note")][&3], "b.snap");
         // a gap is named by tablet and table
-        let gap = vec![file("a.snap", "Note", vec![0, 2]), file("b.snap", "Note", vec![1])];
+        let gap = vec![
+            file("a.snap", "Note", vec![0, 2]),
+            file("b.snap", "Note", vec![1]),
+        ];
         let error = judge_coverage(&gap, &tables, 4).expect_err("a gap is refused");
-        assert!(error.contains("tablet 3") && error.contains("Note"), "{error}");
+        assert!(
+            error.contains("tablet 3") && error.contains("Note"),
+            "{error}"
+        );
         // an overlap is named by both files
-        let overlap = vec![file("a.snap", "Note", vec![0, 1, 2]), file("b.snap", "Note", vec![2, 3])];
+        let overlap = vec![
+            file("a.snap", "Note", vec![0, 1, 2]),
+            file("b.snap", "Note", vec![2, 3]),
+        ];
         let error = judge_coverage(&overlap, &tables, 4).expect_err("an overlap is refused");
-        assert!(error.contains("a.snap") && error.contains("b.snap") && error.contains("tablet 2"), "{error}");
+        assert!(
+            error.contains("a.snap") && error.contains("b.snap") && error.contains("tablet 2"),
+            "{error}"
+        );
         // a table the cluster does not serve
         let foreign = vec![file("a.snap", "Other", vec![0, 1, 2, 3])];
         let error = judge_coverage(&foreign, &tables, 4).expect_err("a foreign table is refused");
-        assert!(error.contains("Other") && error.contains("does not serve"), "{error}");
+        assert!(
+            error.contains("Other") && error.contains("does not serve"),
+            "{error}"
+        );
         // nothing at all
         assert!(judge_coverage(&[], &tables, 4).is_err());
         // a second table covered whole beside the first
-        let both = vec![file("a.snap", "Note", (0..4).collect()), file("r.snap", "Row", (0..4).collect())];
-        assert_eq!(judge_coverage(&both, &tables, 4).expect("two tables").len(), 2);
+        let both = vec![
+            file("a.snap", "Note", (0..4).collect()),
+            file("r.snap", "Row", (0..4).collect()),
+        ];
+        assert_eq!(
+            judge_coverage(&both, &tables, 4).expect("two tables").len(),
+            2
+        );
     }
 }

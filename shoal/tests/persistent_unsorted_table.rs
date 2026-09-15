@@ -162,10 +162,9 @@ async fn a_get_off_disk_answers_the_same_row_as_one_in_memory() -> Result<(), Te
     let resident = client
         .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
         .await?;
-    let resident_row = TestRecord::deserialize(
-        resident.access::<TestRecord>()?.unwrap().first().unwrap(),
-    )
-    .unwrap();
+    let resident_row =
+        TestRecord::deserialize(resident.access::<TestRecord>()?.unwrap().first().unwrap())
+            .unwrap();
     pool.exit()?;
     // wait for threads to fully clean up and the port to be released
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -188,10 +187,9 @@ async fn a_get_off_disk_answers_the_same_row_as_one_in_memory() -> Result<(), Te
     let archived = client
         .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
         .await?;
-    let archived_row = TestRecord::deserialize(
-        archived.access::<TestRecord>()?.unwrap().first().unwrap(),
-    )
-    .unwrap();
+    let archived_row =
+        TestRecord::deserialize(archived.access::<TestRecord>()?.unwrap().first().unwrap())
+            .unwrap();
     // the row came back whole both times, and the two answers agree
     assert_eq!(resident_row, test_data);
     assert_eq!(
@@ -224,13 +222,17 @@ async fn a_projected_get_off_disk_answers_what_a_resident_one_does() -> Result<(
     let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
     let response = client
         .send_one(
-            TestRecordGet::new(vec![test_data.partition_key.clone()])
-                .projection::<TestRecordKey>(),
+            TestRecordGet::new(vec![test_data.partition_key.clone()]).projection::<TestRecordKey>(),
         )
         .await?;
-    let projected =
-        TestRecordKey::deserialize(response.access::<TestRecordKey>()?.unwrap().first().unwrap())
-            .unwrap();
+    let projected = TestRecordKey::deserialize(
+        response
+            .access::<TestRecordKey>()?
+            .unwrap()
+            .first()
+            .unwrap(),
+    )
+    .unwrap();
     // the projection came back carrying only the field it named
     assert_eq!(
         projected,
@@ -696,7 +698,10 @@ async fn projection_returns_only_its_own_fields() -> Result<(), TestError> {
     // the row is in the projections variant, not the tables
     let rows = response.access::<TestRecordKey>()?.unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows.first().unwrap().partition_key.as_str(), "partition_key");
+    assert_eq!(
+        rows.first().unwrap().partition_key.as_str(),
+        "partition_key"
+    );
     // reaching for the row type is the wrong type, not an empty answer
     assert!(response.access::<TestRecord>().is_err());
     // Shutdown server
@@ -747,7 +752,10 @@ async fn projection_reads_an_archived_partition() -> Result<(), TestError> {
     // the projection came out of the archive
     let rows = response.access::<TestRecordKey>()?.unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows.first().unwrap().partition_key.as_str(), "partition_key");
+    assert_eq!(
+        rows.first().unwrap().partition_key.as_str(),
+        "partition_key"
+    );
     // Shutdown server
     pool.exit()?;
     // wait for threads to fully clean up and the port to be released

@@ -33,13 +33,15 @@ use super::conf::cluster::{BootstrapPolicy, Consistency, DurationSpec};
 use super::control::migrate::{DataConfiguration, MoveRecord};
 use super::control::repair::{QuarantinedCopy, RepairRecord};
 use super::control::types::{ControlState, MemberHealth, MemberPhase, MemberRole};
-use super::peer::handshake::{Admission, PeerAddr, Verdict};
 use super::hosting::Hosting;
+use super::peer::handshake::{Admission, PeerAddr, Verdict};
 use super::ring::{Ring, TABLET_COUNT};
 use super::shard::ShardContact;
 use super::ServerError;
 use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
-use crate::shared::protocol::admin::{ConfiguredSet, MoveSummary, QuarantinedMember, TopologyFrame, TopologyMember};
+use crate::shared::protocol::admin::{
+    ConfiguredSet, MoveSummary, QuarantinedMember, TopologyFrame, TopologyMember,
+};
 use uuid::Uuid;
 
 /// One member of the cluster, as the map carries it
@@ -143,7 +145,9 @@ impl GroupSpec {
     /// Whether this node's member is the placement primary: the first member that can vote
     #[must_use]
     pub fn is_primary(&self, node: NodeId) -> bool {
-        self.voters.first().is_some_and(|primary| primary.node == node && primary.shard == self.mine)
+        self.voters
+            .first()
+            .is_some_and(|primary| primary.node == node && primary.shard == self.mine)
     }
 }
 
@@ -307,19 +311,42 @@ impl TabletMap {
                 state.tables.clone()
             },
             desired_rf: policy.map_or(0, |policy| policy.replication_factor),
-            write_consistency: policy.map_or(Consistency::Quorum, |policy| policy.write_consistency),
+            write_consistency: policy
+                .map_or(Consistency::Quorum, |policy| policy.write_consistency),
             read_consistency: policy.map_or(Consistency::One, |policy| policy.read_consistency),
             table_read_policy: state.table_read_policy.clone(),
             admins: policy.map_or_else(Vec::new, |policy| policy.admins.clone()),
-            repairs: state.repairs.values().filter(|record| !record.is_done()).cloned().collect(),
+            repairs: state
+                .repairs
+                .values()
+                .filter(|record| !record.is_done())
+                .cloned()
+                .collect(),
             // truncation cannot happen: a failover base is seconds, not weeks
             #[allow(clippy::cast_possible_truncation)]
-            primary_failover_ms: policy.map_or(0, |policy| policy.primary_failover_after.duration().as_millis() as u64),
+            primary_failover_ms: policy.map_or(0, |policy| {
+                policy.primary_failover_after.duration().as_millis() as u64
+            }),
             configurations: state.configurations.values().cloned().collect(),
-            moves: state.moves.values().filter(|record| !record.is_done()).cloned().collect(),
+            moves: state
+                .moves
+                .values()
+                .filter(|record| !record.is_done())
+                .cloned()
+                .collect(),
             activated_wire: state.activated_wire(),
-            backups: state.backups.values().filter(|record| !record.is_done()).cloned().collect(),
-            restores: state.restores.values().filter(|record| !record.is_done()).cloned().collect(),
+            backups: state
+                .backups
+                .values()
+                .filter(|record| !record.is_done())
+                .cloned()
+                .collect(),
+            restores: state
+                .restores
+                .values()
+                .filter(|record| !record.is_done())
+                .cloned()
+                .collect(),
             restored_from: state.restored_from,
             tombstones: state.tombstones.keys().copied().collect(),
         }
@@ -332,7 +359,9 @@ impl TabletMap {
     /// * `node` - The member
     #[must_use]
     pub fn is_up(&self, node: NodeId) -> bool {
-        self.members.get(&node).is_some_and(|member| member.health == MemberHealth::Up)
+        self.members
+            .get(&node)
+            .is_some_and(|member| member.health == MemberHealth::Up)
     }
 
     /// Whether a member's copy of a tablet is quarantined for any table
@@ -350,9 +379,12 @@ impl TabletMap {
         // truncation cannot happen: a tablet id is twelve bits
         #[allow(clippy::cast_possible_truncation)]
         let tablet = tablet as u16;
-        self.members
-            .get(&node)
-            .is_some_and(|member| member.quarantined.iter().any(|copy| copy.tablets.contains(&tablet)))
+        self.members.get(&node).is_some_and(|member| {
+            member
+                .quarantined
+                .iter()
+                .any(|copy| copy.tablets.contains(&tablet))
+        })
     }
 
     /// The replica a node holding no copy of a tablet sends to: the first holder that is up
@@ -373,7 +405,11 @@ impl TabletMap {
         // a holder whose copy is quarantined is passed over like one that is down
         let up = replicas
             .iter()
-            .find(|replica| Some(replica.node) != avoid && self.is_up(replica.node) && !self.is_quarantined(replica.node, tablet))
+            .find(|replica| {
+                Some(replica.node) != avoid
+                    && self.is_up(replica.node)
+                    && !self.is_quarantined(replica.node, tablet)
+            })
             .copied();
         match (up, avoid) {
             (Some(holder), _) => Some(holder),
@@ -396,7 +432,12 @@ impl TabletMap {
     /// * `me` - This node, which holds none of them or the share would not have been forwarded
     /// * `avoid` - The node the share was forwarded to
     #[must_use]
-    pub fn alternate_holder(&self, partitions: &[u64], me: NodeId, avoid: NodeId) -> Option<ShardAddr> {
+    pub fn alternate_holder(
+        &self,
+        partitions: &[u64],
+        me: NodeId,
+        avoid: NodeId,
+    ) -> Option<ShardAddr> {
         let mut common: Option<Vec<ShardAddr>> = None;
         for partition in partitions {
             let tablet = Ring::tablet_of(*partition);
@@ -405,12 +446,18 @@ impl TabletMap {
                 .replicas_of(tablet)
                 .into_iter()
                 .filter(|replica| {
-                    replica.node != avoid && replica.node != me && self.is_up(replica.node) && !self.is_quarantined(replica.node, tablet)
+                    replica.node != avoid
+                        && replica.node != me
+                        && self.is_up(replica.node)
+                        && !self.is_quarantined(replica.node, tablet)
                 })
                 .collect();
             common = Some(match common {
                 None => holders,
-                Some(so_far) => so_far.into_iter().filter(|addr| holders.contains(addr)).collect(),
+                Some(so_far) => so_far
+                    .into_iter()
+                    .filter(|addr| holders.contains(addr))
+                    .collect(),
             });
         }
         common.and_then(|holders| holders.first().copied())
@@ -497,7 +544,8 @@ impl TabletMap {
             .iter()
             .filter(|node| {
                 self.members.get(node).is_some_and(|member| {
-                    member.phase == MemberPhase::Removed || (member.phase == MemberPhase::Removing && self.tombstones.contains(node))
+                    member.phase == MemberPhase::Removed
+                        || (member.phase == MemberPhase::Removing && self.tombstones.contains(node))
                 })
             })
             .count();
@@ -584,7 +632,9 @@ impl TabletMap {
         // truncation cannot happen: a tablet id is twelve bits
         #[allow(clippy::cast_possible_truncation)]
         let tablet = tablet as u16;
-        self.configurations.iter().find(|configuration| configuration.covers(tablet))
+        self.configurations
+            .iter()
+            .find(|configuration| configuration.covers(tablet))
     }
 
     /// The move a tablet is under, if one is not done
@@ -703,7 +753,11 @@ impl TabletMap {
             // the set's tablets share one configuration and one move, since both cover whole sets
             let first = usize::from(tablets[0]);
             let members = self.replicas_of(first);
-            let voters: Vec<ShardAddr> = members.iter().filter(|member| !self.tombstones.contains(&member.node)).copied().collect();
+            let voters: Vec<ShardAddr> = members
+                .iter()
+                .filter(|member| !self.tombstones.contains(&member.node))
+                .copied()
+                .collect();
             let learner = self.learner_of(first).filter(|learner| learner.node == me);
             let transition = self.move_of(first).map(|record| record.op);
             // this node's member, or the learner's shard when it is the destination
@@ -763,7 +817,9 @@ impl TabletMap {
     /// * `tablet` - The tablet
     #[must_use]
     pub fn holds(&self, me: NodeId, tablet: usize) -> bool {
-        self.replicas_of(tablet).iter().any(|member| member.node == me)
+        self.replicas_of(tablet)
+            .iter()
+            .any(|member| member.node == me)
     }
 
     /// Whether this node holds tablets: under the placement, under a configuration, or as
@@ -791,7 +847,12 @@ impl TabletMap {
             .configurations
             .iter()
             .flat_map(|configuration| configuration.members.iter().map(|member| member.node))
-            .chain(self.moves.iter().filter(|record| !record.is_queued()).map(|record| record.to.node))
+            .chain(
+                self.moves
+                    .iter()
+                    .filter(|record| !record.is_queued())
+                    .map(|record| record.to.node),
+            )
             .filter(|node| !self.placement.contains(node))
             .collect();
         extra.sort_unstable();
@@ -851,7 +912,11 @@ impl TabletMap {
     /// # Errors
     ///
     /// Fails as [`TabletMap::ring_for`] does.
-    pub fn read_ring_for(&self, me: NodeId, hosting: &Hosting) -> Result<Option<Ring>, ServerError> {
+    pub fn read_ring_for(
+        &self,
+        me: NodeId,
+        hosting: &Hosting,
+    ) -> Result<Option<Ring>, ServerError> {
         if !self.places(me) {
             return Ok(None);
         }
@@ -865,7 +930,10 @@ impl TabletMap {
             let replicas = self.replicas_of(tablet);
             // the slot this node's copy is on, if it holds one: the rule's, or the
             // configuration's ([F45](../../../docs/src/features/replica-migration.md))
-            let local = replicas.iter().find(|replica| replica.node == me).map(|replica| replica.shard);
+            let local = replicas
+                .iter()
+                .find(|replica| replica.node == me)
+                .map(|replica| replica.shard);
             // a copy this node holds and may serve is read here; a quarantined one is read
             // elsewhere while another holder is up, and here as the backstop, where the
             // refusal names the quarantine ([F44](../../../docs/src/features/repair.md))
@@ -1044,7 +1112,12 @@ impl Admission for MapCell {
         }
         // a removed identity never comes back, by this door or any other
         // ([F49](../../../docs/src/features/backup-and-recovery.md))
-        if map.tombstones.contains(&node) || map.members.get(&node).is_some_and(|member| member.phase == MemberPhase::Removed) {
+        if map.tombstones.contains(&node)
+            || map
+                .members
+                .get(&node)
+                .is_some_and(|member| member.phase == MemberPhase::Removed)
+        {
             return Verdict::Removed;
         }
         match map.members.get(&node) {
@@ -1123,7 +1196,10 @@ mod tests {
         assert_eq!(map.quorum_for(Consistency::One), 1);
         assert_eq!(map.quorum_for(Consistency::Quorum), 2);
         assert_eq!(map.quorum_for(Consistency::All), 3);
-        assert_eq!(map.write_admission(), Err(QuorumShortfall { have: 1, need: 2 }));
+        assert_eq!(
+            map.write_admission(),
+            Err(QuorumShortfall { have: 1, need: 2 })
+        );
         // the bootstrapper places on itself before any initialization
         assert_eq!(map.placement, vec![node]);
         assert_eq!(map.active_rf(), 1);
@@ -1157,7 +1233,10 @@ mod tests {
             episode: None,
         });
         let map = TabletMap::from_state(&state, Some(node), &[]);
-        assert_eq!(map.write_admission(), Err(QuorumShortfall { have: 1, need: 2 }));
+        assert_eq!(
+            map.write_admission(),
+            Err(QuorumShortfall { have: 1, need: 2 })
+        );
     }
 
     /// A joiner holds no tablets before an initialization, and the bootstrapper holds them all
@@ -1168,8 +1247,14 @@ mod tests {
         state.apply(&ControlCommand::Admit(record(joiner, 3, 1)));
         state.apply(&ControlCommand::ObserveMember(record(joiner, 3, 1)));
         let map = TabletMap::from_state(&state, Some(node), &[]);
-        assert!(map.ring_for(joiner, &Hosting::identity(3)).expect("a ring").is_none());
-        let ring = map.ring_for(node, &Hosting::identity(2)).expect("a ring").expect("the bootstrapper is placed");
+        assert!(map
+            .ring_for(joiner, &Hosting::identity(3))
+            .expect("a ring")
+            .is_none());
+        let ring = map
+            .ring_for(node, &Hosting::identity(2))
+            .expect("a ring")
+            .expect("the bootstrapper is placed");
         // a one node placement is the standalone ring
         assert_eq!(ring.shards.len(), 2);
         // after initialization both are placed, in the order given
@@ -1183,7 +1268,10 @@ mod tests {
         let map = TabletMap::from_state(&state, Some(node), &[]);
         assert_eq!(map.placement, vec![joiner, node]);
         assert_eq!(map.placement_counts(), vec![(joiner, 3), (node, 2)]);
-        assert!(map.ring_for(joiner, &Hosting::identity(3)).expect("a ring").is_some());
+        assert!(map
+            .ring_for(joiner, &Hosting::identity(3))
+            .expect("a ring")
+            .is_some());
         // and a node claiming another shard count than the placement's is refused
         assert!(map.ring_for(node, &Hosting::identity(4)).is_err());
         // the frame carries the client endpoints and the tables
@@ -1265,13 +1353,26 @@ mod tests {
         let (map, nodes) = placed(&[4, 2, 2], 3);
         let me = nodes[0];
         let hosting = Hosting::identity(4).plan(2, true).expect("a plan");
-        let ring = map.read_ring_for(me, &hosting).expect("a ring").expect("placed");
+        let ring = map
+            .read_ring_for(me, &hosting)
+            .expect("a ring")
+            .expect("placed");
         // two local executors and every remote slot
-        assert_eq!(ring.shards.iter().filter(|info| info.contact.local_index().is_some()).count(), 2);
+        assert_eq!(
+            ring.shards
+                .iter()
+                .filter(|info| info.contact.local_index().is_some())
+                .count(),
+            2
+        );
         assert_eq!(ring.shards.len(), 2 + 2 + 2);
         for tablet in 0..TABLET_COUNT {
             let key = (tablet as u64) << (u64::BITS - super::super::ring::TABLET_BITS);
-            let local = map.replicas_of(tablet).into_iter().find(|replica| replica.node == me).expect("a factor of three holds everything");
+            let local = map
+                .replicas_of(tablet)
+                .into_iter()
+                .find(|replica| replica.node == me)
+                .expect("a factor of three holds everything");
             assert_eq!(
                 ring.find_shard(key).contact,
                 ShardContact::Local(hosting.host_of_slot(local.shard)),
@@ -1281,23 +1382,41 @@ mod tests {
         }
         // the placement ring routes a remote primary to its slot, untouched by the hosting
         let placement = map.ring_for(me, &hosting).expect("a ring").expect("placed");
-        let identity = map.ring_for(me, &Hosting::identity(4)).expect("a ring").expect("placed");
+        let identity = map
+            .ring_for(me, &Hosting::identity(4))
+            .expect("a ring")
+            .expect("placed");
         for tablet in 0..TABLET_COUNT {
             let key = (tablet as u64) << (u64::BITS - super::super::ring::TABLET_BITS);
             let primary = map.replicas_of(tablet)[0];
             if primary.node != me {
-                assert_eq!(placement.find_shard(key).contact, identity.find_shard(key).contact, "tablet {tablet}");
+                assert_eq!(
+                    placement.find_shard(key).contact,
+                    identity.find_shard(key).contact,
+                    "tablet {tablet}"
+                );
             } else {
-                assert_eq!(placement.find_shard(key).contact, ShardContact::Local(hosting.host_of_slot(primary.shard)));
+                assert_eq!(
+                    placement.find_shard(key).contact,
+                    ShardContact::Local(hosting.host_of_slot(primary.shard))
+                );
             }
         }
         // the groups keep their slot as `mine`, and split over the executors by the hosting
         let groups = map.replica_groups(me);
         assert!(!groups.is_empty());
         let by_executor: Vec<usize> = (0..2)
-            .map(|executor| groups.iter().filter(|spec| hosting.host_of_slot(spec.mine) == executor).count())
+            .map(|executor| {
+                groups
+                    .iter()
+                    .filter(|spec| hosting.host_of_slot(spec.mine) == executor)
+                    .count()
+            })
             .collect();
-        assert!(by_executor.iter().all(|count| *count > 0), "{by_executor:?}");
+        assert!(
+            by_executor.iter().all(|count| *count > 0),
+            "{by_executor:?}"
+        );
         assert_eq!(by_executor.iter().sum::<usize>(), groups.len());
         assert!(groups.iter().all(|spec| usize::from(spec.mine) < 4));
         // a hosting for another slot count is refused
@@ -1320,14 +1439,19 @@ mod tests {
         let (mut map, nodes) = placed(&[1, 1, 1, 1], 3);
         let me = nodes[3];
         // a tablet the fourth node holds no copy of, and the key that hashes to it
-        let tablet = (0..TABLET_COUNT).find(|tablet| !map.holds(me, *tablet)).expect("a tablet not held");
+        let tablet = (0..TABLET_COUNT)
+            .find(|tablet| !map.holds(me, *tablet))
+            .expect("a tablet not held");
         let key = (tablet as u64) << (u64::BITS - super::super::ring::TABLET_BITS);
         assert_eq!(Ring::tablet_of(key), tablet);
         let replicas = map.replicas_of(tablet);
         let primary = replicas[0];
         // everybody up: the primary, on the ring too
         assert_eq!(map.preferred_holder(tablet, None), Some(primary));
-        let ring = map.read_ring_for(me, &Hosting::identity(1)).expect("a ring").expect("placed");
+        let ring = map
+            .read_ring_for(me, &Hosting::identity(1))
+            .expect("a ring")
+            .expect("placed");
         assert_eq!(
             ring.find_shard(key).contact,
             ShardContact::Remote {
@@ -1338,7 +1462,10 @@ mod tests {
         // the primary down: the next replica, on the ring too, and as the alternate for a share
         map.members.get_mut(&primary.node).expect("a member").health = MemberHealth::Down;
         assert_eq!(map.preferred_holder(tablet, None), Some(replicas[1]));
-        let ring = map.read_ring_for(me, &Hosting::identity(1)).expect("a ring").expect("placed");
+        let ring = map
+            .read_ring_for(me, &Hosting::identity(1))
+            .expect("a ring")
+            .expect("placed");
         assert_eq!(
             ring.find_shard(key).contact,
             ShardContact::Remote {
@@ -1346,11 +1473,20 @@ mod tests {
                 shard: replicas[1].shard
             }
         );
-        assert_eq!(map.alternate_holder(&[key], me, primary.node), Some(replicas[1]));
+        assert_eq!(
+            map.alternate_holder(&[key], me, primary.node),
+            Some(replicas[1])
+        );
         // the failed node is never named even while the map still calls it up
         map.members.get_mut(&primary.node).expect("a member").health = MemberHealth::Up;
-        assert_eq!(map.alternate_holder(&[key], me, primary.node), Some(replicas[1]));
-        assert_eq!(map.preferred_holder(tablet, Some(primary.node)), Some(replicas[1]));
+        assert_eq!(
+            map.alternate_holder(&[key], me, primary.node),
+            Some(replicas[1])
+        );
+        assert_eq!(
+            map.preferred_holder(tablet, Some(primary.node)),
+            Some(replicas[1])
+        );
         // nobody up: the primary anyway for routing, nobody for a reroute
         for replica in &replicas {
             map.members.get_mut(&replica.node).expect("a member").health = MemberHealth::Down;
@@ -1363,9 +1499,15 @@ mod tests {
         // the failover base rides the map, and an absent one leaves the file's
         let base = Cluster::default().policy();
         map.primary_failover_ms = 750;
-        assert_eq!(map.policy_with(&base).primary_failover_after.duration(), Duration::from_millis(750));
+        assert_eq!(
+            map.policy_with(&base).primary_failover_after.duration(),
+            Duration::from_millis(750)
+        );
         map.primary_failover_ms = 0;
-        assert_eq!(map.policy_with(&base).primary_failover_after, base.primary_failover_after);
+        assert_eq!(
+            map.policy_with(&base).primary_failover_after,
+            base.primary_failover_after
+        );
     }
 
     /// Replicas land on distinct nodes, capacity follows shard counts, and the factor is feasible
@@ -1385,11 +1527,24 @@ mod tests {
             let mut seen: Vec<NodeId> = replicas.iter().map(|addr| addr.node).collect();
             seen.sort_unstable();
             seen.dedup();
-            assert_eq!(seen.len(), 3, "tablet {tablet} repeats a node: {replicas:?}");
-            assert_eq!(replicas[0].node, nodes[tablet % 3], "tablet {tablet} has the wrong primary");
+            assert_eq!(
+                seen.len(),
+                3,
+                "tablet {tablet} repeats a node: {replicas:?}"
+            );
+            assert_eq!(
+                replicas[0].node,
+                nodes[tablet % 3],
+                "tablet {tablet} has the wrong primary"
+            );
         }
         for node in &nodes {
-            assert_eq!((0..TABLET_COUNT).filter(|tablet| map.holds(*node, *tablet)).count(), TABLET_COUNT);
+            assert_eq!(
+                (0..TABLET_COUNT)
+                    .filter(|tablet| map.holds(*node, *tablet))
+                    .count(),
+                TABLET_COUNT
+            );
         }
         // four nodes at three: distinct nodes, and about three quarters of the tablets each
         let (map, nodes) = placed(&[1, 1, 1, 1], 3);
@@ -1399,12 +1554,21 @@ mod tests {
             let mut seen: Vec<NodeId> = replicas.iter().map(|addr| addr.node).collect();
             seen.sort_unstable();
             seen.dedup();
-            assert_eq!(seen.len(), 3, "tablet {tablet} repeats a node: {replicas:?}");
+            assert_eq!(
+                seen.len(),
+                3,
+                "tablet {tablet} repeats a node: {replicas:?}"
+            );
         }
         for node in &nodes {
-            let held = (0..TABLET_COUNT).filter(|tablet| map.holds(*node, *tablet)).count();
+            let held = (0..TABLET_COUNT)
+                .filter(|tablet| map.holds(*node, *tablet))
+                .count();
             let share = TABLET_COUNT * 3 / 4;
-            assert!(held.abs_diff(share) <= 1, "a node holds {held} tablets, not about {share}");
+            assert!(
+                held.abs_diff(share) <= 1,
+                "a node holds {held} tablets, not about {share}"
+            );
         }
         // a node with twice the shards spreads its replicas over twice as many shards, and a
         // replica sits on the shard the primary rule would pick were the node primary
@@ -1422,7 +1586,10 @@ mod tests {
         }
         assert_eq!(on_shard[0] + on_shard[1], TABLET_COUNT);
         // three tablets in a row share a shard, so the split is even to within one such run
-        assert!(on_shard[0].abs_diff(on_shard[1]) <= 3, "shards hold {on_shard:?}");
+        assert!(
+            on_shard[0].abs_diff(on_shard[1]) <= 3,
+            "shards hold {on_shard:?}"
+        );
         // the groups a node hosts name its own shard as a member, tablets ascending
         for group in map.replica_groups(nodes[0]) {
             assert!(group.members.contains(&group.me(nodes[0])));
@@ -1446,7 +1613,9 @@ mod tests {
     /// ([F45](../../../docs/src/features/replica-migration.md)).
     #[test]
     fn a_configuration_overrides_the_rule_and_keeps_the_id() {
-        use crate::server::control::migrate::{DataConfiguration, GroupMove, MovePhase, MoveRecord};
+        use crate::server::control::migrate::{
+            DataConfiguration, GroupMove, MovePhase, MoveRecord,
+        };
         let (mut map, nodes) = placed(&[1, 1, 1], 3);
         // a fourth member, admitted after the placement, with two shards
         let fourth = NodeId::mint();
@@ -1467,7 +1636,10 @@ mod tests {
             },
         );
         assert!(!map.places(fourth));
-        assert!(map.ring_for(fourth, &Hosting::identity(2)).expect("a ring").is_none());
+        assert!(map
+            .ring_for(fourth, &Hosting::identity(2))
+            .expect("a ring")
+            .is_none());
         // the set node two leads, and its tablets, from the groups the rule derives
         let before = map.groups_of(TableId::of("Row"));
         let (id, expected, tablets) = before
@@ -1508,7 +1680,10 @@ mod tests {
         assert_eq!(learners[0].transition, Some(record.op));
         assert!(!learners[0].is_primary(fourth));
         // the rings route: the fourth node is in them, and its learner tablets go to the source
-        let ring = map.read_ring_for(fourth, &Hosting::identity(2)).expect("a ring").expect("placed by the move");
+        let ring = map
+            .read_ring_for(fourth, &Hosting::identity(2))
+            .expect("a ring")
+            .expect("placed by the move");
         let key = (u64::from(tablets[0])) << (u64::BITS - super::super::ring::TABLET_BITS);
         assert_eq!(
             ring.find_shard(key).contact,
@@ -1519,7 +1694,10 @@ mod tests {
         );
         // the source still hosts the set as a member, under the move
         let sources = map.replica_groups(nodes[2]);
-        let source = sources.iter().find(|spec| spec.id == id).expect("the source hosts it");
+        let source = sources
+            .iter()
+            .find(|spec| spec.id == id)
+            .expect("the source hosts it");
         assert!(!source.learner);
         assert_eq!(source.transition, Some(record.op));
         // published: the configuration overrides the rule for the set's tablets alone
@@ -1535,14 +1713,24 @@ mod tests {
             #[allow(clippy::cast_possible_truncation)]
             let moved = tablets.contains(&(tablet as u16));
             assert_eq!(map.replicas_of(tablet) == target, moved, "tablet {tablet}");
-            assert_eq!(map.rule_replicas_of(tablet) == expected, moved, "tablet {tablet}");
+            assert_eq!(
+                map.rule_replicas_of(tablet) == expected,
+                moved,
+                "tablet {tablet}"
+            );
             assert_eq!(map.holds(fourth, tablet), moved);
             assert_eq!(map.holds(nodes[2], tablet), !moved);
         }
         // the identity is the rule's, on every node, and the members are the target's
         let after = map.groups_of(TableId::of("Row"));
-        assert_eq!(after.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(), before.iter().map(|(id, _, _)| *id).collect::<Vec<_>>());
-        let moved = after.iter().find(|(found, _, _)| *found == id).expect("the set is still there");
+        assert_eq!(
+            after.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(),
+            before.iter().map(|(id, _, _)| *id).collect::<Vec<_>>()
+        );
+        let moved = after
+            .iter()
+            .find(|(found, _, _)| *found == id)
+            .expect("the set is still there");
         assert_eq!(moved.1, target);
         assert_eq!(moved.2, tablets);
         let hosted = map.replica_groups(fourth);
@@ -1551,13 +1739,31 @@ mod tests {
         assert_eq!(hosted[0].members, target);
         assert!(hosted[0].is_primary(fourth));
         assert_eq!(hosted[0].transition, None);
-        assert!(map.replica_groups(nodes[2]).iter().all(|spec| spec.id != id));
+        assert!(map
+            .replica_groups(nodes[2])
+            .iter()
+            .all(|spec| spec.id != id));
         // the fourth node reads its copy on its own shard; node two sends there
-        let ring = map.read_ring_for(fourth, &Hosting::identity(2)).expect("a ring").expect("placed");
+        let ring = map
+            .read_ring_for(fourth, &Hosting::identity(2))
+            .expect("a ring")
+            .expect("placed");
         assert_eq!(ring.find_shard(key).contact, ShardContact::Local(1));
-        let ring = map.read_ring_for(nodes[2], &Hosting::identity(1)).expect("a ring").expect("placed");
-        assert_eq!(ring.find_shard(key).contact, ShardContact::Remote { node: fourth, shard: 1 });
-        assert_eq!(map.preferred_holder(usize::from(tablets[0]), None), Some(to));
+        let ring = map
+            .read_ring_for(nodes[2], &Hosting::identity(1))
+            .expect("a ring")
+            .expect("placed");
+        assert_eq!(
+            ring.find_shard(key).contact,
+            ShardContact::Remote {
+                node: fourth,
+                shard: 1
+            }
+        );
+        assert_eq!(
+            map.preferred_holder(usize::from(tablets[0]), None),
+            Some(to)
+        );
         // and the frame carries the configuration
         let frame = map.frame();
         assert_eq!(frame.configurations.len(), 1);

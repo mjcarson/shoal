@@ -137,7 +137,7 @@ impl Workload for InsertUnsorted {
 
 #[cfg(test)]
 mod tests {
-    use super::{InsertUnsorted, ROWS, ROW_BYTES};
+    use super::{InsertUnsorted, ROW_BYTES, ROWS};
     use crate::model::macro_layer::Timing;
     use crate::workloads::harness::seed::Scale;
     use crate::workloads::workload::Workload;

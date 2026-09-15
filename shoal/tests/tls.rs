@@ -74,7 +74,15 @@ pub struct TlsDb {
 /// * `temp_dir` - The temp dir this server should store its data in, which has to outlive it
 async fn start_encrypted(
     temp_dir: &tempfile::TempDir,
-) -> Result<(Shoal<TlsDbClient>, ShoalPool<TlsDb>, String, TestCertificate), TestError> {
+) -> Result<
+    (
+        Shoal<TlsDbClient>,
+        ShoalPool<TlsDb>,
+        String,
+        TestCertificate,
+    ),
+    TestError,
+> {
     // generate a certificate for this run and point a server at it
     let cert = TestCertificate::new(temp_dir);
     let conf = utils::build_tls_config(temp_dir, &cert);

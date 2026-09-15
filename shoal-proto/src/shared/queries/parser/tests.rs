@@ -118,8 +118,14 @@ fn and_keyword_is_case_insensitive() {
 /// Table names are case sensitive even though keywords are not
 fn table_names_are_case_sensitive() {
     // the identifier after FROM is kept exactly as it was written
-    assert_eq!(parse("select * from Movie where id = 1").table_name, "Movie");
-    assert_eq!(parse("select * from movie where id = 1").table_name, "movie");
+    assert_eq!(
+        parse("select * from Movie where id = 1").table_name,
+        "Movie"
+    );
+    assert_eq!(
+        parse("select * from movie where id = 1").table_name,
+        "movie"
+    );
 }
 
 #[test]
@@ -244,10 +250,16 @@ fn tracks_value_positions() {
     let parsed = parse(query);
     // the recorded span for the string should cover the quoted literal
     let title = &parsed.conditions[0];
-    assert_eq!(&query[values_of(&title)[0].start..values_of(&title)[0].end], "'Alien'");
+    assert_eq!(
+        &query[values_of(&title)[0].start..values_of(&title)[0].end],
+        "'Alien'"
+    );
     // and the span for the number should cover just the digits
     let id = &parsed.conditions[1];
-    assert_eq!(&query[values_of(&id)[0].start..values_of(&id)[0].end], "550");
+    assert_eq!(
+        &query[values_of(&id)[0].start..values_of(&id)[0].end],
+        "550"
+    );
 }
 
 #[test]
@@ -694,7 +706,12 @@ fn parses_in_without_regard_to_case_or_spacing() {
         "SELECT * FROM Movie WHERE id In(1,2)",
     ] {
         let condition = parse_one(query);
-        assert_eq!(values_of(&condition).len(), 2, "failed to parse '{}'", query);
+        assert_eq!(
+            values_of(&condition).len(),
+            2,
+            "failed to parse '{}'",
+            query
+        );
     }
 }
 
@@ -704,7 +721,10 @@ fn parses_mixed_literals_in_an_in_list() {
     // strings, numbers, booleans, and null are all values
     let condition = parse_one("SELECT * FROM Movie WHERE note IN ('a', 1, true, null)");
     assert_eq!(values_of(&condition).len(), 4);
-    assert_eq!(values_of(&condition)[0].value, Value::String("a".to_string()));
+    assert_eq!(
+        values_of(&condition)[0].value,
+        Value::String("a".to_string())
+    );
     assert_eq!(values_of(&condition)[2].value, Value::Bool(true));
     assert_eq!(values_of(&condition)[3].value, Value::Null);
 }
@@ -730,7 +750,7 @@ fn or_and_in_parse_the_same() {
     let values = |condition: &WhereClause| -> Vec<Value> {
         condition
             .as_values()
-        .expect("this field was matched rather than bounded")
+            .expect("this field was matched rather than bounded")
             .iter()
             .map(|found| found.value.clone())
             .collect()
@@ -920,5 +940,8 @@ fn tracks_positions_across_multibyte_values() {
     let parsed = parse(query);
     // the recorded span should still slice back to the quoted literal
     let title = &parsed.conditions[0];
-    assert_eq!(&query[values_of(&title)[0].start..values_of(&title)[0].end], "'café'");
+    assert_eq!(
+        &query[values_of(&title)[0].start..values_of(&title)[0].end],
+        "'café'"
+    );
 }

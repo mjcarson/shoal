@@ -322,7 +322,9 @@ pub fn analyze(query: &str, cursor: usize) -> CompletionContext {
             (Expecting::Value { .. }, Token::String | Token::Number) => Expecting::Continuation,
             // a bare true/false/null literal, which also completes this condition
             (Expecting::Value { .. }, Token::Ident(word))
-                if is_keyword(word, "true") || is_keyword(word, "false") || is_keyword(word, "null") =>
+                if is_keyword(word, "true")
+                    || is_keyword(word, "false")
+                    || is_keyword(word, "null") =>
             {
                 Expecting::Continuation
             }
@@ -332,7 +334,9 @@ pub fn analyze(query: &str, cursor: usize) -> CompletionContext {
             }
             // a bare true/false/null literal inside a list
             (Expecting::ValueList { field }, Token::Ident(word))
-                if is_keyword(word, "true") || is_keyword(word, "false") || is_keyword(word, "null") =>
+                if is_keyword(word, "true")
+                    || is_keyword(word, "false")
+                    || is_keyword(word, "null") =>
             {
                 Expecting::ListContinuation { field }
             }
@@ -517,7 +521,11 @@ fn value_suggestions(validator: TypeValidator) -> Vec<Suggestion> {
     // booleans are the only values we can offer in full
     if let Ok(name) = validator(&Value::Bool(true)) {
         let detail = short_type_name(&name);
-        suggestions.push(Suggestion::new("true", SuggestionKind::Value, detail.clone()));
+        suggestions.push(Suggestion::new(
+            "true",
+            SuggestionKind::Value,
+            detail.clone(),
+        ));
         suggestions.push(Suggestion::new("false", SuggestionKind::Value, detail));
     }
     // a nullable field can be matched against null
@@ -593,19 +601,17 @@ fn candidates<S: QuerySupport>(context: &CompletionContext) -> Vec<Suggestion> {
         // a query asks for whole rows with a star, or for a subset of them by naming one of
         // this databases projections. the table is not known yet at this point in the query,
         // so every projection is offered and binding is what rejects one of another table
-        Expecting::Star => std::iter::once(Suggestion::new(
-            "*",
-            SuggestionKind::Keyword,
-            "all columns",
-        ))
-        .chain(S::projection_names().iter().map(|(projection, table)| {
-            Suggestion::new(
-                *projection,
-                SuggestionKind::Projection,
-                format!("projection of {table}"),
-            )
-        }))
-        .collect(),
+        Expecting::Star => {
+            std::iter::once(Suggestion::new("*", SuggestionKind::Keyword, "all columns"))
+                .chain(S::projection_names().iter().map(|(projection, table)| {
+                    Suggestion::new(
+                        *projection,
+                        SuggestionKind::Projection,
+                        format!("projection of {table}"),
+                    )
+                }))
+                .collect()
+        }
         Expecting::From => vec![keyword_suggestion("FROM", &context.word)],
         Expecting::Where => vec![keyword_suggestion("WHERE", &context.word)],
         // the operators this field can be constrained by, which depends on the role it plays
@@ -651,7 +657,11 @@ fn candidates<S: QuerySupport>(context: &CompletionContext) -> Vec<Suggestion> {
             keyword_suggestion("LIMIT", &context.word),
             Suggestion::new(";", SuggestionKind::Keyword, "end of query"),
         ],
-        Expecting::End => vec![Suggestion::new(";", SuggestionKind::Keyword, "end of query")],
+        Expecting::End => vec![Suggestion::new(
+            ";",
+            SuggestionKind::Keyword,
+            "end of query",
+        )],
         // every table in this database
         Expecting::Table => S::table_names()
             .iter()
@@ -676,7 +686,10 @@ fn candidates<S: QuerySupport>(context: &CompletionContext) -> Vec<Suggestion> {
                     let type_name =
                         S::table_field_validator(table, field.name).and_then(probe_type_name);
                     let detail = field_detail(role, type_name);
-                    Some((role, Suggestion::new(field.name, SuggestionKind::Field, detail)))
+                    Some((
+                        role,
+                        Suggestion::new(field.name, SuggestionKind::Field, detail),
+                    ))
                 })
                 .collect();
             // a query has to constrain a partition key, so offer those first

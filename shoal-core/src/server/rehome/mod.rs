@@ -124,7 +124,10 @@ impl CrashPoint {
     /// * `name` - The name
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
-        CrashPoint::ALL.iter().copied().find(|point| point.name() == name)
+        CrashPoint::ALL
+            .iter()
+            .copied()
+            .find(|point| point.name() == name)
     }
 }
 
@@ -162,7 +165,8 @@ pub mod crash_point {
         let point = if name == "none" {
             CrashPoint::None
         } else {
-            CrashPoint::from_name(name).ok_or_else(|| format!("{name} is not a rehome crash point"))?
+            CrashPoint::from_name(name)
+                .ok_or_else(|| format!("{name} is not a rehome crash point"))?
         };
         arm(point);
         Ok(())
@@ -172,7 +176,11 @@ pub mod crash_point {
     #[must_use]
     pub fn armed() -> CrashPoint {
         let raw = ARMED.load(Ordering::Relaxed);
-        CrashPoint::ALL.iter().copied().find(|point| *point as u8 == raw).unwrap_or(CrashPoint::None)
+        CrashPoint::ALL
+            .iter()
+            .copied()
+            .find(|point| *point as u8 == raw)
+            .unwrap_or(CrashPoint::None)
     }
 
     /// Die here if this point is armed
@@ -185,7 +193,10 @@ pub mod crash_point {
     /// * `point` - The point reached
     pub fn hit(point: CrashPoint) {
         if ARMED.load(Ordering::Relaxed) == point as u8 && point != CrashPoint::None {
-            tracing::error!(msg = "dying at an armed rehome crash point", point = point.name());
+            tracing::error!(
+                msg = "dying at an armed rehome crash point",
+                point = point.name()
+            );
             std::process::exit(137);
         }
     }
@@ -291,8 +302,17 @@ impl Rehome {
             slots = identity.slots,
         );
         // the tables whose files move: the persistent ones, by name
-        let tables: Vec<String> = S::persistent_tables().iter().map(|table| (*table).to_string()).collect();
-        let root = conf.storage.default.filesystem.latency_sensitive.path.clone();
+        let tables: Vec<String> = S::persistent_tables()
+            .iter()
+            .map(|table| (*table).to_string())
+            .collect();
+        let root = conf
+            .storage
+            .default
+            .filesystem
+            .latency_sensitive
+            .path
+            .clone();
         let cluster = conf.cluster.is_some();
         let node = identity.node;
         let conf = conf.clone();
@@ -301,7 +321,17 @@ impl Rehome {
             .name("shoal-rehome")
             .make()?;
         let report = executor.run(async move {
-            run_steps::<S>(&conf, &root, pending.from, pending.to, cluster, node, map.as_deref(), &tables).await
+            run_steps::<S>(
+                &conf,
+                &root,
+                pending.from,
+                pending.to,
+                cluster,
+                node,
+                map.as_deref(),
+                &tables,
+            )
+            .await
         })?;
         event!(
             Level::INFO,
@@ -335,7 +365,12 @@ impl Rehome {
 /// * `map` - The map, on a cluster node
 /// * `tables` - The persistent tables
 #[allow(clippy::too_many_arguments)]
-#[instrument(name = "rehome::run_steps", skip_all, fields(from, to, cluster), err(Debug))]
+#[instrument(
+    name = "rehome::run_steps",
+    skip_all,
+    fields(from, to, cluster),
+    err(Debug)
+)]
 async fn run_steps<S: ShoalDatabase>(
     conf: &Conf,
     root: &Path,
@@ -364,7 +399,9 @@ async fn run_steps<S: ShoalDatabase>(
         event!(
             Level::INFO,
             msg = "resuming a rehome",
-            step = manifest.next_step().map(|at| format!("{:?}", manifest.steps[at].kind)),
+            step = manifest
+                .next_step()
+                .map(|at| format!("{:?}", manifest.steps[at].kind)),
             done = manifest.steps.iter().filter(|step| step.done).count(),
             steps = manifest.steps.len(),
         );
@@ -382,7 +419,11 @@ async fn run_steps<S: ShoalDatabase>(
             StepKind::Fold { source, table } => {
                 // a source's intent logs of a table into its archives
                 let Some(named) = S::table_of_id(TableId::of(table)) else {
-                    event!(Level::WARN, msg = "the manifest names a table this schema does not have", table);
+                    event!(
+                        Level::WARN,
+                        msg = "the manifest names a table this schema does not have",
+                        table
+                    );
                     manifest.steps[at].done = true;
                     continue;
                 };
@@ -390,14 +431,21 @@ async fn run_steps<S: ShoalDatabase>(
                 manifest.report.folded += folded;
                 crash_point::hit(CrashPoint::AfterFold);
             }
-            StepKind::Archives { source, dest, table } => {
-                let (records, bytes) = archives_step(&mut manifest, at, conf, root, &slots, *source, *dest, table).await?;
+            StepKind::Archives {
+                source,
+                dest,
+                table,
+            } => {
+                let (records, bytes) =
+                    archives_step(&mut manifest, at, conf, root, &slots, *source, *dest, table)
+                        .await?;
                 manifest.report.records += records;
                 manifest.report.bytes += bytes;
                 crash_point::hit(CrashPoint::AfterArchives);
             }
             StepKind::Log { source, dest } => {
-                let (groups, dropped) = log_step(&manifest, conf, root, &slots, *source, *dest).await?;
+                let (groups, dropped) =
+                    log_step(&manifest, conf, root, &slots, *source, *dest).await?;
                 manifest.report.groups += groups;
                 manifest.report.installs_dropped += dropped;
                 crash_point::hit(CrashPoint::AfterLog);
@@ -412,7 +460,8 @@ async fn run_steps<S: ShoalDatabase>(
                 manifest.after.write(root)?;
                 StorageMeta::finish_rehome(root, manifest.to)?;
                 crash_point::hit(CrashPoint::AfterFinalize);
-                manifest.report.millis += u64::try_from(tick.elapsed().as_millis()).unwrap_or(u64::MAX);
+                manifest.report.millis +=
+                    u64::try_from(tick.elapsed().as_millis()).unwrap_or(u64::MAX);
                 Manifest::remove(root)?;
                 return Ok(manifest.report);
             }
@@ -560,7 +609,12 @@ fn sync_dir(dir: &Path) -> Result<(), ServerError> {
 /// * `dest` - The executor they are written to
 /// * `table` - The table
 #[allow(clippy::too_many_arguments)]
-#[instrument(name = "rehome::archives_step", skip_all, fields(source, dest, table), err(Debug))]
+#[instrument(
+    name = "rehome::archives_step",
+    skip_all,
+    fields(source, dest, table),
+    err(Debug)
+)]
 async fn archives_step(
     manifest: &mut Manifest,
     at: usize,
@@ -585,7 +639,10 @@ async fn archives_step(
         .copied()
         .collect();
     moving.sort_by_key(|entry| (entry.archive, entry.offset));
-    let total_bytes: u64 = moving.iter().map(|entry| u64::try_from(entry.size).unwrap_or(u64::MAX)).sum();
+    let total_bytes: u64 = moving
+        .iter()
+        .map(|entry| u64::try_from(entry.size).unwrap_or(u64::MAX))
+        .sum();
     // a redo: an archive the destination's map names is a copy that finished before the
     // crash, whose records count as moved since the crashed run never wrote its count down;
     // one it does not name is the partial the crash left, and goes before the copy is redone
@@ -642,7 +699,15 @@ async fn archives_step(
     SerializedMap::save(&dst).await?;
     src.close_all().await?;
     dst.close_all().await?;
-    event!(Level::INFO, msg = "copied a source's archived records to a destination", source, dest, table, records, bytes);
+    event!(
+        Level::INFO,
+        msg = "copied a source's archived records to a destination",
+        source,
+        dest,
+        table,
+        records,
+        bytes
+    );
     Ok((records, bytes))
 }
 
@@ -659,7 +724,11 @@ fn marker_groups(dir: &Path) -> Vec<GroupId> {
     // every file named by a group's hex identity
     entries
         .flatten()
-        .filter_map(|entry| u64::from_str_radix(&entry.file_name().to_string_lossy(), 16).ok().map(GroupId))
+        .filter_map(|entry| {
+            u64::from_str_radix(&entry.file_name().to_string_lossy(), 16)
+                .ok()
+                .map(GroupId)
+        })
         .collect()
 }
 
@@ -672,7 +741,12 @@ fn marker_groups(dir: &Path) -> Vec<GroupId> {
 /// * `sub` - The marker directory under each
 /// * `group` - The group
 #[instrument(name = "rehome::move_marker", skip_all, fields(sub, %group), err(Debug))]
-async fn move_marker(src_dir: &Path, dst_dir: &Path, sub: &str, group: GroupId) -> Result<(), ServerError> {
+async fn move_marker(
+    src_dir: &Path,
+    dst_dir: &Path,
+    sub: &str,
+    group: GroupId,
+) -> Result<(), ServerError> {
     // the marker as the source wrote it, if it wrote one
     let from = src_dir.join(sub).join(format!("{group}"));
     let Ok(bytes) = std::fs::read(&from) else {
@@ -727,10 +801,24 @@ async fn log_step(
     let mut dst_retries = Retries::read(&dst_dir).await.map_err(ServerError::IO)?;
     // every group the source holds anything for
     let mut groups: BTreeSet<GroupId> = src_wal.groups().into_iter().collect();
-    groups.extend(src_checkpoint.groups.keys().filter_map(|hex| u64::from_str_radix(hex, 16).ok().map(GroupId)));
-    groups.extend(src_retries.groups.keys().filter_map(|hex| u64::from_str_radix(hex, 16).ok().map(GroupId)));
-    groups.extend(marker_groups(&src_dir.join(super::shard::repair::QUARANTINE_DIR)));
-    groups.extend(marker_groups(&src_dir.join(super::shard::migrate::RETIRED_DIR)));
+    groups.extend(
+        src_checkpoint
+            .groups
+            .keys()
+            .filter_map(|hex| u64::from_str_radix(hex, 16).ok().map(GroupId)),
+    );
+    groups.extend(
+        src_retries
+            .groups
+            .keys()
+            .filter_map(|hex| u64::from_str_radix(hex, 16).ok().map(GroupId)),
+    );
+    groups.extend(marker_groups(
+        &src_dir.join(super::shard::repair::QUARANTINE_DIR),
+    ));
+    groups.extend(marker_groups(
+        &src_dir.join(super::shard::migrate::RETIRED_DIR),
+    ));
     let mut moved = 0u64;
     let mut dropped = 0u64;
     for group in groups {
@@ -746,12 +834,16 @@ async fn log_step(
         if let Some(last) = &src_last {
             if dst_last.as_ref() != Some(last) {
                 let from = dst_last.as_ref().map_or(0, |log_id| log_id.index + 1);
-                let entries = src_store.try_get_log_entries(from..).await.map_err(ServerError::IO)?;
+                let entries = src_store
+                    .try_get_log_entries(from..)
+                    .await
+                    .map_err(ServerError::IO)?;
                 if !entries.is_empty() {
-                    dst_store
-                        .blocking_append(entries)
-                        .await
-                        .map_err(|error| ServerError::GlommioGeneric(format!("appending group {group}'s entries: {error}")))?;
+                    dst_store.blocking_append(entries).await.map_err(|error| {
+                        ServerError::GlommioGeneric(format!(
+                            "appending group {group}'s entries: {error}"
+                        ))
+                    })?;
                 }
             }
         }
@@ -760,21 +852,45 @@ async fn log_step(
             dst_store.save_vote(&vote).await.map_err(ServerError::IO)?;
         }
         if let Some(committed) = src_store.read_committed().await.map_err(ServerError::IO)? {
-            dst_store.save_committed(Some(committed)).await.map_err(ServerError::IO)?;
+            dst_store
+                .save_committed(Some(committed))
+                .await
+                .map_err(ServerError::IO)?;
         }
-        if let Some(purged) = src_store.get_log_state().await.map_err(ServerError::IO)?.last_purged_log_id {
+        if let Some(purged) = src_store
+            .get_log_state()
+            .await
+            .map_err(ServerError::IO)?
+            .last_purged_log_id
+        {
             dst_store.purge(purged).await.map_err(ServerError::IO)?;
         }
         // the checkpoint and the retry sidecar entries
         if let Some(point) = src_checkpoint.get(group) {
-            dst_checkpoint.groups.insert(group.to_string(), point.clone());
+            dst_checkpoint
+                .groups
+                .insert(group.to_string(), point.clone());
         }
         if let Some(retries) = src_retries.groups.get(&group.to_string()) {
-            dst_retries.groups.insert(group.to_string(), retries.clone());
+            dst_retries
+                .groups
+                .insert(group.to_string(), retries.clone());
         }
         // the markers that hold through a restart
-        move_marker(&src_dir, &dst_dir, super::shard::repair::QUARANTINE_DIR, group).await?;
-        move_marker(&src_dir, &dst_dir, super::shard::migrate::RETIRED_DIR, group).await?;
+        move_marker(
+            &src_dir,
+            &dst_dir,
+            super::shard::repair::QUARANTINE_DIR,
+            group,
+        )
+        .await?;
+        move_marker(
+            &src_dir,
+            &dst_dir,
+            super::shard::migrate::RETIRED_DIR,
+            group,
+        )
+        .await?;
         // a partial install is not carried: the leader feeds the group again
         let installs = src_dir.join(super::replication::snapshot::INSTALL_DIR);
         for suffix in ["pending", "part"] {
@@ -789,8 +905,18 @@ async fn log_step(
     dst_wal.close().await.map_err(ServerError::IO)?;
     src_wal.close().await.map_err(ServerError::IO)?;
     dst_retries.write(&dst_dir).await.map_err(ServerError::IO)?;
-    dst_checkpoint.write(&dst_dir).await.map_err(ServerError::IO)?;
-    event!(Level::INFO, msg = "moved a source's tablet groups to a destination", source, dest, groups = moved, installs_dropped = dropped);
+    dst_checkpoint
+        .write(&dst_dir)
+        .await
+        .map_err(ServerError::IO)?;
+    event!(
+        Level::INFO,
+        msg = "moved a source's tablet groups to a destination",
+        source,
+        dest,
+        groups = moved,
+        installs_dropped = dropped
+    );
     Ok((moved, dropped))
 }
 
@@ -837,7 +963,11 @@ async fn reclaim_step(
             let intent_dir = settings.get_intent_path(table);
             if let Ok(entries) = std::fs::read_dir(&intent_dir) {
                 for entry in entries.flatten() {
-                    if entry.file_name().to_string_lossy().starts_with(&format!("{name}-")) {
+                    if entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(&format!("{name}-"))
+                    {
                         remove_if_exists(&entry.path())?;
                     }
                 }
@@ -850,7 +980,11 @@ async fn reclaim_step(
         let wal_dir = root.join(WAL_DIR).join(&name);
         remove_dir_if_exists(&wal_dir)?;
         sync_dir(&root.join(WAL_DIR))?;
-        event!(Level::INFO, msg = "reclaimed a vanished executor's files", source);
+        event!(
+            Level::INFO,
+            msg = "reclaimed a vanished executor's files",
+            source
+        );
         return Ok(());
     }
     // a live donor keeps its files and forgets what moved
@@ -873,7 +1007,13 @@ async fn reclaim_step(
         let mut intent_writer = map.compact_map().await?;
         intent_writer.close().await?;
         map.close_all().await?;
-        event!(Level::INFO, msg = "a donor forgot the records that moved", source, table, records = moved.len());
+        event!(
+            Level::INFO,
+            msg = "a donor forgot the records that moved",
+            source,
+            table,
+            records = moved.len()
+        );
     }
     if manifest.cluster {
         let wal_dir = root.join(WAL_DIR).join(&name);
@@ -885,10 +1025,24 @@ async fn reclaim_step(
             let mut checkpoint = Checkpoint::read(&wal_dir).await.map_err(ServerError::IO)?;
             let mut retries = Retries::read(&wal_dir).await.map_err(ServerError::IO)?;
             let mut groups: BTreeSet<GroupId> = wal.groups().into_iter().collect();
-            groups.extend(checkpoint.groups.keys().filter_map(|hex| u64::from_str_radix(hex, 16).ok().map(GroupId)));
-            groups.extend(retries.groups.keys().filter_map(|hex| u64::from_str_radix(hex, 16).ok().map(GroupId)));
-            groups.extend(marker_groups(&wal_dir.join(super::shard::repair::QUARANTINE_DIR)));
-            groups.extend(marker_groups(&wal_dir.join(super::shard::migrate::RETIRED_DIR)));
+            groups.extend(
+                checkpoint
+                    .groups
+                    .keys()
+                    .filter_map(|hex| u64::from_str_radix(hex, 16).ok().map(GroupId)),
+            );
+            groups.extend(
+                retries
+                    .groups
+                    .keys()
+                    .filter_map(|hex| u64::from_str_radix(hex, 16).ok().map(GroupId)),
+            );
+            groups.extend(marker_groups(
+                &wal_dir.join(super::shard::repair::QUARANTINE_DIR),
+            ));
+            groups.extend(marker_groups(
+                &wal_dir.join(super::shard::migrate::RETIRED_DIR),
+            ));
             let mut forgotten = 0u64;
             for group in groups {
                 if group_target(manifest, slots, source, group).is_none() {
@@ -900,15 +1054,28 @@ async fn reclaim_step(
                 }
                 checkpoint.groups.remove(&group.to_string());
                 retries.groups.remove(&group.to_string());
-                remove_if_exists(&wal_dir.join(super::shard::repair::QUARANTINE_DIR).join(format!("{group}")))?;
-                remove_if_exists(&wal_dir.join(super::shard::migrate::RETIRED_DIR).join(format!("{group}")))?;
+                remove_if_exists(
+                    &wal_dir
+                        .join(super::shard::repair::QUARANTINE_DIR)
+                        .join(format!("{group}")),
+                )?;
+                remove_if_exists(
+                    &wal_dir
+                        .join(super::shard::migrate::RETIRED_DIR)
+                        .join(format!("{group}")),
+                )?;
                 forgotten += 1;
             }
             wal.flush().await.map_err(ServerError::IO)?;
             wal.close().await.map_err(ServerError::IO)?;
             retries.write(&wal_dir).await.map_err(ServerError::IO)?;
             checkpoint.write(&wal_dir).await.map_err(ServerError::IO)?;
-            event!(Level::INFO, msg = "a donor forgot the groups that moved", source, groups = forgotten);
+            event!(
+                Level::INFO,
+                msg = "a donor forgot the groups that moved",
+                source,
+                groups = forgotten
+            );
         }
     }
     Ok(())
@@ -935,7 +1102,12 @@ pub fn table_files_of(conf: &Conf, table: &str, executor: u16) -> Vec<PathBuf> {
         files.extend(
             entries
                 .flatten()
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with(&format!("{name}-")))
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(&format!("{name}-"))
+                })
                 .map(|entry| entry.path()),
         );
     }
@@ -960,9 +1132,11 @@ pub fn executor_has_files(conf: &Conf, tables: &[&str], executor: u16) -> bool {
         return true;
     }
     // or any table's file of the executor's
-    tables
-        .iter()
-        .any(|table| table_files_of(conf, table, executor).iter().any(|path| path.exists()))
+    tables.iter().any(|table| {
+        table_files_of(conf, table, executor)
+            .iter()
+            .any(|path| path.exists())
+    })
 }
 
 /// The set of executors that have any file in the directory, for a test
@@ -975,7 +1149,9 @@ pub fn executor_has_files(conf: &Conf, tables: &[&str], executor: u16) -> bool {
 #[must_use]
 pub fn executors_with_files(conf: &Conf, tables: &[&str], upto: u16) -> Vec<u16> {
     // every executor up to the bound that has anything left
-    (0..=upto).filter(|executor| executor_has_files(conf, tables, *executor)).collect()
+    (0..=upto)
+        .filter(|executor| executor_has_files(conf, tables, *executor))
+        .collect()
 }
 
 /// What a test needs to know about a group's log after a move, read off a WAL directory
@@ -1004,7 +1180,9 @@ pub struct GroupLogView {
 #[instrument(name = "rehome::group_log_view", skip_all, fields(%group), err(Debug))]
 pub async fn group_log_view(wal_dir: &Path, group: GroupId) -> Result<GroupLogView, ServerError> {
     // the WAL recovered and the checkpoint beside it
-    let wal = ShardWal::open(wal_dir, 1 << 24, 1 << 20).await.map_err(ServerError::IO)?;
+    let wal = ShardWal::open(wal_dir, 1 << 24, 1 << 20)
+        .await
+        .map_err(ServerError::IO)?;
     let checkpoint = Checkpoint::read(wal_dir).await.map_err(ServerError::IO)?;
     // what they say about the group
     let view = GroupLogView {
@@ -1028,8 +1206,17 @@ pub async fn group_log_view(wal_dir: &Path, group: GroupId) -> Result<GroupLogVi
 /// # Errors
 ///
 /// Fails if the map cannot be read.
-#[instrument(name = "rehome::archived_keys_of", skip_all, fields(table, executor), err(Debug))]
-pub async fn archived_keys_of(conf: &Conf, table: &str, executor: u16) -> Result<HashSet<u64>, ServerError> {
+#[instrument(
+    name = "rehome::archived_keys_of",
+    skip_all,
+    fields(table, executor),
+    err(Debug)
+)]
+pub async fn archived_keys_of(
+    conf: &Conf,
+    table: &str,
+    executor: u16,
+) -> Result<HashSet<u64>, ServerError> {
     // the executor's map of the table, as it lies on disk
     let settings = table_settings(conf, table);
     settings.setup_paths(table).await?;
