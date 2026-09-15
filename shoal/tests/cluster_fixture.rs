@@ -4903,6 +4903,98 @@ fn key_led_by(
     )))
 }
 
+/// A dead primary's writes are `NotLeader` for its lease and election, then nothing (C7 M6)
+///
+/// The shape [item 110](../../docs/src/appendix/resolved/dead-primary-write-failures.md) read
+/// off the kill arm as a routing defect: a seventh of the client's operations failing for as
+/// long as node one was dead. Three nodes at a factor of three; node one is killed and a key it
+/// led is written through node zero without a retry, every second, until the write succeeds.
+/// Every failure on the way is `NotLeader` or `Unavailable` and never a timeout - the hop to
+/// the dead leader is refused at once - and the first success comes within the lease and an
+/// election, four times the failover base; after it a hundred writes across the groups fail
+/// none. Node zero holds a replica of the group throughout; a follower cannot commit, which is
+/// why nothing but the election ends the refusals.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dead_primary_fails_writes_only_until_its_election() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::error::ErrorCode;
+    let base = Duration::from_secs(1);
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .primary_failover_after(base)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let (key, _group) = key_led_by(&mut cluster, "Note", 1, 5000)?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    write_note(&addr, key, "before").await?;
+    // node one dies with its lead
+    cluster.kill(1)?;
+    let killed = Instant::now();
+    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    // the write is refused by name until the group elects, and the refusal is immediate
+    let mut refusals = Vec::new();
+    let elected = loop {
+        let sent = Instant::now();
+        let outcome = client
+            .send_one(Note {
+                key,
+                text: "during".to_string(),
+            })
+            .await;
+        match outcome {
+            Ok(_) => break sent.elapsed(),
+            Err(shoal::client::Errors::Server { code, .. }) => {
+                assert!(
+                    matches!(code, ErrorCode::NotLeader | ErrorCode::Unavailable),
+                    "a write to a dead leader's group failed {code:?} rather than NotLeader"
+                );
+                assert!(
+                    sent.elapsed() < Duration::from_secs(2),
+                    "a write to a dead leader's group waited {:?} to be refused",
+                    sent.elapsed()
+                );
+                refusals.push(code);
+            }
+            Err(other) => panic!("a write to a dead leader's group failed off the wire: {other:?}"),
+        }
+        assert!(
+            killed.elapsed() < base * 4 + Duration::from_secs(2),
+            "the group node one led elected nobody within four failover bases; {} refusals",
+            refusals.len()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    assert!(
+        !refusals.is_empty(),
+        "no write was refused while the leader was dead, so this measured nothing"
+    );
+    assert!(
+        elected < Duration::from_secs(3),
+        "the first write past the election took {elected:?}"
+    );
+    // what the outage was, for the page that reads this test
+    eprintln!(
+        "node one's group refused {} writes over {:?} and then served in {elected:?}",
+        refusals.len(),
+        killed.elapsed()
+    );
+    // and once elected, a hundred writes across the groups fail none
+    for at in 0..100u64 {
+        client
+            .send_one(Note {
+                key: 6000 + at,
+                text: "after".to_string(),
+            })
+            .await
+            .map_err(|error| {
+                FixtureError::NotReady(format!("a write after the election failed: {error:?}"))
+            })?;
+    }
+    Ok(())
+}
+
 /// A quorum success needs distinct durable voters, and nothing releases it early (C5 M4)
 ///
 /// Three nodes at a factor of three, every lane through a proxy. The replication lane from the

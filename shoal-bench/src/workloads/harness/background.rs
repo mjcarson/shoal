@@ -860,6 +860,7 @@ mod tests {
                     at,
                     elapsed: Duration::from_micros(if slow { 900 } else { 300 }),
                     ok: index != 150,
+                    code: None,
                 }
             })
             .collect();
@@ -936,6 +937,7 @@ mod tests {
                     at,
                     elapsed: Duration::from_micros(if slow { 900 } else { 300 }),
                     ok: true,
+                    code: None,
                 }
             })
             .collect();
@@ -1023,6 +1025,7 @@ mod tests {
                     at,
                     elapsed: Duration::from_micros(if slow { 900 } else { 300 }),
                     ok: true,
+                    code: None,
                 }
             })
             .collect();
@@ -1112,6 +1115,7 @@ mod tests {
                     at,
                     elapsed: Duration::from_micros(if slow { 900 } else { 300 }),
                     ok: true,
+                    code: None,
                 }
             })
             .collect();

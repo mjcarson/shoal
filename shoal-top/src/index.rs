@@ -619,6 +619,9 @@ pub struct WindowFactsLite {
     pub ops: u64,
     /// Operations that failed in it
     pub errors: u64,
+    /// The failures by the error code's name; empty on a capture from before it was kept
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub errors_by_code: BTreeMap<String, u64>,
     /// The median service time of the successes, in microseconds
     pub p50_us: u64,
     /// The 99th percentile of the same

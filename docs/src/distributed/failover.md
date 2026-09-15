@@ -196,10 +196,11 @@ A failover completes in two to three times the base, not base plus two seconds. 
 leader waits out its old lease. Leadership is never moved. A snapshot is per group, so a
 returning node installs every tablet its replica set shares. A dead leader's stream may still
 be installed beside a new leader's (two generations in flight). A resume survives a lane cut,
-not a receiver restart. Installs run concurrently through one compactor. The kill arm's client
-fails a steady share of its operations for as long as node one is dead
-([item 110](../appendix/known-issues.md#110-the-kill-arms-client-fails-a-steady-share-of-its-operations-for-as-long-as-node-one-is-dead)).
-See [C15](open-issues.md).
+not a receiver restart. Installs run concurrently through one compactor. ~~The kill arm's client
+fails a steady share of its operations for as long as node one is dead~~ - it fails every
+write to a dead leader's group `NotLeader` at once until the lease and an election, three to
+four times the base, which the arm's records now say by code
+([Resolved #110](../appendix/resolved/dead-primary-write-failures.md)). See [C15](open-issues.md).
 
 ## Invariants to uphold
 

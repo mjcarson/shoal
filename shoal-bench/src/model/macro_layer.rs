@@ -807,6 +807,12 @@ pub struct WindowFacts {
     pub ops: u64,
     /// Operations that failed in it
     pub errors: u64,
+    /// The failures by the error code's name, or `client` for the client's own
+    ///
+    /// Empty on a capture from before
+    /// [Resolved #110](../../../docs/src/appendix/resolved/dead-primary-write-failures.md).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub errors_by_code: BTreeMap<String, u64>,
     /// The median service time of the operations that succeeded, in microseconds
     pub p50_us: u64,
     /// The 99th percentile of the same
