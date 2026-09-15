@@ -360,6 +360,20 @@ impl PeerNetwork {
         self.shared.wires.borrow().clone()
     }
 
+    /// Whether this node can reach nobody over the control lane
+    ///
+    /// True when this node has dialled at least one member and none of its links is up: every
+    /// one is cut, reconnecting or backing off. A node that has dialled nobody yet is not
+    /// isolated, it is starting. What a member does with the answer is stop standing for
+    /// elections it cannot win
+    /// ([Resolved #106](../../../../docs/src/appendix/resolved/isolated-member-term-inflation.md)).
+    #[must_use]
+    pub fn is_isolated(&self) -> bool {
+        let links = self.shared.links.borrow();
+        // a node with no link has nobody to be cut off from
+        !links.is_empty() && links.values().all(|link| !link.link.is_up())
+    }
+
     /// Where to dial a member, from its committed record and this node's overrides
     ///
     /// # Arguments

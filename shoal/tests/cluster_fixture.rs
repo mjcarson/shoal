@@ -9001,6 +9001,82 @@ async fn two_volatile_voters_lost_at_once_do_not_kill_the_survivor() -> Result<(
     Ok(())
 }
 
+/// A member isolated on every lane long enough to inflate its term heals without dying (C3 M6)
+///
+/// [Item 106](../../docs/src/appendix/resolved/isolated-member-term-inflation.md): a node cut
+/// off on every lane keeps electing - its control member times out, votes for itself at a
+/// higher term, is answered by nobody, and again - so after a while its term is far above the
+/// survivors', and when the lanes are healed the survivors' leader reaching it took the
+/// following path with a vote of its own that openraft asserts is committed, and the child
+/// died. Three nodes, node two isolated for twelve seconds under writes - dozens of control
+/// elections at the fixture's base - then healed: node two is alive, joins again, its term
+/// climbed by no more than a handful, and a write through it lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_isolated_on_every_lane_heals_without_dying() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .primary_failover_after(Duration::from_secs(1))
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let addrs: Vec<String> = (0..3)
+        .map(|id| cluster.node(id).endpoints.client.to_string())
+        .collect();
+    write_note(&addrs[2], 9000, "before").await?;
+    let term_before = cluster.node_mut(2).command("MEMBERS")?["ok"]["term"]
+        .as_u64()
+        .unwrap_or_default();
+    // cut node two off on every lane, both directions, and keep the cluster busy meanwhile
+    cluster.isolate(2);
+    let isolated = Instant::now();
+    let mut key = 9001u64;
+    while isolated.elapsed() < Duration::from_secs(12) {
+        let _ = write_note(&addrs[0], key, "during").await;
+        key += 1;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let term_isolated = cluster.node_mut(2).command("MEMBERS")?["ok"]["term"]
+        .as_u64()
+        .unwrap_or_default();
+    // healed, the survivors' leader reaches it again
+    cluster.heal(2);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert_eq!(
+            cluster.node(2).failure(),
+            None,
+            "node two died once its lanes were healed"
+        );
+        if write_note(&addrs[2], key, "after").await.is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node two served no write within thirty seconds of being healed"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let term_after = cluster.node_mut(2).command("MEMBERS")?["ok"]["term"]
+        .as_u64()
+        .unwrap_or_default();
+    eprintln!(
+        "node two's control term: {term_before} before, {term_isolated} isolated, {term_after} healed"
+    );
+    // an isolated member that cannot reach anybody has no election to win, and asks for none
+    assert!(
+        term_isolated <= term_before + 3,
+        "node two's control term went from {term_before} to {term_isolated} while isolated"
+    );
+    for node in 0..3 {
+        assert_eq!(cluster.node(node).failure(), None, "node {node} died");
+    }
+    Ok(())
+}
+
 /// `One` reads converge without exposing uncommitted state (C6 M4, P4)
 ///
 /// A follower cut off from the leader serves its committed, applied state - the old value -
@@ -15066,6 +15142,47 @@ fn wait_links_at(
     }
 }
 
+/// Wait until every up link *into* a node from the others speaks one version, and there is one
+///
+/// A node that came back leads nothing until an election puts a lead on it - a returning
+/// leader waits out its lease and an empty volatile copy waits to be fed
+/// ([Resolved #103](../../docs/src/appendix/resolved/returning-leader.md),
+/// [Resolved #109](../../docs/src/appendix/resolved/volatile-majority-loss.md)) - so it may
+/// hold no outbound link for a while; the links the others made to it are what it came back on.
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node the links lead to
+/// * `others` - The nodes whose links are read
+/// * `version` - The version every link has to report
+/// * `within` - How long to wait
+fn wait_links_into(
+    cluster: &mut Cluster,
+    node: usize,
+    others: &[usize],
+    version: u8,
+    within: Duration,
+) -> Result<Vec<(usize, String, u8)>, FixtureError> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let mut links = Vec::new();
+        for other in others {
+            let (from, _) = wire_of(cluster, *other)?;
+            links.extend(from.into_iter().filter(|(peer, _, _)| *peer == node));
+        }
+        if !links.is_empty() && links.iter().all(|(_, _, spoken)| *spoken == version) {
+            return Ok(links);
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!(
+                "the links into node {node} never all spoke {version}: {links:?}"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// Wait until a node reports the cluster's activated wire version
 ///
 /// # Arguments
@@ -15225,7 +15342,13 @@ async fn mixed_versions_exchange_real_cluster_operations() -> Result<(), Fixture
         "node two installed no snapshot: {installed}"
     );
     // still pinned: every link it came back on speaks the floor
-    wait_links_at(&mut cluster, 2, MIN_PEER_VERSION, Duration::from_secs(10))?;
+    wait_links_into(
+        &mut cluster,
+        2,
+        &[0, 1],
+        MIN_PEER_VERSION,
+        Duration::from_secs(10),
+    )?;
     // the one member at the newest version killed: the two at the floor elect, commit, serve
     cluster.kill(0)?;
     let leader = cluster.wait_leader_among(1, &[1, 2], Duration::from_secs(30))?;
@@ -15252,7 +15375,13 @@ async fn mixed_versions_exchange_real_cluster_operations() -> Result<(), Fixture
     cluster.restart(0, NodeKind::Server)?;
     cluster.wait_joined(&[0])?;
     wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))?;
-    wait_links_at(&mut cluster, 0, MIN_PEER_VERSION, Duration::from_secs(10))?;
+    wait_links_into(
+        &mut cluster,
+        0,
+        &[1, 2],
+        MIN_PEER_VERSION,
+        Duration::from_secs(10),
+    )?;
     // the newest version cannot be activated while two members speak the floor
     let refused = cluster
         .node_mut(0)
@@ -15464,7 +15593,13 @@ async fn rolling_upgrade_survives_operations_and_failure() -> Result<(), Fixture
             cluster.restart(1, NodeKind::Server)?;
             cluster.wait_joined(&[1])?;
             // still at the old version, so still spoken to at the floor
-            wait_links_at(&mut cluster, 1, MIN_PEER_VERSION, Duration::from_secs(15))?;
+            wait_links_into(
+                &mut cluster,
+                1,
+                &[0, 2],
+                MIN_PEER_VERSION,
+                Duration::from_secs(15),
+            )?;
             let (_, wire) = wire_of(&mut cluster, 0)?;
             assert_eq!(wire["min_member"], u64::from(MIN_PEER_VERSION), "{wire}");
             assert_eq!(wire["max_member"], u64::from(PROTOCOL_VERSION), "{wire}");
@@ -15482,13 +15617,15 @@ async fn rolling_upgrade_survives_operations_and_failure() -> Result<(), Fixture
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    // every member reports the newest, and every link speaks it
+    // every member reports the newest, and every link into every member speaks it
     let (_, wire) = wire_of(&mut cluster, 0)?;
     assert_eq!(wire["min_member"], u64::from(PROTOCOL_VERSION), "{wire}");
     for node in 0..3 {
-        wait_links_at(
+        let others: Vec<usize> = (0..3).filter(|other| *other != node).collect();
+        wait_links_into(
             &mut cluster,
             node,
+            &others,
             PROTOCOL_VERSION,
             Duration::from_secs(15),
         )?;

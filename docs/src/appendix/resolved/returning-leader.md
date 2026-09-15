@@ -106,5 +106,5 @@ build.
 
 [F42. Primary failover](../../features/primary-failover.md), which filed this;
 [C7. Failover](../../distributed/failover.md); [Resolved #110](dead-primary-write-failures.md),
-the lease seen from the client; [item 106](../known-issues.md#106-a-member-isolated-on-every-lane-long-enough-to-inflate-its-term-trips-an-openraft-debug-assertion-when-healed),
+the lease seen from the client; [Resolved #106](isolated-member-term-inflation.md),
 the term inflation this half also stops for a returning leader.

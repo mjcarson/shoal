@@ -357,6 +357,13 @@ pub struct TopologyView {
     /// ([F48](../../../../docs/src/features/rolling-compatibility.md))
     #[serde(default)]
     pub wire: WireView,
+    /// The term this node's control member is at
+    ///
+    /// Climbs by one per election; a member electing alone climbs it alone, which is what a
+    /// test of an isolated member reads
+    /// ([Resolved #106](../../../../docs/src/appendix/resolved/isolated-member-term-inflation.md)).
+    #[serde(default)]
+    pub term: u64,
 }
 
 /// The wire versions a cluster's members speak, and the one it has activated
@@ -1043,6 +1050,14 @@ struct Core {
     observe_held: bool,
     /// Whether a promotion is in flight
     promoting: bool,
+    /// Whether this member has stopped standing for election because it can reach nobody
+    ///
+    /// A member cut off on every lane keeps electing - it times out, votes for itself at the
+    /// next term, is answered by nobody, and again - and comes back with a term far above the
+    /// survivors', which disrupts their leader and once tripped an assertion in the engine.
+    /// So a member whose every control link is down stops standing until one comes back
+    /// ([Resolved #106](../../../../docs/src/appendix/resolved/isolated-member-term-inflation.md)).
+    isolated: bool,
     /// Whether a rewrite of a moved member's addresses into the membership is in flight
     /// ([F50](../../../../docs/src/features/cluster-operations.md))
     readdressing: bool,
@@ -1139,6 +1154,10 @@ impl Core {
             incarnation: self.member.incarnation,
             control: self.status,
             leader: self.leader,
+            term: self
+                .metrics
+                .as_ref()
+                .map_or(0, |metrics| metrics.current_term),
             version: state.topology_version,
             members,
             voters: state.voters(),
@@ -1601,6 +1620,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         observe_after: None,
         observe_held: false,
         promoting: false,
+        isolated: false,
         readdressing: false,
         joining: false,
         admitting: false,
@@ -1720,6 +1740,8 @@ impl Core {
                 if self.network.refused_as_removed() {
                     return Err(ServerError::Shoal(ShoalError::Removed { node: self.node }));
                 }
+                // whether this member can still reach anybody, before it would stand
+                self.judge_isolation();
                 // the tick is also when anything that failed for want of a leader is tried
                 // again: this node's own observation, a promotion, a queued admission
                 self.maybe_observe();
@@ -1730,7 +1752,10 @@ impl Core {
                 self.accrue_graces();
                 self.drive_plans(false);
             }
-            Event::PingTick => self.ping_members(),
+            Event::PingTick => {
+                self.judge_isolation();
+                self.ping_members();
+            }
             Event::Reported(outcome) => self.handle_reported(outcome)?,
             Event::Pinged(node, answered) => self.handle_pinged(node, answered),
             Event::HealthProposed(node, outcome) => self.handle_health_proposed(node, outcome),
@@ -3343,6 +3368,27 @@ impl Core {
                 let _ = tx.send(Event::Pinged(node, answered)).await;
             })
             .detach();
+        }
+    }
+
+    /// Stop standing for election while this member can reach nobody, and stand again after
+    ///
+    /// Judged from the control links rather than the pings: a link goes down the moment its
+    /// connection does, and a ping takes an interval to miss. A member alone cannot win an
+    /// election; what this removes is the term it would have spent asking
+    /// ([Resolved #106](../../../../docs/src/appendix/resolved/isolated-member-term-inflation.md)).
+    fn judge_isolation(&mut self) {
+        let isolated = self.network.is_isolated();
+        // only a change is acted on, so the runtime switch is flipped once per transition
+        if isolated == self.isolated {
+            return;
+        }
+        self.isolated = isolated;
+        self.raft.runtime_config().elect(!isolated);
+        if isolated {
+            event!(Level::WARN, msg = "every control link is down; this member stops standing for election until one comes back", node = %self.node);
+        } else {
+            event!(Level::INFO, msg = "a control link is up again; this member may stand for election", node = %self.node);
         }
     }
 

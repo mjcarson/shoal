@@ -352,9 +352,9 @@ than the ones it is behind on; a partial transfer survives a lane cut but not a 
 the bench arms ran at smoke scale on the development host, where the outage outlasts the
 absence and neither arm shows a catch-up; item 99 (a durable follower's log reversion) was left
 for M8, where it was [fixed first](../appendix/resolved/durable-log-reversion.md);
-and a member isolated on every lane long enough to inflate its term trips an openraft
-debug assertion in the control plane when healed
-([item 106](../appendix/known-issues.md#106-a-member-isolated-on-every-lane-long-enough-to-inflate-its-term-trips-an-openraft-debug-assertion-when-healed)).
+and a member isolated on every lane long enough to inflate its term tripped an openraft
+debug assertion in the control plane when healed, until an isolated member stopped standing
+([Resolved #106](../appendix/resolved/isolated-member-term-inflation.md)).
 
 | Test | Where | What it asserts |
 | --- | --- | --- |

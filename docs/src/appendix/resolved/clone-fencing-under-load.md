@@ -114,8 +114,9 @@ came, and no timeout reaches a member that never asks.
 ## Still open
 
 - A member standing before it observes still inflates its term until it is fenced or fed,
-  which is [item 106](../known-issues.md#106-a-member-isolated-on-every-lane-long-enough-to-inflate-its-term-trips-an-openraft-debug-assertion-when-healed)'s shape
-  on a shorter fuse.
+  which was [item 106](isolated-member-term-inflation.md)'s shape on a shorter fuse until an
+  isolated member stopped standing; a clone that can reach the leader is not isolated and
+  still stands until it is fenced.
 - The fixture suite at thirty-two threads on this host is not a measurement of anything but
   io_uring's limits; it stays at six threads, for that reason rather than for this item.
 - Found on the way and filed: `certificate_rotation_binds_identity` fails about half its runs
@@ -138,4 +139,4 @@ came, and no timeout reaches a member that never asks.
 [F39. Membership](../../features/membership.md), the observation and the fence;
 [F50. Cluster operations](../../features/cluster-operations.md), the address change the door
 must admit; [Resolved #102](fixture-port-block.md), the other suite-load failure;
-[item 106](../known-issues.md#106-a-member-isolated-on-every-lane-long-enough-to-inflate-its-term-trips-an-openraft-debug-assertion-when-healed).
+[Resolved #106](isolated-member-term-inflation.md).

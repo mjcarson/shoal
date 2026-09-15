@@ -89,9 +89,13 @@ with an error, not one that panicked; the probe answers for both.
 
 ## Invariants to uphold
 
-- **The `volatile/` markers are written on every up and read at every start.** A shard's
-  in-memory `held_before` is what the scan at its start said, never flipped by the write in
-  the same run: the rule is about a run that is over.
+- **The `volatile/` markers are written on every up and read once, when the shard starts.**
+  `Replication.held_volatile` is that one scan; `rebuild_groups` reads it and never the disk
+  again, so a group rebuilt within a run - the bootstrapper's single-member groups replaced by
+  the placement's, say - is not taken for one that lost its memory. The first cut of this
+  scanned on every rebuild and stalled a fresh cluster's bootstrap on exactly that, which the
+  suite caught and [Resolved #106](isolated-member-term-inflation.md)'s commit corrected.
+- **A group of one voter initializes itself whatever it held before**: nobody else can feed it.
 - **An empty held-before copy neither initializes nor grants to an empty candidate for the
   grace**, two election timeouts. Shorter and two empties elect each other again; a group
   where every member lost its memory is new after it.
@@ -105,7 +109,11 @@ with an error, not one that panicked; the probe answers for both.
   before it is new again.
 - A dead core is reported and not restarted; the copy serves nothing until the process does.
 - A restarted volatile copy that is fed by snapshot rather than log is
-  [F43](../../features/node-recovery.md)'s path, unchanged.
+  [F43](../../features/node-recovery.md)'s path, unchanged - which means it is `installing`,
+  and unreadable, for as long as the snapshot takes to land in memory. Before this it had
+  re-initialized and led an empty group of its own, so a read through it was served at once
+  and served nothing; `installing_tablet_never_serves_partial_state` reads the ephemeral table
+  through a returning node in that window and met it once under the suite's load.
 
 ## Tests
 

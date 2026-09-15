@@ -211,6 +211,7 @@
   - [103. A returning leader was refused its own re-election until its old lease lapsed](appendix/resolved/returning-leader.md)
   - [104. A restart merged every sealed segment below the checkpoint into the archives again](appendix/resolved/segments-recompacted-after-restart.md)
   - [105. A volatile group never checkpointed, so its log was never purged](appendix/resolved/volatile-groups-never-purged.md)
+  - [106. A member isolated on every lane long enough to inflate its term tripped an openraft debug assertion when healed](appendix/resolved/isolated-member-term-inflation.md)
   - [108. A cluster arm's server overrides were dropped on the way to every node](appendix/resolved/cluster-arm-overrides-dropped.md)
   - [109. A volatile group's survivor tripped an openraft debug assertion when a majority lost its memory log at once](appendix/resolved/volatile-majority-loss.md)
   - [110. The kill arm's client failed a steady share of its operations for as long as node one was dead](appendix/resolved/dead-primary-write-failures.md)

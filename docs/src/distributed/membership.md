@@ -217,9 +217,10 @@ is a constant. The grace is the policy's, not per member, and there is no `SetPo
 loaded before `Initialize` stays on the bootstrapper. Only the leader's detector view is
 meaningful. ~~The admin refusal's code is derived from its reason text~~ - a refusal carries
 its kind since [Resolved #98](../appendix/resolved/admin-refusal-kinds.md).
-A member isolated on every lane long enough to inflate its term trips a debug assertion when
-healed ([item 106](../appendix/known-issues.md#106-a-member-isolated-on-every-lane-long-enough-to-inflate-its-term-trips-an-openraft-debug-assertion-when-healed)).
-See [C15](open-issues.md).
+~~A member isolated on every lane long enough to inflate its term trips a debug assertion when
+healed~~ - a member that can reach nobody over a lane stops standing for election on it until
+a link is back ([Resolved #106](../appendix/resolved/isolated-member-term-inflation.md)); a
+member cut off from some of its peers still stands. See [C15](open-issues.md).
 
 ## Invariants to uphold
 

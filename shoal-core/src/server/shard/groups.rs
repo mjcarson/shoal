@@ -279,6 +279,16 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) epoch: u64,
     /// Deadline ticks since the last segment sweep
     pub(super) ticks: u32,
+    /// Whether this shard's groups have stopped standing for election because it can reach
+    /// nobody over the replication lane
+    /// ([Resolved #106](../../../../docs/src/appendix/resolved/isolated-member-term-inflation.md))
+    pub(super) isolated: bool,
+    /// The volatile groups this shard held in a run that is over, from the markers on disk
+    ///
+    /// Read once, when the shard starts, and never again in the run: a marker this run wrote
+    /// is about the next run, and a group rebuilt within this run has not lost its memory
+    /// ([Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md))
+    pub(super) held_volatile: HashSet<GroupId>,
     /// The last report the control thread was sent, so an unchanged one is not sent again
     pub(super) last_report: Option<ShardReplication>,
     /// Whether the groups are being stopped
@@ -406,6 +416,8 @@ where
             drop_replies: 0,
             epoch: 0,
             ticks: 0,
+            isolated: false,
+            held_volatile: scan_held_volatile(&dir),
             last_report: None,
             stopping: false,
             sweep_due: false,
@@ -458,8 +470,8 @@ where
             return Ok(());
         }
         replication.epoch += 1;
-        // the volatile groups this shard held in a run that is over, from the markers on disk
-        let held_volatile = scan_held_volatile(&replication.wal_dir);
+        // the volatile groups this shard held in a run that is over, as read when it started
+        let held_volatile = replication.held_volatile.clone();
         // the groups this executor hosts under the map, if the node is placed at all: every
         // group whose slot the hosting puts here ([F47](../../../../docs/src/features/local-rehome.md))
         let specs: Vec<GroupSpec> = if placed {
@@ -2373,6 +2385,23 @@ where
             return;
         };
         replication.ticks += 1;
+        // a shard whose every replication link is down stops its groups standing for
+        // elections they cannot win, and lets them stand again once a link is back
+        // ([Resolved #106](../../../../docs/src/appendix/resolved/isolated-member-term-inflation.md))
+        let isolated = replication.network.is_isolated();
+        if isolated != replication.isolated {
+            replication.isolated = isolated;
+            for slot in replication.groups.values() {
+                if let Some(raft) = &slot.raft {
+                    raft.runtime_config().elect(!isolated);
+                }
+            }
+            if isolated {
+                event!(Level::WARN, msg = "every replication link is down; this shard's groups stop standing for election until one comes back", shard = self.shard_id);
+            } else {
+                event!(Level::INFO, msg = "a replication link is up again; this shard's groups may stand for election", shard = self.shard_id);
+            }
+        }
         // a segment sweep every so many ticks; a report on every tick something moved, so the
         // view an admin read folds is at most a tick behind the shard
         if replication.ticks >= REPORT_EVERY_TICKS {
@@ -3107,7 +3136,8 @@ async fn start_group<D: ShoalDatabase>(
     if lost_memory {
         event!(Level::WARN, msg = "a volatile copy came back empty; it waits to be fed rather than initializing the group again", group = %group);
     }
-    if !initialized && !lost_memory && (primary || spec.voters.len() == 1) {
+    // a group of one voter has nobody to be fed by, and initializes itself either way
+    if !initialized && (spec.voters.len() == 1 || (primary && !lost_memory)) {
         if let Err(error) = raft.initialize(members.clone()).await {
             event!(Level::DEBUG, msg = "a group was initialized already", group = %group, %error);
         }

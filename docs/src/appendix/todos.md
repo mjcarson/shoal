@@ -463,9 +463,10 @@ list rather than from the diff:
   and no catch-up, since the outage outlasts the absence there; the capture is the benchmark
   host's, and a smoke schedule long enough for the survivors to serve writes while the node is
   away would be a third arm rather than a change to these two.
-- **Item 106.** A member isolated on every lane long enough to inflate its term trips an
-  openraft debug assertion in the control plane when healed
-  ([item 106](known-issues.md#106-a-member-isolated-on-every-lane-long-enough-to-inflate-its-term-trips-an-openraft-debug-assertion-when-healed)).
+- ~~**Item 106.** A member isolated on every lane long enough to inflate its term trips an
+  openraft debug assertion in the control plane when healed.~~ A member that can reach nobody
+  stops standing ([Resolved #106](resolved/isolated-member-term-inflation.md)); pre-vote, which
+  would cover a partial partition too, is still unbuilt.
 
 **What F42 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:

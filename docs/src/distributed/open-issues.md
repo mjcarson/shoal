@@ -15,7 +15,6 @@ a second copy. A new defect goes to known issues at the next free number, never 
 | Item | What | Page |
 | --- | --- | --- |
 | [112](../appendix/known-issues.md#112-certificate_rotation_binds_identity-fails-about-half-its-runs-alone-on-the-development-host) | `certificate_rotation_binds_identity` fails about half its runs alone on the development host, on which member leads when node zero restarts | [C11](testing.md) |
-| [106](../appendix/known-issues.md#106-a-member-isolated-on-every-lane-long-enough-to-inflate-its-term-trips-an-openraft-debug-assertion-when-healed) | A member isolated on every lane long enough to inflate its term trips an openraft debug assertion when healed | [C3](membership.md) |
 | [113](../appendix/known-issues.md#113-glommios-dmafileopen_at-unwraps-statfs-after-a-successful-open) | glommio's `DmaFile::open_at` unwraps `statfs` after a successful open; fixed in the fork's working tree, uncommitted there | [C11](testing.md) |
 | [15](../appendix/known-issues.md#15-no-backpressure-anywhere) | The local kanal mesh between a node's shards is unbounded; only the peer lanes are bounded in bytes | [C2](transport.md) |
 
