@@ -32,9 +32,9 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 104, 105, 108 and 111, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ item 112 is the newest entry here and the newest number, and why 17, 33, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 104, 105, 108 and 111 are on the resolved page. **111 never
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 104, 105, 107, 108 and 111, and
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ item 113 is the newest entry here and the newest number, and why 17, 33, 78, 79, 80, 82,
+83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 104, 105, 107, 108 and 111 are on the resolved page. **111 never
 appeared here**: it was found by [F47](../features/local-rehome.md)'s crash matrix - a read
 landing while an archive closed panicked the executor - reproduced against the map alone and
 fixed in the same change ([Resolved #111](resolved/archive-removal-borrow.md)). **108 never
@@ -1718,61 +1718,28 @@ field. The cheap and honest thing, done in
 [Observability](../operations/observability.md#tracing), is to write down that confirming delivery
 means asking the collector rather than reading Shoal's logs.
 
-### 91. A compaction that fails ends the compactor
+### 91. A compaction that fails after writing ends the compactor
 
-`shoal-core/src/server/tables/storage/fs/compactor.rs:688-706`, `Compactor::start`
+`shoal-core/src/server/tables/storage/fs/compactor.rs`, `FileSystemCompactor::start`,
+`JobFailure::Fatal`
 
-```rust
-loop {
-    let job = self.jobs_rx.recv().await?;
-    match job.clone() {
-        CompactionJob::IntentLog { path, generation } => self.compact_intent(path, generation).await?,
-        CompactionJob::Archives => self.compact_archives().await?,
-        CompactionJob::Shutdown => { self.shutdown().await?; break; }
-    }
-}
-```
+~~Every job is `?`. A compaction that fails - an archive it cannot open, a read that comes back
+short - returns the error out of the loop, and the compactor task ends.~~ A job that fails
+**before it writes** is tried again with a backoff since
+[Resolved #91, 107](resolved/compaction-retry.md), which is where every failure seen so far
+was. The remainder is the harder half that page names: a job that fails **after** its first
+write - a partially written archive, a map entry not yet re-pointed - still ends the compactor
+with the error, the next rotation's send into the closed channel ends the shard, and a client
+with a query in flight to that shard waits forever ([item 62](#62-a-server-that-has-exited-leaves-its-client-connections-open)).
 
-Every job is `?`. A compaction that fails — an archive it cannot open, a read that comes back
-short — returns the error out of the loop, and the compactor task ends. Nothing restarts it: the
-shard keeps rotating intent logs and queueing `CompactionJob`s onto a channel whose receiver is
-gone, so every rotation after the first failure sends into `ReceiveClosed`, and the shard's
-storage stops ever being compacted. The shard itself keeps serving, from memory and from logs
-that now only grow.
+**Established by reading the source.** No failure after the write has been reproduced; the
+fault the tests inject is met at the load, before it.
 
-**Established by reproduction**, and only because [Resolved #58](resolved/pool-readiness.md)
-made `exit` return a shard's error instead of logging it to nobody. The first full run of
-`shoal/tests/persistent_sorted_table.rs` after that change failed once, in
-`a_get_whose_partition_cannot_be_read_does_not_hang`:
-
-```
----- a_get_whose_partition_cannot_be_read_does_not_hang stdout ----
-Error: Server(KanalSend(ReceiveClosed))
-test result: FAILED. 60 passed; 1 failed; 1 ignored
-```
-
-That test takes the read permission off a table's archives to make one get fail, and puts it
-back. Whether a compaction ran *while* they were unreadable depends on when the log rotated
-under a one-byte memory limit, so the compactor dies in some runs and not others — the same
-binary passed on the next two runs. It has been dying in those runs for as long as the test has
-existed, and `exit` swallowed it every time. The test now tolerates an error at its final `exit`
-and prints it, with a comment naming this item, rather than hiding the defect again by reverting
-the honest `exit`.
-
-The `KanalSend(ReceiveClosed)` is the second-order symptom: `FileSystem::shutdown` sent
-`CompactionJob::Shutdown` to the dead compactor and reported *that* failure, not the one that
-killed it. That half is fixed — the send's failure is now a `WARN` and the join that follows
-returns the compactor's own error — so a run that hits this reports the archive it could not read
-rather than a channel nobody was listening on.
-
-**Fix direction:** a failed job should be reported and the loop continued, with the job either
-retried once its cause is gone or its intent log left for the next rotation to pick up; and a
-rotation that finds its compactor gone should say so rather than queue forever. The harder half
-is what a compaction that failed *midway* leaves behind — a partially written archive, a map
-entry not yet re-pointed — which needs the same "old complete or new complete" rule
+**Fix direction:** the "old complete or new complete" rule
 [C7](../distributed/failover.md#snapshots-and-atomic-installation) sets for snapshot
-installation, and is the reason this is filed rather than fixed alongside
-[F36](../features/cluster-harness.md).
+installation, applied to the archive write and the map's re-pointing, after which a failed
+write can be retried by discarding the incomplete new; and a rotation that finds its compactor
+gone should say so rather than end the shard.
 
 ### 92. A table with two `#[shoal(partition)]` fields does not compile
 
@@ -1889,37 +1856,6 @@ is also what keeps its term from inflating; the phi-accrual detector already kno
 is `Down` on the leader's side. Either way a fixture test that isolates a node for a minute
 on every lane and heals it belongs beside the M6 partition tests.
 
-### 107. A get after a failed partition load can be answered by the load that failed
-
-`shoal/tests/persistent_unsorted_table.rs`, `a_get_whose_partition_cannot_be_read_does_not_hang`
-and `a_get_whose_archive_is_missing_does_not_end_its_shard`; `shoal-core/src/server/tables/persistent/unsorted.rs`,
-`load_partition` and `fail_partition`
-
-Both tests make a partition's archive unreadable - permissions off, or the file gone - get the
-row, expect `StorageRead` or `ArchiveMissing`, put the archive back and get the row again,
-which must read from disk. About one run in five of the binary at `--test-threads 6` the
-second get fails with the first get's error: `Server(GlommioIO { source: Os { code: 13, kind:
-PermissionDenied }, op: "Opening", path: Some(".../TestRecord/archives/<id>") })` or the
-`NotFound` twin, after the archive was restored. The shape says a second load of the same
-partition was requested before the first one's failure was delivered, ran against the
-unreadable file, and its failure was what answered the get issued after the restore - a
-failed load answering a query that joined it later, rather than the query asking for a fresh
-one.
-
-**Established by running it**, on 2026-09-13, on both the [F43](../features/node-recovery.md)
-tree and the [F42](../features/primary-failover.md) tree (`f5f9c76`) in a worktree: one
-failure in four runs on the first and one in six on the second, so it is not M7's; every run
-of either test alone passes. Not reproduced in isolation, and which of the two loads answered
-is a reading of the error, not a trace.
-
-**Fix direction:** a query that arrives for a partition whose load has failed should not be
-joined to a load that was requested before the failure; either the failed load's waiters are
-released and the pending request cleared before the failure is answered, or a load requested
-after a failure is keyed by a generation the failure bumped, the way F43's install marks a
-parked load `stale` so it is asked for again. The test that would catch it deterministically
-issues the second get inside the window: hold the first load's completion with a hook, issue
-the second get, restore the archive, release.
-
 ### 109. A volatile group's survivor trips an openraft debug assertion when a majority loses its memory log at once
 
 `shoal-core/src/server/wal/memory.rs`, `shoal-core/src/server/shard/groups.rs` (`group_config`,
@@ -2015,3 +1951,38 @@ moving the control lead to node one (`SetControlVoters` cannot; a `transfer_lead
 fixture would), or wait for the link failures with node zero still a member and restart it
 only after node two's leaf is reissued as itself. Either way the test then says what it means:
 the mismatch is refused at every new handshake, and the cluster it is refused in goes on.
+
+### 113. glommio's `DmaFile::open_at` unwraps `statfs` after a successful open
+
+`~/projects/claude/glommio/glommio/src/io/dma_file.rs:214`, `DmaFile::open_at`, the local fork
+the workspace builds against
+
+```rust
+let file = GlommioFile::open_at(dir, path, flags, mode).await?;
+let buf = statfs(path).unwrap();
+```
+
+The open goes through io_uring and the `statfs` is a synchronous call on the same path
+straight after it. A directory whose permissions change between the two - which is exactly
+what `UnreadableArchives` does to a table's archives in the storage tests - makes the second
+fail with `EACCES` on a path the first just opened, and the `unwrap` panics the task that
+called it. In a loader task that is a partition read that never answers, so every query parked
+on it waits to its deadline.
+
+**Established by running it**, once in twelve runs of `shoal/tests/persistent_unsorted_table.rs`
+at six threads while [Resolved #91, 107](resolved/compaction-retry.md) was being traced:
+
+```text
+thread 'unnamed-17' panicked at .../glommio/glommio/src/io/dma_file.rs:214:32:
+called `Result::unwrap()` on an `Err` value: EACCES
+```
+
+after which `a_get_whose_partition_cannot_be_read_does_not_hang` failed on its first get's
+twenty-second timeout rather than on its answer.
+
+**Fix direction, taken in the fork's working tree the same day and not yet committed there:**
+`fstatfs` on the descriptor just opened, which cannot disagree with the open, with its error
+returned the way the open's is. The workspace builds against the fork by path, so it builds
+against that change now; this item closes when the fork commits it. Shoal's side has nothing
+to change: a load that panics is a load that never answers, and the fix for that is the open
+not panicking.

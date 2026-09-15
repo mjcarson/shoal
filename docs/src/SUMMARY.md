@@ -197,6 +197,7 @@
   - [86. The hover label read a logarithmic chart in decades](appendix/resolved/hover-label-reads-in-decades.md)
   - [89. One query produced several disjoint traces](appendix/resolved/fragmented-query-traces.md)
   - [90. Setting `RUST_LOG` could fragment every exported trace](appendix/resolved/divergent-layer-filters.md)
+  - [91, 107. A compaction that failed ended the compactor, and the tests that met it were misread](appendix/resolved/compaction-retry.md)
   - [94. An answer owed to a client that had left ended the shard](appendix/resolved/disconnected-client-cleanup.md)
   - [96. `cluster.transport.ping_interval` is parsed, documented and consumed by nothing](appendix/resolved/ping-interval-consumer.md)
   - [100. duplicate_node_identity_is_fenced failed under the fixture suite at full parallelism](appendix/resolved/clone-fencing-under-load.md)

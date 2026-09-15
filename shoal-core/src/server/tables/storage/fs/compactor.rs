@@ -1,7 +1,7 @@
 //! The file system compaction utilties for intent logs/archives
 
 use byte_unit::Byte;
-use futures::AsyncWriteExt;
+use futures::{select, AsyncWriteExt, FutureExt};
 use glommio::io::{BufferedFile, DmaFile, DmaStreamWriter, OpenOptions};
 use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
@@ -17,6 +17,7 @@ use std::hash::Hasher;
 use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
@@ -116,6 +117,69 @@ macro_rules! write_map_intent {
             _ => unsafe { std::hint::unreachable_unchecked() },
         }
     }};
+}
+
+/// The first wait before a compaction job that failed before writing is tried again
+const COMPACTION_RETRY_MIN: Duration = Duration::from_millis(100);
+
+/// The longest wait between two tries of the same job
+const COMPACTION_RETRY_MAX: Duration = Duration::from_secs(5);
+
+/// Why a compaction job did not finish, and whether trying it again could
+///
+/// A job that failed before it wrote anything - an archive it could not open, a log it could
+/// not read - has changed nothing on disk or in the map, so it is tried again after a backoff
+/// rather than ending the compactor with every job after it
+/// ([Resolved #91](../../../../../../docs/src/appendix/resolved/compaction-retry.md)). A job
+/// that failed after writing cannot be redone blind, and ends the compactor as it always did.
+#[derive(Debug)]
+enum JobFailure {
+    /// Nothing was written; the job is tried again after a backoff
+    Retry(ServerError),
+    /// Something was written that cannot be redone; the compactor ends with the error
+    Fatal(ServerError),
+}
+
+impl JobFailure {
+    /// The error, whichever way it failed
+    ///
+    /// For the startup fold, which runs before any shard serves and has nothing to try
+    /// again: a log it cannot read stops the start, as it always did.
+    fn into_error(self) -> ServerError {
+        match self {
+            JobFailure::Retry(error) | JobFailure::Fatal(error) => error,
+        }
+    }
+}
+
+/// A job that failed before writing, waiting to be tried again
+struct RetryJob {
+    /// When to try it next
+    at: Instant,
+    /// The job
+    job: CompactionJob,
+    /// How many times it has failed
+    attempts: u32,
+}
+
+/// The backoff before a job's next try
+///
+/// # Arguments
+///
+/// * `attempts` - How many times the job has failed
+fn retry_backoff(attempts: u32) -> Duration {
+    // double from the floor, capped at the ceiling
+    COMPACTION_RETRY_MIN
+        .saturating_mul(1u32 << attempts.min(16))
+        .min(COMPACTION_RETRY_MAX)
+}
+
+/// What the loop does after a job
+enum AfterJob {
+    /// Take the next job
+    Continue,
+    /// The compactor was told to stop
+    Stop,
 }
 
 pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase> {
@@ -414,7 +478,10 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         let mut folded = 0u64;
         for (generation, path) in logs.into_iter().enumerate() {
             // the generation is only what the evictable mark carries, and nothing reads it here
-            folded += self.compact_intent(path, generation as u64 + 1).await?;
+            folded += self
+                .compact_intent(path, generation as u64 + 1)
+                .await
+                .map_err(JobFailure::into_error)?;
         }
         // leave the map and the archives consistent on disk
         self.shutdown().await?;
@@ -429,7 +496,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     ///
     /// * `path` - The path to the intent log to compact
     #[instrument(name = "FileSystemCompactor::compact_intent", skip_all, err(Debug))]
-    async fn compact_intent(&mut self, path: PathBuf, generation: u64) -> Result<u64, ServerError>
+    async fn compact_intent(&mut self, path: PathBuf, generation: u64) -> Result<u64, JobFailure>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
         for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
@@ -445,8 +512,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
     {
-        // read and sort this intent log
-        let truncated = self.sort_intent_log(&path).await?;
+        // read and sort this intent log, which writes nothing and so can be tried again
+        let truncated = self
+            .sort_intent_log(&path)
+            .await
+            .map_err(JobFailure::Retry)?;
         // work out what deleting this log is about to cost us before we touch it
         let loss = classify_tail(truncated, !self.changes.is_empty());
         // check if we have any compacted partitions to write
@@ -454,12 +524,14 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             // this log had nothing to compact so there is nothing to write
             Vec::default()
         } else {
-            // load any existing partitions from disk
-            self.load_partitions_for_intents().await?;
+            // load any existing partitions from disk, still writing nothing
+            self.load_partitions_for_intents()
+                .await
+                .map_err(JobFailure::Retry)?;
             // apply the new intents to our loaded partitions
-            self.apply_intents(loss).await?;
-            // write our compacted partitions to disk
-            self.write_partition().await?
+            self.apply_intents(loss).await.map_err(JobFailure::Fatal)?;
+            // write our compacted partitions to disk, past which nothing can be tried again
+            self.write_partition().await.map_err(JobFailure::Fatal)?
         };
         // say what this log cost us, on both paths - an empty log is the ordinary
         // result of rotating a table nobody wrote to, and a damaged one is not
@@ -482,12 +554,16 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         // delete our no longer needed inactive intent log, which is safe for both arms
         // above: write_partition syncs everything it wrote before returning, and a log
         // we compacted nothing from has nothing left to make durable
-        glommio::io::remove(path).await?;
+        glommio::io::remove(path)
+            .await
+            .map_err(|error| JobFailure::Fatal(error.into()))?;
         // how many partitions this log wrote, for a fold's count
         let written = u64::try_from(partitions.len()).unwrap_or(u64::MAX);
         // tell our shard this generation is now durable even if it was empty, since
         // that is what tells our table how far its data has been compacted
-        self.send_mark_evictables(generation, partitions).await?;
+        self.send_mark_evictables(generation, partitions)
+            .await
+            .map_err(JobFailure::Fatal)?;
         Ok(written)
     }
 
@@ -513,7 +589,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         generation: u64,
         frames: Vec<(u64, u32)>,
         positions: Vec<(GroupId, WalLogId)>,
-    ) -> Result<(), ServerError>
+    ) -> Result<(), JobFailure>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
         for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
@@ -531,36 +607,50 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     {
         // read every frame named, and sort its command's intent under its partition
         if !frames.is_empty() {
-            let file = BufferedFile::open(&path).await?;
+            // reading the segment writes nothing, so a failure here is tried again
+            let file = BufferedFile::open(&path)
+                .await
+                .map_err(|error| JobFailure::Retry(error.into()))?;
             for (offset, len) in &frames {
-                let read = file.read_at(*offset, *len as usize).await?;
+                let read = file
+                    .read_at(*offset, *len as usize)
+                    .await
+                    .map_err(|error| JobFailure::Retry(error.into()))?;
                 // a frame that is not a whole command is a shard bug, not a torn log: the shard
                 // named it from an index it built from whole frames
                 let Some(command) = crate::server::wal::frame::command_of(&read) else {
-                    return Err(ServerError::GlommioGeneric(format!(
+                    return Err(JobFailure::Fatal(ServerError::GlommioGeneric(format!(
                         "the frame at {}:{offset} named for compaction is not a command",
                         path.display()
-                    )));
+                    ))));
                 };
                 // a scrub entry carries no intent; the WAL's index never names one for
                 // compaction, and one that reached here is skipped rather than decoded
                 if command.scrub_op().is_some() {
                     continue;
                 }
-                let (partition_key, intent) =
-                    T::partition_key_and_intent_checked(&command.payload)?;
+                let (partition_key, intent) = T::partition_key_and_intent_checked(&command.payload)
+                    .map_err(JobFailure::Fatal)?;
                 self.changes.entry(partition_key).or_default().push(intent);
             }
-            file.close().await?;
+            file.close()
+                .await
+                .map_err(|error| JobFailure::Retry(error.into()))?;
         }
         // merge what was read the way an intent log is merged; a resolved segment is whole by
         // construction, so nothing was lost reading it
         let partitions = if self.changes.is_empty() {
             Vec::default()
         } else {
-            self.load_partitions_for_intents().await?;
-            self.apply_intents(TailLoss::None).await?;
-            self.write_partition().await?
+            // still writing nothing, so this too can be tried again
+            self.load_partitions_for_intents()
+                .await
+                .map_err(JobFailure::Retry)?;
+            // past here something is written, and a failure ends the compactor
+            self.apply_intents(TailLoss::None)
+                .await
+                .map_err(JobFailure::Fatal)?;
+            self.write_partition().await.map_err(JobFailure::Fatal)?
         };
         // the archives now hold the effect of every frame through these positions
         for (group, last) in positions {
@@ -570,13 +660,16 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             }
         }
         // the table hears the generation is compacted, then the shard hears this table is done
-        self.send_mark_evictables(generation, partitions).await?;
+        self.send_mark_evictables(generation, partitions)
+            .await
+            .map_err(JobFailure::Fatal)?;
         self.shard_local_tx
             .send(ServerMsg::SegmentCompacted {
                 table: self.table_name,
                 generation,
             })
-            .await?;
+            .await
+            .map_err(|error| JobFailure::Fatal(error.into()))?;
         Ok(())
     }
 
@@ -1294,13 +1387,127 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         Ok(())
     }
 
-    /// Start this compactor
+    /// Forget what a job that failed before writing had read, so its next try starts clean
     ///
-    /// This is skipped by the profiler. It is a task that runs for as long as the shard does,
-    /// so measuring it reports the process lifetime rather than any work, and at roughly 24x
-    /// the run length it swamps every real entry in the report. The compaction work itself is
-    /// measured through `compact_intent`, `compact_archives` and their callees.
-    #[cfg_attr(feature = "hotpath", hotpath::skip)]
+    /// The sort and the load fill `changes` and `loaded` as they go; a try that stopped
+    /// part way leaves them half full, and a second sort on top would count every intent
+    /// twice.
+    fn reset_job(&mut self) {
+        // everything a job accumulates before it writes
+        self.changes.clear();
+        self.loaded.clear();
+        self.entries.clear();
+        self.removals.clear();
+    }
+
+    /// Run one compaction job
+    ///
+    /// # Arguments
+    ///
+    /// * `job` - The job
+    ///
+    /// # Errors
+    ///
+    /// Says whether the job can be tried again - it wrote nothing - or ended the compactor.
+    async fn run_job(&mut self, job: CompactionJob) -> Result<AfterJob, JobFailure>
+    where
+        <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+        for<'a> <T::Intent as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >,
+    {
+        // handle this job
+        match job {
+            CompactionJob::IntentLog { path, generation } => {
+                let _ = self.compact_intent(path, generation).await?;
+            }
+            CompactionJob::Segment {
+                path,
+                generation,
+                frames,
+                positions,
+            } => {
+                self.compact_segment(path, generation, frames, positions)
+                    .await?;
+            }
+            // a cut and an install answer the shard with their own outcome, so only the
+            // channel to it can fail here
+            CompactionJob::Snapshot {
+                group,
+                schema_id,
+                tablets,
+                at_least,
+                memberships,
+                retries,
+                expired_before,
+                provenance,
+                dir,
+            } => {
+                self.cut_snapshot(
+                    group,
+                    schema_id,
+                    tablets,
+                    at_least,
+                    memberships,
+                    retries,
+                    expired_before,
+                    provenance,
+                    dir,
+                )
+                .await
+                .map_err(JobFailure::Fatal)?;
+            }
+            CompactionJob::Install {
+                group,
+                tablets,
+                path,
+            } => self
+                .install_snapshot(group, tablets, path)
+                .await
+                .map_err(JobFailure::Fatal)?,
+            CompactionJob::Drop { group, tablets } => self
+                .drop_tablets(group, tablets)
+                .await
+                .map_err(JobFailure::Fatal)?,
+            CompactionJob::Fault { fault, key, reply } => {
+                // a fault the fixture asked for, answered with what was done
+                let outcome = self.inject_fault(fault, key).await;
+                let _ = reply.send(outcome);
+            }
+            // rewriting the archives copies live records forward and repoints the map after
+            // each archive, so a failure part way leaves dead bytes and nothing lost: tried again
+            CompactionJob::Archives => self.compact_archives().await.map_err(JobFailure::Retry)?,
+            CompactionJob::Shutdown => {
+                // shutdown this compactor
+                self.shutdown().await.map_err(JobFailure::Fatal)?;
+                // stop handling compactor jobs
+                return Ok(AfterJob::Stop);
+            }
+        }
+        Ok(AfterJob::Continue)
+    }
+
+    /// Handle compaction jobs until told to stop
+    ///
+    /// A job that fails before it wrote anything is tried again after a backoff that doubles
+    /// from a tenth of a second to five, for as long as it keeps failing, with a warning each
+    /// time; new jobs are taken meanwhile, so one unreadable archive holds up its own log
+    /// and nothing else. A job that fails after writing ends the compactor with its error,
+    /// which the shard's exit reports
+    /// ([Resolved #91](../../../../../../docs/src/appendix/resolved/compaction-retry.md)).
+    ///
+    /// # Errors
+    ///
+    /// The channel closing, or a job that failed past the point it could be tried again.
     pub async fn start(mut self) -> Result<(), ServerError>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
@@ -1317,65 +1524,60 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
     {
+        // the jobs that failed before writing, waiting for their next try
+        let mut retries: Vec<RetryJob> = Vec::new();
         loop {
-            // wait for a intent log compaction job
-            let job = self.jobs_rx.recv().await?;
-            // handle this job;
-            match job.clone() {
-                CompactionJob::IntentLog { path, generation } => {
-                    let _ = self.compact_intent(path, generation).await?;
+            // a retry that is due comes before the channel
+            let due = retries
+                .iter()
+                .position(|retry| retry.at <= Instant::now())
+                .map(|index| retries.remove(index));
+            let (job, attempts) = match due {
+                Some(retry) => (retry.job, retry.attempts),
+                None => {
+                    // wait for a job, but no longer than the earliest retry
+                    let earliest = retries
+                        .iter()
+                        .map(|retry| retry.at)
+                        .min()
+                        .map(|at| at.saturating_duration_since(Instant::now()));
+                    match earliest {
+                        Some(wait) => {
+                            let mut recv = Box::pin(self.jobs_rx.recv()).fuse();
+                            let mut timer = Box::pin(glommio::timer::sleep(wait)).fuse();
+                            select! {
+                                job = recv => (job?, 0),
+                                () = timer => continue,
+                            }
+                        }
+                        None => (self.jobs_rx.recv().await?, 0),
+                    }
                 }
-                CompactionJob::Segment {
-                    path,
-                    generation,
-                    frames,
-                    positions,
-                } => {
-                    self.compact_segment(path, generation, frames, positions)
-                        .await?
+            };
+            // run it, keeping a copy in case it has to be tried again
+            match self.run_job(job.clone()).await {
+                Ok(AfterJob::Continue) => (),
+                Ok(AfterJob::Stop) => break,
+                Err(JobFailure::Retry(error)) => {
+                    // say so, and try it again after the backoff
+                    let attempts = attempts + 1;
+                    let delay = retry_backoff(attempts);
+                    event!(
+                        Level::WARN,
+                        msg = "A compaction failed before writing and will be tried again",
+                        table = R::name(),
+                        attempts,
+                        retry_in_ms = delay.as_millis() as u64,
+                        error = ?error,
+                    );
+                    self.reset_job();
+                    retries.push(RetryJob {
+                        at: Instant::now() + delay,
+                        job,
+                        attempts,
+                    });
                 }
-                CompactionJob::Snapshot {
-                    group,
-                    schema_id,
-                    tablets,
-                    at_least,
-                    memberships,
-                    retries,
-                    expired_before,
-                    provenance,
-                    dir,
-                } => {
-                    self.cut_snapshot(
-                        group,
-                        schema_id,
-                        tablets,
-                        at_least,
-                        memberships,
-                        retries,
-                        expired_before,
-                        provenance,
-                        dir,
-                    )
-                    .await?;
-                }
-                CompactionJob::Install {
-                    group,
-                    tablets,
-                    path,
-                } => self.install_snapshot(group, tablets, path).await?,
-                CompactionJob::Drop { group, tablets } => self.drop_tablets(group, tablets).await?,
-                CompactionJob::Fault { fault, key, reply } => {
-                    // a fault the fixture asked for, answered with what was done
-                    let outcome = self.inject_fault(fault, key).await;
-                    let _ = reply.send(outcome);
-                }
-                CompactionJob::Archives => self.compact_archives().await?,
-                CompactionJob::Shutdown => {
-                    // shutdown this compactor
-                    self.shutdown().await?;
-                    // stop handling compactor jobs
-                    break;
-                }
+                Err(JobFailure::Fatal(error)) => return Err(error),
             }
         }
         Ok(())

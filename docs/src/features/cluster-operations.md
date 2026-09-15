@@ -163,7 +163,7 @@ earlier pages named for M10, and what became of each:
 | Item 100, fixture failures under load | known-issues | **Open**, not a gate: every failure passes alone, the suite is run at six threads, and the count says so |
 | Item 102, a deferred fixture node losing its reserved port | known-issues | **Open**, not a gate: the fixture's port reservation, never a server's |
 | Item 106, a debug assertion on a member healed after long isolation | known-issues | **Open**, not a gate: a `debug_assert` in the library on a term inflated by isolation, met by no row at six threads and absent from a release build; the runbook for a control quorum names a restart as the way back |
-| Item 107, two table tests one run in five | known-issues | **Open**, not a gate: a test's timing, retried alone |
+| Item 107, two table tests one run in five | known-issues | **Resolved** with item 91 ([Resolved #91, 107](../appendix/resolved/compaction-retry.md)): the compactor dying on the tests' fault, not a test's timing |
 | Item 109, a volatile group's survivor when a majority loses its memory log at once | known-issues | **Open**, not a gate: an ephemeral table's rows are memory by contract, and the recovery this milestone built reinitializes a volatile group from the surviving members |
 | Item 110, the kill arm's client failing a steady share while node one is dead | known-issues | **Open**, not a gate: the arm's client does not retry by design, so the record shows the outage rather than hiding it |
 

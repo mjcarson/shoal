@@ -144,7 +144,8 @@ exponential in the schedule. Cross-tablet checks are P6's explicit non-promise.
 
 **`exit` still swallowing shard errors.** It was the smallest honest half of item 58's fix
 direction. It surfaced one shard error a test had been swallowing for as long as the test existed,
-which is [item 91](../appendix/known-issues.md#91-a-compaction-that-fails-ends-the-compactor).
+which was [item 91](../appendix/resolved/compaction-retry.md), resolved for every failure before
+the write; a failure after it is the remainder still filed under that number.
 
 **Frame-level faults in the fixture's proxy.** A byte proxy cannot see inside TLS, and the fault
 table wants frame-class manipulation before encryption. That is a fake transport for a later
@@ -269,8 +270,9 @@ open*.
 - [C11](../distributed/testing.md), [C10](../distributed/performance.md) and
   [C13](../distributed/protocol.md), whose acceptance rows the tests above are
 - [Resolved #38, #58, #88](../appendix/resolved/pool-readiness.md), the pool handle
-- [Item 91](../appendix/known-issues.md#91-a-compaction-that-fails-ends-the-compactor), what
-  the honest `exit` surfaced
+- [Resolved #91, 107](../appendix/resolved/compaction-retry.md), what the honest `exit`
+  surfaced, and [item 91](../appendix/known-issues.md#91-a-compaction-that-fails-after-writing-ends-the-compactor)'s
+  remainder
 - [F8](purpose-built-workloads.md), whose readiness probe this keeps for the question it answers
 - [F29](benchmark-explorer.md), whose index now mirrors the cluster record
 - [Benchmarking](../performance/benchmarking.md), for `run --server` and `serve`
