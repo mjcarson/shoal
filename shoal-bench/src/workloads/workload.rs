@@ -430,6 +430,29 @@ pub struct TimelineSample {
     pub elapsed: std::time::Duration,
     /// Whether it was answered
     pub ok: bool,
+    /// Why it was not, as the error code's name, or the client's own failure as `client`
+    ///
+    /// None when it was answered. Kept so an outage's errors can be read by kind rather than
+    /// counted alone ([Resolved #110](../../../docs/src/appendix/resolved/dead-primary-write-failures.md)).
+    pub code: Option<&'static str>,
+}
+
+impl TimelineSample {
+    /// The name a failed operation's error is recorded under
+    ///
+    /// A server's code by its name; anything the client failed on itself - a connection lost,
+    /// a pool with nothing to lend - as `client`.
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - What the operation failed with
+    #[must_use]
+    pub fn code_of(error: &shoal::client::Errors) -> &'static str {
+        match error {
+            shoal::client::Errors::Server { code, .. } => code.name(),
+            _ => "client",
+        }
+    }
 }
 
 /// Everything a workload produced

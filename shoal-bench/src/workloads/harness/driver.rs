@@ -674,17 +674,22 @@ where
                             at: sent - started,
                             elapsed,
                             ok: true,
+                            code: None,
                         });
                     }
-                    Err(_) => {
+                    Err(error) => {
                         // a failure is counted and stamped, never recorded as a service time,
                         // and the slot pauses so a dead endpoint is not counted a thousand times
-                        // a second
+                        // a second; what it failed with is kept by name, so an outage is read
+                        // by the codes it produced rather than by a count
+                        let code = TimelineSample::code_of(&error);
                         measured.count("failed", 1);
+                        measured.count(&format!("failed/{code}"), 1);
                         measured.timeline.push(TimelineSample {
                             at: sent - started,
                             elapsed,
                             ok: false,
+                            code: Some(code),
                         });
                         tokio::time::sleep(FAILURE_BACKOFF).await;
                     }

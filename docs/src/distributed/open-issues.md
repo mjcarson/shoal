@@ -18,7 +18,6 @@ a second copy. A new defect goes to known issues at the next free number, never 
 | [103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait) | A returning leader is refused its own re-election until its old lease lapses, and hops to it wait | [C7](failover.md) |
 | [106](../appendix/known-issues.md#106-a-member-isolated-on-every-lane-long-enough-to-inflate-its-term-trips-an-openraft-debug-assertion-when-healed) | A member isolated on every lane long enough to inflate its term trips an openraft debug assertion when healed | [C3](membership.md) |
 | [109](../appendix/known-issues.md#109-a-volatile-groups-survivor-trips-an-openraft-debug-assertion-when-a-majority-loses-its-memory-log-at-once) | A volatile group's survivor trips an openraft debug assertion when a majority loses its memory log at once | [C5](replication.md) |
-| [110](../appendix/known-issues.md#110-the-kill-arms-client-fails-a-steady-share-of-its-operations-for-as-long-as-node-one-is-dead) | The kill arm's client fails a steady share of its operations for as long as node one is dead | [C7](failover.md), [C10](performance.md) |
 | [113](../appendix/known-issues.md#113-glommios-dmafileopen_at-unwraps-statfs-after-a-successful-open) | glommio's `DmaFile::open_at` unwraps `statfs` after a successful open; fixed in the fork's working tree, uncommitted there | [C11](testing.md) |
 | [15](../appendix/known-issues.md#15-no-backpressure-anywhere) | The local kanal mesh between a node's shards is unbounded; only the peer lanes are bounded in bytes | [C2](transport.md) |
 
@@ -70,7 +69,9 @@ built: `groups/{idle,active}` (the spike stands in), `overhead/nodes/2`, `scaleo
 `writes/{insert,update,delete,conditional,retry}`, a failover by pause or by partition, a
 catch-up at several mutation rates, a rehome that grows, a write background under the read arms,
 an open-loop schedule, and a restore's cost. The failover objective of base plus two seconds is
-not met as set: two to three times the base ([C7](failover.md#the-window-and-what-a-client-sees)).
+not met as set: two to three times the base ([C7](failover.md#the-window-and-what-a-client-sees)),
+and measured at four on the development host at base one - the lease of twice the base, then a
+timeout ([Resolved #110](../appendix/resolved/dead-primary-write-failures.md)).
 A physical capture on unequal hardware has a launcher and a record and no run.
 
 ## Filed as unbuilt

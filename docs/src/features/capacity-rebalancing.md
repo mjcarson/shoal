@@ -367,8 +367,8 @@ steps derived in two rounds of three under the cap, four moved, `unfinished`, th
 1.02. `remove`: the kill at eight seconds, the grace elapsed at sixteen, the expiry plan's
 first three steps issued and two moved in the eight seconds left, `unfinished`, the p99 at
 0.99, and `cluster.fault` beside it with no restart mark and the errors of
-[item 110](../appendix/known-issues.md#110-the-kill-arms-client-fails-a-steady-share-of-its-operations-for-as-long-as-node-one-is-dead)
-running to the end. `capacity_blocked`: no step, blocked naming every one of the nine sets
+[item 110](../appendix/resolved/dead-primary-write-failures.md)
+running to the end - `NotLeader` on every write to a group the dead node led, as it turned out. `capacity_blocked`: no step, blocked naming every one of the nine sets
 and the further member each needs, `unfinished` by construction, the p99 at 1.02. A move on
 this host under the smoke mixture is five to six seconds - the learner, the catch-up, the
 joint transition, the activation and a one second grace - so three rounds of three outlast

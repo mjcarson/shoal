@@ -396,6 +396,7 @@ pub(super) fn window(
     // an operation is in the window it was sent in
     let mut ops = 0u64;
     let mut errors = 0u64;
+    let mut errors_by_code = std::collections::BTreeMap::new();
     let mut samples = Samples::default();
     for sample in timeline
         .iter()
@@ -406,6 +407,10 @@ pub(super) fn window(
             samples.record(sample.elapsed);
         } else {
             errors += 1;
+            // by kind too, so an outage says what it answered with
+            *errors_by_code
+                .entry(sample.code.unwrap_or("unknown").to_string())
+                .or_insert(0) += 1;
         }
     }
     // the successes' distribution; a window with none is all zeros, and says so by its count
@@ -416,6 +421,7 @@ pub(super) fn window(
         to_ms: millis(to),
         ops,
         errors,
+        errors_by_code,
         p50_us: micros(&stats.p50),
         p99_us: micros(&stats.p99),
         max_us: micros(&stats.max),
@@ -454,6 +460,7 @@ mod tests {
             at: Duration::from_millis(at_ms),
             elapsed: Duration::from_micros(elapsed_us),
             ok,
+            code: (!ok).then_some("Unavailable"),
         }
     }
 
@@ -513,6 +520,10 @@ mod tests {
         assert_eq!(before.p50_us, 200);
         assert_eq!(during.ops, 29);
         assert_eq!(during.errors, 28);
+        // and the errors are read by their code, which is what says what an outage answered
+        // with ([Resolved #110](../../../../docs/src/appendix/resolved/dead-primary-write-failures.md))
+        assert_eq!(during.errors_by_code.get("Unavailable"), Some(&28));
+        assert!(before.errors_by_code.is_empty());
         // the one success during the outage is the whole distribution there
         assert_eq!(during.p50_us, 300);
         assert_eq!(after.ops, 40);
