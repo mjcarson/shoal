@@ -201,8 +201,9 @@ Three admin verbs and their reads (`Backup`, `BackupStatus`, `Backups`, `Restore
 `RestoreStatus`, `Recoveries`), a `cluster.backup` block (`concurrent` 1, `timeout` 10m, no
 shorter than `replication.snapshot_timeout`), two offline functions (`force_recover`,
 `export_standalone`) with reports, and in `Members` the tombstones, the recoveries and the
-under-replicated sets. The fixture answers `BACKUP <dir>`, `BACKUP_STATUS`, `BACKUPS`, `RESTORE
-<dir>`, `RESTORE_STATUS` and `RECOVERIES`, and runs the recovery and the export in process.
+under-replicated sets. The fixture answers `BACKUP <dir>`, `BACKUP_STATUS`, `BACKUPS`,
+`RESTORE <dir>`, `RESTORE_STATUS` and `RECOVERIES`, and runs the recovery and the export in
+process.
 
 ## Design choices
 

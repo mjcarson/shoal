@@ -95,7 +95,8 @@ client address; every open plan with its steps moved and its blocked reason; the
 the recoveries. Every field is read defensively, so a frame from an older build leaves a
 default rather than failing the tab.
 
-Its command line takes an operation (`ClusterAction`): `decommission <node>`, `remove <node>
+Its command line takes an operation (`ClusterAction`): `initialize <node> [<node>...]` (the
+placement, once, in the order typed), `decommission <node>`, `remove <node>
 [replacement]`, `maintenance <node> on|off`, `rebalance`, `repair <table> [verify|repair]`,
 `backup [table] <dir>`, `restore <dir>`, `activate <wire>`, `status <op>`, `reload-tls`, and
 `help`. The first `Enter` on a mutation renders a **preview** under the model naming the
@@ -235,7 +236,9 @@ Nothing on the list was fixed silently; a debt not on it was never named for M10
 - **A reload is per node.** Every node is reloaded by its own `ReloadTls`; nothing fans it out,
   and the cluster tab's `reload-tls` reaches the node the connection did.
 - **The certificate test needs kTLS**, as every TLS test does, and skips by name without the
-  kernel module. It was written and reviewed on a host without one and has not been run there.
+  kernel module. ~~It was written and reviewed on a host without one and has not been run
+  there.~~ It has since been run on the development host with `modprobe tls`, through the
+  admin verb `ReloadTls` rather than the pool's method, so the operator's path is the one driven.
 - **The cluster tab reaches one node.** What it shows is that node's view - `Replication` is its
   own groups, and a `Members` from a follower is as current as its log. It does not choose a
   node; the connection does.
@@ -288,7 +291,7 @@ one machine, `emulated` true, one build digest - and the capture deleted.
 | --- | --- | --- |
 | `a_peer_certificate_names_its_node_and_a_reload_swaps_whole` | `shoal-proto/src/shared/tls/tests.rs` | The SAN is not read off the DER, a leaf with no node or another scheme is not `None`, non-certificate bytes are not an error, both ends of a finished handshake do not report the peer's node, or a holder does not swap both configs on good material and keep both on bad |
 | `peer_rejects_wrong_cluster_identity_and_malformed_payload` | `shoal-core/src/server/peer/tests.rs` | Beside the earlier refusals: a leaf naming the hello's node is not accepted, one naming another node is not `IdentityMismatch`, one naming none is not `Unauthorized`, the binding off does not trust the chain alone, or a joiner's certificate is not bound |
-| `certificate_rotation_binds_identity` | `shoal/tests/cluster_fixture.rs` | A reissued leaf is not used by the next handshakes after a reload, a bundle does not carry an authority rotation with the old one retired and a restart still joining, a leaf naming another node is not refused by both ends naming the certificate, one naming none is not unauthorized, bad material is not refused with nothing changed, or the cluster does not serve once the leaf is its own again. Skips by name without kTLS |
+| `certificate_rotation_binds_identity` | `shoal/tests/cluster_fixture.rs` | A reissued leaf is not used by the next handshakes after a reload, a bundle does not carry an authority rotation with the old one retired and a restart still joining, a leaf naming another node is not refused by both ends naming the certificate, one naming none is not unauthorized, bad material is not refused with nothing changed, or the cluster does not serve once the leaf is its own again. Every reload goes through the admin verb `ReloadTls`, so the operator's path is the one driven and its refusal wording is what is asserted. Skips by name without kTLS |
 | `address_change_is_observed_and_a_stale_clone_is_fenced` | `shoal/tests/cluster_fixture.rs` | A member restarted at fresh ports is not observed by every member - itself included - at the new address and incarnation, its links do not come up both ways, writes through it do not commit, or a clone at the old address is not refused as a duplicate while it keeps serving |
 | `duplicate_node_identity_is_fenced` | `shoal/tests/cluster_fixture.rs` | The M3 row, which now reaches the winning clone: the leader's control thread stops on the clone's shorter log if the control group's reversion allowance is removed |
 | `the_cluster_model_reads_the_admin_frames` | `shoalctl/src/cluster/model.rs` | The M9b figure is not said in the headline, a member's phase, grace or bytes are lost, a done plan is shown as open or a blocked reason dropped, a backup or a recovery is not summarized, the wire is not read, or an older frame fails the tab |

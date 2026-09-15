@@ -142,7 +142,9 @@
   - [C10. Performance, and the benchmarks that judge it](distributed/performance.md)
   - [C11. Acceptance tests and the cluster harness](distributed/testing.md)
   - [C12. Lessons from other clusters](distributed/prior-art.md)
-  - [C13. Protocol decisions and open questions](distributed/protocol.md)
+  - [C13. The protocol contract and decision record](distributed/protocol.md)
+  - [C14. Deploying a cluster and running shoalctl against it](distributed/deploying.md)
+  - [C15. What is still open](distributed/open-issues.md)
   - [Milestones](distributed/milestones.md)
 
 # Appendix

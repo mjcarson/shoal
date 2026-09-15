@@ -185,8 +185,9 @@ open plans
 The third line is the figure to read first: copies against the factor, who is missing, what is
 under-replicated, and whether a default write is admitted right now.
 
-The query bar is a command line on this tab. It takes `decommission <node>`, `remove <node>
-[replacement]`, `maintenance <node> on|off`, `rebalance`, `repair <table> [verify|repair]`,
+The query bar is a command line on this tab. It takes `initialize <node> [<node>...]` (the
+placement, once, in the order typed - [runbook 1](runbooks.md#1-bootstrap)), `decommission
+<node>`, `remove <node> [replacement]`, `maintenance <node> on|off`, `rebalance`, `repair <table> [verify|repair]`,
 `backup [table] <dir>`, `restore <dir>`, `activate <wire>`, `status <op>`, `reload-tls` and
 `help`. The first `Enter` on a mutation draws a **preview** under the model - the identity it
 touches as the model knows it, what will move, and the boundary that cannot be undone - and the

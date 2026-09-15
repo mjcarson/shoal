@@ -2,294 +2,255 @@
 
 ## Context
 
-A removed node causes rebalancing; a down node retains its assignments during grace. Migration
-must preserve acknowledged operations even when writes continue and a leader changes mid-move.
-The transfer mechanism and the placement policy are separate milestones, M9a and M9b; both
-are delivered ([F45](../features/replica-migration.md),
-[F46](../features/capacity-rebalancing.md)).
+A replica set moves from one member to another as its groups' own joint membership transition,
+driven phase by phase under a recorded operation, with the source's copy retired for a grace.
+The control leader plans: a `Decommission`, a `Remove`, an expired grace or a `Rebalance` is a
+plan whose steps are moves, derived by a pure planner from the sets as served, the members'
+weights and the bytes they report, and blocked by name when capacity is short. A node's core
+count changes locally, by a rehome of executors' files under a manifest, without any address
+moving. Built by [F45](../features/replica-migration.md) (the move),
+[F46](../features/capacity-rebalancing.md) (plans, removal, budgets) and
+[F47](../features/local-rehome.md) (slots, hosting, the rehome).
 
-## What exists today
-
-Logs and archive maps are per shard and table. ~~`ShardCountMismatch` protects this layout.~~
-Since [F47](../features/local-rehome.md) the shard in a file's name is an executor, a
-node-local hosting table says which executor hosts each slot and owns each tablet, and a
-changed core count is a rehome run before a shard starts rather than a refusal; what a peer
-records for a node is its slots, which never move. Archive
-entries name partition keys, so a per-tablet index can enumerate data, ~~but existing compaction
-and log retention know nothing about replicated configurations or resumable migration~~ and
-since [F45](../features/replica-migration.md) a replica set moves: a `Move` names a tablet, a
-source and a destination, its record rides the map and is driven by each of the set's groups'
-leader through the phases the table below annotates, a published configuration overrides the
-placement rule for the set's tablets under the identity the rule minted, and the source's copy
-retires under a marker for a grace before its archived partitions are dropped through the map
-intent log and its frames in the shared WAL are forgotten without touching another group's.
-Compaction knows exactly that much: a retired group's frames are handed to no compactor, and a
-segment is reclaimed once the groups still in it purge past it. ~~The rebalancer, the budgets and
-removal are still M9b's.~~ Since [F46](../features/capacity-rebalancing.md) the control leader
-plans: a `Decommission`, a `Remove` or an elapsed grace records a plan whose steps are ordinary
-moves the leader issues one per member at a time, each set to the least loaded feasible member
-by weight, and a `Rebalance` spreads the sets to a feasible weighted target - a member's share
-of the bytes held, capped at holding every set - with a hysteresis so a second plan moves
-nothing. Feasible is a reported free byte count above `cluster.migration.disk_reserve` and room
-under `cluster.rebalance.moves_per_node`; a set with no feasible destination leaves the plan
-blocked by name, replanned as the membership and the capacity change. Every stream a node
-sends draws on one token bucket (`stream_bytes_per_sec`) and a shard installs
-`concurrent_streams` at a time, refusing the rest at their begin. A drained member is
-tombstoned before it leaves the control group, and its identity never returns.
-
-## The design
-
-### The rebalancer
-
-The embedded control-plane leader computes desired transitions and reconciles persisted progress.
-A new leader resumes those records; it does not reconstruct a plan solely from “lag zero” reports.
-Only one configuration/migration transition per logical tablet is active at a time. Repair,
-removal, RF changes, same-node moves and leadership transfers must either cooperate with that
-transition or wait. A plan is not an in-memory task whose cancellation undoes committed steps.
-*At M8 ([F44](../features/repair.md)) a repair is driven one group at a time per shard
-(`cluster.repair.concurrent`) by the group's leader, its phase committed before every step and
-resumed by the next leader; that per-group serialization, and the record a group is done under,
-are what M9a's transition lock inherits and what `repair_serializes_with_migration_and_new_commits`
-will drive against a move.* *At M9a ([F45](../features/replica-migration.md)) the lock is
-per replica set and holds both ways: a move asked for under a repair of any of the set's groups,
-or a repair asked for under a move, is recorded `Queued { behind }` and released by the last
-group done of the transition ahead, in apply. A scheduled scrub leaves a moving set alone.
-Leadership transfers cooperate: a leader that is a move's source hands the lead to a member of
-the target before the transition. RF changes and same-node moves are not operations yet.*
-*At M9b ([F46](../features/capacity-rebalancing.md)) the leader computes desired transitions
-as a plan record: the planner is pure over the sets as served, the members' phases, weights and
-reported free bytes, and the bytes each holder reported per set; a new leader resumes the
-record and issues the next step from it, never from a lag report. Removal cooperates through
-the same records: a member's every set is a step, and its tombstone waits for the last.*
-
-Placement priorities:
-
-1. Restore the intended distinct-node/failure-domain replication level where a surviving data
-   quorum and capacity permit safe reconfiguration.
-2. Protect disk reserve, installation space and sustainable replication/apply capacity.
-3. Balance measured bytes, write/read load and primary CPU pressure using explicit node/shard
-   capacity weights; prefer minimal movement and hysteresis over exact tablet-count equality.
-4. Transfer leadership separately where supported and worthwhile, using the data protocol.
-
-At N=RF every node holds every tablet regardless of capacity weights. Unequal nodes can distribute
-leadership and local shard work differently, but the slowest replica still needs to keep up with
-its full write stream. Do not run a planner forever trying to reach an impossible 2:1 replica-byte
-ratio. With N>RF, weights influence feasible replica placement. A single hot partition remains
-indivisible by range splitting; expose that limit and measure its primary bottleneck. *At M9b
-the feasible target is a water fill: a member's weighted share is capped at the bytes of every
-set, and the excess is spread over the members that are not capped by weight; a `Rebalance` at
-N = RF answers `Nothing` naming the constraint, and `heterogeneous_placement_obeys_feasible_weights`
-proves the 3:1:1:1 case settles in one plan.*
+## How it works
 
 ### A move
 
-The initial transition schema records tablet, operation id, expected old configuration, target
-configuration, source/destination, snapshot id/boundary, phase and last completed data-config id.
-Exact fields and Raft membership APIs are selected in Q1/Q2; these are the required semantics:
+`Move { tablet, from, to }` (an admin verb, or a plan's step) is refused unless `from` holds the
+tablet and `to` is a placeable member outside its set. It commits a `MoveRecord`
+(`shoal-core/src/server/control/migrate.rs`) for the whole replica set the tablet is in - every
+table's group over those tablets - naming the source and destination addresses (the
+destination's slot is the rule's), the expected and target member lists, and a phase per
+group; a set already moving or under repair queues the record behind it. The record rides the
+map, the destination's shards build the set's groups as learners from it, and each group's
+leader drives its own move (`shard/migrate.rs`, `cluster.migration.concurrent` at a time),
+committing every phase as `MoveProgress` before the step it names, so the next leader resumes
+the record rather than a lag report.
 
-| Phase | Action and durable completion condition | At M9a ([F45](../features/replica-migration.md)) |
-| --- | --- | --- |
-| Plan | Commit transition intent after verifying capacity, source eligibility and expected configuration | `ControlCommand::Move` applied whole: source a member of the set, destination an up member not in it, `expected` and `target` recorded, the set's every group as `Planned` - or `Queued` behind a transition already on the set. Capacity is not verified; there is no reserve yet |
-| Add learner | Add destination as a non-voting learner through the data protocol; persist/report operation identity | `Learner` committed, then `add_learner`; the destination's shard has built the group as a learner spec from the map, which never initializes and never elects; the stream's `SnapshotBegin.transition` carries the operation |
-| Install and catch up | C7 atomic snapshot plus retained tail; learner never counts toward quorum merely because bytes arrived | `CatchingUp` committed at the first matched index and left once `last - matched <= catchup_lag`; the bytes sent and the position reached go on the record. A leader that is the source transfers the lead here, over the lane, and steps aside |
-| Reconfigure | Execute the library's safe membership transition, including joint old/new quorum rules where required; drain/resolve old-configuration writes according to that protocol | `Reconfiguring` committed, then `change_membership(ReplaceAllVoters(target), retain: false)`: the joint `[expected, target]` under both majorities, then the uniform `target`; a leader lost between leaves the joint behind and the next call finishes it. `Configured` at the uniform entry's index, read from the committed membership |
-| Activate | Establish the new committed configuration and required applied barrier; use a proper leadership transfer if moving the primary | `Activated` once the destination's matched index has passed the uniform entry and it has answered an `Applied` probe past it. The driver leaves the group here |
-| Publish | Record completed data configuration in control-plane placement; stale routers refresh/forward within bounds | The last group's `Activated` publishes the set's `DataConfiguration` in apply and moves the topology version; a stale router's forward is refused `StaleTopology` and sent once to another holder |
-| Retire | Remove source eligibility, retain files for grace/references, then durably tombstone and reclaim | The source's shard retires the copy under `wal/Shard-N/retired/<group>`: handle down, partitions evicted, log forgotten with a marker frame; after `cluster.migration.retire_after` the archived partitions are dropped and the files go. `Retiring` then `Done` once the source answers `Retired`, is `Down`, or the grace and a timeout have passed |
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> Queued: a transition is already on the set
+    [*] --> Planned: Move applied whole
+    Queued --> Planned: the transition ahead is done
+    Planned --> Learner: add_learner(to), fed by log or snapshot
+    Learner --> CatchingUp: first matched index
+    CatchingUp --> Reconfiguring: lag at most catchup_lag, a source leader transfers the lead first
+    Reconfiguring --> Configured: change_membership(ReplaceAllVoters(target)), joint then uniform
+    Configured --> Activated: destination matched past the uniform entry and answered an Applied probe
+    Activated --> Published: the last group activated, DataConfiguration committed, map version moves
+    Published --> Retiring: source retires the copy under wal/Shard-N/retired
+    Retiring --> Done: source answers Retired, or is Down, or the grace and a timeout passed
+    Done --> [*]
+```
 
-The essential barrier is not a cached zero-lag report. New writes can arrive between that report
-and DropReplica, and old-config requests can remain in flight. Membership transition rules must
-ensure all acknowledged operations are represented in the new authoritative history before the
-old copy is no longer needed.
+The destination is a learner until the group's own joint transition - `[expected, target]`
+under both majorities, then the uniform `target` - and its own apply make it count
+(`learner_never_counts_before_configuration_commit`); a leader lost between leaves the joint
+configuration behind and the next leader finishes it. A leader that is the move's source hands
+the lead to a target member over the lane before reconfiguring, since without that its own
+lease is the first to lapse. The last group's `Activated` publishes the set's
+`DataConfiguration` beside the rule ([C4](tablet-map.md#the-placement-rule)); a stale router's
+forward is answered `StaleTopology` and re-sent once. The source's shard retires the copy:
+handle shut down, resident partitions evicted, the log forgotten with a `Forget` frame, a
+marker under `wal/Shard-N/retired/`, every query of its tablets refused by name, and after
+`cluster.migration.retire_after` the archived partitions dropped through the map's intent log
+and the files gone (`retired_copy_never_serves_from_grace_files`). A group's identity survives
+the move, so a session token minted before it bounds a read after it, and a retry identity is
+judged the same on the destination ([C5](replication.md#retry-identity)). Every phase's
+failure - source, destination or control leader killed - resumes from the record
+(`migration_resumes_after_each_phase_failure`); a write acknowledged after a zero-lag report
+survives the source's retirement (`move_preserves_write_after_zero_lag_report`); moving one
+group's frames out of a shared segment erases nothing another group needs
+(`shared_wal_cleanup_preserves_other_tablets`).
 
-Data and control commits can finish in either order around a crash. On restart reconcile the
-recorded transition with the data group's actual committed configuration; retry idempotently or
-finish publication. Never roll a completed data configuration backward to match a stale map.
-A source/destination/control-leader failure at every phase is an acceptance test.
+A repair and a move on one set serialize: whichever is asked second is recorded `Queued`
+behind the first and released by its last group's `Done`, in apply
+([C9](operations.md#repair)). Leadership transfers cooperate the same way.
 
-[etcd's learner design](https://etcd.io/docs/v3.5/learning/design-learner/) is useful background on
-why catching up a replica must precede making it a voter. This is a protocol reference, not an
-etcd service dependency. The selected embedded library's exact membership API and completion
-rules must be linked in Q1 before implementing this state machine.
+### Plans
 
-### Transfer budgets
+```mermaid
+flowchart TB
+    op["Decommission { node } / Remove { node, replacement } / Rebalance /<br/>GraceElapsed { expire }"] --> rec["PlanRecord committed: kind, steps, blocked, phase, outcome<br/>(control/plan.rs); rides the TopologyView, read by PlanStatus / Plans"]
+    rec --> tick["leader: drive_plans every rebalance.plan_interval and on every change"]
+    tick --> done{"a step's move done?"}
+    done -- yes --> mark["PlanProgress: Moved or Failed"]
+    done -- no --> pend{"a Pending step under moves_per_node?"}
+    pend -- yes --> mv["ControlCommand::Move as principal 'plan op'<br/>PlanProgress: Moving(op)"]
+    pend -- "nothing moving" --> plan["planner::plan(kind, PlanInput):<br/>eligible members, weights, free bytes,<br/>sets with bytes per holder, reserve, hysteresis"]
+    plan -- steps --> rec
+    plan -- "none feasible" --> blk["PlanProgress: Blocked { reason }<br/>replanned as members and capacity change"]
+    plan -- "drain complete" --> fin["Finishing: Tombstone, then leave the control group -> Done"]
+    plan -- "rebalance settled" --> ok["Done: Completed / Nothing"]
+```
 
-Keep at most one stream per source/destination pair initially, and additionally enforce aggregate
-limits per source, per destination and per node/device. Configure bytes/sec, concurrent transfers,
-buffer bytes and minimum free disk space. Reserve space for old and new checkpoint generations,
-retained WAL and concurrent foreground growth. Expose a blocked reason instead of repeatedly
-restarting transfers when reserves are insufficient.
-
-Snapshot streams use separate bounded lanes from queries, replication and control traffic.
-Adapt/reduce background work when foreground tails or replica lag exceed thresholds; it must
-still make progress under a documented supported load envelope. One stream per pair alone does
-not prevent N peers overloading one destination.
-
-*At M9b ([F46](../features/capacity-rebalancing.md)): `cluster.migration.stream_bytes_per_sec`
-is one token bucket per sending node across every stream and group, 64 MiB/s by default and
-zero for none; `concurrent_streams` caps what one shard assembles at once, the rest refused at
-their begin and fed again by the sender's backoff; `disk_reserve` is checked by the planner
-against the reported free bytes and by the receiver against its own before it accepts a
-stream, so a stale report is caught where the bytes would land. Per device and per pair are
-not built - one bucket per node - and nothing adapts to the foreground's tail; the budget is a
-constant and the envelope is what the arms measure under it. A move's `timeout` bounds the
-refusals.*
-
-### Storage stays keyed by shard
-
-Keep shared physical WAL/group commit as the initial storage choice. Add per-tablet indices and
-manifest/checkpoint ownership needed for atomic replacement and reclamation. Logical tablet
-checkpoint/archive organization is independent of whether one physical WAL serves many tablets.
-Evaluate tablet-organized immutable files if they reduce transfer/cleanup costs; they do not
-require thousands of independent fsync loops.
-
-A shared segment can be reclaimed only when every tablet that depends on it has durable coverage
-or the specified retained replacement history. Dropping a tablet must not delete another tablet's
-log records or archives. Snapshot/read references pin immutable generations until released.
-
-### Orphaned tablets
-
-An orphan is data no longer assigned to this node. Report it before deleting; never serve or
-count it solely because it exists. A verified old checkpoint may seed a new learner only after
-identity/configuration checks and full reconciliation with the current group. A removed NodeId
-cannot regain voting authority by reporting useful files. Reusing an old directory needs an
-explicit replacement workflow; it is not a normal rejoin, and since
-[F49](../features/backup-and-recovery.md) what it held comes back only through a `Backup` of a
-live cluster restored into a new one.
-
-### ShardCountMismatch retires
-
-M9c, after inter-node migration works, adds a local startup recovery executor for files belonging
-to vanished shards. It reads all per-table WALs, checkpoints, term/vote and dedup metadata under
-a manifest describing the in-progress rehome. Transfer to live shards is atomic and resumable;
-a crash halfway through cannot double-own or abandon data. If a node is also a tablet voter,
-address/incarnation and group configuration changes must use the same safe transition contract.
-
-~~Keep the mismatch refusal until this mechanism and its crash tests exist. An index alone cannot
-read/replay a dead shard's files, and the marker does not become informational prematurely.~~
-*Delivered at M9c ([F47](../features/local-rehome.md)).* The executor is `Rehome::run`, the
-manifest is `shoal-rehome.json`, and the files it moves are an executor's: a cluster node's
-*slots* - the shard in every address, the rule's modulus, every group's identity - are claimed
-once and never move, so no address or group configuration changes at all; what moves is which
-executor hosts a slot, a table nobody else reads. The WAL half appends the moving groups'
-entries, votes, commits and purge points through the store openraft writes through and moves
-their checkpoint, sidecar, quarantine and retired markers; the archive half copies the moving
-records into a fresh archive on the destination; a vanished executor's files are reclaimed
-whole and a live donor's moved entries leave its map. The crash tests are the two rows below.
-The marker's `shards` is not informational: it is the slots, and a `cluster.slots` that differs
-from it is still refused by name.
+The planner (`control/planner.rs`) is pure and deterministic over a `PlanInput`: the placeable
+members with their `weight` (`cluster.weight`, the executor count by default) and reported free
+bytes, and every set with its members, tablets and the bytes each holder reports for it
+(`ArchiveMap::tablet_bytes`, folded into the status report and kept in the leader's memory,
+never committed; a set nobody measured counts as one byte). A drain sends each of the member's
+sets to the feasible member with the lowest load over weight - the named replacement first -
+where feasible is placeable, not in the set, free bytes at least the set plus
+`cluster.migration.disk_reserve`, and under `cluster.rebalance.moves_per_node`. A rebalance
+gives every member its weight's share of the bytes held, capped at holding every set with the
+excess spread over the others, and moves a set from the member most over its target to the
+member below it that gains the most while the source is over by more than
+`cluster.rebalance.hysteresis` (0.10), so a second plan moves nothing; at N = RF every node holds
+every tablet and the plan answers `Nothing` naming the constraint
+(`heterogeneous_placement_obeys_feasible_weights`). The leader issues one move per member as
+source or destination at a time, retries a stale-version proposal eight times, and records a
+step that no member can take as `Blocked` by name. One proposal per plan is in flight.
 
 ### Adding a node
 
-Join as a member first, with no tablet voting authority. Then approve/automatically execute the
-capacity-checked plan. At RF=3 adding a fourth node permits storage redistribution; give it
-learners and safely replace old replicas. Serving remains available where healthy quorums and
-capacity permit it. A stalled move pauses visibly without taking unrelated tablets offline.
-*At M9b the plan is approved, never automatic: a member that joined holds nothing until an
-operator's `Rebalance`, decided with the user, and a blocked removal waiting on a further
-member runs on its own once one joins.*
+A node joins as a member holding nothing ([C3](membership.md#joining)). Nothing moves onto it on
+its own: an operator asks for a `Rebalance` and follows `PlanStatus`, or a blocked removal
+waiting on a further member runs by itself once one joins. At three nodes and a factor of
+three a fourth node permits redistribution; the plan gives it learners and replaces old copies
+set by set, serving continues where quorums and capacity permit, and a stalled move pauses
+visibly without taking unrelated tablets offline.
 
 ### Removing a node
 
-`Decommission` marks a live node Leaving, excludes it from new placement and drains it through
-safe transitions while it serves its remaining eligible replicas. `Remove` marks a down node
-Removing and rebuilds from surviving authoritative groups. No old copy is dropped before the
-new configuration is safe. Mark Removed only after required data transitions and control-voter
-replacement are complete, with an identity tombstone persisted.
+`Decommission { node }` moves a plain member to `Leaving` and records a plan; it serves its
+remaining copies while they drain. `Remove { node, replacement }` needs a member that is down
+or leaving, moves it to `Removing` with its grace expired at the operator's word, and takes the
+replacement - a placeable member outside every set the member holds - first when one is named.
+Both drain one set per member at a time. When every set has moved, `finish_removal` commits the
+`Tombstone` first - the member `Removed`, its grace cleared, its identity in `tombstones` -
+then changes the control membership to drop it, and `maybe_promote` refills the voter count
+from a placeable learner; a leader removing itself transfers the lead. The tombstoned identity
+is refused at `observe`, `Admit`, `SetHealth`, the join, its report, the membership and both
+hello judges, and is never pinged; a node that learns it is removed stops
+`ShoalError::Removed` (`automatic_removal_and_rejoin_preserve_fencing`). Three nodes at a factor
+of three with one dead is `remove_without_replacement_capacity_stays_blocked`: the plan blocks
+naming the missing member, every copy is kept, the factor is untouched, and the fourth identity
+that joins completes it. No copy is dropped before the new configuration is safe, and the factor
+is never reduced: there is no RF change.
 
-For a three-node RF=3 cluster with one dead node, add a replacement (or initiate an integrated
-Replace operation) before expecting removal to finish. There are only two surviving distinct
-nodes otherwise. Decommissioning from three nodes to two at RF=3 similarly blocks unless RF is
-explicitly changed through a separate supported policy transition. Never silently reduce RF.
-*At M9b ([F46](../features/capacity-rebalancing.md)): `Decommission` moves a plain member to
-`Leaving`; `Remove` needs a down or leaving member and moves it to `Removing`, its grace
-expired at the operator's word; `Replace` is `Remove` with a replacement named, which has to be
-a placeable member outside every set the member holds and is chosen first. Both record a plan
-the leader drains one set per member at a time; the tombstone is committed once every set has
-moved and before the member leaves the control group, and the voter policy refills from the
-spare. Three at three with one dead is `remove_without_replacement_capacity_stays_blocked`:
-blocked naming the missing member, every copy kept, the factor untouched, and completed by the
-fourth identity that joins. No RF change is an operation.*
+An expired grace ([C3](membership.md#what-follows-from-down-and-when)) is the same as a
+`Remove` under the policy's name. `Maintenance { node, suspend }` holds it. A partitioned node
+fenced and replaced after its grace cannot undo the transitions when it returns.
 
-### auto_remove_after
+### Transfer budgets
 
-Proposed default 30m, `null` disables, maintenance can suspend. Expiry requests Removing; it does
-not guarantee capacity to finish. Preserve remaining copies and show blocked under-replication
-if there is no safe target. Persist episode/progress across control-leader restart (C3).
-A partitioned node can be fenced and replaced after grace; its return cannot undo completed
-transitions. Operators see remaining grace, planned bytes and replacement capacity before expiry.
-*At M9b ([F46](../features/capacity-rebalancing.md)) the default is thirty minutes and acted
-on: the leader counts a down member's grace from its last commit and commits every eighth of
-it, so a leader change loses at most one increment; `null` opens no grace; `Maintenance`
-suspends the count and `Members` reports `grace_remaining_ms` throughout; expiry commits the
-whole grace, moves the member to `Removing` and records an `Expiry` plan under the policy's
-name; a removed identity is tombstoned and refused at every door; `under_replicated_sets` and
-each member's `free_bytes` and `held_bytes` are on `Members`
-([decision record](protocol.md#q7-and-q8-at-m9b)).*
+`cluster.migration.stream_bytes_per_sec` (64 MiB/s; 0 is unlimited) is one token bucket per
+sending node across every stream and group; `concurrent_streams` (2) caps what one shard
+assembles at once, the rest refused at their `Begin` and fed again by the sender's backoff;
+`disk_reserve` (1 GiB) is checked by the planner against the reported free bytes and again by
+the receiver against its own before a stream is accepted, so a stale report is caught where the
+bytes would land (`node_transfer_budgets_bound_concurrent_sources`). A move's `timeout` bounds
+the refusals. Snapshot bytes ride the bulk lane, separate from queries, replication and control
+([C2](transport.md#four-lanes-on-two-ports)).
+
+### Orphaned copies
+
+Data no longer assigned to this node - a retired copy past its grace, a removed node's
+directory - is never served or counted because it exists. A removed identity cannot regain
+authority by reporting useful files, and reusing its directory is not a rejoin: what it held
+comes back only through a `Backup` of a live cluster restored into a new one
+([C9](operations.md#backup-restore-and-export)).
+
+### Slots, executors and the rehome
+
+A cluster node's *slots* - `cluster.slots`, one per core by default - are claimed once into the
+marker and never move: they are the shard in every address, the rule's modulus and every
+group's identity. Which *executor* hosts a slot, and on a standalone node which executor owns
+each tablet, is `shoal-hosting.json` (`server/hosting.rs`), a table nothing off the node reads.
+Changing `resources.cores` is therefore local: the claim reports a pending rehome, and
+`Rehome::run` (`server/rehome/`) runs on its own executor after the control plane is up (its map
+says which slot each group is on) and before any shard opens a file, under the directory lock
+and a manifest, `shoal-rehome.json`, written whole before the first move and rewritten after
+each durable step, so a crash resumes at its step (`local_rehome_recovers_after_each_crash_point`,
+`standalone_rehome_rebalances_tablets_across_restarts`).
+
+```mermaid
+flowchart LR
+    plan["Hosting::plan(to): a deterministic deal -<br/>shrink: each vanishing executor's slots to the least loaded survivor;<br/>grow: from the most loaded to the least until counts differ by one"]
+    plan --> fold["Fold (standalone)<br/>source intent logs compacted into archives"]
+    fold --> arch["Archives<br/>moving records read_record-verified,<br/>write_record-written into one new archive on the destination"]
+    arch --> log["Log (cluster)<br/>moving groups' entries, vote, committed and purged appended<br/>through GroupStore into the destination's wal/Shard-N;<br/>checkpoint, retries, quarantine and retired markers moved"]
+    log --> rec["Reclaim<br/>a vanished executor's directories deleted;<br/>a live donor's moved entries forgotten"]
+    rec --> fin["Finalize<br/>hosting-after written, marker.physical moved,<br/>manifest removed"]
+```
+
+More cores than slots is refused `CoresExceedSlots` - a slot is a ceiling, and the way past it
+is a `Replace` - and a `cluster.slots` that differs from the marker's is refused `SlotsFixed`.
+The rehome changes no address, no rule, no group identity and nothing on the map; the pool's
+`rehome()` reports what moved and how long the hold was, and `macro/rehome/shrink` prices it.
+
+## Design choices
+
+A move as the group's own joint transition, because only the protocol knows when the new copy
+counts. A record committed before every step, because the leader that finishes a move is often
+not the one that started it. Plans as recorded steps that are ordinary moves, so removal,
+expiry and rebalancing are one mechanism with one audit trail. A pure planner over reported
+bytes, so a plan can be tested without a cluster and a leader change loses nothing but a
+report. Bytes reported rather than committed, since they change every second. Slots separate
+from executors, so a core-count change never touches the map.
 
 ## Alternatives rejected
 
-Three map edits and a lag-zero heartbeat are superseded by the persisted data-configuration
-transition. Replica-count equality is superseded by feasible capacity targets. Immediate file
-cleanup and source reads during post-drop grace are excluded: retained files can already be stale.
-Automatic removal is not permission to force a new configuration after losing the data majority.
+Three map edits and a lag-zero heartbeat as a move; replica-count equality as the target;
+immediate file cleanup, or reading a retired copy during its grace; automatic removal as
+permission to force a configuration after a lost data majority; a plan that runs forever toward
+an impossible ratio at N = RF; a rehome that changes addresses.
 
 ## What it costs
 
-Temporary disk amplification, retained history, foreground interference and metadata transitions.
-Leadership transfers can cause short retries; measure them rather than promise unconditional
-zero client errors under arbitrary simultaneous failures. Supported healthy add/drain operations
-should complete with zero final operation errors within their configured deadline/load envelope.
+Temporary disk amplification, retained history, foreground interference under the token bucket,
+and a leadership transfer's short retries. A rehome holds the node's start for the copy; the
+rehome arm records the hold in `cluster.rehome.millis`.
 
-## What it breaks
+## Limitations
 
-Map-only MoveTablet/AddReplica/DropReplica semantics, ownership cleanup, disk budgeting and local
-rehoming. The earlier claim that per-tablet files buy nothing is withdrawn; WAL sharing and
-checkpoint organization will be evaluated separately.
+A failed move leaves the committed membership where it got to; there is no rollback. A set
+moves its groups one at a time. There is no same-node move, no RF change, no operator-chosen
+destination slot, no `Decommission` cancel and no plan preview beyond reading the steps.
+Bytes are archived bytes only. The bucket is per node, not per device or per pair, and does
+not adapt to the foreground's tail. The learner is fed a whole-group snapshot
+([O55](../appendix/optimizations.md#o55-a-learner-inside-the-retained-log-is-fed-a-snapshot-when-the-leaders-cached-cut-is-newer-than-its-purge-point)). A rehome serves nothing while it runs
+([O59](../appendix/optimizations.md#o59-the-rehome-runs-on-one-core-and-blocks-the-start)) and drops partial installs. See [C15](open-issues.md).
 
 ## Invariants to uphold
 
-- Migration preserves acknowledged operations across both configurations and every crash phase.
-- Learners become voters only through a committed data-protocol transition.
-- Transitions resume by durable identity, never solely from cached progress reports.
-- Down keeps assignments during grace; removal cannot manufacture capacity or a majority.
-- Per-node and per-device resource budgets bound streams and retained state.
-- Retired copies do not serve; cleanup waits for safe configuration and reference release.
+- A migration preserves acknowledged operations across both configurations and every crash phase.
+- A learner becomes a voter only through a committed data-protocol transition.
+- A transition resumes by durable identity, never from a cached progress report.
+- `Down` keeps assignments through the grace; removal cannot manufacture capacity or a majority.
+- Per-node budgets bound streams and retained state; the reserve is checked where the bytes land.
+- A retired copy does not serve; cleanup waits for the configuration and the grace.
+- A tombstone precedes the membership change; a slot never moves.
 
-## Prerequisites
+## How it is measured
 
-[C7](failover.md) complete, C13 Q7–Q9, [C4](tablet-map.md), [C5](replication.md).
-~~M9a migration~~ M9a migration is delivered ([F45](../features/replica-migration.md)),
-~~M9b planner/removal~~ M9b's planner and removal are delivered
-([F46](../features/capacity-rebalancing.md)), ~~M9c local shard-count changes~~ and M9c's
-local shard-count changes are delivered ([F47](../features/local-rehome.md)).
-
-## How it would be measured
-
-[C10](performance.md): add/drain/remove, capacity weights, hot tablets, foreground tails, error
-counts and time/bytes to reach a feasible target. Measure lag and disk reserve during transfer.
+`macro/cluster/rebalance/{add,decommission,remove,capacity_blocked}`: the kill arm's placement
+and mixture with a plan driven from a third of the way through, each recording
+`p99_ratio_permille` against the foreground before it; `macro/cluster/migration/move` prices
+one move; `macro/rehome/shrink` the rehome's hold ([C10](performance.md#the-arms)).
 
 ## Acceptance tests
 
 | Test | Asserts | Milestone |
 | --- | --- | --- |
-| `move_preserves_write_after_zero_lag_report` | Acknowledge more writes after the catch-up report and delay old-config requests; all survive source retirement | M9a |
-| `migration_resumes_after_each_phase_failure` | Kill source, destination or control leader at every phase; reconcile without lost/duplicate operations | M9a |
-| `learner_never_counts_before_configuration_commit` | Delayed snapshot installation cannot prematurely satisfy quorum | M9a |
-| `retired_copy_never_serves_from_grace_files` | Stale routing forwards/refreshes rather than returning post-drop stale source data | M9a |
-| `shared_wal_cleanup_preserves_other_tablets` | Moving one stream cannot erase history required by another | M9a |
-| `node_transfer_budgets_bound_concurrent_sources` | Many sources respect destination memory/disk/bandwidth limits while foreground work progresses | M9b |
-| `heterogeneous_placement_obeys_feasible_weights` | N>RF balances bytes/load; N=RF reports the full-copy constraint without oscillation | M9b |
-| `remove_without_replacement_capacity_stays_blocked` | Three-node RF=3 loss preserves two copies and desired RF until a fourth identity joins | M9b |
-| `automatic_removal_and_rejoin_preserve_fencing` | Grace expiry, leader restart and old-node return cannot revive old authority | M9b |
-| `decommission_drains_within_supported_load_envelope` | Healthy migration preserves all operations and finishes without final client errors | M9b |
-| `local_rehome_recovers_after_each_crash_point` | Fewer configured shards preserve full data and consensus metadata across interrupted rehome | M9c |
+| `move_preserves_write_after_zero_lag_report` | Writes acknowledged after the catch-up report and delayed old-configuration requests all survive source retirement | M9a |
+| `migration_resumes_after_each_phase_failure` | Source, destination or control leader killed at every phase: reconciled without lost or duplicate operations | M9a |
+| `learner_never_counts_before_configuration_commit` | A delayed snapshot installation cannot prematurely satisfy a quorum | M9a |
+| `retired_copy_never_serves_from_grace_files` | Stale routing forwards rather than returning post-drop stale source data | M9a |
+| `shared_wal_cleanup_preserves_other_tablets` | Moving one stream cannot erase history another needs | M9a |
+| `node_transfer_budgets_bound_concurrent_sources` | Many sources respect the destination's memory, disk and bandwidth limits while foreground work progresses | M9b |
+| `heterogeneous_placement_obeys_feasible_weights` | N>RF balances bytes; N=RF reports the full-copy constraint without oscillation | M9b |
+| `remove_without_replacement_capacity_stays_blocked` | A three-node factor-of-three loss preserves two copies and the desired factor until a fourth identity joins | M9b |
+| `automatic_removal_and_rejoin_preserve_fencing` | Grace expiry, a leader restart and an old node's return cannot revive old authority | M9b |
+| `decommission_drains_within_supported_load_envelope` | A healthy drain preserves every operation and finishes without final client errors | M9b |
+| `local_rehome_recovers_after_each_crash_point` | Fewer configured cores preserve full data and consensus metadata across an interrupted rehome | M9c |
 | `standalone_rehome_rebalances_tablets_across_restarts` | A standalone node dealt per tablet up and down preserves every row through a crash at the fold and at the copy | M9c |
 
-## Related and implementation references
+## Related
 
-[C3](membership.md), [C4](tablet-map.md), [C7](failover.md), [C13](protocol.md).
-[Scylla's tablet implementation](https://www.scylladb.com/2024/06/17/how-tablets/) describes durable
-transition metadata, conflict serialization and movable tablet storage; these motivate the
-separation between migration mechanics, file organization and placement policy here. Shoal's
-ordered replication still needs its own selected library's configuration-transition rules.
+[C3](membership.md), [C4](tablet-map.md), [C7](failover.md), [C9](operations.md),
+[C13](protocol.md); [etcd's learner design](https://etcd.io/docs/v3.5/learning/design-learner/)
+on why catch-up precedes promotion and
+[Scylla's tablets](https://www.scylladb.com/2024/06/17/how-tablets/) on durable transition
+records, both references and not dependencies.

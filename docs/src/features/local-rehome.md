@@ -9,7 +9,7 @@ three things at once - the core it ran on, the name every one of its files carri
 (`Shard-N`), and on a cluster node the shard in every address a peer recorded and the modulus of
 the placement rule ([C4](../distributed/tablet-map.md)) - so changing the core count changed
 where every partition was looked for and, on a cluster node, the identity of every replica set
-on every peer. [C8](../distributed/rebalancing.md#shardcountmismatch-retires) said what it would
+on every peer. [C8](../distributed/rebalancing.md#slots-executors-and-the-rehome) said what it would
 take to retire it: a startup executor over the vanished shards' files, a manifest describing
 the rehome, transfer that is atomic and resumable, and the crash tests that prove it. [M9c](../distributed/milestones.md#m9c-change-local-shard-count)
 is that gate, and asks for the resource and startup costs to be recorded.
@@ -279,7 +279,7 @@ thirty-two archived records in 226 to 309 ms on this host, and a growth the same
 ## Related
 
 [C1](../distributed/node-identity.md), [C4](../distributed/tablet-map.md),
-[C8](../distributed/rebalancing.md#shardcountmismatch-retires),
+[C8](../distributed/rebalancing.md#slots-executors-and-the-rehome),
 [C10](../distributed/performance.md), [F37](node-identity-control-plane.md),
 [F40](replication.md), [F45](replica-migration.md), [F46](capacity-rebalancing.md),
 [item 11](../appendix/resolved/tablet-ring.md), [item 45](../appendix/resolved/storage-marker-format.md),

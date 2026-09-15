@@ -2,247 +2,257 @@
 
 ## Context
 
-Membership is a durable decision; reachability is an observation that can differ between peers.
-Shoal runs both mechanisms itself. An embedded `openraft` control-plane group owns cluster
-membership and desired placement. Each tablet's embedded data group owns its election and log
-configuration. No external membership, configuration or failover service is required.
+The cluster's membership is one `openraft` group of nodes, running on every node's control
+thread, whose committed state is the cluster: its identity, its members with their health and
+phase, its placement, its plans and its policy. A node joins through seeds as a learner, the
+leader promotes voters up to the policy, a phi-accrual detector on the leader commits a silent
+member `Down`, and a `Down` member keeps its placement through a grace. Built by
+[F39](../features/membership.md), with the detector's short-lived-member rule from
+[F42](../features/primary-failover.md), the phase, the grace and the tombstone from
+[F46](../features/capacity-rebalancing.md), and an address change followed since
+[F50](../features/cluster-operations.md).
 
-## What exists today
-
-**Delivered at M3 by [F39](../features/membership.md)**: one control group of nodes, joiners
-admitted as learners through seeds, voters promoted under the explicit policy and never past it,
-the member state machine's `Joining`, `Up` and `Down`, fencing by a persisted incarnation, the
-leader's phi-accrual detector over freshness-aware status reports committing `Down` and `Up`
-through the log, shard health committed beside it, and readiness that tells a joined control
-plane from data that can take default writes. Since M6 ([F42](../features/primary-failover.md))
-a member that fell silent before its fifth report is judged too - the expected interval stands
-in for the samples it never sent ([Resolved #101](../appendix/resolved/short-lived-member-detection.md))
-- a `Down` verdict moves no replica and no placement (`down_retains_placement_during_grace`),
-the map carries the policy's `primary_failover_after` so every node's groups elect at the
-cluster's pace, and a node holding no copy of a tablet routes it by health, `Up` first.
-~~`Leaving`, `Removing`, `Removed`, grace expiry
-and removal are M9b's.~~ Since M9b ([F46](../features/capacity-rebalancing.md)) a member
-carries a phase beside its health - `member`, `leaving`, `removing`, `removed` - and the one
-state below is the two read together; a `Down` verdict under the policy opens a grace the
-leader counts in committed increments, an elapsed grace or an operator's `Remove` records a
-plan that rebuilds the member's sets elsewhere, a `Decommission` drains a live one, and a
-removed identity is tombstoned and refused at every door. Before that: ~~`Shard::join_cluster` broadcasts a local join and `Ring::add`
-ignores unknown shards.~~ ~~Reserved
-ping/pong frames have no implementation.~~ ~~The pool lacks a dependable readiness/failure handle.~~
-`ShoalPool::ready` and `failure` are that handle since
-[F36](../features/cluster-harness.md), for the process's own shards. ~~No consensus library is
-currently in the workspace.~~ `openraft` is, since [F37](../features/node-identity-control-plane.md),
-running ~~a group of one member per cluster node~~ the group of nodes this page describes, with a
-state machine that holds the cluster id, the members with their health, roles and incarnations,
-the placement, the tables and the bootstrap policy. [C1](node-identity.md) ~~introduces~~ delivered identity and
-the control-plane thread; ~~M0 first adds readiness and failure propagation~~ M0 added them.
-
-## The design
+## How it works
 
 ### One Raft group of nodes
 
-The control-plane state machine holds ClusterId, member identities/endpoints, policy versions,
-placement intent, transition records, and removal tombstones. It stores its own WAL and snapshots
-under the node's latency-sensitive storage path. Persistence is independent of application-table
-compaction and must recover after abrupt power loss under C13's storage assumptions.
+`ControlState` (`shoal-core/src/server/control/types.rs`) is the state machine: `cluster`,
+`topology_version`, `members` (each a record, a role, a health, a phase, a grace, its failed
+shards and its quarantined copies), `policy`, `bootstrapper`, `initialized`, `tables`,
+`operations`, `fenced`, `joint`, `table_read_policy`, `repairs`, `configurations`, `moves`,
+`tombstones`, `plans`, `activated`, `backups`, `restores`, `restored_from` and `recoveries`.
+`ControlState::apply` is a pure function of a `ControlCommand` - `Bootstrap`, `ObserveMember`,
+`Admit`, `SetHealth`, `ReportShards`, `Initialize`, `SetControlVoters`, `SetTableReadPolicy`,
+`Repair`, `RepairProgress`, `ReportQuarantine`, `Move`, `MoveProgress`, `Decommission`,
+`Remove`, `Maintenance`, `Rebalance`, `GraceElapsed`, `PlanProgress`, `Tombstone`, `Backup`,
+`BackupProgress`, `Restore`, `RestoreProgress`, `ForceRecovered`, `Activate` - and every one of
+them moves the topology version. The group's log and files live under `<storage>/control/`
+(`log`, `vote.json`, `committed.json`, `purged.json`, `state.json`, `snapshot.json`), written
+by the control store ([C13](protocol.md#q1-and-q13-at-m1)), independently of any table's
+compaction.
 
-Prefer three control voters initially; permit an explicit five-voter policy for larger clusters.
-Other data nodes are learners of this metadata group. Adding a fourth data node does not silently
-change the control quorum to four. Membership transitions use the library's supported API,
-including catch-up before promotion. Replace a lost voter only while the old configuration has
-quorum; never force promotion using a detector verdict. Spread voters over configured failure
-domains where available. Define placement feasibility and alert if domains are insufficient.
-
-Control voters and tablet voters are separate populations. An RF=3 tablet may live entirely on
-metadata learners. Reports are telemetry, not election votes for that tablet.
+`control_voters` is 1, 3 or 5. Every other member is a learner of the control group: a fourth
+node under a three-voter policy joins as a learner and stays one
+(`fourth_data_node_does_not_change_control_voter_count`), and `SetControlVoters` is the one
+way the count moves. Control voters and tablet voters are separate populations: a tablet at a
+factor of three may live entirely on control learners, and a member's status report is
+telemetry, never a vote for any tablet.
 
 ### Joining
 
-An explicitly bootstrapped node creates the cluster once and persists its identity. Other nodes
-join through configured seed addresses, verify cluster/schema/protocol/authentication, receive
-control state as learners, and become members without automatically becoming tablet voters.
-Their data readiness advances only through snapshot/catch-up and data configuration transitions.
-An interrupted join is resumable by identity, with a recorded transition id and timeout policy.
+```mermaid
+sequenceDiagram
+    participant J as joiner (mode: joining)
+    participant S as seed (any member's control_port)
+    participant L as control leader
+    participant G as control group
+    J->>S: hello naming no cluster, Lane::Control
+    S-->>J: JoinResponse::Redirect { leader } (unless S leads)
+    J->>L: ControlKind::Join { record }
+    Note over L: tombstone check, incarnation check,<br/>one admission at a time (others told to retry)
+    L->>G: raft.add_learner(node, record)
+    L->>G: propose ControlCommand::Admit(record)
+    G-->>J: log replicated: the joiner applies Admit
+    Note over J: StorageMeta::adopt_cluster, once:<br/>mode joining -> cluster, cluster id written
+    J-->>L: StatusReport every interval_ms
+    Note over L: voters below control_voters and not joint?
+    L->>G: add_learner(blocking) then change_membership(+joiner)
+    Note over J: JoinStatus::Joined; promoted to voter
+```
 
-An existing cluster directory never auto-bootstraps a new group because seeds fail to answer.
-Duplicate processes using the same NodeId are rejected/fenced using authenticated identity and
-incarnation rules settled in Q11. Local directory locking alone does not protect cloned disks
-on two machines. Address changes update advertised peer/client endpoints through membership.
+The first node, `bootstrap: true` on an empty directory, mints the cluster and leads a group of
+one. Every other node names `seeds` - control addresses - and no bootstrap; its marker says
+`joining` with a pre-minted node id and no cluster until a leader admits it. The control thread
+dials each seed in turn with a hello naming no cluster, follows a redirect to the leader, and
+asks `Join`. The leader refuses a tombstoned or fenced identity, admits one joiner at a time -
+`add_learner` then a committed `Admit` - and tells a second joiner to retry. Applying its own
+`Admit` is when the joiner adopts the cluster identity, once, and the admission is idempotent
+by identity, so an interrupted join is asked again and answered the same. `maybe_promote` on
+the leader promotes the first placeable learner in node order whenever committed voters are
+below the policy and no joint configuration is in flight, one change at a time.
 
-### The state machine of a member
+A member restarted on its directory does not join again: it comes back `recovering` - its
+log intact, its identity not yet observed by a leader at this incarnation - and is `joined`
+once the leader observes it, seeds reachable or not
+(`lost_seeds_do_not_rebootstrap_existing_directory`). Nothing is placed on a joined member
+until an operator's `Initialize { nodes }` deals the tablets over the members it names, once
+([C4](tablet-map.md#the-placement-rule)).
 
-| State | Meaning |
-| --- | --- |
-| Joining | Accepted identity; receiving metadata and not eligible as a data placement target yet |
-| Up | Node control plane and required shard health known; per-tablet readiness still checked |
-| Down | Sustained unreachability recorded; existing replica assignments retained during grace |
-| Leaving | Graceful drain requested; no new placement onto the node |
-| Removing | Grace elapsed or operator requested replacement; recovery transitions in progress |
-| Removed | Identity tombstoned; old data cannot rejoin as an authoritative member |
+### The state of a member
 
-`Unreachable` is a local observation, not a durable membership change. Membership state never
-changes a data quorum threshold. `Down` does not delete copies or automatically change voters.
-A node can return from Down after identity and shard health checks, while individual tablets
-remain in recovery. Removing cannot be reversed by a late heartbeat; cancellation, if supported,
-is an explicit versioned operation that reconciles all already committed data transitions.
-*At M9b ([F46](../features/capacity-rebalancing.md)) the table is delivered as `phase` beside
-`health`: `Leaving` and `Removing` are phases an operator's `Decommission` or `Remove`, or an
-elapsed grace, commit, and a member in either can be up or down; `Removed` is the tombstone,
-committed before the member leaves the control group so a live one learns it. A late `Up` on a
-`Removing` member keeps the phase and the grace, in apply. Cancellation is not supported: a
-`Decommission` that fails puts the member back, and nothing else does.*
+```mermaid
+stateDiagram-v2
+    direction LR
+    state health {
+        Joining --> Up: leader observes a fresh report
+        Up --> Down: detector phi past the threshold (SetHealth)
+        Down --> Up: a fresh report (SetHealth)
+    }
+    state phase {
+        Member --> Leaving: Decommission
+        Member --> Removing: Remove, or the grace expires
+        Leaving --> Removing: the last set moved
+        Leaving --> Member: the decommission failed
+        Removing --> Removed: Tombstone, then the member leaves the group
+    }
+```
+
+Health and phase are read together. `Joining` is an accepted identity not yet observed;
+`Up` a member whose control thread reports and whose shard health is known; `Down` a sustained
+silence the leader committed. `Member` is placeable when `Up` - `is_placeable` is the one
+placement check - `Leaving` is a drain no new set is placed onto, `Removing` a member whose
+sets are being rebuilt elsewhere, `Removed` a tombstone. A late `Up` on a `Removing` member
+keeps the phase and its grace. `Unreachable` from a ping is a local observation, never a
+committed change; `Down` deletes no copy and changes no voter; nothing about health or phase
+moves a data quorum's threshold. A `Decommission` that fails puts the member back to `Member`;
+nothing else cancels a phase.
+
+Fencing is the `observe` rule on every `ObserveMember`: a tombstoned identity is `Removed`; a
+`wire_max` below the activated wire is refused; an incarnation lower than the committed one is
+`Fenced`; an equal one from a different control address is `Fenced` as a duplicate; an equal
+one from the same address is a re-observation; a higher one supersedes, and the run it replaced
+is recorded in `fenced`. A running node that sees a higher incarnation of itself committed
+exits `ShoalError::Fenced`, and every hello below the committed incarnation is refused
+`PeerRefusal::Fenced` (`duplicate_node_identity_is_fenced`).
+
+### An address change
+
+A member restarted at another address comes back at a higher incarnation with the new
+addresses in its record, and the M3 rule admits it. `PeerNetwork::note_addresses` on every
+apply makes the control thread dial each member where its committed record says it is, and the
+leader's `maybe_readdress` writes the new address into the membership with `ChangeMembers::SetNodes`,
+one member at a time, so the next leader dials it there too. A clone left at the old address is
+refused as a duplicate; a clone that wins its identity from another address is fed past its
+shorter log, which the control group allows (`allow_log_reversion`)
+(`address_change_is_observed_and_a_stale_clone_is_fenced`).
 
 ### Failure detection
 
-Use bounded peer probes over a control traffic lane, independent of bulk snapshot streams.
-Phi-accrual is a candidate policy with configurable probe interval, sample window, minimum
-samples and threshold. Phi is a suspicion score derived from an estimated arrival distribution,
-not a literal probability that a node is dead and not a deterministic `interval × phi` deadline.
-
-Node reports include freshness/sequence and incarnation. Prefer a dedicated `StatusReport` frame
-rather than assuming arbitrary application fields can be attached to OpenRaft heartbeat replies.
-Bound/coalesce per-tablet progress reports; they do not prove current durable state for promotion.
-A leader commits Down according to the configured fresh-evidence policy; M3 specifies the required
-reporter set and behavior when reports are missing. *At M3 the reporter set is every member but
-the leader, each reporting at `interval_ms`; a report is fresh by `(incarnation, seq)`; a member
-with fewer than `min_samples` fresh arrivals is not judged, and a new leader seeds every up
-member with the expected pace and a grace of five intervals so an election is not evidence
-([F39](../features/membership.md)).* A metadata majority is required to commit
-that decision regardless of the detector policy. Test partitions among control voters and data
-learners separately.
-
-Data-shard heartbeats and task failures feed node health. Healthy control pings must not mask a
-dead shard or stalled data socket. Tablet elections and read barriers use their own protocol
-traffic, so they can progress without waiting for a global Down verdict.
+Every member sends the leader a `StatusReport` over the control lane every
+`failure_detector.interval_ms` (500 ms): its incarnation, a sequence, its topology version and
+applied index, its failed shards, its reachability of every other member from its own pings,
+its quarantined copies, its free bytes, the bytes it holds per group and its `wire_max`. The
+leader's `Detector` (`control/detector.rs`) keeps the last `window` (100) arrival intervals per
+member and, on every report tick, computes phi - the suspicion that the next report is this
+late, from the fitted distribution, never a literal `interval × phi` deadline - and proposes
+`SetHealth Down` for a member past `phi_threshold` (8.0). A report is fresh only if its
+sequence is above the last of the same incarnation; a stale one is counted and ignored, and one
+from an older run is answered fenced (`fresh_failure_reports_do_not_mask_shard_failure`). A
+member with fewer than `min_samples` (5) arrivals is judged with the expected interval standing
+in for the ones it never sent ([item 101](../appendix/resolved/short-lived-member-detection.md)),
+and a new leader seeds every up member with the expected pace and a grace of five intervals so
+an election is not evidence. The next fresh report from a `Down` member proposes `SetHealth Up`.
+`ReportShards` carries a dead shard beside the health, so a healthy control ping never masks
+one; the leader also pings every member at `transport.ping_interval` into a local reachability
+view that is never proposed. Only the leader's detector view means anything.
 
 ### What follows from Down, and when
 
-Tablet elections may change primaries without moving data. The `primary_failover_after` base
-configures data-election timing (C7); it is not added to a second post-Down failover sleep.
-
-`auto_remove_after` defaults to a proposed 30 minutes, matching the requested automatic-removal
-policy; `null` explicitly disables it. A persisted Down episode records the grace state, policy
-version and removal operation id. Control-leader changes must not erase or accidentally restart
-an elapsed grace. Q7 specifies elapsed-time accounting across restart and clock discontinuities:
-when elapsed time cannot be established, delay removal conservatively rather than guess early.
-Allow explicit maintenance suspension/resumption with an observable deadline.
-
-On expiry, propose Removing and let C8 rebuild copies from surviving authoritative groups.
-Insufficient data quorum, disk space, distinct destination nodes or failure domains leaves a
-visible blocked operation. Do not shrink RF, erase the only remaining copy, or mark the node fully
-Removed merely to make the timer complete. A three-node RF=3 cluster needs a replacement node
-to restore three distinct copies after one machine is permanently lost.
-*At M9b ([F46](../features/capacity-rebalancing.md), [Q7](protocol.md#q7-and-q8-at-m9b)) the
-default is thirty minutes and acted on. The leader counts a down member's grace from its last
-commit and commits every eighth of it as `GraceElapsed`; a new leader starts its own count on
-top of the committed value, so a leader change loses at most one increment and never restarts or
-skips a grace; `Maintenance` suspends the count and `Members` reports `grace_remaining_ms`
-throughout; expiry commits the whole grace, moves the member to `Removing` and records an
-`Expiry` plan under the policy's name. The plan's steps are moves to feasible members; with
-none - three at three with one dead - it is blocked naming the missing member, every copy is
-kept and the factor is untouched, and it runs on its own once a fourth joins. The three-node
-case is `remove_without_replacement_capacity_stays_blocked`; the leader change is
-`removal_grace_survives_control_leader_restart`; the suspension is
-`maintenance_suspends_automatic_removal`.*
+An election needs no `Down`: a tablet group's followers elect on their own timers
+([C7](failover.md)), and a node without a copy routes a `Down` holder's tablets to another
+holder that is up. A `Down` verdict moves no replica (`down_retains_placement_during_grace`).
+Under `auto_remove_after` (thirty minutes; `null` opens no grace) it opens a `GraceState` on
+the member: the leader accrues elapsed time from its own monotonic clock on top of the
+committed value and proposes `GraceElapsed` every eighth of the grace or every sixty seconds,
+whichever is shorter; apply keeps it monotonic and of one episode, so a leader change loses at
+most one increment and never restarts or skips a grace
+(`removal_grace_survives_control_leader_restart`). `Maintenance { node, suspend: true }` holds
+the count and `Members` reports `grace_remaining_ms` throughout
+(`maintenance_suspends_automatic_removal`). Expiry commits the member `Removing` and records an
+`Expiry` plan under the policy's name whose steps are moves to feasible members; with none -
+three nodes at a factor of three with one dead - the plan blocks naming the missing member,
+every copy is kept, the factor is untouched, and it runs on its own once a fourth joins
+([C8](rebalancing.md#removing-a-node)).
 
 ### openraft and the runtime
 
-~~Use a current-thread Tokio runtime on the reserved control core as the initial integration.~~
-The control core runs a **glommio** executor, and openraft is driven on it through the
-`AsyncRuntime` [F37](../features/node-identity-control-plane.md) wrote
-(`shoal-core/src/server/control/runtime/`), under openraft's `single-threaded` feature. The
-Tokio runtime was rejected there: a second reactor and timer wheel in a process that already has
-one of each, for no property glommio lacks, and a `Send` bound on every store that the
-`!Send` file handles would have had to be hidden from. The library's own runtime conformance
-suite passes on it.
-Run blocking filesystem work through an appropriate asynchronous/blocking adapter; a synchronous
-fsync must not freeze all election timers on that runtime - the marker rewrite goes through
-`spawn_blocking`, and the store's own writes are glommio's, which do not block the reactor.
-Returning from an append or vote operation must follow the library's durability contract, not
-merely enqueue work: the control store completes `IOFlushed` after its `fdatasync` and `save_vote`
-returns after the vote file is renamed and the directory synced.
+The control core runs a **glommio** executor, and `openraft 0.10.0-alpha.34` is driven on it
+through the `AsyncRuntime` in `shoal-core/src/server/control/runtime/` under the library's
+`single-threaded` feature. The control store completes an append's `IOFlushed` after its
+`fdatasync` and returns from `save_vote` after the vote file is renamed and the directory
+synced; the marker rewrite goes through `spawn_blocking`, so no synchronous write freezes an
+election timer. `PeerNetwork` (`control/network.rs`) is the library's network adapter over the
+control lane, carrying `append_entries`, `vote` and `full_snapshot` as JSON under a 16 byte
+head, dialling every member's committed address at each RPC; a link failure is `Unreachable`,
+which the library retries. `add_learner` with catch-up and `change_membership` with the others
+retained are one change at a time, and a joint configuration is never stacked on another.
 
-Implement the library's network adapter over Shoal's control traffic framing. The adapter must
-preserve request identity, deadlines and shutdown behavior. It owns no external service; local
-Tokio sockets or shard relays are implementation choices. Prefer direct control-plane socket
-ownership so a stalled Glommio data shard cannot stall control elections. Peer transport has
-separate control/data endpoints or a validated dispatch design; ~~Q1/M2 settles the wiring~~ M2
-settled it ([F38](../features/inter-node-transport.md)): the control thread binds its own
-listener and owns its own links, and a stalled data lane leaves it pinging.
+Two things the library does that the plane had to answer: a leader answers a write with an
+empty forward hint until a quorum has acknowledged it, which read as "no leader" is a busy loop
+and is polled with a backoff instead; and `enable_leader_restore` restores a stopped leader as
+the leader of its old term, which a copied directory turns into two, so it is off. Never hold
+a `RefCell` borrow across an `.await` on the control core, and never retry a proposal on a
+metrics change without a backoff: both starve the one executor the RaftCore, the links and the
+loop share.
 
-The original source note named 0.9.25 and an alpha 0.10 alternative; C13's
-[decision record](protocol.md#decision-record) reads both (0.9.25 and 0.10.0-alpha.34 on
-2026-09-11) as data-plane candidates ~~and pins neither for the control plane. Before implementation, pin an
-actual version and record source/API evidence for runtime behavior, storage completions, learner
-membership changes and network driving~~. **M1 pinned `0.10.0-alpha.34` exactly** for the control
-plane, with the runtime, storage and network seams built and the two conformance suites
-passing ([decision record](protocol.md#q1-and-q13-decided-at-m1)); ~~learner membership changes
-and network driving are M2/M3's and still unevidenced~~ network driving is evidenced at M2 -
-`PeerNetwork` carries `append_entries` and `vote` over the control lane and a placed peer answers
-a vote probe ([F38](../features/inter-node-transport.md)); ~~learner membership changes are M3's
-and still unevidenced~~ learner membership changes are evidenced at M3 - `add_learner` with
-catch-up and `change_membership` with the others retained, one change at a time, and a joint
-configuration never stacked on another ([F39](../features/membership.md)). Two things the
-library did that the feature had to answer: a leader answers a write with an empty forward hint
-until a quorum has acknowledged it, which read as "no leader" is a busy loop; and
-`enable_leader_restore` restores a stopped leader as the leader of its old term, which a copied
-directory turns into two, so it is off. Do not assume an alpha API or heartbeat
-extension is available. No handwritten-Raft fallback is planned.
+## Design choices
+
+Membership under consensus, so that every node's map is one committed thing, rather than
+gossip, which converges but never decides. A fixed, small voter set with everyone else a
+learner, so a fourth node does not change the quorum. Phi-accrual on the leader alone, because
+a verdict is a committed command and only the leader proposes it. A grace counted in committed
+increments rather than wall-clock deadlines, so it survives the leader that started it. A
+tombstone committed *before* the member leaves the group, so a live member learns it is removed
+from the log rather than from silence. glommio under openraft rather than a second Tokio
+runtime in a process that already has a reactor and a timer wheel.
 
 ## Alternatives rejected
 
-Gossip alone does not establish authoritative membership. A failure detector is not a consensus
-protocol. Conversely, consensus does not turn reachability into objective truth. The initial
-all-members-majority detector and first-five-automatically-vote rules are superseded by an explicit
-control voter policy and defined evidence freshness. Auto-removal is enabled, guarded and observable,
-rather than disabled despite the selected policy.
+Gossip as authoritative membership; a failure detector as a consensus protocol, or consensus as
+a way of making reachability objective; the first draft's all-members-majority detector and
+first-five-automatically-vote rules; auto-removal disabled by default; a handwritten Raft
+fallback; a current-thread Tokio runtime for the control core; `enable_leader_restore`.
 
 ## What it costs
 
-One embedded metadata group, control probes/reports, a reserved execution core and durable metadata
-storage. All-pairs probing grows quadratically; Q13 must establish the intended node-count budget
-and change probe/report topology if necessary. Control work is isolated from ordinary queries,
-but still shares hardware unless explicitly provisioned separately.
+One embedded group's log and files, a status report per member per half second at the leader,
+a ping per member per second, and a reserved core. All-pairs reachability in the report grows
+quadratically ([C13](protocol.md#q11-and-q13-at-m3)): a third of a megabyte a second of JSON
+into the leader at sixty-four members, and the first thing to bound at a hundred.
 
-## What it breaks
+## Limitations
 
-The local join seam, startup readiness, marker metadata and endpoint configuration change. A
-node's Up state no longer means every tablet is ready. The pool reports shard failure and the
-control plane reflects it without fabricating global data eligibility.
+A member has no failure domain, so voters are not spread over one. The detector's seeding grace
+is a constant. The grace is the policy's, not per member, and there is no `SetPolicy`. Data
+loaded before `Initialize` stays on the bootstrapper. Only the leader's detector view is
+meaningful, and the admin refusal's code is derived from its reason text
+([item 98](../appendix/known-issues.md#98-an-admin-refusals-error-code-is-derived-from-its-reason-text)).
+A member isolated on every lane long enough to inflate its term trips a debug assertion when
+healed ([item 106](../appendix/known-issues.md#106-a-member-isolated-on-every-lane-long-enough-to-inflate-its-term-trips-an-openraft-debug-assertion-when-healed)).
+See [C15](open-issues.md).
 
 ## Invariants to uphold
 
-- All membership decisions are committed by the embedded control-plane group.
+- Every membership decision is committed by the embedded control group.
 - Failure suspicion cannot create a voting majority or lower a data quorum.
-- Down retains assignments during grace; Removing starts durable, capacity-checked transitions.
+- `Down` retains assignments through the grace; `Removing` starts durable, capacity-checked transitions.
 - Control quorum loss freezes metadata mutations, not independent healthy tablet elections.
-- Rejoin, voter promotion and data readiness have distinct checks.
+- Rejoin, voter promotion and data readiness are distinct checks.
+- A tombstone precedes the membership change that removes the member.
+- The `observe` rule is the only fencing policy, and it runs in apply.
 
-## Prerequisites
+## How it is measured
 
-[C1](node-identity.md), [C2](transport.md), [C13](protocol.md) Q1/Q7/Q11/Q13 and M0 readiness.
-
-## How it would be measured
-
-Idle/control CPU, report bytes, election latency under bulk transfer and node-count scaling in
-[C10](performance.md). Count blocking-I/O delay and control responsiveness during data-shard stalls.
+Idle control CPU and report bytes are the M1 and M3 spike tables ([C13](protocol.md#q1-and-q13-at-m1));
+`macro/cluster/overhead/nodes/3` carries every node's report at the end of the run
+([C10](performance.md#the-arms)).
 
 ## Acceptance tests
 
 | Test | Asserts | Milestone |
 | --- | --- | --- |
 | `three_nodes_bootstrap_without_external_membership` | Shoal-only processes converge on one cluster and recover metadata after restart | M3 |
-| `fourth_data_node_does_not_change_control_voter_count` | Joins as metadata learner under the three-voter policy | M3 |
-| `minority_cannot_commit_membership_changes` | Isolated control minority cannot remove majority peers or promote replacement voters | M3 |
-| `fresh_failure_reports_do_not_mask_shard_failure` | Old incarnation/status reports are ignored and data-shard failure is observable | M3 |
-| `lost_seeds_do_not_rebootstrap_existing_directory` | Restart with unreachable seeds preserves established cluster identity and log | M3 |
-| `down_retains_placement_during_grace` | Elections may change primaries, but no replica moves before the configured removal action | M6 |
-| `removal_grace_survives_control_leader_restart` | Restart/failover preserves the episode, without an early or forgotten removal | M9b |
-| `maintenance_suspends_automatic_removal` | Explicit suspension prevents removal, and resumption has a documented remaining deadline | M9b |
+| `fourth_data_node_does_not_change_control_voter_count` | A fourth node joins as a control learner under the three-voter policy | M3 |
+| `minority_cannot_commit_membership_changes` | An isolated control minority cannot remove majority peers or promote replacement voters | M3 |
+| `fresh_failure_reports_do_not_mask_shard_failure` | Old incarnation and status reports are ignored and a data-shard failure is observable | M3 |
+| `lost_seeds_do_not_rebootstrap_existing_directory` | A restart with unreachable seeds preserves the established cluster identity and log | M3 |
+| `down_retains_placement_during_grace` | An election may change a primary, but no replica moves before the configured removal | M6 |
+| `removal_grace_survives_control_leader_restart` | A restart or failover of the leader preserves the episode, without an early or forgotten removal | M9b |
+| `maintenance_suspends_automatic_removal` | A suspension prevents removal, and resumption reports the remaining deadline | M9b |
 
-## Related and implementation references
+## Related
 
-- [C4](tablet-map.md), [C7](failover.md), [C8](rebalancing.md), [C13](protocol.md).
-- [OpenRaft integration guide](https://docs.rs/openraft/latest/openraft/docs/getting_started/index.html): application-owned network and storage adapters; run its storage conformance suite in addition to Shoal crash tests.
-- [OpenRaft log storage contract](https://docs.rs/openraft/latest/openraft/storage/trait.RaftLogStorage.html): vote persistence, append completion, truncation and purging.
-- [OpenRaft source](https://github.com/databendlabs/openraft): pin source corresponding to the selected release and link the exact runtime/membership implementation in Q1's decision record.
+[C1](node-identity.md), [C4](tablet-map.md), [C7](failover.md), [C8](rebalancing.md),
+[C13](protocol.md); the [OpenRaft integration guide](https://docs.rs/openraft/latest/openraft/docs/getting_started/index.html)
+and its [log storage contract](https://docs.rs/openraft/latest/openraft/storage/trait.RaftLogStorage.html),
+which the control store passes the conformance suite of.

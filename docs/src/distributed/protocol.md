@@ -1,183 +1,168 @@
-# C13. Protocol decisions, failure model, and open questions
+# C13. The protocol contract and decision record
 
 ## Context
 
-The first draft appointed primaries from heartbeat progress and treated publishing a new epoch
-as fencing. That does not establish which writes a new primary must preserve. This revision
-makes the safety protocol a prerequisite for implementing replication, recovery, or migration.
-Nothing in this chapter is built. [The contract](#the-contract) below was agreed on 2026-09-11 as
-the Before-M0 gate and binds every later milestone; the [decision record](#decision-record) holds
-its evidence, and says what that gate did not decide.
+The first draft of this chapter appointed primaries from heartbeat progress and treated
+publishing a new epoch as fencing. That establishes nothing about which writes a new primary
+must preserve, and it was replaced before anything was built: the safety protocol came first,
+as a contract of six clauses agreed on 2026-09-11 at the Before-M0 gate, and every milestone
+after it was built against those clauses. This page is the contract, the failure model it
+assumes, and the record of where each of its thirteen questions was decided and what each
+decision left unsettled.
 
-**Membership, placement, and failover run inside Shoal processes. No external membership,
-configuration, or failover service is required.** The control plane uses an embedded `openraft`
-group on a reserved core. Data replication must also remain embedded. An external coordinator,
-whether operated separately or hidden behind a dependency, is outside the design.
+**Membership, placement and failover run inside Shoal processes.** The control plane is an
+embedded `openraft` group on a reserved core; every tablet is an embedded `openraft` group under
+the shard that hosts it. No external membership, configuration or failover service is required,
+operated separately, or hidden behind a dependency.
 
-## What exists today
+## How it works
 
-Shoal has per-shard, per-table intent logs and archives, local recovery, and a derived tablet
-assignment. It has no replicated log or election implementation. See [C5](replication.md) for
-the storage seams and [C3](membership.md) for the control-plane integration.
-
-## The design
-
-### Decisions retained and revised
+### The decisions
 
 | Decision | Status |
 | --- | --- |
-| One primary orders a tablet's mutations | Agreed 2026-09-11; a tablet is qualified by table identity ([P2](#the-contract)) |
-| Embedded `openraft` for cluster membership and placement | Agreed 2026-09-11; reserved core defaults to CPU 0 but is configurable. The version is pinned by M1, not here |
-| `Quorum` writes and `One` reads by default | Agreed 2026-09-11; durable quorum ([P3](#the-contract)) and committed-prefix reads ([P4](#the-contract)) are defined below |
-| A down node keeps placement during a grace period | Agreed 2026-09-11; primary elections do not copy tablets |
-| Automatic removal after a configurable timeout | Enabled in the proposed cluster defaults at 30 minutes; `null` explicitly disables it. The value stays open under Q7 |
-| Data-plane protocol | ~~Prefer embedded Raft per tablet; library/runtime integration is a gated implementation decision~~ Raft per logical tablet, agreed 2026-09-11 ([P5](#the-contract)). ~~Which library and runtime is Q1, still open, and M1's spike decides it~~ M1's spike chose `openraft` on glommio for the control plane and found that per-group heartbeats do not coalesce, so the data plane's group count is a design constraint M4 inherits ([decision record](#q1-and-q13-decided-at-m1)). **At M4** ([F40](../features/replication.md)): `openraft` under a shard, one group per table and distinct replica vector rather than per tablet - nine groups a table on the benchmark placement - on one shared WAL per shard ([Q2, Q3 and Q4 at M4](#q2-q3-and-q4-at-m4)) |
-| Control-plane `SetPrimary` alone authorizes a writer | Rejected; a tablet election and recovery establish authority ([P5](#the-contract)) |
-| Sequence numbers reset each epoch | Replaced by a logical log index across terms and term/index history ([P2](#the-contract)) |
-| External membership or failover service | Excluded ([R7](overview.md#what-is-being-asked-for)) |
+| One primary orders a tablet's mutations | A tablet is qualified by table identity ([P2](#the-contract)); its primary is its group's elected leader |
+| Embedded `openraft` for membership and placement | `openraft 0.10.0-alpha.34`, pinned exactly, on a glommio runtime this repository wrote, on `cluster.control_core` (CPU 0 by default) |
+| `Quorum` writes and `One` reads by default | A durable majority ([P3](#the-contract)) and committed-prefix reads ([P4](#the-contract)) |
+| A down node keeps its placement through a grace | Thirty minutes by default, counted by the leader in committed eighths; an election copies nothing |
+| Automatic removal after the grace | An expired grace is a removal plan; `auto_remove_after: null` opens no grace |
+| The data protocol is Raft | `openraft` under a shard, one group per table and distinct replica set - `N × slots` groups a table, not 4096 - on one shared WAL per shard ([Q2, Q3 and Q4 at M4](#q2-q3-and-q4-at-m4)) |
+| A control-plane `SetPrimary` alone authorizes a writer | Rejected: a tablet's election and recovery establish authority ([P5](#the-contract)) |
+| Sequence numbers reset each epoch | Rejected: a log index is logical and continuous across terms ([P2](#the-contract)) |
+| An external membership or failover service | Excluded ([R7](overview.md#what-is-asked-of-it)) |
 
-The data-plane baseline is a proven Raft implementation, with a primary per logical
-tablet and batched transport/storage across groups where the library permits it. It need not
-be `openraft`: the user's library choice is for the control plane. Assess the data-plane library
-against Glommio ownership, storage completion, timer, and message-driving requirements first.
-A design spike may propose fewer groups containing several tablets, but must account for coupled
-leadership, migration, recovery, and hotspot behavior. Do not silently replace tablet independence.
-
-Raft's ordinary write path replicates to a majority in one communication round; it does not add
-a separate election vote to every write. Its log agreement also does not provide transactions
-across independent tablets. These are the properties motivating the baseline, not a claim of
-measured Shoal performance. [Raft paper, sections 5–6](https://raft.github.io/raft.pdf)
-
-A custom centrally appointed primary protocol is not the fallback for an inconvenient library
-API. It would need its own complete election, recovery, reconfiguration, and read specification,
-a safety argument, and executable model before replacing this baseline. No external service is
-an acceptable workaround.
+Raft's ordinary write path replicates to a majority in one communication round; it adds no
+separate election vote to a write, and its log agreement provides no transaction across
+independent tablets. Those two properties are what the baseline needs and what a centrally
+appointed primary lacks ([Raft paper, sections 5–6](https://raft.github.io/raft.pdf)).
 
 ### The contract
 
-The [Before-M0 gate](milestones.md#before-m0-the-protocol-contract) names six clauses. They are
-numbered here so that a test, a page or a review can name one without quoting it; `P` numbers
-are never reused, the rule `C`, `M` and `Q` numbers already follow. Each clause is written as a
-property that can be checked against a history, next to the schedule that would violate it,
-because [C11](testing.md)'s model checks properties rather than prose. The M0 test
-`protocol_model_preserves_acknowledged_history` names the `P` number each of its checks enforces.
+The Before-M0 gate agreed six clauses. They are numbered so a test, a page or a review can name
+one without quoting it; `P` numbers are never reused. Each is written as a property that can be
+checked against a history, beside the schedule that violates it, because [C11](testing.md)'s
+model checks properties. The M0 test `protocol_model_preserves_acknowledged_history` names the
+`P` number each of its checks enforces.
 
-| # | Property | Binds | The violation the M0 model must reject | Owning tests |
+| # | Property | Binds | The violation the model rejects | Owning tests |
 | --- | --- | --- | --- | --- |
-| P1 | **Failure model.** Correctness holds under crash/restart, lost, delayed, duplicated and reordered messages, asymmetric partitions, process pauses and reported I/O failures, with stable storage meaning a successful fsync. It never depends on clocks, leases or a non-Byzantine replica behaving well. The availability table below is part of this clause | C2, C3, C7, C11; every milestone from M0 | A paused old primary, a duplicated acknowledgement or a reordered append that changes which operations are in the authoritative history; any check that needs synchronized clocks | `protocol_model_preserves_acknowledged_history` (M0) |
-| P2 | **Table-qualified stream identity.** The unit of replication, election and progress is `(TableId, range_id)`. Its log index is logical and continuous across terms and physical WAL rotation, and `TableId` is stable schema metadata, never a peer's enum layout | C4, C5, C7; M3, M4 | Two tables sharing one index sequence; an index that restarts at rotation; a peer that infers a table from a position | `table_ids_and_streams_are_stable_across_restart` (M3), `table_streams_recover_independently_without_holes` (M4) |
-| P3 | **Durable quorum.** A default write succeeds only after a majority of the *committed voter configuration* has fsynced the record and the primary has applied it. A replica counts once, only with matching durable history; `Up`/`Down`, a local `Async` setting and learners never change the threshold | C3, C5; M4, M6 | A quorum computed from the current `Up` list; a repeated cumulative ack counted as a second voter; an `Async` receipt counted as durable | `quorum_success_requires_distinct_durable_voters` (M4), `async_replica_cannot_weaken_durable_quorum` (M4), `quorum_loss_is_unavailable_without_data_loss` (M6) - a minority never acknowledges, whatever the control plane says, `quorum_history_survives_repeated_elections` (M6) - every acknowledged result survives the leaders that follow |
-| P4 | **Committed visibility.** A `One` read returns an eligible replica's committed, applied prefix, possibly stale, and never an appended-but-uncommitted suffix. Checkpoints hold only committed applied state, and the result of a state-dependent mutation is derived in committed order | C5, C6, C7; M4, M5 | A read or checkpoint that observes an entry a later leader truncates; a conditional result computed before its command commits | `one_reads_converge_without_exposing_uncommitted_state` (M4), `uncommitted_suffix_never_enters_checkpoint` (M4), `barrier_read_observes_prior_quorum_write` (M5) - the strong half, which the model checks as `Linearizable`: a `Quorum` read observes every write acknowledged before it began |
-| P5 | **Control/data authority split.** Membership, placement intent and transition records are committed by the embedded control group; a tablet's writer is established only by that tablet's own consensus election and recovery. A control majority cannot activate a data minority, and losing control quorum stops metadata mutation, not established tablet groups | C3, C4, C7; M3, M6 | The B=100 / C=101 / A+B=102 schedule from [C7](failover.md#when-a-primary-is-down): choosing C from cached reports discards B's acknowledged 102. Any promotion whose only evidence is a topology edit | `metadata_quorum_cannot_replace_a_missing_data_quorum` (M6), `established_tablets_survive_control_quorum_loss` (M6), `stale_heartbeat_reports_cannot_lose_acked_write` (M6) - all three run since [F42](../features/primary-failover.md), with `delayed_topology_cannot_authorize_old_primary` and `shard_stall_with_live_control_plane_can_fail_over` beside them |
-| P6 | **No cross-tablet transaction promise.** Nothing promises atomicity across tablets, an atomic bundle, or a common multi-tablet read snapshot. A bundle's queries complete independently, each with one complete result or one error, and partial outcomes stay visible | C5, C6; M0 oracle scope, M5 | An oracle, API or test that treats a bundle as atomic or reads two tablets at one instant | `limits_apply_after_complete_ordered_gather` (M5), `mixed_table_bundle_resolves_each_table_policy` (M5); M0's oracle checks single-tablet histories only, which is P6 applied to the oracle |
+| P1 | **Failure model.** Correctness holds under crash/restart, lost, delayed, duplicated and reordered messages, asymmetric partitions, process pauses and reported I/O failures, with stable storage meaning a successful fsync. It never depends on clocks, leases or a non-Byzantine replica behaving well. The availability table below is part of this clause | C2, C3, C7, C11 | A paused old primary, a duplicated acknowledgement or a reordered append that changes which operations are in the authoritative history; any check that needs synchronized clocks | `protocol_model_preserves_acknowledged_history` (M0) |
+| P2 | **Table-qualified stream identity.** The unit of replication, election and progress is `(TableId, range_id)`. Its log index is logical and continuous across terms and physical WAL rotation, and `TableId` is stable schema metadata, never a peer's enum layout | C4, C5, C7 | Two tables sharing one index sequence; an index that restarts at rotation; a peer that infers a table from a position | `table_ids_and_streams_are_stable_across_restart` (M3), `table_streams_recover_independently_without_holes` (M4) |
+| P3 | **Durable quorum.** A default write succeeds only after a majority of the *committed voter configuration* has fsynced the record and the primary has applied it. A replica counts once, only with matching durable history; `Up`/`Down`, a local `Async` setting and learners never change the threshold | C3, C5 | A quorum computed from the current `Up` list; a repeated cumulative ack counted as a second voter; an `Async` receipt counted as durable | `quorum_success_requires_distinct_durable_voters` (M4), `async_replica_cannot_weaken_durable_quorum` (M4), `quorum_loss_is_unavailable_without_data_loss` (M6), `quorum_history_survives_repeated_elections` (M6) |
+| P4 | **Committed visibility.** A `One` read returns an eligible replica's committed, applied prefix, possibly stale, and never an appended-but-uncommitted suffix. Checkpoints hold only committed applied state, and the result of a state-dependent mutation is derived in committed order | C5, C6, C7 | A read or checkpoint that observes an entry a later leader truncates; a conditional result computed before its command commits | `one_reads_converge_without_exposing_uncommitted_state` (M4), `uncommitted_suffix_never_enters_checkpoint` (M4), `barrier_read_observes_prior_quorum_write` (M5), which the model checks as `Linearizable` |
+| P5 | **Control/data authority split.** Membership, placement intent and transition records are committed by the embedded control group; a tablet's writer is established only by that tablet's own consensus election and recovery. A control majority cannot activate a data minority, and losing control quorum stops metadata mutation, not established tablet groups | C3, C4, C7 | The B=100 / C=101 / A+B=102 schedule from [C7](failover.md#when-a-primary-is-down): choosing C from cached reports discards B's acknowledged 102. Any promotion whose only evidence is a topology edit | `metadata_quorum_cannot_replace_a_missing_data_quorum`, `established_tablets_survive_control_quorum_loss`, `stale_heartbeat_reports_cannot_lose_acked_write`, `delayed_topology_cannot_authorize_old_primary`, `shard_stall_with_live_control_plane_can_fail_over` (all M6) |
+| P6 | **No cross-tablet transaction promise.** Nothing promises atomicity across tablets, an atomic bundle, or a common multi-tablet read snapshot. A bundle's queries complete independently, each with one complete result or one error, and partial outcomes stay visible | C5, C6 | An oracle, API or test that treats a bundle as atomic or reads two tablets at one instant | `limits_apply_after_complete_ordered_gather` (M5), `mixed_table_bundle_resolves_each_table_policy` (M5); M0's oracle checks single-tablet histories only |
 
-What the gate settled about the protocol is P1–P6 and that the data protocol is Raft. What it
-left open is which library and runtime drive it, which is Q1. A custom protocol cannot pass this
-gate by calling primary appointment a topology edit: that is P5 restated, and it is the reason
-the first draft's heartbeat-max election is in [Alternatives rejected](#alternatives-rejected).
+```mermaid
+flowchart TB
+    subgraph control["control group (one per cluster, on the control cores)"]
+        cs["ControlState: members, health, phase,<br/>placement, plans, moves, repairs, activation"]
+    end
+    subgraph data["tablet group (one per table and replica set, under a shard)"]
+        dg["term, vote, log, committed index,<br/>membership, checkpoint"]
+    end
+    cs -- "TabletMap: who should hold the tablet,<br/>who is placeable, what is moving" --> dg
+    dg -- "who leads, what is committed:<br/>status reports, never authority" --> cs
+    cs -. "cannot: appoint a leader,<br/>choose a history, count a quorum" .-> dg
+```
+
+P5 as a picture: the control group says where a tablet *should* be and what is moving; the
+tablet group says who leads it and what is committed. A control commit never becomes a data
+authority, and a data group's election never needs a control commit.
 
 ### Failure model and availability
 
-Assume crash/restart failures, lost, delayed, duplicated and reordered messages, asymmetric
-network partitions, process pauses, and disks that report I/O failures. Stable storage honors
-successful fsync; hardware that lies about flushes is outside that durability assumption.
+Crash/restart failures, lost, delayed, duplicated and reordered messages, asymmetric partitions,
+process pauses, and disks that report I/O failures are assumed. Stable storage honors a
+successful fsync; hardware that lies about flushes is outside the durability assumption.
 Checksums detect accidental corruption; replicas are not Byzantine-tolerant. Clocks may be
-unreliable: correctness in the initial protocol must not depend on lease timing.
+unreliable: no correctness property depends on lease timing, and the one lease in the system
+(`Lease::of`, [C7](failover.md#the-lease)) decides only whether a leader may *append*.
 
-| Condition | Required behavior |
+| Condition | Behavior |
 | --- | --- |
-| One failed replica in an established RF=3 tablet | Remaining majority can elect and acknowledge durable writes |
-| No tablet majority | No successful quorum writes or strong reads; eligible replicas may serve `One` |
-| Control-plane quorum lost, tablet quorum intact | Established tablet groups continue ordinary operations/elections; joins, placement changes, removal and policy changes stop |
-| Control plane available, tablet quorum lost | Control plane must not manufacture a replacement authority from stale reports |
-| Fewer nodes than configured RF at initial bootstrap | Admin/readiness available, but default writes wait for the intended initial configuration; no implicit RF reduction. *At M3 ([F39](../features/membership.md)): readiness reports `default_writes` short by name, a write is refused `QuorumUnavailable` until `rf / 2 + 1` members are up under `Quorum` (all of them under `All`, one under `One`), reads are served, and the factor never moves on its own* |
-| Capacity insufficient to restore RF | Mark blocked under-replication; retain surviving copies and configuration evidence |
-| Entire cluster restarted from durable storage | Recover committed state without inventing empty membership or discarding acknowledged writes |
+| One failed replica in an established RF=3 tablet | The remaining majority elects and acknowledges durable writes |
+| No tablet majority | No quorum write and no strong read succeeds; eligible replicas serve `One` |
+| Control quorum lost, tablet quorum intact | Established tablet groups continue their writes and elections; joins, placement changes, removal, plans and policy changes stop, and every admin mutation is refused naming the missing voters |
+| Control plane available, tablet quorum lost | The control plane manufactures no replacement authority from stale reports; a permanent loss is an operator's `force_recover` on one stopped survivor ([C9](operations.md#permanent-quorum-loss)) |
+| Fewer members up than the factor needs | Readiness reports `default_writes` short by name; a write is refused `QuorumUnavailable` until `rf / 2 + 1` members are up under `Quorum` (every one under `All`); reads are served; the factor never moves on its own |
+| Capacity insufficient to restore the factor | The plan blocks naming the member it waits for; every surviving copy and configuration is kept |
+| The whole cluster restarted from durable storage | Committed state is recovered without inventing an empty membership or discarding an acknowledged write (`whole_cluster_restart_preserves_durable_history`) |
 
-A failover duration is an objective under a stated healthy-survivor and bounded-delay test
-scenario. There is no unconditional time bound during arbitrary partitions or storage stalls.
-No cross-tablet transaction, atomic bundle, or common multi-tablet read snapshot is promised.
+A failover duration is a measurement under a stated healthy-survivor scenario ([C7](failover.md#the-window-and-what-a-client-sees)),
+never an unconditional bound under partitions or storage stalls. No cross-tablet transaction,
+atomic bundle, or common multi-tablet read snapshot is promised.
 
 ### Identity and progress
 
-A logical tablet is `(TableId, range_id)`. Initially `range_id` uses the current top twelve hash
-bits. `TableId` is stable schema metadata, never process-local enum layout inferred by a peer.
-Placement templates may be shared across tables, but their log histories and applied positions
-are independent. This avoids one stream spanning separately fsynced table logs without a durable
-cross-table ordering mechanism.
+A logical tablet is `(TableId, range_id)`; `range_id` is the partition hash's top twelve bits.
+`TableId` is stable schema metadata, never a process-local enum layout a peer infers. Placement
+is shared across tables - every table's tablet `t` lives on the same nodes - but every table's
+log history and applied position is its own group's, so one stream never spans separately
+fsynced table logs.
 
 | Position | Meaning |
 | --- | --- |
 | Appended | Accepted into the local replication log; may not survive restart |
-| Durable | Contiguous prefix with completed required stable-storage writes |
-| Committed | Prefix the consensus protocol guarantees future leaders retain |
-| Applied | Committed prefix reflected in the query-visible state |
-| Checkpointed | Applied prefix represented in a durably installed checkpoint |
+| Durable | The contiguous prefix whose stable-storage writes completed (`IOFlushed` after the batch's `fdatasync`) |
+| Committed | The prefix the protocol guarantees future leaders retain |
+| Applied | The committed prefix reflected in query-visible state |
+| Checkpointed | The applied prefix the table's archives hold, recorded per group in `checkpoint.json` |
 
-Persist term/vote before replying as required by the selected protocol. Keep term/index history,
-configuration identity and checkpoint metadata sufficient for log matching after compaction.
-Logical indices do not restart with physical WAL rotation. A restored copy must not claim
-progress beyond the state and log it actually recovered. Data receipts never count as durable
-acknowledgements until their required storage completions occur.
+Term and vote are persisted before a reply; term/index history, configuration identity and
+checkpoint metadata survive compaction so log matching works past it. A logical index does
+not restart at WAL rotation. A restored copy claims no progress beyond the state and log it
+recovered. A receipt never counts as a durable acknowledgement until its storage completion.
 
 ### Visibility and durability
 
-Default persistent writes require a majority of the committed voter configuration to have fsynced
-the record, plus local application before returning the operation's result. A node's local
-`Async` setting cannot silently weaken that promise. Configuration changes use the consensus
-protocol's transition rules, not a fresh majority computed from the current `Up` list.
+A default persistent write needs a majority of the committed voter configuration to have
+fsynced the record, plus local application, before its result is returned. A node's `Async`
+setting cannot weaken that: a persistent table configured `Async` on a cluster node is refused
+at start. Configuration changes use the protocol's joint transition, never a fresh majority
+computed from the `Up` list.
 
-Reads at `One` observe an eligible replica's committed, applied prefix. It may lag, including
-after the caller receives a successful write response, but never exposes a suffix known only
-to be speculative. The initial implementation derives state-dependent mutations in committed
-order; pipelining must preserve those semantics without exposing speculative state or
-checkpointing it. See Q4 before optimizing this path.
+A `One` read observes an eligible replica's committed, applied prefix. It may lag, including
+after the caller received a successful write, but never exposes a suffix known only to be
+speculative. A state-dependent mutation's result is derived in committed order on every
+replica; nothing speculates.
 
-`Write::One` is an optional weaker acknowledgement: local stable append, possibly rolled back
-on failover. It cannot promise a committed mutation result or immediate read-your-writes before
-commit. The first release may refuse it explicitly until a distinct accepted/pending result API
-exists. Replicated ephemeral tables likewise need an explicitly volatile policy; they cannot
-satisfy the default stable-storage contract. Neither option may be silently emulated by `Quorum`.
+`Write::One` - a local stable append, possibly rolled back on failover - is refused at
+validation, because it needs a distinct accepted-or-pending result API nothing offers. A
+replicated ephemeral table is explicitly volatile: its group logs in memory, and a restart
+empties it. Neither is emulated by `Quorum`.
 
 ### Decision record
 
-Recorded 2026-09-11 at the Before-M0 gate, on the tree at `8354e4a`, the commit before this
-record. Each row says how the claim was checked, in the manner of the
-[August review](../appendix/review-2026-08.md), so the next reader can skip what is verified.
-Crate facts were read from the sources cargo fetched into the local registry, at the path and
-line given for that release; `docs.rs` and default branches were not the source.
+Each entry was recorded on the tree that delivered it, in the manner of the
+[August review](../appendix/review-2026-08.md): what was decided, where it is in the source,
+and what it did not settle. The unsettled remainders are gathered on [C15](open-issues.md#not-settled).
+
+#### Before M0: the contract, 2026-09-11
 
 | Decision | Evidence |
 | --- | --- |
-| P1–P6 are the contract | The six clauses of the Before-M0 gate, mapped [above](#the-contract) one to one onto the pages that inherit each and the test that owns it. No clause was dropped, merged or added |
-| Raft is the data-plane protocol; the control plane stays `openraft` | The two properties cited above from the Raft paper, one round to a majority per write and no agreement across independent logs, are what the baseline needs and what a centrally appointed primary lacks. A custom protocol is not the fallback: it would need its own election, recovery, reconfiguration and read specification plus an executable model before it could replace this baseline |
-| Q1 is **not** settled: no library or runtime is selected | Selecting one needs M1's spike numbers, idle memory and CPU per group at 4096 groups per table, message batching across groups, durable term/vote before a reply, a read barrier, and election timing under Glommio ownership. None exist. The pins below are candidates for that spike to read, not a choice |
-| Candidate: `openraft` `0.10.0-alpha.34`, the latest release; `0.9.25`, the latest stable | `cargo info openraft` and `cargo info openraft@0.9`, 2026-09-11. The `single-threaded` feature makes `OptionalSend`/`OptionalSync` empty bounds (`Cargo.toml:72-77`, `src/base/mod.rs:8,43`), so a `!Send` adapter owned by a Glommio shard is admissible in principle; 0.9 spells the feature `singlethreaded`. Storage is an async seam: `save_vote` (`src/storage/v2/raft_log_storage.rs:63`), `append(entries, IOFlushed)` (`:128`), `truncate_after` (`:141`), `purge` (`:148`) and `RaftStateMachine::apply` (`raft_state_machine.rs:98`). `RaftTypeConfig` requires an `AsyncRuntime` (`src/type_config.rs:84-99`), and the only one shipped is Tokio behind the default `tokio-rt` feature (`Cargo.toml:78,144-147`); no Glommio runtime exists, so the spike either writes one or drives `openraft` on a per-shard current-thread Tokio runtime. Default features also pull `clap` |
-| Candidate: `raft` (raft-rs) `0.7.0` | `cargo info raft`, 2026-09-11. `RawNode` "is a thread-unsafe Node" by design (`src/raw_node.rs:284-286`): no runtime, no `Send`, driven by `tick`, `step`, `propose`, `ready` and `advance`. Persistence completion is separated from stepping by `advance_append_async` and `on_persist_ready` (`:697`, `:617`), which is the shape a DMA-completion-driven shard needs, and `read_index` (`:764`) is the read-barrier entry point. `Storage` is a synchronous trait of six methods, `initial_state`, `entries`, `term`, `first_index`, `last_index` and `snapshot` (`src/storage.rs:106-166`). Dependencies are `protobuf 2`, `raft-proto`, `slog`, `rand 0.8`, `fxhash`, `getset` and `thiserror` (`Cargo.toml:45-87`); messages are protobuf, so a Shoal command would ride as an opaque `data` field |
-| What the spike inherits | rustc 1.100.0-nightly (2026-09-04). Glommio is the `../glommio` path dependency at 0.10.0, not the crates.io release, so a runtime adapter targets that fork. No consensus crate is in `Cargo.lock` |
+| P1–P6 are the contract | The six clauses of the gate, mapped [above](#the-contract) one to one onto the pages that inherit each and the test that owns it |
+| Raft is the data-plane protocol; the control plane is `openraft` | One round to a majority per write and no agreement across independent logs are what the baseline needs and what a centrally appointed primary lacks. A custom protocol was not a fallback: it would need its own election, recovery, reconfiguration and read specification plus an executable model |
+| Q1 was left to M1's spike | Selecting a library needed idle memory and CPU per group at scale, batching across groups, durable term/vote before a reply, a read barrier and election timing under glommio ownership; none existed. `openraft 0.10.0-alpha.34` and `raft 0.7.0` were pinned as candidates from the sources cargo had fetched: `openraft`'s `single-threaded` feature makes `OptionalSend`/`OptionalSync` empty bounds, its storage is an async seam (`save_vote`, `append(entries, IOFlushed)`, `truncate_after`, `purge`, `apply`) and it ships only a Tokio runtime; `raft-rs`'s `RawNode` is a thread-unsafe state machine driven by `tick`/`step`/`ready`/`advance` with a synchronous `Storage` |
+| What the spike inherited | rustc 1.100.0-nightly, glommio as the `../glommio` path dependency at 0.10.0. No consensus crate was in `Cargo.lock` |
 
-**What this gate did not do.** It selected no library or runtime, wrote no types, added no
-dependency, and measured nothing. A version above is a pin for the spike to start from, not a
-selection, and nothing on the [milestones page](milestones.md) moved except the gate itself.
+#### Q1 and Q13 at M1
 
-#### Q1 and Q13, decided at M1
-
-Recorded 2026-09-11 by [F37](../features/node-identity-control-plane.md), on the tree that
-delivered it. The spike is `shoal-spike`, a workspace binary that is not a benchmark and is not
-a capture: `cargo run -p shoal-spike --release` prints the tables below, labelled by host and
-governor, and they were pasted here by hand. **They were taken on `europa` under the
-`powersave` governor** - the development machine, not the benchmark host - so they bound the
-shape of the answer and not its exact value.
+Recorded 2026-09-11 by [F37](../features/node-identity-control-plane.md). `shoal-spike` is a
+workspace binary, not a benchmark and not a capture: `cargo run -p shoal-spike --release`
+prints the tables below labelled by host and governor. **They were taken on `europa` under the
+`powersave` governor**, so they bound the shape of the answer and not its exact value.
 
 | Decision | Evidence |
 | --- | --- |
-| **`openraft` `0.10.0-alpha.34` is the control plane's library, pinned exactly** | `shoal-core/Cargo.toml`: `openraft = "=0.10.0-alpha.34"` and `openraft-rt` at the same pin, `default-features = false`, features `single-threaded` and `serde`. Exact because 0.10 is an alpha whose storage and network traits have moved between alphas (`RaftLogStorage::truncate_after` and `RaftStateMachine::apply`'s entry-responder stream are both `#[since("0.10.0")]`). `openraft-rt-tokio` is not in `cargo tree -p shoal-core`; `tokio` is, transitively, through the OTLP exporter it always was |
-| **The runtime is glommio, through an `AsyncRuntime` this repository wrote** | `shoal-core/src/server/control/runtime/`: task, timer, a bounded mpsc with weak senders, a watch with seen/unseen semantics, an async mutex, and `futures_channel`'s oneshot. Under `single-threaded` every one is `Rc`/`RefCell`. `openraft_rt::testing::Suite::<GlommioRuntime>::test_all()` - forty six runtime tests plus the deterministic-rng suite - passes as `glommio_runtime_passes_the_openraft_suite`. C1's "current-thread Tokio runtime" is struck through on its page: a second reactor and timer wheel in a process that has one of each bought no property glommio lacks |
-| **The storage seam is the control store, and it passes the conformance suite** | `shoal-core/src/server/control/store.rs`: log frames `[u32 len][u32 gxhash32][json]` appended and `fdatasync`ed before `IOFlushed` completes, a torn tail truncated at open, every other file replaced by temp-fsync-rename-dirsync. `openraft::testing::log::Suite::test_all` - forty four storage tests - passes as `control_store_passes_the_openraft_storage_suite`; `control_store_recovers_from_a_torn_append` is the crash test |
-| **The network seam is `RaftNetworkV2`, and at M1 every peer is unreachable** | `shoal-core/src/server/control/network.rs`. A group of one never sends. ~~M2 replaces it~~ *M2 replaced it: `PeerNetwork` wraps a peer link on the control lane and carries `append_entries`, `vote` and `full_snapshot` as JSON under a 16 byte head; a link failure is `Unreachable`, which openraft retries* ([F38](../features/inter-node-transport.md)) |
-| **raft-rs was not measured, and why** | `RawNode` has no runtime abstraction to adapt: it is a state machine the caller drives with `tick`/`step`/`ready`/`advance`. A spike on the *runtime seam* axis would measure the harness written around it rather than the library, and the runtime seam is what Q1 was blocking on. The 0.7.0 pin above stays as the alternative if the data plane needs a completion-driven shape openraft's async storage cannot give (Q2/Q4) |
-| **Q13, first numbers: one control-shaped thread holds about a thousand three-member groups at openraft's default timers, and about four thousand at C1's** | The idle tables below. At 50 ms heartbeats, 1024 groups saturate the thread (99.99% of one core, 35,000 `append_entries` a second); 4096 groups never settle (129 s to elect, log growth to 4 MiB a group from re-elections). At 500 ms heartbeats and 1.5-3 s elections, 4096 groups idle at 95% of a core and 16,000 messages a second. **Heartbeats are per group and nothing coalesces across groups**: the rate is members-minus-one over the interval, times the group count, and the spike's loopback counted exactly that. So a tablet-per-group data plane at 4096 tablets on one shard needs either multi-raft heartbeat batching openraft does not have, or a group count an order of magnitude below the tablet count - which is the design constraint M4 inherits, and the grouped-tablets alternative Q1 named is no longer only an alternative |
-| **Durable append: 395 µs alone, 10.8 ms when sixty four leaders write at once** | The durable table below, on the control store, C1's timers. p50 395 µs / p99 506 µs for one group writing 200 entries in sequence; p50 10.8 ms / p99 13.1 ms for sixty four groups each writing 200 at once on one thread. The 27× is fsyncs from independent groups queueing on one executor: each append waits its own `fdatasync`, and there is no group commit across groups. Q2's shared physical WAL is the answer to that, and this is the number it has to beat |
+| **`openraft 0.10.0-alpha.34` is the control plane's library, pinned exactly** | `shoal-core/Cargo.toml`: `openraft = "=0.10.0-alpha.34"` and `openraft-rt` at the same pin, `default-features = false`, features `single-threaded` and `serde`. Exact because the alpha's storage and network traits have moved between alphas. `openraft-rt-tokio` is not in `cargo tree -p shoal-core` |
+| **The runtime is glommio, through an `AsyncRuntime` this repository wrote** | `shoal-core/src/server/control/runtime/`: task, timer, a bounded mpsc with weak senders, a watch, an async mutex and a oneshot, every one `Rc`/`RefCell` under `single-threaded`. `openraft_rt::testing::Suite::<GlommioRuntime>::test_all()` passes as `glommio_runtime_passes_the_openraft_suite`. A current-thread Tokio runtime was considered and dropped: a second reactor and timer wheel in a process that has one of each bought no property glommio lacks |
+| **The storage seam is the control store, and it passes the conformance suite** | `shoal-core/src/server/control/store.rs`: log frames `[u32 len][u32 gxhash32][json]` appended and `fdatasync`ed before `IOFlushed` completes, a torn tail truncated at open, every other file replaced by temp-fsync-rename-dirsync. `control_store_passes_the_openraft_storage_suite` and `control_store_recovers_from_a_torn_append` |
+| **The network seam is `RaftNetworkV2`** | `shoal-core/src/server/control/network.rs`. At M1 a group of one never sent; since M2 `PeerNetwork` wraps a control-lane link and carries `append_entries`, `vote` and `full_snapshot` as JSON under a 16 byte head, a link failure being `Unreachable`, which openraft retries |
+| **raft-rs was not measured, and why** | `RawNode` has no runtime abstraction to adapt; a spike on the runtime seam would have measured the harness written around it rather than the library, and the runtime seam is what Q1 was blocking on. The data plane later took `openraft` under a shard too ([M4](#q2-q3-and-q4-at-m4)) |
+| **Q13, first numbers: one control-shaped thread holds about a thousand three-member groups at openraft's default timers and about four thousand at C1's** | The idle tables below. **Heartbeats are per group and nothing coalesces across groups**: the rate is members-minus-one over the interval, times the group count. A tablet-per-group data plane at 4096 tablets on one shard therefore needs a group count an order of magnitude below the tablet count, which is the constraint M4 built to |
+| **Durable append: 395 µs alone, 10.8 ms when sixty four leaders write at once** | The durable table below, on the control store. The 27× is fsyncs from independent groups queueing on one executor; Q2's shared WAL with one fsync per batch is the answer, and that number is what it beats |
 
 **Idle cost, memory stores, 10 s window, openraft's defaults (heartbeat 50 ms, election 150-300 ms):**
 
@@ -188,7 +173,7 @@ shape of the answer and not its exact value.
 | 1024 | 650.7 | 514.2 | 99.99 | 35319 | 0.5 |
 | 4096 | 17282.3 | 3966.9 | 99.99 | 69722 | 128.6 |
 
-**Idle cost, memory stores, 10 s window, C1's proposal (heartbeat 500 ms, election 1500-3000 ms):**
+**Idle cost, memory stores, 10 s window, C1's timers (heartbeat 500 ms, election 1500-3000 ms):**
 
 | groups | RSS MiB | RSS delta/group KiB | idle CPU % of one core | append_entries/s | startup s |
 | --- | --- | --- | --- | --- | --- |
@@ -197,8 +182,8 @@ shape of the answer and not its exact value.
 | 1024 | 18690.5 | 346.9 | 45.68 | 4062 | 0.6 |
 | 4096 | 20179.7 | 358.2 | 95.13 | 16245 | 2.3 |
 
-The absolute RSS in the second table is the first table's high-water mark: the allocator kept
-what the 4096-group run touched. The per-group delta is the number to read.
+The absolute RSS in the second table is the first table's high-water mark; the per-group delta
+is the number to read.
 
 **Durable append, control store under a temp dir, 200 writes per leader, C1's timers:**
 
@@ -207,29 +192,36 @@ what the 4096-group run touched. The per-group delta is the number to read.
 | 1 | 1 | 395.1 | 506.4 | 51099.1 |
 | 64 | 64 | 10792.5 | 13070.9 | 59351.7 |
 
-**What M1's spike did not do.** It measured no data-plane library under a *shard's* ownership -
-every group here ran on a control-shaped thread with nothing else on it - and it measured on
-the wrong host. Q13's target-scale budgets for connections, map dissemination and control-plane
-reports ~~are M3's, and stay open~~ are below, at M3.
+The spike measured no data-plane library under a *shard's* ownership and measured on the
+development host; both remain true of these tables.
+
+#### Q10 and Q11 at M2
+
+Recorded 2026-09-12 by [F38](../features/inter-node-transport.md). Neither question was closed
+here; M2 wrote down the contract each rests on early enough that the transport could not be
+built against a different one.
+
+| Contract | Where it is |
+| --- | --- |
+| **Q10: schema identity, wire version and capabilities are three things, compared separately** | The 68 byte hello (`shoal-proto/src/shared/protocol/peer/hello.rs`) carries `schema_id`, `wire_min`/`wire_max` and a `capabilities` bit set as three fields, and the judge (`shoal-core/src/server/peer/handshake.rs`) compares each. `SCHEMA_ID` is the structural fingerprint *without* `PROTOCOL_VERSION` folded in. At M2 all three had to match exactly; the range and the bit set existed so that M10a had fields to negotiate over without changing the hello's shape, which it did ([Q10 at M10a](#q10-at-m10a)) |
+| **Q11: a peer certificate chains to the cluster's authority; its binding to a node came later** | `cluster.tls` makes every lane mutual TLS 1.3 handed to the kernel; the listener requires a chain to `ca` and the dialler presents its own. The shape decided here - identity asserted in the hello and proven by the certificate - is what lets a node be issued a certificate for an id it has already minted. The binding is [Q11 at M10c](#q11-at-m10c) |
 
 #### Q11 and Q13 at M3
 
 Recorded 2026-09-12 by [F39](../features/membership.md).
 
-**Q11, decided as far as identity goes: the highest incarnation wins.** The storage marker
-carries an `incarnation` bumped by every claim of an established directory; it rides in the
-committed member record, the hello, the pong, every status report and every proposal. The
-state machine's `observe` rule is the policy - a lower incarnation than the committed one is
-refused, an equal one from a different control address is refused as a duplicate, an equal one
-from the same address is a re-observation, a higher one supersedes - and a running node that
-sees a higher run of itself committed stops `Fenced`. `cluster.dial` answers the
-private-address question: where this node dials a member instead of where it advertises. The
-certificate half - the `shoal-node://<id>` SAN, provisioning before a node id exists, rotation -
-stays open; a certificate still chains to `ca` and binds to nothing.
+**Q11, the identity half: the highest incarnation wins.** The marker carries an `incarnation`
+bumped by every claim of an established directory; it rides in the committed member record,
+the hello, the pong, every status report and every proposal. The state machine's `observe`
+rule is the policy - a lower incarnation than the committed one is refused, an equal one from a
+different control address is refused as a duplicate, an equal one from the same address is a
+re-observation, a higher one supersedes - and a running node that sees a higher run of itself
+committed stops `Fenced`. `cluster.dial` is where this node dials a member instead of where it
+advertises.
 
 **Q13, measured: topology fanout and report traffic**, `cargo run -p shoal-spike --release --
-fanout` on `europa` under `powersave`, JSON bodies as the wire carries them. The map at M3 is
-an ordered node list, so a frame grows with members and barely with tables:
+fanout` on `europa` under `powersave`, JSON bodies as the wire carries them. The map is an
+ordered node list, so a frame grows with members and barely with tables:
 
 | members | tables | frame bytes | encode µs |
 | --- | --- | --- | --- |
@@ -262,194 +254,180 @@ reachability of every other member:
 | 32 | 1,553 | 62 | 96,286 |
 | 64 | 2,993 | 126 | 377,118 |
 
-**What the numbers decide.** Whole-map fanout is the right shape while the map is a node list:
-a version is pushed to a thousand clients in the time of one disk write, and the leader's report
-intake at sixty-four members is a third of a megabyte a second of JSON, which is a budget and not
-a problem. Per-tablet records - 4096 a table - would multiply the frame by three orders of
-magnitude, which is why they wait for the day a tablet moves and arrive as deltas when they do.
-The report's reachability list is what grows quadratically; at a hundred members it is the
-first thing to bound. Connections are not measured here: a client's pool subscribes on every
-connection, so a pool of ten reads ten frames a version, and a server's subscriber count is
-its connection count.
+Whole-map fanout is the right shape while the map is a node list: a version reaches a thousand
+clients in the time of one disk write, and the leader's intake at sixty-four members is a third
+of a megabyte a second. Per-tablet records would multiply the frame by three orders of
+magnitude, which is why a move publishes a `DataConfiguration` for its set rather than a record
+per tablet. The report's reachability list grows quadratically; at a hundred members it is the
+first thing to bound. A client's pool subscribes on every connection, so a pool of ten reads ten
+frames a version.
 
 #### Q2, Q3 and Q4 at M4
 
-Recorded 2026-09-12 by [F40](../features/replication.md). Q2 and Q4 are closed as far as M4
-owns them; Q3's design half is, and its implementation half ~~is M7's~~ is [closed at M7](#q3-and-q9-at-m7).
+Recorded 2026-09-12 by [F40](../features/replication.md).
 
 | Decision | Where it is, and what it does not settle |
 | --- | --- |
-| **Q2: one shared WAL per shard, every group's log a subsequence of it, one `fdatasync` per batch across groups** | The format 2 frame (`shoal-core/src/server/wal/frame.rs`): `[len u32][gxhash32]` unhashed, then `[kind][version=2][flag][reserved][group u64][index u64][term u64][leader ShardAddr]` hashed with the body, so the index over a file is rebuilt from headers alone and a group's history is the frames that name it. The store (`wal/mod.rs`) stages every group's appends into the open batch, the writer syncs a batch once and completes every `IOFlushed` in it after - which is the group commit across groups the M1 durable table asked for, and `rotation_preserves_pending_replication_requirements` and `table_streams_recover_independently_without_holes` are the restart and rotation tests. Truncate, purge, vote and committed records reuse the header's fields with no body; membership bodies are postcard, since a map keyed by a shard address has no JSON. Not settled: the number the shared WAL has to beat is the M1 spike's, on the control store, and the shared store's own figure at sixty-four leaders is the benchmark host's to take |
-| **Q3: a checkpoint is a log id per group, moved by the compactor** | `wal/Shard-N/checkpoint.json` records, per persistent group, the last log id whose effect the table's archives hold and the membership as of it; a sealed segment is handed to the compactors once every group applied past its frames and the checkpoints in it advance when the compactor is through; openraft's snapshot is the checkpoint as metadata, taken only once the checkpoint is on disk, and the purge follows it. No write pause: a segment is immutable once sealed, the compactor reads it beside the writer's active one. ~~Not settled: installing a snapshot - the transfer of archives to a member behind the purge point - is refused naming M7, and the crash matrix over checkpoint, compaction and purge is M7's too~~ Both are [M7's](#q3-and-q9-at-m7) |
-| **Q4: none** | A command is applied once, in committed order, on every replica, and its result - inserted or not, deleted or not, updated or not - is derived there from the state the replica finds (`PersistentUnsortedTable::apply`, `PersistentSortedTable::apply`); a partition the apply needs from disk parks the batch and blocks the group behind it and nothing else. Retries are answered from a per-group LRU of request identity, payload digest and result. `One` writes are refused at validation naming the accepted-or-pending API they would need; a persistent table configured `Async` on a cluster node is refused at start. Volatile tables replicate through the same command with an in-memory log, bounded by `volatile_log_bytes`, that a restart empties - their leader is told a follower may come back empty, a durable group's is not. ~~Not settled: the durable low-water mark of the retry table is M6's, and~~ The durable mark is [Q4 at M6](#q4-at-m6); speculation stays an optimization that would have to specify dependencies, rollback and separate committed visibility before it is taken |
+| **Q2: one shared WAL per shard, every group's log a subsequence of it, one `fdatasync` per batch across groups** | The format 2 frame (`shoal-core/src/server/wal/frame.rs`): `[len u32][gxhash32]` unhashed, then `[kind][version=2][flag][reserved][group u64][index u64][term u64][leader ShardAddr]` hashed with the body, so the index over a file is rebuilt from headers alone. The store (`wal/mod.rs`) stages every group's appends into the open batch; the writer syncs a batch once and completes every `IOFlushed` in it after. `rotation_preserves_pending_replication_requirements` and `table_streams_recover_independently_without_holes` are the restart and rotation tests. Not settled: the shared store's own figure at sixty-four leaders is the benchmark host's to take |
+| **Q3: a checkpoint is a log id per group, moved by the compactor** | `wal/Shard-N/checkpoint.json` records, per persistent group, the last log id whose effect the table's archives hold and the membership as of it; a sealed segment is handed to the compactors once every group applied past its frames; openraft's snapshot is the checkpoint as metadata, and the purge follows it. No write pause: a sealed segment is immutable. The transfer of a checkpoint's state is [Q3 at M7](#q3-and-q9-at-m7) |
+| **Q4: apply once, in committed order, derive there** | A command is applied once on every replica and its result - inserted or not, deleted or not, updated or not - derived from the state the replica finds (`PersistentUnsortedTable::apply`, `PersistentSortedTable::apply`); a partition the apply needs from disk parks the batch and blocks that group alone. Retries are answered from a per-group LRU of request identity, payload digest and result. `One` writes are refused at validation; a persistent table configured `Async` on a cluster node is refused at start. Volatile tables replicate through the same command with an in-memory log bounded by `volatile_log_bytes`. The retry table's durable mark is [Q4 at M6](#q4-at-m6) and its expiry [Q4 at M9a](#q4-and-q5-at-m9a). Not settled: speculation stays an optimization that would have to specify dependencies, rollback and separate committed visibility before it is taken |
 
 #### Q5 at M5
 
-Recorded 2026-09-13 by [F41](../features/read-consistency.md). Q5 is closed; Q6 stays open with
-the barrier as the default it says it is.
+Recorded 2026-09-13 by [F41](../features/read-consistency.md).
 
 | Decision | Where it is, and what it does not settle |
 | --- | --- |
-| **Q5: one strong level, `Quorum`; a session token is an index in one group of one table of one cluster** | `ReadLevel { One, Quorum }` (`shoal-proto/src/shared/protocol/read.rs`), and no `Primary`: the draft's two names were two routing policies over one freshness promise, and a name is earned by an implementation - `Primary` as "execute the share at the leader" is an additive third arm of the same match and is filed. The barrier is openraft's `ReadIndex` (`get_read_linearizer`), on the executing shard's own handle when it leads and asked of the leader over the replication lane with `ReplicateKind::ReadBarrier` when it does not, followed by the replica's own apply through the index (`shoal-core/src/server/shard/reads.rs`); `LeaseRead` is never used. The token is `SessionToken { cluster, table, tablet, group, index }`, forty-eight bytes, minted for `Applied` and `Duplicate` outcomes and refused by name - `WrongCluster`, `UnknownLineage` - rather than ignored; it carries an index and no term, since a committed index is never lost and the barrier's `ReadLogId` is what carries a term; it does not expire, since a lower bound does not age. Sixteen a bundle. The protocol model gained the same rule as `BarrierRule::QuorumConfirmed` with `CachedLeaderUnconfirmed` as its knob, caught on `strong_read_from_cached_leader.json` under the new `Linearizable` property. ~~Not settled: a token across a leader change and a barrier through one are M6's to run;~~ Run at M6 (`session_read_waits_for_committed_lower_bound`, `read_barrier_survives_leader_change_and_delayed_messages`): a token names an index and a group, neither of which an election changes. ~~Not settled: a token across a move or a split is M9a's, and the group identity in it is the field that check will read~~ A token across a move is [Q5 at M9a](#q4-and-q5-at-m9a): the group identity is pinned through it; a split is still nobody's |
+| **Q5: one strong level, `Quorum`; a session token is an index in one group of one table of one cluster** | `ReadLevel { One, Quorum }` (`shoal-proto/src/shared/protocol/read.rs`) and no `Primary`: the draft's two names were two routing policies over one freshness promise, and "execute the share at the leader" is an additive routing choice, filed. The barrier is openraft's `ReadIndex` (`get_read_linearizer`) on the executing shard's own handle when it leads, asked of the leader over the replication lane with `ReplicateKind::ReadBarrier` when it does not, followed by the replica's own apply through the index (`shoal-core/src/server/shard/reads.rs`); `LeaseRead` is never used. The token is `SessionToken { cluster, table, tablet, group, index }`, forty-eight bytes, minted for `Applied` and `Duplicate` outcomes, refused by name (`WrongCluster`, `UnknownLineage`) rather than ignored, carrying an index and no term, never expiring; sixteen a bundle. The model gained `BarrierRule::QuorumConfirmed` with `CachedLeaderUnconfirmed` as its knob, caught on `strong_read_from_cached_leader.json` under `Linearizable`. A token across an election was run at M6 and across a move at [M9a](#q4-and-q5-at-m9a). Not settled: a split |
 
 #### Q4 at M6
 
-Recorded 2026-09-13 by [F42](../features/primary-failover.md). What Q4 left open at M4 - the
-retry table's durable mark - is closed; Q6 stays open with the barrier as the default, and the
-lease openraft already keeps is what a leader's *writes* are judged by, never a read.
+Recorded 2026-09-13 by [F42](../features/primary-failover.md). Q6 stays open with the barrier as
+the default, and the lease openraft keeps is what a leader's *writes* are judged by, never a read.
 
 | Decision | Where it is, and what it does not settle |
 | --- | --- |
-| **Q4: the retry table is persisted beside the checkpoint and seeded from it** | `wal/Shard-N/retries.bin` (`shoal-core/src/server/wal/mod.rs`, `Retries`): every persistent group's remembered requests - identity, payload digest, result, applied index - as postcard, written atomically on the checkpoint's trigger and before `checkpoint.json`, which names the index the sidecar is complete to (`retries_at`) and the table's low-water mark (`retry_floor`), both defaulting to zero so an M4 checkpoint loads. A group is seeded only from a sidecar written for exactly its checkpoint and only with entries applied at or below it (`Retries::seed_for`), since a seeded entry above the checkpoint would make the replay answer `Duplicate` and skip the apply. The client's identity is its bundle id, pinned with `SendOptions::identity`, which is the `RequestId` every command already carried; `lost_response_retry_returns_original_result` retries across an election and across a rotate, compact and restart on every node. Volatile groups persist nothing. ~~Not settled: expiry - the floor is recorded and nothing reads it; an identity below it is applied as new, which is the check M9a's `retry_identity_survives_snapshot_and_migration` will read the floor for~~ Expiry is [Q4 at M9a](#q4-and-q5-at-m9a) |
-| **The lease is judged, not waited on, and a lapsed one is a definite refusal** | `Lease::of` (`shoal-core/src/server/replication/lease.rs`) classifies a handle from the metrics' state and `last_quorum_acked` against `election_timeout_max`: a leader whose lease lapsed answers `NotLeader` before it appends and `QuorumUnavailable` for a barrier at once, where before both loops waited for "a leader" on a handle that named itself and answered `OutcomeUnknown` at the deadline. The lease is openraft's - `election_timeout_max`, twice the base - and what it makes the failover window is recorded on [C7](failover.md#the-window-and-what-a-client-sees): two to three times the base, since a follower refuses every vote inside it. A killed leader returning inside it is refused its own term by the same rule ([item 103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait)). Not settled: Q6 - a lease *read* is still never taken, and this lease is a write's evidence of nothing but that a write may be attempted |
-| **A definite non-answer is rerouted or refused; an unknown one is the client's** | The link's unsent list (`LinkEvent::Down`) is the line on both lanes: a forward the data link never wrote goes to another holder that is up once, under the same attempt and slot (`resolve_lost_link`, `TabletMap::alternate_holder`); a proposal or barrier the replication link never wrote is `RpcFailure::NotSent`, which a proposal answers `NotLeader` at once; anything written is `Unavailable` or `OutcomeUnknown` and is retried only by the client under its identity. A wanted link redials at `reconnect_min`, so the refusal takes the floor and not the backoff. Not settled: the transport's backoff and floor are the file's, not the policy's, and a deployment whose reconnect floor is longer than its clients' patience gets the old five second wait back |
+| **Q4: the retry table is persisted beside the checkpoint and seeded from it** | `wal/Shard-N/retries.bin` (`Retries` in `wal/mod.rs`): every persistent group's remembered requests as postcard, written atomically on the checkpoint's trigger and before `checkpoint.json`, which names the index the sidecar is complete to (`retries_at`) and the table's low-water mark. A group is seeded only from a sidecar written for exactly its checkpoint and only with entries applied at or below it (`Retries::seed_for`). The client's identity is its bundle id (`SendOptions::identity`); `lost_response_retry_returns_original_result` retries across an election and across a rotate, compact and restart on every node. Volatile groups persist nothing |
+| **The lease is judged, not waited on, and a lapsed one is a definite refusal** | `Lease::of` (`shoal-core/src/server/replication/lease.rs`) classifies a handle from the metrics' state and `last_quorum_acked` against `election_timeout_max`: a leader whose lease lapsed answers `NotLeader` before it appends and `QuorumUnavailable` for a barrier at once. The lease is openraft's, twice the base, and what it makes the failover window is on [C7](failover.md#the-window-and-what-a-client-sees). A killed leader returning inside it is refused its own term by the same rule ([item 103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait)). Not settled: Q6 - a lease *read* is never taken |
+| **A definite non-answer is rerouted or refused; an unknown one is the client's** | The link's unsent list (`LinkEvent::Down`) is the line: a forward the data link never wrote goes to another holder that is up once, under the same attempt and slot (`resolve_lost_link`, `TabletMap::alternate_holder`); a proposal or barrier the replication link never wrote is `RpcFailure::NotSent`, answered `NotLeader` at once; anything written is `Unavailable` or `OutcomeUnknown` and is retried only by the client under its identity. A wanted link redials at `reconnect_min`. Not settled: the backoff and floor are the transport's settings, not the policy's |
 
 #### Q3 and Q9 at M7
 
-Recorded 2026-09-13 by [F43](../features/node-recovery.md). Q3's implementation half and Q9
-are closed as far as a single replica set owns them; ~~what a move or a split does to either is
-M9a's~~ what a move does to either is [F45](../features/replica-migration.md)'s: the same cut
-feeds a move's learner, carrying the membership as of its boundary rather than the state's
-current one, and the same budget bounds it; a split is nobody's yet.
+Recorded 2026-09-13 by [F43](../features/node-recovery.md). Both are closed as far as a single
+replica set owns them; a move feeds its learner from the same cut and budget ([F45](../features/replica-migration.md)).
 
 | Decision | Where it is, and what it does not settle |
 | --- | --- |
-| **Q3: the cut is one file the compactor writes between two of its jobs, at the archives' boundary** | `CompactionJob::Snapshot` (`shoal-core/src/server/tables/storage.rs`) runs on the table's compactor between two merges, so the archives stand still under it and no pause, generation or copy-on-write view is needed: the boundary is the highest position the compactor merged for the group or the loop's checkpoint, whichever is higher, and the file (`replication/snapshot.rs`: a 41 byte header, `[key u64][len u32][bytes]` records keyed by partition hash, a postcard trailer of the dedup table's remembered results, a chunk-invariant `FileHasher` checksum in the manifest) is exactly the archives at it. A volatile group cuts the same file from memory on the shard loop. The receiver hands the file to openraft under the sender's vote only after a marker is durable, and the install (`CompactionJob::Install`) replaces or removes every partition of every covered tablet before the archive map is repointed; the crash matrix is `snapshot_install_is_atomic_at_every_crash_point` over seven points and the boundary test is `snapshot_has_one_stable_boundary_under_writes`. Two defects the design half hid were fixed first: a frame at or below the checkpoint was handed to the compactor again at restart ([item 104](../appendix/resolved/segments-recompacted-after-restart.md)) and a volatile group's checkpoint never moved ([item 105](../appendix/resolved/volatile-groups-never-purged.md)). Not settled: the file copies the archives rather than pinning them ([O52](../appendix/optimizations.md#o52-a-snapshot-copies-every-record-of-the-archives-into-one-file)), and a snapshot is per group, so a returning node installs every tablet its replica set shares |
-| **Q9: the budget is bytes of sealed WAL, and a group past it is purged behind and fed a snapshot** | `replication.retained_bytes` (`shoal-core/src/server/conf/cluster.rs`, a gibibyte, at least two segments): the shard's sweep measures the sealed segments and, past the budget, forces the groups pinning the oldest to snapshot and purge (`enforce_retention`, counted under `snapshots.forced`), which openraft's `max_in_snapshot_log_to_keep` then bounds; a member that missed those entries gets a snapshot from the next leader that reaches it. The receiver's side is `replication.install_bytes` over the partials it holds, `snapshot_chunk_bytes` under the frame and the bulk queue, and `snapshot_timeout` as openraft's install timeout, whose default of a fifth of a second would have failed every transfer. Neither side throttles the foreground: `retention_and_recovery_memory_are_bounded` holds the leader's sealed WAL under twice the budget and its memory under a bound with a follower cut under wide writes, and the catch-up arms record `none` rather than convergence when a run ends with the lag above zero. Not settled: a time budget is not offered, the budget is per shard rather than per stream, and a stream that cannot keep up is fed snapshots repeatedly rather than told to stop |
+| **Q3: the cut is one file the compactor writes between two of its jobs, at the archives' boundary** | `CompactionJob::Snapshot` (`shoal-core/src/server/tables/storage.rs`) runs on the table's compactor between two merges, so the archives stand still under it: the boundary is the highest position the compactor merged for the group or the loop's checkpoint, whichever is higher, and the file (`replication/snapshot.rs`: a header, `[key u64][len u32][bytes]` records keyed by partition hash, a postcard trailer of the retry table, a chunk-invariant checksum in the manifest) is exactly the archives at it. A volatile group cuts the same file from memory. The receiver hands the file to openraft only after a marker is durable, and the install replaces or removes every partition of every covered tablet before the archive map is repointed; `snapshot_install_is_atomic_at_every_crash_point` is the crash matrix over seven points. Two defects the design hid were fixed first ([item 104](../appendix/resolved/segments-recompacted-after-restart.md), [item 105](../appendix/resolved/volatile-groups-never-purged.md)). Not settled: the file copies the archives rather than pinning them ([O52](../appendix/optimizations.md#o52-a-snapshot-copies-every-record-of-the-archives-into-one-file)), and a snapshot is per group, so a returning node installs every tablet its set shares |
+| **Q9: the budget is bytes of sealed WAL, and a group past it is purged behind and fed a snapshot** | `replication.retained_bytes` (a gibibyte, at least two segments): the shard's sweep measures the sealed segments and, past the budget, forces the groups pinning the oldest to snapshot and purge (`enforce_retention`, counted under `snapshots.forced`); a member that missed those entries gets a snapshot from the next leader that reaches it. The receiver's side is `install_bytes`, `snapshot_chunk_bytes` and `snapshot_timeout`. `retention_and_recovery_memory_are_bounded` holds the leader's sealed WAL under twice the budget with a follower cut under wide writes. Not settled: no time budget, a budget per shard rather than per stream, and a stream that cannot keep up is fed snapshots repeatedly rather than told to stop |
 
 #### Q12 at M8
 
-Recorded 2026-09-13 by [F44](../features/repair.md). The corruption half of Q12 is closed as
-far as a replica set's own copies own it; the backup and disaster-recovery half is M10's.
+Recorded 2026-09-13 by [F44](../features/repair.md). The corruption half of Q12 is closed; the
+backup half is [Q12 at M10b](#q12-at-m10b).
 
 | Decision | Where it is, and what it does not settle |
 | --- | --- |
-| **Q12: a strict majority of verified copies, or an operator's named source, is authoritative when replicas disagree; nothing else is, and nothing is chosen automatically on a split** | `judge` (`shoal-core/src/server/shard/repair.rs`, `the_judge_needs_a_majority_or_an_operator`): a copy whose record failed its checksum at the scrub is quarantined on that evidence alone; among the verified copies a strict majority of the *replica set* agreeing on one canonical digest - rows re-serialized in key order under the schema and the tablets, never archive bytes (`replication/digest.rs`) - is the trusted state and every other verified copy is quarantined divergent; `Repair { source }` overrides the rule with the named node's verified digest under the operator's provenance; and no majority and no source is `Unresolved { digests, invalid }`, which quarantines nothing more and installs nothing, the record being the evidence (`repair_detects_corrupt_primary_and_preserves_evidence`). A scheduled pass (`cluster.repair.scrub_interval`, off by default) is verification only and never installs, and its cost is the background arm's record (`macro/cluster/background/repair`): the scrub reads a group's archives whole once per pass, priced against the foreground as `during` against `before`. Not settled: a backup as a second provenance when every copy disagrees, what an operator does after a majority is permanently lost, and the interval a default should be - the arm ran at smoke scale on the development host, where every partition was resident |
+| **Q12: a strict majority of verified copies, or an operator's named source, is authoritative when replicas disagree; nothing is chosen automatically on a split** | `judge` (`shoal-core/src/server/shard/repair.rs`): a copy whose record failed its checksum at the scrub is quarantined on that evidence alone; among the verified copies a strict majority of the *replica set* agreeing on one canonical digest - rows re-serialized in key order, never archive bytes (`replication/digest.rs`) - is the trusted state and every other verified copy is quarantined divergent; `Repair { source }` overrides the rule with the named node's verified digest; no majority and no source is `Unresolved { digests, invalid }`, which installs nothing. A scheduled pass (`cluster.repair.scrub_interval`, off by default) verifies and never installs; its cost is `macro/cluster/background/repair`. Not settled: what an operator does after a majority is permanently lost is [M10b's](#q12-at-m10b) `force_recover`; the interval a default should be, since the arm ran at smoke scale where every partition was resident |
 
 #### Q4 and Q5 at M9a
 
-Recorded 2026-09-13 by [F45](../features/replica-migration.md). Q4's expiry half and Q5's
-move half are closed; what a *split* does to either stays with the split, which nothing
-schedules.
+Recorded 2026-09-13 by [F45](../features/replica-migration.md). Q4's expiry half and Q5's move
+half are closed; what a *split* does to either stays with the split, which nothing schedules.
 
 | Decision | Where it is, and what it does not settle |
 | --- | --- |
-| **Q4: a retry identity is time-ordered, and expires by its own time or by the group's forgetting** | A bundle identity is a version 7 uuid (`Queries::default`, the client's retry loop and stream ids; `SendOptions::identity` still takes any). Before a write is proposed, `MachineState::is_expired` (`shoal-core/src/server/replication/machine.rs`) on the coordinator's own replica judges the identity's forty-eight timestamp bits against `cluster.replication.retry_window` (five minutes, never under the write timeout) and against `expired_before`, the newest time-ordered identity the retry table has evicted - moved only by `remember`, carried by `GroupCheckpoint::expired_before` and a snapshot's manifest so a copy built from either refuses what its source would; older than either is `IdentityExpired` (22) and the log never carries it, so every replica answers alike. An identity that is not time-ordered expires never and is applied as new once forgotten, which is what the floor always meant. `retry_identity_survives_snapshot_and_migration` is the check the M6 record said this would read the floor for; it reads the identity's time instead, since an index is nothing a client can compare its retry to. Not settled: the watermark is replica-local, so two coordinators can answer one late retry differently and neither applies it twice; and the window is a node's setting rather than the policy's |
-| **Q5: a token survives a move because the group's identity does** | The token's `group` names `GroupId::of(table, rule_replicas_of)`, which a move keeps: the destination's log is the same log at the same indexes, so a token minted before the move bounds a read on the destination after it, and `UnknownLineage` is still exactly a group this replica does not hold. Nothing on the wire moved. Not settled: a split |
+| **Q4: a retry identity is time-ordered, and expires by its own time or by the group's forgetting** | A bundle identity is a version 7 uuid. Before a write is proposed, `MachineState::is_expired` (`shoal-core/src/server/replication/machine.rs`) on the coordinator's own replica judges the identity's timestamp against `cluster.replication.retry_window` (five minutes, never under the write timeout) and against `expired_before`, the newest time-ordered identity the retry table has evicted - carried by `GroupCheckpoint::expired_before` and a snapshot's manifest so a copy built from either refuses what its source would; older than either is `IdentityExpired` and the log never carries it. `retry_identity_survives_snapshot_and_migration` reads the identity's time, since an index is nothing a client can compare a retry to. Not settled: the watermark is replica-local, so two coordinators can answer one late retry differently (neither applies it twice); the window is a node's setting rather than the policy's |
+| **Q5: a token survives a move because the group's identity does** | The token's `group` names `GroupId::of(table, rule_replicas_of)`, which a move keeps: the destination's log is the same log at the same indexes. Nothing on the wire moved. Not settled: a split |
 
 #### Q7 and Q8 at M9b
 
-Recorded 2026-09-14 by [F46](../features/capacity-rebalancing.md). Q7 is closed; Q8's
-placement and budget halves are closed, and its hotspot half - a per-partition threshold - is
-not built and not scheduled.
+Recorded 2026-09-14 by [F46](../features/capacity-rebalancing.md). Q7 is closed; Q8's placement
+and budget halves are closed, and its hotspot half is not built and not scheduled.
 
 | Decision | Where it is, and what it does not settle |
 | --- | --- |
-| **Q7: thirty minutes by default, counted in committed increments, suspended by maintenance, and an expiry that blocks rather than forces** | `cluster.auto_remove_after` is the policy's, thirty minutes unless `null`, and a `Down` verdict under it opens a `GraceState` on the member (`shoal-core/src/server/control/types.rs`). The leader accrues it from its own monotonic clock starting at the committed value and proposes `GraceElapsed` every eighth of the grace or sixty seconds, whichever is shorter (`accrue_graces` in `control/plane.rs`); apply keeps it monotonic and of one episode, so a leader change loses at most one increment and never restarts or guesses early, which is what "delay conservatively" was asked to mean. `Maintenance { node, suspend }` is a versioned operation; a suspended grace is neither counted nor committed and `Members` reports `grace_remaining_ms` throughout. Expiry moves the member to `Removing` and records an `Expiry` plan whose steps are moves to feasible members; with none, the plan is blocked naming the missing member, every copy is kept, and the factor is untouched (`remove_without_replacement_capacity_stays_blocked`). A removed member is tombstoned before it leaves the control group, and its identity is refused at every door. Not settled: the grace is the policy's and not per member, and there is no `SetPolicy` to change it without a bootstrap; a `Decommission` cannot be cancelled |
-| **Q8: a weight per node, a byte share water-filled to what a member can hold, a tenth's hysteresis, a reserve checked twice, and one bucket per node** | `cluster.weight` is the node's own, defaulting to its shard count, recorded on its member record. The planner (`control/planner.rs`) gives every placeable member its weight's share of the bytes held, capped at holding every set with the excess spread by weight, and moves a set from the member most over its target to the member below it that gains the most while the source is over by more than `cluster.rebalance.hysteresis` (0.10); at N = RF it answers nothing, twice (`heterogeneous_placement_obeys_feasible_weights`). Bytes are the archived bytes each holder reports per group, kept in the leader's memory and never committed; a set nobody has measured counts as one byte. `cluster.migration.disk_reserve` (1 GiB) is checked by the planner against the reported free bytes and by the receiver against its own before a stream is accepted; `stream_bytes_per_sec` (64 MiB) is one token bucket per sending node and `concurrent_streams` (2) caps a shard's assembling streams (`node_transfer_budgets_bound_concurrent_sources`). Not settled: per-device and per-pair budgets, a budget that adapts to the foreground's tail, resident bytes as a weight, and any hotspot threshold - a single hot partition is as indivisible as C8 says |
+| **Q7: thirty minutes by default, counted in committed increments, suspended by maintenance, and an expiry that blocks rather than forces** | `cluster.auto_remove_after` is the policy's; a `Down` verdict under it opens a `GraceState` on the member (`control/types.rs`). The leader accrues it from its own monotonic clock starting at the committed value and proposes `GraceElapsed` every eighth of the grace or sixty seconds, whichever is shorter (`accrue_graces` in `control/plane.rs`); apply keeps it monotonic and of one episode, so a leader change loses at most one increment. `Maintenance { node, suspend }` is a versioned operation; `Members` reports `grace_remaining_ms` throughout. Expiry moves the member to `Removing` and records an `Expiry` plan whose steps are moves to feasible members; with none, the plan blocks naming the missing member (`remove_without_replacement_capacity_stays_blocked`). A removed member is tombstoned before it leaves the control group. Not settled: the grace is the policy's and not per member; there is no `SetPolicy`; a `Decommission` cannot be cancelled |
+| **Q8: a weight per node, a byte share water-filled to what a member can hold, a tenth's hysteresis, a reserve checked twice, one bucket per node** | `cluster.weight` defaults to the node's executor count. The planner (`control/planner.rs`) gives every placeable member its weight's share of the bytes held, capped at holding every set, and moves a set from the member most over its target to the member below it that gains the most while the source is over by more than `cluster.rebalance.hysteresis`; at N = RF it answers nothing (`heterogeneous_placement_obeys_feasible_weights`). Bytes are the archived bytes each holder reports per group, kept in the leader's memory. `cluster.migration.disk_reserve` is checked by the planner and by the receiver; `stream_bytes_per_sec` is one token bucket per sending node and `concurrent_streams` caps a shard's assembling streams (`node_transfer_budgets_bound_concurrent_sources`). Not settled: per-device and per-pair budgets, a budget that adapts to the foreground's tail, resident bytes as a weight, any hotspot threshold |
 
 #### Q10 at M10a
 
 Recorded 2026-09-14 by [F48](../features/rolling-compatibility.md). Q10's wire half is closed;
-its schema and on-disk halves are closed as explicitly unsupported limits rather than as
-migrations.
+its schema and on-disk halves are closed as explicitly unsupported limits.
 
 | Decision | Where it is, and what it does not settle |
 | --- | --- |
-| **Q10: the wire version is a range negotiated to the highest both read, every frame names the version its body is encoded at, and a cluster-wide activation - judged by the members' running builds and committed - is the boundary past which no member rolls back** | `PROTOCOL_VERSION` is 5 and `MIN_PEER_VERSION` 4 (`shoal-proto/src/shared/protocol.rs`); `PeerHello::negotiate` picks the highest version both ranges hold and `Negotiated` (`shoal-core/src/server/peer/handshake.rs`) carries it with the intersected capability word onto every link and accepted connection. A link stamps its negotiated version over a frame built with no version of its own and keeps the one a `Frame::at` named; a receiver decodes by the header and refuses a frame above what was negotiated (`validate_at`). The one body that differs is the snapshot manifest - `ManifestV4` on a version 4 link, the stamped shape on a 5 (`SnapshotRpc::encode_at`/`decode_at`) - and a snapshot file's version 2 header is written only once 5 is activated (`SnapshotProvenance::at`). `ControlState::activated` moves by `Activate { wire, members }`, whose `members` the leader fills from the hellos its links completed and the members' status reports and never from the committed records (`activation_needs_every_member_at_the_wire`); a member below it is `BelowActivatedWire` at the hello, refused at observe and admit, and stops itself at start (`WireBelowActivated`). `cluster.transport.wire_version` pins a node below the build's newest. The client lane is exact at `CLIENT_WIRE_VERSION`, 4, which the fingerprint folds. Every capability this build defines is required (`REQUIRED_CAPABILITIES`); an optional one is gated by `Negotiated::has`. **Explicitly unsupported**: a schema change as a rolling operation - a join with another `schema_id` is refused, and the path is a new cluster and a restore or an import - and a marker format migration in place, served by the build that wrote it or brought into a new directory. Not settled: nothing on the wire half; the "on-disk format" half is the file format following the activation and the marker never moving, which is the whole of the answer rather than a migration framework |
+| **Q10: the wire version is a range negotiated to the highest both read, every frame names its codec, and a committed cluster-wide activation is the boundary past which no member rolls back** | `PROTOCOL_VERSION` is 5 and `MIN_PEER_VERSION` 4 (`shoal-proto/src/shared/protocol.rs`); `PeerHello::negotiate` picks the highest version both ranges hold and `Negotiated` carries it with the intersected capability word onto every link. A receiver decodes by the header and refuses a frame above what was negotiated. The one body that differs is the snapshot manifest (`SnapshotRpc::encode_at`/`decode_at`), and a snapshot file's version 2 header is written only once 5 is activated. `ControlState::activated` moves by `Activate { wire, members }`, whose `members` the leader fills from the hellos its links completed and the members' status reports (`activation_needs_every_member_at_the_wire`); a member below it is `BelowActivatedWire` at the hello and stops itself at start. `cluster.transport.wire_version` pins a node below the build's newest. The client lane is exact at `CLIENT_WIRE_VERSION`, 4. **Explicitly unsupported**: a schema change as a rolling operation (a join with another `schema_id` is refused; the path is a new cluster and a restore) and a marker format migration in place |
 
 #### Q12 at M10b
 
-Recorded 2026-09-14 by [F49](../features/backup-and-recovery.md). Q12's backup and
-disaster-recovery half is closed: a backup is a second provenance a new cluster restores, and
-the recovery after a permanent majority loss is an operator's, offline, to one survivor.
+Recorded 2026-09-14 by [F49](../features/backup-and-recovery.md).
 
 | Decision | Where it is, and what it does not settle |
 | --- | --- |
-| **Q12: a backup is one verified file per group at that group's committed boundary, restored only into an empty new cluster that then refuses the old identities; a permanently lost majority is recovered by an operator rewriting one stopped survivor's membership, and by nothing the cluster does on its own** | `Backup { table, path }` (`shoal-core/src/server/control/backup.rs`, `shard/backup.rs`) is a control record every group's leader drives: the group's own snapshot file cut at a boundary the record names, copied under the path with a JSON manifest beside it, verified against it, and refused until wire version 5 is activated so the file's version 2 header names its cluster. `Restore { path }` (`shard/restore.rs`) is asked of a fresh, initialized, empty cluster: the files' coverage, schema and source cluster are judged before anything is proposed, every group's leader builds a file for its tablets from them and installs it on every member through the repair install path under a quarantine a scrub lifts, `restored_from` is committed, and a node of the source cluster is refused as removed at every door (`backup_restore_verifies_history_in_new_cluster`). `force_recover(conf, &[me])` (`recover.rs`) runs on a stopped survivor under its lock: it applies what the control log held unapplied, appends a membership of this node alone and a `ForceRecovered` at a term past every term seen, rewrites every durable group whose members include a lost node to this shard alone, and applying the record tombstones the lost members with a `Remove` plan each; the cluster meanwhile refuses writes, strong reads and admin mutations naming the voters and the way out, and a restart with `bootstrap: true` mints nothing (`permanent_quorum_loss_requires_explicit_recovery`). Single-node data takes the same path: `export_standalone` writes a stopped standalone directory's archives as one such file per table and a fresh cluster restores it (`single_node_data_has_a_verified_cluster_migration_path`). Not settled: a backup's shipping, retention and age; a point-in-time or partial restore; a recovery to more than one survivor, or of a set the survivor never held; and the backup arm's full-scale cost |
+| **Q12: a backup is one verified file per group at that group's committed boundary, restored only into an empty new cluster that then refuses the old identities; a permanently lost majority is recovered by an operator rewriting one stopped survivor's membership** | `Backup { table, path }` (`control/backup.rs`, `shard/backup.rs`) is a control record every group's leader drives: the group's own snapshot file cut at a boundary the record names, copied under the path with a JSON manifest beside it, verified, refused until wire 5 is activated. `Restore { path }` (`shard/restore.rs`) is asked of a fresh, initialized, empty cluster: coverage, schema and source cluster are judged before anything is proposed; every group's leader builds a file for its tablets and installs it on every member through the repair path under a quarantine a scrub lifts; `restored_from` is committed and a node of the source cluster is refused as removed at every door (`backup_restore_verifies_history_in_new_cluster`). `force_recover(conf, &[me])` (`recover.rs`) runs on a stopped survivor under its lock: it applies what the control log held unapplied, appends a membership of this node alone and a `ForceRecovered` at a term past every term seen, rewrites every durable group whose members include a lost node to this shard alone, and applying the record tombstones the lost members with a `Remove` plan each (`permanent_quorum_loss_requires_explicit_recovery`). Single-node data takes the same path: `export_standalone` writes a stopped standalone directory's archives as one such file per table (`single_node_data_has_a_verified_cluster_migration_path`). Not settled: a backup's shipping, retention and age; point-in-time or partial restore; recovery to more than one survivor, or of a set the survivor never held; the backup arm's full-scale cost |
 
 #### Q11 at M10c
 
 Recorded 2026-09-14 by [F50](../features/cluster-operations.md). Q11's certificate half is
-closed: a certificate is bound to a node, rotated on a live node, and an address change is
-followed; first-boot provisioning is closed as explicitly manual.
+closed; first-boot provisioning is closed as explicitly manual.
 
 | Decision | Where it is, and what it does not settle |
 | --- | --- |
-| **Q11: a peer certificate is bound to the node it claims by its `shoal-node://<id>` name, on both ends of every lane; a certificate and an authority rotate on a live node whole or not at all; an address changes at a restart under the bound certificate and the cluster follows it; and a certificate is issued for a node id that exists** | `shared::tls::node_identity_of` reads the URI SAN off the leaf the authority verified and `Established.peer` carries it; `bound_identity` (`peer/handshake.rs`) judges the hello against it at the listener and at the dialler, `IdentityMismatch` for another node and `Unauthorized` for none, under `cluster.tls.bind_identity` (on by default; off is the shared-leaf deployment, named as what it gives up). `PeerTlsHolder` is read at every handshake and `ReloadTls` / `ShoalPool::reload_tls` swap both configs or neither; `ca` is a bundle through an authority rotation. An address change is the M3 rule - a restart, a higher incarnation, the new record observed, a clone at the old address refused as a duplicate - plus `PeerNetwork::note_addresses` and `maybe_readdress`, so the control leader dials the member where it is and writes it into the membership for the next leader; a clone that wins is fed past its shorter log by `allow_log_reversion`. Provisioning before a node id exists is explicitly unsupported: the id is minted at the first claim, the leaf issued for it, and the node started under the binding afterwards (`certificate_rotation_binds_identity`, `address_change_is_observed_and_a_stale_clone_is_fenced`, `a_peer_certificate_names_its_node_and_a_reload_swaps_whole`). Not settled: nothing issues or distributes a certificate, a reload is per node, and a deployment sharing one leaf has no identity in it |
+| **Q11: a peer certificate is bound to the node it claims by its `shoal-node://<id>` name on both ends of every lane; a certificate and an authority rotate on a live node whole or not at all; an address change at a restart is followed** | `shared::tls::node_identity_of` reads the URI SAN off the leaf the authority verified; `bound_identity` (`peer/handshake.rs`) judges the hello against it at the listener and at the dialler, `IdentityMismatch` for another node and `Unauthorized` for none, under `cluster.tls.bind_identity` (on by default; off is the shared-leaf deployment). `PeerTlsHolder` is read at every handshake and `ReloadTls` swaps both configs or neither; `ca` is a bundle through an authority rotation. An address change is the M3 rule plus `PeerNetwork::note_addresses` and `maybe_readdress`, so the control leader dials the member where it is and writes it into the membership; a clone that wins is fed past its shorter log by `allow_log_reversion`. Provisioning before a node id exists is manual: the id is minted at the first claim, the leaf issued for it, the node started under the binding afterwards. Not settled: nothing issues or distributes a certificate; a reload is per node; a shared leaf carries no identity |
 
-#### Q10 and Q11 at M2
+### The questions, and where each was decided
 
-Recorded 2026-09-12 by [F38](../features/inter-node-transport.md). Neither question is closed;
-what M2 owed was the *contract* each rests on, written down early enough that the transport
-could not be built against a different one.
+| ID | Question | Decided | Open remainder |
+| --- | --- | --- | --- |
+| Q1 | Which embedded Raft library, on which runtime | [M1](#q1-and-q13-at-m1): `openraft` on glommio for the control plane; [M4](#q2-q3-and-q4-at-m4): the same under a shard for the data plane, grouped by replica set | — |
+| Q2 | How logical logs share a physical WAL | [M4](#q2-q3-and-q4-at-m4): one WAL per shard, a format 2 frame per group entry, one fsync per batch | The sixty-four leader figure on the benchmark host |
+| Q3 | A stable checkpoint without long pauses | Design at [M4](#q2-q3-and-q4-at-m4), transfer at [M7](#q3-and-q9-at-m7) | A snapshot copies rather than pins ([O52](../appendix/optimizations.md#o52-a-snapshot-copies-every-record-of-the-archives-into-one-file)) |
+| Q4 | Results, retries and `One` in committed order | [M4](#q2-q3-and-q4-at-m4) apply-and-derive; [M6](#q4-at-m6) the durable mark; [M9a](#q4-and-q5-at-m9a) expiry | Speculation; a replica-local watermark |
+| Q5 | A portable session token and one strong level | [M5](#q5-at-m5); across a move at [M9a](#q4-and-q5-at-m9a) | A split |
+| Q6 | Whether a lease read can beat a barrier | **Open.** The barrier is the default and the only strong read; `ReadPolicy::LeaseRead` is never used | The whole question ([C15](open-issues.md)) |
+| Q7 | The auto-removal default and its accounting | [M9b](#q7-and-q8-at-m9b): thirty minutes in committed eighths, maintenance, a blocking expiry | Per-member grace; `SetPolicy`; cancelling a decommission |
+| Q8 | Weights, reserve and hotspots on unequal hardware | [M9b](#q7-and-q8-at-m9b) for placement and budgets | The hotspot threshold is not built; adaptive and per-pair budgets |
+| Q9 | The retention budget | [M7](#q3-and-q9-at-m7): bytes of sealed WAL per shard | No time budget; a stream that never keeps up |
+| Q10 | Schema, wire and on-disk negotiation | Contract at [M2](#q10-and-q11-at-m2); wire at [M10a](#q10-at-m10a); schema and marker migration explicitly unsupported | — |
+| Q11 | Certificates, cloned directories, address changes | Identity at [M3](#q11-and-q13-at-m3); certificate at [M10c](#q11-at-m10c); provisioning explicitly manual | Certificate issuance and distribution |
+| Q12 | Authority on disagreement; recovery after a lost majority | Corruption at [M8](#q12-at-m8); backup and recovery at [M10b](#q12-at-m10b) | Recovery to several survivors; backup shipping and retention |
+| Q13 | Scale targets | First numbers at [M1](#q1-and-q13-at-m1); fanout and reports at [M3](#q11-and-q13-at-m3) | Budgets at a hundred members; the report's reachability list |
 
-| Contract | Where it is, and what it does not yet settle |
-| --- | --- |
-| **Q10: schema identity, wire version and capabilities are three things, compared separately** | The 68 byte hello (`shoal-proto/src/shared/protocol/peer/hello.rs`) carries `schema_id`, `wire_min`/`wire_max` and a `capabilities` bit set as three fields, and the judge (`shoal-core/src/server/peer/handshake.rs`) compares each. `SCHEMA_ID` is the structural fingerprint *without* `PROTOCOL_VERSION` folded in (`shoal-derive/src/traits/fingerprint.rs`, `the_schema_id_is_the_fingerprint_without_the_version`), which is the separation the first draft of this page asked for. **At M2 all three must match exactly**: `speaks_our_version` requires the ranges to meet at `PROTOCOL_VERSION`, and the capability set is `CAP_FORWARD_V1 \| CAP_CONTROL_RAFT_V1 \| CAP_BULK_SNAPSHOT_V1` or nothing. A version range and a bit set exist so that M10 has fields to negotiate over without changing the hello's shape; the codec that makes an n−1 acceptance mean something is M10's, and so is the on-disk format half of the question, which the hello does not carry at all. *Both delivered at [M10a](#q10-at-m10a).* |
-| **Q11: a peer certificate chains to the cluster's authority; its binding to a node is deferred to the joiner** | `cluster.tls` (`cert`, `key`, `ca`) makes every lane mutual TLS 1.3 handed to the kernel; the listener's `WebPkiClientVerifier` requires a chain to `ca` and the dialler presents its own certificate (`shoal-proto/src/shared/tls.rs`, `a_peer_listener_requires_a_certificate_from_the_cluster_authority`). A SAN of `shoal-node://<id>` is written by the test PKI and read by nothing; `PeerRefusal::Unauthorized` and `IdentityMismatch` are defined and never produced. **What M2 decided** is the shape: identity is asserted in the hello and proven by the certificate, which is the only order that lets a node be provisioned a certificate before it has minted a `NodeId` - the certificate names the authority that admitted it, and the binding of a particular certificate to a particular node is checked when a joiner exists to be admitted. Incarnation is process start time, provisional; first-boot provisioning, rotation, cloned-directory fencing and address changes are all still open, at M3 and after |
+## Design choices
+
+The contract precedes the code: P1–P6 were agreed before a type existed, and every acceptance
+test on every C page names the milestone that gated it. A property is executable: the
+`shoal-model` oracle checks P1, P3, P4 and P5 against saved schedules, and the fixture checks
+them against processes. Authority is split by construction, not by convention: a shard that
+receives a `TabletMap` builds groups from it and never elects on its say-so, and the control
+group's apply is a pure function of committed commands. Decisions are recorded where they were
+made, with what they did not settle, so a later reader can see the boundary of each.
 
 ## Alternatives rejected
 
-The earlier heartbeat-max promotion proof assumes current, durable, compatible histories and an
-intersecting tablet quorum; heartbeat reports establish none of these. A metadata majority and
-a data majority may contain entirely different nodes. Increasing the failure timeout does not
-repair this safety gap. External group membership is excluded by the deployment requirement.
+The heartbeat-max promotion proof assumed current, durable, compatible histories and an
+intersecting tablet quorum; heartbeat reports establish none of these, and a metadata majority
+and a data majority may contain entirely different nodes. Increasing the failure timeout does
+not repair that. A custom centrally appointed primary protocol was not taken as the fallback for
+an inconvenient library API: it would have needed its own election, recovery, reconfiguration
+and read specification, a safety argument and an executable model. External group membership
+is excluded by R7. A lease read (Q6) was left unbuilt because the barrier's cost is a heartbeat
+round and the lease would need clock, expiry, revocation and pause assumptions the failure
+model does not grant.
 
 ## What it costs
 
-Consensus introduces per-group state, scheduling, log matching, and configuration transitions.
-The initial spike must measure idle group overhead and batched active throughput. Shared physical
-WALs remain possible; independently fsyncing thousands of files is not a prerequisite for logical
-groups. Safety mechanisms remain required even if the baseline misses a latency target.
+Consensus costs per-group state, scheduling, log matching and configuration transitions. The
+idle cost of a group is the M1 tables above; the write cost is one fsync per batch across
+groups on a shard rather than one per group; the read cost of a barrier is a heartbeat round.
+Shared physical WALs keep the group count from multiplying fsyncs. Safety mechanisms stay
+required whatever the baseline's latency.
 
-## What it breaks
+## Limitations
 
-This page supersedes the first draft's heartbeat-max election, lease-by-recent-contact, fourteen
-byte fixed record budget, and map-only replica transition. C1–C12 describe the revised baseline.
-No delivered feature or frozen benchmark is changed by this documentation revision.
+The contract promises nothing across tablets: no atomic bundle and no common read snapshot.
+Correctness never depends on clocks, which means no lease read. The failure model excludes
+Byzantine replicas and lying disks. Every remainder in the decision record's "Not settled"
+clauses is listed on [C15](open-issues.md#not-settled).
 
 ## Invariants to uphold
 
 - Every acknowledged durable quorum operation remains in every future authoritative history.
-- A replica's term/vote, durable acknowledgements, and installed checkpoints survive restart.
-- Only a consensus-authorized primary can commit new operations in the active configuration.
+- A replica's term/vote, durable acknowledgements and installed checkpoints survive restart.
+- Only a consensus-authorized primary commits new operations in the active configuration.
 - Checkpoints contain committed applied state; deleting WAL segments cannot remove required history.
 - Joining, snapshot installation, corruption quarantine and voting eligibility are distinct states.
 - A quarantine is decided on evidence - a checksum, or a verified majority's digest at a committed boundary - and lifted only by a verified repair or an operator; a split no majority can judge stops with its evidence and installs nothing.
 - Removal cannot lower a write's previously promised durability or bypass a missing data quorum.
 - All coordination and election components are embedded in Shoal nodes.
 
-## Prerequisites
+## How it is measured
 
-The existing storage model and [C11](testing.md)'s pure protocol model. Resolve the blocking
-questions below before the named milestone; record the decision and evidence in the
-[decision record](#decision-record) when resolved, as the Before-M0 rows do.
-A preferred answer is a design hypothesis, not evidence that a library already supports it.
-
-## Questions to answer
-
-| ID | Question and preferred direction | Gate and evidence |
-| --- | --- | --- |
-| Q1 | Which embedded data-plane Raft library can be driven under shard ownership? Evaluate callbacks, durable term/vote handling, batching and idle-group cost; compare grouped tablets only as an explicit alternative. **Decided 2026-09-11:** the protocol is Raft and the candidates are pinned in the [decision record](#decision-record). **Decided at M1** ([F37](../features/node-identity-control-plane.md)): `openraft` `0.10.0-alpha.34` on a glommio `AsyncRuntime`, with the spike's numbers [recorded](#q1-and-q13-decided-at-m1). What stays open is whether the *data* plane uses the same library under a shard: the spike found per-group heartbeats do not coalesce, so grouped tablets are now the expected shape rather than the alternative | M1; spike run and version pinned. M4 decides the data plane's shape against it |
-| Q2 | How are logical tablet logs multiplexed into shared physical WALs without lost completion ordering? What alignment, table identity, versioning and checksums does the envelope need? **Decided at M4** ([decision record](#q2-q3-and-q4-at-m4)): one shared WAL per shard, a format 2 frame naming its group, one fsync per batch across groups | ~~M4; format specification, restart and rotation tests~~ Done at M4 |
-| Q3 | Which checkpoint mechanism provides a stable boundary without long write pauses? Prefer immutable generations or copy-on-write; a bounded pause is a documented initial fallback. **Design decided at M4** ([decision record](#q2-q3-and-q4-at-m4)): a per-group checkpoint log id the compactor moves, immutable sealed segments, no pause. **Implemented at M7** ([decision record](#q3-and-q9-at-m7)): the cut is a file the compactor writes between two jobs at the archives' boundary, installed atomically under a marker | ~~M4 design, M7 implementation; crash matrix and pause/memory measurements~~ Closed at M7; the crash matrix is `snapshot_install_is_atomic_at_every_crash_point` |
-| Q4 | How are conditional mutation results, no-ops and retries derived in committed order while batching? Can `One` use a distinct accepted/pending API? How are volatile-table consensus metadata and full-cluster restart handled? **Decided at M4** ([decision record](#q2-q3-and-q4-at-m4)): apply once in committed order and derive there, no speculation; `One` refused until there is an API; volatile groups on an in-memory log that a restart empties. **Expiry decided at M9a** ([decision record](#q4-and-q5-at-m9a)): a time-ordered identity refused by its own time or the group's forgetting, before proposal | ~~M4; operation/API matrix and state-machine tests; unsupported policies explicitly refused~~ Done at M4; ~~the retry table's durable mark is M6's~~ the durable mark done at M6 ([decision record](#q4-at-m6)), expiry M9a's |
-| Q5 | What token format gives session reads a portable committed lower bound across leaders, moves and eventual splits? **Decided at M5** ([decision record](#q5-at-m5)): cluster, table, tablet, group and index, forty-eight bytes, an index and no term, refused by name outside its lineage; and one strong level, `Quorum`. **Across a move decided at M9a** ([decision record](#q4-and-q5-at-m9a)): the group identity is pinned, so the token is the same token after | ~~M5; lineage validation and expired/unknown-token outcomes~~ Done at M5; across a leader change done at M6, across a move M9a's |
-| Q6 | Can a correct lease optimization beat quorum read barriers enough to justify clock assumptions? | After M6; explicit expiry, revocation and pause model plus measurements; barriers remain default - and are, at M6: `ReadPolicy::LeaseRead` is never used, and the lease M6 judges (`Lease::of`) decides only whether a leader may *append*, never what a read may see |
-| Q7 | What finite auto-removal default and capacity guardrails fit deployments? Proposed 30m; persist grace across control-plane restart, allow null and maintenance suspension. **Decided at M9b** ([decision record](#q7-and-q8-at-m9b)): thirty minutes, counted by the leader in committed eighths so a leader change loses at most one, `null` opens no grace, `Maintenance` suspends with a reported remaining deadline, and expiry is a removal plan that blocks by name rather than manufacturing capacity | ~~M9b; timed removal, partition healing, insufficient-capacity and maintenance tests~~ Done at M9b: `automatic_removal_and_rejoin_preserve_fencing`, `removal_grace_survives_control_leader_restart`, `maintenance_suspends_automatic_removal`, `remove_without_replacement_capacity_stays_blocked` |
-| Q8 | What initial capacity weights, disk reserve and hotspot thresholds avoid oscillation on unequal hardware? **Decided at M9b** ([decision record](#q7-and-q8-at-m9b)): a weight per node defaulting to its shard count, the target a byte share water-filled to what a member can hold, a tenth's hysteresis, a 1 GiB reserve checked twice, a 64 MiB/s bucket per node and two streams per shard; hotspot thresholds are not built | ~~M9b; heterogeneous placement and stalled-recovery workloads~~ Done at M9b for placement and budgets: `heterogeneous_placement_obeys_feasible_weights`, `node_transfer_budgets_bound_concurrent_sources`; a stalled-recovery workload under an adaptive budget is not built |
-| Q9 | What replication retention budget supports catch-up without pinning unbounded shared WALs? **Decided at M7** ([decision record](#q3-and-q9-at-m7)): bytes of sealed WAL per shard, a forced snapshot and purge behind the groups pinning it | ~~M7; time/byte budgets, slow follower and snapshot starvation tests~~ Closed at M7 with a byte budget and `retention_and_recovery_memory_are_bounded`; a time budget is not offered |
-| Q10 | How do clients negotiate schema identity separately from wire capabilities and on-disk format? **Contract recorded at M2** ([decision record](#q10-and-q11-at-m2)): three separately compared fields in the hello, exact match until M10's codecs. **Decided at M10a** ([decision record](#q10-at-m10a)): the wire negotiated to the highest both read with every frame naming its codec, a committed activation judged by the running builds as the rollback boundary for wire and disk, the client lane exact at its own version; a schema change and a marker format migration explicitly unsupported | ~~M2 contract, M10 release gate; mixed-version operation and rollback tests~~ Done at M10a: `mixed_versions_exchange_real_cluster_operations`, `rolling_upgrade_survives_operations_and_failure`, and `rolling_upgrade_from_previous_binary` against a real previous build |
-| Q11 | How are node certificates provisioned before first join, identities protected against cloned directories, and address changes authenticated? **Shape recorded at M2** ([decision record](#q10-and-q11-at-m2)): chain to `ca` on every lane now, the certificate-to-node binding with the joiner. **Identity decided at M3** ([decision record](#q11-and-q13-at-m3)): a persisted incarnation, highest wins, `dial` for private addresses. **Certificate decided at M10c** ([decision record](#q11-at-m10c)): the SAN bound on both ends of every lane, rotation by reload and a bundle, an address change followed, and provisioning before an id exists explicitly manual | ~~M2~~ ~~M3 onward~~ M3 and M10c done; join, replacement, duplicate identity and certificate rotation tests |
-| Q12 | What checksummed checkpoint or backup is authoritative when replicas disagree? What operator recovery is possible after a majority is permanently lost? **Decided at M8 and M10b** ([M8](#q12-at-m8), [M10b](#q12-at-m10b)): a strict majority of verified copies at a scrub's committed boundary, or an operator's named source; a split stops unresolved with its evidence; the scheduled half verifies and never installs; a backup is one verified file per group restored only into an empty new cluster that refuses the old identities; a lost majority is recovered by an operator rewriting one stopped survivor's membership, never by the cluster | ~~M8/M10~~ M8 and M10b done |
-| Q13 | What scale targets bound table count, tablet count, connections, map dissemination and control-plane reports? **First numbers at M1** ([decision record](#q1-and-q13-decided-at-m1)): about a thousand groups a thread at openraft's timers, four thousand at C1's, 350 KiB a group idle. Connections, dissemination and reports are M3's | M1/M3; memory, idle CPU and update-fanout budgets measured at target scale |
-
-## How it would be measured
-
-[C10](performance.md) specifies the control/data-plane spike, fixed-resource overhead tests,
-scale-out tests, and failure measurements. Results include completed durable work, latency tails,
-and replica lag; acknowledged throughput with growing lag is not sustainable throughput.
+[C10](performance.md) prices the control plane's idle cost (the spike), a durable and a volatile
+quorum against the same placement replicating to nobody, a barrier and a token against a `One`
+read, and a failover as a time series. Results are completed durable work, latency tails and
+replica lag; acknowledged throughput with growing lag is not sustainable throughput.
 
 ## Acceptance tests
 
@@ -463,7 +441,7 @@ and replica lag; acknowledged throughput with growing lag is not sustainable thr
 
 ## Related
 
-[C3](membership.md), [C5](replication.md), [C7](failover.md), [C11](testing.md), and
-[Milestones](milestones.md) implement and test this contract. The
-[implementation reading list](prior-art.md#implementation-reading-list) maps primary sources,
-library APIs and Linux persistence contracts to the gates that require them.
+[C3](membership.md), [C5](replication.md), [C7](failover.md) and [C11](testing.md) implement
+and test this contract; [Milestones](milestones.md) records the gates; the
+[implementation reading list](prior-art.md#implementation-reading-list) maps primary sources and
+library APIs to the decisions that used them; [C15](open-issues.md) gathers the remainders.

@@ -7,7 +7,7 @@ Since [F38](inter-node-transport.md) the peer hello has carried three things the
 id, a wire version *range* and a capability set - and compared each of them exactly.
 `speaks_our_version` required the peer's range to contain `PROTOCOL_VERSION` and nothing else;
 the range and the bit set were fields to negotiate over one day, with the codec that would make
-an n−1 acceptance mean something left to M10. [C2](../distributed/transport.md#compatibility-and-rolling-upgrades)
+an n−1 acceptance mean something left to M10. [C2](../distributed/transport.md#compatibility-and-the-wire-version)
 said what that codec had to be: a negotiated version that is *actually encoded and decoded*, a
 cluster-wide activated version persisted in control state, a rollback limit stated once a
 storage format past it is written, and old and new binaries exchanging queries, replication,
@@ -261,7 +261,7 @@ taken and none is claimed; a change that touched the transport's bytes per frame
 
 ## Related
 
-[C2](../distributed/transport.md#compatibility-and-rolling-upgrades),
+[C2](../distributed/transport.md#compatibility-and-the-wire-version),
 [C13 Q10](../distributed/protocol.md#q10-at-m10a), [M10](../distributed/milestones.md#m10-operations-and-the-real-cluster),
 [F38](inter-node-transport.md), [F39](membership.md), [F43](node-recovery.md),
 [F49](backup-and-recovery.md), [F50](cluster-operations.md),

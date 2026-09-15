@@ -2,10 +2,11 @@
 
 ## Context
 
-Use primary sources for individual protocol and implementation decisions. Similar vocabulary does
-not make protocols equivalent. This revision withdraws the first draft's universal claims about
-automatic removal, interchangeable leases/high watermarks, and an extra per-write vote in Raft.
-**Shoal embeds coordination and failover; these references introduce no external service.**
+Every protocol and implementation decision in this chapter cites a primary source, and similar
+vocabulary is never taken as equivalence. The first draft's universal claims - about automatic
+removal, interchangeable leases and high watermarks, and an extra per-write vote in Raft - were
+withdrawn before anything was built. **Shoal embeds coordination and failover; these references
+introduced no external service.** What each system lent, and what was refused, is below.
 
 ## The systems
 
@@ -13,108 +14,115 @@ automatic removal, interchangeable leases/high watermarks, and an extra per-writ
 
 [How ScyllaDB implemented tablets](https://www.scylladb.com/2024/06/17/how-tablets/) is useful for
 persisted transitions and independent tablet storage. Its load balancer reconciles transitions
-after failure and serializes conflicting operations. Use those ideas in C8 while implementing
-Shoal's own selected ordered-replication configuration protocol.
+after failure and serializes conflicting operations, which is what [C8](rebalancing.md)'s move
+record, its phase-by-phase commit and its queue behind a repair do, under `openraft`'s own
+membership transition.
 
-Do not equate a global tablet-id range shared across every table with per-table tablet replication.
-Separate logical identity, shared placement templates and physical WAL batching (C4/C5).
-Scylla's timestamp-based data path is not the chosen Shoal primary model.
+A global tablet-id range shared across every table is not per-table tablet replication: Shoal
+keeps logical identity per table, a placement rule shared across tables, and one physical WAL
+per shard as three separate things ([C4](tablet-map.md), [C5](replication.md)). Scylla's
+timestamp-based data path is not Shoal's primary model.
 
 ### Kafka
 
 [Kafka replication design](https://kafka.apache.org/41/design/design/#replication) and
 [KIP-101: leader epochs and truncation](https://cwiki.apache.org/confluence/display/KAFKA/KIP-101+-+Alter+Replication+Protocol+to+use+Leader+Epoch+rather+than+High+Watermark+for+Truncation)
-are references for the distinction between leader history, replication progress and commitment.
-Kafka's ISR policy is not an arbitrary majority of currently Up replicas. Do not copy its names
-onto C5's quorum arithmetic or call a high watermark a read lease. A controller choice also does
-not by itself supply Shoal's storage reconciliation or durability proof.
+are the references for the distinction between leader history, replication progress and
+commitment. Kafka's ISR policy is not an arbitrary majority of currently `Up` replicas, its
+names are not [C5](replication.md)'s quorum arithmetic, and a high watermark is not a read lease.
+A controller's choice supplies neither Shoal's storage reconciliation nor its durability proof.
 
 ### Kudu, TiKV and CockroachDB
 
-The useful pattern is independent replicated ranges/tablets with safe data leadership. For Shoal's
-Rust integration spike, [raft-rs](https://github.com/tikv/raft-rs) provides a consensus core while
-the embedding application supplies log, state machine and transport. Inspect
-[RawNode](https://docs.rs/raft/latest/raft/raw_node/struct.RawNode.html) and its persistence/apply
-advance points before selecting the adapter. It is a library candidate, not a requirement to
-run TiKV or its placement service.
+The pattern taken is independent replicated ranges with safe data leadership.
+[raft-rs](https://github.com/tikv/raft-rs) was pinned as a candidate at the Before-M0 gate - a
+consensus core whose embedding application supplies log, state machine and transport, driven
+through [RawNode](https://docs.rs/raft/latest/raft/raw_node/struct.RawNode.html) - and was
+considered, not measured: it has no runtime seam to adapt, which is the seam Q1 was blocking on,
+and `openraft` took both planes ([C13](protocol.md#q1-and-q13-at-m1)). TiKV's placement service
+was never a requirement.
 
 [CockroachDB's replication layer](https://docs.cockroachlabs.com/docs/stable/architecture/replication-layer)
-is a reference for separating replicas, leadership and serving authority. Its implementation is
-not evidence that Shoal can implement a correct lease by resetting a timer on metadata contact.
+is the reference for separating replicas, leadership and serving authority. Its leases are not
+evidence that a timer reset on metadata contact is a correct lease, and Shoal takes none: a
+strong read is a barrier ([C6](reads.md)), and the one lease judged is a write's
+([C7](failover.md#the-lease)).
 
 [The Raft paper](https://raft.github.io/raft.pdf) specifies log matching, election safety,
-configuration changes, snapshots and read considerations. Use it to review adapter assumptions;
-prefer tested library behavior rather than implement consensus from a summary. A per-tablet
-replicated log does not provide cross-tablet transactions.
+configuration changes, snapshots and read considerations, and is what every adapter assumption
+was reviewed against; the library's tested behaviour was preferred to consensus written from a
+summary. A per-tablet replicated log provides no cross-tablet transaction, and none is promised.
 
 ### Cassandra
 
 Cassandra's leaderless conflict resolution and tombstone handling address a different data model.
-The earlier analogy between a dropped Shoal replica's cleanup grace and row tombstone GC is
-withdrawn: keeping source files briefly is not a proof that deletes cannot be resurrected.
-C7's complete checkpoint manifest and C8's eligibility/configuration rules provide that boundary.
-Failure suspicion remains separate from membership authority; phi is not a literal dead-node
-probability or a fixed-duration bound (C3).
+The first draft's analogy between a retired replica's cleanup grace and row tombstone GC was
+withdrawn: keeping source files briefly proves nothing about resurrected deletes, and a
+snapshot's total coverage ([C7](failover.md#snapshots-and-atomic-installation)) and a retired
+copy's refusal by name ([C8](rebalancing.md#a-move)) are the boundary instead. Phi-accrual
+detection came from Cassandra's lineage and stays separate from membership authority: phi is
+a suspicion score, not a probability that a node is dead and not a fixed deadline ([C3](membership.md#failure-detection)).
 
 ### MongoDB
 
-The comparison illustrates why write acknowledgement policy and rollback behavior must be stated
-separately. Shoal's optional accepted-only `One` policy may lose an uncommitted suffix; the default
-durable quorum may not. No foreign product's timeout default is used as justification for Shoal's
-five-second election base. Q1 measures/tunes that base under the chosen embedded protocol.
+The comparison shows why write acknowledgement policy and rollback behaviour are stated
+separately. An accepted-only `One` write would lose an uncommitted suffix, which is why it is
+refused until an API says so; the default durable quorum loses nothing. No other product's
+timeout default justifies the five second election base; what the base makes the failover
+window is measured ([C7](failover.md#the-window-and-what-a-client-sees)).
 
 ### Aurora
 
 Different quorum systems have different fault models and storage layouts. Shoal uses distinct
-node replicas and the selected consensus configuration rules; it does not infer a durability
-promise by copying another system's replica counts. C13 defines the supported failure model.
+node replicas under `openraft`'s configuration rules and infers no durability promise from
+another system's replica counts; [C13](protocol.md#failure-model-and-availability) is the
+failure model it does promise.
 
 ### DragonflyDB
 
-Thread ownership and journal batching are useful architectural comparisons. They do not establish
-the safety of Shoal's elections or configuration changes. In particular, an external placement
-or failover controller is outside this plan. Shoal's control and data protocols run in its nodes.
+Thread ownership and journal batching are the architectural comparison - the shared WAL with one
+fsync per batch across groups is the same instinct - and establish nothing about the safety of
+elections or configuration changes. An external placement or failover controller was never in
+the design; both protocols run in the nodes.
 
 ### FoundationDB
 
 [The FoundationDB paper](https://www.foundationdb.org/files/fdb-paper.pdf), especially its testing
-section, is a reference for simulation and controlled fault injection. C11 applies that discipline
-to a bounded new protocol/adapter state machine plus real process tests. The absence of a simulated
-Glommio runtime is not a reason to reject every deterministic schedule test.
+section, is the reference for simulation and controlled fault injection. [C11](testing.md)
+applies that discipline to a bounded protocol model plus real process tests; the absence of a
+simulated glommio runtime was not taken as a reason to reject deterministic schedules.
 
 ## Implementation reading list
 
-These links were consulted or identify APIs/contracts vital to implementation. Read the source
-for the chosen release at each gate; `latest` documentation and default branches are discovery
-links, not dependency pins. Replace/add exact release and commit permalinks in the decision record
-when Q1/Q2/Q10 settle the implementation. That [record](protocol.md#decision-record) exists since
-2026-09-11 and pins the Q1 candidates at the versions it read; it selects none of them yet.
+These links were read for the decisions they name. The source for the pinned release was read at
+each gate - `openraft 0.10.0-alpha.34` from the registry, never `latest` or a default branch -
+and the [decision record](protocol.md#decision-record) carries the paths and lines it read.
 
-| Reference | Why to read it | Gate |
+| Reference | What it decided | Decided at |
 | --- | --- | --- |
-| [Raft extended paper](https://raft.github.io/raft.pdf) | Election restrictions, matching histories, configuration transitions and snapshot metadata | C13 Q1, M1/M4 |
-| [OpenRaft integration guide](https://docs.rs/openraft/latest/openraft/docs/getting_started/index.html) | Embedded application network/storage seams and storage conformance tests | C3, M1/M3 |
-| [OpenRaft source](https://github.com/databendlabs/openraft) | Pin runtime, network and membership APIs; inspect actual completion behavior | C13 Q1 |
-| [OpenRaft RaftLogStorage](https://docs.rs/openraft/latest/openraft/storage/trait.RaftLogStorage.html) | Vote and log persistence, truncation and purge obligations | C3/C5, M1/M4 |
-| [OpenRaft RaftStateMachine](https://docs.rs/openraft/latest/openraft/storage/trait.RaftStateMachine.html) | Applied state, configuration and checkpoint installation lifecycle | C7, M7 |
-| [raft-rs source](https://github.com/tikv/raft-rs) | Candidate Rust consensus core with application-supplied I/O | C13 Q1 |
-| [raft-rs RawNode](https://docs.rs/raft/latest/raft/raw_node/struct.RawNode.html) | Ready batches, persistence/application advancement, read-index and membership entry points | C5/C6, M4/M5 |
-| [etcd Raft library](https://github.com/etcd-io/raft) | Independent embedded-library example of deterministic core, read paths and I/O integration; not an external etcd deployment | C13 Q1, C11 |
-| [etcd learner design](https://etcd.io/docs/v3.5/learning/design-learner/) | Why catching up a new member must be separated from increasing voting requirements | C8, M9a |
-| [Scylla tablet implementation](https://www.scylladb.com/2024/06/17/how-tablets/) | Resumable transition metadata, conflicting operations and tablet storage organization | C4/C8, M9a/b |
-| [Linux fsync/fdatasync](https://man7.org/linux/man-pages/man2/fsync.2.html) | Durability completion, I/O errors and required directory synchronization | C5/C7, M4/M7 |
-| [Linux rename](https://man7.org/linux/man-pages/man2/rename.2.html) | Atomic replacement semantics and filesystem constraints; rename alone is not a durability barrier | C7, M7 |
-| [FoundationDB paper](https://www.foundationdb.org/files/fdb-paper.pdf) | Reproducible fault scheduling and simulation/testing discipline | C11, M0 onward |
+| [Raft extended paper](https://raft.github.io/raft.pdf) | Election restrictions, matching histories, configuration transitions and snapshot metadata: the contract's P2–P5 | Before M0; [C13](protocol.md#the-contract) |
+| [OpenRaft integration guide](https://docs.rs/openraft/latest/openraft/docs/getting_started/index.html) | The network and storage seams the control plane and the shards implement; the conformance suites both pass | M1, M3 |
+| [OpenRaft source](https://github.com/databendlabs/openraft) | The runtime, network and membership APIs at the pinned alpha; `enable_leader_restore` off, `allow_log_reversion` on for the control group | M1, M10c |
+| [OpenRaft RaftLogStorage](https://docs.rs/openraft/latest/openraft/storage/trait.RaftLogStorage.html) | Vote and log persistence, truncation and purge, implemented by the control store and the shared WAL | M1, M4 |
+| [OpenRaft RaftStateMachine](https://docs.rs/openraft/latest/openraft/storage/trait.RaftStateMachine.html) | Apply, and the snapshot build and install lifecycle | M4, M7 |
+| [raft-rs source](https://github.com/tikv/raft-rs) and [RawNode](https://docs.rs/raft/latest/raft/raw_node/struct.RawNode.html) | Pinned as the alternative with application-supplied I/O; considered, not measured, and not taken | M1 |
+| [etcd Raft library](https://github.com/etcd-io/raft) | An independent embedded example of a deterministic core and its read paths; never an etcd deployment | Before M0, C11 |
+| [etcd learner design](https://etcd.io/docs/v3.5/learning/design-learner/) | Why catching up precedes promotion: the move's `Learner` and `CatchingUp` phases | M9a |
+| [Scylla tablet implementation](https://www.scylladb.com/2024/06/17/how-tablets/) | Resumable transition records, conflicting operations serialized, movable tablet storage | M9a, M9b |
+| [Linux fsync/fdatasync](https://man7.org/linux/man-pages/man2/fsync.2.html) | Durability completion, I/O errors and directory synchronization for the WAL, the checkpoint and the install marker | M4, M7 |
+| [Linux rename](https://man7.org/linux/man-pages/man2/rename.2.html) | Atomic replacement, which is not a durability barrier: the install syncs the data, the marker and the directory | M7 |
+| [FoundationDB paper](https://www.foundationdb.org/files/fdb-paper.pdf) | Reproducible fault scheduling: the protocol model's saved schedules and the fixture's named crash points | M0 onward |
 
 ## The comparison
 
-Shoal's selected guarantees must follow its actual embedded protocol and storage adapter, not an
-analogy to any one product. Automatic removal is a deployment policy with a proposed finite grace,
-not an industry-wide rule claimed to be universally on or off. The critical distinction is
-between suspected failure, data authority, safe replacement and final cleanup.
+Shoal's guarantees follow its embedded protocol and storage adapter, not an analogy to any one
+product. Automatic removal is a deployment policy with a finite grace - thirty minutes, `null`
+to disable - not an industry-wide rule claimed to be universally on or off. The distinction
+every page keeps is between suspected failure, data authority, safe replacement and final
+cleanup.
 
 ## Related
 
-[C13](protocol.md) decisions and open gates, [C3](membership.md), [C5](replication.md),
+[C13](protocol.md), [C3](membership.md), [C5](replication.md),
 [C7](failover.md), [C8](rebalancing.md), [C11](testing.md),
 [D9](../direction/prior-art.md) for the separate client-side review.

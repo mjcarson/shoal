@@ -14,7 +14,7 @@ owns it - and nothing said which gxhash produced it, whether that hash was stabl
 versions, or what `deterministic` would change if it were turned on. Upgrading gxhash, or turning
 the feature on, would silently re-hash every key and make every persisted directory unreadable,
 and no test would have noticed. Two nodes built from different lockfiles would disagree about
-which tablet a row is in, which is why [C1](../../distributed/node-identity.md#prerequisites)
+which tablet a row is in, which is why [C1](../../distributed/node-identity.md#how-it-works)
 made this a prerequisite of M1.
 
 ## Cause
@@ -126,4 +126,4 @@ it. **Item 46**, an unmarked directory being claimed, is unaffected.
 - [F15](../../features/client-server-split.md), which made the question live
 - [Partitioning](../../architecture/partitioning.md), whose claim about `deterministic` this
   corrected
-- [C1](../../distributed/node-identity.md#prerequisites)
+- [C1](../../distributed/node-identity.md#how-it-works)

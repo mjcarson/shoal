@@ -374,7 +374,7 @@ magnitude; the capture is the benchmark host's.
 
 [C4](../distributed/tablet-map.md), [C5](../distributed/replication.md),
 [C6](../distributed/reads.md), [C8](../distributed/rebalancing.md),
-[C9](../distributed/operations.md), [C13](../distributed/protocol.md#q4-at-m9a),
+[C9](../distributed/operations.md), [C13](../distributed/protocol.md#q4-and-q5-at-m9a),
 [F39](membership.md), [F40](replication.md), [F42](primary-failover.md),
 [F43](node-recovery.md), [F44](repair.md),
 [Resolved #108](../appendix/resolved/cluster-arm-overrides-dropped.md),

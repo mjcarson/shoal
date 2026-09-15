@@ -156,7 +156,7 @@ server runs; the join is what `exit` is for.
 ## Related
 
 - [F36](../../features/cluster-harness.md), which needed this first
-- [C11](../../distributed/testing.md#the-cluster-fixture), which named the bind-zero race
+- [C11](../../distributed/testing.md#the-process-fixture), which named the bind-zero race
 - [C9](../../distributed/operations.md#readiness), which asked for `ready()` and `shard_failed()`
 - [Item 16](../known-issues.md#16-panics-on-the-hot-path), the shard that should not die
 - [Item 69](../known-issues.md#69-shoalctl-and-the-tests-still-install-no-tracing-subscriber),

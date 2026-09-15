@@ -121,7 +121,7 @@ again on its directory.
 
 **The spike and the benchmark arm.** `shoal-spike` is a workspace binary that runs N three-member
 groups on one pinned executor with a counting loopback network and prints the idle and durable
-tables the [decision record](../distributed/protocol.md#q1-and-q13-decided-at-m1) now carries.
+tables the [decision record](../distributed/protocol.md#q1-and-q13-at-m1) now carries.
 `macro/cluster/overhead/nodes/1` is the grid's reference cell with a `cluster:` block, appended to
 `workload_ids::IDS` at port 12374, in the `cluster-overhead` family and the `cluster` group, and
 its capture carries a `ClusterFacts` record read from the pool's topology view.
@@ -322,7 +322,7 @@ arms run; they measure nothing, and the standalone arm's own spread across its t
 **What the control plane costs at idle**, from the spike rather than the arm: one group of one
 member ticks at openraft's default 50 ms heartbeat and sends nothing, at under 3% of one core in
 the spike's three-member measurement and less for a group of one. The
-[decision record](../distributed/protocol.md#q1-and-q13-decided-at-m1) has the tables.
+[decision record](../distributed/protocol.md#q1-and-q13-at-m1) has the tables.
 
 **What the runtime conformance suite costs to run:** the timer tests sleep, so
 `glommio_runtime_passes_the_openraft_suite` takes about a second and the storage suite, which
@@ -356,7 +356,7 @@ fsyncs, about eight. Both are unit tests of `shoal-core`.
 
 - [M1](../distributed/milestones.md#m1-node-identity-and-the-control-plane-thread), the gate
   this delivers, and [C1](../distributed/node-identity.md), [C3](../distributed/membership.md)
-  and [C13](../distributed/protocol.md#q1-and-q13-decided-at-m1), the pages it changed
+  and [C13](../distributed/protocol.md#q1-and-q13-at-m1), the pages it changed
 - [Configuration](../getting-started/configuration.md#cluster), the `cluster:` reference
 - [Resolved #65](../appendix/resolved/gxhash-pin.md), the hash pin, and
   [Resolved #45](../appendix/resolved/storage-marker-format.md), the marker whose invariant this

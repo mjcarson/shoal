@@ -2,342 +2,288 @@
 
 ## Context
 
-An operator needs to see data readiness, durability, replication debt and migration progress,
-and to recover without silently discarding evidence. All administration talks to Shoal nodes;
-there is no external membership or failover service. Basic observability and authorization land
-with the operations they expose, not only at the end of the feature.
+An operator sees data readiness, durability, replication debt, quarantines and plan progress,
+and changes the cluster through authorized, versioned, idempotent operations that are recorded
+where any node can read them. All of it talks to Shoal nodes over the client connection; there
+is no external service and no second protocol. Built across the milestones as each operation
+appeared - readiness and the admin frame at [F39](../features/membership.md), replication
+reports at [F40](../features/replication.md), repair at [F44](../features/repair.md), moves at
+[F45](../features/replica-migration.md), plans at [F46](../features/capacity-rebalancing.md),
+activation at [F48](../features/rolling-compatibility.md), backup and recovery at
+[F49](../features/backup-and-recovery.md), and certificate rotation, the cluster tab and the
+runbooks at [F50](../features/cluster-operations.md). [C14](deploying.md) is the walk through
+a deployment; the [runbooks](../operations/runbooks.md) are the procedures.
 
-## What exists today
+## How it works
 
-Shoal has authenticated client principals, TLS, a schema-specific `shoalctl` TUI and optional
-OTLP tracing/metrics. ~~The pool lacks a reliable readiness/failure handle.~~ Since
-[F39](../features/membership.md) it has the admin frame below for `Members`, `Readiness`,
-`Detector`, `Initialize` and `SetControlVoters` - over the authenticated client connection,
-authorized against `cluster.admins` by the connection's principal, versioned by expected topology
-version, idempotent by operation id and logged - and readiness in the three parts the design
-asks for: process, control and data, with default writes judged by the same map the shards
-admit against. Since [F40](../features/replication.md) it has `Replication` beside them - every
-tablet group a node hosts with its table, members, leader, applied, committed and checkpoint
-indexes, pending bytes and whether it is volatile and up, folded per node into groups hosted
-and led, the widest committed-to-applied gap, pending and volatile bytes and the writes
-answered unknown or rejected - which readiness carries too, and which is the replication debt
-this page asks an operator to see; `shoalctl` does not draw it yet. Since
-[F43](../features/node-recovery.md) the report carries the recovery row of the metrics table
-below - per group whether it is installing a snapshot, per shard the segments being compacted
-and the snapshot counters (built, sent, installed, bytes each way, chunks, duplicates, drops,
-resumes, aborts, redos, forced purges and entries installed), per node the installing count
-- and readiness counts a node's installing groups, so a node with a tablet installing is not
-ready for that tablet and is for the rest; the sealed WAL's budget is `replication.retained_bytes`.
-Since [F44](../features/repair.md) it has `Repair` and `RepairStatus` - a scrub of a table's
-groups at a committed boundary, a verdict over its copies, a quarantine of what the verdict
-names, and in repair mode an install from a verified source, recorded by operation and readable
-through any node - the integrity row of the metrics table below, per group whether a copy is
-quarantined and why, per node the quarantined count, and every member's quarantined copies on
-the frame every client is handed, which is what routes reads around them; and
-`cluster.repair` with a scheduled scrub that is off by default. ~~Existing disk archives do
-not have the end-to-end integrity metadata required by this design.~~ Every archive record,
-the checkpoint file and the retry sidecar carry a checksum; an archive from before the format
-is read unverified and counted until archive compaction rewrites it.
-Since [F45](../features/replica-migration.md) it has `Move` and `MoveStatus` - the replica set
-holding a tablet moved from one member to another, authorized, versioned, idempotent and
-audited like `Repair`, recorded by operation with a phase per group and readable through any
-node; a move asked for under a repair of the set, or a repair under a move, is recorded queued
-behind it rather than refused, and the record says what it waits behind - and
-`cluster.migration` with the catch-up lag, the phase timeout, the retired copy's grace and how
-many moves a shard drives at once. Since [F46](../features/capacity-rebalancing.md) it has
-`Decommission`, `Remove` with an optional replacement - which is `Replace` - `Maintenance`
-and `Rebalance`, authorized, versioned, idempotent and audited the same way, each recording a
-plan readable through `PlanStatus` and `Plans` from any node with its steps, its blocked
-reason and its outcome; `Members` reports each member's phase, its one-name state, its
-remaining grace, its weight and the free and held bytes the leader last heard, beside
-`under_replicated_sets` and the tombstones; and `cluster.migration` gained the byte budget,
-the stream cap and the disk reserve, `cluster.rebalance` the move cap, the hysteresis and the
-plan interval, and `cluster.weight` the node's share. It has no
-~~migration,~~ backup/restore ~~or cluster-admin API~~ and the rest of the admin families are
-their milestones'.
+### The admin frame
 
-## The design
+An `AdminRequest { op, expected_version, kind }` rides the authenticated client connection
+(`shoal-proto/src/shared/protocol/admin.rs`). A read is answered by the node reached; a
+mutation is relayed to the control thread, forwarded to the control leader, judged against
+`expected_version` (`StaleVersion` if the topology moved under it), authorized against
+`cluster.admins` by the connection's SCRAM principal (`Unauthorized` naming who may), applied
+once by its `op` id (`Repeated { version }` the second time), logged with the principal, and
+answered `Applied { version }` with a record a later read follows.
 
-### The Admin frame
+```mermaid
+sequenceDiagram
+    participant O as operator (shoalctl or Shoal::admin)
+    participant S as shard (any node)
+    participant P as control thread
+    participant L as control leader
+    participant G as control group
+    O->>S: AdminRequest { op, expected_version, kind } on the client lane
+    alt a read (Members, Readiness, Replication, Plans, ...)
+        S-->>O: this node's view
+    else a mutation
+        Note over S: principal in cluster.admins? else Unauthorized
+        S->>P: ControlRequest::Admin
+        P->>L: forwarded over the control lane
+        Note over L: expected_version current? else StaleVersion<br/>op seen before? -> Repeated
+        L->>G: propose ControlCommand (Decommission, Repair, Backup, ...)
+        G-->>O: Applied { version }
+        O->>S: PlanStatus / RepairStatus / BackupStatus { op }, from any node
+        S-->>O: the record, until its outcome is set
+    end
+```
 
-Use the authenticated client connection and relay admin requests to the embedded control runtime.
-Read-only replies identify the node and control/data versions observed. Mutations carry an
-operation id and expected policy/topology version, are forwarded to the control leader when
-appropriate, and return an accepted operation/status handle rather than block indefinitely for
-a long migration. Repeating the same operation id is idempotent.
-
-| Request family | Information/action |
+| Kind | What it does |
 | --- | --- |
-| Members / Topology | Identities, control voters, data placement, leader hints and committed configuration ids |
-| Lag / Health | Durable, committed, applied and checkpointed positions; eligible/quarantined/installing copies |
-| Detector | Local suspicion, report freshness, incarnation and committed Down episodes |
-| Rebalance / OperationStatus | Transition phases, blockers, remaining bytes, disk reserve and resource budgets. *At M9b `Rebalance`, `PlanStatus` and `Plans`: the steps, each step's move and state, the blocked reason and its version, the outcome with what moved; bytes are the sets' archived bytes as planned* |
-| Decommission / Remove / Replace | Capacity-checked state transitions; replacement joins as a learner first. *At M9b: `Decommission` of a plain member, `Remove` of a down or leaving one with an optional replacement that has to be a placeable member outside every set it would take; the plan is capacity-checked at every look and blocked by name* |
-| Policy / Maintenance | Versioned RF/default/grace/weight policies; suspend/resume automatic removal. *At M9b `Maintenance { node, suspend }` alone: the factor, the grace and a weight are not versioned operations - the first two are the bootstrap's, the weight the node's own file* |
-| Repair / Backup / Restore | Scoped operations with provenance, checksums and explicit recovery boundary |
+| `Members` | The `TopologyView`: cluster, this node and its incarnation, the leader, the version, every member with its role, health, phase, incarnation, grace remaining, weight, free and held bytes and wire, the voters, learners and whether a joint configuration is in flight, the placement, the factors, `up_members`, `under_replicated_sets`, the open plans, the tombstones, the policy and the wire (activated, floor, newest, the range the members speak) |
+| `Readiness` | Three parts: `process` (the shards bound), `control` (`joining`, `recovering` or `joined`, the leader, the voter and learner counts) and `data` (initialized, placed, members up, desired and active factor, `default_writes` as `Ok` or the `QuorumShortfall` by name, failed shards, and this node's replication summary) |
+| `Detector` | The leader's suspicion per member, report freshness and incarnations |
+| `Replication` | Every group this node hosts with its table, members, leader, applied, committed and checkpoint indexes, pending bytes, whether it is volatile, up, installing or quarantined; folded per node into groups hosted and led, the widest lag, pending and volatile bytes, writes answered unknown or rejected, the snapshot counters and the integrity counters |
+| `Initialize { nodes }` | Deals every tablet over these members in this order, once ([C4](tablet-map.md#the-placement-rule)) |
+| `SetControlVoters { voters }` | 1, 3 or 5; the leader promotes or demotes to it |
+| `SetTableReadPolicy { table, level }` | A table's read level, or none to clear it ([C6](reads.md#the-per-bundle-override)) |
+| `Repair { table, tablet, mode, source, release }`, `RepairStatus { op }` | A scrub of a table's groups, a verdict, a quarantine and in repair mode an install ([below](#repair)) |
+| `Move { tablet, from, to }`, `MoveStatus { op }` | A replica set moved ([C8](rebalancing.md#a-move)) |
+| `Decommission { node }`, `Remove { node, replacement }`, `Maintenance { node, suspend }`, `Rebalance`, `PlanStatus { op }`, `Plans` | The plans ([C8](rebalancing.md#plans)) |
+| `Activate { wire }` | The cluster's activated wire version ([below](#rolling-upgrade)) |
+| `Backup { table, path }`, `BackupStatus { op }`, `Backups`, `Restore { path }`, `RestoreStatus { op }`, `Recoveries` | Backups, restores and the recoveries an operator ran ([below](#backup-restore-and-export)) |
+| `ReloadTls` | This node reads its peer certificate, key and authority again ([below](#certificates)) |
 
-Authorize every state-changing request, including Repair, through `cluster.admins` from its first
-implementation. Log principal, request id, expected version and outcome. Read-only visibility
-follows the deployment's auth policy, with topology exposure documented. Admin authorization
-belongs in M3/M8/M9 as those requests appear, not retrofitted in M10.
-
-### shoalctl's cluster tab
-
-Show desired versus active RF, learners versus voters, leader hints/terms, per-tablet readiness,
-max/histogram replication lag, Down grace remaining, migration phases and blocked reasons.
-Surface “two durable copies, desired three, awaiting replacement node” explicitly. A member count
-of three is not sufficient evidence that every tablet has three ready copies. *At M9b the
-`Members` read carries what such a tab would draw: `grace_remaining_ms` per member, the open
-plans with their blocked reasons, and `under_replicated_sets` - the sets holding a copy on a
-member the cluster has given up on - which is the "two copies, awaiting a member" figure; the
-tab itself is M10's. At M10c ([F50](../features/cluster-operations.md)) it exists: `Space c`
-in `shoalctl` draws the model from six admin reads a second with that figure as its headline,
-the members' phases, grace, weight, bytes and wire, this node's groups, lag, installs and
-quarantines, every open plan with its blocked reason, the backups, the recoveries and the
-activated wire ([shoalctl](../operations/shoalctl.md#the-cluster-tab)). Per-tablet readiness
-and a lag histogram are not drawn: the frames carry a node's widest lag and its groups' counts.*
-
-Actions show a preview naming the affected identity, planned data movement and irreversible
-boundary, then submit the versioned operation. Long operations survive a disconnected TUI and are
-resumable by id. Record state changes so automated and manual removal are equally auditable.
-*At M10c the tab's command line does exactly this: the first `Enter` previews the identity as
-the model knows it, what moves and the boundary; the second sends the operation under its own
-id against the version previewed at; `status <op>` follows an operation from any connection,
-since the record is the cluster's.*
-
-### Metrics
-
-| Family | Essential measurements |
-| --- | --- |
-| Membership | Control quorum availability, voter count, policy/topology versions, Down/Removing age |
-| Replication | Durable/commit/apply lag in entries, bytes and age; missing quorum and under-replicated tablets |
-| Writes | End-to-end and quorum/application wait histograms; success, rejection and unknown outcomes |
-| Reads | Barrier/application wait, stale/session routing, retry/timeout and incomplete-share errors |
-| Recovery | Retained history bytes/oldest position, snapshot generation/progress, blocked recovery and time to catch up. *At M7:* the snapshot counters and the installing flag on `Replication`; the time to catch up is the catch-up arms' record |
-| Resources | Pending bytes, lane queue bytes, memory caps, free disk reserve, transfer throughput and I/O failures |
-| Integrity | Checksum failures, quarantined copies, repair source/provenance and unresolved divergence. *At M8:* `integrity` on `Replication` - checksum failures, unverified reads, lost logs, quarantines, scrubs with their partitions and bytes - per shard and per node; the source, the provenance and the unresolved digests are the repair record's ([F44](../features/repair.md)) |
-| Failover | Detection/election/recovery/reconnect intervals and client-visible outage |
-
-Aggregate by node/table/role by default; per-tablet series are opt-in to avoid unbounded collector
-cardinality. Top-k diagnostics and admin queries identify individual hot or lagging tablets.
-A zero sequence gap alone is not an integrity/readiness check. Record replication traffic and
-all participating nodes' work, not just the coordinator's profile.
-
-### Traces
-
-Forward and replication spans retain originating context, with links/per-record metadata for
-batches. Include term/configuration and transition ids where useful, without making every tablet
-an unbounded metric label. Traces distinguish append, durable, commit, apply and reply. Repair and
-snapshot operations carry independent operation ids and resource-wait spans.
+A standalone node answers every kind `Unavailable`. A client sends one with `Shoal::admin`;
+the cluster tab of `shoalctl` sends most of them from a command line
+([shoalctl](../operations/shoalctl.md#the-cluster-tab)). Three operations run on a stopped
+directory rather than through the frame: `force_recover`, `export_standalone` and a rehome.
 
 ### Readiness
 
-`start` returns a handle with process readiness and shard-failure notification. Separate process
-live, control-plane joined, and data-ready-for-policy states. Expose per-tablet readiness and a
-summary that says whether default reads/writes can be accepted. A joining node can answer admin
-without claiming ready quorum data. An installing tablet stays ineligible even if `One` tolerates
-arbitrary lag. Client load balancers need a documented readiness probe, not a fixed sleep.
+`ShoalPool::ready` returns once the shards are bound and reports the first shard that failed;
+it is the process half. `Readiness.control` says whether this node's control thread has been
+observed by a leader at this incarnation; `Readiness.data.default_writes` says whether a
+default write would be admitted right now, by the same `write_admission` the shards use, and
+names the shortfall when not. A node with a tablet installing is not ready for that tablet and
+is for the rest. Neither `Members = up` nor a member count of three is data readiness: three
+members do not mean three ready copies of every tablet
+(`readiness_distinguishes_process_control_and_data`). The cluster tab's third line - copies
+against the factor, who is missing, whether writes are admitted - is the figure to read first.
 
-### Runbooks
+### What the reports carry
 
-Since [F50](../features/cluster-operations.md) each of these is a procedure on the
-[Runbooks](../operations/runbooks.md) page - the operation, the keys, what to wait on, the
-rollback point - and two more beside them: changing a node's address and rotating certificates
-and authorities. What follows is the intent as it was set, with what each milestone made true.
+| Family | Where it is |
+| --- | --- |
+| Membership | `Members`: control quorum, voters, versions, health and phase, grace remaining, tombstones |
+| Replication | `Replication`: applied, committed and checkpoint indexes per group, lag in entries, pending and volatile bytes, `under_replicated_sets` on `Members` |
+| Writes | The client's outcomes ([C5](replication.md#what-the-client-is-promised)); per node the writes answered unknown or rejected on `Replication`; the histograms are the cluster arms' |
+| Reads | `read_stats` per node: barriers, hops, barrier and application waits, session waits, lineage refusals, timeouts, late and duplicate shares, reroutes ([C6](reads.md)) |
+| Recovery | The snapshot counters on `Replication` (built, sent, installed, bytes each way, chunks, duplicates, drops, resumes, aborts, redos, forced purges, entries installed) and the installing flag per group; time to catch up is the catch-up arms' |
+| Resources | Pending bytes, volatile bytes, each member's free and held bytes, the token bucket's waits and the refused streams |
+| Integrity | `integrity` on `Replication`: checksum failures, unverified reads, lost logs, quarantines, scrubs with their partitions and bytes; the source, provenance and unresolved digests are the repair record's |
+| Failover | The failover arm's marks and windows; a node's own `Lease` state per group |
 
-1. **Bootstrap.** Explicitly create the first embedded control group; join the intended nodes.
-   Wait for data configuration/replica readiness, not just Members=Up, before default writes.
-2. **Add.** Join identity, inspect resource/domain capacity, follow learner transfer and safe
-   reconfiguration until the feasible target is reached. Report blocked capacity clearly.
-   *At M9b: join, read `Members` for the new member's `free_bytes` and `weight`, then ask for
-   a `Rebalance` - nothing spreads onto it otherwise - and follow `PlanStatus` to `completed`;
-   a `blocked` reason names the set and the reserve or cap it waits on.*
-3. **Replace a dead node.** Start an authenticated replacement as a new identity or use Replace
-   to pair it with the old member. At RF=3 on three machines, restoring RF needs that replacement;
-   do not wait for removal to complete before supplying the missing capacity.
-   *At M9b: the grace expires into a removal plan on its own, or `Remove { node, replacement }`
-   asks for it now with the replacement taken first; at three on three the plan is blocked
-   naming the missing member and runs on its own the moment a fourth identity joins.*
-4. **Decommission.** Preview feasibility, mark Leaving, follow transition ids, wait for safe data
-   and control-voter retirement, then stop. Refuse an impossible RF/domain target without override
-   *At M9b: there is no preview - the first look's steps and blocked reason are the record -
-   and an impossible target is recorded blocked rather than refused; the member is `leaving`
-   and serving until the last step, then tombstoned and taken out of the control group, and
-   its process stops on its own with `ShoalError::Removed`.*
-   through a separate explicit policy change.
-5. **Automatic removal and maintenance.** Show the proposed 30m grace, permit null or explicit
-   maintenance suspension, persist episode/progress across leader changes, and page on blockers.
-   *At M9b: `Members` shows `grace_remaining_ms` per down member; `Maintenance { node, suspend:
-   true }` holds it and `false` resumes from the committed count; a leader change loses at
-   most one eighth of the grace; the expiry's plan is what to page on when `blocked`.*
-6. **Removed node returns.** Never restore its old authority. Preserve the directory for audit or
-   verified import; an explicit replacement/import path may reuse validated checkpoint data as
-   learner input. Do not delete the only remaining useful evidence on a count-only health check.
-   *At M9b the return is refused as a removed identity at every door and the process stops with
-   `ShoalError::Removed`; the directory is untouched. At M10b
-   ([F49](../features/backup-and-recovery.md)) the same is true of a member lost to a
-   recovery and of a node of the cluster a restore came from; the directory is evidence, and
-   what it held is brought back by a `Backup` of a live cluster restored into a new one, never
-   by the directory rejoining. A cluster member's directory is refused as an export's source.*
-7. **Rolling upgrade.** Validate n/n−1 structural schema and codecs; upgrade one failure domain at
-   a time, wait for data readiness/catch-up, then activate new capabilities through control state.
-   State the last safe binary/storage rollback point. Changed schema needs its own migration.
-   *At M10a ([F48](../features/rolling-compatibility.md)): the codecs are the negotiated wire
-   with the snapshot manifest as the one body that differs, the activation is `Activate { wire }`
-   judged by the running builds and read at every door, the rollback point is the activation -
-   stated in the F page's matrix - and a changed schema is explicitly unsupported as a rolling
-   operation; a node is held at the old version through the window by
-   `cluster.transport.wire_version`, and `Members.wire` is what an operator reads before
-   activating.*
-8. **Control quorum lost.** Established data groups continue where their own quorums survive.
-   Restore original control voters from durable storage; no automatic rebootstrap. Topology/admin
-   mutations remain blocked. Permanent majority loss requires the disaster-recovery procedure.
-   *At M10b ([F49](../features/backup-and-recovery.md)): a write through a survivor is unknown
-   or refused for want of a leader and never acknowledged alone, a strong read is refused, an
-   admin mutation is refused naming the voters, which this node reaches and `force_recover`,
-   and a restart with `bootstrap: true` keeps the cluster and mints nothing. The procedure:
-   stop one survivor - the one whose log is the history - and run `force_recover` on its
-   directory with that node alone as the survivor; it rewrites the control and every durable
-   group's membership to that node at a new term, tombstones the lost members with a `Remove`
-   plan each and records the boundary (`Recoveries`); start it, join fresh identities, and the
-   plans rebuild every set. A lost member's directory that comes back is refused as removed.
-   What the survivor never held is gone, and a set it was not in stays blocked until restored.*
-9. **Backup and restore.** Capture checksummed per-tablet committed checkpoints with configuration,
-   schema/format, deduplication state and boundary manifest. Store outside the failure domain being
-   protected. The initial backup need not be one cross-tablet transactional snapshot; say so.
-   Restore to an isolated new cluster identity, verify histories/data, then explicitly cut over.
-   *At M10b ([F49](../features/backup-and-recovery.md)): `Backup { table, path }`, once wire
-   version 5 is activated, writes one verified snapshot file per group at that group's own
-   committed boundary under `<path>/<op>/<table>/` on the leader's disk, a JSON manifest beside
-   each naming the cluster, the schema, the boundary, the tablets and the checksum, and the
-   retry table in the file's trailer; it is not one cross-tablet snapshot and the record says
-   each group's boundary. Ephemeral tables are skipped. Copying the directory out of the
-   failure domain is the operator's step. `Restore { path }` is asked of a fresh, initialized,
-   empty cluster: the files are judged for coverage, schema and source, every group's leader
-   installs its tablets' records on every member under a quarantine a scrub lifts, and the
-   old identities are refused as removed. Verification is the restore's own scrub and the
-   `DIGEST` of every table against the source's; cutover is pointing clients at the new
-   cluster, whose tokens are its own.*
-10. **Existing single-node data.** Test supported offline conversion or export/import into fresh
-    cluster storage, verification, cutover and rollback. Never require destroying the source.
-    *At M10b ([F49](../features/backup-and-recovery.md)): stop the standalone node and run
-    `export_standalone` with its own configuration and an empty directory; it folds the intent
-    logs into the archives - the one thing it writes to the source - and writes each persistent
-    table's archives as one backup-shaped file with a manifest. Bootstrap, join and initialize
-    a fresh cluster of the size and factor wanted, and `Restore { path }` the export; verify by
-    the restore's scrub and by `DIGEST` against the source's, then cut clients over. The source
-    starts standalone again with every row, which is the rollback. A standalone directory
-    started with a `cluster:` block is refused naming this path; nothing converts in place.*
-11. **Changing a node's cores.** *At M9c ([F47](../features/local-rehome.md)):* stop the node,
-    change `resources.cores`, start it. The start is held while the files of the executors that
-    no longer run are moved onto the ones that do - the log says `rehoming the storage directory
-    before any shard starts` with the counts, then `rehomed the storage directory` with what
-    moved and how long it took - and the node joins as itself, since its slots and every address
-    a peer holds for it are unchanged; `Members` shows `physical` moved and `shards` not. A
-    crash during the hold is finished by the next start at the same count; a start at a third
-    count is refused naming the count to start with. On a cluster node the count cannot pass
-    the slots the directory claimed - `cluster.slots`, one per core unless it was set at the
-    first claim - and past it the answer is a `Replace` onto a fresh identity claimed with more.
-    Budget the hold from the `rehome` benchmark group's `millis` at the node's data size, and
-    do not change the count on more than one member of a set at a time: the node is down for
-    the hold.
+Series are aggregated by node, table and role; a tablet is never a metric label. Traces cross
+the hop from each query's own span and a snapshot or repair carries its operation id
+([F35](../features/wire-trace-context.md)).
 
 ### Repair
 
-Detect storage corruption with persistent archive/checkpoint checksums and validate manifests.
-For logical comparison, pin replicas to the same committed applied checkpoint and hash canonical
-logical content in deterministic table/partition/key order, including schema and coverage.
-Different archive layout, padding or compaction timing must not create false corruption reports.
-If replicas cannot reach a common retained boundary, establish a new checkpoint for comparison.
+Every archive record is `[size][gxhash64][payload]` behind a format 2 header, written by
+`write_record` and verified by `ArchiveMap::read_record` and nowhere else; the checkpoint file
+and the retry sidecar carry checksums too. A record that fails is `CorruptArchive` to the
+queries parked on it and quarantines the copy on the spot: a marker under
+`wal/Shard-N/quarantine/`, committed through the node's next status report as
+`ReportQuarantine`, so every other node routes reads around it and the node refuses them
+`Quarantined`. An archive written before the format is read unverified and counted until
+compaction rewrites it.
 
-Do not assume the primary is correct. Quarantine checksum-invalid copies, compare independent
-verified replicas/backup provenance, and select a source under an explicit accidental-corruption
-policy. If a trustworthy source cannot be established, stop destructive repair and preserve
-copies for operator recovery. A majority digest can support diagnosis under the stated fault
-model but does not prove arbitrary software-corruption immunity.
+`Repair { table, mode: verify | repair, source }` commits a `RepairRecord` with a phase per
+group of the table, and each group's leader drives its own (`shard/repair.rs`,
+`cluster.repair.concurrent` at a time), every phase committed as `RepairProgress` before the
+step: `Queued` behind a move on the set, `Pending`, `Scrubbing`, `Judged`, `Installing`,
+`Verifying`, `Done`. A scrub is `Command::scrub`, a command whose tablet is `SCRUB_TABLET`,
+applied in committed order and never handed to a compactor; every replica takes a canonical cut
+at the entry's index - rows re-serialized in key order under the schema and the tablets, never
+archive bytes, so layout, compaction timing and residency cannot make a false report
+(`canonical_digest_ignores_archive_layout_at_same_boundary`) - and reports a `DigestReport` the
+leader collects with `ReplicateKind::Digest`. `judge` is pure: a copy whose record failed its
+checksum is quarantined on that evidence; among the verified copies a strict majority of the
+replica set agreeing on one digest is trusted and every other verified copy is quarantined
+divergent; `source` overrides the rule with that node's verified digest under the operator's
+provenance; no majority and no source is `Unresolved { digests, invalid }`, which quarantines
+nothing more and installs nothing, the record being the evidence
+(`repair_detects_corrupt_primary_and_preserves_evidence`). In repair mode a leader that is not
+trusted hands the lead to a trusted member first; a durable target is restarted from its held
+checkpoint with the leader's cut installed through the snapshot path
+([C7](failover.md#snapshots-and-atomic-installation)), then verified by a second scrub that
+lifts the quarantines of the copies that agree. A scheduled pass, `cluster.repair.scrub_interval`
+(off by default), is verification only and never installs. A repair and a move on one set
+serialize (`repair_serializes_with_migration_and_new_commits`).
 
-Repair uses C7's atomic snapshot mechanism and C8's per-tablet transition lock and resource budgets.
-It cannot overwrite a newer committed history with an older snapshot. Repairing a corrupted
-primary includes removing its serving eligibility and reestablishing authority on a healthy
-quorum. Metrics record the evidence, source, replaced generation and verified resulting boundary.
+### Rolling upgrade
 
-Scheduled scrub/repair intervals and their default are a Q12 decision with a cost measurement;
-manual repair is available at M8. Replication is not a backup against deletion, operator mistakes
-or corruption applied consistently everywhere.
+A build carries `MIN_PEER_VERSION..=PROTOCOL_VERSION` and every link negotiates the highest
+both read ([C2](transport.md#compatibility-and-the-wire-version)). `Members.wire` reports the
+activated version and the range the members speak. The order: one failure domain at a time,
+stop, install, start - `cluster.transport.wire_version` pins a node at the old version through
+the window if wanted - wait for `Readiness` and for `Replication.lag_max` to reach zero; lift
+the pins; when `min_member` is the new version, `Activate { wire }`, which the leader refuses
+until every non-removed member's running build reports it, never lowers, and past which a
+build below it is refused at the hello and stops itself at start. Rollback is a downgrade
+before activation and nothing after it; the matrix is on the F page. A schema change is not
+a rolling operation: a join with another `schema_id` is refused, and the path is a new cluster
+and a restore (`rolling_upgrade_survives_operations_and_failure`, `rolling_upgrade_from_previous_binary`).
 
-*At M8 ([F44](../features/repair.md)):* every archive record is checksummed and verified at
-the one read path, and so are the checkpoint file and the retry sidecar; a scrub is a log
-entry every replica takes a canonical cut at, whose digest folds rows re-serialized in key
-order under the schema and the tablets and never sees archive bytes, so archive layout,
-compaction timing and residency cannot create a false report; a copy whose record failed its
-checksum or whose verified digest differs from a strict majority of the replica set is
-quarantined, locally on the spot and in the committed state a tick later; a repair installs
-from the leader's own cut, transferring the lead first when the leader's copy is not trusted;
-a split no majority can judge stops `Unresolved` with every digest recorded and installs
-nothing, and an operator's `source` is the explicit policy that resolves it. The scheduled
-half is `cluster.repair.scrub_interval`, off by default, verify only, priced by the background
-arm ([Q12](protocol.md#q12-at-m8)). What the metrics record is the repair record: the source,
-the targets, the boundary installed and the index verified.
+### Backup, restore and export
+
+`Backup { table, path }`, refused until wire 5 is activated, commits a `BackupRecord` every
+group's leader drives: it nudges its checkpoint, cuts its own snapshot file at that boundary,
+copies it to `<path>/<op>/<table>/<group>-<boundary>.snap` **on its own node's disk** with a
+JSON manifest beside it naming the cluster, the schema, the table, the group, the boundary, the
+tablets, the records, the bytes, the checksum and the retry table in the trailer, verifies it,
+and records `Written`, `Skipped` (an ephemeral table) or `Failed`. It is not one cross-tablet
+snapshot; each group's boundary is on the record. Copying `<path>/<op>` out of the failure
+domain is the operator's step. `Restore { path }` is asked of a fresh, bootstrapped, joined,
+initialized and empty cluster with the files reachable from every leader: coverage, schema and
+source cluster are judged before anything is proposed (a gap, an overlap, a populated table and
+the same cluster are refused); every group's leader proves its members empty by a scrub,
+builds one file for its tablets from the backup's, installs it on every member through the
+repair path under a quarantine, and lifts it with a second scrub; `restored_from` is
+committed, the old cluster's nodes are refused as removed at every door, and the old cluster's
+session tokens are `WrongCluster` (`backup_restore_verifies_history_in_new_cluster`).
+
+Single-node data takes the same path: `export_standalone::<Schema>(&conf, &dir)` on a stopped
+standalone directory folds its intent logs - the one thing it writes to the source - and writes
+each persistent table's archives as one backup-shaped file with a manifest; a fresh cluster
+restores it, and the source starts standalone again with every row, which is the rollback
+(`single_node_data_has_a_verified_cluster_migration_path`). Nothing converts a directory in place.
+
+### Permanent quorum loss
+
+While the control group has no quorum, established tablet groups keep serving where their own
+quorums survive; a write through a survivor without one is unknown or refused and never
+acknowledged alone; a strong read is refused; an admin mutation is refused naming the voters
+this node reaches and `force_recover`; and a restart with `bootstrap: true` keeps the cluster
+and mints nothing. Losing the original voters' storage for good is recovered by an operator, offline,
+to one survivor: `force_recover(&conf, &[me])` on the stopped survivor whose log is the
+history applies what the control log held unapplied, appends a membership of that node alone
+and a `ForceRecovered` record at a term past every term seen, rewrites every durable group whose
+members include a lost node to that shard alone, and, applied, tombstones the lost members with
+a `Remove` plan each and records the boundary in `Recoveries`. The survivor restarts leading
+alone, fresh identities join, and the plans rebuild every set. What the survivor never held is
+gone, and a set it was not in stays blocked until restored from a backup
+(`permanent_quorum_loss_requires_explicit_recovery`).
+
+### Certificates
+
+`ReloadTls`, node-local and admin-only, reads `cluster.tls`'s three files again, rebuilds both
+the server and the client config, and swaps the pair or neither, reporting the chain length,
+the authorities in the bundle and the node the leaf names; established kTLS connections keep
+their kernel keys and every later handshake uses the new material. An authority rotates as a
+bundle: trust both, reissue the leaves, retire the old ([C2](transport.md#encryption-and-identity)).
+
+### The runbooks
+
+| Runbook | Operation |
+| --- | --- |
+| [1. Bootstrap](../operations/runbooks.md#1-bootstrap) | `bootstrap: true`, `seeds`, `Initialize`, wait for `default_writes` |
+| [2. Add a node](../operations/runbooks.md#2-add-a-node) | `seeds`, `weight`, `Rebalance`, `PlanStatus` |
+| [3. Replace a dead node](../operations/runbooks.md#3-replace-a-dead-node) | A new identity, `Remove { node, replacement }` or the grace |
+| [4. Decommission](../operations/runbooks.md#4-decommission) | `Decommission`, `PlanStatus` |
+| [5. Automatic removal and maintenance](../operations/runbooks.md#5-automatic-removal-and-maintenance) | `auto_remove_after`, `Maintenance` |
+| [6. A removed node returns](../operations/runbooks.md#6-a-removed-node-returns) | Nothing: refused as removed |
+| [7. Rolling upgrade](../operations/runbooks.md#7-rolling-upgrade) | `transport.wire_version`, `Activate` |
+| [8. Control quorum lost](../operations/runbooks.md#8-control-quorum-lost) | Restart the missing voters |
+| [9. Permanent quorum loss](../operations/runbooks.md#9-permanent-quorum-loss) | `force_recover`, offline |
+| [10. Backup and restore](../operations/runbooks.md#10-backup-and-restore) | `Backup`, `Restore` |
+| [11. Existing single-node data](../operations/runbooks.md#11-existing-single-node-data) | `export_standalone`, offline, then `Restore` |
+| [12. Change a node's cores](../operations/runbooks.md#12-change-a-nodes-cores) | `resources.cores`, the rehome at start |
+| [13. Change a node's address](../operations/runbooks.md#13-change-a-nodes-address) | `advertise`, `port`, `control_port`, `dial`, a restart |
+| [14. Rotate certificates and authorities](../operations/runbooks.md#14-rotate-certificates-and-authorities) | `cluster.tls`, `ReloadTls` |
+
+## Design choices
+
+Every mutation is a committed record with an operation id, so it survives a disconnected
+operator and is followed from any node. Authorization from the first operation, by the
+connection's principal against committed `admins`, rather than retrofitted. A repair that
+trusts a verified majority or a named source and nothing else, so no primary is believed for
+being the primary. A backup as the snapshot the groups already cut, restored only into a fresh
+identity that refuses the old one, so two clusters never claim one history. A recovery that
+an operator runs offline on one survivor, so a lost majority is never manufactured by the
+cluster. Runbooks as procedures naming the operation, the keys, the wait and the rollback point.
 
 ## Alternatives rejected
 
-Repair-from-primary on any mismatch, raw archived-byte digest as universal logical equality,
-handshake-only rolling upgrades, and deleting orphaned data based on RF counts are superseded.
-A forced new majority after permanent quorum loss is disaster recovery with an explicit data-loss
-boundary, not normal automatic failover - since [F49](../features/backup-and-recovery.md) it is
-`force_recover`, offline, to one survivor, and the boundary is the `RecoveryRecord`'s
-`last_committed`.
+Repair from the primary on any mismatch; a raw archive-byte digest as logical equality;
+handshake-only rolling upgrades; deleting orphaned data on a replica count; an automatic
+forced majority after a lost quorum; a restore into a populated cluster or a node's directory;
+a separate admin port or protocol.
 
 ## What it costs
 
-Integrity scans, checksums, snapshot/backup storage, administrative state and telemetry. Scope and
-throttle background work. Strong operational claims require restore and mixed-version exercises,
-not just working UI controls. No performance capture is required for this plan-only revision.
+A scrub reads a group's archives whole once per pass, priced against the foreground by
+`macro/cluster/background/repair`; a backup cuts and copies every group's file, priced by
+`macro/cluster/background/backup`; the admin reads cost a frame each, six a second on the
+cluster tab. Strong operational claims rest on the restore and mixed-version tests, not the
+UI.
 
-## What it breaks
+## Limitations
 
-Readiness APIs and startup callers, admin protocol and authorization, storage integrity metadata,
-release compatibility and backup tooling. Client-visible error semantics must expose unknown write
-outcomes and blocked recovery instead of flattening them into success/failure.
+Backup files land on each leader's disk with no shipping, encryption, retention or age; a
+restore is once, whole, into an empty cluster - no point-in-time or single-table restore; a
+recovery is to one survivor. A quarantine is routed around per holder, not per table. One
+repair per shard at a time; a scheduled scrub refused stale is not retried. `shoalctl`'s tab
+reaches one node. Nothing issues a certificate. An admin refusal's code is derived from its
+reason text ([item 98](../appendix/known-issues.md#98-an-admin-refusals-error-code-is-derived-from-its-reason-text)).
+See [C15](open-issues.md).
 
 ## Invariants to uphold
 
-- Admin mutations are authorized, versioned, idempotent and auditable from first implementation.
-- Readiness reflects data eligibility and the requested policy, not just open sockets.
-- Repair never trusts a primary solely because it is primary or overwrites unresolved evidence.
-- Upgrade compatibility includes payloads, schema and storage activation boundaries.
-- Backup/restore preserves identity boundaries and makes its consistency scope explicit.
+- Admin mutations are authorized, versioned, idempotent and auditable.
+- Readiness reflects data eligibility and the requested policy, not open sockets.
+- Repair never trusts a primary for being the primary and never overwrites unresolved evidence.
+- Upgrade compatibility includes payloads, schema and the activation boundary.
+- Backup and restore preserve identity boundaries and state their consistency scope.
+- Recovery after a lost majority is an operator's explicit, offline choice with a recorded boundary.
 
-## Prerequisites
+## How it is measured
 
-[C1](node-identity.md), [C3](membership.md), [C7](failover.md), [C8](rebalancing.md),
-C13 Q10–Q12. Readiness M0 — the process half is delivered as `ShoalPool::ready` and `failure`
-([F36](../features/cluster-harness.md)); the control-plane and per-tablet states arrive with the
-milestones that add them; basic admin M3; lag M4; repair M8; operations expand through M10.
-
-## How it would be measured
-
-[C10](performance.md) includes scrub/repair interference and restore time in addition to cluster
-query capacity. Track backup age and retained recovery points; define RPO/RTO objectives for the
-deployment instead of conflating replica failover with disaster recovery.
+`macro/cluster/background/{repair,backup}`: the kill arm's placement and mixture with nothing
+killed and a verify-mode `Repair` or a `Backup` asked for a third of the way through, the
+scrub's or the copy's cost to the foreground read as `during` against `before`
+([C10](performance.md#the-arms)). Restore time is not priced.
 
 ## Acceptance tests
 
 | Test | Asserts | Milestone |
 | --- | --- | --- |
-| `readiness_distinguishes_process_control_and_data` | Ready process/admin cannot falsely imply ready default quorum writes | M3 |
+| `readiness_distinguishes_process_control_and_data` | A ready process and admin cannot falsely imply ready default quorum writes | M3 |
 | `admin_mutations_require_principal_and_operation_identity` | Unauthorized, stale-version and duplicate requests cannot repeat a membership mutation | M3 |
-| `repair_detects_corrupt_primary_and_preserves_evidence` | Corrupt the primary; trusted surviving state repairs it, unresolved divergence stops | M8 |
-| `canonical_digest_ignores_archive_layout_at_same_boundary` | Equivalent data compacted differently compares equal; changed/missing data does not | M8 |
-| `repair_serializes_with_migration_and_new_commits` | Concurrent repair/move cannot install stale state or destroy current evidence | M9a |
-| `rolling_upgrade_survives_operations_and_failure` | Mixed binaries replicate, read, snapshot and elect correctly, with activation/rollback limits ([F48](../features/rolling-compatibility.md)) | M10a |
-| `rolling_upgrade_from_previous_binary` | A real previous build's nodes are upgraded in place one at a time and the version activated, when `SHOAL_PREVIOUS_TEST_BINARY` names one ([F48](../features/rolling-compatibility.md)) | M10a |
-| `backup_restore_verifies_history_in_new_cluster` | Restore isolated backups including retry state, validate data, and prohibit old identities joining ([F49](../features/backup-and-recovery.md)) | M10b |
-| `permanent_quorum_loss_requires_explicit_recovery` | No automatic empty bootstrap or destructive choice when durable majority evidence is unavailable; an operator's `force_recover` to one survivor leads, serves every acknowledged key and rebuilds the sets on fresh identities ([F49](../features/backup-and-recovery.md)) | M10b |
-| `the_cluster_model_reads_the_admin_frames`, `an_action_previews_its_boundary_and_follows_its_record` | The operator's view is one model built from the admin frames with the copies-against-factor figure first, and every operation is previewed with the identity it touches, what moves and its irreversible boundary before it is sent, then followed by its record ([F50](../features/cluster-operations.md)) | M10c |
+| `repair_detects_corrupt_primary_and_preserves_evidence` | A corrupted primary is repaired from trusted surviving state; unresolved divergence stops with its evidence | M8 |
+| `canonical_digest_ignores_archive_layout_at_same_boundary` | Equivalent data compacted differently compares equal; changed or missing data does not | M8 |
+| `repair_serializes_with_migration_and_new_commits` | A concurrent repair and move cannot install stale state or destroy current evidence | M9a |
+| `rolling_upgrade_survives_operations_and_failure` | Mixed binaries replicate, read, snapshot and elect correctly, with the activation and rollback limits | M10a |
+| `rolling_upgrade_from_previous_binary` | A real previous build's nodes are upgraded in place one at a time and the version activated, when `SHOAL_PREVIOUS_TEST_BINARY` names one | M10a |
+| `backup_restore_verifies_history_in_new_cluster` | An isolated backup with its retry state restores, validates, and the old identities are refused | M10b |
+| `permanent_quorum_loss_requires_explicit_recovery` | No automatic empty bootstrap or destructive choice without durable majority evidence; an operator's `force_recover` to one survivor leads, serves every acknowledged key and rebuilds the sets on fresh identities | M10b |
+| `the_cluster_model_reads_the_admin_frames` | The operator's view is one model built from the admin frames with the copies-against-factor figure first | M10c |
+| `an_action_previews_its_boundary_and_follows_its_record` | Every operation is previewed with the identity it touches, what moves and its irreversible boundary before it is sent, then followed by its record | M10c |
+| `initialize_previews_its_order_and_is_sent_once` | An `initialize` lists its members in the order typed, names the factor and that it happens once, and sends them in that order | M10c |
 
 ## Related
 
-[C2](transport.md) compatibility, [C7](failover.md) checkpoints, [C8](rebalancing.md) transitions,
-[C13](protocol.md) failure assumptions and gates, [Observability](../operations/observability.md),
-[Authentication](../features/authentication.md).
+[C2](transport.md), [C7](failover.md), [C8](rebalancing.md), [C13](protocol.md),
+[C14](deploying.md), the [runbooks](../operations/runbooks.md), [shoalctl](../operations/shoalctl.md),
+[Observability](../operations/observability.md), [Authentication](../features/authentication.md).

@@ -2,223 +2,202 @@
 
 ## Context
 
-**A default `One` read may not see a successful `Quorum` write yet.** It observes one eligible
-replica's committed applied prefix. Stronger reads establish current authority through the data
-protocol; an asynchronously pushed map and recent control-plane contact do not establish it.
-This meets R4 and R6 without claiming cross-tablet transactions or a common query snapshot.
+A read is served at `One` - the local replica's committed, applied state, possibly stale - or
+at `Quorum` - a read barrier from the tablet's leader, then the replica's own apply through it.
+A committed write hands back a session token a later read is served past. A bundle that spans
+nodes is split into shares, forwarded as bytes, and gathered under one deadline, each query
+index answered once. Built by [F41](../features/read-consistency.md), with a barrier and a token
+through a leader change and the reroute of an unwritten share from
+[F42](../features/primary-failover.md), the installing refusal from [F43](../features/node-recovery.md),
+the quarantine refusal from [F44](../features/repair.md) and the retired-copy refusal from
+[F45](../features/replica-migration.md).
 
-## What exists today
+## How it works
 
-**Delivered at M5 by [F41](../features/read-consistency.md).** A read is served at `One` or
-`Quorum`. `One` is what [F40](../features/replication.md) delivered at M4: the local replica's
-applied state - commands the group committed and the shard applied in log order, never an entry
-that was only appended - or the placement primary's when this node holds no replica
-(`TabletMap::read_ring_for`); a cut follower keeps answering with what was committed before the
-cut and an isolated leader does not show a write it could not commit
-(`one_reads_converge_without_exposing_uncommitted_state`). `Quorum` is the barrier of the level
-table below, as built: the executing shard obtains a read index from its group's leader -
-openraft's `ReadIndex` linearizer, its own handle's when it leads and a `ReadBarrier` over the
-replication lane when it does not - waits until its own replica has applied through it, and only
-then reads (`shoal-core/src/server/shard/reads.rs`). A committed write's answer carries a session
-token, a read carrying one is served past it by any replica holding that lineage and refused by
-name by any other, every gather has a slot per share and a deadline, a bundle's level resolves
-per table, and all of it rides the wire under a negotiated capability byte. ~~What the design below
-asked for and M5 did not build: a retry within the budget, a coverage list on the response
-frame, `Primary` as a level, and a token or a barrier through a leader change, which M6 gates.~~
-Since M6 ([F42](../features/primary-failover.md)) a token and a barrier have been run through a
-leader change (`session_read_waits_for_committed_lower_bound`,
-`read_barrier_survives_leader_change_and_delayed_messages`): a barrier asked of a member that
-names another leader follows it, a lapsed lease refuses a barrier at once as
-`QuorumUnavailable`, and a read share the link never wrote is sent to another holder once
-within the budget. Since M7 ([F43](../features/node-recovery.md)) a read of a tablet whose
-group is installing a snapshot is refused `Unavailable` at either level, and the rest of the
-node serves (`installing_tablet_never_serves_partial_state`). Since
-[F45](../features/replica-migration.md) a read of a tablet no group on the shard serves at all
-- a copy that retired under a move, or one that was never there - is refused `StaleTopology`
-at the map version held, before it waits for anything and never from the rows the shard still
-holds on disk; a forwarded one is refused on a frame the origin acts on, sending it once to
-another holder (`retired_copy_never_serves_from_grace_files`). Still not built: a coverage
-list on the response frame and `Primary` as a level.
-Before that: `route_archived` splits queries across owning shards, `Shard::handle_gathered`
-merges responses, restores partition order and applies the final limit, and ~~existing gather
-state lacks expiry (item 33)~~ a gather expires at its bundle's deadline
-([Resolved #33](../appendix/resolved/gather-expiry.md)).
+### Two read levels
 
-## The design
-
-### ~~Three~~ Two read levels
-
-| Level | Behavior | Promise |
+| Level | Where it executes | What it promises |
 | --- | --- | --- |
-| `One`, default | Select an eligible local replica if possible, otherwise another reachable replica. *As built:* the local replica when this node holds one, else the placement primary | Its installed committed applied state, possibly stale |
-| ~~`Primary`~~ | ~~Route to the current leader, obtain the protocol's read barrier and wait for application through that barrier~~ Not a level. Decided under Q5 at M5 ([C13](protocol.md#q5-at-m5)): the same freshness under a second name would have been two implementations to keep equivalent. Executing the share at the leader is an additive routing choice, filed | ~~Single-tablet linearizable read~~ |
-| `Quorum` | Obtain a current data-quorum barrier, then read an eligible replica applied through it. *As built:* the executing shard asks the group's leader for a `ReadIndex` barrier - a heartbeat round a majority answers - hopping over the replication lane when it does not lead, waits for its own apply through the index, then reads its own state | Same single-tablet freshness; alternate execution/routing policy, not a merge of speculative rows |
+| `One`, the default | The local replica when this node holds one (`read_ring_for`), else the tablet's preferred holder: the first replica that is up, the primary preferred | That replica's committed, applied prefix, possibly stale, never an appended-but-uncommitted entry |
+| `Quorum` | The same replica, after a `ReadIndex` barrier from the group's leader and its own apply through the index | Every write acknowledged before the read began is visible: single-tablet linearizable |
 
-~~Q1/Q5 must decide whether `Primary` and `Quorum` warrant two public names or should share one
-strong-read implementation. Until then the distinction is routing only;~~ **Decided at M5: one
-strong level, `Quorum`.** Neither ~~can~~ promises freshness based on a cached leader address.
-Neither uses the control-plane Raft log per read.
-A strong read proves authority after invocation, chooses a safe committed position, waits for
-local application, and reads a consistent tablet view. A leader change during the operation
-must obey the chosen protocol's read-barrier contract - which is openraft's `ReadIndex`, and
-whose behaviour through a leader change ~~is M6's to test~~ M6 tested: an old leader's own
-barrier is refused at its lapsed lease, and a barrier through a follower hops to whoever the
-follower names.
+There is no `Primary` level: it would be a second routing policy over the same freshness
+promise ([C13](protocol.md#q5-at-m5)). `All` is refused at validation, since nothing waits on
+every replica. Neither level promises freshness from a cached leader address, and neither uses
+the control group per read. A cut follower keeps answering `One` with what was committed before
+the cut, and an isolated leader never shows a write it could not commit
+(`one_reads_converge_without_exposing_uncommitted_state`).
 
-The original `Primary` lease-by-recent-contact and “maximum tuple wins” quorum merge are
-superseded. A delayed contact can arrive after replacement; a higher tuple can describe an
-incompatible uncommitted history. Initial strong reads pay for a barrier. Lease optimization is
-C13 Q6, gated by explicit clock, expiry, revocation and process-pause assumptions.
+### The strong read
+
+```mermaid
+sequenceDiagram
+    participant K as coordinator
+    participant E as executing shard (the replica)
+    participant L as group leader
+    participant V as other voters
+    K->>E: share with EntryRead { level: Quorum, slot, tokens }
+    Note over E: await_read_barrier: every token's lineage checked<br/>(UnknownLineage / WrongCluster refused by name)
+    alt E leads the group
+        Note over E: Lease::of == Lapsed? -> QuorumUnavailable at once
+        E->>V: get_read_linearizer(ReadIndex): an empty append in this term
+        V-->>E: a majority acknowledges
+    else E follows
+        E->>L: ReplicateKind::ReadBarrier (replication lane)
+        Note over L: BarrierAnswer::Ready(read_log_id),<br/>NotLeader(hint) -> E follows the hint once, NoQuorum
+        L-->>E: read_log_id
+    end
+    Note over E: need = max(barrier index, token indexes)<br/>raft.wait(...).applied_index_at_least(need) within the bundle's deadline
+    E->>E: ServerMsg::ReadReady -> execute_query reads its own state
+    E-->>K: the share
+```
+
+The barrier is openraft's `get_read_linearizer(ReadPolicy::ReadIndex)`: the leader records its
+read log id, probes every other voter with an empty append, and answers only once a majority
+acknowledged in its term, so an old leader whose term has moved cannot answer one. A leader
+whose lease lapsed refuses at once (`QuorumUnavailable`) rather than waiting out a deadline;
+a barrier asked of a member that names another leader follows the hint after `LEASE_POLL`; a
+barrier whose frame the link never wrote is `NotLeader` at once. The replica then waits for its
+own applied index to reach the barrier within the bundle's budget, else `Timeout`, and reads.
+`ReadPolicy::LeaseRead` is never used ([C13](protocol.md#the-questions-and-where-each-was-decided), Q6).
 
 ### Session tokens
 
-A successful committed write may return a token identifying the cluster, logical tablet/history
-and committed lower bound. A session read supplies that token and may execute on any eligible
-replica that proves it has applied that committed history. Otherwise it waits within the deadline
-or forwards. It need not always contact the primary, but it must validate lineage after moves,
-elections and future splits. A token is not a cross-tablet transaction timestamp. A bundle
-needing several tablet lower bounds carries several tokens with a bounded size.
-
-Define behavior for unknown, expired or wrong-cluster tokens; never silently ignore them. A
-locally appended `Write::One` record does not produce a committed token before commitment.
-
-*As built at M5:* a `SessionToken` is forty-eight bytes - version, tablet, cluster id, table id,
-group id, log index - minted for `Applied` and `Duplicate` outcomes in `answer_proposal` and
-handed to the client under a response flag, `ShoalResponse::session_token()`. It is an index and
-never a term. A read carries up to sixteen in its options; the replica waits
-`applied_index_at_least(index)` in the token's group within the bundle's deadline, else
-`Timeout`; a token naming another cluster or sent to a standalone node is `WrongCluster`; one
-naming a group that does not serve its tablet on that replica is `UnknownLineage`. There is no
-expiry: an index lower bound does not age, and a lineage that no longer exists is refused by
-name.
+A `Quorum` write's `Applied` or `Duplicate` answer carries a `SessionToken` - version, tablet,
+cluster id, table id, group id, log index; forty-eight bytes - under `Flags::SESSION_TOKEN`
+(`ShoalResponse::session_token()`). A read carries up to sixteen in its options, and the
+replica waits `applied_index_at_least(index)` in the token's group within the bundle's deadline
+before it reads, at either level; a `One` read with a token is a session read that pays no
+barrier. A token naming another cluster, or sent to a standalone node, is `WrongCluster`; one
+naming a group that does not serve its tablet on that replica is `UnknownLineage`. A token
+carries an index and no term, because a committed index is never lost, and it does not expire,
+because a lower bound does not age; a move keeps the group identity, so a token minted before
+a move bounds a read after it ([C8](rebalancing.md#a-move)).
 
 ### Choosing a replica
 
-Separate local reachability from authority and storage readiness. Exclude installing, corrupt,
-unreconciled and removed copies at every read level. A stale but complete committed replica may
-answer `One` even if it cannot reach a majority; returning speculative/conflicting state is not
-allowed. Prefer local, then measured low latency with bounded load awareness. Node-level `Up`
-is not sufficient evidence of tablet readiness, and a cached `Up` cannot prevent in-flight errors.
-
-A node at RF=3 on three nodes holds a replica of every tablet, but a request generally still
-crosses to its owning local shard. “Local node” does not imply the accepting shard owns the row.
-On more nodes than RF, local replicas are no longer guaranteed.
+Reachability, authority and storage readiness are separate checks at every level. An installing
+group's tablets are refused `Unavailable` while the rest of the node serves
+([C7](failover.md#snapshots-and-atomic-installation)); a quarantined copy is refused
+`Quarantined` locally and routed around by every other node ([C9](operations.md#repair)); a
+tablet no group on the shard serves - a copy retired under a move, or one never there - is
+refused `StaleTopology` before anything is waited on and never from the rows still on disk. A
+node at a factor of three on three nodes holds a copy of every tablet, but the request still
+crosses to the executor hosting the tablet's slot; on more nodes than the factor a local copy
+is not guaranteed.
 
 ### Fan-out across nodes
 
-Partition each query by table-qualified tablet. Each share names its coverage, original query
-index, execution attempt and routing version. Replies include explicit covered partitions and
-snapshot/applied-position metadata even when no rows match. A deletion or an empty filtered
-result must override an older nonempty answer if an optional future reconciliation path is used.
-Do not infer “no data” from a missing reply.
+```mermaid
+flowchart LR
+    B["bundle: query 0 over keys on A, B, C<br/>attempt a1, deadline = query_deadline or the bundle's budget"]
+    B --> G["Gather { attempt: a1, slots: [A ?, B ?, C ?], partition_order, limit }"]
+    G -- "ServerMsg::Query, slot 0" --> A["shard on node A (local)"]
+    G -- "Forward, slot 1" --> Bn["node B"]
+    G -- "Forward, slot 2" --> Cn["node C"]
+    A -- "Gathered, a1, slot 0" --> M["arrive: slot filled"]
+    Bn -- "Forwarded share, a1, slot 1" --> M
+    Cn -- "link never wrote it: reroute once<br/>to alternate_holder, same a1, slot 2" --> D["node D"]
+    D -- "Forwarded share, a1, slot 2" --> M
+    M --> R["every slot covered: merge in partition order,<br/>apply the limit, answer query 0 once"]
+    Cn -. "a late share for a1 slot 2 after completion:<br/>counted, dropped" .-> M
+    S["sweeper tick"] -. "deadline passed: Timeout 'n of m shares arrived',<br/>pendings forgotten" .-> G
+```
 
-The initial strong path uses one authoritative answer per tablet after its barrier, avoiding
-row reconciliation entirely. Across tablets there is no common snapshot: state can be observed
-at different instants. Document this for limits, projections, filters and concurrent mutations.
-Merge in requested partition order and apply the final limit afterward. Any per-share limit
-pushdown must be proved equivalent for that query shape. Pagination tokens must preserve the
-stated ordering/consistency contract or explicitly permit changes between pages.
-
-A bundle is not atomic. Each query index receives one complete result or one structured error;
-do not return a successful partial row set for a query missing one of its required shares.
-Other query indices may succeed independently.
+The coordinator splits each query by tablet and holds a `Gather` per `(bundle, index)` with an
+attempt id and a slot per share (`shoal-core/src/server/shard/gather.rs`). Every share names the
+attempt and the slot it fills; a reply is judged by them, so a share from an older attempt or
+for a slot already covered is counted and dropped. A share the link never wrote is sent once
+more to another holder under the same attempt and slot; one the link wrote is never re-sent by
+the server. When every slot is covered the shares are merged in partition order and the limit
+applied afterwards (`limits_apply_after_complete_ordered_gather`); an empty share still covers
+its partitions, so a deletion or an empty filter can never be overwritten by an older answer
+(`empty_and_deleted_partitions_have_explicit_coverage`). A bundle is not atomic: each query
+index gets one complete result or one error, and other indices succeed independently. Across
+tablets there is no common snapshot.
 
 ### Deadlines on a gather
 
-Carry an end-to-end deadline budget through forwarding, retries, barrier waits and gathering.
-Do not reset it at every hop or compare absolute clocks on different machines. On expiry release
-gather state, cancel outstanding read work where possible, and emit one error for that query.
-Late and duplicate replies are ignored by attempt identity after completion. A bounded read
-retry can reroute within the original budget; an accepted write is never replayed this way
-without C5's stable operation identity.
-
-*As built at M5:* every bundle expires at `networking.query_deadline` (ten seconds), or the
-shorter budget it names, measured from its last byte off the socket; a forward carries the
-milliseconds remaining and the serving node counts down from arrival; a pending forward expires
-at the sooner of its own timeout and the bundle's. An expired gather is answered `Timeout` once
-and forgets its pendings. A share is judged by the attempt and slot it names: late and duplicate
-ones are counted and dropped. Outstanding read work is not cancelled - a late share arrives and
-is dropped - ~~and no retry reroutes within the budget; the attempt identity for one is minted~~
-and since M6 a share the link never wrote is re-sent once, to another holder that is up, under
-the same attempt and slot, within the bundle's budget; a share the link wrote is never re-sent
-by the server ([F42](../features/primary-failover.md)).
+Every bundle expires at `networking.query_deadline` (ten seconds) or the shorter budget it
+names, measured from its last byte off the socket. A forward carries the milliseconds
+remaining, and the serving node counts down from arrival, so no absolute clocks are compared.
+The sweeper on every node ticks at `max(50 ms, shortest deadline / 10)`, answers an expired
+gather `Timeout` once naming how many shares arrived, and forgets its pendings; an expired
+forward is `OutcomeUnknown` (`gather_timeout_completes_once_and_discards_late_replies`).
+Outstanding read work is not cancelled - a late share arrives and is dropped.
 
 ### The per-bundle override
 
-A bundle may override read and write policy; absent values fall back to each query's table policy,
-then the cluster default. A bundle can contain several tables, so resolution is per routed query
-or homogeneous sub-bundle, not once for the entire mixed bundle. The coordinator forwards the
-resolved policy and servers validate compatibility rather than reinterpreting local defaults.
-Cluster/table defaults are versioned control-plane state, not divergent per-node YAML decisions.
+A bundle's read level is the option it carries, else its table's level, else the cluster's
+`read_consistency`; a table's level is versioned control state set by `SetTableReadPolicy`
+(`one`, `quorum`, or nothing to clear it), never a YAML setting, so every coordinator resolves
+a table the same way and a mixed bundle resolves per query
+(`mixed_table_bundle_resolves_each_table_policy`). The coordinator forwards the level resolved,
+and the serving node validates it rather than reinterpreting a local default. The read options
+section and the token ride the client wire only behind the capability byte the hello granted.
 
-Keep wire types in `shoal-proto`, independent of the engine. Cap token/metadata size and version
-these additions via C2's compatibility scheme. The old protocol version is not assumed to decode
-a widened rkyv struct simply because its handshake was accepted.
+## Design choices
+
+One strong level, because a name is earned by an implementation and a second name would have
+been two implementations to keep equivalent. A barrier rather than a lease, because the barrier
+costs a heartbeat round and needs no clock. A token that is an index in a group, because a
+group identity survives a move and an index is never lost. A slot per share and an attempt per
+bundle, because that is the smallest identity that lets a late or duplicate share be judged
+without state. A deadline carried as a remaining budget, because two machines' clocks are not
+compared.
 
 ## Alternatives rejected
 
-Control-plane-contact leases and choosing rows by maximum reported progress are superseded.
-A session token is useful for read-your-writes without making every read linearizable. If a later
-quorum fetch optimization is proposed, it must preserve negative-result metadata and the read
-barrier, and benchmark its traffic against selecting one eligible replica.
+Control-plane-contact leases; choosing rows by the highest reported progress; a `Primary`
+level; a per-share limit pushdown that is not proved equivalent; cancelling read work already
+running; a quorum fetch that merges speculative rows.
 
 ## What it costs
 
-`One` adds eligibility/routing checks and sometimes a hop. Strong reads add barrier traffic and
-application wait; leader-directed does not mean one-hop-only latency. Session reads can avoid
-a new barrier once the replica validates a committed lower bound. Remote gather decoding,
-coverage metadata, deadlines and retries consume bounded CPU/memory and are measured separately.
+`One` costs an eligibility check and sometimes a hop. `Quorum` costs a barrier - a heartbeat
+round at the leader, plus one hop when the replica does not lead - and an application wait; a
+session read costs the wait alone. A remote gather decodes what it merges; coverage metadata,
+deadlines and the sweeper are bounded and measured on the read arms.
 
-## What it breaks
+## Limitations
 
-The wire gains policies, tokens, request-attempt identity and deadline budgets. Gathers terminate
-instead of leaking. Strong-read guarantees replace the draft's informal lease, and `One` reads
-cannot expose apply-before-commit state from the original local write path.
+There is no cross-tablet snapshot. Leadership is never moved toward a reader. A coverage list is
+not on the response frame - coverage is the share's own metadata. Tokens never expire. The
+stage report does not draw the barrier and application waits. See [C15](open-issues.md).
 
 ## Invariants to uphold
 
-- `One` reads only complete, eligible committed state; staleness is not partial installation.
-- Strong reads require current data-protocol authority and application through the barrier.
-- Empty results carry coverage when needed; absent shares never masquerade as successful emptiness.
+- `One` reads only complete, eligible committed state; staleness is never partial installation.
+- A strong read requires current data-protocol authority and application through the barrier.
+- An empty share carries its coverage; an absent share never masquerades as emptiness.
 - Every query index completes once, with complete rows or an error, within its budget.
-- Table policy is resolved correctly for mixed bundles; no cross-tablet atomicity is implied.
+- A table's level is resolved from committed state, and no cross-tablet atomicity is implied.
 
-## Prerequisites
+## How it is measured
 
-[C5](replication.md), [C7](failover.md), [C2](transport.md), C13 Q5/Q6.
-M5 builds the read paths; M6 ~~validates~~ validated them through leadership changes before claiming HA.
-
-## How it would be measured
-
-[C10](performance.md) read-only arms compare local `One`, remote `One`, barrier reads and session
-reads, including lagging replicas, filters/limits and cross-node fan-out. Measure tails and
-barrier/application wait separately; do not assume strong reads cost only a routing hop.
+`macro/cluster/reads/{one,barrier,session}`: one get at the reference depth on the replication
+arms' placement, differing only in what the read asks for; `macro/cluster/fanout/{get,filter,limit,empty}`:
+a six key get split over three nodes in four shapes. Every read arm records the barriers, hops,
+barrier and application wait means and maxima, session waits, timeouts and late and duplicate
+shares per node ([C10](performance.md#the-arms)).
 
 ## Acceptance tests
 
 | Test | Asserts | Milestone |
 | --- | --- | --- |
-| `one_reads_converge_without_exposing_uncommitted_state` | Paused follower yields stale committed reads, then converges; speculative mutations never leak | M4 |
+| `one_reads_converge_without_exposing_uncommitted_state` | A paused follower yields stale committed reads, then converges; speculative mutations never leak | M4 |
 | `barrier_read_observes_prior_quorum_write` | A different coordinator reads committed state after the write response | M5 |
-| `session_read_waits_for_committed_lower_bound` | Behind replica waits/forwards; token works after leader change and refuses wrong lineage | M6 |
-| `empty_and_deleted_partitions_have_explicit_coverage` | Filtering/deletion cannot resurrect an older row through missing metadata | M5 |
-| `limits_apply_after_complete_ordered_gather` | Multi-tablet results preserve partition order and limit without silently dropping required rows | M5 |
-| `gather_timeout_completes_once_and_discards_late_replies` | Timeout, retry and duplicate shares release state and produce one result/error per query | M5 |
+| `session_read_waits_for_committed_lower_bound` | A replica behind the token waits; the token works after a leader change and refuses a wrong lineage | M6 |
+| `empty_and_deleted_partitions_have_explicit_coverage` | Filtering and deletion cannot resurrect an older row through missing metadata | M5 |
+| `limits_apply_after_complete_ordered_gather` | Multi-tablet results preserve partition order and the limit without dropping required rows | M5 |
+| `gather_timeout_completes_once_and_discards_late_replies` | A timeout, a retry and duplicate shares release state and produce one result or error per query | M5 |
 | `mixed_table_bundle_resolves_each_table_policy` | Different table defaults resolve independently unless explicitly overridden | M5 |
-| `read_barrier_survives_leader_change_and_delayed_messages` | Pauses, old leader replies and late control-plane contact cannot authorize stale strong reads | M6 |
+| `read_barrier_survives_leader_change_and_delayed_messages` | Pauses, old leader replies and late control-plane contact cannot authorize a stale strong read | M6 |
 
 ## Related
 
 [C5](replication.md), [C7](failover.md), [C13](protocol.md),
-[Request lifecycle](../architecture/request-lifecycle.md).
-~~For the data-plane candidate's read-index entry point and application integration inspect
-[raft-rs RawNode read_index](https://docs.rs/raft/latest/raft/raw_node/struct.RawNode.html#method.read_index).
-Q1 must document how the selected library establishes and returns the barrier before this API
-is implemented; a method name alone is not a read-safety proof.~~ The selected library is
-openraft, and the barrier is `Raft::get_read_linearizer(ReadPolicy::ReadIndex)`: the core records
-its read log id, probes every other voter with an empty append at the heartbeat interval, and
-answers only once a majority has acknowledged in its term (`handle_ensure_linearizable_read` in
-`openraft/src/core/raft_core.rs`); a follower rebuilds the `Linearizer` over the leader's
-`ReadLogId` and `try_await_ready` waits for its own applied index to reach it. That is the
-read-safety argument [F41](../features/read-consistency.md) rests on, and the protocol model's
-`QuorumConfirmed` rule is the same argument written down where the checker can break it.
+[Request lifecycle](../architecture/request-lifecycle.md), [Client](../api/client.md). The
+read-safety argument is openraft's `handle_ensure_linearizable_read` in
+`openraft/src/core/raft_core.rs`, and the protocol model's `QuorumConfirmed` rule is the same
+argument written where the checker can break it.
