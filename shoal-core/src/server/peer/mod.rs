@@ -113,4 +113,8 @@ pub struct ShardTransportView {
     pub links: Vec<LinkView>,
     /// Bytes received on bulk lanes accepted by this shard
     pub bulk_received: u64,
+    /// Queries this shard turned away at the admission bound, `Shedding` by name
+    /// ([Resolved #15](../../../docs/src/appendix/resolved/shard-mesh-admission.md))
+    #[serde(default)]
+    pub shed: u64,
 }

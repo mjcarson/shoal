@@ -94,8 +94,9 @@ add.
   M6's ([F41](../../features/read-consistency.md#limitations)).~~ Done at M6
   ([F42](../../features/primary-failover.md)): a share the link never wrote is sent to another
   holder once, under the same attempt and slot.
-- The local mesh queues are still unbounded ([item 15](../known-issues.md#15-no-backpressure-anywhere)); a
-  deadline bounds how long a client waits, not how much a shard holds.
+- ~~The local mesh queues are still unbounded~~ (an admission bound since
+  [Resolved #15](shard-mesh-admission.md)); a deadline bounds how long a client waits, not how
+  much a shard holds behind what it admitted.
 - [Item 32](../known-issues.md#32-a-disconnected-client-is-never-cleaned-up-anywhere)'s remainder:
   a departed ordinary client's gathers are dropped now, its channel is not yet retired.
 

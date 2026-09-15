@@ -257,24 +257,28 @@ leaves item 30 as the remaining place the question is answered badly.
 
 ## Medium — robustness
 
-### 15. No backpressure anywhere
+### 15. No backpressure anywhere - the remainder
 
-Every channel is `kanal::unbounded_async`: the shard mesh (`comms.rs:33`), per-client response
+~~Every channel is `kanal::unbounded_async`: the shard mesh (`comms.rs:33`), per-client response
 channels (`shard.rs:146`), compaction jobs (`.../storage/fs.rs:317`), loader requests
-(`.../persistent/sorted.rs:234`, `.../persistent/unsorted.rs:180`).
+(`.../persistent/sorted.rs:234`, `.../persistent/unsorted.rs:180`).~~ The shard mesh has an
+admission bound since [Resolved #15](resolved/shard-mesh-admission.md): a client's query bound
+for a shard whose queue holds `networking.max_queued_queries` messages is answered `Shedding`
+at once and never enqueued, so a shard that falls behind no longer grows its queue until the
+process is killed. The channel itself stays unbounded, since a blocking send between shards is
+a deadlock.
 
-Sends never block, so no shard can deadlock on another — but nothing throttles a client
-either. A shard that falls behind grows its queue until the process is killed. `blocked` and
-`pending_data` are likewise unbounded, as is `PendingResponse`.
+What remains is what that bound does not reach. `PendingResponse` (`.../storage.rs`) grows with
+arrival rate times fsync latency under a slow device and a rotation releases every pending
+response at once; a per-client response channel holds every answer until the client's relay
+writes it; `blocked` and `pending_data` hold every query parked on a partition read. Each is
+bounded by the work the admission bound admits and by no number of its own, and the bound
+counts every message on a queue - releases and loads as well as queries - so a shard busy with
+its own work sheds sooner than one busy with clients alone.
 
-The one exception is `StreamWriter`'s `max_write_behind` (`.../fs/stream.rs:553`), which
-bounds in-flight writes only.
-
-**Fix direction:** [D6](../direction/connection-pool.md#bounded-channels), ~~sequenced behind
-[D2](../direction/framing.md#the-error-channel)~~ — the prerequisite is met.
-[F11](../features/error-channel.md) made *shedding* sayable: `ErrorCode::Shedding` is defined, and
-a query the server declined can now be reported as declined rather than as an empty result. What
-remains is the bound itself and the policy that decides when it is hit.
+**Fix direction:** a bound on `PendingResponse` that sheds a write the device cannot keep up
+with, and a per-client bound that closes a connection whose reader has stopped, both answered
+by the `Shedding` the mesh now produces.
 
 ### 16. Panics on the hot path
 

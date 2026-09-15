@@ -3463,12 +3463,14 @@ mod tests {
             ErrorCode::ConnectionLost,
             ErrorCode::OutcomeUnknown,
             ErrorCode::Timeout,
+            // shed before anything ran, so a repeat is a first try
+            // ([Resolved #15](../../../docs/src/appendix/resolved/shard-mesh-admission.md))
+            ErrorCode::Shedding,
         ] {
             assert!(retriable(&server(code)), "{code:?} is not tried again");
         }
         for code in [
             ErrorCode::Internal,
-            ErrorCode::Shedding,
             ErrorCode::WrongCluster,
             ErrorCode::UnknownLineage,
             ErrorCode::Unauthorized,
@@ -4111,6 +4113,8 @@ mod endpoint_tests {
 /// * `error` - What the try came to
 fn retriable(error: &Errors) -> bool {
     match error {
+        // a shed query was turned away before anything ran, so asking again is safe
+        // ([Resolved #15](../../../docs/src/appendix/resolved/shard-mesh-admission.md))
         Errors::Server { code, .. } => matches!(
             code,
             ErrorCode::NotLeader
@@ -4119,6 +4123,7 @@ fn retriable(error: &Errors) -> bool {
                 | ErrorCode::ConnectionLost
                 | ErrorCode::OutcomeUnknown
                 | ErrorCode::Timeout
+                | ErrorCode::Shedding
         ),
         Errors::IO(_) | Errors::ConnectionPool(_) => true,
         _ => false,

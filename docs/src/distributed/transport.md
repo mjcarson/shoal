@@ -147,7 +147,9 @@ accepted, a timeout or a lost peer is an unknown outcome unless something defini
 Bulk work has its own lane and queue, so a snapshot cannot starve the appends and votes beside
 it, and a slow follower blocks neither the other follower nor the shard's other groups. Nothing
 holds a consensus or storage resource while waiting on a queue whose consumer needs it. The
-local kanal mesh between a node's own shards is still unbounded ([item 15](../appendix/known-issues.md#15-no-backpressure-anywhere)).
+local kanal mesh between a node's own shards is unbounded as a channel and bounded at
+admission: a query routed to a shard whose queue holds `networking.max_queued_queries`
+messages is shed at once ([Resolved #15](../appendix/resolved/shard-mesh-admission.md)).
 
 ### Compatibility and the wire version
 

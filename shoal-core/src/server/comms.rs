@@ -74,6 +74,20 @@ impl<S: ShoalDatabase> Comms<S> {
     /// # Arguments
     ///
     /// * `shard` - The index of the shard to get our receiver for
+    /// How many messages wait on one shard's queue right now
+    ///
+    /// What the admission bound is judged against
+    /// ([Resolved #15](../../../docs/src/appendix/resolved/shard-mesh-admission.md)); zero for
+    /// a shard this mesh does not know.
+    ///
+    /// # Arguments
+    ///
+    /// * `shard` - The shard
+    #[must_use]
+    pub fn queued(&self, shard: usize) -> usize {
+        self.shards.get(shard).map_or(0, |(sender, _)| sender.len())
+    }
+
     pub fn get_shards_channels(
         &self,
         shard: usize,

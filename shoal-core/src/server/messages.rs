@@ -417,6 +417,12 @@ where
     },
     /// Report what this shard's peer links look like
     Transport(std::sync::mpsc::Sender<crate::server::peer::ShardTransportView>),
+    /// Hold this shard's loop for so many milliseconds, for a test of the admission bound
+    ///
+    /// The loop sleeps and its queue grows behind it, which is what a shard that has fallen
+    /// behind looks like from the mesh
+    /// ([Resolved #15](../../../docs/src/appendix/resolved/shard-mesh-admission.md)).
+    Hold(u64),
     /// A message from a client
     Client {
         /// This peers id
@@ -926,6 +932,7 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             },
             // a view is asked of one shard, on a channel that answers once
             ServerMsg::Transport(_) => panic!("A transport view is asked of one shard"),
+            ServerMsg::Hold(ms) => ServerMsg::Hold(*ms),
             ServerMsg::Query {
                 meta,
                 body,

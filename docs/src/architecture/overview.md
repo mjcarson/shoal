@@ -174,5 +174,8 @@ guarded by a comment rather than by the type system
   `StorageSupport` is only partly proven as an extension point
   ([F9](../features/ephemeral-tables.md)).
 - No prioritisation between message kinds on the shard loop.
-- All channels are unbounded, so there is no backpressure anywhere in the system
-  ([Known Issues](../appendix/known-issues.md#15-no-backpressure-anywhere)).
+- ~~All channels are unbounded, so there is no backpressure anywhere in the system.~~ The
+  shard mesh has an admission bound - a query for a shard that has fallen behind is shed
+  `Shedding` at once ([Resolved #15](../appendix/resolved/shard-mesh-admission.md)); the
+  channels behind it are bounded by what was admitted and by nothing else
+  ([Known Issues](../appendix/known-issues.md#15-no-backpressure-anywhere-the-remainder)).

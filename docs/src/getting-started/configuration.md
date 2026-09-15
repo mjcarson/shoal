@@ -39,6 +39,7 @@ networking:
   port: 12000                        # default
   max_frame_bytes: 67108864          # default; 64 MiB
   query_deadline: 10s                # default; how long a bundle may take in all
+  max_queued_queries: 65536          # default; messages one shard may have waiting before a query to it is shed
   tls:                               # optional; omitting it serves plaintext
     cert: "/etc/shoal/server.pem"    # certificate chain, leaf first
     key: "/etc/shoal/server.key"     # the private key for that chain
@@ -153,6 +154,21 @@ released; before this existed a share that never arrived held its client forever
 ([Resolved #33](../appendix/resolved/gather-expiry.md)). A bundle may name a shorter budget of
 its own through the client's `SendOptions::deadline` and never a longer one. Written the way
 `cluster.primary_failover_after` is: `500ms`, `2s`, `1m`.
+
+#### networking.max_queued_queries
+
+**How many messages may wait on one shard's queue before a query routed to it is shed**,
+sixty-four thousand by default ([Resolved #15](../appendix/resolved/shard-mesh-admission.md)).
+The admission bound on the shard mesh: the shard that accepts a client's bundle judges each
+query's shards as it routes it, and a query with a share bound for another shard whose queue
+already holds this many messages is answered `Shedding` at once, in its own table variant,
+and never enqueued. The channel between shards is not bounded - a send between shards that
+blocked would be a deadlock - so this is a bound on what clients may put on it, and the
+traffic between shards is bounded by what was admitted. A share for the accepting shard
+itself is never shed, since that shard's loop is the one draining its queue. A client with a
+retry asks again; nothing ran. The count is of every message on the queue, not only queries,
+so a shard busy with releases and loads sheds sooner than one busy with clients alone. At the
+frame bound the default is a few gibibytes of queued queries at most.
 
 #### networking.tls
 

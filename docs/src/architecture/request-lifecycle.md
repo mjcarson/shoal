@@ -236,8 +236,11 @@ afterwards is dropped by identity ([Resolved #33](../appendix/resolved/gather-ex
 [F42](../features/primary-failover.md) a share forwarded to a peer whose link never wrote it is
 sent to another holder once, under the same slot, so the gather waits for exactly the share it
 was owed. What
-a shard holds while it waits is still unbounded
-([Known Issues #15](../appendix/known-issues.md#15-no-backpressure-anywhere)).
+a shard holds while it waits is bounded by what the coordinator admitted: a query bound for a
+shard whose queue holds `networking.max_queued_queries` messages is shed at once
+([Resolved #15](../appendix/resolved/shard-mesh-admission.md)), and what the admitted queries
+hold behind that is not bounded by a number of its own
+([Known Issues #15](../appendix/known-issues.md#15-no-backpressure-anywhere-the-remainder)).
 
 ## 4. Executing
 

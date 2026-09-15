@@ -195,8 +195,9 @@ It is also what makes two other things possible. Most of the server's hot-path p
 for an error to go — `client_rx_relay` panics on any non-EOF socket error (`shard.rs:63-64`) and
 `client_tx_relay` panics on both a short write and a write error (`shard.rs:110-114`), killing a
 shard and every other client it was serving. And bounding the channels
-([item 15](../appendix/known-issues.md#15-no-backpressure-anywhere)) requires a way to say
-*shedding*, which is an error the client has to be able to receive.
+([item 15](../appendix/known-issues.md#15-no-backpressure-anywhere-the-remainder)) requires a way to say
+*shedding*, which is an error the client has to be able to receive - and which the mesh's
+admission bound now sends ([Resolved #15](../appendix/resolved/shard-mesh-admission.md)).
 
 ## Recommendation
 

@@ -391,4 +391,5 @@ load, latency stays low because the queue drains.
 - Rotation releases every pending response at once. That is correct — they are all durable —
   but it means a rotation can emit an unbounded burst of responses.
 - Nothing bounds `PendingResponse`. Under a slow device it grows with arrival rate times fsync
-  latency. See [Known Issues #15](../appendix/known-issues.md#15-no-backpressure-anywhere).
+  latency. See [Known Issues #15](../appendix/known-issues.md#15-no-backpressure-anywhere-the-remainder),
+  the remainder once the mesh got its admission bound.

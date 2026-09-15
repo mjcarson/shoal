@@ -16,7 +16,7 @@ a second copy. A new defect goes to known issues at the next free number, never 
 | --- | --- | --- |
 | [112](../appendix/known-issues.md#112-certificate_rotation_binds_identity-fails-about-half-its-runs-alone-on-the-development-host) | `certificate_rotation_binds_identity` fails about half its runs alone on the development host, on which member leads when node zero restarts | [C11](testing.md) |
 | [113](../appendix/known-issues.md#113-glommios-dmafileopen_at-unwraps-statfs-after-a-successful-open) | glommio's `DmaFile::open_at` unwraps `statfs` after a successful open; fixed in the fork's working tree, uncommitted there | [C11](testing.md) |
-| [15](../appendix/known-issues.md#15-no-backpressure-anywhere) | The local kanal mesh between a node's shards is unbounded; only the peer lanes are bounded in bytes | [C2](transport.md) |
+| [15](../appendix/known-issues.md#15-no-backpressure-anywhere-the-remainder) | The local kanal mesh has an admission bound ([Resolved #15](../appendix/resolved/shard-mesh-admission.md)); the response and pending structures behind it are bounded by admitted work alone | [C2](transport.md) |
 
 ## Explicitly unsupported
 

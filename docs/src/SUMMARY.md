@@ -163,6 +163,7 @@
   - [11, 12, 37. The ring panicked on an empty lookup and never smoothed load](appendix/resolved/tablet-ring.md)
   - [13. Eviction logging can underflow](appendix/resolved/eviction-log-underflow.md)
   - [14. Empty rotated intent logs were never deleted](appendix/resolved/empty-rotated-logs.md)
+  - [15. No backpressure anywhere, the shard mesh half](appendix/resolved/shard-mesh-admission.md)
   - [16, 51. A partition read that failed panicked its shard and stranded its queries](appendix/resolved/partition-load-failure.md)
   - [17. Leftover debug `println!`s](appendix/resolved/leftover-printlns.md)
   - [18, 50. Core exclusion was ignored and shard placement was random](appendix/resolved/excluded-cores-typo.md)
