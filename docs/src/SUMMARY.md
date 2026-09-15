@@ -199,6 +199,7 @@
   - [90. Setting `RUST_LOG` could fragment every exported trace](appendix/resolved/divergent-layer-filters.md)
   - [94. An answer owed to a client that had left ended the shard](appendix/resolved/disconnected-client-cleanup.md)
   - [96. `cluster.transport.ping_interval` is parsed, documented and consumed by nothing](appendix/resolved/ping-interval-consumer.md)
+  - [100. duplicate_node_identity_is_fenced failed under the fixture suite at full parallelism](appendix/resolved/clone-fencing-under-load.md)
   - [101. A member that fell silent before its fifth report was never called Down](appendix/resolved/short-lived-member-detection.md)
   - [95. ShoalPool::transport() reported shard zero's links and called them the node's](appendix/resolved/transport-view-every-shard.md)
   - [97. stage_join.rs had not compiled since F36, and needed /opt/shoal to run](appendix/resolved/stage-join-storage.md)

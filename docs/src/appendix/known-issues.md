@@ -32,9 +32,9 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 101, 102, 104, 105, 108 and 111, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ item 110 is the newest entry here ~~and the newest number~~ and 111 the newest number, and why 17, 33, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 101, 102, 104, 105, 108 and 111 are on the resolved page. **111 never
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 104, 105, 108 and 111, and
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ item 112 is the newest entry here and the newest number, and why 17, 33, 78, 79, 80, 82,
+83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 104, 105, 108 and 111 are on the resolved page. **111 never
 appeared here**: it was found by [F47](../features/local-rehome.md)'s crash matrix - a read
 landing while an archive closed panicked the executor - reproduced against the map alone and
 fixed in the same change ([Resolved #111](resolved/archive-removal-borrow.md)). **108 never
@@ -1822,32 +1822,6 @@ what `Hash for str` writes - `write_str`, which the std hasher contract spells a
 `0xff` - and freeze the archived hash beside the live one in `partition_keys.rs` so the two cannot
 drift again.
 
-### 100. `duplicate_node_identity_is_fenced` fails under the fixture suite at full parallelism
-
-`shoal/tests/cluster_fixture.rs`, `duplicate_node_identity_is_fenced`
-
-The M3 fencing test passes alone in under two seconds, passes beside the six M4 tests, and
-passes in the whole suite at `--test-threads 6`; run in the whole suite at the default thread
-count - thirty-seven tests, each staging a cluster and claiming whole cores on a thirty-two
-thread machine - it fails every time with `the clone kept running`: the clone started from the
-copied directory at the same incarnation is not refused within its sixty-second wait, and the
-test runs past its mark before the suite is done. Whether the clone never joins under that
-load or joins and is not fenced is not established; the child logs of a failing run were not
-kept.
-
-**Established by running it**, three times each way, on the development host while
-[F40](../features/replication.md) ran the suite - which added nine tests to it and may be what
-tipped the load. `CLAUDE.md` already says a fixture failure that passes alone was a timeout; this
-one is recorded because it is reproducible at one thread count and not at another, which a
-timeout usually is not.
-
-**Fix direction:** find out which. Keep `SHOAL_CHILD_LOG` for a failing run and read the
-clone's - it either never printed ready, never joined, or joined and was admitted. If the
-allocator makes the clone wait for cores, the fixture's `ready_timeout` is the bound to raise;
-if the leader admitted the same incarnation from a second address, that is a fencing defect
-and this item moves up. Until then the suite is run at a lower thread count, which the
-[test-coverage](test-coverage.md) runbook now says.
-
 ### 103. A returning leader is refused its own re-election until its old lease lapses, and hops to it wait
 
 `shoal-core/src/server/shard/groups.rs`, `propose_through`, the `Electing` arm; openraft
@@ -2012,3 +1986,32 @@ which is what its family page says to expect.
 and, if they are `Unavailable` or `PeerUnavailable` from a forward to the dead primary,
 propose through the local replica when the node holds one, which is what `read_ring_for` does
 for reads. Then a smoke run of the kill arm should show the outage the F42 page shows.
+
+### 112. `certificate_rotation_binds_identity` fails about half its runs alone on the development host
+
+`shoal/tests/cluster_fixture.rs`, `certificate_rotation_binds_identity`, the identity-mismatch
+step
+
+The M10c certificate test reissues node two's leaf naming node one, reloads it, restarts node
+zero and waits for it to join. Node zero refuses node two's hello and node two's dials to node
+zero fail by name, which is what the step asserts - but node zero's own rejoin needs the control
+leader, and after node zero's restart the leader is whichever of nodes one and two won the
+election. When node two wins, node zero cannot reach it: its observation is proposed to a
+member it refuses, it never joins, and `wait_joined` fails at sixty seconds with node zero
+`recovering` and three members up. Two other shapes were seen at the writes of the same test
+under the same odds: `OutcomeUnknown: the replication rpc timed out` and `NotLeader: group …
+elected no leader within the deadline`, which are the data groups node two leads answering a
+write through node zero.
+
+**Established by running it**, on 2026-09-15, while [Resolved #100](resolved/clone-fencing-under-load.md)
+ran the suite: alone, one failure in four runs against the tree at `16f9a53` and five in eight
+against the fixed tree, in the three shapes above; it passed in the six-thread suite runs of
+[Resolved #102](resolved/fixture-port-block.md) and failed in the last of Resolved #100's. The
+reading of which leader is which is from the test's steps and the join path, not from a child
+log.
+
+**Fix direction:** the step should not depend on who leads. Either restart node zero only after
+moving the control lead to node one (`SetControlVoters` cannot; a `transfer_leader` verb on the
+fixture would), or wait for the link failures with node zero still a member and restart it
+only after node two's leaf is reissued as itself. Either way the test then says what it means:
+the mismatch is refused at every new handshake, and the cluster it is refused in goes on.

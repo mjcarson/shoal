@@ -100,5 +100,4 @@ simpler and a second binary would take the module by copy in any case.
 
 [F36. Cluster harness](../../features/cluster-harness.md), the fixture; [C11. Testing](../../distributed/testing.md);
 [F41. Read consistency](../../features/read-consistency.md), where the bench harness met the
-same range; [item 100](../known-issues.md#100-duplicate_node_identity_is_fenced-fails-under-the-fixture-suite-at-full-parallelism),
-the other suite-load failure.
+same range; [Resolved #100](clone-fencing-under-load.md), the other suite-load failure.

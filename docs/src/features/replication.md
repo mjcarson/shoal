@@ -417,7 +417,7 @@ one function on the one type. The fixture row is what tests it on the wire.
   glommio runtime the groups run on
 - [F36](cluster-harness.md), the fixture and the protocol model that judge the ledger
 - [Item 99](../appendix/known-issues.md#99-a-durable-followers-log-reversion-stops-the-leaders-whole-process)
-  and [item 100](../appendix/known-issues.md#100-duplicate_node_identity_is_fenced-fails-under-the-fixture-suite-at-full-parallelism),
-  what was found on the way
+  and [item 100](../appendix/resolved/clone-fencing-under-load.md),
+  what was found on the way, both since resolved
 - [O46](../appendix/optimizations.md), [O47](../appendix/optimizations.md) and
   [O48](../appendix/optimizations.md), what was deliberately not taken

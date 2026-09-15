@@ -32,6 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -99,6 +100,23 @@ const LEASE_POLL: Duration = Duration::from_millis(50);
 /// A hint may name a leader that has just changed, and a leader whose lease is not established
 /// yet answers with no hint at all; each is one more hop.
 const PROPOSE_HOPS: usize = 4;
+
+/// How long a node's first observation of itself is held back, in milliseconds, for a test
+///
+/// Zero, which is the default, holds nothing. A test sets it to make the control member stand
+/// for election before it has observed itself, which is the race
+/// [Resolved #100](../../../../docs/src/appendix/resolved/clone-fencing-under-load.md) is about,
+/// deterministically rather than under a loaded machine.
+static OBSERVE_HOLD_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Hold back this process's first observation of itself, for a test
+///
+/// # Arguments
+///
+/// * `ms` - How long, or zero for no hold
+pub fn hold_observe(ms: u64) {
+    OBSERVE_HOLD_MS.store(ms, Ordering::SeqCst);
+}
 
 /// How long a node waits after a failed observation before it tries again
 ///
@@ -1021,6 +1039,8 @@ struct Core {
     observing: bool,
     /// When the next observation may start, after one failed
     observe_after: Option<Instant>,
+    /// Whether the test hold on the first observation has been applied, so it is applied once
+    observe_held: bool,
     /// Whether a promotion is in flight
     promoting: bool,
     /// Whether a rewrite of a moved member's addresses into the membership is in flight
@@ -1579,6 +1599,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         status,
         observing: false,
         observe_after: None,
+        observe_held: false,
         promoting: false,
         readdressing: false,
         joining: false,
@@ -2822,10 +2843,24 @@ impl Core {
         self.maybe_promote();
     }
 
-    /// Observe this node through the leader, once one is known and it has not been done
+    /// Observe this node through the leader, once it has not been done
+    ///
+    /// The leader need not be known here: `propose` follows the local group's hint when it has
+    /// one and asks the committed members otherwise, since a recovering member that started
+    /// electing before it observed names no leader of its own and would otherwise never ask
+    /// ([Resolved #100](../../../../docs/src/appendix/resolved/clone-fencing-under-load.md)).
     fn maybe_observe(&mut self) {
-        if self.status != JoinStatus::Recovering || self.observing || self.leader.is_none() {
+        if self.status != JoinStatus::Recovering || self.observing {
             return;
+        }
+        // a test may hold the first observation back, to make the member stand first
+        if self.observe_after.is_none() && !self.observe_held {
+            self.observe_held = true;
+            let hold = OBSERVE_HOLD_MS.load(Ordering::SeqCst);
+            if hold > 0 {
+                self.observe_after = Some(Instant::now() + Duration::from_millis(hold));
+                return;
+            }
         }
         // a failed observation is not retried on every metrics change, only after the backoff
         if self.observe_after.is_some_and(|at| Instant::now() < at) {
@@ -4229,10 +4264,21 @@ pub async fn propose(
         };
         let payload = serde_json::to_vec(&command)
             .map_err(|error| ProposeError::Failed(format!("encoding a proposal: {error}")))?;
-        // a hint may name a leader that has just changed, so this follows a few of them
-        for _ in 0..PROPOSE_HOPS {
-            // no hint: the leader the metrics name once the group elects one
-            let Some(record) = hint.take().or_else(|| leader_record(raft, machine)) else {
+        // the committed members this node may ask where the leader is, when its own group
+        // names none: a member that stood for election before it heard from the leader has a
+        // vote nobody committed and would otherwise wait on metrics that never name one
+        // ([Resolved #100](../../../../docs/src/appendix/resolved/clone-fencing-under-load.md))
+        let mut to_ask = members_to_ask(machine, me);
+        // a hint may name a leader that has just changed, so this follows a few of them, and
+        // each member asked is a hop of its own
+        for _ in 0..PROPOSE_HOPS + to_ask.len() {
+            // no hint: the leader the metrics name, else a member to ask, else the leader the
+            // metrics name once the group elects one
+            let Some(record) = hint
+                .take()
+                .or_else(|| leader_record(raft, machine))
+                .or_else(|| to_ask.pop())
+            else {
                 let elected = raft
                     .wait(Some(Duration::from_secs(3)))
                     .metrics(|metrics| metrics.current_leader.is_some(), "a leader")
@@ -4294,7 +4340,15 @@ pub async fn propose(
                     }
                 },
                 Err(RpcFailure::Remote(msg)) => return Err(ProposeError::Failed(msg)),
-                Err(RpcFailure::Unreachable(_)) => return Err(ProposeError::NoLeader),
+                // a member that cannot be reached is not asked again by anyone this proposal
+                // consults, and is not the end of the road while there is another to ask
+                Err(RpcFailure::Unreachable(_)) => {
+                    to_ask.retain(|member| member.node != record.node);
+                    match to_ask.pop() {
+                        Some(next) => hint = Some(next),
+                        None => return Err(ProposeError::NoLeader),
+                    }
+                }
             }
         }
         Err(ProposeError::NoLeader)
@@ -4303,6 +4357,31 @@ pub async fn propose(
         Ok(outcome) => outcome,
         Err(_) => Err(ProposeError::NoLeader),
     }
+}
+
+/// The committed members a node may ask where the leader is, nearest the end first
+///
+/// Every member but this node that the state holds up and placeable, in an order `pop` walks
+/// from the first committed. A member that is not the leader answers a proposal with the
+/// leader it knows, which is the hint the proposal follows next.
+///
+/// # Arguments
+///
+/// * `machine` - The state machine
+/// * `me` - This node
+fn members_to_ask(machine: &ControlStateMachine, me: NodeId) -> Vec<MemberRecord> {
+    let state = machine.state();
+    let mut records: Vec<MemberRecord> = state
+        .members
+        .iter()
+        .filter(|(node, member)| {
+            **node != me && member.health == MemberHealth::Up && member.is_placeable()
+        })
+        .map(|(_, member)| member.record.clone())
+        .collect();
+    // popped from the end, so the first committed is asked first
+    records.reverse();
+    records
 }
 
 /// The record of the leader the metrics name, if they name one this node knows

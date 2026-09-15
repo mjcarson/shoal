@@ -69,8 +69,12 @@ cargo run -p shoal-model --example regenerate_schedules   # after a model change
 # every test allocates whole cores, so the suite is what a loaded machine makes it: a failure
 # that passes alone was a timeout, and the child logs are under SHOAL_CHILD_LOG=<dir> (one file
 # per child, DEBUG, hundreds of MB each - point it under target/, never at a tmpfs). run it at
-# six threads: at the default thirty-two the fencing test fails every time (known issue 100)
+# six threads: at the default thirty-two the children die at glommio's io_uring probe on the
+# development host (the fencing failure filed as item 100 was a race of the clone's own, since
+# resolved). SHOAL_CHILD_LOG wants an absolute path - a child runs in its own directory - and a
+# targeted run: one suite run under it wrote 54 GB and failed twenty-two tests on the I/O
 cargo test -p shoal --test cluster_fixture -- --test-threads 6
+SHOAL_CHILD_LOG=$PWD/target/child-logs cargo test -p shoal --test cluster_fixture -- <one test>
 
 # item 33's reproduction (F41): a standalone two shard get whose shares are held expires at the
 # bundle deadline. run against the tree with the gather sweep disabled it never returns
