@@ -37,8 +37,9 @@ the test binary as its children, one per node, each on whole cores the allocator
 control core and its shard cores - so the suite is what a loaded machine makes it, and a
 failure that passes alone was a timeout. A child claims its staged marker: node zero's names
 the cluster, every other child's says `joining` with a pre-minted id and node zero's control
-address as its seed; data and control ports are reserved with `SO_REUSEPORT` sockets before
-the child starts, client ports are zero and reported. A child prints `SHOAL_CLUSTER_READY`
+address as its seed; data and control ports are numbers from a block below the ephemeral
+floor ([Resolved #102](../appendix/resolved/fixture-port-block.md)), client ports are zero and
+reported. A child prints `SHOAL_CLUSTER_READY`
 with its bound endpoints, identities, control core and control status, then answers verbs on
 stdin with one JSON line each. Between any two nodes a byte proxy per direction per lane
 (`cluster.dial`) can cut, delay, throttle to a byte rate, or heal, so every connection opened
@@ -176,7 +177,8 @@ digest the repair path does not share, so a bug in the canonical digest cannot h
 ## Alternatives rejected
 
 Rejecting deterministic testing because glommio is not simulated; an insert-only success set as
-the oracle; fixed sleeps as readiness; bind-zero-then-close as a port reservation; a process
+the oracle; fixed sleeps as readiness; bind-zero-then-close as a port reservation, and after it
+a reservation from the ephemeral range at all; a process
 pause and a link partition labelled as one fault; twenty repetitions of a ledger in place of a
 named schedule.
 
@@ -190,8 +192,8 @@ machine gives it, and a test that needs a real cluster of three needs nine or mo
 The model is Raft-shaped and not a library: no configuration changes, learners or snapshots in
 it. Core allocation is recorded, not enforced. The fencing test fails at full parallelism
 ([item 100](../appendix/known-issues.md#100-duplicate_node_identity_is_fenced-fails-under-the-fixture-suite-at-full-parallelism));
-a deferred node can lose its reserved port to an outbound connection
-([item 102](../appendix/known-issues.md#102-a-deferred-fixture-node-can-lose-its-reserved-port-to-an-outbound-connection));
+~~a deferred node can lose its reserved port to an outbound connection~~ (the ports come from a
+block below the ephemeral floor since [Resolved #102](../appendix/resolved/fixture-port-block.md));
 the certificate test skips without kTLS; the previous-binary upgrade test runs only when a
 build is named. Disk full and torn archive writes are not injected. See [C15](open-issues.md).
 

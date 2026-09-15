@@ -204,6 +204,7 @@
   - [97. stage_join.rs had not compiled since F36, and needed /opt/shoal to run](appendix/resolved/stage-join-storage.md)
   - [98. An admin refusal's error code was derived from its reason text](appendix/resolved/admin-refusal-kinds.md)
   - [99. A durable follower's log reversion stopped the leader's whole process](appendix/resolved/durable-log-reversion.md)
+  - [102. A deferred fixture node could lose its reserved port to an outbound connection](appendix/resolved/fixture-port-block.md)
   - [104. A restart merged every sealed segment below the checkpoint into the archives again](appendix/resolved/segments-recompacted-after-restart.md)
   - [105. A volatile group never checkpointed, so its log was never purged](appendix/resolved/volatile-groups-never-purged.md)
   - [108. A cluster arm's server overrides were dropped on the way to every node](appendix/resolved/cluster-arm-overrides-dropped.md)

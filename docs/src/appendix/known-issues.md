@@ -32,9 +32,9 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 101, 104, 105, 108 and 111, and
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 101, 102, 104, 105, 108 and 111, and
 why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ item 110 is the newest entry here ~~and the newest number~~ and 111 the newest number, and why 17, 33, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 101, 104, 105, 108 and 111 are on the resolved page. **111 never
+83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 101, 102, 104, 105, 108 and 111 are on the resolved page. **111 never
 appeared here**: it was found by [F47](../features/local-rehome.md)'s crash matrix - a read
 landing while an archive closed panicked the executor - reproduced against the map alone and
 fixed in the same change ([Resolved #111](resolved/archive-removal-borrow.md)). **108 never
@@ -1847,29 +1847,6 @@ allocator makes the clone wait for cores, the fixture's `ready_timeout` is the b
 if the leader admitted the same incarnation from a second address, that is a fencing defect
 and this item moves up. Until then the suite is run at a lower thread count, which the
 [test-coverage](test-coverage.md) runbook now says.
-
-### 102. A deferred fixture node can lose its reserved port to an outbound connection
-
-`shoal/tests/cluster/mod.rs`, `build_membership_cluster`, `Cluster::start`, `start_deferred`
-
-The fixture reserves every node's data and control port with a bound, never-listening
-`SO_REUSEPORT` socket from the ephemeral range, and drops every reservation once the nodes it
-starts have bound. A node the builder deferred has not bound anything at that point, so its two
-ports are free until `start_deferred` runs - free for any other test in the suite to take as the
-*local* end of an outbound connection, which the kernel hands out from the same range. When that
-happens the deferred node fails to bind with `AddrInUse` and the test fails; the memory note on
-this host records that a listener cannot bind over a client-side `TIME_WAIT` whatever it sets,
-so the reservation trick cannot be extended to cover the gap.
-
-**Established by running it**: `minority_cannot_commit_membership_changes` failed once with
-`AddrInUse` on its deferred node under the full fixture suite at `--test-threads 6` while
-[F42](../features/primary-failover.md) ran it, and passes alone and in the next two suite runs.
-The M6 tests start no deferred node.
-
-**Fix direction:** keep a deferred node's reservations until it starts, by handing them to
-`start_deferred` rather than dropping them with the rest; or take the fixture's ports from a
-block under 32768 the way the benchmark harness does since [F41](../features/read-consistency.md),
-which is the fix that also stops a reservation colliding with a `TIME_WAIT`.
 
 ### 103. A returning leader is refused its own re-election until its old lease lapses, and hops to it wait
 

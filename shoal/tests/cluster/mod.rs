@@ -32,6 +32,7 @@
 pub mod cores;
 pub mod link;
 pub mod node;
+pub mod ports;
 pub mod schema;
 
 use std::collections::BTreeMap;
@@ -830,10 +831,6 @@ impl ClusterBuilder {
                 },
             )?));
         }
-        // hold the port reservations until every child has bound, so nothing else takes them
-        let reservations = staged
-            .as_mut()
-            .map(|staged| std::mem::take(&mut staged.reservations));
         plan.endpoints = vec![Endpoints::unbound(); self.nodes.len()];
         for (id, node) in nodes.iter_mut().enumerate() {
             if let Some(node) = node {
@@ -843,7 +840,6 @@ impl ClusterBuilder {
                 plan.endpoints[id] = node.endpoints.clone();
             }
         }
-        drop(reservations);
         // a directed link per ordered pair, each pointing at the target's client endpoint
         let mut links = BTreeMap::new();
         if self.links {
@@ -1500,14 +1496,12 @@ impl Cluster {
     pub fn restart_at_new_address(&mut self, id: usize) -> Result<(u16, u16), FixtureError> {
         let mut staged = self.staged[id].clone();
         let old = (staged.data_port, staged.control_port);
-        let (data_sock, data_port) = reserve_port()?;
-        let (control_sock, control_port) = reserve_port()?;
+        // fresh ports from the block, so the old address is free for a clone
+        let (data_port, control_port) = ports::next_pair()?;
         staged.data_port = data_port;
         staged.control_port = control_port;
         self.staged[id] = staged.clone();
-        let restarted = self.restart_with(id, NodeKind::Server, Some(staged));
-        drop((data_sock, control_sock));
-        restarted?;
+        self.restart_with(id, NodeKind::Server, Some(staged))?;
         Ok(old)
     }
 
@@ -1553,8 +1547,8 @@ impl Cluster {
     /// * `dir` - The copy of its directory
     pub fn spawn_clone(&self, id: usize, dir: &std::path::Path) -> Result<Node, FixtureError> {
         let mut staged = self.staged[id].clone();
-        let (data_sock, data_port) = reserve_port()?;
-        let (control_sock, control_port) = reserve_port()?;
+        // the clone's own ports, from the block
+        let (data_port, control_port) = ports::next_pair()?;
         staged.data_port = data_port;
         staged.control_port = control_port;
         // the clone runs on the original's allocation, so it runs the shard count the
@@ -1571,7 +1565,6 @@ impl Cluster {
             None,
             ChildOverrides::default(),
         )?;
-        drop((data_sock, control_sock));
         Ok(node)
     }
 
@@ -1844,33 +1837,17 @@ pub fn is_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
-/// The reserved ports and per-node staging of a membership cluster, held until every child binds
+/// The per-node staging of a membership cluster
+///
+/// The ports each node binds are numbers from the fixture's block
+/// ([`ports`](ports::next_pair)), ours by number below the ephemeral floor, so nothing is
+/// reserved and nothing has to be held until a deferred node starts
+/// ([Resolved #102](../../../docs/src/appendix/resolved/fixture-port-block.md)).
 struct StagedPlan {
     /// One `StagedCluster` per node, in node order
     per_node: Vec<StagedCluster>,
-    /// The bound-not-listening reservations, dropped once the cluster is up
-    reservations: Vec<socket2::Socket>,
     /// The authority the peer lanes trust, if they are encrypted
     pki: Option<Pki>,
-}
-
-/// Reserve a port with `SO_REUSEPORT`, bound but never listening
-///
-/// The same trick the pool uses for the client port: a bound reuse-port socket keeps the port
-/// from everyone else, and the kernel routes no connection to it because it never listens, so a
-/// child can bind the same port with `SO_REUSEPORT` and take every connection.
-fn reserve_port() -> Result<(socket2::Socket, u16), FixtureError> {
-    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
-    socket.set_reuse_port(true)?;
-    socket.set_reuse_address(true)?;
-    let addr: SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");
-    socket.bind(&addr.into())?;
-    let port = socket
-        .local_addr()?
-        .as_socket_ipv4()
-        .expect("an ipv4 socket")
-        .port();
-    Ok((socket, port))
 }
 
 /// Mint the identities, reserve the ports, stage the markers, and point every joiner at node zero
@@ -1894,7 +1871,6 @@ fn build_membership_cluster(
     let mut ids = Vec::with_capacity(specs.len());
     let mut data_ports = Vec::with_capacity(specs.len());
     let mut control_ports = Vec::with_capacity(specs.len());
-    let mut reservations = Vec::new();
     let mut shard_counts = Vec::with_capacity(specs.len());
     for (id, _spec) in specs.iter().enumerate() {
         ids.push(NodeId::mint());
@@ -1907,10 +1883,8 @@ fn build_membership_cluster(
             .find(|(node, _)| *node == id)
             .map_or(cores, |(_, slots)| *slots);
         shard_counts.push(shards);
-        let (data_sock, data_port) = reserve_port()?;
-        let (control_sock, control_port) = reserve_port()?;
-        reservations.push(data_sock);
-        reservations.push(control_sock);
+        // the node's two ports, from the block below the ephemeral floor
+        let (data_port, control_port) = ports::next_pair()?;
         data_ports.push(data_port);
         control_ports.push(control_port);
     }
@@ -2023,9 +1997,5 @@ fn build_membership_cluster(
             tls: pki.as_ref().map(|_| tls_paths(dir.path())),
         });
     }
-    Ok(StagedPlan {
-        per_node,
-        reservations,
-        pki,
-    })
+    Ok(StagedPlan { per_node, pki })
 }
