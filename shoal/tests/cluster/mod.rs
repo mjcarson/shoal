@@ -1546,6 +1546,22 @@ impl Cluster {
     /// * `id` - The node to clone
     /// * `dir` - The copy of its directory
     pub fn spawn_clone(&self, id: usize, dir: &std::path::Path) -> Result<Node, FixtureError> {
+        self.spawn_clone_with(id, dir, ChildOverrides::default())
+    }
+
+    /// Start a second process of a node on a copy of its directory, with overrides
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node to clone
+    /// * `dir` - The copy of its directory
+    /// * `overrides` - What the clone runs with beyond its staging
+    pub fn spawn_clone_with(
+        &self,
+        id: usize,
+        dir: &std::path::Path,
+        overrides: ChildOverrides,
+    ) -> Result<Node, FixtureError> {
         let mut staged = self.staged[id].clone();
         // the clone's own ports, from the block
         let (data_port, control_port) = ports::next_pair()?;
@@ -1563,7 +1579,7 @@ impl Cluster {
             None,
             Some(staged),
             None,
-            ChildOverrides::default(),
+            overrides,
         )?;
         Ok(node)
     }

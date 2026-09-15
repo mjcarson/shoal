@@ -94,6 +94,11 @@ pub struct ChildRequest {
     /// ([F47](../../../docs/src/features/local-rehome.md))
     #[serde(default)]
     pub rehome_crash_at: Option<String>,
+    /// How long the child's control member holds back its first observation of itself, in
+    /// milliseconds, so it stands for election first
+    /// ([Resolved #100](../../../docs/src/appendix/resolved/clone-fencing-under-load.md))
+    #[serde(default)]
+    pub observe_hold_ms: Option<u64>,
 }
 
 /// What a restart may change about a child beyond its staging
@@ -109,6 +114,8 @@ pub struct ChildOverrides {
     pub cores: Option<usize>,
     /// A rehome crash point to arm before the pool starts
     pub rehome_crash_at: Option<String>,
+    /// How long to hold the control member's first observation of itself back, in milliseconds
+    pub observe_hold_ms: Option<u64>,
     /// The newest wire version the node advertises: a pin, the build's newest, or as staged
     ///
     /// `Some(Some(v))` pins, `Some(None)` lifts the staged pin, `None` keeps the staging.
@@ -479,6 +486,7 @@ impl Node {
             durability: durability.clone(),
             cluster,
             rehome_crash_at: overrides.rehome_crash_at,
+            observe_hold_ms: overrides.observe_hold_ms,
         };
         let request = serde_json::to_string(&request).expect("a request serializes");
         // the test binary again, running only the child function - or another build of it,

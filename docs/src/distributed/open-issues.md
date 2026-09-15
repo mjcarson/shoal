@@ -14,7 +14,7 @@ a second copy. A new defect goes to known issues at the next free number, never 
 
 | Item | What | Page |
 | --- | --- | --- |
-| [100](../appendix/known-issues.md#100-duplicate_node_identity_is_fenced-fails-under-the-fixture-suite-at-full-parallelism) | `duplicate_node_identity_is_fenced` fails under the fixture suite at full parallelism | [C11](testing.md) |
+| [112](../appendix/known-issues.md#112-certificate_rotation_binds_identity-fails-about-half-its-runs-alone-on-the-development-host) | `certificate_rotation_binds_identity` fails about half its runs alone on the development host, on which member leads when node zero restarts | [C11](testing.md) |
 | [103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait) | A returning leader is refused its own re-election until its old lease lapses, and hops to it wait | [C7](failover.md) |
 | [106](../appendix/known-issues.md#106-a-member-isolated-on-every-lane-long-enough-to-inflate-its-term-trips-an-openraft-debug-assertion-when-healed) | A member isolated on every lane long enough to inflate its term trips an openraft debug assertion when healed | [C3](membership.md) |
 | [107](../appendix/known-issues.md#107-a-get-after-a-failed-partition-load-can-be-answered-by-the-load-that-failed) | A get after a failed partition load can be answered by the load that failed (storage, named in F50's debt table) | [C6](reads.md) |

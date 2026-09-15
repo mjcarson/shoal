@@ -46,9 +46,12 @@ stdin with one JSON line each. Between any two nodes a byte proxy per direction 
 after a join stays under the fault; a proxy cannot parse an encrypted frame, which is why
 frame-class faults are the child's own verbs and the real-TLS tests use a fixture authority.
 `SHOAL_CHILD_LOG=<dir>` keeps every child's log (hundreds of megabytes each; point it under
-`target/`, never at a tmpfs, and never set it empty). Run it at six threads: at the default
-thirty-two the fencing test fails every time
-([item 100](../appendix/known-issues.md#100-duplicate_node_identity_is_fenced-fails-under-the-fixture-suite-at-full-parallelism)).
+`target/`, never at a tmpfs, never set it empty, give it an absolute path since a child runs
+in its own directory, and set it for a targeted run only - one suite run under it wrote fifty
+gigabytes and failed twenty-two tests on the I/O). Run it at six threads: at the default thirty-two the children die
+at glommio's io_uring probe on the development host, which is the machine's limit and not a
+defect - the fencing failure that was filed against that load was a race of the clone's own
+([Resolved #100](../appendix/resolved/clone-fencing-under-load.md)).
 
 | Verbs | What they do | Since |
 | --- | --- | --- |
@@ -190,8 +193,9 @@ machine gives it, and a test that needs a real cluster of three needs nine or mo
 ## Limitations
 
 The model is Raft-shaped and not a library: no configuration changes, learners or snapshots in
-it. Core allocation is recorded, not enforced. The fencing test fails at full parallelism
-([item 100](../appendix/known-issues.md#100-duplicate_node_identity_is_fenced-fails-under-the-fixture-suite-at-full-parallelism));
+it. Core allocation is recorded, not enforced. ~~The fencing test fails at full parallelism~~
+(the clone's race is [Resolved #100](../appendix/resolved/clone-fencing-under-load.md); the
+suite at full parallelism fails on the host's io_uring limits);
 ~~a deferred node can lose its reserved port to an outbound connection~~ (the ports come from a
 block below the ephemeral floor since [Resolved #102](../appendix/resolved/fixture-port-block.md));
 the certificate test skips without kTLS; the previous-binary upgrade test runs only when a

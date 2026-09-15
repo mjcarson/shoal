@@ -1493,6 +1493,11 @@ async fn cluster_server_child() {
         shoal::server::rehome::crash_point::arm_named(point)
             .expect("a rehome crash point the fixture names exists");
     }
+    // a hold on the control member's first observation of itself, so it stands first
+    // ([Resolved #100](../../docs/src/appendix/resolved/clone-fencing-under-load.md))
+    if let Some(ms) = request.observe_hold_ms {
+        shoal::server::control::plane::hold_observe(ms);
+    }
     let mut pool = match ShoalPool::<TestDb>::start(conf) {
         Ok(pool) => pool,
         Err(error) => {
@@ -2886,6 +2891,58 @@ async fn duplicate_node_identity_is_fenced() -> Result<(), FixtureError> {
         )
     );
     assert_eq!(clone.failure(), None, "the winning clone died");
+    Ok(())
+}
+
+/// A clone that stood for election before it observed itself is still fenced
+///
+/// The shape [item 100](../../docs/src/appendix/resolved/clone-fencing-under-load.md) met under
+/// a loaded machine, made deterministic: the clone's control member is held back from its first
+/// observation for longer than the control group's election timeout, so it stands - its loaded
+/// vote is committed with no lease, and nothing heartbeats a member the leader does not dial -
+/// and its own group names no leader from then on. Before the fix the observation waited for a
+/// leader the member's own metrics would never name again, so the clone ran on, unfenced, for
+/// as long as the test would wait. It is fenced within the readiness timeout now, because the
+/// observation asks the committed members for the leader when the local group names none.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clone_that_stands_before_it_observes_is_fenced() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(2, CoreClaim::Count(1))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 2)?;
+    let incarnation = cluster.node_mut(1).command("INCARNATION")?["ok"]["incarnation"]
+        .as_u64()
+        .expect("an incarnation");
+    // stop node 1 and copy its directory as it stands
+    cluster.kill(1)?;
+    let copy = cluster.clone_dir(1)?;
+    // the original comes back one start later
+    cluster.restart(1, NodeKind::Server)?;
+    cluster.wait_joined(&[1])?;
+    // the clone starts from the copy at that same incarnation, from other ports, holding its
+    // first observation back for two seconds: several election timeouts, so it stands first
+    let overrides = cluster::ChildOverrides {
+        observe_hold_ms: Some(2_000),
+        ..cluster::ChildOverrides::default()
+    };
+    let mut clone = cluster.spawn_clone_with(1, copy.path(), overrides)?;
+    clone.wait_ready(Duration::from_secs(60))?;
+    assert_eq!(clone.endpoints.incarnation, Some(incarnation + 1));
+    // it is fenced all the same, within the fixture's readiness timeout
+    let refused = Cluster::wait_failure(&clone, Duration::from_secs(30))
+        .expect("the clone kept running: it stood before it observed and never found the leader");
+    assert!(
+        refused.contains("incarnation")
+            || refused.contains("duplicate")
+            || refused.contains("fenced"),
+        "the clone failed for another reason: {refused}"
+    );
+    assert_eq!(
+        cluster.node(1).failure(),
+        None,
+        "the original was fenced by a duplicate"
+    );
     Ok(())
 }
 
@@ -13632,7 +13689,14 @@ async fn node_transfer_budgets_bound_concurrent_sources() -> Result<(), FixtureE
             .saturating_sub(received_before);
         let elapsed = started.elapsed().as_secs_f64();
         // a full bucket to begin with, then the rate, plus a chunk of slack
-        let bound = (BUDGET as f64) * (elapsed + 1.0) + 2.0 * 64.0 * 1024.0;
+        //
+        // the budget is each *sender's*, so every source that has streamed so far brought a
+        // full bucket of its own: the streams installed plus the one in flight. This bound
+        // allowed one bucket for three sources and passed on the margin until
+        // [Resolved #100](../../docs/src/appendix/resolved/clone-fencing-under-load.md)
+        // changed the timing around it
+        let sources = stats["installed"].as_f64().unwrap_or(0.0) + 1.0;
+        let bound = (BUDGET as f64) * (elapsed + sources) + 2.0 * 64.0 * 1024.0;
         assert!((received as f64) <= bound, "the spare received {received} bytes in {elapsed:.1}s, over the budget's bound of {bound:.0}: {stats}");
         if record["phase"] == "Done" {
             break record;

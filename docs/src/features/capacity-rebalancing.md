@@ -309,7 +309,8 @@ the planner's is what keeps it from being hit.
 - **The detector under load.** A busy development host loses enough of a member's reports at
   a 200 ms interval to call it down during a drain; the drain test runs at the default
   interval. The control lane's RPC timeouts under load are older than this feature
-  ([item 100](../appendix/known-issues.md)).
+  ([item 100](../appendix/resolved/clone-fencing-under-load.md), whose suite-load half turned
+  out to be the host's io_uring limits).
 
 ## Invariants to uphold
 
