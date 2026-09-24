@@ -142,7 +142,9 @@ server runs; the join is what `exit` is for.
 - **`stage_join.rs` still names a fixed port** above the capture range, because
   `RunRequest::port` is resolved into the harness's address before the pool exists.
 - **Item 16** — a shard that does not die at all — is the version of 58 worth more than any
-  report of a death, and is where it was.
+  report of a death, ~~and is where it was~~ and is [resolved](hot-path-panics.md) for every panic
+  a query could reach. A shard still ends on an error its loop returns, which is what this page's
+  reporting is for; [item 122](../known-issues.md) is the one of those a device can cause.
 
 ## Tests
 
@@ -159,7 +161,7 @@ server runs; the join is what `exit` is for.
 - [F36](../../features/cluster-harness.md), which needed this first
 - [C11](../../distributed/testing.md#the-process-fixture), which named the bind-zero race
 - [C9](../../distributed/operations.md#readiness), which asked for `ready()` and `shard_failed()`
-- [Item 16](../known-issues.md#16-panics-on-the-hot-path), the shard that should not die
+- [Resolved #16](hot-path-panics.md), the shard that should not die
 - [Item 69](../known-issues.md#69-shoalctl-and-the-tests-still-install-no-tracing-subscriber),
   why the tests saw none of the logging
 - [F8](../../features/purpose-built-workloads.md), whose probe stays for the question it answers

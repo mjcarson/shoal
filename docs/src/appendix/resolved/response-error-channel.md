@@ -162,10 +162,13 @@ is reading.
 
 ## Still open
 
-**The eight `storage.commit(..).unwrap()` sites still panic**, and they are the ones with a
+~~**The eight `storage.commit(..).unwrap()` sites still panic**, and they are the ones with a
 plausible non-adversarial trigger — a full disk on an ordinary insert. They now have somewhere to
 put an error and do not use it. That is the largest remaining piece of
-[item 16](../known-issues.md).
+[item 16](../known-issues.md).~~ **Done** — [Resolved #16](hot-path-panics.md) answers them
+`StorageWrite` with the table left as it was. The trigger this named was wrong: a full disk never
+reached them, since `commit` only stages bytes. It ends the shard later, through the sweep, and is
+[item 122](../known-issues.md).
 
 **`send_one` still treats an empty get as a failure** — [item 55](../known-issues.md), unblocked and
 not closed.

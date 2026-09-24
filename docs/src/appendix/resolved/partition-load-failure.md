@@ -1,9 +1,11 @@
 # 16, 51. A partition read that failed panicked its shard and stranded its queries
 
-*Partial fixes of [item 16](../known-issues.md#16-panics-on-the-hot-path) and
+*Partial fixes of [item 16](hot-path-panics.md) and
 [item 51](response-error-channel.md).
-Item 16's other twelve panic sites and item 51's early exits inside `load_partition` are still
-open; both entries say which half is which.*
+~~Item 16's other twelve panic sites and item 51's early exits inside `load_partition` are still
+open; both entries say which half is which.~~ Both are closed: item 51's exits by
+[Resolved #56, 61](response-error-channel.md), and item 16's other sites by
+[Resolved #16](hot-path-panics.md).*
 
 ## Symptom
 
@@ -183,7 +185,10 @@ log is what stops it being silent.
 
 ## Still open
 
-- Item 16's other twelve panic sites, none of them on the storage read path.
+- ~~Item 16's other twelve panic sites, none of them on the storage read path.~~ **Done** —
+  [Resolved #16](hot-path-panics.md). Two of them were on the storage read path after all: the
+  request to the loader that `block_on_load` unwrapped, which fails once the loader built here
+  has gone, and now answers `StorageRead` through the same slots a released query fills.
 - ~~Item 51's remainder: `load_partition`'s own early exits, which still return `Err` past the
   drain of `blocked`. `fail_partition` now exists and does the releasing, so this is a matter of
   routing those errors into it.~~ **Done** — [Resolved #56, 61](response-error-channel.md), and the

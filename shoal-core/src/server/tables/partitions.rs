@@ -411,25 +411,49 @@ where
     /// # Arguments
     ///
     /// * `update` - The update to apply
-    pub fn update(&mut self, update: &UnsortedUpdate<R>) -> Option<UnsortedPartition<R>> {
+    ///
+    /// # Errors
+    ///
+    /// Fails if an accessible partition's archive does not deserialize, having changed nothing
+    /// ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
+    pub fn update(
+        &mut self,
+        update: &UnsortedUpdate<R>,
+    ) -> Result<Option<UnsortedPartition<R>>, rkyv::rancor::Error> {
         // get our row or deserialize it
         match self {
             MaybeLoaded::Loaded { partition, .. } => {
                 // this row is already loaded so just update it in place
                 partition.update(update);
                 // we don't need to replace our wrapped row so return none
-                None
+                Ok(None)
             }
             MaybeLoaded::Accessible(read) => {
                 // access our data
                 let access = read.archived();
                 // deserialize our row
-                let mut loaded = UnsortedPartition::<R>::deserialize(&access).unwrap();
+                let mut loaded = UnsortedPartition::<R>::deserialize(&access)?;
                 // update this rows data
                 loaded.update(&update);
                 // we loaded an updated our row so return it
-                Some(loaded)
+                Ok(Some(loaded))
             }
+        }
+    }
+
+    /// Update the row of a partition that is already loaded, in place
+    ///
+    /// An accessible partition is left as it is: the caller reads its archive into rows first,
+    /// before it commits the update, so a copy that cannot be read commits nothing
+    /// ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `update` - The update to apply
+    pub fn update_loaded(&mut self, update: &UnsortedUpdate<R>) {
+        // only a loaded row can be updated where it lies
+        if let MaybeLoaded::Loaded { partition, .. } = self {
+            partition.update(update);
         }
     }
 
@@ -753,6 +777,70 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         }
     }
 
+    /// Put back a row [`Self::remove`] took out, undoing it exactly
+    ///
+    /// Only for a delete whose commit failed: the row was taken out to learn that it existed,
+    /// and the delete that took it never reached the log, so the row goes back with the size and
+    /// the tombstone count it had ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `sort` - The sort key the row was removed from
+    /// * `row` - The row `remove` handed back
+    /// * `row_size` - The size `remove` handed back with it
+    pub fn restore(&mut self, sort: T::Sort, row: T, row_size: usize) {
+        // replace the tombstone remove left with the row it shadowed
+        self.rows.insert(sort, MaybeRow::Row(row));
+        // count its size again
+        self.size = self.size.saturating_add(row_size);
+        // and stop counting the tombstone that is gone
+        self.tombstones = self.tombstones.saturating_sub(1);
+    }
+
+    /// Get a live row to change, leaving it as it is until the caller changes it
+    ///
+    /// Lets an update be committed between finding its row and applying to it, in one lookup
+    /// ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `sort` - The sort key of the row
+    pub fn live_row_mut(&mut self, sort: &T::Sort) -> Option<&mut T> {
+        // tombstones and missing rows can't be changed
+        match self.rows.get_mut(sort) {
+            Some(MaybeRow::Row(row)) => Some(row),
+            Some(MaybeRow::Tombstone) | None => None,
+        }
+    }
+
+    /// Apply an update to one row, returning the change in its size
+    ///
+    /// The caller adds the change to its partition with [`Self::resize`] once it has let go of
+    /// the row.
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to update
+    /// * `update` - The update to apply
+    pub fn update_row(row: &mut T, update: &SortedUpdate<T>) -> isize {
+        // measure old size
+        let old_size = row.deep_size_of();
+        // update our row
+        row.update(update);
+        // measure new size and compute diff
+        let new_size = row.deep_size_of();
+        new_size.cast_signed() - old_size.cast_signed()
+    }
+
+    /// Add a change in size to this partition
+    ///
+    /// # Arguments
+    ///
+    /// * `diff` - The signed change in size
+    pub fn resize(&mut self, diff: isize) {
+        self.size = self.size.saturating_add_signed(diff);
+    }
+
     /// Insert a tombstone for a sort key unconditionally
     ///
     /// Used during intent replay where we need tombstones to overlay
@@ -837,24 +925,13 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     /// Returns `Some(diff)` with the change in memory usage if the row was
     /// found and updated, or `None` if the row does not exist.
     pub fn update(&mut self, update: &SortedUpdate<T>) -> Option<isize> {
-        // get the row to update
-        match self.rows.get_mut(&update.sort_key) {
-            // we found the target row so apply our update
-            Some(MaybeRow::Row(row)) => {
-                // measure old size
-                let old_size = row.deep_size_of();
-                // update our row
-                row.update(&update);
-                // measure new size and compute diff
-                let new_size = row.deep_size_of();
-                let diff = new_size.cast_signed() - old_size.cast_signed();
-                // adjust this partitions size correctly
-                self.size = self.size.saturating_add_signed(diff);
-                Some(diff)
-            }
-            // tombstones and missing rows can't be updated
-            Some(MaybeRow::Tombstone) | None => None,
-        }
+        // get the row to update, if it is live
+        let row = self.live_row_mut(&update.sort_key)?;
+        // apply our update to it
+        let diff = Self::update_row(row, update);
+        // adjust this partitions size correctly
+        self.resize(diff);
+        Some(diff)
     }
 
     /// Iterate over only the live rows in this partition, skipping tombstones
@@ -979,15 +1056,21 @@ where
 
     /// Archive one sort key and validate it, once for the whole query
     ///
-    /// The unwrap cannot fire on bytes this process serialized a line earlier - it is the
-    /// price of holding the validated form rather than re-validating at every seek.
+    /// Neither `expect` can fire. The key arrived inside a request frame, which is bounded far
+    /// below the offsets an archive's relative pointers reach, so archiving it cannot fail; and
+    /// bytes this process serialized a line earlier cannot fail validation. Holding them as
+    /// invariants is the price of keeping the validated form rather than re-validating at every
+    /// seek ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
     ///
     /// # Arguments
     ///
     /// * `key` - The sort key to archive
     fn archive_key(key: &S) -> ValidatedArchive<S, AlignedVec> {
-        ValidatedArchive::new(<S as RkyvSupport>::serialize(key))
-            .expect("a sort key we just archived failed validation")
+        // archive the key a frame small enough to be accepted carried
+        let bytes = <S as RkyvSupport>::serialize(key)
+            .expect("a sort key small enough to arrive in a frame failed to archive");
+        // and validate it once, for every seek this query makes
+        ValidatedArchive::new(bytes).expect("a sort key we just archived failed validation")
     }
 
     /// Archive the value one end of a range holds, if it holds one
@@ -1872,6 +1955,61 @@ mod tests {
             sort_key: sort_key.to_owned(),
             update: "updated".to_owned(),
         }
+    }
+
+    #[test]
+    /// Putting back a row a delete removed undoes the removal exactly
+    ///
+    /// A delete whose commit failed puts its row back rather than leaving the table ahead of its
+    /// log, so what `restore` leaves has to be what `remove` found: the row, the size and the
+    /// tombstone count ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
+    fn restoring_a_removed_row_undoes_the_removal() {
+        // a partition of two rows, and what it looks like before anything is removed
+        let mut partition = partition_of(&["a", "b"]);
+        let (size, tombstones) = (partition.size, partition.tombstones);
+        // remove one, which leaves a tombstone in its place
+        let (row_size, row) = partition
+            .remove(&"a".to_owned())
+            .expect("a live row was not removed");
+        assert!(matches!(
+            partition.rows.get(&"a".to_owned()),
+            Some(MaybeRow::Tombstone)
+        ));
+        // and put it back
+        partition.restore("a".to_owned(), row, row_size);
+        // the row is live again, and nothing about the partition shows it ever left
+        let Some(MaybeRow::Row(restored)) = partition.rows.get(&"a".to_owned()) else {
+            panic!("the restored row is not live");
+        };
+        assert_eq!(restored.sort_key, "a");
+        assert_eq!(partition.size, size);
+        assert_eq!(partition.tombstones, tombstones);
+        assert_eq!(partition.rows.len(), 2);
+    }
+
+    #[test]
+    /// An update found through `live_row_mut` and applied with `update_row` is the update
+    /// `update` applies, in size as well as in data
+    fn an_update_split_around_a_commit_is_the_same_update() {
+        // two copies of one partition, updated the two ways
+        let mut whole = partition_of(&["a"]);
+        let mut split = partition_of(&["a"]);
+        let diff = whole.update(&update_for("a")).expect("a live row was not updated");
+        // find the row, then apply to it, as a write does around its commit
+        let row = split.live_row_mut(&"a".to_owned()).expect("a live row was not found");
+        let split_diff = SortedPartition::update_row(row, &update_for("a"));
+        split.resize(split_diff);
+        // both came to the same thing
+        assert_eq!(diff, split_diff);
+        assert_eq!(whole.size, split.size);
+        let Some(MaybeRow::Row(row)) = split.rows.get(&"a".to_owned()) else {
+            panic!("our row was replaced by a tombstone");
+        };
+        assert_eq!(row.data, "updated");
+        // and neither a tombstone nor a missing row can be found to change
+        split.remove(&"a".to_owned());
+        assert!(split.live_row_mut(&"a".to_owned()).is_none());
+        assert!(split.live_row_mut(&"b".to_owned()).is_none());
     }
 
     #[test]
@@ -2801,7 +2939,7 @@ mod tests {
     fn a_projection_reads_an_archived_row() {
         // archive a row the way a partition on disk holds one
         let row = TestRow::new("a");
-        let archived_bytes = <TestRow as RkyvSupport>::serialize(&row);
+        let archived_bytes = <TestRow as RkyvSupport>::serialize(&row).unwrap();
         let archived = <TestRow as RkyvSupport>::access(&archived_bytes).unwrap();
         // project it straight out of the archive
         let projection = <SortKeyOnly as ShoalProjection>::from_archived(archived);
@@ -2822,7 +2960,7 @@ mod tests {
     /// * `sort_keys` - The sort keys to build rows for
     fn accessible(sort_keys: &[&str]) -> MaybeLoaded<SortedPartition<TestRow>, AlignedVec> {
         // archive the partition the way a compaction would have written it
-        let raw = <SortedPartition<TestRow> as RkyvSupport>::serialize(&partition_of(sort_keys));
+        let raw = <SortedPartition<TestRow> as RkyvSupport>::serialize(&partition_of(sort_keys)).unwrap();
         // hold it as an archive rather than as rows, validated the way a load validates it
         MaybeLoaded::Accessible(ValidatedArchive::new(raw).unwrap())
     }
@@ -2834,6 +2972,7 @@ mod tests {
     /// * `sort_keys` - The sort keys to build rows for
     fn archived_of(sort_keys: &[&str]) -> AlignedVec {
         <SortedPartition<TestRow> as RkyvSupport>::serialize(&partition_of(sort_keys))
+            .unwrap()
     }
 
     /// Copy an archive, keeping its alignment, so a test can damage it
@@ -3072,7 +3211,7 @@ mod tests {
     /// so it has to be the length of the buffer rather than the size of the rows in it.
     fn an_accessible_partition_reports_its_byte_size() {
         // archive a partition and hold it both ways
-        let raw = <SortedPartition<TestRow> as RkyvSupport>::serialize(&partition_of(&["a", "b"]));
+        let raw = <SortedPartition<TestRow> as RkyvSupport>::serialize(&partition_of(&["a", "b"])).unwrap();
         let len = raw.len();
         let partition: MaybeLoaded<SortedPartition<TestRow>, AlignedVec> =
             MaybeLoaded::Accessible(ValidatedArchive::new(raw).unwrap());
@@ -3090,7 +3229,7 @@ mod tests {
     fn unsorted_accessible(
         partition: &UnsortedPartition<TestRow>,
     ) -> MaybeLoaded<UnsortedPartition<TestRow>, AlignedVec> {
-        let raw = <UnsortedPartition<TestRow> as RkyvSupport>::serialize(partition);
+        let raw = <UnsortedPartition<TestRow> as RkyvSupport>::serialize(partition).unwrap();
         MaybeLoaded::Accessible(ValidatedArchive::new(raw).unwrap())
     }
 
@@ -3145,6 +3284,7 @@ mod tests {
                 partition_key: 0,
                 update: "updated".to_owned(),
             })
+            .expect("an archive this test wrote deserializes")
             .expect("an archived partition has to be deserialized to be updated");
         // the row that came back carries the update
         let MaybeRow::Row(row) = &updated.row else {
@@ -3161,6 +3301,7 @@ mod tests {
                 partition_key: 0,
                 update: "updated".to_owned(),
             })
+            .expect("a loaded partition is updated without being read")
             .is_none());
     }
 }

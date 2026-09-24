@@ -320,7 +320,10 @@ An insert writes to the intent log first, then to memory:
 
 ```rust
 let intent = SortedIntents::Insert(row);
-let pos = self.storage.commit(&intent).await.unwrap();
+let pos = match self.storage.commit(&intent).await {
+    Ok(pos) => pos,
+    Err(error) => return storage_write(meta, self.table_name, key, &error),
+};
 let row = match intent { SortedIntents::Insert(row) => row, _ => unsafe { unreachable_unchecked() } };
 ...
 self.pending.add(meta, pos, action);
@@ -394,7 +397,8 @@ reverse order of completion. Harmless, since the client reorders by index, but s
 let archived = rkyv::to_bytes::<_>(&response)?;
 match self.client_map.get(&client) {
     Some(client_tx) => client_tx.send((query_id, span, archived)).await?,
-    None => panic!("{} Missing client channel? {client}", self.info.name),
+    // a client already gone: logged and let go, never a panic
+    None => event!(Level::DEBUG, /* ... */),
 }
 ```
 
@@ -502,8 +506,9 @@ now start in the same place; see
 - ~~The length prefix is unvalidated, so a bad length is an unbounded allocation.~~ Bounded by
   `max_frame_bytes` since [F10](../features/framing-and-protocol-evolution.md).
 - ~~Socket and channel errors are panics rather than per-connection teardown.~~ Both relays tear
-  down the connection now; the panics elsewhere in the server are
-  [item 16](../appendix/known-issues.md#16-panics-on-the-hot-path).
+  down the connection now; ~~the panics elsewhere in the server are
+  [item 16](../appendix/known-issues.md#16-panics-on-the-hot-path)~~ and the panics elsewhere on
+  the request path answer their query instead ([Resolved #16](../appendix/resolved/hot-path-panics.md)).
 - ~~A response too large to frame closes the connection with nothing on the wire saying why.~~
   Fixed by [F11](../features/error-channel.md): the relay writes an `Error` frame naming the query
   and both sizes, and keeps serving every other query on that connection

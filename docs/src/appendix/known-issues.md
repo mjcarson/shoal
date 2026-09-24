@@ -31,9 +31,9 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at ~~15~~ 16 and skips 17, 25, 26, 30, 31, 33, 34, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120 and 121, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ item 119 is the newest entry here, ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ with 121 the newest number, on the resolved page, and why 112 is on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
+list starts at ~~15~~ ~~16~~ 19 and skips 25, 26, 30, 31, 33, 34, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 120 and 121, and
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ item 124 is the newest entry here, ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ and the newest number, and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120 and 121 are on the resolved page. **120 and 121 never appeared here**:
 they were found by reading the code around item 30 - the unsorted table's version of its arm
 charging the shard twice, and the duplicate read that let either arm be reached - reproduced by
@@ -78,18 +78,28 @@ found and fixed in the same change ([Resolved #79](resolved/micro-only-capture-c
 worth noting because it makes the numbering look like six entries went missing. Item 80 is the other way round —
 it was filed here rather than fixed, because the fix turned on a question about the storage layer
 that reading `block_on_load` alone could not answer, and stayed here until somebody answered it
-([Resolved #80](resolved/never-flushed-partitions.md)). The exceptions are items 16, 20, 24, 32, 54 and 73, which were only
-partly fixed: the open remainder is here and the rest is there. Items 9, 15 and 51 were each one such
-exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
+([Resolved #80](resolved/never-flushed-partitions.md)). The exceptions are items 20, 24, 32, 54 and 73, which were only
+partly fixed: the open remainder is here and the rest is there. Items 9, 15, 16 and 51 were each one such
+exception until their last part was fixed, and are now on the resolved page alone - 16 in four
+parts, the last of which ([Resolved #16](resolved/hot-path-panics.md)) also found that the item's
+write path claim was wrong and filed what it should have said as item 122; item 25 was one
 in the other direction — it had one row left open, that row was fixed, and the whole item
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ **1,555 tests**, six ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ **1,564 tests**, six ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
 two of `persistent_unsorted_table.rs` fail about one run in five of that binary (item 107).
+[Resolved #16](resolved/hot-path-panics.md) added 9 and took it to 1,564: one new binary,
+`hot_path_failures.rs` (5, on the `table_backlog.rs` harness), and four unit tests in
+`shoal-core`; one `shoal-proto` test moved its probe of an unclaimed code from 13, which
+`StorageWrite` now claims, to 14. It filed items 122, 123 and 124. Under the workspace run at six
+threads three fixture tests failed and each passed alone:
+`a_dead_primary_fails_writes_only_until_its_election`,
+`lost_response_retry_returns_original_result` and
+`scheduled_scrub_quarantines_without_an_operator` (item 100's shape).
 [The remainder of item 15](resolved/backlog-bounds.md) added 6 and took it to 1,555, one new
 binary, `table_backlog.rs`, and one test in `backpressure.rs`, and filed nothing. Under the
 workspace run at six threads three fixture tests failed across two runs and each passed alone:
@@ -269,8 +279,9 @@ were 105 and 116.
 
 ## High — data loss and silent failure
 
-*Nothing is currently filed at this severity.* Items 9 and 31 were the last two and are both
-[resolved](resolved-issues.md).
+~~*Nothing is currently filed at this severity.*~~ Item 124 is, filed at the end of this page
+with the entries that came after the triage order. Items 9 and 31 were the two before it and are
+both [resolved](resolved-issues.md).
 
 ~~One thread they shared is still worth pulling.~~ Both were about what happens when a copy read
 from disk meets a copy already in memory: item 31's `scan` overwrote the in-memory copy, and
@@ -287,61 +298,6 @@ disagree, and a partition has at most one read outstanding.
 ---
 
 ## Medium — robustness
-
-### 16. Panics on the hot path
-
-233 `.unwrap()` calls and 59 `panic!`s outside `target/` and `old/`. The ones on live request
-paths:
-
-| Site | Trigger |
-| --- | --- |
-| `shard.rs:923` | Reply for a client with no channel |
-| `shard.rs:979` | A split query whose `gather` contact is missing — an `.expect` |
-| `shard.rs:1163` | Client UUID collision |
-| `comms.rs:53`, `:72` | Unknown shard contact |
-| `messages.rs:223` | A `Gathered` message asked to be cloned, which only a broadcast does |
-| `.../tables/persistent.rs:185` | A parked get resumed with a different projection |
-| `.../fs/stream.rs:455`, `:506` | A `DataFlushed` wakeup that could not be sent to the shard |
-| `.../fs/stream.rs:662`, `:680`, `:752` | A WAL write that failed |
-| `shared/traits.rs:54` | rkyv serialization failure |
-| `.../persistent/sorted.rs:511`, `:795`, `:854`, `:952`, `:1007`; `.../persistent/unsorted.rs:481`, `:722`, `:822` | **An intent-log commit that failed** |
-| `.../persistent/sorted.rs:439`; `.../persistent/unsorted.rs:386` | A `load_partition` that could not ask for a read |
-| `.../persistent/sorted.rs:547`, `:845`, `:999`, `:1297`, `:1343`, `:1383` | Corrupt archive data |
-
-**Three things about this table are worth more than the sites in it.**
-
-*The counting method undercounts.* It counts `.unwrap()` and `panic!` and not `.expect()`, of
-which `shoal-core` alone has 78 — one of them, `shard.rs:732`, is on the split-query path and is
-now listed above. `unimplemented!()` in `shoal-derive` is a third spelling, though that one fires
-at expansion time rather than at runtime.
-
-*The write path is a class of its own.* Eight of the sites above are
-`self.storage.commit(&intent).await.unwrap()`. This entry used to file all of the table sites under
-*corrupt archive data*, which is wrong for these: a full disk, an `EIO`, or a closed intent log
-panics the shard on an ordinary insert. They are the ones with a plausible non-adversarial trigger,
-and the ones an error channel ~~would~~ **can** actually answer:
-[F11](../features/error-channel.md) built it, and these eight sites are the largest thing that has
-somewhere to put an error now and does not use it. They are what is left of this item that a client
-would ever see.
-
-*The loader's three are gone.* A `todo!()` on the partition read path and the two `panic!`s
-that fired on any loader task error have been replaced by a failure the shard is told about:
-[Resolved #16, 51](resolved/partition-load-failure.md). The rest of this item is open.
-
-*Two of the corrupt archive sites are gone.* `sorted.rs:326` and `:328` — the `access` and
-`deserialize` on the merge path inside `load_partition` — became a failure that releases the queries
-parked on that read and answers them with `ErrorCode::CorruptArchive`
-([Resolved #56, 61](resolved/response-error-channel.md)). The line numbers above have also been
-corrected: this table had been carrying `shard.rs:676`, `:732` and `:916` since before
-[F10](../features/framing-and-protocol-evolution.md) moved them.
-
-*The two relays' five are gone.* `client_rx_relay` panicked on any non-EOF socket error, on a
-failed read of a request body, and on a failed forward into the shard; `client_tx_relay` panicked
-on both a short write and a write error. All five became a logged `break` with
-[F10](../features/framing-and-protocol-evolution.md), so a frame nobody can read ends one
-connection instead of the shard and every other client it was serving
-([Resolved #34](resolved/unvalidated-length-prefix.md)). These are the sites that were reachable
-by anything a peer could put on a socket, which is what made them the worst ones in the table.
 
 ### 27. SHQL cannot express a string containing a single quote
 
@@ -831,7 +787,10 @@ addressed to.
    Worth doing before the fixes below rather than after them. It said "two" until the
    [August 2026 review](review-2026-08.md) re-measured, which is the argument for doing it rather
    than tracking it: every new test binary that starts a server joins the collision by default.
-2. **Item 16** — the hot-path panics. This entry used to read "items 11 and 16"; item 11, the
+2. **Items 124 and 122** — ~~item 16, the hot-path panics~~ [resolved](resolved/hot-path-panics.md),
+   and these are what fixing it found. 124 is a stale read after an eviction nobody would think
+   to look for; 122 is the storage failure item 16 was always said to be about, which ends the
+   shard rather than panicking it. This entry used to read "items 11 and 16"; item 11, the
    empty-ring window a client could hit during startup, is [resolved](resolved/tablet-ring.md) and
    was made unbuildable rather than checked.
 3. **Item 22** — the size accounting the whole memory limit rests on, now with *four* different
@@ -1845,3 +1804,47 @@ needs a control quorum, and its kill can land before that quorum exists. The fix
 three voters before killing. **Established by running it**: it failed once in the
 whole-workspace run for [Resolved #115](resolved/retry-sidecar-crash-window.md) and passed
 alone at once.
+
+### 122. A background write or fdatasync error ends the shard
+
+*Medium — robustness.* An intent log write runs on a detached task, and a device error it hits -
+a full disk, an `EIO` - is recorded in `FlushState::record_error`
+(`shoal-core/src/server/tables/storage/fs/stream.rs`) rather than returned. The next
+`compact_if_needed` takes it with `StreamWriter::check_error` and returns it, `get_flushed`
+passes it up, and the shard loop's `?` ends the shard - and every client it was serving. This is
+what [item 16](resolved/hot-path-panics.md) used to say the eight `commit(..).unwrap()` sites
+did; they never could, since `commit` only stages bytes and the error arrives later.
+
+The writes behind the failed one are the hard part. They were committed to a buffer and some of
+them to the file; none of them is durable and none will be answered. **Fix direction:** fail
+every pending write past the durable watermark with `ErrorCode::StorageWrite` - which, unlike
+the refusals [Resolved #16](resolved/hot-path-panics.md) sends, is not a definite refusal,
+because part of the log may have landed - and decide what the table does with a log it can no
+longer write: refuse writes until an operator acts, or rotate to a new file and try again.
+**Established by reading the source.**
+
+### 123. A get reusing a parked get's id and index has its rows merged into it
+
+*Low.* `PendingGets` keys a parked get by `(meta.id, meta.index)`, both chosen by the client.
+[Resolved #16](resolved/hot-path-panics.md) refuses a get that collides with a parked one under
+another projection, but one under the *same* projection resumes the parked get's progress and
+the two gets' rows are merged into whichever answers first. Another client can only collide by
+guessing a v4 id, so this is a client confusing its own queries rather than reading anyone
+else's. **Fix direction:** key the map by `(meta.client, meta.id, meta.index)`, which the
+blocked-query maps would then have to agree with. **Established by reading the source**, while
+fixing the projection collision.
+
+### 124. An unsorted update to a loaded partition never re-stamps its generation
+
+*High — silent failure.* `PersistentUnsortedTable::update` applies to a loaded partition in place
+and leaves its `generation` where the partition's last insert set it. The sorted table's update
+sets it to the current log's generation, and so does the unsorted table's own replicated
+`apply`. A generation is what `mark_evictable` compares against: a compaction of the *older*
+log that holds the partition's insert finds it evictable while the update is still only in the
+current log, and an eviction in that window drops it. A read then loads the archive, which does
+not have the update, and serves the old row until the current log is compacted - and a resident
+copy loaded from that archive keeps serving it until it is itself evicted.
+**Fix direction:** stamp `generation: self.generation` on the loaded arm, as both other paths do,
+with a test that evicts between the two compactions. **Established by reading the source**,
+while reordering that update for [Resolved #16](resolved/hot-path-panics.md), which kept the
+behaviour exactly so this could be fixed with its own evidence.

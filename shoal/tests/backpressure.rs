@@ -186,7 +186,7 @@ const INSERTS: usize = 256;
 /// * `bundle` - The bundle to frame
 fn request_frame(bundle: &Queries<TestDbClient>) -> Vec<u8> {
     // the bundle's archive, behind the preamble that says how long it is
-    let payload = RkyvSupport::serialize(bundle);
+    let payload = RkyvSupport::serialize(bundle).expect("a bundle this test built archives");
     let mut frame = protocol::request_preamble(payload.len(), protocol::DEFAULT_MAX_FRAME_BYTES)
         .expect("a request preamble")
         .to_vec();

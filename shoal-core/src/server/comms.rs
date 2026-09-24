@@ -54,8 +54,12 @@ impl<S: ShoalDatabase> Comms<S> {
                 match self.shards.get(*shard) {
                     // send this message to the correct shard
                     Some((sender, _)) => sender.send(msg).await?,
-                    // this is not a known shard
-                    None => panic!("Who is {contact:#?}"),
+                    // this is not a known shard, which fails this message rather than the shard
+                    None => {
+                        return Err(ServerError::Shoal(ShoalError::UnknownShard {
+                            shard: *shard,
+                        }))
+                    }
                 }
             }
             // a remote shard is not on the mesh
@@ -69,11 +73,6 @@ impl<S: ShoalDatabase> Comms<S> {
         Ok(())
     }
 
-    /// Get a shards channels
-    ///
-    /// # Arguments
-    ///
-    /// * `shard` - The index of the shard to get our receiver for
     /// How many messages wait on one shard's queue right now
     ///
     /// What the admission bound is judged against
@@ -88,28 +87,45 @@ impl<S: ShoalDatabase> Comms<S> {
         self.shards.get(shard).map_or(0, |(sender, _)| sender.len())
     }
 
+    /// Get a shards channels
+    ///
+    /// # Arguments
+    ///
+    /// * `shard` - The index of the shard to get our channels for
     pub fn get_shards_channels(
         &self,
         shard: usize,
-    ) -> (AsyncSender<ServerMsg<S>>, AsyncReceiver<ServerMsg<S>>) {
+    ) -> Result<(AsyncSender<ServerMsg<S>>, AsyncReceiver<ServerMsg<S>>), ServerError> {
         // get this shards channel
         match self.shards.get(shard) {
-            Some((tx, rx)) => (tx.clone(), rx.clone()),
-            None => panic!("Missing channels for {shard}!"),
+            Some((tx, rx)) => Ok((tx.clone(), rx.clone())),
+            None => Err(ServerError::Shoal(ShoalError::UnknownShard { shard })),
         }
     }
 
     /// Broadcast a message to all shards
+    ///
+    /// A message that is only ever sent to one shard is refused before any shard is sent
+    /// anything, rather than panicking part way through the broadcast.
+    ///
+    /// # Arguments
+    ///
+    /// * `msg` - The message to send every shard a copy of
     pub async fn broadcast(&self, msg: &ServerMsg<S>) -> Result<(), ServerError> {
         // broadcast our message to every shard that we have a channel for
         for (tx, _) in &self.shards {
-            tx.send(msg.clone()).await?;
+            // copy this message for this shard, if it is a message every shard may be sent
+            let copy = msg
+                .try_clone()
+                .map_err(|why| ServerError::Shoal(ShoalError::NotBroadcast { why }))?;
+            tx.send(copy).await?;
         }
         Ok(())
     }
 }
 
 impl<S: ShoalDatabase> Clone for Comms<S> {
+    /// Clone the channels to every shard on this node
     fn clone(&self) -> Self {
         Comms {
             shards: self.shards.clone(),

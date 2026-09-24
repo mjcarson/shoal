@@ -62,12 +62,13 @@ const ALL_TYPES: [MessageType; 26] = [
 ];
 
 /// Every error code this build knows, so a test can walk all of them
-const ALL_CODES: [ErrorCode; 33] = [
+const ALL_CODES: [ErrorCode; 34] = [
     ErrorCode::Unknown,
     ErrorCode::Internal,
     ErrorCode::StorageRead,
     ErrorCode::ArchiveMissing,
     ErrorCode::CorruptArchive,
+    ErrorCode::StorageWrite,
     ErrorCode::ResponseTooLarge,
     ErrorCode::RequestTooLarge,
     ErrorCode::Shedding,
@@ -570,6 +571,7 @@ fn every_error_code_round_trips_through_its_discriminant() {
         (ErrorCode::StorageRead, 10),
         (ErrorCode::ArchiveMissing, 11),
         (ErrorCode::CorruptArchive, 12),
+        (ErrorCode::StorageWrite, 13),
         (ErrorCode::ResponseTooLarge, 20),
         (ErrorCode::RequestTooLarge, 21),
         (ErrorCode::Shedding, 30),
@@ -616,7 +618,7 @@ fn every_error_code_round_trips_through_its_discriminant() {
 #[test]
 fn an_unknown_error_code_reads_as_unknown() {
     // walk some numbers no variant claims, including the gaps inside the bands
-    for raw in [2u16, 13, 23, 42, 56, 74, 9000, u16::MAX] {
+    for raw in [2u16, 14, 23, 42, 56, 74, 9000, u16::MAX] {
         assert_eq!(ErrorCode::from_u16(raw), ErrorCode::Unknown);
     }
 }

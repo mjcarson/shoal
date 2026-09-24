@@ -957,10 +957,12 @@ wire change for a year when it was a local edit to one function.
 
 What this entry still holds:
 
-- **The eight `storage.commit(..).unwrap()` sites.** This entry's original claim — that an error
+- ~~**The eight `storage.commit(..).unwrap()` sites.** This entry's original claim — that an error
   variant "would unlock replacing most hot-path panics with recoverable errors"
   ([Known Issues #16](known-issues.md#16-panics-on-the-hot-path)) — is now true and untaken. A full
-  disk on an ordinary insert still panics the shard, and it now has somewhere to report instead.
+  disk on an ordinary insert still panics the shard, and it now has somewhere to report instead.~~
+  **Taken** — [Resolved #16](resolved/hot-path-panics.md). The claim was true; the full disk was
+  not what reached those sites, and is [item 122](known-issues.md).
 - **`Flags::IS_ERROR` on a response frame whose payload is an error.** F11 sets it on `Error`
   frames only. Setting it on responses would mean threading a flag through `client_tx_relay`'s
   `(Uuid, Span, StageStamps, AlignedVec)` tuple, and so through `ServerMsg::NewClient`,

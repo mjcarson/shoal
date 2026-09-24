@@ -280,10 +280,15 @@ where
     /// # Arguments
     ///
     /// * `query` - The query
+    ///
+    /// # Errors
+    ///
+    /// Fails if the write's intent cannot be archived, which fails that one write
+    /// ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
     fn write_command(
         &self,
         query: &<Self::ClientType as QuerySupport>::QueryKinds,
-    ) -> Option<(Self::TableNames, u64, Vec<u8>)>;
+    ) -> Result<Option<(Self::TableNames, u64, Vec<u8>)>, ServerError>;
 
     /// Apply a committed command to the table it names, in committed order
     ///

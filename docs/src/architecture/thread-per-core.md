@@ -261,8 +261,10 @@ process runs out of memory.
   ([Resolved #15](../appendix/resolved/shard-mesh-admission.md)), and a table's pending writes and
   parked queries and a connection's owed answers each have a bound of their own
   ([the remainder of item 15](../appendix/resolved/backlog-bounds.md)).
-- Failures on the shard loop are handled by `panic!` rather than by degrading — a single
-  malformed client message can take down a shard
-  ([Known Issues](../appendix/known-issues.md#16-panics-on-the-hot-path)).
+- ~~Failures on the shard loop are handled by `panic!` rather than by degrading — a single
+  malformed client message can take down a shard~~ A failure a query meets is answered to that
+  query ([Resolved #16](../appendix/resolved/hot-path-panics.md)). An error the shard loop itself
+  returns still ends the shard, and a device error reaches it that way
+  ([item 122](../appendix/known-issues.md)).
 - Per-client relay tasks run on the default task queue rather than a prioritised one
   (`shard.rs:132`, marked TODO).

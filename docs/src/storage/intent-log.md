@@ -27,7 +27,7 @@ never sees.
 Written by `commit`:
 
 ```rust
-let archived = RkyvSupport::serialize(data);
+let archived = RkyvSupport::serialize(data)?;
 let size = archived.len();
 let mut hasher = GxHasher::default();
 hasher.write(archived.as_slice());

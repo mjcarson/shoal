@@ -46,7 +46,7 @@ fn a_query_round_trips_through_the_wire_format() {
     let query = <CheckDbClient as QuerySupport>::parse("SELECT * FROM Movie WHERE id = 7;")
         .expect("a well formed select parses");
     // put it on the wire
-    let bytes = RkyvSupport::serialize(&query);
+    let bytes = RkyvSupport::serialize(&query).expect("a query this test built archives");
     assert!(!bytes.is_empty(), "a query serialized to nothing");
     // and read it back, which is a validating access rather than a cast - this is the step that
     // would fail if the archived layout and the reader disagreed across the new crate boundary

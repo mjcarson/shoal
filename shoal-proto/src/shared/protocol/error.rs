@@ -74,6 +74,12 @@ pub enum ErrorCode {
     ArchiveMissing = 11,
     /// The archive holding this data is on disk and is not readable as an archive
     CorruptArchive = 12,
+    /// A write could not be committed to this table's log, and was not applied
+    ///
+    /// A definite refusal: a commit fails before it stages a byte, and a table that is refused
+    /// one leaves every row as it found it, so nothing of this write is in memory or on disk
+    /// ([Resolved #16](../../../../docs/src/appendix/resolved/hot-path-panics.md)).
+    StorageWrite = 13,
     /// This response is larger than the frame bound the connection agreed on
     ResponseTooLarge = 20,
     /// This request is larger than the frame bound the connection agreed on - reserved
@@ -207,6 +213,7 @@ impl ErrorCode {
             10 => ErrorCode::StorageRead,
             11 => ErrorCode::ArchiveMissing,
             12 => ErrorCode::CorruptArchive,
+            13 => ErrorCode::StorageWrite,
             20 => ErrorCode::ResponseTooLarge,
             21 => ErrorCode::RequestTooLarge,
             22 => ErrorCode::IdentityExpired,
@@ -248,6 +255,7 @@ impl ErrorCode {
             ErrorCode::StorageRead => "StorageRead",
             ErrorCode::ArchiveMissing => "ArchiveMissing",
             ErrorCode::CorruptArchive => "CorruptArchive",
+            ErrorCode::StorageWrite => "StorageWrite",
             ErrorCode::ResponseTooLarge => "ResponseTooLarge",
             ErrorCode::RequestTooLarge => "RequestTooLarge",
             ErrorCode::IdentityExpired => "IdentityExpired",

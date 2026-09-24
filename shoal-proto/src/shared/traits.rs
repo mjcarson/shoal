@@ -35,9 +35,13 @@ pub trait RkyvSupport: Archive
     + Sized
 {
     /// Archive this type to an aligned vec
+    ///
+    /// Fallible, because archiving is: a value whose archive would place a relative pointer
+    /// further than its width reaches cannot be written, and a partition is the kind of value
+    /// that grows until it does ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
     #[inline]
-    fn serialize(&self) -> AlignedVec {
-        rkyv::to_bytes::<Error>(self).unwrap()
+    fn serialize(&self) -> Result<AlignedVec, Error> {
+        rkyv::to_bytes::<Error>(self)
     }
 
     /// Load our archived type from a slice

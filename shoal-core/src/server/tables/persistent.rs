@@ -155,6 +155,9 @@ pub(crate) struct PendingGet<R> {
     slots: Vec<Option<Vec<R>>>,
     /// The most rows this get asked for, if it set a limit
     limit: Option<usize>,
+    /// The failure this get answers with once every partition has been dealt with, if a read
+    /// it needed could not even be asked for
+    failed: Option<ResponseError>,
 }
 
 impl<R> PendingGet<R> {
@@ -169,6 +172,7 @@ impl<R> PendingGet<R> {
             keys: keys.to_vec(),
             slots: (0..keys.len()).map(|_| None).collect(),
             limit,
+            failed: None,
         }
     }
 
@@ -199,6 +203,29 @@ impl<R> PendingGet<R> {
     /// * `rows` - The rows this partition gave us
     pub fn fill(&mut self, rank: usize, rows: Vec<R>) {
         self.slots[rank] = Some(rows);
+    }
+
+    /// Record that a partition this get named could not be read, and why
+    ///
+    /// The slot is filled empty so the get stops waiting on it, and the first failure is kept
+    /// for the get to answer with once nothing of it is parked. Answering at once could put a
+    /// second response at this get's index, since part of it may still be parked elsewhere
+    /// ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `rank` - The slot of the partition that could not be read
+    /// * `error` - Why it could not be
+    pub fn fail(&mut self, rank: usize, error: ResponseError) {
+        // stop waiting on this partition
+        self.slots[rank] = Some(Vec::new());
+        // keep the first failure, which is the one the client is told
+        self.failed.get_or_insert(error);
+    }
+
+    /// Take the failure this get answers with, if a partition it named could not be read
+    pub fn take_failure(&mut self) -> Option<ResponseError> {
+        self.failed.take()
     }
 
     /// Whether the partitions named before this one already hold every row this get asked for
@@ -569,10 +596,12 @@ impl PendingGets {
     /// Pick a parked get back up, or start it fresh if it has never run before
     ///
     /// A get is replayed with the projection it was sent with, because the query parked on the
-    /// partition is a copy of the one that parked it, so the type asked for here is always the
-    /// type stored. A downcast that fails would mean two gets shared a query id and index while
-    /// asking for different rows, which cannot happen, so it is a panic rather than a fresh
-    /// start that would silently drop the rows already found.
+    /// partition is a copy of the one that parked it, so the type asked for by a replay is
+    /// always the type stored. A downcast that fails means two gets share a query id and index
+    /// while asking for different rows - which the id being the client's own choice makes
+    /// possible, and which used to panic the shard. The parked get is put back, untouched, so
+    /// it still finishes, and the get that collided is refused
+    /// ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
     ///
     /// # Arguments
     ///
@@ -584,16 +613,24 @@ impl PendingGets {
         key: &(Uuid, usize),
         partition_keys: &[u64],
         limit: Option<usize>,
-    ) -> PendingGet<P> {
+    ) -> Result<PendingGet<P>, ResponseError> {
         // take this gets progress back out, if it has run before
         match self.parked.remove(key) {
             // carry on filling the slots this get already has
             Some(parked) => match parked.downcast::<PendingGet<P>>() {
-                Ok(pending) => *pending,
-                Err(_) => panic!("a parked get was resumed with a different projection"),
+                Ok(pending) => Ok(*pending),
+                Err(parked) => {
+                    // the get that parked is not this one, so it goes back where it was
+                    self.parked.insert(*key, parked);
+                    Err(ResponseError::new(
+                        ErrorCode::InvalidRequest,
+                        "a get with this id and index is already waiting on a partition read"
+                            .to_owned(),
+                    ))
+                }
             },
             // this query has never been executed before so start it off
-            None => PendingGet::new(partition_keys, limit),
+            None => Ok(PendingGet::new(partition_keys, limit)),
         }
     }
 
@@ -626,7 +663,7 @@ impl PendingGets {
 /// A query that would park past the table's `max_parked_queries` is refused before anything is
 /// pushed or asked for, so the caller answers it `Shedding` having run nothing
 /// ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md)).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) enum Parking {
     /// The query is parked behind a read and is answered when it is replayed
     Parked,
@@ -634,6 +671,42 @@ pub(crate) enum Parking {
     Absent,
     /// The table already holds as many parked queries as it may, so the caller sheds this one
     Shed,
+    /// The read could not be asked for, so nothing was parked and the caller answers with this
+    ///
+    /// This used to be an `unwrap` on the request to the loader
+    /// ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
+    Failed(ResponseError),
+}
+
+/// Log a partition read that could not even be asked for, and say what its query answers with
+///
+/// The loader's channel is the only thing that can refuse the request, and it only does once the
+/// loader has gone, so nothing was parked and no read will ever land for this query to wait on
+/// ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
+///
+/// # Arguments
+///
+/// * `table` - The table the partition belongs to
+/// * `partition_id` - The partition whose read could not be asked for
+/// * `error` - Why the request could not be sent
+pub(crate) fn read_not_asked<T: std::fmt::Display>(
+    table: T,
+    partition_id: u64,
+    error: &crate::server::ServerError,
+) -> Parking {
+    // the whole error goes to the log, where the operator can act on it
+    event!(
+        Level::ERROR,
+        msg = "a partition read could not be asked for",
+        %table,
+        partition_id,
+        ?error
+    );
+    // and the query is told its partition could not be read
+    Parking::Failed(ResponseError::new(
+        ErrorCode::StorageRead,
+        format!("partition {partition_id} of {table} could not be read"),
+    ))
 }
 
 /// The queries a table holds parked on partition reads, counted
@@ -752,13 +825,90 @@ pub(crate) fn shed<P>(
     msg: String,
 ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
     // answer in this query's own place with a failure that says to try again
+    refuse(meta, ResponseError::new(ErrorCode::Shedding, msg))
+}
+
+/// Build the answer a query is refused with, in its own place in its bundle
+///
+/// # Arguments
+///
+/// * `meta` - The metadata of the query being refused
+/// * `error` - What to tell the client
+pub(crate) fn refuse<P>(
+    meta: QueryMetadata,
+    error: ResponseError,
+) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
+    // the index and the end flag are the ones this query would have answered with
     let response = Response {
         id: meta.id,
         index: meta.index,
-        data: ResponseAction::Error(ResponseError::new(ErrorCode::Shedding, msg)),
+        data: ResponseAction::Error(error),
         end: meta.end,
     };
     Some((meta.client, meta.id, meta.stamps, response))
+}
+
+/// Build the answer a write is refused with when its table could not commit it
+///
+/// Every caller answers this having left the table exactly as it found it, so the write did not
+/// apply and saying so is a definite refusal. The client is told the table and the partition;
+/// the error itself goes to the `ERROR` event, like [`corrupt_archive`]'s
+/// ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
+///
+/// # Arguments
+///
+/// * `meta` - The metadata of the write being refused
+/// * `table` - The table the write named
+/// * `partition_id` - The partition the write named
+/// * `error` - Why the commit failed
+pub(crate) fn storage_write<P, T: std::fmt::Display>(
+    meta: QueryMetadata,
+    table: T,
+    partition_id: u64,
+    error: &crate::server::ServerError,
+) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
+    // the whole error goes to the log, where the operator can act on it
+    event!(
+        Level::ERROR,
+        msg = "a write could not be committed and was refused",
+        %table,
+        partition_id,
+        ?error
+    );
+    // and the client is told only what it asked for and that it did not apply
+    refuse(
+        meta,
+        ResponseError::new(
+            ErrorCode::StorageWrite,
+            format!("the write to partition {partition_id} of {table} could not be committed"),
+        ),
+    )
+}
+
+/// Build the answer a query is refused with when a partition it needs could not be read back
+///
+/// # Arguments
+///
+/// * `meta` - The metadata of the query being refused
+/// * `table` - The table the partition belongs to
+/// * `partition_id` - The partition that could not be read
+/// * `error` - Why its archive could not be deserialized
+pub(crate) fn unreadable<P, T: std::fmt::Display>(
+    meta: QueryMetadata,
+    table: T,
+    partition_id: u64,
+    error: &rkyv::rancor::Error,
+) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
+    // the whole error goes to the log, where the operator can act on it
+    event!(
+        Level::ERROR,
+        msg = "a resident archive could not be deserialized",
+        %table,
+        partition_id,
+        ?error
+    );
+    // and the client is told the table and the partition, as a corrupt archive always is
+    refuse(meta, corrupt_archive(table, partition_id))
 }
 
 /// Apply a signed change in size to a shards total memory usage
@@ -852,8 +1002,66 @@ pub(crate) fn eviction_totals(pre: usize, post: usize, removed: usize) -> (usize
 
 #[cfg(test)]
 mod tests {
-    use super::{adjust_memory_usage, eviction_totals};
+    use super::{adjust_memory_usage, eviction_totals, PendingGets};
+    use crate::shared::protocol::error::ErrorCode;
     use std::cell::RefCell;
+    use uuid::Uuid;
+
+    #[test]
+    /// A get resumed with another projection than the one parked under its key is refused,
+    /// and the get that parked is kept to finish
+    ///
+    /// The key is the query's id and index, both the client's choice, so two gets can share one
+    /// while asking for different rows. That used to panic the shard
+    /// ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
+    fn a_get_resumed_with_another_projection_is_refused_and_the_parked_one_kept() {
+        // park a get answering in one row type, part way through its two partitions
+        let key = (Uuid::new_v4(), 0);
+        let mut parked = PendingGets::with_capacity(1);
+        let mut pending = parked
+            .resume::<u32>(&key, &[1, 2], None)
+            .expect("a fresh get was refused");
+        pending.fill(0, vec![7]);
+        parked.park(key, pending);
+        // a get under the same key asking for another row type is refused, by name
+        let Err(error) = parked.resume::<u64>(&key, &[1, 2], None) else {
+            panic!("a get with another projection took over a parked one");
+        };
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+        // and the parked get is still there, holding what it had found
+        assert!(parked.is_parked(&key));
+        let mut resumed = parked
+            .resume::<u32>(&key, &[1, 2], None)
+            .expect("the parked get was not kept");
+        assert_eq!(resumed.rank(1), None);
+        assert_eq!(resumed.rank(2), Some(1));
+        resumed.fill(1, vec![8]);
+        assert_eq!(resumed.finish().rows, vec![7, 8]);
+    }
+
+    #[test]
+    /// A get whose partition could not be read stops waiting on it and answers with why
+    fn a_failed_partition_fills_its_slot_and_keeps_the_first_failure() {
+        // a get of two partitions, neither read yet
+        let mut pending = super::PendingGet::<u32>::new(&[1, 2], None);
+        // the first could not be read, which stops it waiting on that one alone
+        pending.fail(
+            0,
+            crate::shared::responses::ResponseError::new(ErrorCode::StorageRead, "first".to_owned()),
+        );
+        assert!(pending.is_pending());
+        assert_eq!(pending.rank(1), None);
+        // a second failure does not replace the first
+        pending.fail(
+            1,
+            crate::shared::responses::ResponseError::new(ErrorCode::Internal, "second".to_owned()),
+        );
+        assert!(!pending.is_pending());
+        let failure = pending.take_failure().expect("the failure was not kept");
+        assert_eq!(failure.code(), ErrorCode::StorageRead);
+        // and it is taken once
+        assert!(pending.take_failure().is_none());
+    }
 
     #[test]
     /// An eviction pass summarizes itself without underflowing on a drifted counter

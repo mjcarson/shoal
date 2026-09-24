@@ -123,7 +123,8 @@ the failure this item is about, relocated.
   explicitly: the cost of a per-query span is quoted from [F5](../../features/flushed-sweep-gate.md)
   by analogy, not measured on this code.
 
-These keep item 69 filed in [Known Issues](../known-issues.md), the way items 16, 20, 24 and 54 are.
+These keep item 69 filed in [Known Issues](../known-issues.md), the way items ~~16,~~ 20, 24 and 54 are
+([16 has since closed](hot-path-panics.md)).
 
 ## Tests
 

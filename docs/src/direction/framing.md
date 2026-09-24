@@ -191,8 +191,8 @@ attach to. Three open items want the same variant and none of them can be closed
   case.
 
 It is also what makes two other things possible. Most of the server's hot-path panics
-([item 16](../appendix/known-issues.md#16-panics-on-the-hot-path)) exist because there is nowhere
-for an error to go — `client_rx_relay` panics on any non-EOF socket error (`shard.rs:63-64`) and
+([item 16](../appendix/resolved/hot-path-panics.md), since resolved through exactly this) exist
+because there is nowhere for an error to go — `client_rx_relay` panics on any non-EOF socket error (`shard.rs:63-64`) and
 `client_tx_relay` panics on both a short write and a write error (`shard.rs:110-114`), killing a
 shard and every other client it was serving. And bounding the channels
 ([item 15](../appendix/resolved/backlog-bounds.md)) requires a way to say

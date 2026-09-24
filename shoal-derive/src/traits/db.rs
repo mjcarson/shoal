@@ -342,10 +342,10 @@ pub fn add(
             let row_ident = utils::extract_inner_table_ident(&field.ty)
                 .expect("Failed to extract inner table ident");
             quote! {
-                #query_ident::#row_ident(query) => self
+                #query_ident::#row_ident(query) => Ok(self
                     .#field_ident
-                    .build_intent(query)
-                    .map(|(key, payload)| (#table_names_ident::#variant_ident, key, payload)),
+                    .build_intent(query)?
+                    .map(|(key, payload)| (#table_names_ident::#variant_ident, key, payload))),
             }
         });
     // build our apply command arms
@@ -667,7 +667,7 @@ pub fn add(
             fn write_command(
                 &self,
                 query: &<Self::ClientType as ::shoal::shared::traits::QuerySupport>::QueryKinds,
-            ) -> Option<(Self::TableNames, u64, Vec<u8>)> {
+            ) -> Result<Option<(Self::TableNames, u64, Vec<u8>)>, ::shoal::server::ServerError> {
                 match query {
                     #(#write_command_arms)*
                 }

@@ -30,7 +30,8 @@ use crate::server::replication::{CommandResult, ResultKind};
 use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::UnsortedPartition;
 use crate::server::tables::persistent::{
-    adjust_memory_usage, open, shed, ApplyStep, ParkedQueries, Parking, RowSink,
+    adjust_memory_usage, open, read_not_asked, refuse, shed, storage_write, unreadable, ApplyStep,
+    ParkedQueries, Parking, RowSink,
 };
 use crate::server::tables::persistent::{
     apply_failure, corrupt_archive, eviction_totals, settle_resident_read, PartitionLoad,
@@ -547,7 +548,7 @@ where
             return Parking::Parked;
         }
         // try to load this partition from disk if it exists
-        let will_load = self
+        let will_load = match self
             .storage
             .load_partition(
                 self.table_name,
@@ -557,7 +558,11 @@ where
                 &self.loader_tx,
             )
             .await
-            .unwrap();
+        {
+            Ok(will_load) => will_load,
+            // the loader could not take the request, so nothing was parked and nothing will land
+            Err(error) => return read_not_asked(self.table_name, partition_key, &error),
+        };
         // if this partition has no data on disk then there is nothing to wait for
         if !will_load {
             return Parking::Absent;
@@ -710,8 +715,11 @@ where
         let key = row.get_partition_key();
         // wrap our row in an insert intent
         let intent = UnsortedIntents::insert(row);
-        // persist this new row to storage
-        let pos = self.storage.commit(&intent).await.unwrap();
+        // persist this new row to storage, or refuse it having changed nothing
+        let pos = match self.storage.commit(&intent).await {
+            Ok(pos) => pos,
+            Err(error) => return storage_write(meta, self.table_name, key, &error),
+        };
         // record that this writes synchronous work is finished
         //
         // a write returns nothing to the shard, so it stamps this itself rather than having
@@ -779,9 +787,15 @@ where
         // whether this execution has parked this get on any partition yet
         let mut parked_any = false;
         // pick this get up where its last execution left off, or start it fresh
-        let mut pending =
-            self.pending_data
-                .resume::<P>(&(meta.id, meta.index), &get.partition_keys, get.limit);
+        let mut pending = match self.pending_data.resume::<P>(
+            &(meta.id, meta.index),
+            &get.partition_keys,
+            get.limit,
+        ) {
+            Ok(pending) => pending,
+            // another get parked under this id and index, and it is left to finish
+            Err(error) => return open(refuse(meta, error)),
+        };
         // check each of the partition keys this execution was handed
         for partition_key in &get.partition_keys {
             // find where this partitions row belongs in the answer
@@ -830,6 +844,9 @@ where
                         Parking::Shed => {
                             return open(self.shed_parked(meta));
                         }
+                        // this partition could not be read, which this get answers with once
+                        // nothing of it is parked
+                        Parking::Failed(error) => pending.fail(rank, error),
                     }
                 }
             }
@@ -840,6 +857,10 @@ where
             self.pending_data.park((meta.id, meta.index), pending);
             // we have blocked partitions so return None
             return None;
+        }
+        // a partition this get named could not be read, so it answers with why
+        if let Some(error) = pending.take_failure() {
+            return open(refuse(meta, error));
         }
         // fold our slots into the rows this get answers with, keeping which partition each
         // run came from so the gather never has to ask a row where it belongs
@@ -1040,6 +1061,8 @@ where
                     Parking::Parked => None,
                     // too many queries are parked on this table to park another
                     Parking::Shed => self.shed_parked(meta),
+                    // the read could not be asked for, so this query answers with why
+                    Parking::Failed(error) => refuse(meta, error),
                     Parking::Absent => {
                         // the partition doesn't exist so data doesn't exist
                         let response = Response {
@@ -1085,8 +1108,11 @@ where
                     let old_size = partition.size();
                     // wrap our key in a delete intent
                     let intent = UnsortedIntents::<R>::delete(key);
-                    // wite this delete to our intent log
-                    let pos = self.storage.commit(&intent).await.unwrap();
+                    // wite this delete to our intent log, or refuse it having changed nothing
+                    let pos = match self.storage.commit(&intent).await {
+                        Ok(pos) => pos,
+                        Err(error) => return storage_write(meta, self.table_name, key, &error),
+                    };
                     // record that this writes synchronous work is finished
                     //
                     // a write returns nothing to the shard, so it stamps this itself rather than having
@@ -1133,6 +1159,8 @@ where
                     Parking::Parked => return None,
                     // too many queries are parked on this table to park another
                     Parking::Shed => return self.shed_parked(meta),
+                    // the read could not be asked for, so this query answers with why
+                    Parking::Failed(error) => return refuse(meta, error),
                     Parking::Absent => (),
                 }
                 // cast this action to a response
@@ -1176,20 +1204,47 @@ where
                 if !partition.is_tombstoned() {
                     // get our old partition size
                     let old_size = partition.size();
-                    // update this paritions data
-                    if let Some(loaded) = partition.update(&update) {
-                        // replace our accessible partition with our loaded one
-                        *partition = MaybeLoaded::Loaded {
-                            partition: loaded,
-                            generation: self.generation,
-                        };
-                    }
                     // get our partition key so we can remove this from our lru cache later
                     let key = update.partition_key;
-                    // wrap our row in an delete intent
+                    // an accessible partition is read into rows before the commit, so a copy
+                    // that cannot be read commits nothing
+                    let archived = match partition {
+                        MaybeLoaded::Accessible(read) => {
+                            match UnsortedPartition::<R>::deserialize(read.archived()) {
+                                Ok(loaded) => Some(loaded),
+                                Err(error) => {
+                                    return unreadable(meta, self.table_name, key, &error)
+                                }
+                            }
+                        }
+                        MaybeLoaded::Loaded { .. } => None,
+                    };
+                    // wrap our row in an update intent
                     let intent = UnsortedIntents::<R>::update(update);
-                    // write this update to storage
-                    let pos = self.storage.commit(&intent).await.unwrap();
+                    // write this update to storage, or refuse it with the row untouched
+                    let pos = match self.storage.commit(&intent).await {
+                        Ok(pos) => pos,
+                        Err(error) => return storage_write(meta, self.table_name, key, &error),
+                    };
+                    // take our update back out of its intent
+                    let update = match intent {
+                        UnsortedIntents::Update(update) => update,
+                        // SAFETY we just wrapped this in an update intent before
+                        _ => unsafe { std::hint::unreachable_unchecked() },
+                    };
+                    // apply the committed update to this partitions row
+                    match archived {
+                        // the archives row, read above, takes the update and replaces it
+                        Some(mut loaded) => {
+                            loaded.update(&update);
+                            *partition = MaybeLoaded::Loaded {
+                                partition: loaded,
+                                generation: self.generation,
+                            };
+                        }
+                        // a partition that was not read above is loaded, and updates in place
+                        None => partition.update_loaded(&update),
+                    }
                     // record that this writes synchronous work is finished
                     //
                     // a write returns nothing to the shard, so it stamps this itself rather than having
@@ -1233,6 +1288,8 @@ where
                     Parking::Parked => return None,
                     // too many queries are parked on this table to park another
                     Parking::Shed => return self.shed_parked(meta),
+                    // the read could not be asked for, so this query answers with why
+                    Parking::Failed(error) => return refuse(meta, error),
                     Parking::Absent => (),
                 }
                 // we didn't find any data to update
@@ -1257,8 +1314,14 @@ where
     /// # Arguments
     ///
     /// * `query` - The query
-    #[must_use]
-    pub fn build_intent(&self, query: &UnsortedQuery<R>) -> Option<(u64, Vec<u8>)>
+    ///
+    /// # Errors
+    ///
+    /// Fails if the intent cannot be archived, which fails this write and nothing else.
+    pub fn build_intent(
+        &self,
+        query: &UnsortedQuery<R>,
+    ) -> Result<Option<(u64, Vec<u8>)>, ServerError>
     where
         for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -1278,9 +1341,11 @@ where
                 update.partition_key,
                 UnsortedIntents::<R>::update(update.clone()),
             ),
-            UnsortedQuery::Get(_) | UnsortedQuery::Exists(_) => return None,
+            UnsortedQuery::Get(_) | UnsortedQuery::Exists(_) => return Ok(None),
         };
-        Some((key, RkyvSupport::serialize(&intent).to_vec()))
+        // archive it once, for every replica's log and state machine
+        let payload = RkyvSupport::serialize(&intent)?;
+        Ok(Some((key, payload.to_vec())))
     }
 
     /// Apply a committed command to this table, deriving its result from the state it finds
@@ -1397,7 +1462,15 @@ where
                             false
                         } else {
                             let before = partition.size();
-                            if let Some(loaded) = partition.update(&update) {
+                            let loaded = match partition.update(&update) {
+                                Ok(loaded) => loaded,
+                                Err(error) => {
+                                    return ApplyStep::Refused(format!(
+                                        "the resident archive does not decode: {error}"
+                                    ))
+                                }
+                            };
+                            if let Some(loaded) = loaded {
                                 *partition = MaybeLoaded::Loaded {
                                     partition: loaded,
                                     generation,
@@ -1487,12 +1560,12 @@ where
             // a resident row as it is, an archived one read back
             let bytes = match self.partitions.get(&key) {
                 Some(MaybeLoaded::Loaded { partition, .. }) => match &partition.row {
-                    MaybeRow::Row(row) => RkyvSupport::serialize(row),
+                    MaybeRow::Row(row) => RkyvSupport::serialize(row)?,
                     MaybeRow::Tombstone => continue,
                 },
                 Some(MaybeLoaded::Accessible(read)) => match &read.archived().row {
                     ArchivedMaybeRow::Row(row) => match <R as RkyvSupport>::deserialize(row) {
-                        Ok(row) => RkyvSupport::serialize(&row),
+                        Ok(row) => RkyvSupport::serialize(&row)?,
                         Err(_) => continue,
                     },
                     ArchivedMaybeRow::Tombstone => continue,
@@ -1505,7 +1578,7 @@ where
                     let archived = <UnsortedPartition<R> as RkyvSupport>::access(&read)?;
                     match &archived.row {
                         ArchivedMaybeRow::Row(row) => match <R as RkyvSupport>::deserialize(row) {
-                            Ok(row) => RkyvSupport::serialize(&row),
+                            Ok(row) => RkyvSupport::serialize(&row)?,
                             Err(_) => continue,
                         },
                         ArchivedMaybeRow::Tombstone => continue,
@@ -1553,13 +1626,16 @@ where
             resident_keys.insert(*key);
             let bytes = match entry {
                 MaybeLoaded::Loaded { partition, .. } => match &partition.row {
-                    MaybeRow::Row(row) => Some(RkyvSupport::serialize(row)),
+                    MaybeRow::Row(row) => Some(RkyvSupport::serialize(row)?),
                     MaybeRow::Tombstone => None,
                 },
                 MaybeLoaded::Accessible(read) => match &read.archived().row {
-                    ArchivedMaybeRow::Row(row) => <R as RkyvSupport>::deserialize(row)
-                        .ok()
-                        .map(|row| RkyvSupport::serialize(&row)),
+                    // a row that does not read back is left out, as before; one that does not
+                    // write back fails the cut, since it would be left out on one replica alone
+                    ArchivedMaybeRow::Row(row) => match <R as RkyvSupport>::deserialize(row) {
+                        Ok(row) => Some(RkyvSupport::serialize(&row)?),
+                        Err(_) => None,
+                    },
                     ArchivedMaybeRow::Tombstone => None,
                 },
             };
@@ -1588,7 +1664,7 @@ where
         let row = match &archived.row {
             ArchivedMaybeRow::Row(row) => Some(RkyvSupport::serialize(
                 &<R as RkyvSupport>::deserialize(row)?,
-            )),
+            )?),
             ArchivedMaybeRow::Tombstone => None,
         };
         Ok(hash_partition(
@@ -2001,7 +2077,7 @@ where
                         // get the size of not yet updated partition
                         let old_size = partition.size();
                         // update our row in place if its loaded or by replacement if its not
-                        if let Some(loaded) = partition.update(&update) {
+                        if let Some(loaded) = partition.update(&update)? {
                             // replace our old partition with its updated data
                             *partition = MaybeLoaded::Loaded {
                                 partition: loaded,

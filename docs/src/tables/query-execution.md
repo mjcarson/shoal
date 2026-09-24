@@ -35,17 +35,24 @@ different places.
 filling a slot per partition:
 
 ```rust
-let mut pending = self
+let mut pending = match self
     .pending_data
-    .resume::<P>(&(meta.id, meta.index), &get.partition_keys, get.limit);
+    .resume::<P>(&(meta.id, meta.index), &get.partition_keys, get.limit)
+{
+    Ok(pending) => pending,
+    Err(error) => return open(refuse(meta, error)),
+};
 for partition_key in &get.partition_keys {
     let Some(rank) = pending.rank(*partition_key) else { continue };
     if pending.filled_before(rank) { pending.fill(rank, Vec::new()); continue }
-    /* maybe read from disk, otherwise scan and fill this slot */
+    /* maybe read from disk - a read that cannot be asked for is `pending.fail(rank, error)` -
+       otherwise scan and fill this slot */
 }
 if pending.is_pending() {
     self.pending_data.park((meta.id, meta.index), pending);
     None
+} else if let Some(error) = pending.take_failure() {
+    /* a partition could not be read: answer with why, once, now nothing is parked */
 } else {
     /* flatten the slots in order, truncate, and answer */
 }
@@ -58,8 +65,10 @@ are still missing. It terminates when every slot is filled.
 `pending_data` is keyed by `(query id, index)` — the pair that uniquely identifies one query
 within one bundle. What it holds is type-erased, because a parked get can be waiting for whole rows
 or for any of its table's projections. `resume::<P>` downcasts back to the type the query named, and
-panics rather than silently starting fresh, which would discard the rows already found
-([F2](../features/projections.md#invariants-to-uphold)). The box is only ever allocated on this
+~~panics~~ refuses the get rather than silently starting fresh, which would discard the rows already
+found ([F2](../features/projections.md#invariants-to-uphold)). A failed downcast is two gets
+sharing a client-chosen id and index, and the one that parked is put back to finish
+([Resolved #16](../appendix/resolved/hot-path-panics.md)). The box is only ever allocated on this
 path: a get whose partitions are all resident finishes in one execution and never parks.
 
 ### Slots, not an accumulator
@@ -374,7 +383,11 @@ commits it, in log order, on every replica, and the result is derived there rath
 
 ```rust
 let intent = SortedIntents::Insert(row);
-let pos = self.storage.commit(&intent).await.unwrap();
+let pos = match self.storage.commit(&intent).await {
+    Ok(pos) => pos,
+    // refused with the table exactly as it was: nothing below has run
+    Err(error) => return storage_write(meta, self.table_name, key, &error),
+};
 let row = match intent {
     SortedIntents::Insert(row) => row,
     _ => unsafe { std::hint::unreachable_unchecked() },
@@ -389,6 +402,13 @@ None
 
 Order: log first, then memory, then park the response. Popping from the LRU marks the
 partition non-evictable — it now holds changes not yet compacted.
+
+**The order holds for every write, including the ones that have to look first.** An update finds
+its row with `live_row_mut` and changes it only after the commit returns; an accessible
+partition is deserialized before the commit that will replace it; a sorted delete removes its
+row to learn it was there and, if the commit fails, puts it back with `SortedPartition::restore`.
+So a commit that fails is answered `StorageWrite` with nothing in memory or in the log
+([Resolved #16](../appendix/resolved/hot-path-panics.md)).
 
 Before any of that, a write arriving at a table whose `PendingResponse` already holds
 `networking.max_pending_writes` responses is answered `Shedding` and nothing is logged

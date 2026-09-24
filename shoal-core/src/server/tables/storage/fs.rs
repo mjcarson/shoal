@@ -561,8 +561,8 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
                 "a table on a cluster node committed to an intent log it does not have; every write goes through its tablet group".to_string(),
             ));
         };
-        // serialize our data
-        let archived = RkyvSupport::serialize(data);
+        // serialize our data, before anything is staged, so a failure here stages nothing
+        let archived = RkyvSupport::serialize(data)?;
         // get the size of the data to write
         let size = archived.len();
         // compute a checksum over our serialized data

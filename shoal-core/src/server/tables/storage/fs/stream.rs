@@ -515,7 +515,10 @@ fn start_sync<D: ShoalDatabase>(
             flush_state.written_pos > flush_state.synced_pos
         };
         // wake our shard so it can release any newly durable responses
-        sync_tx.send(ServerMsg::DataFlushed).await.unwrap();
+        //
+        // a closed channel means the shard is exiting, and a detached task has nobody else to
+        // tell - what this sync recorded is in the shared state either way
+        let _ = sync_tx.send(ServerMsg::DataFlushed).await;
         // start another sync if more data landed while we were syncing
         if resync {
             start_sync::<D>(sync_file, sync_state, sync_tx);
@@ -566,7 +569,9 @@ async fn write_helper<D: ShoalDatabase>(
         return;
     }
     // tell our shard some data has been written to disk so it releases responses
-    shard_local_tx.send(ServerMsg::DataFlushed).await.unwrap()
+    //
+    // a closed channel means the shard is exiting, and a detached task has nobody else to tell
+    let _ = shard_local_tx.send(ServerMsg::DataFlushed).await;
 }
 
 /// A streaming writer that utilizes high queue depth DMA to have efficient
@@ -687,18 +692,23 @@ impl<D: ShoalDatabase> StreamWriter<D> {
 
     /// Write our current buffer to our WAL via a background task
     ///
+    /// Infallible by design: the write itself runs on a detached task, and an error it hits is
+    /// recorded in our flush state for [`StreamWriter::check_error`] to surface. Nothing here
+    /// can fail before that task is spawned, so returning a `Result` only invited its callers
+    /// to unwrap one that was never an error ([Resolved #16](../../../../../../docs/src/appendix/resolved/hot-path-panics.md)).
+    ///
     /// # Arguments
     ///
     /// * `new_usable` - The amount of usable space our next buffer needs
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    async fn write(&mut self, new_usable: usize) -> Result<(), ServerError> {
+    async fn write(&mut self, new_usable: usize) {
         // if we have nothing staged then just make sure our buffer is big enough
         if self.buff_pos == 0 {
             // grow our buffer if it can't fit our next write
             if self.usable() < new_usable {
                 self.buffer = self.alloc_buffer(new_usable);
             }
-            return Ok(());
+            return;
         }
         // back-pressure: if at capacity, await the oldest pending write
         self.flush_oldest_write().await;
@@ -740,7 +750,6 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         // buffer that happened to hold one wide record sizes its successor and nothing after it
         self.widest_flushed = self.widest_staged;
         self.widest_staged = 0;
-        Ok(())
     }
 
     /// Make sure we have enough space to fully store this next write
@@ -756,7 +765,7 @@ impl<D: ShoalDatabase> StreamWriter<D> {
             // make this new buffer big enough to batch several writes of this size
             let new_usable = self.staging_target(size);
             // write but not sync our current buffer to disk
-            self.write(new_usable).await.unwrap();
+            self.write(new_usable).await;
         }
         // remember this record so the buffer after this one is sized to batch records like it
         self.widest_staged = std::cmp::max(self.widest_staged, size);
@@ -776,7 +785,7 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         // if we have consumed all of our usable space then write it to disk
         if self.usable() <= self.buff_pos {
             // write but not sync our current buffer to disk
-            self.write(self.staging_target(0)).await.unwrap();
+            self.write(self.staging_target(0)).await;
         }
     }
 
@@ -848,7 +857,7 @@ impl<D: ShoalDatabase> StreamWriter<D> {
     /// [`ServerMsg::DataFlushed`] is recieved by this shard.
     pub async fn sync(&mut self) -> Result<(), ServerError> {
         if self.buff_pos > 0 {
-            self.write(self.staging_target(0)).await.unwrap();
+            self.write(self.staging_target(0)).await;
         }
         Ok(())
     }
@@ -863,7 +872,7 @@ impl<D: ShoalDatabase> StreamWriter<D> {
     pub async fn sync_blocking(&mut self) -> Result<(), ServerError> {
         // write out whatever is still staged in our buffer
         if self.buff_pos > 0 {
-            self.write(self.staging_target(0)).await?;
+            self.write(self.staging_target(0)).await;
         }
         // wait for every in flight write to land
         self.drain_pending_writes().await;
@@ -958,7 +967,7 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         self.drain_pending_writes().await;
         // write out whatever is still staged in our buffer
         if self.buff_pos > 0 {
-            self.write(self.staging_target(0)).await?;
+            self.write(self.staging_target(0)).await;
             self.drain_pending_writes().await;
         }
         // sync our files data to stable storage before we let go of it

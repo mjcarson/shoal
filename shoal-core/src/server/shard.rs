@@ -1573,7 +1573,7 @@ where
         // build our lru cache
         let lru = Arc::new(RefCell::new(LruCache::unbounded_with_hasher(lru_hasher)));
         // get the channels for this shards channel on this node
-        let (shard_local_tx, shard_local_rx) = comms.get_shards_channels(shard_id);
+        let (shard_local_tx, shard_local_rx) = comms.get_shards_channels(shard_id)?;
         // build our shards tables
         let tables = D::new(
             &info.name,
@@ -2508,21 +2508,14 @@ where
                 max,
             )?;
             // try to queue it, answering every entry with a definite refusal if the queue is full
-            match self
-                .peers
-                .as_mut()
-                .expect("peers exist here")
-                .enqueue(node, Lane::Data, frame)
-            {
+            //
+            // through the peers bound at the top of this iteration, rather than looked up again
+            // and expected to be there ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md))
+            match peers.enqueue(node, Lane::Data, frame) {
                 Ok(()) => {
                     // recorded as pending, one entry at a time
                     for (entry, pending) in entries.into_iter().zip(pendings) {
-                        self.peers.as_mut().expect("peers exist here").expect(
-                            bundle_id,
-                            entry.index,
-                            node,
-                            pending,
-                        );
+                        peers.expect(bundle_id, entry.index, node, pending);
                     }
                 }
                 Err(_) => {
@@ -2966,7 +2959,21 @@ where
             // configuration it lives under: refused by name, never answered from files the
             // cluster no longer counts, and sent on by the origin to another holder
             // ([F45](../../../docs/src/features/replica-migration.md))
-            if let Some((table, key, payload)) = self.tables.write_command(&query) {
+            // a write whose intent cannot be archived fails alone, as a write nothing accepted
+            let command = match self.tables.write_command(&query) {
+                Ok(command) => command,
+                Err(error) => {
+                    event!(Level::ERROR, msg = "failed to archive a write's intent", ?error);
+                    let error = crate::shared::responses::ResponseError::new(
+                        ErrorCode::StorageWrite,
+                        "the write could not be archived and was not applied".to_owned(),
+                    );
+                    return self
+                        .answer_read_failure(meta, query, span, gathered_meta, error)
+                        .await;
+                }
+            };
+            if let Some((table, key, payload)) = command {
                 // a write names no partitions of its own, so its tablet is judged from its key
                 // truncation cannot happen: a tablet id is twelve bits
                 #[allow(clippy::cast_possible_truncation)]
@@ -3050,13 +3057,18 @@ where
             // answer in a single pass
             stamps.mark_exec_done();
             // a share of a query someone else split goes back to them, not to the client
-            match gathered_meta {
-                Some(gathered_meta) => {
-                    // this query was split, so we know it named a shard to collect its shares
-                    let contact = gathered_meta
-                        .gather
-                        .clone()
-                        .expect("A gathered query always names the shard collecting it");
+            //
+            // the shard collecting it is read out of the metadata here rather than trusted to
+            // be there: metadata naming no collector is a whole query, owed to its client
+            // ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md))
+            let share_of = gathered_meta.and_then(|gathered_meta| {
+                gathered_meta
+                    .gather
+                    .clone()
+                    .map(|contact| (contact, gathered_meta))
+            });
+            match share_of {
+                Some((contact, gathered_meta)) => {
                     // a share collected on this node goes over the mesh; one collected on the
                     // node that forwarded the query goes back down the peer connection it came
                     // in on, as a share the origin merges
@@ -3984,10 +3996,23 @@ where
                 }
                 // Add this new client to our client map
                 ServerMsg::NewClient { client, client_tx } => {
-                    // add this client to our client map
-                    if self.client_map.insert(client, client_tx).is_some() {
-                        // panic if we had a client id collision
-                        panic!("Client ID collision?");
+                    match self.client_map.entry(client) {
+                        // add this client to our client map
+                        std::collections::hash_map::Entry::Vacant(vacant) => {
+                            vacant.insert(client_tx);
+                        }
+                        // a v4 id minted twice names two connections, and a reply routed by it
+                        // could reach the wrong one, so neither is answered - which every shard
+                        // decides alike, since every shard is told of both - rather than this
+                        // shard panicking ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md))
+                        std::collections::hash_map::Entry::Occupied(occupied) => {
+                            occupied.remove();
+                            event!(
+                                Level::ERROR,
+                                msg = "a client id named two connections, and neither is answered",
+                                %client
+                            );
+                        }
                     }
                 }
                 // a client has gone away, so drop the channel every shard was holding for it
@@ -4454,8 +4479,12 @@ where
     // ask shard 0 for the transport view, drive a bulk probe, and push every map to all of them
     let senders = ShardSenders(
         (0..shard_count)
-            .map(|shard| comms.get_shards_channels(shard).0.clone_sync())
-            .collect(),
+            .map(|shard| {
+                comms
+                    .get_shards_channels(shard)
+                    .map(|(tx, _)| tx.clone_sync())
+            })
+            .collect::<Result<Vec<_>, ServerError>>()?,
     );
     Ok((shards, should_shutdown, event_rx, senders))
 }

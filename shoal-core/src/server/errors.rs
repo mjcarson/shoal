@@ -461,6 +461,16 @@ pub enum ShoalError {
     /// The mesh carries messages between this node's shards and nothing else; a remote contact
     /// goes through the shard's peer links. Reaching this is a routing bug, not a peer's doing.
     NotLocal { node: NodeId, shard: u16 },
+    /// A contact names a shard of this node that the mesh has no channel for
+    ///
+    /// Reaching this is a routing bug, and is returned rather than panicked on so that it
+    /// fails the one message that carried it ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
+    UnknownShard { shard: usize },
+    /// A message that is only ever sent to one shard was handed to a broadcast
+    ///
+    /// Refused before any shard is sent anything, so a broadcast is never half delivered
+    /// ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
+    NotBroadcast { why: &'static str },
     /// A peer refused this node's hello, and why
     PeerRefused { node: NodeId, reason: PeerRefusal },
     /// A peer's certificate does not name the node its hello claims, or names none
@@ -684,6 +694,12 @@ impl std::fmt::Display for ShoalError {
                 f,
                 "shard {shard} of {node} is on another node and was handed to the local mesh"
             ),
+            ShoalError::UnknownShard { shard } => {
+                write!(f, "shard {shard} is not one this node's mesh has a channel for")
+            }
+            ShoalError::NotBroadcast { why } => {
+                write!(f, "a message was handed to a broadcast that cannot be: {why}")
+            }
             ShoalError::PeerRefused { node, reason } => {
                 write!(f, "{node} refused our hello: {reason}")
             }
