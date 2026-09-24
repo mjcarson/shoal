@@ -238,9 +238,12 @@ sent to another holder once, under the same slot, so the gather waits for exactl
 was owed. What
 a shard holds while it waits is bounded by what the coordinator admitted: a query bound for a
 shard whose queue holds `networking.max_queued_queries` messages is shed at once
-([Resolved #15](../appendix/resolved/shard-mesh-admission.md)), and what the admitted queries
-hold behind that is not bounded by a number of its own
-([Known Issues #15](../appendix/known-issues.md#15-no-backpressure-anywhere-the-remainder)).
+([Resolved #15](../appendix/resolved/shard-mesh-admission.md)), ~~and what the admitted queries
+hold behind that is not bounded by a number of its own~~ and what the admitted queries hold
+behind that is bounded as well: a write waiting on its fdatasync past
+`networking.max_pending_writes` and a read that would park past `networking.max_parked_queries`
+are shed before they commit or park, and a connection owing `networking.max_queued_replies`
+answers is not read until they drain ([the remainder of item 15](../appendix/resolved/backlog-bounds.md)).
 
 ## 4. Executing
 

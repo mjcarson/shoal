@@ -44,6 +44,11 @@ pub struct UnblockedResponse<T> {
     pub response: Response<T>,
 }
 
+/// The responses to writes that are waiting on their data being made durable
+///
+/// Bounded by `networking.max_pending_writes` at the table that fills it, which sheds a write
+/// before committing it once this holds that many
+/// ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md)).
 #[derive(Debug)]
 pub struct PendingResponse<T> {
     /// The still pending writes
@@ -60,6 +65,18 @@ impl<T> PendingResponse<T> {
         PendingResponse {
             pending: VecDeque::with_capacity(capacity),
         }
+    }
+
+    /// How many responses are waiting on their data being made durable
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Whether no response is waiting on its data being made durable
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
     }
 
     /// Add a pending response action thats data is still being flushed

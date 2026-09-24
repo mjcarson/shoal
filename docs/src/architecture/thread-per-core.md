@@ -256,9 +256,11 @@ process runs out of memory.
 - The `Send` invariant is a comment, not a type. See
   [Known Issues](../appendix/known-issues.md#unsafe-send-invariant).
 - Shutdown latency is bounded below by the 3-second poll interval.
-- Backpressure at admission only: a shard's mesh queue is judged when a query is routed to it
-  and the channel itself stays unbounded ([Resolved #15](../appendix/resolved/shard-mesh-admission.md),
-  [Known Issues](../appendix/known-issues.md#15-no-backpressure-anywhere-the-remainder)).
+- ~~Backpressure at admission only~~ Backpressure by bound, never by a blocking send: a shard's
+  mesh queue is judged when a query is routed to it and the channel itself stays unbounded
+  ([Resolved #15](../appendix/resolved/shard-mesh-admission.md)), and a table's pending writes and
+  parked queries and a connection's owed answers each have a bound of their own
+  ([the remainder of item 15](../appendix/resolved/backlog-bounds.md)).
 - Failures on the shard loop are handled by `panic!` rather than by degrading — a single
   malformed client message can take down a shard
   ([Known Issues](../appendix/known-issues.md#16-panics-on-the-hot-path)).

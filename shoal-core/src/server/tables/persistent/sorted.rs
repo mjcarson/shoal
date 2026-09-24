@@ -33,7 +33,7 @@ use crate::server::tables::persistent::{
     adjust_memory_usage, apply_failure, corrupt_archive, eviction_totals, settle_resident_read,
     PartitionLoad, PendingGets,
 };
-use crate::server::tables::persistent::{open, ApplyStep, RowSink};
+use crate::server::tables::persistent::{open, shed, ApplyStep, ParkedQueries, Parking, RowSink};
 use crate::server::Conf;
 use crate::server::ServerError;
 use crate::shared::protocol::error::ErrorCode;
@@ -173,7 +173,11 @@ where
     /// The channel to send loader jobs on
     loader_tx: AsyncSender<LoaderMsg<N>>,
     /// A map of queries blocked on partitions being loaded from disk
-    blocked: HashMap<u64, Vec<(QueryMetadata, SortedQuery<R>)>>,
+    blocked: ParkedQueries<SortedQuery<R>>,
+    /// The most writes this table holds waiting to be made durable before it sheds one
+    max_pending_writes: usize,
+    /// The most queries this table holds parked on partition reads before it sheds one
+    max_parked_queries: usize,
     /// The partitions a replicated apply asked to have read, and is waiting on
     ///
     /// Kept apart from `blocked`, which holds queries: an apply parks nothing here, the shard
@@ -321,7 +325,9 @@ where
             pending_exists: HashMap::with_capacity(500),
             flushed: Vec::with_capacity(1000),
             loader_tx: loader_tx.clone(),
-            blocked: HashMap::with_capacity(1000),
+            blocked: ParkedQueries::with_capacity(1000),
+            max_pending_writes: conf.networking.max_pending_writes,
+            max_parked_queries: conf.networking.max_parked_queries,
             loading: HashSet::new(),
             stale: HashSet::new(),
             memory_usage: memory_usage.clone(),
@@ -516,7 +522,7 @@ where
             }
         }
         // get the queries that were blocked on this partition
-        Ok(match self.blocked.remove(&partition_id) {
+        Ok(match self.blocked.take(&partition_id) {
             Some(unblocked) => {
                 // put every query this read released in the same trace as the read
                 link_released(&unblocked, &read_span);
@@ -551,7 +557,7 @@ where
         // a read an apply asked for gave up, whatever else was waiting on it
         self.loading.remove(&partition_id);
         // take the queries that were parked on this partition
-        let mut blocked = self.blocked.remove(&partition_id)?;
+        let mut blocked = self.blocked.take(&partition_id)?;
         // log how many queries this failure released
         event!(
             Level::WARN,
@@ -576,8 +582,11 @@ where
 
     /// Block a query on a partition being loaded from disk
     ///
-    /// Returns true if this query was parked and false if this partition has no
-    /// data on disk to wait for, in which case the caller should answer now.
+    /// Says whether this query was parked, whether this partition has no data on disk to wait
+    /// for, in which case the caller should answer now, or whether it was shed because this
+    /// table already holds `max_parked_queries` parked queries. A query is only ever shed
+    /// before anything was pushed or asked for, and only when `may_shed` says no part of it
+    /// is parked already ([Resolved #15](../../../../docs/src/appendix/resolved/backlog-bounds.md)).
     ///
     /// A read already in flight for this partition - one a parked query asked for, or one a
     /// replicated apply asked for through `request_load` - is waited on rather than asked for
@@ -588,36 +597,39 @@ where
     /// * `partition_key` - The key of the partition this query needs
     /// * `meta` - The metadata for the query to park
     /// * `query` - The query to replay once this partition has been loaded
+    /// * `may_shed` - Whether this query has parked nothing yet, so it may still be shed
     #[instrument(name = "PersistentTable::block_on_load", skip_all)]
     async fn block_on_load(
         &mut self,
         partition_key: u64,
         meta: &QueryMetadata,
         query: SortedQuery<R>,
-    ) -> bool {
+        may_shed: bool,
+    ) -> Parking {
+        // a query released by a failed load answers without the read that just failed, since
+        // asking for it again would only park this query on the same failure - unless another
+        // read of it is already in flight, which it queues behind like any other query
+        if meta.skip_disk == Some(partition_key) && !self.blocked.contains_key(&partition_key) {
+            return Parking::Absent;
+        }
+        // a table holding as many parked queries as it may sheds this one before it parks,
+        // rather than growing the parked set by arrival rate times read latency
+        if may_shed && self.blocked.len() >= self.max_parked_queries {
+            return Parking::Shed;
+        }
         // if this partition already has blocked queries then a load is in flight
         // for it, so queue behind that load rather than requesting it again
-        if let Some(entry) = self.blocked.get_mut(&partition_key) {
-            // park this query behind the load we have already requested
-            entry.push((meta.clone(), query));
-            return true;
-        }
-        // a query released by a failed load answers without the read that just failed,
-        // since asking for it again would only park this query on the same failure
-        if meta.skip_disk == Some(partition_key) {
-            return false;
-        }
+        let Err(query) = self.blocked.join(partition_key, meta, query) else {
+            return Parking::Parked;
+        };
         // a read a replicated apply asked for is in flight too, and its landing drains
         // `blocked` like any other, so park behind it rather than asking for a second read
         // that would land on the copy the first one made resident
         // ([Resolved #121](../../../../docs/src/appendix/resolved/resident-copy-collision.md))
         if self.loading.contains(&partition_key) {
             // park this query behind the read the apply already requested
-            self.blocked
-                .entry(partition_key)
-                .or_default()
-                .push((meta.clone(), query));
-            return true;
+            self.blocked.park(partition_key, meta, query);
+            return Parking::Parked;
         }
         // try to load this partition from disk if it exists
         let will_load = self
@@ -637,14 +649,49 @@ where
             // is what this partition is already holding - so remember this answer instead of
             // asking again on every query that touches this partition
             self.mark_absent_from_disk(partition_key);
-            return false;
+            return Parking::Absent;
         }
         // park this query until its partition has been loaded from disk
-        self.blocked
-            .entry(partition_key)
-            .or_default()
-            .push((meta.clone(), query));
-        true
+        self.blocked.park(partition_key, meta, query);
+        Parking::Parked
+    }
+
+    /// Shed a query that would have parked past this table's bound
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The metadata of the query being shed
+    fn shed_parked<P>(
+        &self,
+        meta: QueryMetadata,
+    ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
+        // say which table and which bound, never anything about the partition
+        shed(
+            meta,
+            format!(
+                "{} holds {} queries parked on partition reads and this one was not parked behind them",
+                self.table_name, self.max_parked_queries
+            ),
+        )
+    }
+
+    /// Shed a write the device has not kept up with
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The metadata of the write being shed
+    fn shed_pending<P>(
+        &self,
+        meta: QueryMetadata,
+    ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
+        // say which table and which bound
+        shed(
+            meta,
+            format!(
+                "{} holds {} writes waiting to be made durable and this one was not committed behind them",
+                self.table_name, self.max_pending_writes
+            ),
+        )
     }
 
     /// Record that storage has told us a partition has nothing on disk
@@ -708,6 +755,17 @@ where
         meta.stamps.set_durability(self.storage.durability());
         // keep the failure this query was released with, if a read it was parked on gave up
         let failed = meta.failed.take();
+        // a write the device has not kept up with is shed before it is committed, rather than
+        // growing the pending queue by arrival rate times fsync latency. A write released from a
+        // parked read is judged again here, which is sound: it has committed nothing yet
+        // ([Resolved #15](../../../../docs/src/appendix/resolved/backlog-bounds.md))
+        if matches!(
+            query,
+            SortedQuery::Insert { .. } | SortedQuery::Delete { .. } | SortedQuery::Update(_)
+        ) && self.pending.len() >= self.max_pending_writes
+        {
+            return apply_failure(open(self.shed_pending(meta)), failed);
+        }
         // execute the correct query type
         let answered = match query {
             // insert a row into this partition
@@ -831,6 +889,12 @@ where
         if self.can_answer_in_place(&meta, get) {
             return Some(self.get_sealed::<P>(meta, get, seal));
         }
+        // a get that parked on an earlier execution is never shed, since part of it is held
+        //
+        // this is read before `resume`, which takes the parked state out
+        let fresh = !self.pending_data.is_parked(&(meta.id, meta.index));
+        // whether this execution has parked this get on any partition yet
+        let mut parked_any = false;
         // pick this get up where its last execution left off, or start it fresh
         //
         // a get blocked on a partition is replayed once that partition has been read, so the
@@ -869,10 +933,21 @@ where
                 let blocked_get = SortedQuery::Get(get.to_blocked(*partition_key));
                 // park this get if this partition has to be read from disk first
                 //
-                // a partition being read fills its own slot when this get is replayed for it
-                if self.block_on_load(*partition_key, &meta, blocked_get).await {
+                // a partition being read fills its own slot when this get is replayed for it, and
+                // a get is only shed while no part of it is parked
+                let may_shed = fresh && !parked_any;
+                match self
+                    .block_on_load(*partition_key, &meta, blocked_get, may_shed)
+                    .await
+                {
                     // leave this slot empty for the replay to fill
-                    continue;
+                    Parking::Parked => {
+                        parked_any = true;
+                        continue;
+                    }
+                    // nothing of this get is parked, so what it found so far is dropped
+                    Parking::Shed => return open(self.shed_parked(meta)),
+                    Parking::Absent => (),
                 }
             }
             // get the rows this get asked for from this partition
@@ -1073,6 +1148,8 @@ where
         exists_query: &SortedExists<R>,
     ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
         // pick up the partitions this exists is still waiting on, or start it fresh
+        // an exists that parked on an earlier execution is never shed, since part of it is held
+        let fresh = !self.pending_exists.contains_key(&(meta.id, meta.index));
         let mut blocked = match self.pending_exists.remove(&(meta.id, meta.index)) {
             // carry on with the partitions this exists has yet to read
             Some(blocked) => blocked,
@@ -1100,13 +1177,20 @@ where
                 // park this exists if this partition has to be read from disk first
                 //
                 // a partition being read is answered about when this exists is replayed for it
-                if self
-                    .block_on_load(*partition_key, &meta, blocked_exists)
+                // and it is only shed while no part of it is parked
+                let may_shed = fresh && blocked.is_empty();
+                match self
+                    .block_on_load(*partition_key, &meta, blocked_exists, may_shed)
                     .await
                 {
                     // remember that we are still waiting on this partition
-                    blocked.push(*partition_key);
-                    continue;
+                    Parking::Parked => {
+                        blocked.push(*partition_key);
+                        continue;
+                    }
+                    // nothing of this exists is parked, so it is answered as shed
+                    Parking::Shed => return self.shed_parked(meta),
+                    Parking::Absent => (),
                 }
             }
             // this partition has been read so it is no longer one we are waiting on
@@ -1209,9 +1293,12 @@ where
                             };
                             // park this delete if this partition has to be read from disk
                             // first, so it can be retried once we hold the archived copy
-                            if self.block_on_load(key, &meta, blocked_delete).await {
+                            match self.block_on_load(key, &meta, blocked_delete, true).await {
                                 // theres nothing to respond with yet
-                                return None;
+                                Parking::Parked => return None,
+                                // too many queries are parked on this table to park another
+                                Parking::Shed => return self.shed_parked(meta),
+                                Parking::Absent => (),
                             }
                         }
                         // Tthis row doesn't exist and so can't be deleted
@@ -1286,17 +1373,20 @@ where
                     sort_key: sort,
                 };
                 // this partition exists and is being loaded
-                if self.block_on_load(key, &meta, blocked_delete).await {
-                    None
-                } else {
-                    // build the failed delete response
-                    let response = Response {
-                        id: meta.id,
-                        index: meta.index,
-                        data: ResponseAction::Delete(false),
-                        end: meta.end,
-                    };
-                    Some((meta.client, meta.id, meta.stamps, response))
+                match self.block_on_load(key, &meta, blocked_delete, true).await {
+                    Parking::Parked => None,
+                    // too many queries are parked on this table to park another
+                    Parking::Shed => self.shed_parked(meta),
+                    Parking::Absent => {
+                        // build the failed delete response
+                        let response = Response {
+                            id: meta.id,
+                            index: meta.index,
+                            data: ResponseAction::Delete(false),
+                            end: meta.end,
+                        };
+                        Some((meta.client, meta.id, meta.stamps, response))
+                    }
                 }
             }
         }
@@ -1360,12 +1450,20 @@ where
                             // we don't have this partition loaded so try to load it from disk
                             let partition_key = update.partition_key;
                             // park this update if this partition has to be read from disk first
-                            if self
-                                .block_on_load(partition_key, &meta, SortedQuery::Update(update))
+                            match self
+                                .block_on_load(
+                                    partition_key,
+                                    &meta,
+                                    SortedQuery::Update(update),
+                                    true,
+                                )
                                 .await
                             {
                                 // wait for this partition to get loaded
-                                return None;
+                                Parking::Parked => return None,
+                                // too many queries are parked on this table to park another
+                                Parking::Shed => return self.shed_parked(meta),
+                                Parking::Absent => (),
                             }
                         }
                         // this partition doesn't exist in disk or in memory
@@ -1439,21 +1537,24 @@ where
                 // we don't have this partition loaded so try to load it
                 let partition_key = update.partition_key;
                 // this partition exists and is being loaded
-                if self
-                    .block_on_load(partition_key, &meta, SortedQuery::Update(update))
+                match self
+                    .block_on_load(partition_key, &meta, SortedQuery::Update(update), true)
                     .await
                 {
-                    None
-                } else {
-                    // Partition doesn't exist - update fails
-                    let response = Response {
-                        id: meta.id,
-                        index: meta.index,
-                        data: ResponseAction::Update(false),
-                        end: meta.end,
-                    };
-                    // wait for this partition to get loaded
-                    Some((meta.client, meta.id, meta.stamps, response))
+                    Parking::Parked => None,
+                    // too many queries are parked on this table to park another
+                    Parking::Shed => self.shed_parked(meta),
+                    Parking::Absent => {
+                        // Partition doesn't exist - update fails
+                        let response = Response {
+                            id: meta.id,
+                            index: meta.index,
+                            data: ResponseAction::Update(false),
+                            end: meta.end,
+                        };
+                        // wait for this partition to get loaded
+                        Some((meta.client, meta.id, meta.stamps, response))
+                    }
                 }
             }
         }

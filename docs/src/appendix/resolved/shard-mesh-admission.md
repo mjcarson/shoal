@@ -88,12 +88,15 @@ waited for nothing; the first cut did this and the test's slowest refusal was th
 
 ## Still open
 
-The remainder under [item 15](../known-issues.md#15-no-backpressure-anywhere-the-remainder):
+~~The remainder under item 15:
 `PendingResponse` grows with arrival rate times fsync latency under a slow device, a rotation
 releases every pending response at once, and a per-client response channel holds every answer
 until the client's relay writes it - each bounded by admitted work, none by a number of its
 own. And the bound counts every message on a queue, not only client queries, so a shard busy
-with releases and loads sheds sooner than one busy with clients alone.
+with releases and loads sheds sooner than one busy with clients alone.~~ Closed by
+[the remainder](backlog-bounds.md): `max_pending_writes` and `max_parked_queries` shed a query
+before it commits or parks, and `max_queued_replies` stops reading a client that is not reading
+its answers. The bound still counts every message on a queue, and that page says why.
 
 ## Tests
 

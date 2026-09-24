@@ -621,6 +621,146 @@ impl PendingGets {
     }
 }
 
+/// What asking to park a query on a partition read came to
+///
+/// A query that would park past the table's `max_parked_queries` is refused before anything is
+/// pushed or asked for, so the caller answers it `Shedding` having run nothing
+/// ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Parking {
+    /// The query is parked behind a read and is answered when it is replayed
+    Parked,
+    /// The partition has nothing on disk to wait for, so the caller answers now
+    Absent,
+    /// The table already holds as many parked queries as it may, so the caller sheds this one
+    Shed,
+}
+
+/// The queries a table holds parked on partition reads, counted
+///
+/// A map from partition to the queries waiting on its read, with the number of queries across
+/// every partition kept beside it, so the parked bound is one comparison rather than a walk
+/// ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md)). Every push and
+/// every take goes through here, which is what keeps the count honest.
+#[derive(Debug)]
+pub(crate) struct ParkedQueries<Q> {
+    /// The queries parked on each partition's read
+    by_partition: HashMap<u64, Vec<(QueryMetadata, Q)>>,
+    /// How many queries are parked across every partition
+    count: usize,
+}
+
+impl<Q> ParkedQueries<Q> {
+    /// Create an empty set of parked queries with room for this many partitions
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - The number of partitions to make room for
+    pub fn with_capacity(capacity: usize) -> Self {
+        ParkedQueries {
+            by_partition: HashMap::with_capacity(capacity),
+            count: 0,
+        }
+    }
+
+    /// How many queries are parked across every partition
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Whether any query is parked on this partition's read
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_key` - The partition to check
+    #[must_use]
+    pub fn contains_key(&self, partition_key: &u64) -> bool {
+        self.by_partition.contains_key(partition_key)
+    }
+
+    /// Every partition some query is parked on
+    pub fn keys(&self) -> impl Iterator<Item = &u64> {
+        self.by_partition.keys()
+    }
+
+    /// Park a query behind a read of this partition only if one is already parked there
+    ///
+    /// Hands the query back if nothing is parked on this partition, so the caller can decide
+    /// whether a read has to be asked for.
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_key` - The partition the query waits on
+    /// * `meta` - The metadata of the query to park
+    /// * `query` - The query to replay once the partition has been read
+    pub fn join(&mut self, partition_key: u64, meta: &QueryMetadata, query: Q) -> Result<(), Q> {
+        // only a partition with a read already in flight has a queue to join
+        match self.by_partition.get_mut(&partition_key) {
+            Some(parked) => {
+                // queue behind the queries already waiting on this read
+                parked.push((meta.clone(), query));
+                self.count += 1;
+                Ok(())
+            }
+            None => Err(query),
+        }
+    }
+
+    /// Park a query on this partition's read
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_key` - The partition the query waits on
+    /// * `meta` - The metadata of the query to park
+    /// * `query` - The query to replay once the partition has been read
+    pub fn park(&mut self, partition_key: u64, meta: &QueryMetadata, query: Q) {
+        // add this query to the ones waiting on this partition, starting the queue if need be
+        self.by_partition
+            .entry(partition_key)
+            .or_default()
+            .push((meta.clone(), query));
+        self.count += 1;
+    }
+
+    /// Take every query parked on this partition's read
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_key` - The partition whose read landed or gave up
+    pub fn take(&mut self, partition_key: &u64) -> Option<Vec<(QueryMetadata, Q)>> {
+        // take this partition's queue and stop counting what was in it
+        let released = self.by_partition.remove(partition_key)?;
+        self.count -= released.len();
+        Some(released)
+    }
+}
+
+/// Build the answer a query is shed with before it ran
+///
+/// The index and the `end` flag are the ones this query would have answered with, so a shed
+/// query still takes up exactly its own place in its bundle. Nothing was committed, parked or
+/// read for it, which is what makes `Shedding` safe to try again
+/// ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md)).
+///
+/// # Arguments
+///
+/// * `meta` - The metadata of the query being shed
+/// * `msg` - What to tell the client about why
+pub(crate) fn shed<P>(
+    meta: QueryMetadata,
+    msg: String,
+) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
+    // answer in this query's own place with a failure that says to try again
+    let response = Response {
+        id: meta.id,
+        index: meta.index,
+        data: ResponseAction::Error(ResponseError::new(ErrorCode::Shedding, msg)),
+        end: meta.end,
+    };
+    Some((meta.client, meta.id, meta.stamps, response))
+}
+
 /// Apply a signed change in size to a shards total memory usage
 ///
 /// A shrink is applied with `saturating_add_signed` rather than a cast to `usize`,

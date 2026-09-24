@@ -166,6 +166,7 @@
   - [13. Eviction logging can underflow](appendix/resolved/eviction-log-underflow.md)
   - [14. Empty rotated intent logs were never deleted](appendix/resolved/empty-rotated-logs.md)
   - [15. No backpressure anywhere, the shard mesh half](appendix/resolved/shard-mesh-admission.md)
+  - [15. No backpressure anywhere, the remainder](appendix/resolved/backlog-bounds.md)
   - [16, 51. A partition read that failed panicked its shard and stranded its queries](appendix/resolved/partition-load-failure.md)
   - [17. Leftover debug `println!`s](appendix/resolved/leftover-printlns.md)
   - [18, 50. Core exclusion was ignored and shard placement was random](appendix/resolved/excluded-cores-typo.md)

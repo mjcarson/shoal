@@ -32,12 +32,15 @@ use rkyv::{
     Archive, DeserializeUnsized,
 };
 use rustls::ServerConfig;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 use std::{cell::Cell, cell::RefCell, hash::BuildHasherDefault};
 use std::{collections::HashMap, collections::HashSet, io::IoSlice};
@@ -159,6 +162,88 @@ fn hex_trace_id(wire_trace: &TraceContext) -> String {
         .collect()
 }
 
+/// What one client connection's write relay has taken off its channel and not yet written
+///
+/// Shared by the connection's two relays, which run on the same executor, so it is cells rather
+/// than atomics. The read relay stops reading bundles while the answers owed to this connection
+/// are at `networking.max_queued_replies`, and the write relay wakes it as it drains them - the
+/// model the peer lanes' in-flight bound already used
+/// ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md)).
+#[derive(Default)]
+struct ReplyBacklog {
+    /// Answers the write relay has taken off the channel and not yet started writing
+    unwritten: Cell<usize>,
+    /// Whether the write relay has ended, so nothing will ever drain this connection again
+    closed: Cell<bool>,
+    /// The read relay, if it is waiting for room
+    waker: Cell<Option<Waker>>,
+}
+
+impl ReplyBacklog {
+    /// Note how many answers the write relay just took off the channel
+    ///
+    /// # Arguments
+    ///
+    /// * `taken` - How many answers are in the batch it is about to write
+    fn taken(&self, taken: usize) {
+        self.unwritten.set(taken);
+    }
+
+    /// Note that the write relay has started on one more answer, and wake the read relay
+    fn started(&self) {
+        // one fewer answer is waiting behind the write relay
+        self.unwritten.set(self.unwritten.get().saturating_sub(1));
+        // and a read relay waiting for room may now have it
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+    }
+
+    /// Note that the write relay has ended, and wake the read relay so it ends too
+    fn close(&self) {
+        // nothing will drain this connection again
+        self.closed.set(true);
+        // so a read relay waiting for room has to hear it rather than wait forever
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+    }
+}
+
+/// A future that resolves once a client connection owes fewer answers than its bound
+///
+/// Resolves `true` when there is room to read another bundle and `false` when the write relay
+/// has ended, in which case the connection is over. A bundle's answers are not counted until
+/// they exist, so the answers owed can pass the bound by what was running when it closed - which
+/// is bounded in turn by the mesh, the pending and the parked bounds.
+struct ReplyRoom<'a> {
+    /// What the write relay has taken off the channel and not yet written
+    backlog: &'a ReplyBacklog,
+    /// The channel the write relay drains, read only for its length
+    client_rx: &'a AsyncReceiver<Reply>,
+    /// The most answers this connection may owe before it stops being read
+    bound: usize,
+}
+
+impl Future for ReplyRoom<'_> {
+    type Output = bool;
+
+    /// Resolve when the answers owed fall under the bound or the write relay ends
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // a connection nobody is writing to is over
+        if self.backlog.closed.get() {
+            return Poll::Ready(false);
+        }
+        // the answers owed are those on the channel and those taken off it but not yet written
+        if self.backlog.unwritten.get() + self.client_rx.len() < self.bound {
+            return Poll::Ready(true);
+        }
+        // otherwise wait for the write relay to start on another answer
+        self.backlog.waker.set(Some(cx.waker().clone()));
+        Poll::Pending
+    }
+}
+
 /// Relay bundles of queries from one client into this node
 ///
 /// Nothing in here panics. Every failure ends this one connection and leaves the shard and every
@@ -172,15 +257,35 @@ fn hex_trace_id(wire_trace: &TraceContext) -> String {
 /// * `kanal_tx` - The channel to forward bundles into this node on
 /// * `max_frame_bytes` - The largest frame this server will accept
 /// * `principal` - Who this connection authenticated as, if it did, for its admin requests
+/// * `backlog` - What this connection's write relay has taken and not yet written
+/// * `client_rx` - The channel this connection's answers wait on, read only for its length
+/// * `max_queued_replies` - The most answers this connection may owe before it stops being read
+#[allow(clippy::too_many_arguments)]
 async fn client_rx_relay<S: ShoalDatabase>(
     peer: Uuid,
     mut tcp_rx: ReadHalf<TcpStream>,
     kanal_tx: AsyncSender<ServerMsg<S>>,
     max_frame_bytes: u32,
     principal: Option<String>,
+    backlog: &ReplyBacklog,
+    client_rx: &AsyncReceiver<Reply>,
+    max_queued_replies: usize,
 ) {
     // keep waiting for messages until  our tcp socket closes
     loop {
+        // a client that is not reading its answers is not read either: wait until this
+        // connection owes fewer than its bound, so TCP pushes back on the client rather than
+        // this server holding every answer it will never read
+        // ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md))
+        let room = ReplyRoom {
+            backlog,
+            client_rx,
+            bound: max_queued_replies,
+        };
+        if !room.await {
+            // the write relay has ended, so nothing this connection sends can be answered
+            break;
+        }
         // have a buffer for the header of the next frame
         let mut preamble = [0u8; protocol::REQUEST_PREAMBLE_LEN];
         // try to read the header of the next message from our tcp socket
@@ -506,11 +611,36 @@ async fn write_error_frame(
 /// * `client_rx` - The channel this node's shards hand responses over
 /// * `tcp_tx` - The write half of this client's connection
 /// * `peer_max_frame_bytes` - The largest frame this client said it would accept
+/// * `caps` - The optional sections this client's hello asked for
+/// * `backlog` - What this relay has taken and not yet written, which the read relay waits on
 async fn client_tx_relay<S: ShoalDatabase>(
     client_rx: AsyncReceiver<Reply>,
+    tcp_tx: WriteHalf<TcpStream>,
+    peer_max_frame_bytes: u32,
+    caps: u8,
+    backlog: Rc<ReplyBacklog>,
+) {
+    // write until the client or the channel goes away
+    write_replies::<S>(&client_rx, tcp_tx, peer_max_frame_bytes, caps, &backlog).await;
+    // then tell the read relay, which may be waiting on this one for room that will never come
+    backlog.close();
+}
+
+/// Write the replies queued to one client until its socket or its channel fails
+///
+/// # Arguments
+///
+/// * `client_rx` - The channel this node's shards hand responses over
+/// * `tcp_tx` - The write half of this client's connection
+/// * `peer_max_frame_bytes` - The largest frame this client said it would accept
+/// * `caps` - The optional sections this client's hello asked for
+/// * `backlog` - What this relay has taken and not yet written, which the read relay waits on
+async fn write_replies<S: ShoalDatabase>(
+    client_rx: &AsyncReceiver<Reply>,
     mut tcp_tx: WriteHalf<TcpStream>,
     peer_max_frame_bytes: u32,
     caps: u8,
+    backlog: &ReplyBacklog,
 ) {
     // loop over messages to send back to our client
     'relay: loop {
@@ -527,7 +657,11 @@ async fn client_tx_relay<S: ShoalDatabase>(
             batch.push(next);
         }
         coalesce_topology(&mut batch);
+        // say how many answers this batch holds, which the read relay counts as owed
+        backlog.taken(batch.len());
         for reply in batch {
+            // this answer is no longer waiting behind the socket, whatever becomes of it
+            backlog.started();
             let Reply {
                 id: query_id,
                 kind,
@@ -955,7 +1089,8 @@ async fn server_auth(
 /// * `max_frame_bytes` - The largest frame this server will accept
 /// * `store` - The users this shard will accept, and whether it requires one
 /// * `tls` - What to encrypt connections with, if this listener is encrypted
-#[allow(clippy::future_not_send)]
+/// * `max_queued_replies` - The most answers one connection may owe before it stops being read
+#[allow(clippy::future_not_send, clippy::too_many_arguments)]
 async fn client_acceptor<S: ShoalDatabase>(
     tcp_sock: TcpListener,
     comms: Comms<S>,
@@ -963,6 +1098,7 @@ async fn client_acceptor<S: ShoalDatabase>(
     max_frame_bytes: u32,
     store: Rc<CredentialStore>,
     tls: Option<Arc<ServerConfig>>,
+    max_queued_replies: usize,
 ) -> Result<(), ServerError> {
     loop {
         // try to read a single datagram from our udp socket
@@ -1070,16 +1206,33 @@ async fn client_acceptor<S: ShoalDatabase>(
             }
             // start writing responses back to this client, bounded by what it said it accepts
             // and carrying the sections it asked for
+            //
+            // the read relay keeps a handle on the channel only to see how many answers wait on
+            // it, and both relays share what the write relay has taken and not yet written
+            let backlog = Rc::new(ReplyBacklog::default());
+            let owed = client_rx.clone();
             let tx_task = glommio::spawn_local(client_tx_relay::<S>(
                 client_rx,
                 tcp_tx,
                 hello.max_frame_bytes,
                 hello.caps & CLIENT_CAP_READ_OPTIONS,
+                backlog.clone(),
             ));
-            // read this clients bundles until it goes away or sends something we refuse; its
-            // principal rides along, since an admin request on this connection is judged by it
+            // read this clients bundles until it goes away, sends something we refuse, or can no
+            // longer be written to; its principal rides along, since an admin request on this
+            // connection is judged by it
             let principal = principal.map(|principal| principal.name);
-            client_rx_relay(client, tcp_rx, node_local_tx, max_frame_bytes, principal).await;
+            client_rx_relay(
+                client,
+                tcp_rx,
+                node_local_tx,
+                max_frame_bytes,
+                principal,
+                &backlog,
+                &owed,
+                max_queued_replies,
+            )
+            .await;
             // stop writing to a client that is not reading, which drops the last half of the
             // stream and closes the socket
             tx_task.cancel().await;
@@ -1800,6 +1953,7 @@ where
                 // than once per connection - a PBKDF2 derivation is the whole point of the cost
                 Rc::new(self.conf.auth.store()?),
                 tls,
+                self.conf.networking.max_queued_replies,
             ),
             self.high_priority,
         )?;

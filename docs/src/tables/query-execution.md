@@ -390,6 +390,10 @@ None
 Order: log first, then memory, then park the response. Popping from the LRU marks the
 partition non-evictable — it now holds changes not yet compacted.
 
+Before any of that, a write arriving at a table whose `PendingResponse` already holds
+`networking.max_pending_writes` responses is answered `Shedding` and nothing is logged
+([the remainder of item 15](../appendix/resolved/backlog-bounds.md)).
+
 `PendingResponse` is a FIFO of `(pos, meta, action)`:
 
 ```rust
@@ -495,7 +499,11 @@ synchronisation mechanism. Simple, and dependent on nothing reordering that queu
   [F11](../features/error-channel.md) it is answered `ResponseAction::Error` with a code saying which
   class of failure it was, and only a partition the compactor *pruned* still answers as empty —
   which is correct, because a query replayed against one has found everything there is to find.
-- `pending_data` and `blocked` are unbounded; what feeds them is bounded at admission by
-  `networking.max_queued_queries` ([Resolved #15](../appendix/resolved/shard-mesh-admission.md))
-  and by nothing else ([item 15](../appendix/known-issues.md#15-no-backpressure-anywhere-the-remainder)).
+- ~~`pending_data` and `blocked` are unbounded; what feeds them is bounded at admission by
+  `networking.max_queued_queries` and by nothing else.~~ `blocked` holds at most
+  `networking.max_parked_queries` queries per table per shard: a query that would park past it
+  is answered `Shedding` before it parks, one already parked in part is never shed, and a
+  resident read never parks ([the remainder of item 15](../appendix/resolved/backlog-bounds.md)).
+  A fresh query for a partition with nothing on disk can still be shed while the table is at its
+  bound, since the bound is judged before storage is asked.
 - Memory accounting corrupts on the partition-shrinks path.

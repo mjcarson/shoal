@@ -972,14 +972,17 @@ What this entry still holds:
 
 ### Backpressure
 
-~~Every channel is unbounded ([Known Issues #15](known-issues.md#15-no-backpressure-anywhere-the-remainder)).
+~~Every channel is unbounded (item 15).
 Bounding them requires deciding what to do when a shard is saturated — shed load, block the
 coordinator, or reject the client — which requires the error channel above.~~ **Built for the
 shard mesh** ([Resolved #15](resolved/shard-mesh-admission.md)): the decision is shed, at
 admission, by the coordinator routing a client's query to a shard whose queue already holds
 `networking.max_queued_queries` messages, answered `Shedding` at once and retried by the client.
-What is left is the remainder the known issues page keeps under the same number - the
-response and pending structures bounded by admitted work alone.
+~~What is left is the remainder the known issues page keeps under the same number - the
+response and pending structures bounded by admitted work alone.~~ **Built for the rest**
+([the remainder](resolved/backlog-bounds.md)): a write past `networking.max_pending_writes` and a
+read past `networking.max_parked_queries` are shed before they commit or park, and a client
+connection owing `networking.max_queued_replies` answers is not read until they drain.
 
 ### Timeouts
 

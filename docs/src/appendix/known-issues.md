@@ -31,7 +31,7 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 17, 25, 26, 30, 31, 33, 34, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
+list starts at ~~15~~ 16 and skips 17, 25, 26, 30, 31, 33, 34, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
 76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120 and 121, and
 why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ item 119 is the newest entry here, ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ with 121 the newest number, on the resolved page, and why 112 is on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120 and 121 are on the resolved page. **120 and 121 never appeared here**:
@@ -79,17 +79,22 @@ worth noting because it makes the numbering look like six entries went missing. 
 it was filed here rather than fixed, because the fix turned on a question about the storage layer
 that reading `block_on_load` alone could not answer, and stayed here until somebody answered it
 ([Resolved #80](resolved/never-flushed-partitions.md)). The exceptions are items 16, 20, 24, 32, 54 and 73, which were only
-partly fixed: the open remainder is here and the rest is there. Items 9 and 51 were each one such
+partly fixed: the open remainder is here and the rest is there. Items 9, 15 and 51 were each one such
 exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
 in the other direction — it had one row left open, that row was fixed, and the whole item
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ **1,549 tests**, six ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ **1,555 tests**, six ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
 two of `persistent_unsorted_table.rs` fail about one run in five of that binary (item 107).
+[The remainder of item 15](resolved/backlog-bounds.md) added 6 and took it to 1,555, one new
+binary, `table_backlog.rs`, and one test in `backpressure.rs`, and filed nothing. Under the
+workspace run at six threads three fixture tests failed across two runs and each passed alone:
+`backup_restore_verifies_history_in_new_cluster` (item 117), `down_retains_placement_during_grace`
+(item 119) and `migration_resumes_after_each_phase_failure` (item 100).
 [Resolved #30, 120, 121](resolved/resident-copy-collision.md) added 6 and took it to 1,549,
 one new binary, `resident_reads.rs`, and filed nothing: the two defects it found beside item 30
 were fixed with it. Under the workspace run at six threads two fixture tests failed and passed
@@ -283,29 +288,6 @@ disagree, and a partition has at most one read outstanding.
 
 ## Medium — robustness
 
-### 15. No backpressure anywhere - the remainder
-
-~~Every channel is `kanal::unbounded_async`: the shard mesh (`comms.rs:33`), per-client response
-channels (`shard.rs:146`), compaction jobs (`.../storage/fs.rs:317`), loader requests
-(`.../persistent/sorted.rs:234`, `.../persistent/unsorted.rs:180`).~~ The shard mesh has an
-admission bound since [Resolved #15](resolved/shard-mesh-admission.md): a client's query bound
-for a shard whose queue holds `networking.max_queued_queries` messages is answered `Shedding`
-at once and never enqueued, so a shard that falls behind no longer grows its queue until the
-process is killed. The channel itself stays unbounded, since a blocking send between shards is
-a deadlock.
-
-What remains is what that bound does not reach. `PendingResponse` (`.../storage.rs`) grows with
-arrival rate times fsync latency under a slow device and a rotation releases every pending
-response at once; a per-client response channel holds every answer until the client's relay
-writes it; `blocked` and `pending_data` hold every query parked on a partition read. Each is
-bounded by the work the admission bound admits and by no number of its own, and the bound
-counts every message on a queue - releases and loads as well as queries - so a shard busy with
-its own work sheds sooner than one busy with clients alone.
-
-**Fix direction:** a bound on `PendingResponse` that sheds a write the device cannot keep up
-with, and a per-client bound that closes a connection whose reader has stopped, both answered
-by the `Shedding` the mesh now produces.
-
 ### 16. Panics on the hot path
 
 233 `.unwrap()` calls and 59 `panic!`s outside `target/` and `old/`. The ones on live request
@@ -406,7 +388,7 @@ from again. What is still leaked is the bookkeeping every *other* shard holds, w
 `ClientGone` below is for.
 
 ~~A response that arrives for a dead client is not an error either — it is sent into an unbounded
-channel ([item 15](#15-no-backpressure-anywhere)) that nothing will ever read.~~ It was worse than
+channel ([item 15](resolved/backlog-bounds.md)) that nothing will ever read.~~ It was worse than
 that, and it is fixed: the send used `?`, so an answer owed to a client that had left ended the
 shard ([Resolved #94](resolved/disconnected-client-cleanup.md)). An answer with nowhere to go is
 now logged at `DEBUG` and dropped, whether the receiver is gone or the map entry is.

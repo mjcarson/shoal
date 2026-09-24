@@ -389,7 +389,9 @@ load, latency stays low because the queue drains.
 - `write_at` and the wakeup send still `unwrap()` inside the detached task on some paths;
   `FlushState` records the write error, but a failed *send* aborts the shard.
 - Rotation releases every pending response at once. That is correct — they are all durable —
-  but it means a rotation can emit an unbounded burst of responses.
-- Nothing bounds `PendingResponse`. Under a slow device it grows with arrival rate times fsync
-  latency. See [Known Issues #15](../appendix/known-issues.md#15-no-backpressure-anywhere-the-remainder),
-  the remainder once the mesh got its admission bound.
+  ~~but it means a rotation can emit an unbounded burst of responses.~~ and the burst is bounded
+  by `networking.max_pending_writes`, since that is all the queue can hold.
+- ~~Nothing bounds `PendingResponse`. Under a slow device it grows with arrival rate times fsync
+  latency.~~ `PendingResponse` is bounded by `networking.max_pending_writes` per table per shard:
+  a write arriving at a full queue is answered `Shedding` before it is committed
+  ([the remainder of item 15](../appendix/resolved/backlog-bounds.md)).
