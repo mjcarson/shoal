@@ -55,6 +55,7 @@ use super::network::{PeerNetwork, RpcFailure};
 use super::plan::{PlanOutcome, PlanPhase, PlanRecord, PlanUpdate, StepState};
 use super::planner::{self, NodeInput, PlanInput, SetInput};
 use super::repair::{QuarantinedCopy, RepairMode};
+use super::stats::{NodeStatsTracker, STALE_AFTER_INTERVALS, STATS_EVERY_REPORTS};
 use super::store::{self, ControlStateMachine, CONTROL_DIR};
 use super::types::{
     ControlCommand, ControlConfig, ControlResponse, ControlState, MemberHealth, MemberPhase,
@@ -76,6 +77,7 @@ use crate::shared::protocol::admin::{
 };
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::protocol::peer::{ControlKind, PeerHello, StatusReport, CAPABILITIES};
+use crate::shared::protocol::stats::{ClusterStatsView, MemberStats, NodeStats};
 use crate::shared::protocol::{MIN_PEER_VERSION, PROTOCOL_VERSION};
 use crate::shared::tls::PeerTlsHolder;
 
@@ -364,7 +366,15 @@ pub struct TopologyView {
     /// ([Resolved #106](../../../../docs/src/appendix/resolved/isolated-member-term-inflation.md)).
     #[serde(default)]
     pub term: u64,
+    /// The admin reads this build answers beyond the ones every cluster build does, which a
+    /// client checks before sending one: a node that cannot decode a kind closes the
+    /// connection ([F52](../../../../docs/src/features/cluster-stats.md))
+    #[serde(default)]
+    pub admin_reads: Vec<String>,
 }
+
+/// The admin reads a `Members` frame advertises, beyond the ones every cluster build answers
+pub const ADMIN_READS: &[&str] = &["stats"];
 
 /// The wire versions a cluster's members speak, and the one it has activated
 ///
@@ -1112,6 +1122,13 @@ struct Core {
     planned_at: u64,
     /// How many reports have changed the capacity table since the plans were looked at
     capacity_moved: bool,
+    /// This node's trailing rates, derived from its shards' reports on every report tick
+    /// ([F52](../../../../docs/src/features/cluster-stats.md))
+    stats_tracker: NodeStatsTracker,
+    /// This node's figures as the last report tick derived them
+    last_stats: Option<NodeStats>,
+    /// Every member's figures as this leader last heard them, with when; never committed
+    stats: BTreeMap<NodeId, (NodeStats, Instant)>,
 }
 
 impl Core {
@@ -1198,6 +1215,7 @@ impl Core {
                 }
             },
             policy: state.policy,
+            admin_reads: ADMIN_READS.iter().map(|read| (*read).to_string()).collect(),
         }
     }
 
@@ -1646,6 +1664,9 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         last_plan: None,
         planned_at: 0,
         capacity_moved: false,
+        stats_tracker: NodeStatsTracker::default(),
+        last_stats: None,
+        stats: BTreeMap::new(),
     };
     core.publish();
     event!(
@@ -1747,6 +1768,9 @@ impl Core {
                 self.maybe_observe();
                 self.maybe_promote();
                 self.drain_joins();
+                // this node's figures move on every tick, joined or not, so its rates are warm
+                // by the time anybody asks ([F52](../../../../docs/src/features/cluster-stats.md))
+                self.tick_stats();
                 self.report();
                 self.judge_members();
                 self.accrue_graces();
@@ -2197,6 +2221,11 @@ impl Core {
                 report.free_bytes,
                 &report.group_bytes,
             );
+            // and its figures, when the report carries them, for the Stats read
+            // ([F52](../../../../docs/src/features/cluster-stats.md))
+            if let Some(stats) = report.stats.clone() {
+                self.note_stats(report.node, stats);
+            }
             // and the wire version its running build speaks, which an activation is judged by
             // ([F48](../../../../docs/src/features/rolling-compatibility.md))
             self.wires
@@ -2648,6 +2677,15 @@ impl Core {
                 let _ = call.reply.send(answer(outcome));
                 return;
             }
+            // every member's standing and figures and every plan's progress
+            // ([F52](../../../../docs/src/features/cluster-stats.md))
+            AdminKind::Stats { table } => {
+                let outcome = self.cluster_stats(table.as_deref()).map(|view| {
+                    AdminOutcome::Read(serde_json::to_value(view).unwrap_or_default())
+                });
+                let _ = call.reply.send(answer(outcome));
+                return;
+            }
             AdminKind::Plans => {
                 let mut plans: Vec<&PlanRecord> = state.plans.values().collect();
                 plans.sort_by_key(|record| record.requested_at);
@@ -2852,6 +2890,7 @@ impl Core {
             self.plan_in_flight.clear();
             self.finishing.clear();
             self.capacity.clear();
+            self.stats.clear();
             self.last_plan = None;
             let now = Instant::now();
             for (node, member) in &self.machine.state().members {
@@ -3129,6 +3168,10 @@ impl Core {
         if self.is_leader {
             let (free_bytes, group_bytes) = self.own_capacity();
             self.note_capacity(self.node, self.member.incarnation, free_bytes, &group_bytes);
+            // and its own figures where a report would have put them
+            if let Some(stats) = self.last_stats.clone() {
+                self.note_stats(self.node, stats);
+            }
             if self.reported_quarantine != self.quarantined {
                 self.reported_quarantine = self.quarantined.clone();
                 let raft = self.raft.clone();
@@ -3295,6 +3338,13 @@ impl Core {
             free_bytes,
             group_bytes,
             wire_max: self.member.wire_max,
+            // the node's figures ride one report in every few, which is often enough for a
+            // ten second window and a fraction of the bytes
+            stats: if seq % u64::from(STATS_EVERY_REPORTS) == 0 {
+                self.last_stats.clone()
+            } else {
+                None
+            },
         };
         let payload = serde_json::to_vec(&report).map_err(|error| error.to_string())?;
         let network = self.network.clone();
@@ -3504,6 +3554,152 @@ impl Core {
             self.capacity_moved = true;
         }
         self.capacity.insert(node, capacity);
+    }
+
+    /// Keep a member's newest figures, as this leader heard them
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member
+    /// * `stats` - Its figures
+    fn note_stats(&mut self, node: NodeId, mut stats: NodeStats) {
+        // the figures are filed under the member that reported them, whatever they say
+        stats.node = node;
+        self.stats.insert(node, (stats, Instant::now()));
+    }
+
+    /// Derive this node's figures from its shards' newest reports
+    fn tick_stats(&mut self) {
+        // the free bytes are read the way the capacity report reads them
+        let free_bytes = super::capacity::free_bytes(&self.root).unwrap_or(0);
+        let stats = self.stats_tracker.tick(
+            self.node,
+            Instant::now(),
+            super::stats::now_ms(),
+            &self.replication,
+            free_bytes,
+        );
+        self.last_stats = Some(stats);
+    }
+
+    /// How old a member's figures may be before their rates are not read as current
+    fn stats_stale_after(&self) -> Duration {
+        // a few of the intervals the figures are sent at
+        let interval = self.policy.failure_detector.interval_ms.max(50);
+        Duration::from_millis(
+            interval * u64::from(STATS_EVERY_REPORTS) * STALE_AFTER_INTERVALS,
+        )
+    }
+
+    /// Every member's standing and figures, and how far every plan has got
+    ///
+    /// The standing and the plans are the applied state, which every node holds; the figures
+    /// are what this node holds - every member's on the leader, its own anywhere else - so a
+    /// view from a follower says so and names the leader to ask instead
+    /// ([F52](../../../../docs/src/features/cluster-stats.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table to narrow the figures to, if one
+    fn cluster_stats(&self, table: Option<&str>) -> Result<ClusterStatsView, AdminError> {
+        // a table is resolved by name against what this node serves
+        if let Some(table) = table {
+            if !self.tables.iter().any(|(name, _)| name == table) {
+                return Err(AdminError::new(
+                    ErrorCode::Internal,
+                    format!(
+                        "no table is named {table}; the schema serves {:?}",
+                        self.tables.iter().map(|(name, _)| name).collect::<Vec<_>>()
+                    ),
+                ));
+            }
+        }
+        let state = self.machine.state();
+        let now = Instant::now();
+        let now_ms = super::stats::now_ms();
+        let stale_after = self.stats_stale_after();
+        let grace_ms = state
+            .policy
+            .as_ref()
+            .and_then(|policy| policy.auto_remove_after)
+            .map(|grace| u64::try_from(grace.duration().as_millis()).unwrap_or(u64::MAX));
+        // what this node holds of a member's figures: the leader's table, or its own
+        let held = |node: NodeId| -> Option<(NodeStats, Duration)> {
+            if self.is_leader {
+                self.stats
+                    .get(&node)
+                    .map(|(stats, at)| (stats.clone(), now.saturating_duration_since(*at)))
+            } else if node == self.node {
+                self.last_stats.clone().map(|stats| (stats, Duration::ZERO))
+            } else {
+                None
+            }
+        };
+        // every member not removed, with its standing and whatever figures are held
+        let members = state
+            .members
+            .values()
+            .filter(|member| member.phase != MemberPhase::Removed)
+            .map(|member| {
+                let node = member.record.node;
+                let figures = held(node);
+                let stale = figures
+                    .as_ref()
+                    .is_some_and(|(_, age)| *age > stale_after);
+                MemberStats {
+                    node,
+                    client: member.record.client.clone(),
+                    role: member.role.name().to_string(),
+                    health: member.health.name().to_string(),
+                    phase: member.phase.name().to_string(),
+                    state: member.state_name().to_string(),
+                    maintenance: member.grace.as_ref().is_some_and(|grace| grace.suspended),
+                    grace_remaining_ms: match (&member.grace, grace_ms) {
+                        (Some(grace), Some(total)) if !grace.expired => {
+                            Some(total.saturating_sub(grace.elapsed_ms))
+                        }
+                        _ => None,
+                    },
+                    shards_failed: member.shards_failed.clone(),
+                    report_age_ms: figures.as_ref().map(|(_, age)| {
+                        u64::try_from(age.as_millis()).unwrap_or(u64::MAX)
+                    }),
+                    stale,
+                    stats: figures.map(|(stats, _)| match table {
+                        Some(table) => stats.narrowed(table),
+                        None => stats,
+                    }),
+                }
+            })
+            .collect();
+        // a member's one minute stream rate, when its figures are held and current
+        let stream_rate = |node: NodeId| -> Option<f64> {
+            held(node)
+                .filter(|(_, age)| *age <= stale_after)
+                .map(|(stats, _)| stats.stream_sent.r1m)
+        };
+        // every plan, open ones first and each kind of order by when it was asked for
+        let mut records: Vec<&PlanRecord> = state.plans.values().collect();
+        records.sort_by_key(|record| (record.is_done(), record.requested_at));
+        let plans = records
+            .into_iter()
+            .map(|record| super::stats::plan_progress(record, &state.moves, now_ms, stream_rate))
+            .collect();
+        let leader_client = self
+            .leader
+            .and_then(|leader| state.members.get(&leader))
+            .map(|member| member.record.client.clone());
+        Ok(ClusterStatsView {
+            source: if self.is_leader { "leader" } else { "local" }.to_string(),
+            answered_by: self.node,
+            leader: self.leader,
+            leader_client,
+            version: state.topology_version,
+            table: table.map(str::to_string),
+            at_ms: now_ms,
+            members,
+            plans,
+        })
     }
 
     /// Count every down member's grace and commit what has elapsed, if this node leads

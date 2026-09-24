@@ -262,6 +262,28 @@ list rather than from the diff:
   operator's to write with local storage paths; the launcher copies the staged file and nothing
   else, and refuses a build that is not its own by digest.
 
+**What F52 left undone, deliberately.** Recorded here so the next change starts from the list
+rather than from the diff:
+
+- **Partitions and bytes before compaction.** Both come from the archive map, so a row counts
+  once the compactor archives it; a freshly written or freshly fed node reads low. Counting the
+  resident partitions no archive names yet is the shape, and has to agree with the map on a
+  partition that is both.
+- **Ephemeral tables' size.** They have no archive map and report no partitions or bytes; their
+  write rates are counted. A resident count per group from the partition maps is the shape.
+- **Catch-up bytes over the log.** Stream rates are snapshot bytes; a learner fed by
+  `AppendEntries` shows little stream, and a plan's current throughput reads low for it. The
+  replication lane's own byte counters per group are the shape.
+- **A standalone node's figures.** A standalone node refuses admin requests, so it has no
+  `Stats`; the counters exist on its shards only when they host groups. Counting at
+  `tables.handle` and answering a standalone read is the shape.
+- **An export.** The figures are a read a tool polls, not a metrics endpoint; a Prometheus or
+  OTLP exporter reading the tracker's output on the control thread is the shape
+  ([Observability](#observability)).
+- **Latency beside the rates.** The server counts what it applies, not how long a client
+  waited; the bench's `p99_ratio_permille` stays the one measure of what a rebalance costs the
+  foreground.
+
 **What F51 left undone, deliberately.** Recorded here so the next change starts from the list
 rather than from the diff:
 
@@ -1163,8 +1185,11 @@ scanning — the comment says so (`.../fs/compactor.rs:306-310`). No such path e
 
 ### Observability
 
-Nothing a monitoring system can read exists — no metrics endpoint, no counters, no gauges
-([Observability](../operations/observability.md#what-is-missing)). Two pieces of this were
+Nothing a monitoring system can read exists — no metrics endpoint, ~~no counters, no gauges~~
+([Observability](../operations/observability.md#what-is-missing)). Since
+[F52](../features/cluster-stats.md) a cluster node does count its writes, per group, and keeps
+them with its tablets, archived partitions and bytes as trailing rates the `Stats` admin read
+answers; that is a surface an exporter could read, and nothing exports it yet. Two pieces of this were
 carved off by [item 9](resolved/orphaned-update-intents.md) and are worth naming separately,
 because that item deliberately stopped short of both.
 
@@ -1172,7 +1197,10 @@ because that item deliberately stopped short of both.
 generated `ShoalDatabase::recovery_stats`, and emitted as one event per shard. The accessor
 exists precisely so something can read the numbers rather than parse them out of logs; nothing
 does. Whatever gets built should expect to carry more than recovery — resident bytes, LRU depth,
-compaction backlog and blocked-query count are the other obvious first residents.
+compaction backlog and blocked-query count are the other obvious first residents. The write
+counters and partition counts [F52](../features/cluster-stats.md) added are the first
+residents that are not recovery; the node's control thread already folds them every report
+tick (`NodeStatsTracker`), which is where the rest could join them.
 
 **Aggregating across shards.** The recovery summary is per shard, and there is no pool-wide
 total, because `ShoalPool::start` spawns its shard threads and returns without joining them —

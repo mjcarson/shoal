@@ -65,7 +65,9 @@ cargo run -p shoal-model --example regenerate_schedules   # after a model change
 # crash the rehome at every point (restart_with_cores, ChildOverrides, REHOME, HOSTING,
 # SHARD_DIRS), one of them on a standalone child, which answers the command loop too; since F50
 # a `.peer_tls()` cluster runs mutual TLS under a fixture authority whose leaves name their
-# nodes, RELOAD_TLS reloads one, and the rotation test skips by name without `modprobe tls`.
+# nodes, RELOAD_TLS reloads one, and the rotation test skips by name without `modprobe tls`;
+# since F52 STATS [table] reads every member's figures and every plan's pace, and the two stats
+# tests count a cluster's writes and partitions and follow a rebalance through it.
 # every test allocates whole cores, so the suite is what a loaded machine makes it: a failure
 # that passes alone was a timeout, and the child logs are under SHOAL_CHILD_LOG=<dir> (one file
 # per child, DEBUG, hundreds of MB each - point it under target/, never at a tmpfs). run it at

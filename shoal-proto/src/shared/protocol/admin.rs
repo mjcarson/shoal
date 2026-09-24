@@ -221,6 +221,20 @@ pub enum AdminKind {
         /// The version to activate
         wire: u8,
     },
+    /// What every member holds and does: its standing, its tablets, partitions and bytes, its
+    /// write rates, and how far and how fast every plan has got
+    /// ([F52](../../../../docs/src/features/cluster-stats.md))
+    ///
+    /// Answered in full by the control leader, which holds every member's figures from its
+    /// status reports; any other node answers the committed half and its own figures, and
+    /// names the leader. Only sent to a node whose `Members` frame lists `stats` in its
+    /// `admin_reads`, since a node that cannot decode a kind closes the connection.
+    Stats {
+        /// The table to narrow the figures to, by the name the schema spells it, or none for
+        /// every table
+        #[serde(default)]
+        table: Option<String>,
+    },
 }
 
 impl AdminKind {
@@ -274,6 +288,7 @@ impl AdminKind {
             AdminKind::RestoreStatus { .. } => "restore_status",
             AdminKind::Recoveries => "recoveries",
             AdminKind::ReloadTls => "reload_tls",
+            AdminKind::Stats { .. } => "stats",
         }
     }
 }
@@ -573,6 +588,10 @@ mod tests {
             AdminKind::Backups,
             AdminKind::RestoreStatus { op: Uuid::new_v4() },
             AdminKind::Recoveries,
+            AdminKind::Stats { table: None },
+            AdminKind::Stats {
+                table: Some("notes".to_string()),
+            },
         ] {
             assert!(!kind.is_mutation(), "{}", kind.name());
             let json = serde_json::to_vec(&kind).expect("a kind encodes");

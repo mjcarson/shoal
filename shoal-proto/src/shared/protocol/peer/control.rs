@@ -231,4 +231,10 @@ pub struct StatusReport {
     /// ([F48](../../../../../docs/src/features/rolling-compatibility.md)).
     #[serde(default)]
     pub wire_max: u8,
+    /// What the node holds and does, as it last derived it, on every few reports only
+    ///
+    /// Absent from a build before F52 and from the reports between two that carry it; the
+    /// leader keeps the newest it heard ([F52](../../../../../docs/src/features/cluster-stats.md)).
+    #[serde(default)]
+    pub stats: Option<super::super::stats::NodeStats>,
 }

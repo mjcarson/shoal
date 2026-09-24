@@ -450,6 +450,15 @@ fn is_not_found(error: &GlommioError<()>) -> bool {
     }
 }
 
+/// What a table's archives hold per tablet, indexed by tablet
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TabletUsage {
+    /// The archived bytes of every partition of each tablet
+    pub bytes: Vec<u64>,
+    /// How many archived partitions each tablet holds
+    pub partitions: Vec<u64>,
+}
+
 /// A map of archives for the file system storage engine
 #[derive(Debug)]
 pub struct ArchiveMap {
@@ -589,12 +598,28 @@ impl ArchiveMap {
     /// ([F46](../../../docs/src/features/capacity-rebalancing.md)).
     #[must_use]
     pub fn tablet_bytes(&self) -> Vec<u64> {
-        let mut bytes = vec![0u64; crate::server::ring::TABLET_COUNT];
+        self.tablet_usage().bytes
+    }
+
+    /// The bytes and partitions the archives hold per tablet, indexed by tablet
+    ///
+    /// The same one pass as [`ArchiveMap::tablet_bytes`], counting each partition once onto
+    /// its tablet as well as its size, so a shard's report learns both for the price of the
+    /// walk it already paid for the bytes ([F52](../../../docs/src/features/cluster-stats.md)).
+    #[must_use]
+    pub fn tablet_usage(&self) -> TabletUsage {
+        // one slot per tablet for each figure
+        let mut usage = TabletUsage {
+            bytes: vec![0u64; crate::server::ring::TABLET_COUNT],
+            partitions: vec![0u64; crate::server::ring::TABLET_COUNT],
+        };
+        // every partition the map names lands on the tablet its key hashes into
         for (key, entry) in self.to_archive.borrow().iter() {
             let tablet = crate::server::ring::Ring::tablet_of(*key);
-            bytes[tablet] += u64::try_from(entry.size).unwrap_or(u64::MAX);
+            usage.bytes[tablet] += u64::try_from(entry.size).unwrap_or(u64::MAX);
+            usage.partitions[tablet] += 1;
         }
-        bytes
+        usage
     }
 
     /// Drop the location for a partition that no longer has any data

@@ -95,6 +95,11 @@ pub struct ClusterModel {
     pub backups: Vec<(String, String, String)>,
     /// Every recovery an operator ran, as `at lost=[..] boundary`
     pub recoveries: Vec<String>,
+    /// The admin reads the node advertises beyond the ones every cluster build answers
+    pub admin_reads: Vec<String>,
+    /// The stats lines drawn under the model, once a poll has read them
+    /// ([F52](../../../docs/src/features/cluster-stats.md))
+    pub stats: Vec<String>,
 }
 
 /// How many nodes a frame's list of them names
@@ -262,7 +267,28 @@ impl ClusterModel {
             plans,
             backups,
             recoveries,
+            admin_reads: members["admin_reads"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|read| read.as_str().map(str::to_string))
+                .collect(),
+            stats: Vec::new(),
         }
+    }
+
+    /// Whether the node the model was read from answers an admin read beyond the ones every
+    /// cluster build does
+    ///
+    /// A node that cannot decode a request closes the connection, so a read it does not
+    /// advertise is never sent ([F52](../../../docs/src/features/cluster-stats.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `read` - The read's name, as `AdminKind::name` spells it
+    #[must_use]
+    pub fn answers(&self, read: &str) -> bool {
+        self.admin_reads.iter().any(|answered| answered == read)
     }
 
     /// The figure an operator reads first: copies against the factor, and who is missing
@@ -368,6 +394,8 @@ impl ClusterModel {
                 lines.push(format!("  {recovery}"));
             }
         }
+        // the figures the last poll read, if the node answers them
+        lines.extend(self.stats.iter().cloned());
         lines
     }
 }
@@ -394,7 +422,7 @@ fn kind_name(kind: &Value) -> String {
 /// # Arguments
 ///
 /// * `bytes` - The count
-fn bytes(bytes: u64) -> String {
+pub(crate) fn bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
     let mut unit = 0;

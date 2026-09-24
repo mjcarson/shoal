@@ -470,23 +470,23 @@ impl<N: TableNameSupport> FullArchiveMap<N> {
         folded
     }
 
-    /// The bytes a table's archives hold per tablet, indexed by tablet
+    /// The bytes and partitions a table's archives hold per tablet, indexed by tablet
     ///
-    /// What a shard's report weighs each group by: one pass over the table's archive map,
-    /// summing every partition's archived size onto its tablet
-    /// ([F46](../../../docs/src/features/capacity-rebalancing.md)). Empty for a table with
-    /// no map.
+    /// What a shard's report weighs each group by and counts its partitions from: one pass
+    /// over the table's archive map, summing every partition's archived size onto its tablet
+    /// and counting it there ([F46](../../../docs/src/features/capacity-rebalancing.md),
+    /// [F52](../../../docs/src/features/cluster-stats.md)). Empty for a table with no map.
     ///
     /// # Arguments
     ///
     /// * `table_name` - The table
     #[must_use]
-    pub fn tablet_bytes(&self, table_name: N) -> Vec<u64> {
+    pub fn tablet_usage(&self, table_name: N) -> fs::TabletUsage {
         let map = self.map.borrow();
         let Some(ArchiveMapKinds::FileSystem(fs_map)) = map.get(&table_name) else {
-            return Vec::new();
+            return fs::TabletUsage::default();
         };
-        fs_map.tablet_bytes()
+        fs_map.tablet_usage()
     }
 
     /// Whether a table's archives hold any partition of some tablets

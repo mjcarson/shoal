@@ -805,8 +805,8 @@ fn a_torn_record_is_refused() {
 // Tablet bytes (F46)
 // ========================================================================
 
-/// The bytes per tablet follow the map: an insert counts, a replacement recounts, a removal
-/// uncounts, and a map saved and reopened counts the same
+/// The bytes and partitions per tablet follow the map: an insert counts, a replacement
+/// recounts, a removal uncounts, and a map saved and reopened counts the same
 ///
 /// What a shard's report weighs a group by
 /// ([F46](../../../../../docs/src/features/capacity-rebalancing.md)).
@@ -858,6 +858,12 @@ fn tablet_bytes_follow_the_map() {
         assert_eq!(bytes[Ring::tablet_of(a)], 150);
         assert_eq!(bytes[Ring::tablet_of(c)], 30);
         assert_eq!(bytes.iter().sum::<u64>(), 180);
+        // and each partition is counted once onto its tablet (F52)
+        let usage = map.tablet_usage();
+        assert_eq!(usage.bytes, bytes);
+        assert_eq!(usage.partitions[Ring::tablet_of(a)], 2);
+        assert_eq!(usage.partitions[Ring::tablet_of(c)], 1);
+        assert_eq!(usage.partitions.iter().sum::<u64>(), 3);
         // a replacement recounts, a removal uncounts
         map.set_partition(
             a,
@@ -872,6 +878,10 @@ fn tablet_bytes_follow_the_map() {
         let bytes = map.tablet_bytes();
         assert_eq!(bytes[Ring::tablet_of(a)], 60);
         assert_eq!(bytes[Ring::tablet_of(c)], 0);
+        // a replacement is still one partition, and a removal is none
+        let usage = map.tablet_usage();
+        assert_eq!(usage.partitions[Ring::tablet_of(a)], 2);
+        assert_eq!(usage.partitions[Ring::tablet_of(c)], 0);
         // saved and reopened, the count is the map's; a save truncates the intent log, which
         // the writer would have opened by now on a live table
         std::fs::write(&map.intent_path, b"").unwrap();
@@ -881,6 +891,7 @@ fn tablet_bytes_follow_the_map() {
             .await
             .unwrap();
         assert_eq!(reopened.tablet_bytes(), bytes);
+        assert_eq!(reopened.tablet_usage(), usage);
         reopened.close_all().await.unwrap();
     });
 }

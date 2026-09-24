@@ -34,7 +34,7 @@ mod stream_tests;
 mod tests;
 
 use compactor::FileSystemCompactor;
-pub use map::ArchiveMap;
+pub use map::{ArchiveMap, TabletUsage};
 use reader::IntentLogReader;
 use stream::StreamWriter;
 

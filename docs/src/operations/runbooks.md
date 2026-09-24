@@ -62,6 +62,15 @@ every committed member's control address, claims it and issues its leaf, starts 
 `cluster.migration.retire_after` (five minutes by default, the inventory's `retire_after` if it
 names one), since a move finishes when its source has reclaimed the retired copy.
 
+**Is it progressing, and how fast.** `shoalctl cluster stats -i <inventory> --watch` shows the
+plan's steps moved out of the total, its planned and streamed bytes, how long it has run and
+each finished step took, the average and current throughput, and an estimate of what is left;
+the new node's row shows its tablets, partitions and applied rate climbing as it is fed. An
+estimate is the larger of the bytes at the current pace and the steps at the finished pace,
+since every step waits out `retire_after` however small it is
+([F52](../features/cluster-stats.md)). `cluster add --rebalance` prints the same line as each
+step moves.
+
 **Rollback.** A node nothing was placed on is stopped and its directory deleted. One a plan has
 moved sets onto is [decommissioned](#4-decommission).
 
@@ -91,7 +100,9 @@ every set it holds to the members the planner picks, one at a time under `moves_
 follow `PlanStatus`. When every set has moved the member is tombstoned, taken out of the
 control group, and its process stops with `ShoalError::Removed`. An impossible target - nowhere
 for a set to go - is recorded `blocked` naming why, not refused; add capacity and the plan
-resumes on its own.
+resumes on its own. `shoalctl cluster stats` follows the plan's pace and estimate the way it
+does a rebalance's, and the leaving member's row shows its tablets and partitions falling
+([F52](../features/cluster-stats.md)).
 
 **Rollback.** While the plan runs, a `Decommission` that fails puts the member back to
 `member`; there is no cancel. Once tombstoned, the identity never returns.
@@ -104,7 +115,8 @@ resumes on its own.
 `grace_remaining_ms`. To hold it - a host being repaired - `Maintenance { node, suspend: true }`;
 the count stops and the member is not removed. `Maintenance { node, suspend: false }` resumes
 it from the committed count. An expired grace records an `Expiry` plan; a `blocked` one is what
-to page on.
+to page on. `shoalctl cluster stats` shows a held member as `down (m)` with the grace it has
+left ([F52](../features/cluster-stats.md)).
 
 **Rollback.** A held grace is resumed; an expired one is a removal ([3](#3-replace-a-dead-node)).
 

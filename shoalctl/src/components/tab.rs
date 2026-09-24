@@ -367,8 +367,17 @@ where
         let app_tx = app_tx.clone();
         let id = tab.id;
         tokio::task::spawn(async move {
+            // the leader's client, once a poll has found it, for the figures only it holds
+            let mut leader = None;
             while alive.load(std::sync::atomic::Ordering::SeqCst) {
-                let model = crate::cluster::poll::<S>(&shoal).await;
+                // a read needs no principal, so the leader is dialed as nobody
+                let dial = |addr: String| async move {
+                    Shoal::<S>::new(addr.as_str())
+                        .await
+                        .map(Arc::new)
+                        .map_err(|error| format!("{error:?}"))
+                };
+                let model = crate::cluster::poll_with_stats::<S, _, _>(&shoal, &mut leader, dial).await;
                 if app_tx
                     .send(AppEvent::ClusterFrame { tab_id: id, model })
                     .await
