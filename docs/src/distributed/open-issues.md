@@ -51,7 +51,7 @@ The remainders the decision record named, one line each.
 | [Q7 at M9b](protocol.md#q7-and-q8-at-m9b) | The grace is the policy's, not per member; there is no `SetPolicy`; a `Decommission` cannot be cancelled |
 | [Q8 at M9b](protocol.md#q7-and-q8-at-m9b) | Per-device and per-pair budgets; a budget that adapts to the foreground's tail; resident bytes as a weight |
 | [Q9 at M7](protocol.md#q3-and-q9-at-m7) | No time budget; a budget per shard rather than per stream; a stream that cannot keep up is fed snapshots repeatedly rather than told to stop |
-| [Q11 at M10c](protocol.md#q11-at-m10c) | Nothing issues or distributes a certificate; a reload is per node; a shared leaf carries no identity |
+| [Q11 at M10c](protocol.md#q11-at-m10c) | ~~Nothing issues or distributes a certificate~~ `shoalctl cluster` does, for the nodes it deploys ([F51](../features/cluster-deployment.md)); a reload is per node; a shared leaf carries no identity |
 | [Q12 at M8](protocol.md#q12-at-m8) | The interval a scheduled scrub should default to, since the arm ran where every partition was resident |
 | [Q12 at M10b](protocol.md#q12-at-m10b) | A backup's shipping, retention and age; the backup arm's full-scale cost |
 | [Q13 at M1 and M3](protocol.md#q11-and-q13-at-m3) | Budgets at a hundred members; the report's reachability list, which grows quadratically |

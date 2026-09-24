@@ -1,0 +1,133 @@
+// The TMDB tables, shared by `tmdbctl` and `shoal/examples/tmdb_node.rs` through `include!`
+//
+// A client refuses a server whose schema fingerprint differs from its own at the hello, so the
+// two halves of a deployed TMDB cluster have to be built from the same tables. Each includer
+// writes its own imports and its own `#[shoal::db]` struct, since only that attribute differs
+// between the server and the client half (F51).
+
+/// Deserialize a comma-space separated string into a Vec<String>
+fn deserialize_comma_separated<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s: String = serde::Deserialize::deserialize(deserializer)?;
+    if s.is_empty() {
+        Ok(Vec::new())
+    } else {
+        Ok(s.split(", ").map(|s| s.to_string()).collect())
+    }
+}
+
+#[derive(
+    Debug,
+    Archive,
+    Serialize,
+    Deserialize,
+    Clone,
+    ShoalUnsortedTable,
+    serde::Deserialize,
+    serde::Serialize,
+    PartialEq,
+    DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Tmdb")]
+pub struct Movie {
+    /// The id for this movie
+    #[shoal(partition)]
+    pub id: u64,
+    /// The name of this move
+    #[shoal(filter)]
+    pub title: String,
+    /// The vote average
+    pub vote_average: f64,
+    /// The total number of votes
+    pub vote_count: u64,
+    /// The status of this movie
+    pub status: String,
+    /// The Date this movie was release
+    pub release_date: String,
+    /// The total revenue this movie made
+    pub revenue: u64,
+    /// The runtime for this movie in minutes
+    pub runtime: u64,
+    /// Whether this is an adult movie
+    pub adult: bool,
+    /// The path to this movies backdrop on tmdb
+    pub backdrop_path: String,
+    /// The budget for this movie
+    pub budget: u64,
+    /// The url to this movies homepage
+    pub homepage: String,
+    /// The imdb id for this movie
+    pub imdb_id: String,
+    /// The original language for this movie
+    pub original_language: String,
+    /// The original title for this movie
+    pub original_title: String,
+    /// The overview for this movie
+    #[shoal(update)]
+    pub overview: String,
+    /// The popularity of this movie
+    pub popularity: f64,
+    /// The path to this movies poster on tmdb
+    pub poster_path: String,
+    /// The tagline for this movie
+    pub tagline: String,
+    /// The genres for this movie
+    #[serde(deserialize_with = "deserialize_comma_separated")]
+    pub genres: Vec<String>,
+    /// The production companies for this movie
+    #[serde(deserialize_with = "deserialize_comma_separated")]
+    pub production_companies: Vec<String>,
+    /// The countries this movie was produced in
+    #[serde(deserialize_with = "deserialize_comma_separated")]
+    pub production_countries: Vec<String>,
+    /// The languages spoken in this movie
+    #[serde(deserialize_with = "deserialize_comma_separated")]
+    pub spoken_languages: Vec<String>,
+    /// The keywords for this movie
+    #[serde(deserialize_with = "deserialize_comma_separated")]
+    pub keywords: Vec<String>,
+}
+
+/// A projection of a movie holding just enough to list one
+///
+/// A movie is a wide row, most of it strings, and listing them needs three fields of it. This
+/// is what a get asks to be answered with instead, so the rest of each row is never copied out
+/// of the archive it was read from.
+#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalProjection, PartialEq)]
+#[rkyv(derive(Debug))]
+#[shoal_projection(table = "Movie")]
+pub struct MovieSummary {
+    /// The id of this movie, which is the partition it was in
+    #[shoal(partition)]
+    pub id: u64,
+    /// The name of this movie
+    pub title: String,
+    /// The vote average for this movie
+    pub vote_average: f64,
+}
+
+#[derive(
+    Debug,
+    Archive,
+    Serialize,
+    Deserialize,
+    Clone,
+    ShoalSortedTable,
+    serde::Deserialize,
+    serde::Serialize,
+    PartialEq,
+    DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Tmdb")]
+pub struct MovieByKeyword {
+    /// The keyword for this movie
+    #[shoal(partition)]
+    pub keyword: String,
+    /// The name of this movie
+    #[shoal(sort)]
+    pub title: String,
+}

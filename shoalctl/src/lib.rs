@@ -55,8 +55,10 @@
 //! ```
 
 pub mod app;
+pub mod cli;
 pub mod cluster;
 pub mod components;
+pub mod deploy;
 
 use std::sync::Arc;
 

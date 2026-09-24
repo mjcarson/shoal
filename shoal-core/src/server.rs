@@ -1,4 +1,4 @@
-use glommio::PoolThreadHandles;
+use glommio::{CpuSet, PoolThreadHandles};
 use rkyv::rancor::Strategy;
 use rkyv::Archive;
 use rkyv::{
@@ -25,6 +25,7 @@ pub mod hosting;
 pub mod map;
 pub mod messages;
 pub mod meta;
+pub mod node;
 pub mod peer;
 pub mod recover;
 pub mod rehome;
@@ -175,57 +176,33 @@ where
             .to_socket_addrs()?
             .next()
             .ok_or_else(|| std::io::Error::other("the configured interface names no address"))?;
-        // a cluster node resolves its control core first, since the shards have to keep off it
-        //
-        // the block is validated here too, so a setting this build cannot act on refuses the
-        // start by name rather than being read by nothing
-        let placement = match &conf.cluster {
-            Some(cluster) => {
-                cluster.validate(&conf.networking.interface, conf.networking.max_frame_bytes)?;
-                // a persistent table acknowledged before its fdatasync cannot be a voter in a
-                // durable quorum, and the durability is per table under `storage`, which the
-                // block's own validation cannot see (C5, F40)
-                for table in S::persistent_tables() {
-                    let settings = conf
-                        .storage
-                        .tables
-                        .get(table)
-                        .map(|settings| match settings {
-                            conf::TableSettings::FS(settings) => settings.clone(),
-                        })
-                        .unwrap_or_else(|| conf.storage.default.filesystem.clone());
-                    if settings.latency_sensitive.durability
-                        == tables::storage::fs::conf::Durability::Async
-                    {
-                        return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
-                            "table {table} is configured with durability: Async on a cluster node; a durable \
-                             quorum cannot be built from an acknowledgement that precedes fdatasync (C5)"
-                        ))));
-                    }
+        if conf.cluster.is_some() {
+            // a persistent table acknowledged before its fdatasync cannot be a voter in a
+            // durable quorum, and the durability is per table under `storage`, which the
+            // block's own validation cannot see (C5, F40)
+            for table in S::persistent_tables() {
+                let settings = conf
+                    .storage
+                    .tables
+                    .get(table)
+                    .map(|settings| match settings {
+                        conf::TableSettings::FS(settings) => settings.clone(),
+                    })
+                    .unwrap_or_else(|| conf.storage.default.filesystem.clone());
+                if settings.latency_sensitive.durability
+                    == tables::storage::fs::conf::Durability::Async
+                {
+                    return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                        "table {table} is configured with durability: Async on a cluster node; a durable \
+                         quorum cannot be built from an acknowledgement that precedes fdatasync (C5)"
+                    ))));
                 }
-                Some(ControlPlacement::resolve(&conf)?)
             }
-            None => None,
-        };
-        // get the total number of cpus that we have, off the control core where there is one
-        let reserved = placement
-            .as_ref()
-            .map(ControlPlacement::reserved_cores)
-            .unwrap_or_default();
-        let cpus = conf.resources.cpus_reserving(&reserved)?;
-        // a node with no cores has no shards, and so nothing that could own any data
-        //
-        // this is caught here rather than in a shard so that a misconfigured `cores` or
-        // `exclude_cores` says so instead of failing somewhere further in
-        if cpus.is_empty() {
-            return Err(ServerError::Shoal(ShoalError::NoShards));
         }
-        // a control core a shard also landed on is a claim of isolation that would be false
-        if let Some(placement) = &placement {
-            placement.check_isolation(&cpus)?;
-        }
-        // hold the storage directory, so a second process on the same path is refused rather
-        // than claiming the same identity
+        // the control core and the cpus the shards run on, validated the way `claim` does it
+        let (placement, cpus) = resolve_executors(&conf)?;
+        // hold the storage directory and claim it, exactly as `claim` would on its own
+        let (lock, identity) = claim_root(&conf, cpus.len())?;
         let root = conf
             .storage
             .default
@@ -233,23 +210,6 @@ where
             .latency_sensitive
             .path
             .clone();
-        let lock = DirectoryLock::acquire(&root)?;
-        // check this storage directory was written by the shard count and in the mode we are
-        // starting with, claiming it with a fresh identity if nothing has
-        //
-        // this happens before any shard is spawned, so a mismatch is refused before a
-        // single write can land in the wrong place
-        let intent = match &conf.cluster {
-            Some(cluster) if cluster.bootstrap => ClusterIntent::Bootstrap,
-            Some(_) => ClusterIntent::Join,
-            None => ClusterIntent::Standalone,
-        };
-        //
-        // since F47 a changed core count is not a mismatch: the claim reports the rehome the
-        // files need and it runs below, before any shard starts. a cluster node's slots are
-        // claimed here too, once ([F47](../../docs/src/features/local-rehome.md))
-        let slots = conf.cluster.as_ref().and_then(|cluster| cluster.slots);
-        let identity = StorageMeta::claim(&root, cpus.len(), slots, intent)?;
         // every other root the configuration writes under - a table's own, or a throughput
         // path apart from the latency one - is locked and carries a mirror of the marker, so
         // a root borrowed from another server is refused before a shard opens it
@@ -966,6 +926,102 @@ where
             None => Ok(()),
         }
     }
+}
+
+/// Resolve the control core and the cpus a node's shards run on
+///
+/// A cluster node resolves its control core first, since the shards have to keep off it, and
+/// its block is validated here so a setting this build cannot act on refuses the start by name
+/// rather than being read by nothing.
+///
+/// # Arguments
+///
+/// * `conf` - The configuration the node starts with
+#[instrument(name = "server::resolve_executors", skip_all, err(Debug))]
+fn resolve_executors(conf: &Conf) -> Result<(Option<ControlPlacement>, CpuSet), ServerError> {
+    // validate the cluster block and place its control core, if there is one
+    let placement = match &conf.cluster {
+        Some(cluster) => {
+            cluster.validate(&conf.networking.interface, conf.networking.max_frame_bytes)?;
+            Some(ControlPlacement::resolve(conf)?)
+        }
+        None => None,
+    };
+    // get the total number of cpus that we have, off the control core where there is one
+    let reserved = placement
+        .as_ref()
+        .map(ControlPlacement::reserved_cores)
+        .unwrap_or_default();
+    let cpus = conf.resources.cpus_reserving(&reserved)?;
+    // a node with no cores has no shards, and so nothing that could own any data
+    //
+    // this is caught here rather than in a shard so that a misconfigured `cores` or
+    // `exclude_cores` says so instead of failing somewhere further in
+    if cpus.is_empty() {
+        return Err(ServerError::Shoal(ShoalError::NoShards));
+    }
+    // a control core a shard also landed on is a claim of isolation that would be false
+    if let Some(placement) = &placement {
+        placement.check_isolation(&cpus)?;
+    }
+    Ok((placement, cpus))
+}
+
+/// Lock a node's storage directory and claim it for the mode its configuration names
+///
+/// Checks the directory was written by the shard count and in the mode the node is starting
+/// with, claiming it with a fresh identity if nothing has. This happens before any shard is
+/// spawned, so a mismatch is refused before a single write can land in the wrong place.
+///
+/// # Arguments
+///
+/// * `conf` - The configuration the node starts with
+/// * `executors` - How many executors the node runs
+#[instrument(name = "server::claim_root", skip(conf), err(Debug))]
+fn claim_root(conf: &Conf, executors: usize) -> Result<(DirectoryLock, Identity), ServerError> {
+    // hold the storage directory, so a second process on the same path is refused rather
+    // than claiming the same identity
+    let root = &conf.storage.default.filesystem.latency_sensitive.path;
+    let lock = DirectoryLock::acquire(root)?;
+    // which of the three ways this directory is meant to be created
+    let intent = match &conf.cluster {
+        Some(cluster) if cluster.bootstrap => ClusterIntent::Bootstrap,
+        Some(_) => ClusterIntent::Join,
+        None => ClusterIntent::Standalone,
+    };
+    // since F47 a changed core count is not a mismatch: the claim reports the rehome the
+    // files need and it runs before any shard starts. a cluster node's slots are claimed here
+    // too, once ([F47](../../docs/src/features/local-rehome.md))
+    let slots = conf.cluster.as_ref().and_then(|cluster| cluster.slots);
+    let identity = StorageMeta::claim(root, executors, slots, intent)?;
+    Ok((lock, identity))
+}
+
+/// Claim a node's storage directory without starting it, and say who it is
+///
+/// Everything [`ShoalPool::start`] does before its first shard, and nothing after: the
+/// configuration is validated, the executors resolved and the directory claimed, so the
+/// identity returned is the one the node's first start will serve as. A deployment reads it
+/// here to issue the node a certificate naming it before the node ever dials a peer
+/// ([F51](../../docs/src/features/cluster-deployment.md)). Claiming an established directory
+/// again changes nothing and returns the identity it already holds.
+///
+/// # Arguments
+///
+/// * `conf` - The configuration the node will start with
+#[instrument(name = "server::claim", skip_all, err(Debug))]
+pub fn claim(conf: &Conf) -> Result<Identity, ServerError> {
+    // the peer certificate is the one thing a claim does not read: it is issued for the id
+    // this returns, so it cannot exist yet, and it decides nothing about the directory
+    let mut conf = conf.clone();
+    if let Some(cluster) = conf.cluster.as_mut() {
+        cluster.tls = None;
+    }
+    // the same resolution a start performs, so a claim cannot disagree with it
+    let (_, cpus) = resolve_executors(&conf)?;
+    // claim the directory and let the lock go with this call
+    let (_lock, identity) = claim_root(&conf, cpus.len())?;
+    Ok(identity)
 }
 
 /// Reserve a port on an interface with `SO_REUSEPORT`, so the shards can bind it too

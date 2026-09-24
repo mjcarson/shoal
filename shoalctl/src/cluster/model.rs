@@ -97,6 +97,23 @@ pub struct ClusterModel {
     pub recoveries: Vec<String>,
 }
 
+/// How many nodes a frame's list of them names
+///
+/// `TopologyView` writes `voters` and `learners` as the node ids themselves; a count is read as
+/// one too, so a frame that ever carries the number instead is not read as none (item 114).
+///
+/// # Arguments
+///
+/// * `value` - The field
+fn count(value: &Value) -> usize {
+    match value {
+        // the ids themselves, which is what the server writes
+        Value::Array(nodes) => nodes.len(),
+        // or a number, read as the count it is
+        _ => value.as_u64().unwrap_or(0) as usize,
+    }
+}
+
 impl ClusterModel {
     /// Build the model from the frames the node answered
     ///
@@ -212,8 +229,8 @@ impl ClusterModel {
             node: members["node"].as_str().unwrap_or_default().to_string(),
             version: members["version"].as_u64().unwrap_or(0),
             leader: members["leader"].as_str().map(str::to_string),
-            voters: members["voters"].as_u64().unwrap_or(0) as usize,
-            learners: members["learners"].as_u64().unwrap_or(0) as usize,
+            voters: count(&members["voters"]),
+            learners: count(&members["learners"]),
             desired_rf: members["desired_rf"].as_u64().unwrap_or(0),
             active_rf: members["active_rf"].as_u64().unwrap_or(0),
             up_members: members["up_members"].as_u64().unwrap_or(0),
@@ -404,7 +421,7 @@ mod tests {
     #[test]
     fn the_cluster_model_reads_the_admin_frames() {
         let members = json!({
-            "cluster": "c1", "node": "n0", "version": 17, "leader": "n0", "voters": 2, "learners": 1,
+            "cluster": "c1", "node": "n0", "version": 17, "leader": "n0", "voters": ["n0", "n1"], "learners": ["n2"],
             "desired_rf": 3, "active_rf": 2, "up_members": 2, "under_replicated_sets": 4,
             "tombstones": { "n9": { "incarnation": 1, "removed_at": 12 } },
             "wire": { "activated": 5, "floor": 4, "newest": 5, "min_member": 4, "max_member": 5 },
@@ -518,5 +535,34 @@ mod tests {
                 .iter()
                 .any(|line| line == "no open plans")
         );
+    }
+}
+
+#[cfg(test)]
+mod voter_tests {
+    use super::ClusterModel;
+    use shoal::serde_json::{json, Value};
+
+    /// The control group's voters and learners are counted from the lists the frame carries
+    ///
+    /// `TopologyView` serializes `voters` and `learners` as the node ids themselves, not as
+    /// counts, so a model that read them as numbers saw a cluster of any size as having no
+    /// voters (item 114).
+    #[test]
+    fn voters_and_learners_are_counted_from_the_lists_the_frame_carries() {
+        // the shape `serde_json::to_value(TopologyView)` writes
+        let members = json!({
+            "voters": ["n0", "n1", "n2"], "learners": ["n3"],
+            "members": []
+        });
+        let model = ClusterModel::from_frames(
+            &members,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+        );
+        assert_eq!((model.voters, model.learners), (3, 1));
     }
 }

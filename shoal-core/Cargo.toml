@@ -71,6 +71,8 @@ rustls = { version = "0.23", default-features = false, features = ["std", "aws-l
 rustls-pki-types = "1"
 rustls-pemfile = "2"
 libc = "0.2"
+# the node program's stop signal (F51). the version the lockfile already resolves for tokio
+signal-hook = "0.3"
 # the embedded control group (F37, M1). pinned exactly: 0.10 is an alpha and its storage and
 # network traits have moved between alphas. `single-threaded` empties openraft's `Send`/`Sync`
 # bounds, which is what lets the store hold glommio's `!Send` file handles; `serde` is what the

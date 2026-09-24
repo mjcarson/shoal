@@ -150,7 +150,7 @@ earlier pages named for M10, and what became of each:
 | The certificate-to-node binding | F38, Q11, C2 | **Resolved here**: the SAN is read and judged on both ends |
 | Certificate and authority rotation | C1, Q11 | **Resolved here**: `ReloadTls`, a bundle, and a test across a live cluster |
 | An address change authenticated | C1, Q11 | **Resolved here**: the M3 rule plus the cluster following the move; the certificate is the authentication |
-| First-boot certificate provisioning before a node id exists | Q11 | **Explicitly unsupported**: a leaf is issued for a node id, so the id comes first - `StorageMeta::claim` on an empty directory mints it, and the operator issues the leaf for it before the node joins; a node with no leaf yet runs plaintext or not at all. The runbook says so |
+| First-boot certificate provisioning before a node id exists | Q11 | ~~**Explicitly unsupported**: a leaf is issued for a node id, so the id comes first - `StorageMeta::claim` on an empty directory mints it, and the operator issues the leaf for it before the node joins; a node with no leaf yet runs plaintext or not at all. The runbook says so~~ **Resolved by [F51](cluster-deployment.md)**: the node program's `claim` prints the id before the first start, and `shoalctl cluster` issues the leaf for it |
 | Rolling wire compatibility and activation | C2, C9 | Resolved by [F48](rolling-compatibility.md) |
 | A schema change as a rolling operation | Q10 | **Explicitly unsupported** by F48: a new cluster and a restore |
 | A marker format migration in place | C1, F37 | **Explicitly unsupported** by F48: the build that wrote it, or a restore |
@@ -230,9 +230,10 @@ Nothing on the list was fixed silently; a debt not on it was never named for M10
 - **The binding needs a leaf per node.** A deployment whose nodes share one certificate has to
   set `bind_identity: false`, and then a member can speak as another with the shared leaf, as
   it always could. The runbook says which to choose.
-- **First-boot provisioning is manual.** The node id is minted at the first claim; the leaf
+- ~~**First-boot provisioning is manual.** The node id is minted at the first claim; the leaf
   for it is the operator's to issue before the node joins under the binding. Nothing issues a
-  certificate.
+  certificate.~~ Since [F51](cluster-deployment.md) `claim` gives the id before the first start
+  and `shoalctl cluster` issues every leaf it deploys; by hand it is still the operator's.
 - **A reload is per node.** Every node is reloaded by its own `ReloadTls`; nothing fans it out,
   and the cluster tab's `reload-tls` reaches the node the connection did.
 - **The certificate test needs kTLS**, as every TLS test does, and skips by name without the

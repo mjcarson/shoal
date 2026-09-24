@@ -191,9 +191,12 @@ one-node cluster against the standalone twin rather than describing the reserved
 
 ## Limitations
 
-The control thread's failure is reported as shard `usize::MAX`. Nothing issues or distributes a
+The control thread's failure is reported as shard `usize::MAX`. ~~Nothing issues or distributes a
 certificate; a leaf is minted for a node id that already exists, so a node's first start is
-plaintext or under a leaf issued from the marker it wrote. The marker records no failure
+plaintext or under a leaf issued from the marker it wrote.~~ A leaf is still minted for a node id
+that already exists, and since [F51](../features/cluster-deployment.md) the id exists before the
+first start: the node program's `claim` writes the marker and prints it, and `shoalctl cluster`
+issues and distributes the leaf. The marker records no failure
 domain. See [C15](open-issues.md).
 
 ## Invariants to uphold

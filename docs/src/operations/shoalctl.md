@@ -1,8 +1,11 @@
 # shoalctl
 
-`shoalctl` is a terminal UI for querying a Shoal database, built on [ratatui]. Because Shoal's
+`shoalctl` is a terminal UI for querying a Shoal database, built on [ratatui], and since
+[F51](../features/cluster-deployment.md) a deployment tool that bootstraps a cluster of the same
+schema and adds nodes to it over ssh ([`cluster`](#the-cluster-commands)). Because Shoal's
 schema is a compile-time construct, **shoalctl cannot be a standalone binary** — it is a
-library you compile against your schema.
+library you compile against your schema, and `shoalctl::cli::main::<DbClient>()` is the whole
+of a program built from it.
 
 ## Compiling it for your schema
 
@@ -16,10 +19,13 @@ pub struct Tmdb {
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
-    let shoal = Arc::new(Shoal::<TmdbClient>::new("127.0.0.1:12000").await?);
-    shoalctl::run(shoal).await
+    // the terminal UI with no arguments, `cluster ...` to deploy (F51)
+    shoalctl::cli::main::<TmdbClient>().await
 }
 ```
+
+`shoalctl::run(Arc<Shoal<S>>)` is still there for a program that builds its own client - with
+TLS, say, which the command line does not take.
 
 ```toml
 [dependencies]
@@ -47,12 +53,15 @@ its `server` feature.
 cargo run --example tmdbctl --release
 ```
 
-The schema definition must be *duplicated* from wherever your server defines it — `tmdbctl.rs`
+~~The schema definition must be *duplicated* from wherever your server defines it — `tmdbctl.rs`
 restates the entire `Movie` and `MoviesByKeyword` definitions that `shoal/examples/tmdb.rs`
-already contains. There is no shared crate, so the two copies can drift, and if they do the
-rkyv layouts diverge and responses fail validation
-([Wire Protocol](../architecture/wire-protocol.md#limitations)). Factoring a schema into its
-own crate is the obvious fix and is not done anywhere in the repo.
+already contains.~~ Since [F51](../features/cluster-deployment.md) `tmdbctl.rs` and its server
+half `shoal/examples/tmdb_node.rs` `include!` one tables file, `shoalctl/examples/tmdb/tables.rs`,
+and each writes only its own `#[shoal::db]` struct - the one line that differs between the
+halves. Two copies can still drift wherever a schema is written twice; the hello refuses a
+client whose schema fingerprint differs from the server's, so a drift is a refused connection
+rather than responses that fail validation. `shoal/examples/tmdb.rs` is a tour with a smaller
+movie and is not this schema.
 
 ## Entry point
 
@@ -60,15 +69,35 @@ own crate is the obvious fix and is not done anywhere in the repo.
 pub async fn run<S>(shoal: Arc<Shoal<S>>) -> color_eyre::Result<()>
 ```
 
-`shoalctl/src/lib.rs:118`
+`shoalctl/src/lib.rs:160`
 
 `run` installs `color_eyre`, enables mouse capture, initialises the terminal, runs the app, and
-restores the terminal on the way out (`lib.rs:129-167`). The restore happens before the error
+restores the terminal on the way out (`lib.rs:180-197`). The restore happens before the error
 is propagated, so a failure does not leave the terminal in raw mode.
 
-The `where` clause is 20 lines of rkyv bounds (`lib.rs:119-140`), repeated verbatim on
-`run_app` (`lib.rs:89-109`) — a good illustration of the ergonomic cost of the
-generic-over-schema approach.
+The `where` clause is 20 lines of rkyv bounds (`lib.rs:161-179`), repeated verbatim on
+`run_app` (`lib.rs:119-139`) and on `cli::main` — a good illustration of the ergonomic cost of
+the generic-over-schema approach.
+
+## The cluster commands
+
+`cluster` deploys a cluster of the program's schema from an inventory, over keyless ssh with
+passwordless sudo on every host ([F51](../features/cluster-deployment.md)):
+
+| Command | What it does |
+| --- | --- |
+| `cluster bootstrap -i <inv> [--wipe]` | Stage, claim, issue a leaf, and start every bootstrap node under systemd, then `Initialize` once and wait for writes |
+| `cluster add -i <inv> <node> [--wipe] [--rebalance]` | Join a listed node through every member, and optionally follow a `Rebalance` onto it |
+| `cluster rebalance -i <inv>` | Send `Rebalance` and follow its plan |
+| `cluster status -i <inv>` | Every node's id, address and unit, then the cluster tab's lines |
+| `cluster start/stop/restart -i <inv> [node]` | systemctl on one node or every deployed node |
+| `cluster logs -i <inv> <node> [-n N]` | The node's journal |
+| `cluster destroy -i <inv> --yes` | Delete every node, its data and the local state |
+| `tui [-i <inv> \| --addr <a>]` | The terminal UI, as the cluster's admin with an inventory |
+
+The server program the inventory names is `shoal::server::node::main::<Db>()` for the same
+schema. `shoal-bench`'s `shoal-node` and `shoal-benchctl` are the bench pair and `tmdb_node` and
+`tmdbctl` the TMDB pair; `shoalctl/inventories/lab.yml` is a worked inventory.
 
 ## Architecture
 
@@ -106,12 +135,14 @@ path is exactly what it would be without it.
 pub enum AppEvent<S: QuerySupport> {
     Terminal(Event),
     QueryResult { tab_id: Uuid, table_name: S::TableNames, result: QueryResult<S> },
+    ClusterFrame { tab_id: Uuid, model: Result<cluster::ClusterModel, String> },
+    AdminOutcome { tab_id: Uuid, outcome: Result<Vec<String>, String>, follow: Option<(Uuid, cluster::Follow)> },
 }
 ```
 
-`shoalctl/src/lib.rs:64-74`
+`shoalctl/src/lib.rs:77-103`
 
-Terminal input and query results arrive on one channel, so the UI never blocks on a query.
+Terminal input, query results and the cluster tab's frames and outcomes arrive on one channel, so the UI never blocks on a query.
 Queries run as background tokio tasks and post results back tagged with the tab's `Uuid`
 (`app.rs:444`).
 
@@ -470,8 +501,8 @@ rows.
 
 ## Limitations
 
-- The schema must be duplicated into the shoalctl binary, with no shared-crate pattern and no
-  drift detection.
+- The schema must be written into the shoalctl binary as well as the server's. ~~No drift
+  detection~~ - the hello refuses a mismatched fingerprint, and the TMDB pair shares one file.
 - Read-only: SHQL parses no writes, so shoalctl cannot insert, update, or delete.
 - Every query must name a partition key, so there is no way to browse a table.
 - Dead `next`/`prev` methods.

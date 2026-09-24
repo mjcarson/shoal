@@ -25,6 +25,19 @@ kanal = { workspace = true }
 # maybe these should?
 serde = { version = "1", features = ["derive"] }
 
+# `shoalctl cluster` (F51): its command line, the inventory and the `shoal.yml` it renders, the
+# leaf it issues each node, and the digest it checks a copied program against. every one is a
+# version the lockfile already resolves for another crate, so the graph does not grow
+clap = { version = "4.2", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+# the pki test reads the leaf's der back the way the peer lanes do
+rustls-pemfile = "2"
+
 
 [profile.release]
 codegen-units = 1

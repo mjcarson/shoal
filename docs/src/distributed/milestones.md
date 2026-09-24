@@ -724,8 +724,8 @@ runnable as `cargo test -p shoal --test cluster_fixture -- --test-threads 6`; th
 row needs the kernel's TLS module and skips by name without it; the remote smoke runs when `SHOAL_REMOTE_SMOKE` names a host and
 says so otherwise. What was delivered, what was not, and the table of every M10-named debt are
 on the F page; the rest of this section is the gate as it was set. *Not done at M10c, on purpose:*
-nothing issues or distributes a certificate - a leaf is issued for a node id that exists, by the
-operator; no physical capture is committed - the record and the launcher are, and the capture
+~~nothing issues or distributes a certificate - a leaf is issued for a node id that exists, by the
+operator~~ (since [F51](../features/cluster-deployment.md) `shoalctl cluster` does); no physical capture is committed - the record and the launcher are, and the capture
 is the benchmark host's to take; and the backup arm of this gate was delivered by
 [F49](../features/backup-and-recovery.md) under M10b.
 
