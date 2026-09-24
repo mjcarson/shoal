@@ -30,8 +30,8 @@ use crate::server::replication::{CommandResult, ResultKind};
 use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::SortedPartition;
 use crate::server::tables::persistent::{
-    adjust_memory_usage, apply_failure, corrupt_archive, eviction_totals, PartitionLoad,
-    PendingGets,
+    adjust_memory_usage, apply_failure, corrupt_archive, eviction_totals, settle_resident_read,
+    PartitionLoad, PendingGets,
 };
 use crate::server::tables::persistent::{open, ApplyStep, RowSink};
 use crate::server::Conf;
@@ -414,9 +414,17 @@ where
         }
         // overlay any existing loaded partition data on this newly loaded partition
         match self.partitions.entry(loaded.partition_id) {
-            hash_map::Entry::Occupied(mut entry) => {
+            hash_map::Entry::Occupied(mut entry) => match entry.get_mut() {
+                // an archive resident already is another copy of the extent we just read, from a
+                // second read that raced the first, so keep it and drop ours - both arms are
+                // named, since a pattern that quietly did not match is how this was once silent
+                // ([Resolved #30](../../../../docs/src/appendix/resolved/resident-copy-collision.md))
+                MaybeLoaded::Accessible(resident) => {
+                    // compare the two, saying so if they disagree; nothing is kept or charged
+                    settle_resident_read(self.table_name, partition_id, resident, &loaded.data);
+                }
                 // if this partition is loaded then insert its current rows ontop of this loaded data
-                if let MaybeLoaded::Loaded { partition, .. } = entry.get_mut() {
+                MaybeLoaded::Loaded { partition, .. } => {
                     // get the current size of this partition
                     let old_size = partition.size();
                     // access and deserialize our loaded partitions data
@@ -461,7 +469,7 @@ where
                         .borrow_mut()
                         .pop(&(self.table_name, loaded.partition_id));
                 }
-            }
+            },
             // this partition does not have any already loaded data
             hash_map::Entry::Vacant(entry) => {
                 // validate this archive once, here, instead of on every query that reads it
@@ -571,6 +579,10 @@ where
     /// Returns true if this query was parked and false if this partition has no
     /// data on disk to wait for, in which case the caller should answer now.
     ///
+    /// A read already in flight for this partition - one a parked query asked for, or one a
+    /// replicated apply asked for through `request_load` - is waited on rather than asked for
+    /// again, so at most one read of a partition is ever outstanding.
+    ///
     /// # Arguments
     ///
     /// * `partition_key` - The key of the partition this query needs
@@ -594,6 +606,18 @@ where
         // since asking for it again would only park this query on the same failure
         if meta.skip_disk == Some(partition_key) {
             return false;
+        }
+        // a read a replicated apply asked for is in flight too, and its landing drains
+        // `blocked` like any other, so park behind it rather than asking for a second read
+        // that would land on the copy the first one made resident
+        // ([Resolved #121](../../../../docs/src/appendix/resolved/resident-copy-collision.md))
+        if self.loading.contains(&partition_key) {
+            // park this query behind the read the apply already requested
+            self.blocked
+                .entry(partition_key)
+                .or_default()
+                .push((meta.clone(), query));
+            return true;
         }
         // try to load this partition from disk if it exists
         let will_load = self

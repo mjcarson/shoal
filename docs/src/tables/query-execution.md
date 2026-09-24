@@ -243,7 +243,11 @@ accumulated in `pending_data`.
 Note the query is parked under `blocked[partition_key]`, keyed by partition rather than by
 query. Several queries waiting on the same partition share one entry and are all released by
 one read — and, because a non-empty entry means a read is already in flight, they no longer
-each ask the loader for it.
+each ask the loader for it. On a cluster node a replicated apply asks for reads too, through
+`request_load`, and records them in `loading` rather than `blocked`, because it parks no query.
+`block_on_load` checks that set as well, so a get that arrives while an apply's read is in flight
+parks behind that read instead of asking for a second one
+([Resolved #121](../appendix/resolved/resident-copy-collision.md)).
 
 **Both table kinds express this as one `block_on_load`.** The sorted table used to inline it at
 each of its blocking sites, on the reasoning that the surrounding match already held a borrow of
@@ -296,15 +300,18 @@ released mark its own uncompacted write as evictable
 ### Merging the loaded partition
 
 ```rust
-hash_map::Entry::Occupied(mut entry) => {
-    if let MaybeLoaded::Loaded { partition, .. } = entry.get_mut() {
+hash_map::Entry::Occupied(mut entry) => match entry.get_mut() {
+    MaybeLoaded::Accessible(resident) => {
+        settle_resident_read(self.table_name, partition_id, resident, &loaded.data);
+    }
+    MaybeLoaded::Loaded { partition, .. } => {
         let old_size = partition.size();
-        let accessed = SortedPartition::<R>::access(&loaded.data).unwrap();
-        let new = SortedPartition::<R>::deserialize(&accessed).unwrap();
+        let accessed = SortedPartition::<R>::access(&loaded.data)?;
+        let new = SortedPartition::<R>::deserialize(&accessed)?;
         partition.merge_from_disk(new);
         ...
     }
-}
+},
 hash_map::Entry::Vacant(entry) => {
     entry.insert(MaybeLoaded::Accessible(ValidatedArchive::new(loaded.data)?));
     ...
@@ -324,9 +331,16 @@ something *is* in memory, the disk copy becomes the base and the in-memory rows 
 tombstones) are extended over it, so memory wins on conflict
 ([Partitions](partitions.md#tombstones)).
 
-Note the `if let` covers only the `Loaded` case. An `Occupied` entry holding `Accessible` is
+~~Note the `if let` covers only the `Loaded` case. An `Occupied` entry holding `Accessible` is
 left untouched and the freshly read data is dropped — correct, since both are copies of the
-same archive extent.
+same archive extent.~~ That was right about the outcome and silent about it, and the unsorted
+table did the opposite — it replaced the resident archive and charged for both
+([Resolved #30, 120, 121](../appendix/resolved/resident-copy-collision.md)). Both tables now
+name the `Accessible` arm and send it through `settle_resident_read`: the resident copy is
+kept, nothing is charged, and the two copies are compared, with an `ERROR` event if they
+disagree. A read reaches that arm only when two reads of one partition were in flight, which
+`block_on_load` now prevents by parking behind a replicated apply's read (`loading`) as well as
+behind a parked query's (`blocked`).
 
 The merge recomputes the partition's size from the rows it ended up holding, and shard memory
 usage is moved by that signed difference:

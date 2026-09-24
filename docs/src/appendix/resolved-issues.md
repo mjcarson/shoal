@@ -11,8 +11,8 @@ only partly fixed and appear on both: the fixed half here, the open remainder th
 were each one of those exceptions until their second half was fixed, and now appear here alone.
 
 Numbers are also grouped when one change closed several items that turned out to share a cause —
-7 and 10, 26 and 39, 56 and 61, 67 and 68, and 11, 12 and 37 each have one page rather than
-several.
+7 and 10, 26 and 39, 56 and 61, 67 and 68, 11, 12 and 37, and 30, 120 and 121 each have one
+page rather than several.
 
 | # | Issue | What fixed it |
 | --- | --- | --- |
@@ -36,6 +36,7 @@ several.
 | 24 | [A bad query could leave the terminal in raw mode](resolved/shoalctl-panic.md) | The parse error is recorded instead of panicking past `ratatui::restore()`; ~~and rendered~~ — nothing drew it until [item 48](resolved/query-error-display.md) |
 | 25 | [`CLAUDE.md` described a Shoal that no longer existed](resolved/claude-md-drift.md) | The two remaining false claims corrected in the file itself — `Conf::new` became `Conf::from_file`, and "LRU eviction at 60%" became what the shard actually does, which is trigger on the limit being exceeded and then free 40% of current usage |
 | 26, 39 | [A multi-partition get answered in an arbitrary order](resolved/partition-order.md) | `IN` and same-field `OR` replaced an `AND` that meant three different things; rows are slotted per partition on each shard and reordered by the coordinator before the limit is applied |
+| 30, 120, 121 | [A partition read that landed on a copy already in memory](resolved/resident-copy-collision.md) | Two reads of one partition could be in flight on a cluster node, because `block_on_load` waited on a parked query's read but not on a replicated apply's (`loading`, 121). The second to land met the first's resident archive: the sorted table dropped it without a word (30), and the unsorted table replaced the resident copy and charged the shard for both (120). **Reproduced** by a harness that builds a shard's tables without a shard: 64 bytes charged for a 32 byte partition, two read requests where one was in flight, and a divergent read that went unreported or replaced the row. `block_on_load` parks behind `loading` too, and both `Occupied` arms name `Accessible` and go through `settle_resident_read`, which keeps the resident copy, charges nothing, and logs at `ERROR` if the two copies disagree |
 | 31 | [Multi-log recovery discarded already-replayed intents](resolved/multi-log-recovery.md) | One prescan across every log before any replay, so no load can overwrite a partition an earlier log replayed into; each partition loaded once; inactive logs deleted only once every replay has succeeded |
 | 34 | [The request length prefix is unvalidated](resolved/unvalidated-length-prefix.md) | An eight byte header carrying a version, a message type, flags and a `u32` length, checked in a pure decoder in front of the allocation it used to feed, against a `max_frame_bytes` the two peers exchange when a connection opens — and five `panic!` sites in the two relays turned into a logged `break`, so a frame nobody can read now ends one connection instead of the shard and every client on it |
 | 44 | [A compaction discarded a damaged log's tail in silence](resolved/compaction-tail-loss.md) | The report moved out of the arm that had nothing to compact and down beside the delete it describes, split into three named outcomes by `classify_tail`, and `truncated_logs` now reaches the compaction path's counters |

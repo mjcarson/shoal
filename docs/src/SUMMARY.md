@@ -174,6 +174,7 @@
   - [24. A bad query could leave the terminal in raw mode](appendix/resolved/shoalctl-panic.md)
   - [25. `CLAUDE.md` described a Shoal that no longer existed](appendix/resolved/claude-md-drift.md)
   - [26, 39. A multi-partition get answered in an arbitrary order](appendix/resolved/partition-order.md)
+  - [30, 120, 121. A partition read landed on a copy already in memory](appendix/resolved/resident-copy-collision.md)
   - [31. Multi-log recovery discarded already-replayed intents](appendix/resolved/multi-log-recovery.md)
   - [33. Collected split-query state had no expiry](appendix/resolved/gather-expiry.md)
   - [34. The request length prefix is unvalidated](appendix/resolved/unvalidated-length-prefix.md)

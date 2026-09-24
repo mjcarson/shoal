@@ -31,7 +31,8 @@ use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::UnsortedPartition;
 use crate::server::tables::persistent::{adjust_memory_usage, open, ApplyStep, RowSink};
 use crate::server::tables::persistent::{
-    apply_failure, corrupt_archive, eviction_totals, PartitionLoad, PendingGets,
+    apply_failure, corrupt_archive, eviction_totals, settle_resident_read, PartitionLoad,
+    PendingGets,
 };
 use crate::server::tables::storage::StorageSupport;
 use crate::server::{Conf, ServerError};
@@ -368,56 +369,23 @@ where
                     .unwrap_or_default(),
             ));
         }
-        // if we have an existing loaded partition then do not use our newly loaded data
-        // as that should be older
+        // a resident copy of this partition always wins over what we just read
         match self.partitions.entry(loaded.partition_id) {
-            hash_map::Entry::Occupied(mut entry) => {
-                // Only overwrite an accessible partition, since that is just another
-                // copy of the same archive extent. A loaded partition is either newer
-                // than what we read or a tombstone shadowing it, and in both cases
-                // our freshly read data is stale.
-                if let &mut MaybeLoaded::Accessible(_) = entry.get_mut() {
-                    // validate this archive once, here, instead of on every query that reads it
-                    let validated = hotpath::measure_block!("ValidatedArchive::new", {
-                        ValidatedArchive::new(loaded.data)
-                    });
-                    // a corrupt archive releases the queries parked on it rather than
-                    // propagating, since an error out of here ends the shard and leaves every
-                    // one of them in `blocked`, which only a completed load ever drains
-                    let archive = match validated {
-                        Ok(archive) => archive,
-                        Err(error) => {
-                            event!(
-                                Level::ERROR,
-                                msg = "A loaded partition failed validation",
-                                table = %self.table_name,
-                                partition_id,
-                                error = ?error,
-                            );
-                            return Ok(PartitionLoad::Failed(
-                                self.fail_partition(
-                                    partition_id,
-                                    &read_span,
-                                    Some(&corrupt_archive(self.table_name, partition_id)),
-                                )
-                                .unwrap_or_default(),
-                            ));
-                        }
-                    };
-                    // get the size of our data, only once it is known to be good
-                    let size = archive.len();
-                    // wrap our raw data so that we can access it only when needed
-                    let wrapped = MaybeLoaded::Accessible(archive);
-                    // overwrite our data with newly loaded data
-                    entry.insert(wrapped);
-                    // increment our memory usage
-                    *self.memory_usage.borrow_mut() += size;
-                    // remove this partition from our cache until any blocked queries have completed
-                    self.lru
-                        .borrow_mut()
-                        .pop(&(self.table_name, loaded.partition_id));
+            hash_map::Entry::Occupied(mut entry) => match entry.get_mut() {
+                // an archive resident already is another copy of the extent we just read, from
+                // a second read that raced the first, so keep it and drop ours
+                //
+                // this used to replace the resident copy and charge the read's size without
+                // taking the replaced copy's off, so every such read inflated the counter by a
+                // whole partition ([Resolved #120](../../../../docs/src/appendix/resolved/resident-copy-collision.md))
+                MaybeLoaded::Accessible(resident) => {
+                    // compare the two, saying so if they disagree; nothing is kept or charged
+                    settle_resident_read(self.table_name, partition_id, resident, &loaded.data);
                 }
-            }
+                // a loaded partition is either newer than what we read or a tombstone
+                // shadowing it, and in both cases our freshly read data is stale
+                MaybeLoaded::Loaded { .. } => (),
+            },
             // this partition does not have any already loaded data
             hash_map::Entry::Vacant(entry) => {
                 // validate this archive once, here, instead of on every query that reads it
@@ -524,6 +492,10 @@ where
     /// Returns true if this query was parked and false if this partition has no
     /// data on disk to wait for, in which case the caller should answer now.
     ///
+    /// A read already in flight for this partition - one a parked query asked for, or one a
+    /// replicated apply asked for through `request_load` - is waited on rather than asked for
+    /// again, so at most one read of a partition is ever outstanding.
+    ///
     /// # Arguments
     ///
     /// * `partition_key` - The key of the partition this query needs
@@ -547,6 +519,18 @@ where
         // since asking for it again would only park this query on the same failure
         if meta.skip_disk == Some(partition_key) {
             return false;
+        }
+        // a read a replicated apply asked for is in flight too, and its landing drains
+        // `blocked` like any other, so park behind it rather than asking for a second read
+        // that would land on the copy the first one made resident
+        // ([Resolved #121](../../../../docs/src/appendix/resolved/resident-copy-collision.md))
+        if self.loading.contains(&partition_key) {
+            // park this query behind the read the apply already requested
+            self.blocked
+                .entry(partition_key)
+                .or_default()
+                .push((meta.clone(), query));
+            return true;
         }
         // try to load this partition from disk if it exists
         let will_load = self

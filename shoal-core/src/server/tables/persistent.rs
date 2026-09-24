@@ -15,11 +15,13 @@ pub use unsorted::PersistentUnsortedTable;
 
 use crate::server::messages::{Answer, QueryMetadata};
 use crate::server::stage_profile::StageStamps;
+use crate::server::tables::partitions::{StableBytes, ValidatedArchive};
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::responses::{GetRows, Response, ResponseAction, ResponseError, RowGroup};
 use crate::shared::row_ref::RowRef;
 use crate::shared::traits::ShoalProjection;
 use rkyv::Archive;
+use tracing::{event, Level};
 
 /// Replace what a query answered with the failure it was released with, if it was released by one
 ///
@@ -633,6 +635,53 @@ pub(crate) fn adjust_memory_usage(memory_usage: &RefCell<usize>, diff: isize) {
     let adjusted = memory_usage.borrow().saturating_add_signed(diff);
     // store our updated usage
     *memory_usage.borrow_mut() = adjusted;
+}
+
+/// Settle a read that landed on a partition already resident as an archive
+///
+/// Two reads of one partition can be in flight at once, and the second to land finds the first
+/// already resident ([Resolved #30, 120, 121](../../../docs/src/appendix/resolved/resident-copy-collision.md)).
+/// The resident copy wins: queries may already have answered from it, and an archive is only
+/// ever resident while nothing has written its partition - a write turns it into a loaded
+/// partition first - so its bytes are the archive's bytes. Nothing new is kept, so nothing is
+/// charged.
+///
+/// The two copies are compared rather than assumed to agree, because this is the end of an IO
+/// path and a disagreement here would otherwise pass in silence. Returns whether they differed.
+///
+/// # Arguments
+///
+/// * `table` - The table the partition belongs to
+/// * `partition_id` - The partition the read landed on
+/// * `resident` - The archive already resident for it
+/// * `read` - The bytes the read produced
+pub(crate) fn settle_resident_read<T: std::fmt::Display, P, B: StableBytes>(
+    table: T,
+    partition_id: u64,
+    resident: &ValidatedArchive<P, B>,
+    read: &[u8],
+) -> bool {
+    // a duplicate read of the same extent holds the same bytes
+    if resident.as_bytes() == read {
+        // which is expected when two reads raced, so it is not worth more than a debug line
+        event!(
+            Level::DEBUG,
+            msg = "A read landed on a resident copy of the same archive",
+            table = %table,
+            partition_id,
+        );
+        return false;
+    }
+    // two copies of one partition disagree, and the resident one is kept regardless
+    event!(
+        Level::ERROR,
+        msg = "A read landed on a resident copy it disagrees with",
+        table = %table,
+        partition_id,
+        resident_len = resident.len(),
+        read_len = read.len(),
+    );
+    true
 }
 
 /// Summarize what an eviction pass reclaimed
