@@ -5458,6 +5458,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "color-eyre",
  "deepsize2",
  "hex",
  "hotpath",
@@ -5476,6 +5477,7 @@ dependencies = [
  "shoal",
  "shoal-core",
  "shoal-top",
+ "shoalctl",
  "tempfile",
  "tokio",
  "uuid",
@@ -5548,6 +5550,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "shoal-proto",
+ "signal-hook 0.3.18",
  "socket2",
  "tempfile",
  "tracing",
@@ -5635,6 +5638,7 @@ dependencies = [
 name = "shoalctl"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "color-eyre",
  "crossterm",
  "deepsize2",
@@ -5642,8 +5646,13 @@ dependencies = [
  "kanal",
  "ratatui",
  "ratatui-hypertile",
+ "rcgen",
  "rkyv 0.8.12",
+ "rustls-pemfile",
  "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
  "shoal",
  "tokio",
  "unicode-width 0.2.2",

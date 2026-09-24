@@ -95,6 +95,23 @@ cargo run -p shoal-spike --release
 # the cluster grows, which is the Q13-at-M3 record on the same page
 cargo run -p shoal-spike --release -- fanout
 
+# a cluster on real hosts (F51): the node program and its shoalctl, built for the oldest cpu
+# among them - never native, which the shell exports and which dies of SIGILL on the Zen1 hosts.
+# its own target dir, so the native build is left alone
+CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
+    cargo build --release -p shoal-bench --bin shoal-node --bin shoal-benchctl
+target/deploy/release/shoal-benchctl cluster bootstrap -i shoalctl/inventories/lab.yml
+target/deploy/release/shoal-benchctl cluster status -i shoalctl/inventories/lab.yml
+target/deploy/release/shoal-benchctl cluster destroy -i shoalctl/inventories/lab.yml --yes
+# the rendered shoal.yml parsed and validated as a Conf, claimed, started and initialized
+cargo test -p shoal-bench --test deploy_render
+# and against the hosts: bootstrap, rows through every node, add --rebalance, destroy. a
+# rebalance step takes at least the inventory's retire_after (15s on the lab, five minutes by
+# default). the lab's nodes run as the system user `shoal`: a node running as you on europa
+# spends your io_uring locked-memory budget and every glommio test here dies at its probe
+SHOAL_DEPLOY_INVENTORY=$PWD/shoalctl/inventories/lab-add.yml \
+    cargo test --release -p shoal-bench --test deploy_smoke -- --nocapture
+
 # Run with hotpath profiling enabled (attribution only, never a baseline number)
 cargo build --release --bin shoal-workload --features hotpath
 

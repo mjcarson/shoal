@@ -240,22 +240,44 @@ are the record the next change starts from.
 **What F50 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
 
-- **Issuing and distributing certificates.** A leaf is issued for a node id by the operator
+- ~~**Issuing and distributing certificates.** A leaf is issued for a node id by the operator
   and placed by the operator; nothing mints one at first boot, since the id is minted at the
   first claim and a leaf without a node in it is refused under the binding. A `shoalctl`
-  `issue` that takes the authority's key and a node id is the shape; not built.
+  `issue` that takes the authority's key and a node id is the shape; not built.~~ **Built by
+  [F51](../features/cluster-deployment.md)** for the nodes `shoalctl cluster` deploys: the node
+  program's `claim` gives the id before the first start and the deployment issues and places the
+  leaf. A standalone `issue` for a node deployed some other way is still not built.
+- ~~**A physical capture.** The record and the launcher exist and the launcher was proven
+  against no host but by its command lines~~ - the launcher is still unproven on a real host,
+  but since F51 three real hosts exist (`shoalctl/inventories/lab.yml`) and a deployed cluster
+  on them is. The capture on unequal hardware, and the render of it, are still the benchmark
+  host's.
 - **A cluster-wide reload.** `ReloadTls` reaches the node the connection did; a fan-out that
   asks every member to reload and reports each is a loop an operator runs, and the cluster
   tab's `reload-tls` reaches one node.
 - **Per-tablet readiness and a lag histogram in the cluster tab.** The frames carry a node's
   widest lag and its groups' counts; a per-tablet view needs a read the control plane does not
   answer yet.
-- **A physical capture.** The record and the launcher exist and the launcher was proven
-  against no host but by its command lines: `SHOAL_REMOTE_SMOKE` names the host it would run
-  against. The capture on unequal hardware, and the render of it, are the benchmark host's.
 - **A remote launcher that reads the host's own configuration.** The remote `shoal.yml` is the
   operator's to write with local storage paths; the launcher copies the staged file and nothing
   else, and refuses a build that is not its own by digest.
+
+**What F51 left undone, deliberately.** Recorded here so the next change starts from the list
+rather than from the diff:
+
+- **Client-facing TLS.** A deployed cluster's peer lanes are mutual TLS; `networking.tls` for
+  clients is not rendered, so a client and the admin's SCRAM exchange cross the network in
+  plaintext. The authority the deployment already keeps could issue the listener's leaf.
+- **More than one node per host.** The inventory refuses two nodes on one address, since the
+  ports are the deployment's, not the node's. Per-node ports would lift it.
+- **Rendering the rest of `cluster:`.** Only the keys a deployment has to set are rendered, plus
+  `migration.retire_after`, which bounds how fast `add --rebalance` finishes; every other tuning
+  key stays at its default. A passthrough block in the inventory is the shape.
+- **Removing one node.** `destroy` is the whole cluster; one node leaves by runbook 4 through the
+  cluster tab. A `cluster remove <node>` that decommissions, follows the plan and deletes the
+  unit is the shape.
+- **Building the program.** The inventory names a program the operator built for the oldest
+  cpu; the deployment refuses a wrong one at the claim by its SIGILL rather than building one.
 
 **What F49 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:

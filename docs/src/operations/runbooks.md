@@ -9,6 +9,10 @@ the three that run on a stopped directory (`force_recover`, `export_standalone`,
 which are said so. What each operation refuses is on the feature page it links; what it costs
 the foreground is on [Performance](../distributed/performance.md).
 
+Runbooks [1](#1-bootstrap) and [2](#2-add-a-node) are also a program: `shoalctl cluster
+bootstrap` and `shoalctl cluster add <node> --rebalance` do every step below from an inventory,
+over ssh, and wait where these say to wait ([F51](../features/cluster-deployment.md)).
+
 Read first: **a directory never changes mode or identity**, an operation is **idempotent by
 its operation id** (retry it with the same id and it is answered as the first time), and a
 mutation is written against a **topology version** and refused `StaleVersion` if the cluster
@@ -30,6 +34,11 @@ asked for. Then `Initialize { nodes }` in the order you want the tablets dealt, 
 every tablet over those nodes at the factor. Wait for `Readiness.data.default_writes` to say
 `Ok` before opening the cluster to clients - `Members = up` is not data readiness.
 
+**With shoalctl.** `shoalctl cluster bootstrap -i <inventory>` preflights every host, stages and
+claims each node, issues each a leaf for the id its claim printed, starts them under systemd in
+this order, sends `Initialize` once in inventory order, and waits for `default_writes`. It
+refuses a cluster its state says it already deployed; `destroy --yes` is its rollback.
+
 **Rollback.** Before `Initialize`, stop everything and delete the directories: nothing has been
 placed. After it, the cluster exists; a mistaken order is fixed by moves, not by a second
 `Initialize`, which is refused.
@@ -46,6 +55,12 @@ one node: it stays where the bootstrapper's rule put it ([F39](../features/membe
 have, `voter`. Read its `free_bytes` and `weight`. Nothing is placed on it yet: ask for
 `Rebalance` and follow `PlanStatus { op }` to `completed`; a `blocked` reason names the set and
 the reserve or cap it waits on. A read of the plan's steps is the preview there is.
+
+**With shoalctl.** `shoalctl cluster add -i <inventory> <node> --rebalance` seeds the node through
+every committed member's control address, claims it and issues its leaf, starts it, waits for it
+`up`, and follows the `Rebalance` plan to its outcome. A step takes at least
+`cluster.migration.retire_after` (five minutes by default, the inventory's `retire_after` if it
+names one), since a move finishes when its source has reclaimed the retired copy.
 
 **Rollback.** A node nothing was placed on is stopped and its directory deleted. One a plan has
 moved sets onto is [decommissioned](#4-decommission).

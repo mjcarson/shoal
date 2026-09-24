@@ -350,7 +350,9 @@ Recorded 2026-09-14 by [F49](../features/backup-and-recovery.md).
 #### Q11 at M10c
 
 Recorded 2026-09-14 by [F50](../features/cluster-operations.md). Q11's certificate half is
-closed; first-boot provisioning is closed as explicitly manual.
+closed; first-boot provisioning is closed as explicitly manual. ~~Explicitly manual~~ - since
+[F51](../features/cluster-deployment.md) `claim` gives the id before the first start and
+`shoalctl cluster` issues the leaf.
 
 | Decision | Where it is, and what it does not settle |
 | --- | --- |

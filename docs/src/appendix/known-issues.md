@@ -33,8 +33,11 @@ carrying the reasoning and the invariants the fix depends on. Item numbers are s
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
 76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111 and 112, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ item 113 is the newest entry here and the newest number, and why 112 is on the resolved page beside them, and why 17, 33, 43, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111 and 112 are on the resolved page. **111 never
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ item 113 is the newest entry here, ~~and the newest number~~ with 114 the newest number, on the resolved page, and why 112 is on the resolved page beside them, and why 17, 33, 43, 78, 79, 80, 82,
+83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111 and 112 are on the resolved page. **114 never appeared here**: it was found by
+[F51](../features/cluster-deployment.md)'s deployment test - the cluster tab's model counted
+no voters in any cluster - reproduced against a real node and by a unit test, and fixed in the
+same change ([Resolved #114](resolved/cluster-tab-voter-count.md)). **111 never
 appeared here**: it was found by [F47](../features/local-rehome.md)'s crash matrix - a read
 landing while an archive closed panicked the executor - reproduced against the map alone and
 fixed in the same change ([Resolved #111](resolved/archive-removal-borrow.md)). **108 never
@@ -71,7 +74,7 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ **1,492 tests**, four ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ **1,529 tests**, six ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;

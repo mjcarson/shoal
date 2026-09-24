@@ -113,6 +113,7 @@
   - [F48. Rolling compatibility and activation](features/rolling-compatibility.md)
   - [F49. Backup, restore, export and permanent quorum loss](features/backup-and-recovery.md)
   - [F50. Certificate rotation, the cluster tab, the runbooks and the physical cluster](features/cluster-operations.md)
+  - [F51. Deploying a cluster with shoalctl cluster](features/cluster-deployment.md)
 
 # Direction
 
@@ -218,6 +219,7 @@
   - [110. The kill arm's client failed a steady share of its operations for as long as node one was dead](appendix/resolved/dead-primary-write-failures.md)
   - [111. Removing an archive held the handle cache across its close](appendix/resolved/archive-removal-borrow.md)
   - [112. certificate_rotation_binds_identity failed about half its runs alone](appendix/resolved/certificate-test-leader.md)
+  - [114. The cluster tab counted no voters and no learners in any cluster](appendix/resolved/cluster-tab-voter-count.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

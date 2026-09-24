@@ -75,6 +75,20 @@ with different instruction sets. Its *output* is: a given gxhash version hashes 
 value on every platform it supports, which is what lets a directory move between machines
 ([Resolved #65](../appendix/resolved/gxhash-pin.md)).
 
+**A program deployed to other machines is built for the oldest of them**, in its own target
+directory so the native build is left alone. `RUSTFLAGS` beats every config file, which is what
+makes this work, and the environment's `native` export is what makes it necessary:
+
+```bash
+# the lab's hosts are Zen1 (hyperion, titan) and Zen4 (europa); Zen1 has AES-NI and AVX2
+CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
+    cargo build --release -p shoal-bench --bin shoal-node --bin shoal-benchctl
+```
+
+A native Zen4 build dies of SIGILL on a Zen1 host. `shoalctl cluster` meets that at the node's
+`claim`, before anything starts, and refuses it by name
+([F51](../features/cluster-deployment.md)).
+
 > This page claimed that before the file existed. The flag was in a `[build]` table in the
 > workspace `Cargo.toml`, where **cargo silently ignores it** — which is why the docs and
 > `shoal_looper.sh` both passed `RUSTFLAGS` by hand. Any measurement taken before
@@ -189,4 +203,5 @@ change.
 - No `rust-toolchain.toml`, so the nightly requirement surfaces as a confusing compile error.
 - No vendoring or git dependency for glommio, so the build is not reproducible from this
   repository alone.
-- `-Ctarget-cpu=native` plus `gxhash` means binaries are not portable between machines.
+- `-Ctarget-cpu=native` plus `gxhash` means binaries are not portable between machines; a
+  deployed one is built for an explicit cpu, above.

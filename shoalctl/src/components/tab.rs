@@ -368,7 +368,7 @@ where
         let id = tab.id;
         tokio::task::spawn(async move {
             while alive.load(std::sync::atomic::Ordering::SeqCst) {
-                let model = poll_cluster::<S>(&shoal).await;
+                let model = crate::cluster::poll::<S>(&shoal).await;
                 if app_tx
                     .send(AppEvent::ClusterFrame { tab_id: id, model })
                     .await
@@ -472,46 +472,6 @@ where
                 .await;
         });
     }
-}
-
-/// Poll the frames a cluster tab draws
-///
-/// # Arguments
-///
-/// * `shoal` - The client to poll through
-async fn poll_cluster<S>(shoal: &Arc<Shoal<S>>) -> Result<ClusterModel, String>
-where
-    S: QuerySupport + Send + Sync + 'static,
-{
-    use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest};
-    // one read per frame, each answered as the json the node built for it
-    let mut frames = Vec::with_capacity(6);
-    for kind in [
-        AdminKind::Members,
-        AdminKind::Readiness,
-        AdminKind::Replication,
-        AdminKind::Plans,
-        AdminKind::Backups,
-        AdminKind::Recoveries,
-    ] {
-        let name = kind.name();
-        let response = shoal
-            .admin(&AdminRequest {
-                op: Uuid::new_v4(),
-                expected_version: 0,
-                kind,
-            })
-            .await
-            .map_err(|error| format!("{name}: {error:?}"))?;
-        match response.outcome {
-            Ok(AdminOutcome::Read(value)) => frames.push(value),
-            Ok(other) => return Err(format!("{name} answered {other:?}")),
-            Err(error) => return Err(format!("{name}: {} ({:?})", error.msg, error.code())),
-        }
-    }
-    Ok(ClusterModel::from_frames(
-        &frames[0], &frames[1], &frames[2], &frames[3], &frames[4], &frames[5],
-    ))
 }
 
 /// Send an operation and read its record once, or read a record

@@ -1,0 +1,29 @@
+# The lab at a factor of two, bootstrapped on the two small hosts with europa left to `add` (F51)
+#
+#   target/deploy/release/shoal-benchctl cluster bootstrap -i shoalctl/inventories/lab-add.yml
+#   target/deploy/release/shoal-benchctl cluster add -i shoalctl/inventories/lab-add.yml europa --rebalance
+#
+# A separate cluster from `lab.yml`: its own name, so its own unit, directory and state. The two
+# share ports, so only one of them runs at a time. See lab.yml for the build line.
+name: lab-add
+server: ../../target/deploy/release/shoal-node
+replication_factor: 2
+control_voters: 3
+# a lab's moves finish in seconds rather than the default five minutes a step: a move is done
+# only once its source has reclaimed the retired copy, after this long
+retire_after: 15s
+# nodes run as a system user of their own, created on first deploy. io_uring charges a ring's
+# locked memory to the user that made it, so a node running as the operator on europa spends the
+# budget every glommio test there needs, and they die at their io_uring probe
+user: shoal
+resources:
+  cores: 4
+  memory: 4Gi
+bootstrap: [hyperion, titan]
+nodes:
+  - name: hyperion
+    address: 172.16.2.5
+  - name: titan
+    address: 172.16.2.4
+  - name: europa
+    address: 172.16.2.10

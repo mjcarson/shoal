@@ -11,8 +11,12 @@ and a filesystem under the storage path that takes direct I/O - a tmpfs does not
 
 ## What you build
 
-There is no `shoal` server binary and no `shoalctl` binary: a schema is a compile-time construct,
-so both are programs you build against yours. The server is `ShoalPool::<Db>::start(conf)` and
+~~There is no `shoal` server binary and no `shoalctl` binary~~ - since [F51](../features/cluster-deployment.md)
+both are one generic call: the server is `shoal::server::node::main::<Db>()` and the tool
+`shoalctl::cli::main::<DbClient>()`, and `shoalctl cluster bootstrap` does everything on this
+page from an inventory, over ssh (see [Deploying with shoalctl](#deploying-with-shoalctl)
+below). A schema is still a compile-time construct, so both are still programs you build
+against yours. What follows is the same by hand. The server is `ShoalPool::<Db>::start(conf)` and
 `ready`, exactly as `shoal/examples/tmdb.rs` does it:
 
 ```rust
@@ -42,7 +46,8 @@ async fn main() -> anyhow::Result<()> {
 
 The tool is the same schema under `#[shoal::db(client)]` handed to `shoalctl::run`, exactly as
 `shoalctl/examples/tmdbctl.rs` does it, with the address, the credentials and the trust root
-given where the client is built - it has no command line of its own:
+given where the client is built. Before F51 it had no command line of its own; this is still
+the form for a client built with options of your own:
 
 ```rust
 #[shoal::db(client)]
@@ -177,8 +182,10 @@ A node's peer certificate is bound to its identity: the leaf carries a URI SAN o
 `shoal-node://<node id>`, and both ends of every lane refuse a leaf naming another node or
 none. The id is minted when the directory is first claimed, so the id comes before the leaf:
 
-1. Start each node once with no `cluster.tls` (or read `node` out of `shoal-meta.json` after
-   the first claim), and note its node id.
+1. ~~Start each node once with no `cluster.tls` (or read `node` out of `shoal-meta.json` after
+   the first claim)~~ Run the node program's `claim --conf shoal.yml`, which claims the
+   directory exactly as the first start will and prints its node id without starting anything
+   ([F51](../features/cluster-deployment.md)), and note the id.
 2. Issue a leaf per node from the cluster authority whose names include the address peers
    dial it at and `shoal-node://<id>`, and install it with the key and the authority under
    `/etc/shoal/`.
@@ -187,9 +194,10 @@ none. The id is minted when the directory is first claimed, so the id comes befo
 
 A deployment that shares one leaf across every node sets `bind_identity: false` and accepts
 that a member can then speak as another. Rotation is [runbook 14](../operations/runbooks.md#14-rotate-certificates-and-authorities):
-write the new files, `reload-tls` on that node; an authority rotates as a bundle. Nothing in
-Shoal issues a certificate; the fixture's authority (`shoal/tests/cluster/mod.rs`, `Pki`) shows
-the shape a `rcgen` or `openssl` script produces.
+write the new files, `reload-tls` on that node; an authority rotates as a bundle. ~~Nothing in
+Shoal issues a certificate~~ `shoalctl cluster` mints a cluster authority and issues every node it
+deploys a leaf this way ([F51](../features/cluster-deployment.md)); by hand, the fixture's authority
+(`shoal/tests/cluster/mod.rs`, `Pki`) shows the shape a `rcgen` or `openssl` script produces.
 
 ## Start, and what to wait for
 
@@ -229,6 +237,27 @@ placed; after it the cluster exists, and a mistaken order is fixed by moves, nev
 with `bootstrap: true` against an established cluster: it keeps its own and never joins yours.
 Never load data before `initialize` on a cluster of more than one node: it stays where the
 bootstrapper's rule put it.
+
+## Deploying with shoalctl
+
+Everything above, done by a program ([F51](../features/cluster-deployment.md)). Write an inventory naming the server
+program, the hosts and the cluster's shape - `shoalctl/inventories/lab.yml` is a worked one -
+and, from a machine with keyless ssh and passwordless sudo on every host:
+
+```sh
+# the server program, built for the oldest cpu among the hosts - never `native`
+CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
+    cargo build --release -p shoal-bench --bin shoal-node --bin shoal-benchctl
+shoal-benchctl cluster bootstrap -i lab.yml          # stage, claim, leaf, start, initialize
+shoal-benchctl cluster status -i lab.yml
+shoal-benchctl cluster add -i lab.yml <node> --rebalance
+shoal-benchctl tui -i lab.yml                         # the cluster tab, as the admin
+```
+
+It renders every file on this page, issues the leaves above from an authority it keeps under
+`~/.shoal/clusters/<name>/`, runs each node as a systemd unit, waits for exactly what the steps
+above wait for, and sends `Initialize` once. Any schema: `tmdbctl` and `tmdb_node` are the same
+pair for TMDB.
 
 ## Connect an application
 
@@ -333,8 +362,10 @@ done, and `status <op>` follows one from any connection.
 
 ## Limitations
 
-There is no server binary, no `shoalctl` binary and no packaging: both are yours to build and
-run under whatever supervises processes on your hosts. Nothing issues a certificate. The
+~~There is no server binary, no `shoalctl` binary and no packaging~~ Both halves are one
+generic call and `shoalctl cluster` deploys them under systemd ([F51](../features/cluster-deployment.md)); there is still no
+packaging, and the program is still yours to build. ~~Nothing issues a certificate.~~ The
+deployment issues every leaf; by hand, nothing does. The
 cluster tab reaches the node the connection reached, so a node's own lag or install is seen by
 connecting to it. `SetControlVoters`, `SetTableReadPolicy` and `Move` have no verb. Every
 number about what a cluster costs is smoke-scale ([C10](performance.md#the-numbers-so-far)).

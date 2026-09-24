@@ -1,0 +1,41 @@
+# The physical lab: three hosts at a factor of three (F51)
+#
+#   europa    172.16.2.10  Ryzen 9 7945HX, 16c/32t - the development host, so the node here
+#                          shares a machine with whatever else runs on it
+#   hyperion  172.16.2.5   Ryzen Embedded V1756B, 4c/8t, 14 GiB, NVMe
+#   titan     172.16.2.4   Ryzen Embedded V1756B, 4c/8t, 14 GiB, NVMe
+#
+# Build the server program for the oldest cpu here, never `native` - the shell exports
+# `-C target-cpu=native`, and a Zen4 build dies of SIGILL on the V1756B at its claim:
+#
+#   CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
+#       cargo build --release -p shoal-bench --bin shoal-node --bin shoal-benchctl
+#
+# then, from the repository root:
+#
+#   target/deploy/release/shoal-benchctl cluster bootstrap -i shoalctl/inventories/lab.yml
+#
+# Addresses are given rather than resolved: europa's own /etc/hosts maps its name to 127.0.1.1.
+name: lab
+server: ../../target/deploy/release/shoal-node
+replication_factor: 3
+control_voters: 3
+# a lab's moves finish in seconds rather than the default five minutes a step: a move is done
+# only once its source has reclaimed the retired copy, after this long
+retire_after: 15s
+# nodes run as a system user of their own, created on first deploy. io_uring charges a ring's
+# locked memory to the user that made it, so a node running as the operator on europa spends the
+# budget every glommio test there needs, and they die at their io_uring probe
+user: shoal
+# four shards on every host: the V1756B has eight cpus, and cpu 0 and its sibling are the
+# control core's
+resources:
+  cores: 4
+  memory: 4Gi
+nodes:
+  - name: hyperion
+    address: 172.16.2.5
+  - name: titan
+    address: 172.16.2.4
+  - name: europa
+    address: 172.16.2.10
