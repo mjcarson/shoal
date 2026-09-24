@@ -36,7 +36,10 @@ once, and nothing that might have been accepted is ever sent twice by the server
 
 Every persistent group's remembered requests - identity, payload digest, result and the index
 each was applied at - are written to `wal/Shard-N/retries.bin` as postcard, atomically, on the
-same trigger as `checkpoint.json` and before it. The checkpoint names the index the sidecar is
+same trigger as `checkpoint.json` ~~and before it~~ - staged as `retries.next.bin` before it
+and renamed over `retries.bin` once it landed, so a crash anywhere in the write leaves a
+sidecar for the checkpoint on disk, which `Retries::recover` settles at open
+([Resolved #115](../appendix/resolved/retry-sidecar-crash-window.md)). The checkpoint names the index the sidecar is
 complete to (`retries_at`) and the table's low-water mark (`retry_floor`), both defaulting to
 zero so an M4 file still loads. At open a group is seeded from a sidecar only when the sidecar
 was written for exactly its checkpoint, and only with entries applied at or below it: a seeded
@@ -271,8 +274,14 @@ driver is in process with node zero, as every cluster arm's is, and the record s
 - **A seeded retry entry is never above the checkpoint.** `seed_for` takes entries with `applied
   <= retries_at` and only from a sidecar whose `retries_at` equals the checkpoint's; a seeded
   entry the replay will re-apply makes the replay answer `Duplicate` and skip the table.
-- **`retries.bin` is written before `checkpoint.json`, and the checkpoint is durable only once
-  the latter landed.** The order is what makes a crash between the two harmless.
+- ~~**`retries.bin` is written before `checkpoint.json`, and the checkpoint is durable only once
+  the latter landed.** The order is what makes a crash between the two harmless.~~ It did not:
+  the sidecar that described the checkpoint on disk was the one overwritten, and a crash
+  between the two opened the group remembering nothing below its checkpoint
+  ([Resolved #115](../appendix/resolved/retry-sidecar-crash-window.md)). **The new sidecar is
+  staged as `retries.next.bin` before `checkpoint.json` and renamed over `retries.bin` only once
+  it landed, and a staged file found at open is settled before any group starts**: at every
+  point some file describes the checkpoint on disk.
 - **The lease is read from the metrics' state, never from the persisted vote.** A restarted node
   carries its old vote for itself; the state says whether it leads.
 - **A lapsed lease appends nothing.** `NotLeader` is returned before `client_write`; a write
@@ -339,10 +348,12 @@ in the first two runs and not at all in the third.
 | `metadata_quorum_cannot_replace_a_missing_data_quorum` | `shoal/tests/cluster_fixture.rs` | A control commit lets a tablet minority take a write, or a write refused by an old primary appears after healing |
 | `established_tablets_survive_control_quorum_loss` | `shoal/tests/cluster_fixture.rs` | Writes or strong reads stop when the control plane has no quorum, or an admin mutation succeeds without one |
 | `lost_response_retry_returns_original_result` | `shoal/tests/cluster_fixture.rs` | A retry under the same identity is applied twice or answered as a delete of nothing, through a leader change or through a restart past the purge point |
+| `retry_table_survives_a_crash_between_sidecar_and_checkpoint` | `shoal/tests/cluster_fixture.rs` | A crash between the staged sidecar and the checkpoint file opens the group remembering nothing below its checkpoint, and a retry is applied as new ([Resolved #115](../appendix/resolved/retry-sidecar-crash-window.md)) |
 | `session_read_waits_for_committed_lower_bound` | `shoal/tests/cluster_fixture.rs` | A session read on a behind replica is served early, a token stops working through a leader change, or a forged lineage is served |
 | `deadline_and_operation_id_survive_forwarding` | `shoal/tests/cluster_fixture.rs` | A forwarded write's identity or budget is reset across the hop, or a write whose link is down is not sent to another holder |
 | `quorum_history_survives_repeated_elections` | `shoal/tests/cluster_fixture.rs` | The oracle rejects the history after repeated elections with lost replies: a result changed, an operation applied twice, or a read that disagrees |
 | `retry_table_survives_the_purge_point` | `shoal-core/src/server/wal/tests.rs` | A retry after a checkpoint and a purge is applied as new, an M4 checkpoint stops loading, or a sidecar for another checkpoint is seeded |
+| `a_stopped_checkpoint_write_leaves_a_sidecar_for_the_checkpoint_on_disk` | `shoal-core/src/server/wal/tests.rs` | A write stopped before its checkpoint file seeds nothing, or one stopped before its rename ignores the staged sidecar ([Resolved #115](../appendix/resolved/retry-sidecar-crash-window.md)) |
 | `routing_prefers_holders_that_are_up_and_reroutes_a_never_sent_share` | `shoal-core/src/server/map.rs` | A non-holder routes to a `Down` primary, or the alternate holder is the failed node or this one |
 | `a_member_silent_before_its_fifth_report_is_suspected` | `shoal-core/src/server/control/detector.rs` | Item 101 returns: three samples and silence is a phi of zero |
 | `a_retry_repeats_only_what_says_to_try_again` | `shoal-client/src/client.rs` | The loop retries a definite failure, stops on a retriable one, re-mints a pinned id, or miscounts attempts |

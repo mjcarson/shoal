@@ -618,6 +618,7 @@ mod tests {
             committed: 0,
             last_log: 0,
             checkpoint: 0,
+            checkpoint_durable: true,
             purged: 0,
             pending_bytes: 0,
             volatile: false,

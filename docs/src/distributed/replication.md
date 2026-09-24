@@ -125,7 +125,9 @@ apply, every replica remembers the identity, a digest of the payload and the res
 per-group LRU (`MachineState`), so a retry after a lost reply is answered as the first attempt
 was - `Duplicate` with the original result - and never applied again, and a reuse with another
 payload is `Refused`. The table is persisted beside the checkpoint as `wal/Shard-N/retries.bin`,
-written atomically before `checkpoint.json` names the index it is complete to, and seeded at
+staged as `retries.next.bin` before `checkpoint.json` names the index it is complete to and
+renamed over it once that landed, so a crash anywhere leaves one describing the checkpoint on
+disk ([Resolved #115](../appendix/resolved/retry-sidecar-crash-window.md)), and seeded at
 open only from a sidecar written for exactly that checkpoint; a snapshot carries it in its
 trailer, so a retry across an election, a compaction, a restart, a snapshot and a move is
 answered the same (`lost_response_retry_returns_original_result`,

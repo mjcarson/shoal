@@ -20,7 +20,7 @@ use openraft::{
 use super::frame::{Entry, LeaderId, WalLogId};
 use super::{
     Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, ShardWal,
-    CHECKPOINT_FILE, RETRIES_FILE, RETRIES_MAGIC,
+    CHECKPOINT_FILE, RETRIES_FILE, RETRIES_MAGIC, RETRIES_NEXT_FILE,
 };
 use crate::server::control::runtime::GlommioRuntime;
 use crate::server::replication::{
@@ -593,6 +593,134 @@ fn retry_table_survives_the_purge_point() {
         assert_eq!(
             Retries::read(empty.path()).await.expect("failed to read"),
             Retries::default()
+        );
+    });
+}
+
+/// A checkpoint write stopped at any point leaves a sidecar for the checkpoint on disk
+///
+/// The two files a write leaves behind at each of its points, read back by `recover`: stopped
+/// before the checkpoint file, `retries.bin` still describes the checkpoint and the staged file
+/// ahead of it is dropped; stopped after the checkpoint file and before the rename, the staged
+/// file describes it and is settled as `retries.bin`. Before the fix the only sidecar at the
+/// first point was the one ahead, and the seed was empty
+/// ([Resolved #115](../../../../docs/src/appendix/resolved/retry-sidecar-crash-window.md)).
+/// The end to end half is `retry_table_survives_a_crash_between_sidecar_and_checkpoint`.
+#[test]
+fn a_stopped_checkpoint_write_leaves_a_sidecar_for_the_checkpoint_on_disk() {
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        let membership = StoredMembership::new(
+            Some(log_id(1, 0)),
+            openraft::Membership::new(
+                vec![members(&[1, 2, 3])],
+                members(&[1, 2, 3])
+                    .into_iter()
+                    .map(|addr| (addr, addr))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            )
+            .expect("a valid membership"),
+        );
+        // one remembered request per applied index
+        let entry = |applied: u64| {
+            (
+                RequestId {
+                    bundle: [9; 16],
+                    index: applied,
+                },
+                Remembered {
+                    digest: applied,
+                    result: CommandResult {
+                        kind: ResultKind::Delete,
+                        ok: true,
+                    },
+                    applied,
+                },
+            )
+        };
+        // a sidecar and a checkpoint for one group at an index
+        let sidecar = |at: u64, entries: Vec<(RequestId, Remembered)>| {
+            let mut retries = Retries::default();
+            retries.groups.insert(
+                GroupId(7).to_string(),
+                GroupRetries {
+                    retries_at: at,
+                    entries,
+                },
+            );
+            retries
+        };
+        let checkpoint = |at: u64| {
+            let mut file = Checkpoint::default();
+            file.groups.insert(
+                GroupId(7).to_string(),
+                GroupCheckpoint::new(Some(log_id(2, at)), &membership).retries(at, 3),
+            );
+            file
+        };
+        let old = sidecar(5, vec![entry(3), entry(5)]);
+        let new = sidecar(9, vec![entry(3), entry(5), entry(9)]);
+        // stopped before the checkpoint file: the old pair and the new sidecar staged
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        old.write(dir.path()).await.expect("failed to write");
+        checkpoint(5)
+            .write(dir.path())
+            .await
+            .expect("failed to write");
+        new.stage(dir.path()).await.expect("failed to stage");
+        let point = Checkpoint::read(dir.path()).await.expect("failed to read");
+        let recovered = Retries::recover(dir.path(), &point)
+            .await
+            .expect("failed to recover");
+        let seed = recovered.seed_for(GroupId(7), point.get(GroupId(7)).expect("a group"));
+        assert_eq!(
+            seed,
+            vec![entry(3), entry(5)],
+            "the checkpoint on disk lost its seed"
+        );
+        assert!(!dir.path().join(RETRIES_NEXT_FILE).exists());
+        assert_eq!(
+            Retries::read(dir.path()).await.expect("failed to read"),
+            old
+        );
+        // stopped after the checkpoint file and before the rename: the staged file is the one
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        old.write(dir.path()).await.expect("failed to write");
+        new.stage(dir.path()).await.expect("failed to stage");
+        checkpoint(9)
+            .write(dir.path())
+            .await
+            .expect("failed to write");
+        let point = Checkpoint::read(dir.path()).await.expect("failed to read");
+        let recovered = Retries::recover(dir.path(), &point)
+            .await
+            .expect("failed to recover");
+        let seed = recovered.seed_for(GroupId(7), point.get(GroupId(7)).expect("a group"));
+        assert_eq!(seed, vec![entry(3), entry(5), entry(9)]);
+        assert!(!dir.path().join(RETRIES_NEXT_FILE).exists());
+        assert_eq!(
+            Retries::read(dir.path()).await.expect("failed to read"),
+            new
+        );
+        // finished: promoted, and nothing staged is left
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        old.write(dir.path()).await.expect("failed to write");
+        new.stage(dir.path()).await.expect("failed to stage");
+        checkpoint(9)
+            .write(dir.path())
+            .await
+            .expect("failed to write");
+        Retries::promote(dir.path())
+            .await
+            .expect("failed to promote");
+        assert!(!dir.path().join(RETRIES_NEXT_FILE).exists());
+        assert!(dir.path().join(RETRIES_FILE).exists());
+        let point = Checkpoint::read(dir.path()).await.expect("failed to read");
+        assert_eq!(
+            Retries::recover(dir.path(), &point)
+                .await
+                .expect("failed to recover"),
+            new
         );
     });
 }

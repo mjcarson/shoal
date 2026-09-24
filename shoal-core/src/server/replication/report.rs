@@ -39,6 +39,13 @@ pub struct GroupReport {
     pub last_log: u64,
     /// The index the table's archives are complete to
     pub checkpoint: u64,
+    /// Whether the checkpoint file on disk names `checkpoint` yet
+    ///
+    /// The index moves when a compaction lands and the file follows on a task of its own; a
+    /// crash in between opens from the checkpoint before
+    /// ([Resolved #115](../../../../docs/src/appendix/resolved/retry-sidecar-crash-window.md)).
+    #[serde(default)]
+    pub checkpoint_durable: bool,
     /// The index the log is purged to
     pub purged: u64,
     /// Bytes proposed through this shard and not yet answered

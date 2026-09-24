@@ -31,10 +31,21 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111 and 112, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ item 113 is the newest entry here, ~~and the newest number~~ with 114 the newest number, on the resolved page, and why 112 is on the resolved page beside them, and why 17, 33, 43, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111 and 112 are on the resolved page. **114 never appeared here**: it was found by
+list starts at 15 and skips 17, 25, 26, 30, 31, 33, 34, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120 and 121, and
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ item 119 is the newest entry here, ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ with 121 the newest number, on the resolved page, and why 112 is on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
+83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120 and 121 are on the resolved page. **120 and 121 never appeared here**:
+they were found by reading the code around item 30 - the unsorted table's version of its arm
+charging the shard twice, and the duplicate read that let either arm be reached - reproduced by
+a harness that builds a shard's tables without a shard, and fixed with it
+([Resolved #30, 120, 121](resolved/resident-copy-collision.md)). **115 and 116 never appeared here**:
+they were the two fixture tests F52's whole-workspace run failed and each passed alone -
+a crash between the retry sidecar and the checkpoint file forgetting every identity below
+the checkpoint, reproduced by a crash point between the two
+([Resolved #115](resolved/retry-sidecar-crash-window.md)), and a test reading the newest map
+version once while the detector committed another
+([Resolved #116](resolved/map-version-test-snapshot.md)) - and were fixed in the change that
+filed them. **114 never appeared here**: it was found by
 [F51](../features/cluster-deployment.md)'s deployment test - the cluster tab's model counted
 no voters in any cluster - reproduced against a real node and by a unit test, and fixed in the
 same change ([Resolved #114](resolved/cluster-tab-voter-count.md)). **111 never
@@ -74,11 +85,18 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ **1,541 tests**, six ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ **1,549 tests**, six ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
 two of `persistent_unsorted_table.rs` fail about one run in five of that binary (item 107).
+[Resolved #30, 120, 121](resolved/resident-copy-collision.md) added 6 and took it to 1,549,
+one new binary, `resident_reads.rs`, and filed nothing: the two defects it found beside item 30
+were fixed with it. Under the workspace run at six threads two fixture tests failed and passed
+alone (item 100).
+[Resolved #115](resolved/retry-sidecar-crash-window.md) and [Resolved #116](resolved/map-version-test-snapshot.md)
+added 2 and took it to 1,543, filing items 117, 118 and 119: one fixture test each that
+failed under load in their runs and passed alone.
 [F50](../features/cluster-operations.md) added 8 and took it to 1,492, filing nothing and
 resolving nothing here: the two defects it met - the control leader dialling a moved member at
 the address it was admitted with rather than the one it committed, and a winning clone's
@@ -249,12 +267,17 @@ were 105 and 116.
 *Nothing is currently filed at this severity.* Items 9 and 31 were the last two and are both
 [resolved](resolved-issues.md).
 
-One thread they shared is still worth pulling. Both were about what happens when a copy read
+~~One thread they shared is still worth pulling.~~ Both were about what happens when a copy read
 from disk meets a copy already in memory: item 31's `scan` overwrote the in-memory copy, and
-[item 30](#30-a-sorted-partition-load-can-be-silently-thrown-away) is the `Occupied` arm of
-`load_partition` (`.../persistent/sorted.rs:314-352`) throwing the disk copy away instead. Item 31 answered the
-question for recovery by removing the collision entirely — nothing loads after a replay — which
-leaves item 30 as the remaining place the question is answered badly.
+item 30 was the `Occupied` arm of the sorted table's `load_partition` throwing the disk copy
+away without a word. Item 31 answered the question for recovery by removing the collision
+entirely — nothing loads after a replay. **Item 30 closed the thread**, together with the two
+defects found by reading its code: the unsorted table's arm replaced the resident copy and
+charged the shard for both (item 120), and the collision was only reachable because a get did
+not wait on a replicated apply's read already in flight (item 121). All three were reproduced
+and fixed in one change ([Resolved #30, 120, 121](resolved/resident-copy-collision.md)). Both
+tables now keep the resident copy, charge nothing, and log at `ERROR` if the two copies
+disagree, and a partition has at most one read outstanding.
 
 ---
 
@@ -670,31 +693,6 @@ a composite sort key is a *range*, not a point, and although ranges exist now
 ([F1](../features/sort-key-ranges.md)) a range over a *prefix* still does not — lowering one needs
 synthesized minimum and maximum values for the fields the prefix leaves out, which `Sort` does not
 name ([TODOs](todos.md#sort-key-range-predicates--built)).
-
-### 30. A sorted partition load can be silently thrown away
-
-`.../persistent/sorted.rs:314-352` — `load_partition` merges a freshly read archive extent into
-whatever is resident, and its `Occupied` arm (`:320-322`) only matches `MaybeLoaded::Loaded`:
-
-```rust
-hash_map::Entry::Occupied(mut entry) => {
-    if let MaybeLoaded::Loaded { partition, .. } = entry.get_mut() {
-        /* merge */
-    }
-}
-```
-
-If the resident entry is `Accessible` — another copy of the same extent — the `if let` does not
-match, the data that was just read from disk is dropped on the floor, and memory usage is not
-adjusted. Any query blocked on that load is still released, so it answers from the copy that
-was already there.
-
-Harmless today, because the two copies hold the same bytes. It is listed because it is a silent
-no-op at the end of an IO path: if the two ever diverge, nothing here would say so.
-
-**Fix direction:** handle the arm explicitly, even if the body is `// the resident copy is the
-same extent, so keep it and drop what we read`. An `else` that says why is worth more than a
-pattern that quietly does not match.
 
 ### 35. A `RefCell` borrow is held across three awaits in the compactor
 
@@ -1804,3 +1802,64 @@ returned the way the open's is. The workspace builds against the fork by path, s
 against that change now; this item closes when the fork commits it. Shoal's side has nothing
 to change: a load that panics is a load that never answers, and the fix for that is the open
 not panicking.
+
+### 117. A restore under the fixture suite's load finds its target table not yet empty
+
+`single_node_data_has_a_verified_cluster_migration_path` fails under the fixture suite at six
+threads, about one run in two here, and passes alone. A group's restore comes to:
+
+```text
+{"Failed":{"reason":"2a02ce9f-…/0 holds 117 rows of the group's tablets; a restore is into
+an empty table, and this one is not"}}
+```
+
+The emptiness check is the `Loading` phase's scrub in `server/shard/restore.rs`. The table was
+new, and the only rows that could be in it are the restore's own. **Suspected, from reading the
+source and not reproduced:** the step is driven again after a leader change. The group commits
+`Loading`, loads rows, and loses its leader before committing past `Loading`. The next leader
+resumes at `Loading` and scrubs rows the first attempt put there. The scrub needs to tell those
+rows apart from rows that were there before the restore, for example by the restore's own
+boundary. It must not skip the check on a resume, because the check is what refuses a
+non-empty target.
+
+**Established by running it**: the run for [Resolved #15](resolved/shard-mesh-admission.md)
+failed it first, and the loaded fixture runs for
+[Resolved #115](resolved/retry-sidecar-crash-window.md) failed it once in two.
+
+### 118. The fixture's admin retry gives up while node zero's topology lags the leader
+
+`mixed_versions_exchange_real_cluster_operations` fails under the fixture suite at six threads
+and passes alone. The `ACTIVATE` it expects to be refused, by naming the pinned members, is
+refused as stale instead:
+
+```text
+the refusal did not name the pinned members: {"error":"StaleVersion: stale version: the
+request was written against topology version 15 and the cluster is at 19"}
+```
+
+The fixture's `admin` helper (`shoal/tests/cluster_fixture.rs`) reads node zero's own topology
+version and retries on `StaleVersion`, eight times at 100 ms. Under load, node zero stayed four
+versions behind the leader for longer than that. The server is right to refuse. The helper's
+budget is a count of attempts where it should be a deadline, and a lagging view outlasts it.
+This is the same shape as [Resolved #116](resolved/map-version-test-snapshot.md): a test
+assuming the version it read is the current one. **Established by running it**, once in two
+loaded fixture runs for [Resolved #115](resolved/retry-sidecar-crash-window.md).
+
+### 119. `down_retains_placement_during_grace` kills a member before the third voter is promoted
+
+The test starts three nodes and kills one without waiting for three voters
+(`cluster.wait_voters(0, 3)`, which the M3 tests call). Under the workspace run at six threads
+the third node was still a **learner** when the kill landed. The control group then had two
+voters, one of them dead, and could not commit the verdict. The detector's own read had the
+dead member at `phi` 300 after thirty misses, while `MEMBERS` kept it `up`:
+
+```text
+the dead member was never called down: {… "learners":["c21edec1-…"], …}
+detector: {… "3c3efa4a-…":{"misses":30, …}, … "phi":300.0, "since_last_ms":30175.8, …}
+```
+
+The detector and the commit are right. The test's schedule is wrong: it asserts a verdict that
+needs a control quorum, and its kill can land before that quorum exists. The fix is to wait for
+three voters before killing. **Established by running it**: it failed once in the
+whole-workspace run for [Resolved #115](resolved/retry-sidecar-crash-window.md) and passed
+alone at once.

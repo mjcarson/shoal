@@ -132,7 +132,8 @@ waits, never on the loop's own task. The loop:
    for one of them stale so it is asked for again from the new map entry when it lands), moves
    `applied` and the checkpoint to the boundary, both memberships to the manifest's, re-seeds
    the retry table from the trailer, sets `snapshot_at`, and writes the checkpoint file - the
-   retry sidecar first, as ever. `BeforeCheckpoint` before the write, `AfterCheckpoint` once it
+   retry sidecar staged first and promoted after, as every checkpoint write does since
+   [Resolved #115](../appendix/resolved/retry-sidecar-crash-window.md). `BeforeCheckpoint` before the write, `AfterCheckpoint` once it
    landed.
 5. On the `CheckpointWritten` that carried it: removes the marker, syncs the directory, removes
    the file, clears `installing`, answers the state machine, counts `installed`.

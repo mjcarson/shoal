@@ -796,9 +796,15 @@ async fn log_step(
         .await
         .map_err(ServerError::IO)?;
     let src_checkpoint = Checkpoint::read(&src_dir).await.map_err(ServerError::IO)?;
-    let src_retries = Retries::read(&src_dir).await.map_err(ServerError::IO)?;
+    // each sidecar as of its own checkpoint, whichever file a crash left it in
+    // ([Resolved #115](../../../../docs/src/appendix/resolved/retry-sidecar-crash-window.md))
+    let src_retries = Retries::recover(&src_dir, &src_checkpoint)
+        .await
+        .map_err(ServerError::IO)?;
     let mut dst_checkpoint = Checkpoint::read(&dst_dir).await.map_err(ServerError::IO)?;
-    let mut dst_retries = Retries::read(&dst_dir).await.map_err(ServerError::IO)?;
+    let mut dst_retries = Retries::recover(&dst_dir, &dst_checkpoint)
+        .await
+        .map_err(ServerError::IO)?;
     // every group the source holds anything for
     let mut groups: BTreeSet<GroupId> = src_wal.groups().into_iter().collect();
     groups.extend(
@@ -900,7 +906,9 @@ async fn log_step(
         }
         moved += 1;
     }
-    // everything appended durable, then the sidecar before the checkpoint, as the shard does
+    // everything appended durable, then the sidecar before the checkpoint. unlike a shard's
+    // checkpoint write this needs no staging: every group already here keeps the entries it had,
+    // and a crash between the two leaves the moved groups to the step's redo
     dst_wal.flush().await.map_err(ServerError::IO)?;
     dst_wal.close().await.map_err(ServerError::IO)?;
     src_wal.close().await.map_err(ServerError::IO)?;
@@ -1023,7 +1031,10 @@ async fn reclaim_step(
                 .await
                 .map_err(ServerError::IO)?;
             let mut checkpoint = Checkpoint::read(&wal_dir).await.map_err(ServerError::IO)?;
-            let mut retries = Retries::read(&wal_dir).await.map_err(ServerError::IO)?;
+            // the sidecar as of that checkpoint, whichever file a crash left it in
+            let mut retries = Retries::recover(&wal_dir, &checkpoint)
+                .await
+                .map_err(ServerError::IO)?;
             let mut groups: BTreeSet<GroupId> = wal.groups().into_iter().collect();
             groups.extend(
                 checkpoint

@@ -194,7 +194,7 @@ impl Partial {
     }
 }
 
-/// Where an install may be made to die, for the crash matrix
+/// Where an install, or a checkpoint write, may be made to die, for the crash matrix
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CrashPoint {
@@ -214,6 +214,11 @@ pub enum CrashPoint {
     AfterCheckpoint = 6,
     /// The marker and the file are gone
     AfterCleanup = 7,
+    /// A checkpoint write staged its retry sidecar and has not written the checkpoint file
+    ///
+    /// Not an install point, so not in [`CrashPoint::ALL`]
+    /// ([Resolved #115](../../../../docs/src/appendix/resolved/retry-sidecar-crash-window.md)).
+    SidecarWritten = 8,
 }
 
 impl CrashPoint {
@@ -228,6 +233,18 @@ impl CrashPoint {
         CrashPoint::AfterCleanup,
     ];
 
+    /// Every point a name can arm: the install's, then the checkpoint write's
+    pub const NAMED: [CrashPoint; 8] = [
+        CrashPoint::BeforePending,
+        CrashPoint::PendingWritten,
+        CrashPoint::MidInstall,
+        CrashPoint::MapSaved,
+        CrashPoint::BeforeCheckpoint,
+        CrashPoint::AfterCheckpoint,
+        CrashPoint::AfterCleanup,
+        CrashPoint::SidecarWritten,
+    ];
+
     /// The name the fixture arms a point by
     #[must_use]
     pub fn name(self) -> &'static str {
@@ -240,6 +257,7 @@ impl CrashPoint {
             CrashPoint::BeforeCheckpoint => "before_checkpoint",
             CrashPoint::AfterCheckpoint => "after_checkpoint",
             CrashPoint::AfterCleanup => "after_cleanup",
+            CrashPoint::SidecarWritten => "sidecar_written",
         }
     }
 
@@ -250,7 +268,7 @@ impl CrashPoint {
     /// * `name` - The name
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
-        CrashPoint::ALL
+        CrashPoint::NAMED
             .iter()
             .copied()
             .find(|point| point.name() == name)
@@ -300,7 +318,7 @@ pub mod crash_point {
     #[must_use]
     pub fn armed() -> CrashPoint {
         let raw = ARMED.load(Ordering::Relaxed);
-        CrashPoint::ALL
+        CrashPoint::NAMED
             .iter()
             .copied()
             .find(|point| *point as u8 == raw)
@@ -382,7 +400,7 @@ mod tests {
             "the prefix's checksum is the file's"
         );
         // the crash points round trip their names, in order
-        for (at, point) in CrashPoint::ALL.iter().enumerate() {
+        for (at, point) in CrashPoint::NAMED.iter().enumerate() {
             assert_eq!(CrashPoint::from_name(point.name()), Some(*point));
             assert_eq!(*point as u8, at as u8 + 1);
         }
