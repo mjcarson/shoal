@@ -54,6 +54,7 @@ use crate::server::replication::{
 };
 use crate::server::ring::Ring;
 use crate::server::stage_profile::{StageDurability, StageOp, Stamp};
+use crate::server::tables::storage::fs::TabletUsage;
 use crate::server::tables::ApplyStep;
 use crate::server::wal::{
     Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, ShardWal,
@@ -63,6 +64,7 @@ use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::protocol::peer::{Command, ReplicateKind, ReplicateRequestHead, RequestId};
 use crate::shared::protocol::read::SessionToken;
+use crate::shared::protocol::stats::WriteCounters;
 use crate::shared::responses::ResponseError;
 use crate::shared::traits::{QuerySupport, TableNameSupport};
 use crate::storage::CompactionJob;
@@ -262,6 +264,12 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) compacting: HashMap<u64, HashSet<D::TableNames>>,
     /// What proposals have come to
     pub(super) stats: ProposalStats,
+    /// The rows and bytes each group's copy on this shard has applied since the shard started
+    ///
+    /// Kept apart from the group's slot so a slot rebuilt for a new map keeps counting, and
+    /// dropped with a group the map no longer names
+    /// ([F52](../../../../docs/src/features/cluster-stats.md))
+    pub(super) writes: HashMap<GroupId, WriteCounters>,
     /// What snapshots have done ([F43](../../../../docs/src/features/node-recovery.md))
     pub(super) snapshots: SnapshotStats,
     /// What the loop found of its storage's integrity: the counters the archive maps do not
@@ -419,6 +427,7 @@ where
             isolated: false,
             held_volatile: scan_held_volatile(&dir),
             last_report: None,
+            writes: HashMap::new(),
             stopping: false,
             sweep_due: false,
             wal_dir: dir.clone(),
@@ -504,6 +513,8 @@ where
         // ([F45](../../../../docs/src/features/replica-migration.md))
         let mut retiring = Vec::new();
         for id in gone {
+            // a group gone from this shard stops being counted here
+            replication.writes.remove(&id);
             if let Some(mut group) = replication.groups.remove(&id) {
                 orphaned.extend(
                     std::mem::take(&mut group.waiting)
@@ -1110,6 +1121,12 @@ where
                     }
                 }
             };
+            // a write this copy applied for the first time is counted, a repeat or a scrub is not
+            if let (Some(ApplyOutcome::Applied(result)), EntryPayload::Normal(command)) =
+                (&outcome, &entry.payload)
+            {
+                self.count_write(group, *result, command.payload.len());
+            }
             // the entry is applied, whatever it was
             resumed = false;
             let mut applied = state.borrow_mut();
@@ -1136,6 +1153,45 @@ where
             replication.sweep_due = true;
         }
         Ok(())
+    }
+
+    /// Count one applied write against its group
+    ///
+    /// An insert, update or delete that changed a row counts one row and its intent's bytes; an
+    /// update or delete that found no row counts a miss; a scrub counts nothing
+    /// ([F52](../../../../docs/src/features/cluster-stats.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group the write was applied for
+    /// * `result` - What applying it came to
+    /// * `bytes` - The size of its replicated intent
+    fn count_write(&mut self, group: GroupId, result: CommandResult, bytes: usize) {
+        // only a shard with a replication half has groups to count against
+        let Some(replication) = self.replication.as_mut() else {
+            return;
+        };
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        let counters = replication.writes.entry(group).or_default();
+        // each kind lands on its own counters, and a write that found nothing is a miss
+        match (result.kind, result.ok) {
+            (ResultKind::Insert, true) => {
+                counters.inserts += 1;
+                counters.insert_bytes += bytes;
+            }
+            (ResultKind::Update, true) => {
+                counters.updates += 1;
+                counters.update_bytes += bytes;
+            }
+            (ResultKind::Delete, true) => {
+                counters.deletes += 1;
+                counters.delete_bytes += bytes;
+            }
+            (ResultKind::Insert | ResultKind::Update | ResultKind::Delete, false) => {
+                counters.misses += 1;
+            }
+            (ResultKind::Scrub, _) => {}
+        }
     }
 
     /// What applying an entry of a group needs: its table, its frame's generation, its state,
@@ -2276,26 +2332,32 @@ where
             };
         };
         let node = self.node_id();
-        // the bytes each table's archives hold per tablet, read once for every group of it
-        let tablet_bytes: std::collections::HashMap<D::TableNames, Vec<u64>> = replication
+        // the bytes and partitions each table's archives hold per tablet, read once for every
+        // group of it
+        let tablet_usage: std::collections::HashMap<D::TableNames, TabletUsage> = replication
             .groups
             .values()
             .map(|slot| slot.table)
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
-            .map(|table| (table, self.table_map.tablet_bytes(table)))
+            .map(|table| (table, self.table_map.tablet_usage(table)))
             .collect();
+        // a figure per tablet summed over the tablets a group serves
+        let over_tablets = |per_tablet: &[u64], tablets: &[u16]| -> u64 {
+            tablets
+                .iter()
+                .map(|tablet| per_tablet.get(usize::from(*tablet)).copied().unwrap_or(0))
+                .sum()
+        };
         let groups = replication
             .groups
             .values()
             .map(|slot| {
                 let state = slot.state.borrow();
-                let bytes = tablet_bytes.get(&slot.table).map_or(0, |per_tablet| {
-                    slot.spec
-                        .tablets
-                        .iter()
-                        .map(|tablet| per_tablet.get(usize::from(*tablet)).copied().unwrap_or(0))
-                        .sum()
+                let usage = tablet_usage.get(&slot.table);
+                let bytes = usage.map_or(0, |usage| over_tablets(&usage.bytes, &slot.spec.tablets));
+                let partitions = usage.map_or(0, |usage| {
+                    over_tablets(&usage.partitions, &slot.spec.tablets)
                 });
                 let metrics = slot
                     .raft
@@ -2345,6 +2407,12 @@ where
                         .as_ref()
                         .map(|metrics| metrics.current_term)
                         .unwrap_or(0),
+                    partitions,
+                    writes: replication
+                        .writes
+                        .get(&slot.spec.id)
+                        .copied()
+                        .unwrap_or_default(),
                 }
             })
             .collect::<Vec<_>>();

@@ -99,6 +99,21 @@ enum ClusterCommand {
         #[clap(flatten)]
         inventory: InventoryArg,
     },
+    /// Print every member's standing, partitions, bytes and write rates, and every plan's progress
+    Stats {
+        /// The inventory
+        #[clap(flatten)]
+        inventory: InventoryArg,
+        /// Narrow the figures to one table, by the name the schema spells it
+        #[clap(long)]
+        table: Option<String>,
+        /// Print again every so many seconds, two if none is given, until interrupted
+        #[clap(long, num_args = 0..=1, default_missing_value = "2")]
+        watch: Option<u64>,
+        /// Print the leader's answer as json rather than as lines
+        #[clap(long)]
+        json: bool,
+    },
     /// Start a node's unit, or every node's
     Start {
         /// The inventory
@@ -239,6 +254,16 @@ where
         }
         ClusterCommand::Status { inventory } => {
             Deployment::open(&inventory.inventory)?.status::<S>().await
+        }
+        ClusterCommand::Stats {
+            inventory,
+            table,
+            watch,
+            json,
+        } => {
+            Deployment::open(&inventory.inventory)?
+                .stats::<S>(table.as_deref(), watch, json)
+                .await
         }
         ClusterCommand::Start { inventory, node } => {
             Deployment::open(&inventory.inventory)?.systemctl("start", node.as_deref())

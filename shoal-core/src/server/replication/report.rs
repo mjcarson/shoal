@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::shared::identity::{GroupId, ShardAddr, TableId};
+use crate::shared::protocol::stats::WriteCounters;
 
 /// One group as its hosting shard sees it
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +82,16 @@ pub struct GroupReport {
     /// ([Resolved #103](../../../../docs/src/appendix/resolved/returning-leader.md)).
     #[serde(default)]
     pub term: u64,
+    /// The partitions the table's archives hold for the group's tablets on this shard
+    ///
+    /// Counted in the same pass over the archive map as `bytes`, so it lags an insert until
+    /// the compactor archives it ([F52](../../../../docs/src/features/cluster-stats.md)).
+    #[serde(default)]
+    pub partitions: u64,
+    /// The rows and bytes this shard's copy has applied for the group since the shard started
+    /// ([F52](../../../../docs/src/features/cluster-stats.md))
+    #[serde(default)]
+    pub writes: WriteCounters,
 }
 
 /// What a shard's snapshots have done since it started
@@ -419,6 +430,10 @@ pub struct NodeReplication {
     /// ([F44](../../../../docs/src/features/repair.md))
     #[serde(default)]
     pub integrity: IntegrityStats,
+    /// The rows and bytes the node's copies have applied, folded over its shards
+    /// ([F52](../../../../docs/src/features/cluster-stats.md))
+    #[serde(default)]
+    pub writes: WriteCounters,
     /// Every shard's report, in shard order
     pub shards: Vec<ShardReplication>,
 }
@@ -473,6 +488,13 @@ impl NodeReplication {
                 .iter()
                 .fold(IntegrityStats::default(), |mut folded, shard| {
                     folded.absorb(&shard.integrity);
+                    folded
+                }),
+            writes: shards
+                .iter()
+                .flat_map(|shard| shard.groups.iter())
+                .fold(WriteCounters::default(), |mut folded, group| {
+                    folded.absorb(&group.writes);
                     folded
                 }),
             shards,

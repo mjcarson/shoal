@@ -197,6 +197,7 @@ so they get worse by existing longer rather than under load.
 | **B15** | [**O57**](#o57-tablet-bytes-are-rescanned-from-the-whole-archive-map-on-every-report) — tablet bytes are rescanned from the whole archive map on every report | Argued — a pass over every archived partition of a table per report tick, on the shard | S | none; a grid cell on a persistent table under writes is where the pass would show | Contained | no |
 | **B16** | [**O58**](#o58-a-rehomes-moved-records-are-copied-and-a-donors-archives-keep-the-dead-ones) — a rehome's moved records are copied, and a donor's archives keep the dead ones | Argued — a read and a write per moved record at start, and a growth's donor holding dead records until its own compaction | M | `macro/rehome/shrink`, whose `bytes` over `millis` is the copy's pace | Contained | no |
 | **B17** | [**O59**](#o59-the-rehome-runs-on-one-core-and-blocks-the-start) — the rehome runs on one core and blocks the start | Argued — the start held for the whole move while every other core idles | M | `macro/rehome/shrink`, whose `millis` is the hold | Contained | no |
+| **B18** | [**O60**](#o60-a-nodes-figures-ride-its-status-report-as-verbose-json) — a node's figures ride its status report as verbose JSON | Measured in shape — about 7.4 KB a report for four busy tables, one report in four, 1.6× the leader's intake at 64 members | S | none; the spike's `fanout` table prices it, and no arm drives a cluster of that size | Contained | no |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -2755,7 +2756,9 @@ Filed by [F46](../features/capacity-rebalancing.md). `TabletMap::from_state` is 
 | **Tradeoff** | Contained — a counter is the same figure without the pass, and `tablet_bytes_follow_the_map` is the test that would catch it drifting |
 | **Benchmark** | none names it; the grid's `r50` cells on the persistent tables would carry a per-tick pass as a shard-core cost, and the kill arm's placement is where a report is built under load |
 
-Filed by [F46](../features/capacity-rebalancing.md).
+Filed by [F46](../features/capacity-rebalancing.md). Since [F52](../features/cluster-stats.md)
+the same pass counts each tablet's partitions as well (`ArchiveMap::tablet_usage`), so a counter
+that replaces it has to keep both figures, or they drift apart.
 
 ### O58. A rehome's moved records are copied, and a donor's archives keep the dead ones
 
@@ -2782,3 +2785,16 @@ Filed by [F47](../features/local-rehome.md).
 | **Benchmark** | `macro/rehome/shrink` ([F47](../features/local-rehome.md)), whose `cluster.rehome.millis` is the hold |
 
 Filed by [F47](../features/local-rehome.md).
+
+### O60. A node's figures ride its status report as verbose JSON
+
+| | |
+| --- | --- |
+| **Rank** | **B18** — measured in shape, contained |
+| **Impact** | Measured in shape — `cargo run -p shoal-spike --release -- fanout` prices a `StatusReport` carrying a `NodeStats` for four busy tables at 7,766 bytes against 323 without; on one report in four (`STATS_EVERY_REPORTS`) that takes the leader's intake from 387 KB/s to 621 KB/s at 64 members and from 1.3 KB/s to 8.7 KB/s at three. Every figure is a named JSON field, every rate three floats printed at full precision, and every table carries both its hosted and its led rates |
+| **Difficulty** | S — round the rates to three significant figures before serializing, send only the led rates and the applied totals and let the leader derive the rest, or carry the figures as rkyv on the control lane; each is local to `NodeStats` and its tracker |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — the report is the control lane's and nothing on a query's path waits on it; zero rates and idle tables are already left out, so a real report is smaller than the priced one |
+| **Benchmark** | none; the spike's `fanout` table is the price, and no arm drives a cluster of 64 |
+
+Filed by [F52](../features/cluster-stats.md).

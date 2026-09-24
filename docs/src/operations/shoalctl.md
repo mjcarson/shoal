@@ -90,6 +90,7 @@ passwordless sudo on every host ([F51](../features/cluster-deployment.md)):
 | `cluster add -i <inv> <node> [--wipe] [--rebalance]` | Join a listed node through every member, and optionally follow a `Rebalance` onto it |
 | `cluster rebalance -i <inv>` | Send `Rebalance` and follow its plan |
 | `cluster status -i <inv>` | Every node's id, address and unit, then the cluster tab's lines |
+| `cluster stats -i <inv> [--table <t>] [--watch [s]] [--json]` | Every member's standing, groups, tablets, archived partitions and bytes, and write and stream rates over 10s/1m/5m, the cluster's led totals, and every plan's progress, pace and estimate, from the control leader ([F52](../features/cluster-stats.md)) |
 | `cluster start/stop/restart -i <inv> [node]` | systemctl on one node or every deployed node |
 | `cluster logs -i <inv> <node> [-n N]` | The node's journal |
 | `cluster destroy -i <inv> --yes` | Delete every node, its data and the local state |
@@ -197,7 +198,12 @@ Mouse clicks are captured and routed to panes (`app.rs:472`).
 Since [F50](../features/cluster-operations.md), `Space c` opens a tab that shows the cluster the
 connection reached and takes the operations an operator runs on it (`shoalctl/src/cluster/`).
 It polls six admin reads a second - `Members`, `Readiness`, `Replication`, `Plans`, `Backups`,
-`Recoveries` - and draws one model from them:
+`Recoveries` - and draws one model from them. Since [F52](../features/cluster-stats.md) a node
+whose `Members` frame lists `stats` in `admin_reads` is asked for a seventh, `Stats`; when the
+node reached is not the control leader, the tab dials the leader's advertised client address
+as nobody (a read needs no principal) and asks there, and draws every member's figures and the
+open plans' pace under the model. A node from before F52 is never sent it, since it would close
+the connection on a kind it cannot decode:
 
 ```text
 cluster 8e26… via daa5… at version 31
@@ -510,7 +516,10 @@ rows.
 - No connection retry or reconnect if the server goes away; a cluster tab whose poll fails
   keeps drawing its last model and says the poll failed.
 - The cluster tab shows the node the connection reached: `Replication` is that node's own
-  groups, and a `Members` from a follower is as current as its log.
+  groups, and a `Members` from a follower is as current as its log. The `Stats` lines are the
+  leader's since [F52](../features/cluster-stats.md), read over a second connection; when the
+  leader's advertised address cannot be reached from where shoalctl runs, they are the reached
+  node's own and say so.
 - ~~Effectively untested — the crate itself has one compile-only doctest, though the SHQL parsing
   it depends on is now covered in `shoal-core` and `shoal/tests/shql.rs`.~~ The completion
   menu has its own tests, and since [F50](../features/cluster-operations.md) the cluster tab's

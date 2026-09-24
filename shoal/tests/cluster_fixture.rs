@@ -2230,6 +2230,11 @@ fn handle_command(
             None => Err("PLAN_STATUS needs an operation id".to_string()),
         },
         "PLANS" => admin(AdminKind::Plans),
+        // every member's standing and figures and every plan's progress, optionally narrowed
+        // to a table ([F52](../../docs/src/features/cluster-stats.md))
+        "STATS" => admin(AdminKind::Stats {
+            table: parts.next().map(str::to_string),
+        }),
         // override the free bytes this node reports and checks, or lift the override
         "FREE_BYTES" => match parts.next() {
             Some("none") => {
@@ -17084,6 +17089,286 @@ async fn certificate_rotation_binds_identity() -> Result<(), FixtureError> {
         .await?;
     }
     for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+// ========================================================================
+// Cluster stats (F52)
+// ========================================================================
+
+/// A node's answer to the `Stats` read, optionally narrowed to a table
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to ask
+/// * `table` - The table to narrow to, if one
+fn stats_via(
+    cluster: &mut Cluster,
+    via: usize,
+    table: Option<&str>,
+) -> Result<serde_json::Value, FixtureError> {
+    // the verb, with the table when one is asked for
+    let verb = match table {
+        Some(table) => format!("STATS {table}"),
+        None => "STATS".to_string(),
+    };
+    let reply = cluster.node_mut(via).command(&verb)?;
+    reply
+        .get("ok")
+        .cloned()
+        .ok_or_else(|| FixtureError::ChildFailed(format!("{verb} answered {reply}")))
+}
+
+/// One figure of a node's total, as a stats view carries it, or zero if it has none
+///
+/// # Arguments
+///
+/// * `view` - The stats view
+/// * `node` - The node's id
+/// * `path` - The keys down to the figure, from the node's total
+fn member_total(view: &serde_json::Value, node: &str, path: &[&str]) -> Option<serde_json::Value> {
+    // the member's row, then its figures' total, then the figure
+    let member = view["members"]
+        .as_array()?
+        .iter()
+        .find(|member| member["node"] == node)?;
+    let mut figure = &member["stats"]["total"];
+    for key in path {
+        figure = &figure[*key];
+    }
+    Some(figure.clone())
+}
+
+/// Every placed member's figures count the rows written once per copy and once per leader,
+/// its partitions once, its rates move, and its standing is the committed one (F52)
+///
+/// Three placed nodes at a factor of three and a spare. Rows written through node zero and
+/// compacted everywhere are counted by the leader's view three times over every copy and once
+/// over the copies led, and the archived partitions the leaders hold add up to the rows; a
+/// follower answers its own figures only and names the leader; a table narrows the figures to
+/// itself and an unknown one is refused by name; the spare, killed and put in maintenance,
+/// reads as down in maintenance ([F52](../../docs/src/features/cluster-stats.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn stats_count_writes_partitions_and_status() -> Result<(), FixtureError> {
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .detector_interval_ms(200)
+            .auto_remove_after(Some(Duration::from_secs(120))),
+    )
+    .await?;
+    cluster.wait_voters(0, 3)?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    // rows through node zero, on every copy, archived everywhere
+    let keys: Vec<u64> = (52_000..52_060).collect();
+    for key in &keys {
+        write_note(&addr0, *key, &format!("stats-{key}")).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for node in 0..3 {
+        compact_now(&mut cluster, node, "Note")?;
+    }
+    let ids = cluster.node_ids();
+    let rows = keys.len() as u64;
+    // the leader's view holds every member's figures once their reports have landed
+    let leader = cluster.wait_leader_among(0, &[0, 1, 2, 3], Duration::from_secs(30))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let view = loop {
+        let view = stats_via(&mut cluster, leader, None)?;
+        let sum = |path: &[&str]| -> u64 {
+            ids.iter()
+                .filter_map(|node| member_total(&view, node, path))
+                .filter_map(|figure| figure.as_u64())
+                .sum()
+        };
+        let counted = sum(&["led_total", "inserts"]) == rows
+            && sum(&["applied_total", "inserts"]) == rows * 3
+            && sum(&["partitions_led"]) == rows
+            && sum(&["partitions"]) == rows * 3;
+        if counted {
+            break view;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the leader's figures never counted {rows} rows: {view}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert_eq!(view["source"], "leader", "{view}");
+    // every placed member's rates moved and its bytes are the archives'
+    for node in &ids[..3] {
+        let rate = member_total(&view, node, &["applied", "inserts", "r5m"])
+            .and_then(|rate| rate.as_f64())
+            .unwrap_or(0.0);
+        assert!(rate > 0.0, "{node} has no insert rate: {view}");
+        let bytes = member_total(&view, node, &["bytes"])
+            .and_then(|bytes| bytes.as_u64())
+            .unwrap_or(0);
+        assert!(bytes > 0, "{node} holds no archived bytes: {view}");
+        let insert_bytes = member_total(&view, node, &["applied_total", "insert_bytes"])
+            .and_then(|bytes| bytes.as_u64())
+            .unwrap_or(0);
+        assert!(insert_bytes >= rows * 8, "{node} counted no bytes: {view}");
+    }
+    // the spare holds and does nothing, and still has a row with its standing
+    let spare = member_total(&view, &ids[3], &["groups"]).and_then(|groups| groups.as_u64());
+    assert_eq!(spare, Some(0), "{view}");
+    // a follower answers its own figures and names the leader
+    let follower = (0..3).find(|node| *node != leader).expect("a follower");
+    let local = stats_via(&mut cluster, follower, None)?;
+    assert_eq!(local["source"], "local", "{local}");
+    assert_eq!(local["leader"], ids[leader], "{local}");
+    let held: Vec<&serde_json::Value> = local["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .filter(|member| !member["stats"].is_null())
+        .collect();
+    assert_eq!(held.len(), 1, "{local}");
+    assert_eq!(held[0]["node"], ids[follower], "{local}");
+    // a table narrows the figures to itself, and an unknown one is refused by name
+    let narrowed = stats_via(&mut cluster, leader, Some("Note"))?;
+    assert_eq!(narrowed["table"], "Note", "{narrowed}");
+    for member in narrowed["members"].as_array().expect("members") {
+        if let Some(tables) = member["stats"]["tables"].as_array() {
+            assert_eq!(tables.len(), 1, "{narrowed}");
+            assert_eq!(tables[0]["table"], "Note", "{narrowed}");
+        }
+    }
+    let refused = cluster.node_mut(leader).command("STATS Nowhere")?;
+    assert!(
+        refused["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("no table is named Nowhere")),
+        "{refused}"
+    );
+    // the spare killed and put in maintenance reads as down in maintenance
+    cluster.kill(3)?;
+    let leader = cluster.wait_leader_among(0, &[0, 1, 2], Duration::from_secs(30))?;
+    wait_member_state(&mut cluster, leader, 3, "down", Duration::from_secs(30))?;
+    let reply = cluster.node_mut(leader).command("MAINTENANCE 3 on")?;
+    assert!(reply["ok"].is_object(), "{reply}");
+    let view = stats_via(&mut cluster, leader, None)?;
+    let row = view["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .find(|member| member["node"] == ids[3])
+        .cloned()
+        .expect("the spare's row");
+    assert_eq!(row["health"], "down", "{row}");
+    assert_eq!(row["maintenance"], true, "{row}");
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A rebalance onto a spare is followed step by step, with its timings off the move records,
+/// and the spare's figures count what it applied while it was fed (F52)
+///
+/// The `heterogeneous_placement_obeys_feasible_weights` shape at equal weights: sets move onto
+/// the spare, and the leader's view shows the plan's steps moving while it runs; once it is
+/// done every step moved, its start, elapsed time and mean step are known, and the spare has
+/// applied rows it never led ([F52](../../docs/src/features/cluster-stats.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn stats_follow_a_rebalance() -> Result<(), FixtureError> {
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .detector_interval_ms(200)
+            .plan_interval(Duration::from_millis(500)),
+    )
+    .await?;
+    cluster.wait_voters(0, 3)?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    // rows in every set, archived, so the plan's steps weigh something
+    let keys: Vec<u64> = (52_100..52_190).collect();
+    for key in &keys {
+        write_note(&addr0, *key, &format!("{key}-{}", "x".repeat(200))).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for node in 0..3 {
+        compact_now(&mut cluster, node, "Note")?;
+    }
+    // the bytes are reported before the plan is asked for
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !member_view(&mut cluster, 0, 1)?["held_bytes"]
+        .as_u64()
+        .is_some_and(|bytes| bytes > 0)
+    {
+        assert!(Instant::now() < deadline, "node one never reported its bytes");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let plan = plan_as_process(&mut cluster, 0, "REBALANCE")?;
+    let op = plan.to_string();
+    // the plan's progress, as the leader's view has it, until it is done
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let mut saw_running = false;
+    let progress = loop {
+        let leader = cluster.wait_leader_among(0, &[0, 1, 2, 3], Duration::from_secs(30))?;
+        let view = stats_via(&mut cluster, leader, None)?;
+        let progress = view["plans"]
+            .as_array()
+            .and_then(|plans| plans.iter().find(|plan| plan["op"] == op).cloned());
+        if let Some(progress) = progress {
+            if progress["phase"] == "done" {
+                break progress;
+            }
+            // while it runs, a step is moving or moved and it has a start
+            if progress["moving"].as_u64().unwrap_or(0) + progress["moved"].as_u64().unwrap_or(0)
+                > 0
+            {
+                saw_running = true;
+                assert!(progress["eta_ms"].is_u64() || progress["eta_ms"].is_null());
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the plan never finished: {view}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(saw_running, "the plan was never seen running: {progress}");
+    assert_eq!(progress["outcome"], "completed", "{progress}");
+    let total = progress["steps_total"].as_u64().unwrap_or(0);
+    assert!(total > 0, "{progress}");
+    assert_eq!(progress["moved"], total, "{progress}");
+    assert!(progress["bytes_planned"].as_u64().unwrap_or(0) > 0, "{progress}");
+    assert_eq!(progress["bytes_moved"], progress["bytes_planned"], "{progress}");
+    assert!(progress["started_ms"].as_u64().unwrap_or(0) > 0, "{progress}");
+    assert!(progress["elapsed_ms"].as_u64().unwrap_or(0) > 0, "{progress}");
+    assert!(progress["mean_step_ms"].as_u64().unwrap_or(0) > 0, "{progress}");
+    assert!(progress["eta_ms"].is_null(), "{progress}");
+    // the spare applied rows for the sets it was fed, and its figures say so
+    let spare = cluster.node_ids()[3].clone();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let leader = cluster.wait_leader_among(0, &[0, 1, 2, 3], Duration::from_secs(30))?;
+        let view = stats_via(&mut cluster, leader, None)?;
+        let applied = member_total(&view, &spare, &["applied_total", "inserts"])
+            .and_then(|inserts| inserts.as_u64())
+            .unwrap_or(0);
+        let groups = member_total(&view, &spare, &["groups"])
+            .and_then(|groups| groups.as_u64())
+            .unwrap_or(0);
+        if applied > 0 && groups > 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the spare's figures never counted what it was fed: {view}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    for id in 0..4 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
     Ok(())

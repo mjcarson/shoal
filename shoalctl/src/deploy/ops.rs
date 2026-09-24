@@ -757,6 +757,16 @@ impl Deployment {
     pub async fn rebalance<S>(&self, shoal: &Arc<Shoal<S>>) -> color_eyre::Result<()>
     where
         S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
     {
         let op = Uuid::new_v4();
         step(None, &format!("rebalancing as {op}"));
@@ -775,6 +785,7 @@ impl Deployment {
         // follow the plan's record the way the cluster tab does
         let deadline = Instant::now() + PLAN_TIMEOUT;
         let mut last = Vec::new();
+        let mut leader = None;
         loop {
             let (lines, done) = crate::components::follow_once(shoal, op, Follow::Plan)
                 .await
@@ -784,6 +795,11 @@ impl Deployment {
                     step(None, line);
                 }
                 last = lines;
+                // and its pace, when a step moved and the cluster answers the figures
+                // ([F52](../../../docs/src/features/cluster-stats.md))
+                if let Some(line) = self.plan_pace(shoal, op, &mut leader).await {
+                    step(None, &line);
+                }
             }
             if done {
                 return Ok(());
@@ -792,6 +808,124 @@ impl Deployment {
                 bail!("the rebalance {op} was not done after {PLAN_TIMEOUT:?}; `status` follows it");
             }
             tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// A plan's progress as one line, from the leader's figures, if the cluster answers them
+    ///
+    /// # Arguments
+    ///
+    /// * `shoal` - The admin client
+    /// * `op` - The plan
+    /// * `leader` - The leader's client from an earlier call, by its address
+    async fn plan_pace<S>(
+        &self,
+        shoal: &Arc<Shoal<S>>,
+        op: Uuid,
+        leader: &mut Option<(String, Arc<Shoal<S>>)>,
+    ) -> Option<String>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        // only a node that says it answers the figures is asked for them
+        let model = crate::cluster::poll(shoal).await.ok()?;
+        if !model.answers("stats") {
+            return None;
+        }
+        let dial = |addr: String| async move {
+            self.connect::<S>(&addr, Instant::now())
+                .await
+                .map_err(|error| error.to_string())
+        };
+        let figures = crate::cluster::stats::leader_stats(shoal, None, leader, dial)
+            .await
+            .ok()?;
+        figures
+            .view
+            .plans
+            .iter()
+            .find(|plan| plan.op == op)
+            .map(crate::cluster::stats::plan_line)
+    }
+
+    /// Print every member's figures and every plan's progress, as the leader holds them
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table to narrow the figures to, if one
+    /// * `watch` - Print again every so many seconds, if given
+    /// * `json` - Print the answer as json rather than as lines
+    ///
+    /// # Errors
+    ///
+    /// When no node answers, or the cluster does not answer the figures.
+    pub async fn stats<S>(
+        &self,
+        table: Option<&str>,
+        watch: Option<u64>,
+        json: bool,
+    ) -> color_eyre::Result<()>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        let record = self.state.record()?;
+        if record.nodes.is_empty() {
+            bail!("{} has not been deployed", self.inventory.name);
+        }
+        // any member answers, and names the leader if it is not the one
+        let shoal = self.any_member::<S>(&record).await?;
+        let model = crate::cluster::poll(&shoal).await.map_err(|error| eyre!(error))?;
+        if !model.answers("stats") {
+            bail!(
+                "the node reached does not answer the Stats read; it runs a build from before F52"
+            );
+        }
+        let mut leader = None;
+        loop {
+            // the leader's answer, or the reached node's own with why
+            let dial = |addr: String| async move {
+                self.connect::<S>(&addr, Instant::now())
+                    .await
+                    .map_err(|error| error.to_string())
+            };
+            let figures = crate::cluster::stats::leader_stats(&shoal, table, &mut leader, dial)
+                .await
+                .map_err(|error| eyre!(error))?;
+            // a watch redraws from the top of the screen
+            if watch.is_some() && !json {
+                print!("\x1b[2J\x1b[H");
+            }
+            if json {
+                println!("{}", shoal::serde_json::to_string_pretty(&figures.view)?);
+            } else {
+                for line in figures.render_lines() {
+                    println!("{line}");
+                }
+            }
+            let Some(every) = watch else {
+                return Ok(());
+            };
+            tokio::time::sleep(Duration::from_secs(every.max(1))).await;
         }
     }
 

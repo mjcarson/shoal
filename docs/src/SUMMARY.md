@@ -114,6 +114,7 @@
   - [F49. Backup, restore, export and permanent quorum loss](features/backup-and-recovery.md)
   - [F50. Certificate rotation, the cluster tab, the runbooks and the physical cluster](features/cluster-operations.md)
   - [F51. Deploying a cluster with shoalctl cluster](features/cluster-deployment.md)
+  - [F52. Cluster stats: what every node holds and does, and how fast a plan moves](features/cluster-stats.md)
 
 # Direction
 

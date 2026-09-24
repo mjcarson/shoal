@@ -85,7 +85,10 @@ and feeds it again. A tombstoned member is not pinged.
 
 `space c` opens a cluster tab (`shoalctl/src/cluster/`). Its content is a `ClusterModel` built
 every second from six admin reads through the connection the app has - `Members`, `Readiness`,
-`Replication`, `Plans`, `Backups`, `Recoveries` - and rendered as lines: the cluster, the node
+`Replication`, `Plans`, `Backups`, `Recoveries` - ~~and rendered as lines~~ (seven since
+[F52](cluster-stats.md): a node that lists `stats` in `admin_reads` is also asked for `Stats`,
+from the leader, and every member's figures and the open plans' pace are drawn under the rest)
+and rendered as lines: the cluster, the node
 reached, the version and the leader; the headline an operator reads first, which is the M9b
 figure said in one line (`2 of 3 copies, awaiting 1 member, 4 sets under-replicated; writes
 refused: have 2 need 2`); the activated wire and the range the members speak; what this node
@@ -281,7 +284,8 @@ Nothing on the list was fixed silently; a debt not on it was never named for M10
 Nothing here is on a query path. The identity check is a DER walk at the handshake; a reload
 is two config builds under a write lock nothing else holds for long; the address lookup is a
 `BTreeMap` read per control RPC; the cluster tab's poll is six admin reads a second on one
-connection. No capture changed, and no bench arm was added: the physical capture this page
+connection (seven, and a second connection to the leader when the one reached is not it, since
+[F52](cluster-stats.md)). No capture changed, and no bench arm was added: the physical capture this page
 makes possible is the benchmark host's to take. The three node overhead arm was run once at
 smoke scale on the development host with the record in place - three environments naming the
 one machine, `emulated` true, one build digest - and the capture deleted.

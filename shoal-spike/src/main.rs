@@ -967,10 +967,10 @@ fn fanout() {
     // the report every member sends the leader, and what the leader takes in per second
     println!("## Status reports at a {REPORT_INTERVAL_MS} ms interval");
     println!();
-    println!("| members | report bytes | reports/s at the leader | bytes/s in at the leader |");
-    println!("| --- | --- | --- | --- |");
+    println!("| members | report bytes | reports/s at the leader | bytes/s in at the leader | stats bytes | stats bytes/s in at the leader |");
+    println!("| --- | --- | --- | --- | --- | --- |");
     for members in FANOUT_MEMBERS {
-        let report = StatusReport {
+        let mut report = StatusReport {
             node: NodeId::mint(),
             incarnation: 3,
             seq: 100_000,
@@ -982,16 +982,83 @@ fn fanout() {
             free_bytes: 0,
             group_bytes: Vec::new(),
             wire_max: shoal::shared::protocol::PROTOCOL_VERSION,
+            stats: None,
         };
         let bytes = shoal::serde_json::to_vec(&report)
             .expect("a report encodes")
             .len();
+        // the same report carrying a node's figures for a schema of four busy tables, which
+        // rides one report in every STATS_EVERY_REPORTS (F52)
+        report.stats = Some(busy_node_stats(4));
+        let with_stats = shoal::serde_json::to_vec(&report)
+            .expect("a report encodes")
+            .len();
         let per_second = (members - 1) as f64 * 1000.0 / REPORT_INTERVAL_MS as f64;
+        let stats_per_second = per_second / STATS_EVERY_REPORTS as f64;
         println!(
-            "| {members} | {bytes} | {per_second:.0} | {:.0} |",
-            per_second * bytes as f64
+            "| {members} | {bytes} | {per_second:.0} | {:.0} | {with_stats} | {:.0} |",
+            per_second * bytes as f64,
+            per_second * bytes as f64 + stats_per_second * (with_stats - bytes) as f64
         );
     }
+}
+
+/// How many status reports in a row one carries a node's figures, as the control plane sends them
+const STATS_EVERY_REPORTS: u64 = shoal::server::control::stats::STATS_EVERY_REPORTS as u64;
+
+/// A node's figures for a schema of busy tables, every field non-zero, for pricing the report
+///
+/// # Arguments
+///
+/// * `tables` - How many tables the schema holds
+fn busy_node_stats(tables: usize) -> shoal::shared::protocol::stats::NodeStats {
+    use shoal::shared::protocol::stats::{NodeStats, Rates, TableStats, WriteCounters, WriteRates};
+    // a rate with three windows that print at full width
+    let rates = Rates {
+        r10s: 12_345.678,
+        r1m: 11_234.567,
+        r5m: 10_123.456,
+    };
+    let write_rates = WriteRates {
+        inserts: rates,
+        updates: rates,
+        deletes: rates,
+        insert_bytes: rates,
+        update_bytes: rates,
+        delete_bytes: rates,
+        misses: rates,
+    };
+    let counters = WriteCounters {
+        inserts: 123_456_789,
+        updates: 123_456_789,
+        deletes: 123_456_789,
+        insert_bytes: 123_456_789_012,
+        update_bytes: 123_456_789_012,
+        delete_bytes: 123_456_789_012,
+        misses: 123_456,
+    };
+    // one row per table, and their sum
+    let row = |table: String| TableStats {
+        table,
+        groups: 12,
+        groups_led: 4,
+        tablets: 4096,
+        tablets_led: 1365,
+        partitions: 12_345_678,
+        partitions_led: 4_115_226,
+        bytes: 123_456_789_012,
+        bytes_led: 41_152_263_004,
+        applied: write_rates,
+        led: write_rates,
+        applied_total: counters,
+        led_total: counters,
+    };
+    let mut stats = NodeStats::empty(NodeId::mint());
+    stats.tables = (0..tables).map(|table| row(format!("table_{table}"))).collect();
+    stats.total = row(String::new());
+    stats.stream_sent = rates;
+    stats.stream_received = rates;
+    stats
 }
 
 fn main() {

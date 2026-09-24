@@ -400,7 +400,11 @@ replanned - and `Plans` every plan the state keeps. `Members` carries, per membe
 `state_name` (the one name of C3's six states), `grace` with its committed `elapsed_ms`,
 `suspended` and `expired`, `grace_remaining_ms`, `weight`, and the `free_bytes` and
 `held_bytes` the leader last heard, beside `under_replicated_sets`, `auto_remove_after_ms`, the
-open `plans` and the `tombstones`. Since [F47](../features/local-rehome.md) a member's `record`
+open `plans` and the `tombstones`. Since [F52](../features/cluster-stats.md) the `Stats`
+read carries every member's figures - tablets, archived partitions and bytes, and trailing
+write and stream rates - and every plan's progress: its steps, bytes, elapsed time, pace and an
+estimate of what is left; the leader holds every member's, any other node its own, and
+`Members` lists `stats` in `admin_reads` so a client knows to ask. Since [F47](../features/local-rehome.md) a member's `record`
 carries `physical` beside `shards`: the executors it runs beside the slots its peers name it
 by, which differ once its core count has changed; a node whose start ran a rehome logs
 `rehoming the storage directory before any shard starts` with the counts and `rehomed the
@@ -516,13 +520,19 @@ The workspace also has `cargo-flamegraph` available, and a `profile.json.gz` and
 
 For running Shoal anywhere real, the gaps are:
 
-- **No metrics.** No Prometheus endpoint, no histograms, and no counters other than the recovery
-  ones, which are emitted as an event rather than exposed. Filed in
+- **No metrics.** No Prometheus endpoint, no histograms, and ~~no counters other than the recovery
+  ones, which are emitted as an event rather than exposed~~ - since
+  [F52](../features/cluster-stats.md) a cluster node counts the rows and bytes it inserts,
+  updates and deletes and keeps them as 10s/1m/5m rates, readable through the `Stats` admin
+  read and `shoalctl cluster stats`; nothing exports them to a monitoring system, and the
+  recovery counters are still an event. Filed in
   [TODOs](../appendix/todos.md#observability). The throughput figure the benchmark harness
   reports is computed by the *client*, not by the server, and is not available at runtime.
 - **No health or readiness endpoint.** Liveness can only be inferred by connecting.
-- **No introspection.** No way to ask a running server for its shard count, table list,
-  resident bytes, LRU depth, or compaction backlog.
+- **No introspection.** No way to ask a running server for its ~~shard count, table list,~~
+  resident bytes, LRU depth, or compaction backlog. A cluster node answers its shard count,
+  its tables, its tablet groups, tablets, archived partitions and archived bytes through
+  `Stats` since [F52](../features/cluster-stats.md); a standalone node answers none of it.
 - **No slow-query log.**
 - **No structured error reporting to clients** — server-side failures are panics
   ([Wire Protocol](../architecture/wire-protocol.md#limitations)).

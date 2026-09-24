@@ -53,6 +53,7 @@ pub mod fingerprint;
 pub mod handshake;
 pub mod peer;
 pub mod read;
+pub mod stats;
 pub mod trace;
 
 #[cfg(test)]

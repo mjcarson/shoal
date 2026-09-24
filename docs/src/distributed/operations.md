@@ -10,8 +10,11 @@ appeared - readiness and the admin frame at [F39](../features/membership.md), re
 reports at [F40](../features/replication.md), repair at [F44](../features/repair.md), moves at
 [F45](../features/replica-migration.md), plans at [F46](../features/capacity-rebalancing.md),
 activation at [F48](../features/rolling-compatibility.md), backup and recovery at
-[F49](../features/backup-and-recovery.md), and certificate rotation, the cluster tab and the
-runbooks at [F50](../features/cluster-operations.md). [C14](deploying.md) is the walk through
+[F49](../features/backup-and-recovery.md), certificate rotation, the cluster tab and the
+runbooks at [F50](../features/cluster-operations.md), and every member's figures and every
+plan's pace at [F52](../features/cluster-stats.md) - the one read a follower answers only in
+part, since the figures live in the control leader's memory, so it names the leader for the
+client to ask. [C14](deploying.md) is the walk through
 a deployment; the [runbooks](../operations/runbooks.md) are the procedures.
 
 ## How it works

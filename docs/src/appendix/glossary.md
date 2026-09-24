@@ -317,6 +317,14 @@ rotated on a live node by `ReloadTls`, which swaps both configs or neither
 built from six admin reads a second, its headline the copies against the factor and who is
 missing, and a command line that previews an operation's identity, movement and boundary,
 sends it on the second `Enter` and follows its record ([F50](../features/cluster-operations.md)).
+Since [F52](../features/cluster-stats.md) a seventh read, `Stats`, draws every member's
+figures and the open plans' pace under the model.
+
+**Cluster stats** — What the `Stats` admin read answers: every member's standing, tablet
+groups, tablets, archived partitions and bytes, each over every copy it hosts and over the
+copies it leads, its trailing insert, update and delete rates in rows and bytes over ten
+seconds, a minute and five minutes, and every plan's progress and estimate. Counted per shard,
+combined per node and held by the control leader ([F52](../features/cluster-stats.md)).
 
 **Environment** (node) — What the process that became a node read of its own machine at its
 ready line - host, CPU, governor, kernel, memory, SMT, NUMA, the filesystem under its storage,
