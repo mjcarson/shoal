@@ -3104,7 +3104,10 @@ fn failure_code<T>(
 /// Five rapid restarts of one node while another's control lanes are slowed: every node ends
 /// on the newest version with three members, a client through the slowed node only ever moves
 /// forward and reaches that version, and a client that connects after the burst is handed the
-/// newest map on subscribing rather than any of the ones it missed.
+/// newest map on subscribing rather than any of the ones it missed. The newest version is the
+/// one the cluster settles on with every member up, and every check past it is at or past it:
+/// a detector verdict under load commits a version after any single read
+/// ([Resolved #116](../../docs/src/appendix/resolved/map-version-test-snapshot.md)).
 #[tokio::test(flavor = "multi_thread")]
 async fn map_versions_install_atomically_and_resync() -> Result<(), FixtureError> {
     let mut cluster = Cluster::builder()
@@ -3128,18 +3131,17 @@ async fn map_versions_install_atomically_and_resync() -> Result<(), FixtureError
         cluster.restart(1, NodeKind::Server)?;
     }
     cluster.wait_joined(&[1])?;
-    // everybody converges on the newest version node 0 knows, with three members and no more
-    let newest = cluster.members(0)?["version"].as_u64().expect("a version");
+    // everybody converges on one version with every member up, with three members and no more
+    let newest = wait_map_settled(&mut cluster, &[0, 1, 2], Duration::from_secs(60))?;
     assert!(
         newest > first,
         "five restarts moved the version from {first} to {newest}"
     );
-    cluster.wait_map_version(&[0, 1, 2], newest)?;
     for id in 0..3 {
         let map = cluster.node_mut(id).command("MAP")?;
-        assert_eq!(
-            map["ok"]["version"], newest,
-            "node {id} holds {}",
+        assert!(
+            map["ok"]["version"].as_u64().unwrap_or(0) >= newest,
+            "node {id} went back from {newest} to {}",
             map["ok"]
         );
         assert_eq!(
@@ -3169,16 +3171,20 @@ async fn map_versions_install_atomically_and_resync() -> Result<(), FixtureError
         );
     }
     let frame = slow.topology().expect("a frame");
-    assert_eq!(frame.version, newest);
+    assert!(frame.version >= newest, "{frame:?}");
     assert_eq!(
         frame.members.len(),
         3,
         "a frame with another member count was installed: {frame:?}"
     );
-    // a client that connects after the burst is handed the newest map on subscribing
+    // a client that connects after the burst is handed the newest map on subscribing, never
+    // one of those it missed, all of which are at or below the settled version
     let late = Shoal::<TestDbClient>::new(&cluster.node(0).endpoints.client.to_string()).await?;
     let version = late.topology_changed(0).await?;
-    assert_eq!(version, newest, "a late client was handed an old map");
+    assert!(
+        version >= newest,
+        "a late client was handed an old map: {version} < {newest}"
+    );
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
@@ -4009,6 +4015,52 @@ fn health_of(cluster: &mut Cluster, at: usize, member: usize) -> Result<String, 
         .to_string())
 }
 
+/// Wait until every named node holds the same map version with every member up, and say which
+///
+/// A map version read once is not the last one: the detector may call a member down under a
+/// loaded host and commit another version, and its recovery a third. A test asserting where the
+/// cluster ends up waits for this rather than reading the version once
+/// ([Resolved #116](../../docs/src/appendix/resolved/map-version-test-snapshot.md)).
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `ids` - The nodes
+/// * `within` - How long to wait
+fn wait_map_settled(
+    cluster: &mut Cluster,
+    ids: &[usize],
+    within: Duration,
+) -> Result<u64, FixtureError> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        // every node's map, as it stands now
+        let maps: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|id| Ok(cluster.node_mut(*id).command("MAP")?["ok"].clone()))
+            .collect::<Result<_, FixtureError>>()?;
+        let version = maps[0]["version"].as_u64();
+        // one version everywhere, and nobody in it down
+        let agreed = maps.iter().all(|map| map["version"].as_u64() == version);
+        let up = maps.iter().all(|map| {
+            map["members"].as_object().is_some_and(|members| {
+                members
+                    .values()
+                    .all(|member| member["health"].as_str() == Some("up"))
+            })
+        });
+        if let (true, true, Some(version)) = (agreed, up, version) {
+            return Ok(version);
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!(
+                "the maps never settled with every member up: {maps:?}"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Write one note through a node, trying again by name while its group is between leaders
 ///
 /// A write proposed in the middle of an election is refused `NotLeader`, one proposed to a
@@ -4604,7 +4656,11 @@ async fn delete_note_as(
     client.send_one_with(NoteDelete::new(key), options).await
 }
 
-/// Rotate and compact every named node until a group's checkpoint on each is at or past an index
+/// Rotate and compact every named node until a group's checkpoint on each is at or past an index, and on disk
+///
+/// The index a shard reports moves before its checkpoint file is written, so a test that kills
+/// a node as soon as the index passes can open it from the checkpoint before; this waits for
+/// the file too ([Resolved #115](../../docs/src/appendix/resolved/retry-sidecar-crash-window.md)).
 ///
 /// # Arguments
 ///
@@ -4628,15 +4684,18 @@ fn wait_checkpoint_past(
             let _ = cluster.node_mut(*node).command("COMPACT")?;
             let view = groups_of(cluster, *node)?;
             let mut checkpoint = None;
+            let mut durable = false;
             for shard in view["shards"].as_array().into_iter().flatten() {
                 for found in shard["groups"].as_array().into_iter().flatten() {
                     let id = found["group"].as_u64().unwrap_or_default();
                     if format!("{id:016x}") == group {
                         checkpoint = found["checkpoint"].as_u64();
+                        durable = found["checkpoint_durable"].as_bool().unwrap_or(false);
                     }
                 }
             }
-            if checkpoint.is_none_or(|checkpoint| checkpoint < index) {
+            // past the index in memory is not enough: the file has to name it
+            if !durable || checkpoint.is_none_or(|checkpoint| checkpoint < index) {
                 behind.push((*node, checkpoint));
             }
         }
@@ -10790,6 +10849,83 @@ async fn lost_response_retry_returns_original_result() -> Result<(), FixtureErro
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
+    Ok(())
+}
+
+/// A crash between the retry sidecar and the checkpoint file forgets no identity (Resolved #115)
+///
+/// One node at a factor of one, so it leads every group and answers every retry itself. A
+/// note is deleted under an identity and checkpointed past on disk; another note is written,
+/// and the node is armed to die after the next checkpoint write's sidecar and before its
+/// checkpoint file. Started again it opens from the checkpoint before, and the same delete
+/// under the same identity is the original result rather than a delete of nothing
+/// ([Resolved #115](../../docs/src/appendix/resolved/retry-sidecar-crash-window.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_table_survives_a_crash_between_sidecar_and_checkpoint() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    let mut cluster = Cluster::builder()
+        .cluster(1, CoreClaim::Count(1))
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let key = 7_000u64;
+    let (group, _) = wait_group_leader(&mut cluster, "Note", key)?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    write_note(&addr, key, "v1").await?;
+    // the delete, under an identity, answered and remembered
+    let identity = uuid::Uuid::new_v4();
+    let deleted = delete_note_as(&addr, key, &SendOptions::new().identity(identity)).await?;
+    let token = deleted
+        .session_token()
+        .expect("a committed delete answers with a token");
+    // the delete goes below a checkpoint that is on disk, beside a sidecar that holds it
+    wait_checkpoint_past(
+        &mut cluster,
+        &[0],
+        &group,
+        token.index,
+        Duration::from_secs(60),
+    )?;
+    // another entry in the group, and the node dies between the next write's two files
+    write_note(&addr, key + 1, "v2").await?;
+    let armed = cluster.node_mut(0).command("CRASH_AT sidecar_written")?;
+    assert!(armed.get("ok").is_some(), "{armed}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while cluster.node(0).failure().is_none() {
+        // a command the node dies during is answered by nobody, which is the point
+        let _ = cluster.node_mut(0).command("ROTATE");
+        let _ = cluster.node_mut(0).command("COMPACT");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the node never reached the point between the sidecar and the checkpoint"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // started again from the checkpoint before, the identity is still remembered
+    cluster.restart(0, NodeKind::Server)?;
+    cluster.wait_joined(&[0])?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    wait_group_leader(&mut cluster, "Note", key)?;
+    let retried = delete_note_as(
+        &addr,
+        key,
+        &SendOptions::new()
+            .identity(identity)
+            .retry(Duration::from_secs(15)),
+    )
+    .await;
+    assert!(
+        retried.is_ok(),
+        "after a crash between the sidecar and the checkpoint the identity was applied as new: {retried:?}"
+    );
+    // and a delete of its own finds nothing
+    let fresh = delete_note(&addr, key).await;
+    assert!(
+        matches!(fresh, Err(shoal::client::Errors::QueryDidNotSucceed { .. })),
+        "{fresh:?}"
+    );
+    assert_eq!(cluster.node(0).failure(), None, "node 0 died");
     Ok(())
 }
 

@@ -138,7 +138,7 @@ sequenceDiagram
     R->>O: install_full_snapshot under the sender's vote
     O->>R: ServerMsg::InstallSnapshot: installing = true
     R->>R: CompactionJob::Install: every covered partition replaced or removed, archive map repointed [MidInstall, MapSaved]
-    R->>R: retries.bin then checkpoint.json at the boundary [BeforeCheckpoint, AfterCheckpoint]
+    R->>R: retries.next.bin, checkpoint.json, then renamed to retries.bin at the boundary [BeforeCheckpoint, AfterCheckpoint]
     R->>R: remove .pending, fsync the directory, installing = false [AfterCleanup]
     R-->>L: Installed { vote }
     Note over L: the log strictly after the boundary follows by replication

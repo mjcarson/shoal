@@ -44,6 +44,7 @@ use crate::server::database::ShoalDatabase;
 use crate::server::map::GroupSpec;
 use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::peer::{LinkEvent, ReplicateReply};
+use crate::server::replication::install::{crash_point, CrashPoint};
 use crate::server::replication::snapshot::{
     self, BuiltSnapshot, SnapshotManifest, SnapshotProvenance, SnapshotWriter, SNAPSHOTS_DIR,
 };
@@ -386,8 +387,11 @@ where
             let _ = sealed_tx.try_send(ServerMsg::WalSealed { generation });
         }));
         let checkpoint = Checkpoint::read(&dir).await.map_err(ServerError::IO)?;
-        // the retry tables as of that checkpoint, written before it
-        let retries = Retries::read(&dir).await.map_err(ServerError::IO)?;
+        // the retry tables as of that checkpoint, from whichever sidecar file describes it
+        // ([Resolved #115](../../../../docs/src/appendix/resolved/retry-sidecar-crash-window.md))
+        let retries = Retries::recover(&dir, &checkpoint)
+            .await
+            .map_err(ServerError::IO)?;
         // where received snapshots are assembled, bounded in bytes on disk and in the queue
         let installs = super::snapshots::Installs::new(&dir, cluster.replication.install_bytes);
         let _ = setup;
@@ -2209,12 +2213,16 @@ where
         }
     }
 
-    /// Write the retry sidecar and then the checkpoint file from every group's checkpoint, on a task of its own
+    /// Stage the retry sidecar, write the checkpoint file and promote the sidecar, on a task of its own
     ///
-    /// The sidecar goes first: a checkpoint that names a sidecar index must find one complete
-    /// to it at open, and a crash between the two leaves a sidecar ahead of its checkpoint,
-    /// which the seed rule ignores. The checkpoint counts as durable only once the checkpoint
-    /// file itself landed.
+    /// The staged sidecar goes first and replaces `retries.bin` only once the checkpoint file
+    /// landed: a crash before the checkpoint leaves `retries.bin` describing the checkpoint on
+    /// disk, and one after it leaves the staged file describing it, which the open settles.
+    /// Writing the sidecar in place first left nothing describing the checkpoint on disk after
+    /// a crash between the two, and the group opened remembering nothing below it
+    /// ([Resolved #115](../../../../docs/src/appendix/resolved/retry-sidecar-crash-window.md)).
+    /// The checkpoint counts as durable once the checkpoint file landed and its sidecar was
+    /// promoted, which is when the loop hears of it.
     ///
     /// Returns whether a write was started now; if not, a dirty checkpoint is written by the
     /// next write, which is the version after the one in flight.
@@ -2260,10 +2268,19 @@ where
         let dir = replication.wal.dir();
         let tx = self.shard_local_tx.clone();
         glommio::spawn_local(async move {
-            // the sidecar first, then the checkpoint that names it
-            let outcome = match retries.write(&dir).await {
-                Ok(()) => file.write(&dir).await.map_err(|error| error.to_string()),
-                Err(error) => Err(format!("the retry sidecar could not be written: {error}")),
+            // the sidecar staged, then the checkpoint that names it, then the sidecar promoted
+            let outcome = match retries.stage(&dir).await {
+                Ok(()) => {
+                    // the fixture's point between the staged sidecar and the checkpoint
+                    crash_point::hit(CrashPoint::SidecarWritten);
+                    match file.write(&dir).await {
+                        Ok(()) => Retries::promote(&dir).await.map_err(|error| {
+                            format!("the retry sidecar could not be promoted: {error}")
+                        }),
+                        Err(error) => Err(error.to_string()),
+                    }
+                }
+                Err(error) => Err(format!("the retry sidecar could not be staged: {error}")),
             };
             let _ = tx
                 .send(ServerMsg::CheckpointWritten { version, outcome })
@@ -2390,6 +2407,7 @@ where
                         .and_then(|metrics| metrics.last_log_index)
                         .unwrap_or(0),
                     checkpoint: state.checkpoint_index(),
+                    checkpoint_durable: state.checkpoint_durable,
                     purged: slot.store.purged_index().unwrap_or(0),
                     pending_bytes: slot.pending_bytes,
                     volatile: slot.store.is_volatile(),

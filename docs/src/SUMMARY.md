@@ -221,6 +221,8 @@
   - [111. Removing an archive held the handle cache across its close](appendix/resolved/archive-removal-borrow.md)
   - [112. certificate_rotation_binds_identity failed about half its runs alone](appendix/resolved/certificate-test-leader.md)
   - [114. The cluster tab counted no voters and no learners in any cluster](appendix/resolved/cluster-tab-voter-count.md)
+  - [115. A crash between the retry sidecar and the checkpoint forgot every identity below it](appendix/resolved/retry-sidecar-crash-window.md)
+  - [116. map_versions_install_atomically_and_resync expected the version it read to stay](appendix/resolved/map-version-test-snapshot.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

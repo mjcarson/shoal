@@ -9,6 +9,8 @@
 //!   000000000000000001.wal   frames, appended in batches, one fdatasync per batch
 //!   000000000000000002.wal   the active segment, once the first rotated
 //!   checkpoint.json          per group, the log id its table's archives are complete to
+//!   retries.bin              per group, the retry table as of that checkpoint
+//!   retries.next.bin         the next checkpoint's retry table, until that checkpoint lands
 //! ```
 //!
 //! # Group commit across groups
@@ -80,9 +82,18 @@ pub const CHECKPOINT_FILE: &str = "checkpoint.json";
 
 /// The retry sidecar's name, beside the checkpoint file
 ///
-/// Every persistent group's remembered requests as of the checkpoint, written before the
-/// checkpoint that names them ([F42](../../../../docs/src/features/primary-failover.md)).
+/// Every persistent group's remembered requests as of the checkpoint on disk
+/// ([F42](../../../../docs/src/features/primary-failover.md)). Replaced only once the checkpoint
+/// it describes has landed; until then the new one is [`RETRIES_NEXT_FILE`]
+/// ([Resolved #115](../../../../docs/src/appendix/resolved/retry-sidecar-crash-window.md)).
 pub const RETRIES_FILE: &str = "retries.bin";
+
+/// The retry sidecar staged for a checkpoint that is not on disk yet
+///
+/// Written before the checkpoint file and renamed over [`RETRIES_FILE`] after it, so a crash
+/// anywhere in a checkpoint write leaves one of the two describing the checkpoint on disk
+/// ([Resolved #115](../../../../docs/src/appendix/resolved/retry-sidecar-crash-window.md)).
+pub const RETRIES_NEXT_FILE: &str = "retries.next.bin";
 
 /// The magic a checksummed retry sidecar begins with
 ///
@@ -671,6 +682,15 @@ pub async fn write_atomic(dir: &Path, name: &str, bytes: Vec<u8>) -> io::Result<
     file.fdatasync().await.map_err(io)?;
     file.rename(dir.join(name)).await.map_err(io)?;
     file.close().await.map_err(io)?;
+    sync_dir(dir).await
+}
+
+/// Sync a directory, so a rename or a removal in it survives a crash
+///
+/// # Arguments
+///
+/// * `dir` - The directory
+async fn sync_dir(dir: &Path) -> io::Result<()> {
     let directory = Directory::open(dir).await.map_err(io)?;
     directory.sync().await.map_err(io)?;
     directory.close().await.map_err(io)?;
@@ -876,10 +896,15 @@ pub struct GroupRetries {
 
 /// The retry sidecar: every persistent group's remembered requests as of its checkpoint
 ///
-/// Written before the checkpoint file on the same trigger, so a checkpoint whose `retries_at`
-/// names an index always has a sidecar complete to it; a crash between the two leaves a sidecar
-/// ahead of its checkpoint, which the seed rule ignores. Postcard rather than JSON: a request
-/// identity is sixteen bytes and an index, and there are up to four thousand a group.
+/// Staged as [`RETRIES_NEXT_FILE`] before the checkpoint file on the same trigger and renamed
+/// over [`RETRIES_FILE`] once the checkpoint landed, so whatever point a crash stops a write at,
+/// one of the two files holds a sidecar for exactly the checkpoint on disk and
+/// [`Retries::recover`] finds it. The sidecar used to be written in place before the checkpoint,
+/// and a crash between the two left only a sidecar ahead of its checkpoint, which the seed rule
+/// refuses: the group opened remembering nothing at or below its checkpoint
+/// ([Resolved #115](../../../../docs/src/appendix/resolved/retry-sidecar-crash-window.md)).
+/// Postcard rather than JSON: a request identity is sixteen bytes and an index, and there are up
+/// to four thousand a group.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Retries {
     /// Per group, by its identity rendered in hex
@@ -893,7 +918,17 @@ impl Retries {
     ///
     /// * `dir` - The WAL directory
     pub async fn read(dir: &Path) -> io::Result<Self> {
-        let path = dir.join(RETRIES_FILE);
+        Self::read_file(dir, RETRIES_FILE).await
+    }
+
+    /// Read one retry sidecar file, or an empty one if there is none
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - The WAL directory
+    /// * `name` - Which of the two sidecar files
+    async fn read_file(dir: &Path, name: &str) -> io::Result<Self> {
+        let path = dir.join(name);
         if !path.exists() {
             return Ok(Retries::default());
         }
@@ -923,12 +958,47 @@ impl Retries {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
-    /// Write the retry sidecar atomically: the magic, a checksum, then the entries
+    /// Read the retry sidecar that describes the checkpoint on disk, and settle it as `retries.bin`
+    ///
+    /// Per group, the entries of whichever file was written for exactly that group's checkpoint:
+    /// `retries.bin` when the last checkpoint write finished or never reached its checkpoint
+    /// file, `retries.next.bin` when it stopped between the checkpoint file and the rename. A
+    /// staged file found here is folded into `retries.bin` and removed before anything else
+    /// runs, so the next checkpoint write cannot stage over the only sidecar describing the
+    /// checkpoint on disk
+    /// ([Resolved #115](../../../../docs/src/appendix/resolved/retry-sidecar-crash-window.md)).
     ///
     /// # Arguments
     ///
     /// * `dir` - The WAL directory
-    pub async fn write(&self, dir: &Path) -> io::Result<()> {
+    /// * `checkpoint` - The checkpoint file as read from the same directory
+    pub async fn recover(dir: &Path, checkpoint: &Checkpoint) -> io::Result<Self> {
+        let mut retries = Self::read_file(dir, RETRIES_FILE).await?;
+        // nothing staged is the common case: the last write finished
+        if !dir.join(RETRIES_NEXT_FILE).exists() {
+            return Ok(retries);
+        }
+        let staged = Self::read_file(dir, RETRIES_NEXT_FILE).await?;
+        for (group, next) in staged.groups {
+            // only a group whose checkpoint on disk is the one the staged file was written for
+            let Some(point) = checkpoint.groups.get(&group) else {
+                continue;
+            };
+            let settled = retries
+                .groups
+                .get(&group)
+                .is_some_and(|current| current.retries_at == point.retries_at);
+            if !settled && next.retries_at == point.retries_at {
+                retries.groups.insert(group, next);
+            }
+        }
+        // settled as the one file, and the staged one gone with it
+        retries.write(dir).await?;
+        Ok(retries)
+    }
+
+    /// The bytes of a sidecar file: the magic, a checksum, then the entries
+    fn encode(&self) -> io::Result<Vec<u8>> {
         let payload = postcard::to_allocvec(self)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         // the magic says a checksum follows, and the checksum says what the payload has to be
@@ -936,7 +1006,49 @@ impl Retries {
         bytes.extend_from_slice(RETRIES_MAGIC);
         bytes.extend_from_slice(&checksum_of(&payload).to_le_bytes());
         bytes.extend_from_slice(&payload);
-        write_atomic(dir, RETRIES_FILE, bytes).await
+        Ok(bytes)
+    }
+
+    /// Write the retry sidecar atomically as `retries.bin`, and drop any staged one
+    ///
+    /// For a writer that holds the whole of what the directory's checkpoint is described by -
+    /// a rehome, and [`Retries::recover`] - rather than a checkpoint write, which stages.
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - The WAL directory
+    pub async fn write(&self, dir: &Path) -> io::Result<()> {
+        write_atomic(dir, RETRIES_FILE, self.encode()?).await?;
+        // a staged file left behind describes nothing this one does not
+        let staged = dir.join(RETRIES_NEXT_FILE);
+        if staged.exists() {
+            glommio::io::remove(&staged).await.map_err(io)?;
+            sync_dir(dir).await?;
+        }
+        Ok(())
+    }
+
+    /// Stage the retry sidecar for a checkpoint that is about to be written
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - The WAL directory
+    pub async fn stage(&self, dir: &Path) -> io::Result<()> {
+        write_atomic(dir, RETRIES_NEXT_FILE, self.encode()?).await
+    }
+
+    /// Make the staged sidecar the one, once the checkpoint it describes has landed
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - The WAL directory
+    pub async fn promote(dir: &Path) -> io::Result<()> {
+        let mut file = BufferedFile::open(dir.join(RETRIES_NEXT_FILE))
+            .await
+            .map_err(io)?;
+        file.rename(dir.join(RETRIES_FILE)).await.map_err(io)?;
+        file.close().await.map_err(io)?;
+        sync_dir(dir).await
     }
 
     /// The entries to seed a group's retry table with at open

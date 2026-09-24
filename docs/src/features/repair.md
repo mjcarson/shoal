@@ -51,8 +51,9 @@ checksums, since rewriting is how its records come to have them. A restart mints
 archive, so a format 1 one is never written to again.
 
 `checkpoint.json` carries `"checksum"`, gxhash64 over the compact JSON of its groups; zero is a
-file from before, read unchecked with a warning. `retries.bin` is `[b"SHOALRTY"][gxhash64][postcard]`;
-a file without the magic is read as the bare postcard it was. Either mismatch fails the open by
+file from before, read unchecked with a warning. `retries.bin` is `[b"SHOALRTY"][gxhash64][postcard]`,
+and so is `retries.next.bin`, the sidecar staged for a checkpoint not yet on disk
+([Resolved #115](../appendix/resolved/retry-sidecar-crash-window.md)); a file without the magic is read as the bare postcard it was. Either mismatch fails the open by
 name, the verdict `MapCorruption` already got: a checkpoint that cannot be trusted is not a
 state to start a group from.
 

@@ -32,9 +32,16 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111 and 112, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ item 113 is the newest entry here, ~~and the newest number~~ with 114 the newest number, on the resolved page, and why 112 is on the resolved page beside them, and why 17, 33, 43, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111 and 112 are on the resolved page. **114 never appeared here**: it was found by
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115 and 116, and
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ item 119 is the newest entry here, ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ and the newest number, and why 112 is on the resolved page beside them, and why 17, 33, 43, 78, 79, 80, 82,
+83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115 and 116 are on the resolved page. **115 and 116 never appeared here**:
+they were the two fixture tests F52's whole-workspace run failed and each passed alone -
+a crash between the retry sidecar and the checkpoint file forgetting every identity below
+the checkpoint, reproduced by a crash point between the two
+([Resolved #115](resolved/retry-sidecar-crash-window.md)), and a test reading the newest map
+version once while the detector committed another
+([Resolved #116](resolved/map-version-test-snapshot.md)) - and were fixed in the change that
+filed them. **114 never appeared here**: it was found by
 [F51](../features/cluster-deployment.md)'s deployment test - the cluster tab's model counted
 no voters in any cluster - reproduced against a real node and by a unit test, and fixed in the
 same change ([Resolved #114](resolved/cluster-tab-voter-count.md)). **111 never
@@ -74,11 +81,14 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ **1,541 tests**, six ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ **1,543 tests**, six ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
 two of `persistent_unsorted_table.rs` fail about one run in five of that binary (item 107).
+[Resolved #115](resolved/retry-sidecar-crash-window.md) and [Resolved #116](resolved/map-version-test-snapshot.md)
+added 2 and took it to 1,543, filing items 117, 118 and 119: one fixture test each that
+failed under load in their runs and passed alone.
 [F50](../features/cluster-operations.md) added 8 and took it to 1,492, filing nothing and
 resolving nothing here: the two defects it met - the control leader dialling a moved member at
 the address it was admitted with rather than the one it committed, and a winning clone's
@@ -1804,3 +1814,64 @@ returned the way the open's is. The workspace builds against the fork by path, s
 against that change now; this item closes when the fork commits it. Shoal's side has nothing
 to change: a load that panics is a load that never answers, and the fix for that is the open
 not panicking.
+
+### 117. A restore under the fixture suite's load finds its target table not yet empty
+
+`single_node_data_has_a_verified_cluster_migration_path` fails under the fixture suite at six
+threads, about one run in two here, and passes alone. A group's restore comes to:
+
+```text
+{"Failed":{"reason":"2a02ce9f-…/0 holds 117 rows of the group's tablets; a restore is into
+an empty table, and this one is not"}}
+```
+
+The emptiness check is the `Loading` phase's scrub in `server/shard/restore.rs`. The table was
+new, and the only rows that could be in it are the restore's own. **Suspected, from reading the
+source and not reproduced:** the step is driven again after a leader change. The group commits
+`Loading`, loads rows, and loses its leader before committing past `Loading`. The next leader
+resumes at `Loading` and scrubs rows the first attempt put there. The scrub needs to tell those
+rows apart from rows that were there before the restore, for example by the restore's own
+boundary. It must not skip the check on a resume, because the check is what refuses a
+non-empty target.
+
+**Established by running it**: the run for [Resolved #15](resolved/shard-mesh-admission.md)
+failed it first, and the loaded fixture runs for
+[Resolved #115](resolved/retry-sidecar-crash-window.md) failed it once in two.
+
+### 118. The fixture's admin retry gives up while node zero's topology lags the leader
+
+`mixed_versions_exchange_real_cluster_operations` fails under the fixture suite at six threads
+and passes alone. The `ACTIVATE` it expects to be refused, by naming the pinned members, is
+refused as stale instead:
+
+```text
+the refusal did not name the pinned members: {"error":"StaleVersion: stale version: the
+request was written against topology version 15 and the cluster is at 19"}
+```
+
+The fixture's `admin` helper (`shoal/tests/cluster_fixture.rs`) reads node zero's own topology
+version and retries on `StaleVersion`, eight times at 100 ms. Under load, node zero stayed four
+versions behind the leader for longer than that. The server is right to refuse. The helper's
+budget is a count of attempts where it should be a deadline, and a lagging view outlasts it.
+This is the same shape as [Resolved #116](resolved/map-version-test-snapshot.md): a test
+assuming the version it read is the current one. **Established by running it**, once in two
+loaded fixture runs for [Resolved #115](resolved/retry-sidecar-crash-window.md).
+
+### 119. `down_retains_placement_during_grace` kills a member before the third voter is promoted
+
+The test starts three nodes and kills one without waiting for three voters
+(`cluster.wait_voters(0, 3)`, which the M3 tests call). Under the workspace run at six threads
+the third node was still a **learner** when the kill landed. The control group then had two
+voters, one of them dead, and could not commit the verdict. The detector's own read had the
+dead member at `phi` 300 after thirty misses, while `MEMBERS` kept it `up`:
+
+```text
+the dead member was never called down: {… "learners":["c21edec1-…"], …}
+detector: {… "3c3efa4a-…":{"misses":30, …}, … "phi":300.0, "since_last_ms":30175.8, …}
+```
+
+The detector and the commit are right. The test's schedule is wrong: it asserts a verdict that
+needs a control quorum, and its kill can land before that quorum exists. The fix is to wait for
+three voters before killing. **Established by running it**: it failed once in the
+whole-workspace run for [Resolved #115](resolved/retry-sidecar-crash-window.md) and passed
+alone at once.
