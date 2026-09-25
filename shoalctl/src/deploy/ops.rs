@@ -37,6 +37,24 @@ pub(super) const UP_TIMEOUT: Duration = Duration::from_secs(180);
 /// How long the cluster has to admit default writes after `Initialize`
 const READY_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// The lines of a followed record that name a group's failure
+///
+/// A repair, backup or restore is done when every group is, failed ones included, so the
+/// failures are read from the record's own lines
+/// ([Resolved #154](../../../docs/src/appendix/resolved/admin-hides-failed-groups.md)).
+///
+/// # Arguments
+///
+/// * `lines` - The record as the cluster tab draws it
+fn failed_lines(lines: &[String]) -> Vec<&str> {
+    // a group's line carries its outcome, which says Failed when it did
+    lines
+        .iter()
+        .filter(|line| line.contains("\"Failed\""))
+        .map(|line| line.trim())
+        .collect()
+}
+
 /// How long a rebalance plan is followed before the deployment stops waiting on it
 const PLAN_TIMEOUT: Duration = Duration::from_secs(1800);
 
@@ -952,6 +970,13 @@ impl Deployment {
                 last = lines;
             }
             if done {
+                // done is every group finished, which includes a group that failed: say so, and
+                // fail the command, so a script never reads a failed restore as a restored one
+                // ([Resolved #154](../../../docs/src/appendix/resolved/admin-hides-failed-groups.md))
+                let failed = failed_lines(&last);
+                if !failed.is_empty() {
+                    bail!("{op} finished with {} failed: {}", failed.len(), failed.join("; "));
+                }
                 return Ok(());
             }
             if Instant::now() > deadline {
@@ -1328,6 +1353,26 @@ pub fn seed_addresses(frame: &Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A followed record's failed groups are read out of it, so the command fails with them (item 154)
+    ///
+    /// On the lab a restore whose group failed was reported "done" and the command succeeded; a
+    /// read of the dataset afterwards found 66,191 movies missing
+    /// ([Resolved #154](../../../docs/src/appendix/resolved/admin-hides-failed-groups.md)).
+    #[test]
+    fn a_followed_records_failed_groups_are_read_out() {
+        let lines = vec![
+            "following 1: done".to_string(),
+            "  17 Done {\"Restored\":{\"records\":3}}".to_string(),
+            "  15 Done {\"Failed\":{\"reason\":\"a peer reset the connection\"}}".to_string(),
+        ];
+        assert_eq!(
+            super::failed_lines(&lines),
+            vec!["15 Done {\"Failed\":{\"reason\":\"a peer reset the connection\"}}"]
+        );
+        // a record with no failure has none, whatever else it says
+        assert!(super::failed_lines(&lines[..2]).is_empty());
+    }
     use super::*;
     use crate::cluster::model::MemberRow;
 
