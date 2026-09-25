@@ -144,7 +144,9 @@ server runs; the join is what `exit` is for.
 - **Item 16** — a shard that does not die at all — is the version of 58 worth more than any
   report of a death, ~~and is where it was~~ and is [resolved](hot-path-panics.md) for every panic
   a query could reach. A shard still ends on an error its loop returns, which is what this page's
-  reporting is for; [item 122](../known-issues.md) is the one of those a device can cause.
+  reporting is for. ~~[item 122](../known-issues.md) is the one of those a device can cause.~~
+  A device used to cause one of those (item 122); a failed intent log now stays with its table
+  ([Resolved #122](intent-log-failure.md)).
 
 ## Tests
 

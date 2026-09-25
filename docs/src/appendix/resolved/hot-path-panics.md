@@ -59,7 +59,7 @@ never returned `Err`: the write runs on a detached task, and an error it hits is
 in only two cases: the cluster-node sink check, and an archive that cannot be written. Both
 happen before a byte is staged. A device error surfaces later, through `compact_if_needed` into
 `get_flushed`, and the shard loop's `?` ends the shard there. That is not a panic, but it is the
-same outage, and it is filed as [item 122](../known-issues.md).
+same outage, and it was filed as item 122, since [resolved](intent-log-failure.md).
 
 ## Evidence
 
@@ -251,19 +251,26 @@ line in the same function that already decided the question:
 
 ## Still open
 
-- **[Item 122](../known-issues.md)**: a background write or fdatasync error ends the shard, and
+- ~~**Item 122**: a background write or fdatasync error ends the shard, and
   the shard's other clients with it. This is what the item used to claim the commit sites did.
   It needs the pending writes failed with `StorageWrite` and a decision about what a shard does
-  with a log it can no longer write. That decision is its own item.
-- **[Item 123](../known-issues.md)**: a parked get is keyed by the client's `(id, index)`, so a
+  with a log it can no longer write. That decision is its own item.~~
+  **[Resolved](intent-log-failure.md).** The decision was to refuse writes until restart. The
+  writes pending past the watermark are answered `OutcomeUnknown`, not `StorageWrite`, because
+  some of them may be on disk and `StorageWrite` has to stay a definite refusal.
+- ~~**Item 123**: a parked get is keyed by the client's `(id, index)`, so a
   client that reuses a key while a get is parked, with the *same* projection, has the two gets'
-  rows merged. Found while fixing the collision above, which only refuses a mismatched projection.
-- **[Item 124](../known-issues.md)**: the unsorted table's client update never re-stamps a loaded
+  rows merged. Found while fixing the collision above, which only refuses a mismatched projection.~~
+  **[Resolved](parked-get-key.md).** The usual outcome was worse than a merge: the second get was
+  never answered. The key now carries the client and the bundle's attempt.
+- ~~**Item 124**: the unsorted table's client update never re-stamps a loaded
   partition's `generation`, where the sorted table's and the replicated apply's both do. Found
   while reordering that update. The reorder kept the behaviour exactly, so the fix has its own
-  evidence to find.
-- The client does not retry `StorageWrite`. That is deliberate: the one way to meet it today is a
-  routing bug, which the same node would reproduce.
+  evidence to find.~~ **[Resolved](unsorted-update-generation.md)**, reproduced as a stale read after an eviction.
+- The client does not retry `StorageWrite`. That is deliberate. ~~the one way to meet it today is a
+  routing bug, which the same node would reproduce.~~ Since [Resolved #122](intent-log-failure.md)
+  there are two ways to meet it: a routing bug, and a table whose log failed. The same node
+  reproduces both until it is restarted.
 
 ## Tests
 
@@ -287,4 +294,6 @@ line in the same function that already decided the question:
   error channel every site here now answers through.
 - [Resolved #34](unvalidated-length-prefix.md), the relays' five sites.
 - [Resolved #15, the remainder](backlog-bounds.md), whose harness these tests are built on.
-- [Known Issues](../known-issues.md): items 122, 123 and 124, filed from this change.
+- Items 122, 123 and 124, filed from this change and since resolved:
+  [Resolved #122](intent-log-failure.md), [Resolved #123](parked-get-key.md),
+  [Resolved #124](unsorted-update-generation.md).

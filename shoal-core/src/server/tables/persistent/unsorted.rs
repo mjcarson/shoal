@@ -34,10 +34,10 @@ use crate::server::tables::persistent::{
     ParkedQueries, Parking, RowSink,
 };
 use crate::server::tables::persistent::{
-    apply_failure, corrupt_archive, eviction_totals, settle_resident_read, PartitionLoad,
+    apply_failure, corrupt_archive, eviction_totals, settle_resident_read, ParkKey, PartitionLoad,
     PendingGets,
 };
-use crate::server::tables::storage::StorageSupport;
+use crate::server::tables::storage::{LogFault, StorageSupport};
 use crate::server::{Conf, ServerError};
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::protocol::peer::Command;
@@ -780,20 +780,21 @@ where
         if self.can_answer_in_place(&meta, &get.partition_keys) {
             return Some(self.get_sealed::<P>(meta, &get, seal));
         }
+        // the key this get parks under, which every replay of it carries
+        let key = ParkKey::of(&meta);
         // a get that parked on an earlier execution is never shed, since part of it is held
         //
         // this is read before `resume`, which takes the parked state out
-        let fresh = !self.pending_data.is_parked(&(meta.id, meta.index));
+        let fresh = !self.pending_data.is_parked(&key);
         // whether this execution has parked this get on any partition yet
         let mut parked_any = false;
         // pick this get up where its last execution left off, or start it fresh
-        let mut pending = match self.pending_data.resume::<P>(
-            &(meta.id, meta.index),
-            &get.partition_keys,
-            get.limit,
-        ) {
+        let mut pending = match self
+            .pending_data
+            .resume::<P>(&key, &get.partition_keys, get.limit)
+        {
             Ok(pending) => pending,
-            // another get parked under this id and index, and it is left to finish
+            // another get parked under this key, and it is left to finish
             Err(error) => return open(refuse(meta, error)),
         };
         // check each of the partition keys this execution was handed
@@ -854,7 +855,7 @@ where
         // hold this get until every partition it named has been read
         if pending.is_pending() {
             // remember what we have found so far for the replay to carry on from
-            self.pending_data.park((meta.id, meta.index), pending);
+            self.pending_data.park(key, pending);
             // we have blocked partitions so return None
             return None;
         }
@@ -902,7 +903,7 @@ where
             return false;
         }
         // a get that has already parked holds rows from an execution that has ended
-        if self.pending_data.is_parked(&(meta.id, meta.index)) {
+        if self.pending_data.is_parked(&ParkKey::of(&meta)) {
             return false;
         }
         // and every partition it names has to be one we can read without going to disk
@@ -1243,7 +1244,7 @@ where
                             };
                         }
                         // a partition that was not read above is loaded, and updates in place
-                        None => partition.update_loaded(&update),
+                        None => partition.update_loaded(&update, self.generation),
                     }
                     // record that this writes synchronous work is finished
                     //
@@ -1901,6 +1902,19 @@ where
         self.storage.compaction_due()
     }
 
+    /// Make the next write or fdatasync of this table's intent log fail as a device error would
+    ///
+    /// For the tests of what a table does with a log it can no longer write
+    /// ([Resolved #122](../../../../docs/src/appendix/resolved/intent-log-failure.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `fault` - Which IO fails
+    #[doc(hidden)]
+    pub fn inject_log_fault(&mut self, fault: LogFault) {
+        self.storage.inject_log_fault(fault);
+    }
+
     /// Get all flushed response actions
     ///
     /// # Arguments
@@ -1914,7 +1928,20 @@ where
         // update our current generation
         self.generation = progress.generation;
         // release the responses whose data is now durable
-        if progress.rotated {
+        if progress.failed {
+            // everything below where the log stopped is durable and answered as it was
+            self.pending.get(progress.durable_pos, &mut self.flushed);
+            // and everything past it may or may not be on disk, which is what it is answered
+            // with ([Resolved #122](../../../../docs/src/appendix/resolved/intent-log-failure.md))
+            let unknown = ResponseError::new(
+                ErrorCode::OutcomeUnknown,
+                format!(
+                    "{} could not make this write durable: its intent log failed, and the write may or may not have landed",
+                    self.table_name
+                ),
+            );
+            self.pending.fail_all(&unknown, &mut self.flushed);
+        } else if progress.rotated {
             // rotation fdatasynced everything in the old log and restarted our
             // positions at 0, so every pending response is durable and none of
             // their positions can be compared against the new files watermark

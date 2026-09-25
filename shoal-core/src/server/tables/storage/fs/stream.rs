@@ -13,6 +13,7 @@ use crate::server::database::ShoalDatabase;
 use crate::server::messages::ServerMsg;
 #[cfg(feature = "stage-profile")]
 use crate::server::stage_profile::{StageStamps, Stamp};
+use crate::server::tables::storage::LogFault;
 use crate::server::ServerError;
 
 /// The sentinel written in place of a size header at the start of a pad region
@@ -290,6 +291,15 @@ pub struct FlushState {
     sync_handle: Option<JoinHandle<()>>,
     /// The first IO error observed by any of our background tasks
     error: Option<ServerError>,
+    /// Whether any of our background tasks has ever hit an IO error
+    ///
+    /// Unlike `error`, which is taken once to be reported, this never clears. A log that failed
+    /// a write or an fdatasync takes nothing more, and no later fdatasync is issued: one that
+    /// succeeds after one that failed does not prove the bytes the first one covered are on
+    /// disk ([Resolved #122](../../../../../../docs/src/appendix/resolved/intent-log-failure.md)).
+    failed: bool,
+    /// A failure a test asked the next write or fdatasync to report instead of doing its IO
+    injected: Option<LogFault>,
 }
 
 impl FlushState {
@@ -411,9 +421,31 @@ impl FlushState {
     /// * `error` - The error to record
     pub fn record_error(&mut self, error: ServerError) {
         // only keep the first error since later ones are likely fallout from it
-        if self.error.is_none() {
+        if !self.failed {
             self.error = Some(error);
         }
+        // and never write to or sync this log again
+        self.failed = true;
+    }
+
+    /// Whether any of our background tasks has ever hit an IO error
+    pub fn failed(&self) -> bool {
+        self.failed
+    }
+
+    /// Take the failure a test injected, if it is the kind this IO is
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The kind of IO asking
+    fn take_injected(&mut self, kind: LogFault) -> Option<std::io::Error> {
+        // only the kind of IO the test named fails
+        if self.injected != Some(kind) {
+            return None;
+        }
+        self.injected = None;
+        // the error a device returns for a failed write or sync
+        Some(std::io::Error::from_raw_os_error(libc::EIO))
     }
 
     /// Get the position that all data below has been written to disk for
@@ -473,6 +505,11 @@ fn start_sync<D: ShoalDatabase>(
         if flush_state.syncing_to.is_some() || flush_state.written_pos <= flush_state.synced_pos {
             return;
         }
+        // and never sync a log that has failed, since a sync that succeeds after one that
+        // failed proves nothing about the bytes the failed one covered
+        if flush_state.failed {
+            return;
+        }
         // claim the sync slot for our current written watermark
         flush_state.syncing_to = Some(flush_state.written_pos);
         // note that every write below this watermark is now waiting on this one sync
@@ -493,8 +530,12 @@ fn start_sync<D: ShoalDatabase>(
     let sync_tx = shard_local_tx.clone();
     // spawn our fdatasync as a background task
     let handle = glommio::spawn_local(async move {
-        // sync our files data to stable storage
-        let synced = sync_file.fdatasync().await;
+        // sync our files data to stable storage, unless a test asked this sync to fail
+        let injected = sync_state.borrow_mut().take_injected(LogFault::Sync);
+        let synced = match injected {
+            Some(error) => Err(error.into()),
+            None => sync_file.fdatasync().await,
+        };
         // update our shared state and check if more data landed while we synced
         let resync = {
             // borrow our shared flush state, never holding it across an await
@@ -550,19 +591,28 @@ async fn write_helper<D: ShoalDatabase>(
     durability: Durability,
     shard_local_tx: AsyncSender<ServerMsg<D>>,
 ) {
-    // write this buffer to disk
-    let written = file.write_at(buff, pos).await;
-    {
+    // write this buffer to disk, unless a test asked this write to fail
+    let injected = state.borrow_mut().take_injected(LogFault::Write);
+    let written = match injected {
+        Some(error) => Err(error.into()),
+        None => file.write_at(buff, pos).await,
+    };
+    let failed = {
         // borrow our shared flush state, never holding it across an await
         let mut flush_state = state.borrow_mut();
         // either retire this write or record the error it hit
+        //
+        // a write that failed is never retired, so the watermark stops below it for good
         match written {
             Ok(_) => flush_state.on_complete(end),
             Err(error) => flush_state.record_error(error.into()),
         }
-    }
+        flush_state.failed
+    };
     // if we only acknowledge synced data then let our sync task wake our shard
-    if durability == Durability::Fsync {
+    //
+    // a failed log is never synced again, so it wakes the shard itself to find out
+    if durability == Durability::Fsync && !failed {
         // fdatasync everything that has landed so far, group committing with any
         // other writes that retired while a sync was already running
         start_sync::<D>(file, state, shard_local_tx);
@@ -834,9 +884,31 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         }
     }
 
+    /// Whether any of our background IO tasks has ever failed
+    ///
+    /// Stays true once it is, whether or not the error has been taken by [`Self::check_error`].
+    pub fn failed(&self) -> bool {
+        self.state.borrow().failed()
+    }
+
+    /// Make the next write or fdatasync of this log fail as a device error would
+    ///
+    /// For the tests of what a table does with a log it can no longer write
+    /// ([Resolved #122](../../../../../../docs/src/appendix/resolved/intent-log-failure.md)): the
+    /// failure is reported by the same background task and through the same state a real one is.
+    ///
+    /// # Arguments
+    ///
+    /// * `fault` - Which IO fails
+    #[doc(hidden)]
+    pub fn inject(&mut self, fault: LogFault) {
+        self.state.borrow_mut().injected = Some(fault);
+    }
+
     /// Check if any of our background IO tasks have failed
     ///
-    /// Takes the error, so a caller that swallows it will not see it again.
+    /// Takes the error, so a caller that swallows it will not see it again. The log stays
+    /// failed after it is taken; see [`Self::failed`].
     pub fn check_error(&mut self) -> Result<(), ServerError> {
         // take any error one of our background tasks recorded
         match self.state.borrow_mut().error.take() {
@@ -870,6 +942,12 @@ impl<D: ShoalDatabase> StreamWriter<D> {
     /// durable.
     #[instrument(name = "StreamWriter::sync_blocking", skip_all, err(Debug))]
     pub async fn sync_blocking(&mut self) -> Result<(), ServerError> {
+        // a failed log cannot be made durable, and a sync that succeeded now would say it was
+        if self.failed() {
+            return Err(ServerError::LogFailed {
+                path: self.path.clone(),
+            });
+        }
         // write out whatever is still staged in our buffer
         if self.buff_pos > 0 {
             self.write(self.staging_target(0)).await;
@@ -878,16 +956,33 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         self.drain_pending_writes().await;
         // wait out any group commit that was already running
         self.drain_pending_sync().await;
-        // sync our files data to stable storage
-        self.file.fdatasync().await?;
-        // record that everything written so far is now durable
+        // a write or sync that failed while we waited fails this sync too, since no fdatasync
+        // after it can vouch for what it covered
+        if self.failed() {
+            self.check_error()?;
+            return Err(ServerError::LogFailed {
+                path: self.path.clone(),
+            });
+        }
+        // sync our files data to stable storage, unless a test asked this sync to fail
+        let injected = self.state.borrow_mut().take_injected(LogFault::Sync);
+        let synced = match injected {
+            Some(error) => Err(error.into()),
+            None => self.file.fdatasync().await,
+        };
         {
             // borrow our shared flush state
             let mut flush_state = self.state.borrow_mut();
-            let written = flush_state.written_pos();
-            flush_state.mark_synced(written);
+            // record that everything written so far is now durable, or that this log failed
+            match synced {
+                Ok(()) => {
+                    let written = flush_state.written_pos();
+                    flush_state.mark_synced(written);
+                }
+                Err(error) => flush_state.record_error(error.into()),
+            }
         }
-        // surface any error our background tasks hit along the way
+        // surface any error our background tasks or this sync hit
         self.check_error()
     }
 
@@ -965,6 +1060,13 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         self.drain_pending_sync().await;
         // wait for every in flight write to land
         self.drain_pending_writes().await;
+        // a failed log is closed as it stopped: its staged tail is not written after the hole,
+        // and no fdatasync is asked to vouch for it
+        // ([Resolved #122](../../../../../../docs/src/appendix/resolved/intent-log-failure.md))
+        if self.failed() {
+            self.file.close_rc().await?;
+            return Ok(self.shard_local_tx);
+        }
         // write out whatever is still staged in our buffer
         if self.buff_pos > 0 {
             self.write(self.staging_target(0)).await;

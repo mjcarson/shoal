@@ -302,6 +302,8 @@ impl<D: ShoalDatabase> StorageSupport for NoStorage<D> {
             generation: 1,
             // a rotation restarts positions at zero, and ours only ever climb
             rotated: false,
+            // there is no log here to fail
+            failed: false,
         })
     }
 

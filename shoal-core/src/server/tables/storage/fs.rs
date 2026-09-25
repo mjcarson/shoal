@@ -38,7 +38,9 @@ pub use map::{ArchiveMap, TabletUsage};
 use reader::IntentLogReader;
 use stream::StreamWriter;
 
-use super::{CompactionJob, FlushProgress, IntentReadSupport, RecoveryStats, StorageSupport};
+use super::{
+    CompactionJob, FlushProgress, IntentReadSupport, LogFault, RecoveryStats, StorageSupport,
+};
 use crate::server::conf::TableSettings;
 use crate::server::database::ShoalDatabase;
 use crate::server::messages::ServerMsg;
@@ -120,10 +122,52 @@ pub struct FileSystem<D: ShoalDatabase> {
     pub tasks: FuturesUnordered<Task<Result<(), ServerError>>>,
     /// The shard local shared map of archive/partition data
     map: Arc<ArchiveMap>,
+    /// Whether this table's intent log failed a write or an fdatasync
+    ///
+    /// Set once, by [`FileSystem::fail`], and never cleared: a failed log takes no more writes
+    /// and is never rotated, synced or compacted again until the server is restarted
+    /// ([Resolved #122](../../../../docs/src/appendix/resolved/intent-log-failure.md)).
+    failed: bool,
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure_all)]
 impl<D: ShoalDatabase> FileSystem<D> {
+    /// Stop writing to this table's intent log, having found that it failed
+    ///
+    /// Logs the failure once, at `ERROR`, with the log it happened to. What was durable before
+    /// it stays durable and replays at the next start; nothing more is written, so every write
+    /// after this is refused before a byte of it is staged
+    /// ([Resolved #122](../../../../docs/src/appendix/resolved/intent-log-failure.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - What the log failed with
+    fn fail(&mut self, error: &ServerError) {
+        // a log fails once, and is reported once
+        if self.failed {
+            return;
+        }
+        self.failed = true;
+        // the operator has to act on this, so it says where and what
+        event!(
+            Level::ERROR,
+            msg = "this table's intent log failed and takes no more writes until the server is restarted",
+            shard = %self.shard_name,
+            path = %self.intent_path.display(),
+            generation = self.generation,
+            error = %error,
+        );
+    }
+
+    /// Whether this table's intent log has failed, reported or not
+    fn log_failed(&self) -> bool {
+        // a background task may have hit the failure before a sweep reported it
+        match &self.sink {
+            LogSink::Intent(writer) => self.failed || writer.failed(),
+            LogSink::Shared { .. } => false,
+        }
+    }
+
     ///// Get a new stream writer for this shard
     /////
     ///// # Arguments
@@ -359,6 +403,7 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
             intent_tx,
             tasks: FuturesUnordered::default(),
             map,
+            failed: false,
         };
         // spawn our intent compactor
         fs.spawn_intent_compactor::<P, R>(shard_table_name, intent_rx, shard_local_tx)
@@ -561,6 +606,12 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
                 "a table on a cluster node committed to an intent log it does not have; every write goes through its tablet group".to_string(),
             ));
         };
+        // a log that failed takes nothing more, and is refused before a byte is staged
+        if self.failed || writer.failed() {
+            return Err(ServerError::LogFailed {
+                path: self.intent_path.clone(),
+            });
+        }
         // serialize our data, before anything is staged, so a failure here stages nothing
         let archived = RkyvSupport::serialize(data)?;
         // get the size of the data to write
@@ -628,10 +679,26 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         let LogSink::Intent(writer) = &self.sink else {
             return false;
         };
+        // a failed log is never rotated, so it is never due
+        if self.failed {
+            return false;
+        }
         // get the latency sensistive max intent log size
         let max_size = self.table_conf.latency_sensitive.intent_log_size;
         // our log is due to rotate once it has accepted more than that
         writer.get_unflushed_pos() > max_size
+    }
+
+    /// Make the next write or fdatasync of this table's intent log fail as a device error would
+    ///
+    /// # Arguments
+    ///
+    /// * `fault` - Which IO fails
+    fn inject_log_fault(&mut self, fault: LogFault) {
+        // a shared WAL is the shard's, and has no writer here to fail
+        if let LogSink::Intent(writer) = &mut self.sink {
+            writer.inject(fault);
+        }
     }
 
     /// Set our intent log to be compact if its needed
@@ -655,11 +722,31 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
                     durable_pos: 0,
                     generation: *generation,
                     rotated: false,
+                    failed: false,
                 });
             }
         };
-        // surface any error our background write tasks hit
-        writer.check_error()?;
+        // a log that failed stays where it stopped, and is never rotated again
+        if self.failed {
+            return Ok(FlushProgress {
+                durable_pos: writer.get_flushed_pos(),
+                generation: self.generation,
+                rotated: false,
+                failed: true,
+            });
+        }
+        // surface any error our background write tasks hit, which fails this log for good
+        if let Err(error) = writer.check_error() {
+            // the watermark stopped below the write that failed, and will never move again
+            let durable_pos = writer.get_flushed_pos();
+            self.fail(&error);
+            return Ok(FlushProgress {
+                durable_pos,
+                generation: self.generation,
+                rotated: false,
+                failed: true,
+            });
+        }
         // check if this intent log is too big or if compaction is being forced
         let due = writer.get_unflushed_pos() > self.table_conf.latency_sensitive.intent_log_size;
         if force || due {
@@ -670,7 +757,23 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
             // build the path to this shards new intent log
             new_path.push(name);
             // refresh this writer to a write to a new file
-            let flushed_pos = writer.refresh(&new_path).await?;
+            //
+            // a rotation that fails is a log that failed: nothing of it was made durable past
+            // the watermark, and a rename that landed leaves the old log to be replayed from
+            // its inactive name at the next start, since no compaction was asked for it
+            let flushed_pos = match writer.refresh(&new_path).await {
+                Ok(flushed_pos) => flushed_pos,
+                Err(error) => {
+                    let durable_pos = writer.get_flushed_pos();
+                    self.fail(&error);
+                    return Ok(FlushProgress {
+                        durable_pos,
+                        generation: self.generation,
+                        rotated: false,
+                        failed: true,
+                    });
+                }
+            };
             // create an intent log compaction job
             self.intent_tx
                 .send(CompactionJob::IntentLog {
@@ -686,6 +789,7 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
                 durable_pos: flushed_pos,
                 generation: self.generation,
                 rotated: true,
+                failed: false,
             })
         } else {
             // get the current position of durable data
@@ -694,6 +798,7 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
                 durable_pos: flushed_pos,
                 generation: self.generation,
                 rotated: false,
+                failed: false,
             })
         }
     }
@@ -705,8 +810,14 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         let LogSink::Intent(writer) = &mut self.sink else {
             return Ok(());
         };
-        // surface any error our background write tasks hit
-        writer.check_error()?;
+        // a failed log is written to no more, and the sweep is what reports it and answers
+        // the writes waiting on it
+        //
+        // the error is left for `compact_if_needed` to take, and the task that recorded it has
+        // already woken the shard to sweep
+        if self.failed || writer.failed() {
+            return Ok(());
+        }
         // sync our intent log to disk
         writer.sync().await?;
         Ok(())
@@ -941,8 +1052,21 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         // this has to be the blocking sync, not `flush`, since `flush` only hands
         // another buffer to the kernel and returns without waiting; a shared WAL is the
         // shard's to close
+        //
+        // a failed log was reported when it failed and can be made no more durable than it is,
+        // so it is left as it stopped for the next start to replay
+        // ([Resolved #122](../../../../docs/src/appendix/resolved/intent-log-failure.md))
+        let failed = self.log_failed();
         if let LogSink::Intent(writer) = &mut self.sink {
-            writer.sync_blocking().await?;
+            if failed {
+                event!(
+                    Level::WARN,
+                    msg = "not syncing a failed intent log at shutdown",
+                    path = %self.intent_path.display(),
+                );
+            } else {
+                writer.sync_blocking().await?;
+            }
         }
         // signal our intent log compactor to shutdown
         //

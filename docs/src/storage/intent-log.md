@@ -274,10 +274,25 @@ a watermark without sending — `sync_blocking`'s `mark_synced` — is only safe
 callers already run inside a sweep that drains. F5's *Invariants to uphold* is the full statement.
 
 IO errors from a background task are recorded in `FlushState` and surfaced by `check_error`
-on the next `flush` or `compact_if_needed`, rather than `unwrap()`ing inside a detached task.
+~~on the next `flush` or `compact_if_needed`~~ on the next `compact_if_needed`, rather than
+`unwrap()`ing inside a detached task.
 `compact_if_needed` now runs behind the gate above, which is safe for the same reason: a failed
 write and a failed fdatasync both still send their `DataFlushed`, so the error is never sitting
-behind a gate that nothing will open.
+behind a gate that nothing will open. A failed write sends its own, since the sync that would
+have sent it is never issued.
+
+**A recorded error fails the log for good**
+([Resolved #122](../appendix/resolved/intent-log-failure.md)). It used to be returned from the
+sweep, which ended the shard. Now:
+
+- `FlushState.failed` is sticky
+- no fdatasync is issued on a failed log, because one that succeeds after one that failed proves nothing
+- a failed write never retires, so the watermark stops below it
+- `compact_if_needed` reports `FlushProgress { failed: true }`. The table releases what is below
+  the watermark and answers every write past it `OutcomeUnknown`.
+- `commit` refuses every later write with `StorageWrite` before staging a byte
+- the log is never rotated, `flush` is a no-op, and `shutdown` closes the log without syncing it
+- the next start replays the durable prefix, and stops at the hole as if it were the end of the log
 
 ### Position tracking
 
@@ -386,8 +401,13 @@ load, latency stays low because the queue drains.
   CPU feature flags.
 - A partial flush costs a partial block of write amplification. Worst at idle, negligible
   under load.
-- `write_at` and the wakeup send still `unwrap()` inside the detached task on some paths;
-  `FlushState` records the write error, but a failed *send* aborts the shard.
+- ~~`write_at` and the wakeup send still `unwrap()` inside the detached task on some paths;
+  `FlushState` records the write error, but a failed *send* aborts the shard.~~ Neither does:
+  a failed write is recorded, and a failed send is discarded, since a closed channel means the
+  shard is exiting ([Resolved #16](../appendix/resolved/hot-path-panics.md)).
+- A log that fails a write or an fdatasync takes no more writes until the server is restarted,
+  and every partition written in its generation stays in memory until then
+  ([Resolved #122](../appendix/resolved/intent-log-failure.md)).
 - Rotation releases every pending response at once. That is correct — they are all durable —
   ~~but it means a rotation can emit an unbounded burst of responses.~~ and the burst is bounded
   by `networking.max_pending_writes`, since that is all the queue can hold.

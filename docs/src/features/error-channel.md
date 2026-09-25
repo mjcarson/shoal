@@ -158,8 +158,10 @@ remains is letting `send_one` take a `QuerySuceededOpts`.
 has somewhere to go and does not yet use it. That is the largest remaining piece of
 [item 16](../appendix/known-issues.md).~~ **Done** — they answer `StorageWrite`, code 13, a definite
 refusal with the table left as it was ([Resolved #16](../appendix/resolved/hot-path-panics.md)).
-A full disk never reached them; it ends the shard through the sweep instead, and is
-[item 122](../appendix/known-issues.md).
+A full disk never reached them; it ~~ends~~ ended the shard through the sweep instead, and was
+item 122, since [resolved](../appendix/resolved/intent-log-failure.md): a table whose log failed
+answers the writes past its durable watermark `OutcomeUnknown` and every later write
+`StorageWrite`.
 
 **A query stream registers only its most recent connection.** `ShoalQueryStream::send` takes
 whatever connection the pool hands out per bundle and overwrites the waiter's connection each time.

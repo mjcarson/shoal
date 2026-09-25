@@ -31,7 +31,7 @@ use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::SortedPartition;
 use crate::server::tables::persistent::{
     adjust_memory_usage, apply_failure, corrupt_archive, eviction_totals, settle_resident_read,
-    PartitionLoad, PendingGets,
+    ParkKey, PartitionLoad, PendingGets,
 };
 use crate::server::tables::persistent::{
     open, read_not_asked, refuse, shed, storage_write, unreadable, ApplyStep, ParkedQueries,
@@ -48,8 +48,8 @@ use crate::shared::traits::{
     RkyvSupport, ShoalProjection, ShoalSortedTable, ShoalTableSupport, TableNameSupport,
 };
 use crate::storage::{
-    link_released, FullArchiveMap, IntentReadSupport, LoaderMsg, Loaders, PendingResponse,
-    RecoveryStats, ShouldPrune, StorageSupport,
+    link_released, FullArchiveMap, IntentReadSupport, LoaderMsg, Loaders, LogFault,
+    PendingResponse, RecoveryStats, ShouldPrune, StorageSupport,
 };
 use crate::tables::partitions::{MaybeLoaded, MaybeRow, PartitionSupport, ValidatedArchive};
 use rkyv::util::AlignedVec;
@@ -169,8 +169,9 @@ where
     /// The partitions each exists query is still waiting to have loaded from disk
     ///
     /// An exists answers with a bool rather than rows, so it only needs to know which of its
-    /// partitions it has yet to hear about.
-    pending_exists: HashMap<(Uuid, usize), Vec<u64>>,
+    /// partitions it has yet to hear about. Keyed the same way as the parked gets, for the same
+    /// reason ([Resolved #123](../../../../docs/src/appendix/resolved/parked-get-key.md)).
+    pending_exists: HashMap<ParkKey, Vec<u64>>,
     /// The responses for queries that have been flushed to disk
     flushed: Vec<(Uuid, Uuid, Span, StageStamps, Response<R>)>,
     /// The channel to send loader jobs on
@@ -922,23 +923,24 @@ where
         if self.can_answer_in_place(&meta, get) {
             return Some(self.get_sealed::<P>(meta, get, seal));
         }
+        // the key this get parks under, which every replay of it carries
+        let key = ParkKey::of(&meta);
         // a get that parked on an earlier execution is never shed, since part of it is held
         //
         // this is read before `resume`, which takes the parked state out
-        let fresh = !self.pending_data.is_parked(&(meta.id, meta.index));
+        let fresh = !self.pending_data.is_parked(&key);
         // whether this execution has parked this get on any partition yet
         let mut parked_any = false;
         // pick this get up where its last execution left off, or start it fresh
         //
         // a get blocked on a partition is replayed once that partition has been read, so the
         // rows it already found have to outlive the execution that found them
-        let mut pending = match self.pending_data.resume::<P>(
-            &(meta.id, meta.index),
-            &get.partition_keys,
-            get.limit,
-        ) {
+        let mut pending = match self
+            .pending_data
+            .resume::<P>(&key, &get.partition_keys, get.limit)
+        {
             Ok(pending) => pending,
-            // another get parked under this id and index, and it is left to finish
+            // another get parked under this key, and it is left to finish
             Err(error) => return open(refuse(meta, error)),
         };
         // the archived forms of this gets keys, built the first time a partition of it is
@@ -1015,7 +1017,7 @@ where
         // hold this get until every partition it named has been read
         if pending.is_pending() {
             // remember what we have found so far for the replay to carry on from
-            self.pending_data.park((meta.id, meta.index), pending);
+            self.pending_data.park(key, pending);
             // we have blocked partitions so return None
             return None;
         }
@@ -1067,7 +1069,7 @@ where
             return false;
         }
         // a get that has already parked holds rows from an execution that has ended
-        if self.pending_data.is_parked(&(meta.id, meta.index)) {
+        if self.pending_data.is_parked(&ParkKey::of(&meta)) {
             return false;
         }
         // and none of the partitions it names may still have rows we have not read
@@ -1198,8 +1200,8 @@ where
     ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
         // pick up the partitions this exists is still waiting on, or start it fresh
         // an exists that parked on an earlier execution is never shed, since part of it is held
-        let fresh = !self.pending_exists.contains_key(&(meta.id, meta.index));
-        let mut blocked = match self.pending_exists.remove(&(meta.id, meta.index)) {
+        let fresh = !self.pending_exists.contains_key(&ParkKey::of(&meta));
+        let mut blocked = match self.pending_exists.remove(&ParkKey::of(&meta)) {
             // carry on with the partitions this exists has yet to read
             Some(blocked) => blocked,
             // this query has never been executed before so instance sane defaults
@@ -1267,7 +1269,7 @@ where
         // hold this exists until every partition it named has been read
         if !blocked.is_empty() {
             // remember what we are still waiting on for the replay to carry on from
-            self.pending_exists.insert((meta.id, meta.index), blocked);
+            self.pending_exists.insert(ParkKey::of(&meta), blocked);
             return None;
         }
         // none of the partitions we read held any of the rows this exists named
@@ -2345,6 +2347,19 @@ where
         self.storage.compaction_due()
     }
 
+    /// Make the next write or fdatasync of this table's intent log fail as a device error would
+    ///
+    /// For the tests of what a table does with a log it can no longer write
+    /// ([Resolved #122](../../../../docs/src/appendix/resolved/intent-log-failure.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `fault` - Which IO fails
+    #[doc(hidden)]
+    pub fn inject_log_fault(&mut self, fault: LogFault) {
+        self.storage.inject_log_fault(fault);
+    }
+
     /// Get all flushed response actions
     ///
     /// # Arguments
@@ -2358,7 +2373,20 @@ where
         // update our current generation
         self.generation = progress.generation;
         // release the responses whose data is now durable
-        if progress.rotated {
+        if progress.failed {
+            // everything below where the log stopped is durable and answered as it was
+            self.pending.get(progress.durable_pos, &mut self.flushed);
+            // and everything past it may or may not be on disk, which is what it is answered
+            // with ([Resolved #122](../../../../docs/src/appendix/resolved/intent-log-failure.md))
+            let unknown = ResponseError::new(
+                ErrorCode::OutcomeUnknown,
+                format!(
+                    "{} could not make this write durable: its intent log failed, and the write may or may not have landed",
+                    self.table_name
+                ),
+            );
+            self.pending.fail_all(&unknown, &mut self.flushed);
+        } else if progress.rotated {
             // rotation fdatasynced everything in the old log and restarted our
             // positions at 0, so every pending response is durable and none of
             // their positions can be compared against the new files watermark

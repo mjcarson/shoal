@@ -569,7 +569,47 @@ impl<'a, P: ShoalProjection> RowSink<'a, P> {
 #[derive(Default)]
 pub(crate) struct PendingGets {
     /// What each parked get has found so far, keyed by the query it answers
-    parked: HashMap<(Uuid, usize), Box<dyn Any>>,
+    parked: HashMap<ParkKey, Box<dyn Any>>,
+}
+
+/// Which execution of which query a parked read is, across its replays
+///
+/// The query id and the index are the client's own choice, so they alone do not tell two
+/// queries apart: a client that reuses an id while a query under it is parked sends a second
+/// query under the same pair. Keyed by those two alone, the second one picked up the first
+/// one's progress, skipped its own partitions and parked on the first one's read, and was never
+/// answered ([Resolved #123](../../../docs/src/appendix/resolved/parked-get-key.md)).
+///
+/// The attempt is minted by the coordinator for every bundle it takes off a socket, and a
+/// replay carries the metadata of the execution that parked, so the attempt is the same on
+/// every replay of one query and different for every bundle that reuses its id. The client
+/// closes the case of two clients choosing the same id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ParkKey {
+    /// The client the query came from
+    client: Uuid,
+    /// The query id the client chose for the bundle
+    id: Uuid,
+    /// The query's index in its bundle
+    index: usize,
+    /// Which arrival of a bundle the coordinator took this query from
+    attempt: u64,
+}
+
+impl ParkKey {
+    /// The key a query parks and is picked back up under
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The metadata of the query being executed
+    pub fn of(meta: &QueryMetadata) -> Self {
+        ParkKey {
+            client: meta.client,
+            id: meta.id,
+            index: meta.index,
+            attempt: meta.read.attempt,
+        }
+    }
 }
 
 impl std::fmt::Debug for PendingGets {
@@ -597,20 +637,20 @@ impl PendingGets {
     ///
     /// A get is replayed with the projection it was sent with, because the query parked on the
     /// partition is a copy of the one that parked it, so the type asked for by a replay is
-    /// always the type stored. A downcast that fails means two gets share a query id and index
-    /// while asking for different rows - which the id being the client's own choice makes
-    /// possible, and which used to panic the shard. The parked get is put back, untouched, so
-    /// it still finishes, and the get that collided is refused
-    /// ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
+    /// always the type stored. A downcast that fails means two gets share a key while asking
+    /// for different rows. Since the key names the attempt that cannot happen, but it used to
+    /// panic the shard when the key was the client's id and index alone, so it is still
+    /// answered: the parked get is put back, untouched, so it still finishes, and the get that
+    /// collided is refused ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
     ///
     /// # Arguments
     ///
-    /// * `key` - The query id and index of the get being executed
+    /// * `key` - The key of the get being executed
     /// * `partition_keys` - The partition keys this get named, in the order it named them
     /// * `limit` - The most rows this get asked for, if it set a limit
     pub fn resume<P: 'static>(
         &mut self,
-        key: &(Uuid, usize),
+        key: &ParkKey,
         partition_keys: &[u64],
         limit: Option<usize>,
     ) -> Result<PendingGet<P>, ResponseError> {
@@ -624,8 +664,7 @@ impl PendingGets {
                     self.parked.insert(*key, parked);
                     Err(ResponseError::new(
                         ErrorCode::InvalidRequest,
-                        "a get with this id and index is already waiting on a partition read"
-                            .to_owned(),
+                        "a get with this key is already waiting on a partition read".to_owned(),
                     ))
                 }
             },
@@ -642,8 +681,8 @@ impl PendingGets {
     ///
     /// # Arguments
     ///
-    /// * `key` - The query id and index of the get being executed
-    pub fn is_parked(&self, key: &(Uuid, usize)) -> bool {
+    /// * `key` - The key of the get being executed
+    pub fn is_parked(&self, key: &ParkKey) -> bool {
         self.parked.contains_key(key)
     }
 
@@ -651,9 +690,9 @@ impl PendingGets {
     ///
     /// # Arguments
     ///
-    /// * `key` - The query id and index of the get being parked
+    /// * `key` - The key of the get being parked
     /// * `pending` - What this get has found so far
-    pub fn park<P: 'static>(&mut self, key: (Uuid, usize), pending: PendingGet<P>) {
+    pub fn park<P: 'static>(&mut self, key: ParkKey, pending: PendingGet<P>) {
         self.parked.insert(key, Box::new(pending));
     }
 }
@@ -1002,7 +1041,8 @@ pub(crate) fn eviction_totals(pre: usize, post: usize, removed: usize) -> (usize
 
 #[cfg(test)]
 mod tests {
-    use super::{adjust_memory_usage, eviction_totals, PendingGets};
+    use super::{adjust_memory_usage, eviction_totals, ParkKey, PendingGets};
+    use crate::server::messages::QueryMetadata;
     use crate::shared::protocol::error::ErrorCode;
     use std::cell::RefCell;
     use uuid::Uuid;
@@ -1011,12 +1051,12 @@ mod tests {
     /// A get resumed with another projection than the one parked under its key is refused,
     /// and the get that parked is kept to finish
     ///
-    /// The key is the query's id and index, both the client's choice, so two gets can share one
-    /// while asking for different rows. That used to panic the shard
+    /// The key used to be the query's id and index, both the client's choice, so two gets
+    /// could share one while asking for different rows. That used to panic the shard
     /// ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
     fn a_get_resumed_with_another_projection_is_refused_and_the_parked_one_kept() {
         // park a get answering in one row type, part way through its two partitions
-        let key = (Uuid::new_v4(), 0);
+        let key = ParkKey::of(&meta(Uuid::new_v4(), Uuid::new_v4(), 1));
         let mut parked = PendingGets::with_capacity(1);
         let mut pending = parked
             .resume::<u32>(&key, &[1, 2], None)
@@ -1037,6 +1077,51 @@ mod tests {
         assert_eq!(resumed.rank(2), Some(1));
         resumed.fill(1, vec![8]);
         assert_eq!(resumed.finish().rows, vec![7, 8]);
+    }
+
+    /// The metadata of a query from a client, under an attempt at its bundle
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The client
+    /// * `id` - The bundle's query id
+    /// * `attempt` - Which arrival of a bundle with this id this is
+    fn meta(client: Uuid, id: Uuid, attempt: u64) -> QueryMetadata {
+        let mut meta = QueryMetadata::untimed(client, id, 0, true, None, tracing::Span::none());
+        meta.read.attempt = attempt;
+        meta
+    }
+
+    #[test]
+    /// A query reusing a parked query's id and index in another bundle is keyed apart from it
+    ///
+    /// The id and the index are the client's; the attempt is the coordinator's, minted per
+    /// bundle, so two bundles that share an id never share a key, while every replay of one
+    /// query does ([Resolved #123](../../../docs/src/appendix/resolved/parked-get-key.md)).
+    fn a_reused_id_in_another_bundle_is_another_key() {
+        let (client, id) = (Uuid::new_v4(), Uuid::new_v4());
+        // a replay carries the metadata of the execution that parked, so its key is the same
+        let first = meta(client, id, 1);
+        assert_eq!(ParkKey::of(&first), ParkKey::of(&first.clone()));
+        // the same id and index in another bundle is another key
+        assert_ne!(ParkKey::of(&first), ParkKey::of(&meta(client, id, 2)));
+        // and so is the same id from another client
+        assert_ne!(
+            ParkKey::of(&first),
+            ParkKey::of(&meta(Uuid::new_v4(), id, 1))
+        );
+        // so a get parked under one is never resumed by the other
+        let mut parked = PendingGets::with_capacity(1);
+        let mut pending = parked
+            .resume::<u32>(&ParkKey::of(&first), &[1], None)
+            .expect("a fresh get was refused");
+        pending.fill(0, vec![7]);
+        parked.park(ParkKey::of(&first), pending);
+        let second = parked
+            .resume::<u32>(&ParkKey::of(&meta(client, id, 2)), &[2], None)
+            .expect("a get in another bundle was refused");
+        assert_eq!(second.rank(2), Some(0));
+        assert!(parked.is_parked(&ParkKey::of(&first)));
     }
 
     #[test]

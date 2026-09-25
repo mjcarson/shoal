@@ -27,7 +27,7 @@ use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::replication::{ArchivedCut, IntegrityStats};
 use crate::server::stage_profile::{StageDurability, StageStamps};
 use crate::server::{Conf, ServerError};
-use crate::shared::responses::{Response, ResponseAction};
+use crate::shared::responses::{Response, ResponseAction, ResponseError};
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, TableNameSupport};
 use crate::tables::partitions::{MaybeLoaded, PartitionSupport};
 
@@ -124,6 +124,39 @@ impl<T> PendingResponse<T> {
         }
     }
 
+    /// Answer every pending response with a failure instead of what it would have said
+    ///
+    /// Only correct once the log these responses wait on has failed and every response below
+    /// its durable watermark has been released by [`Self::get`]. What is left may be on disk and
+    /// may not, and no watermark will ever say which, so each is answered in its own place in
+    /// its bundle with the failure it is given
+    /// ([Resolved #122](../../../docs/src/appendix/resolved/intent-log-failure.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The failure every remaining response is answered with
+    /// * `flushed` - The vec to write our failed responses too
+    pub fn fail_all(
+        &mut self,
+        error: &ResponseError,
+        flushed: &mut Vec<(Uuid, Uuid, Span, StageStamps, Response<T>)>,
+    ) {
+        // every response still waiting is answered, and none of them with what it did
+        for (_, mut meta, _) in self.pending.drain(..) {
+            // record when this response was released back to the shard
+            meta.stamps.mark_released();
+            // answer in this write's own place with the failure
+            let response = Response {
+                id: meta.id,
+                index: meta.index,
+                data: ResponseAction::Error(error.clone()),
+                end: meta.end,
+            };
+            // add this answer to our flushed vec
+            flushed.push((meta.client, meta.id, meta.span, meta.stamps, response));
+        }
+    }
+
     /// Get all responses that have had their data committed to disk
     ///
     /// # Arguments
@@ -186,6 +219,26 @@ pub struct FlushProgress {
     /// at 0, so callers have to release their pending responses rather than compare
     /// their old positions against a new files watermark.
     pub rotated: bool,
+    /// Whether this table's intent log has failed a write or an fdatasync
+    ///
+    /// `durable_pos` is then where the log stopped being durable and will never move again, so
+    /// a caller releases what is below it and answers everything past it as an outcome it
+    /// cannot know ([Resolved #122](../../../docs/src/appendix/resolved/intent-log-failure.md)).
+    pub failed: bool,
+}
+
+/// Which IO of a table's intent log a test makes fail
+///
+/// Injected through [`StorageSupport::inject_log_fault`] and reported by the writer's own
+/// background task, through the same state a device error is
+/// ([Resolved #122](../../../docs/src/appendix/resolved/intent-log-failure.md)).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFault {
+    /// The next buffer written to the log fails
+    Write,
+    /// The next fdatasync of the log fails
+    Sync,
 }
 
 /// A fault the fixture injects into one partition's archived copy, for the repair tests
@@ -762,9 +815,24 @@ pub trait StorageSupport: Sized {
     /// that performs one. It has to stay cheap enough to call on every message.
     fn compaction_due(&self) -> bool;
 
+    /// Make the next write or fdatasync of this table's intent log fail as a device error would
+    ///
+    /// For the tests of a log that fails
+    /// ([Resolved #122](../../../docs/src/appendix/resolved/intent-log-failure.md)). An engine
+    /// with no log of its own has nothing to fail and ignores it.
+    ///
+    /// # Arguments
+    ///
+    /// * `_fault` - Which IO fails
+    #[doc(hidden)]
+    fn inject_log_fault(&mut self, _fault: LogFault) {}
+
     /// Set our intent log to be compact if its needed
     ///
-    /// Returns how far this tables intent log has been made durable
+    /// Returns how far this tables intent log has been made durable. A log that failed a write
+    /// or an fdatasync is reported in that progress rather than as an error, so the table can
+    /// answer its own writes and its shard carries on serving everything else
+    /// ([Resolved #122](../../../docs/src/appendix/resolved/intent-log-failure.md)).
     ///
     /// # Arguments
     ///
@@ -1159,6 +1227,39 @@ mod tests {
         // draining again yields nothing since the queue is now empty
         pending.drain_all(&mut flushed);
         assert_eq!(flushed.len(), 3);
+    }
+
+    #[test]
+    /// A failed log releases what is durable and answers everything past it, each in its place
+    ///
+    /// [Resolved #122](../../../docs/src/appendix/resolved/intent-log-failure.md): the entries
+    /// below where the log stopped keep their answers, and the rest are answered with the
+    /// failure at their own index rather than dropped or merged.
+    fn a_failed_log_answers_what_is_past_its_watermark() {
+        let mut pending = queue_at(&[512, 1024, 1536]);
+        let mut flushed = Vec::new();
+        // the log stopped at 512, so only the first entry is durable
+        pending.get(512, &mut flushed);
+        assert_eq!(flushed.len(), 1);
+        // and the other two are answered with the failure
+        let error = crate::shared::responses::ResponseError::new(
+            crate::shared::protocol::error::ErrorCode::OutcomeUnknown,
+            "failed".to_owned(),
+        );
+        pending.fail_all(&error, &mut flushed);
+        assert_eq!(flushed.len(), 3);
+        assert!(pending.is_empty());
+        // the durable entry kept its own answer
+        assert!(!matches!(flushed[0].4.data, ResponseAction::Error(_)));
+        // each failed entry answers at its own index, with the failure
+        for (index, (_, _, _, _, response)) in flushed.iter().enumerate().skip(1) {
+            assert_eq!(response.index, index);
+            assert!(matches!(
+                &response.data,
+                ResponseAction::Error(error)
+                    if error.code() == crate::shared::protocol::error::ErrorCode::OutcomeUnknown
+            ));
+        }
     }
 
     #[test]

@@ -92,6 +92,12 @@ pub enum ServerError {
     /// Carried as text for the reason [`ServerError::ShardFailed`] is: it crossed from the
     /// control thread, and what the pool's owner needs is to be told.
     ControlFailed { error: String },
+    /// A table's intent log failed a write or an fdatasync, and takes no more writes
+    ///
+    /// The log's durable prefix is what it was when it failed; everything past it may or may not
+    /// be on disk. Nothing more is written to it until the server is restarted, which replays
+    /// what landed ([Resolved #122](../../../docs/src/appendix/resolved/intent-log-failure.md)).
+    LogFailed { path: std::path::PathBuf },
 }
 
 impl std::fmt::Display for ServerError {
@@ -108,6 +114,11 @@ impl std::fmt::Display for ServerError {
             ServerError::SerdeJson(error) => write!(f, "json error: {error}"),
             ServerError::ShardFailed { shard, error } => write!(f, "shard {shard} failed: {error}"),
             ServerError::ControlFailed { error } => write!(f, "control plane failed: {error}"),
+            ServerError::LogFailed { path } => write!(
+                f,
+                "the intent log at {} failed a write or an fdatasync and takes no more until the server is restarted",
+                path.display()
+            ),
             ServerError::ReadyTimeout { ready, of, timeout } => {
                 write!(f, "{ready} of {of} shards ready after {timeout:?}")
             }

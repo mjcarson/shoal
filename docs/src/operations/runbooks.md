@@ -6,7 +6,7 @@ rollback point is. Every operation below is an admin request - sent through a cl
 principal `cluster.admins` names, or typed into the `shoalctl` cluster tab
 ([`space c`](shoalctl.md#the-cluster-tab)), which previews it and follows its record - except
 the three that run on a stopped directory (`force_recover`, `export_standalone`, a rehome),
-which are said so. What each operation refuses is on the feature page it links; what it costs
+which are said so, and [15](#15-a-tables-intent-log-failed), which is a restart. What each operation refuses is on the feature page it links; what it costs
 the foreground is on [Performance](../distributed/performance.md).
 
 Runbooks [1](#1-bootstrap) and [2](#2-add-a-node) are also a program: `shoalctl cluster
@@ -277,3 +277,26 @@ at any point joins, since every node trusts what every leaf chains to.
 **Rollback.** The files: write the previous material back and reload. A leaf reloaded on the
 wrong node is refused by every peer naming the certificate until it is put right, and the node
 keeps its established connections meanwhile.
+
+## 15. A table's intent log failed
+
+**Symptom.** A standalone table's intent log failed a write or an fdatasync. The shard logs one
+`ERROR`, *"this table's intent log failed and takes no more writes until the server is
+restarted"*, with the shard, the log's path and its generation. From then on, every write to
+that table on that shard is refused `StorageWrite`. Reads, and every other table on the shard,
+are served as before. Writes that were waiting on the log when it failed were answered
+`OutcomeUnknown`: each one may or may not be on disk
+([Resolved #122](../appendix/resolved/intent-log-failure.md)).
+
+**Procedure.**
+1. Find out why the device failed: a full filesystem, an `EIO` in the kernel log, a device that went away.
+2. Fix it.
+3. Restart the server. The restart replays each log up to where it stopped being durable. The
+   write that failed, and anything the device took after it, are not replayed.
+4. A client that was answered `OutcomeUnknown` reads the row back to learn which outcome it got.
+
+**Rollback.** There is nothing to roll back. The failed log is left as it stopped, and no
+operation clears it without a restart.
+
+A cluster node's tables have no log of their own: their writes go through the shard's shared WAL,
+whose failures are its tablet groups' to handle.

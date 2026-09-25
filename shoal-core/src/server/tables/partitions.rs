@@ -447,13 +447,26 @@ where
     /// before it commits the update, so a copy that cannot be read commits nothing
     /// ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
     ///
+    /// The partition is stamped with the generation the update was committed in, since that is
+    /// the log whose compaction makes it evictable again. Leaving the stamp at its insert's let
+    /// the older log's compaction evict an update that was only in the current one
+    /// ([Resolved #124](../../../docs/src/appendix/resolved/unsorted-update-generation.md)).
+    ///
     /// # Arguments
     ///
     /// * `update` - The update to apply
-    pub fn update_loaded(&mut self, update: &UnsortedUpdate<R>) {
+    /// * `generation` - The generation of the intent log the update was committed to
+    pub fn update_loaded(&mut self, update: &UnsortedUpdate<R>, generation: u64) {
         // only a loaded row can be updated where it lies
-        if let MaybeLoaded::Loaded { partition, .. } = self {
+        if let MaybeLoaded::Loaded {
+            partition,
+            generation: stamped,
+        } = self
+        {
+            // apply the update to the row
             partition.update(update);
+            // and hold the partition until the log carrying the update is archived
+            *stamped = generation;
         }
     }
 

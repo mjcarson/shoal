@@ -962,7 +962,8 @@ What this entry still holds:
   ([Known Issues #16](known-issues.md#16-panics-on-the-hot-path)) — is now true and untaken. A full
   disk on an ordinary insert still panics the shard, and it now has somewhere to report instead.~~
   **Taken** — [Resolved #16](resolved/hot-path-panics.md). The claim was true; the full disk was
-  not what reached those sites, and is [item 122](known-issues.md).
+  not what reached those sites, and was item 122, since
+  [resolved](resolved/intent-log-failure.md).
 - **`Flags::IS_ERROR` on a response frame whose payload is an error.** F11 sets it on `Error`
   frames only. Setting it on responses would mean threading a flag through `client_tx_relay`'s
   `(Uuid, Span, StageStamps, AlignedVec)` tuple, and so through `ServerMsg::NewClient`,
@@ -1989,6 +1990,23 @@ files into a directory nothing ever looks at is worse than the warning alone.
 
 The same argument applies on the recovery path, which discards a damaged tail with the same
 finality ([Recovery](../storage/recovery.md#truncation-and-corruption)).
+
+### Recovering a failed intent log without a restart
+
+A table whose intent log fails a write or an fdatasync refuses writes until the server is
+restarted ([Resolved #122](resolved/intent-log-failure.md)). That restart takes down every
+other table on the node, just to reopen one file. What is wanted is an admin operation that
+recovers one table's log in place:
+1. seal the failed log at its durable watermark, so the hole and anything past it are never replayed
+2. open a new log at the next generation
+3. hand the sealed prefix to the compactor
+4. clear the table's failed flag
+
+Two things keep this filed rather than done:
+- **Nothing can yet say the device is healthy again**, and the operation is only safe once it is.
+- **Sealing needs the compactor to accept a log whose valid prefix ends before its last byte.**
+  Today a log is read to its first empty record, which happens to be the hole, but nothing
+  promises that.
 
 ### Storage engine abstraction
 

@@ -122,8 +122,11 @@ field, and it emits a compile-time assertion that the projection's `PartitionKey
 type its row's is.
 
 **A parked get is type-erased, and only a parked get.** A get whose partition has to be read from
-disk keeps what it found so far in `PendingGets`, which is now a `HashMap<(Uuid, usize), Box<dyn
-Any>>` because the rows in it can be any of the table's projections. The box is only ever allocated
+disk keeps what it found so far in `PendingGets`, which is now a ~~`HashMap<(Uuid, usize), Box<dyn
+Any>>`~~ `HashMap<ParkKey, Box<dyn Any>>` because the rows in it can be any of the table's
+projections. The key was the query's id and index until
+[Resolved #123](../appendix/resolved/parked-get-key.md) added the client and the bundle's
+attempt, so that a client reusing an id is not handed another get's progress. The box is only ever allocated
 where the old code already inserted into that map — on the pending path — so a get whose partitions
 are all resident finishes in one execution and never touches it. A get that is waiting pays one
 allocation and one downcast against a disk read it is already blocked on.

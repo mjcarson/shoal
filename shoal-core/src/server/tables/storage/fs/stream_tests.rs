@@ -441,3 +441,25 @@ fn a_ceiling_at_the_floor_is_the_old_behaviour() {
         );
     }
 }
+
+#[test]
+/// A failure stays recorded after it is reported, and stops the watermark below the failed write
+///
+/// [Resolved #122](../../../../../../docs/src/appendix/resolved/intent-log-failure.md): the sweep
+/// takes the error to report it, and a log that forgot it had failed would sync again and let a
+/// later fdatasync vouch for bytes an earlier one could not.
+fn a_failure_is_sticky_and_freezes_the_watermark() {
+    let mut state = FlushState::default();
+    // two writes in flight, the first of which fails
+    state.on_start(512);
+    state.on_start(1024);
+    state.record_error(std::io::Error::from_raw_os_error(libc::EIO).into());
+    // the second lands, which cannot carry the watermark past the first
+    state.on_complete(1024);
+    assert_eq!(state.written_pos(), 0);
+    assert_eq!(state.durable_pos(Durability::Async), 0);
+    assert!(state.failed());
+    // a second failure is fallout of the first and does not replace it
+    state.record_error(std::io::Error::from_raw_os_error(libc::ENOSPC).into());
+    assert!(state.failed());
+}

@@ -264,7 +264,9 @@ process runs out of memory.
 - ~~Failures on the shard loop are handled by `panic!` rather than by degrading — a single
   malformed client message can take down a shard~~ A failure a query meets is answered to that
   query ([Resolved #16](../appendix/resolved/hot-path-panics.md)). An error the shard loop itself
-  returns still ends the shard, and a device error reaches it that way
-  ([item 122](../appendix/known-issues.md)).
+  returns still ends the shard. ~~and a device error reaches it that way~~ A device error on a
+  table's intent log no longer does: the table answers the writes it cannot vouch for, refuses
+  later ones and keeps serving reads until a restart
+  ([Resolved #122](../appendix/resolved/intent-log-failure.md)).
 - Per-client relay tasks run on the default task queue rather than a prioritised one
   (`shard.rs:132`, marked TODO).

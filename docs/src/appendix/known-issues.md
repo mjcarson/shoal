@@ -32,9 +32,9 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at ~~15~~ ~~16~~ 19 and skips 25, 26, 30, 31, 33, 34, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 120 and 121, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ item 124 is the newest entry here, ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ and the newest number, and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120 and 121 are on the resolved page. **120 and 121 never appeared here**:
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 120, 121, 122, 123 and 124, and
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ item 125 is the newest entry here, ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ and the newest number, and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
+83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120, 121, 122, 123 and 124 are on the resolved page. **120 and 121 never appeared here**:
 they were found by reading the code around item 30 - the unsorted table's version of its arm
 charging the shard twice, and the duplicate read that let either arm be reached - reproduced by
 a harness that builds a shard's tables without a shard, and fixed with it
@@ -82,16 +82,23 @@ that reading `block_on_load` alone could not answer, and stayed here until someb
 partly fixed: the open remainder is here and the rest is there. Items 9, 15, 16 and 51 were each one such
 exception until their last part was fixed, and are now on the resolved page alone - 16 in four
 parts, the last of which ([Resolved #16](resolved/hot-path-panics.md)) also found that the item's
-write path claim was wrong and filed what it should have said as item 122; item 25 was one
+write path claim was wrong and filed what it should have said as item 122, since
+[resolved](resolved/intent-log-failure.md) with 123 and 124 beside it; item 25 was one
 in the other direction — it had one row left open, that row was fixed, and the whole item
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ **1,564 tests**, six ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ **1,576 tests**, six ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
 two of `persistent_unsorted_table.rs` fail about one run in five of that binary (item 107).
+[Resolved #122](resolved/intent-log-failure.md), [#123](resolved/parked-get-key.md) and
+[#124](resolved/unsorted-update-generation.md) added 12 and took it to 1,576: one new binary,
+`intent_log_failure.rs` (4), five in `resident_reads.rs`, and three `shoal-core` unit tests. They
+filed item 125. The workspace run at six threads with
+`--no-fail-fast` passed every test. An earlier fail-fast run failed
+`a_dead_primary_fails_writes_only_until_its_election` (item 100's shape).
 [Resolved #16](resolved/hot-path-panics.md) added 9 and took it to 1,564: one new binary,
 `hot_path_failures.rs` (5, on the `table_backlog.rs` harness), and four unit tests in
 `shoal-core`; one `shoal-proto` test moved its probe of an unclaimed code from 13, which
@@ -279,9 +286,10 @@ were 105 and 116.
 
 ## High — data loss and silent failure
 
-~~*Nothing is currently filed at this severity.*~~ Item 124 is, filed at the end of this page
-with the entries that came after the triage order. Items 9 and 31 were the two before it and are
-both [resolved](resolved-issues.md).
+~~*Nothing is currently filed at this severity.*~~ ~~Item 124 is, filed at the end of this page
+with the entries that came after the triage order.~~ *Nothing is currently filed at this
+severity* again: item 124, the last one, is [resolved](resolved/unsorted-update-generation.md).
+Items 9 and 31 were the two before it and are both [resolved](resolved-issues.md).
 
 ~~One thread they shared is still worth pulling.~~ Both were about what happens when a copy read
 from disk meets a copy already in memory: item 31's `scan` overwrote the in-memory copy, and
@@ -787,9 +795,10 @@ addressed to.
    Worth doing before the fixes below rather than after them. It said "two" until the
    [August 2026 review](review-2026-08.md) re-measured, which is the argument for doing it rather
    than tracking it: every new test binary that starts a server joins the collision by default.
-2. **Items 124 and 122** — ~~item 16, the hot-path panics~~ [resolved](resolved/hot-path-panics.md),
-   and these are what fixing it found. 124 is a stale read after an eviction nobody would think
-   to look for; 122 is the storage failure item 16 was always said to be about, which ends the
+2. ~~**Items 124 and 122**~~ — ~~item 16, the hot-path panics~~ [resolved](resolved/hot-path-panics.md),
+   and these are what fixing it found. Both are resolved too:
+   [124](resolved/unsorted-update-generation.md) and [122](resolved/intent-log-failure.md). 124 was a stale read after an eviction nobody would think
+   to look for; 122 was the storage failure item 16 was always said to be about, which ended the
    shard rather than panicking it. This entry used to read "items 11 and 16"; item 11, the
    empty-ring window a client could hit during startup, is [resolved](resolved/tablet-ring.md) and
    was made unbuildable rather than checked.
@@ -1805,46 +1814,20 @@ three voters before killing. **Established by running it**: it failed once in th
 whole-workspace run for [Resolved #115](resolved/retry-sidecar-crash-window.md) and passed
 alone at once.
 
-### 122. A background write or fdatasync error ends the shard
+### 125. A retried write whose first try was `OutcomeUnknown` reports the last try's refusal
 
-*Medium — robustness.* An intent log write runs on a detached task, and a device error it hits -
-a full disk, an `EIO` - is recorded in `FlushState::record_error`
-(`shoal-core/src/server/tables/storage/fs/stream.rs`) rather than returned. The next
-`compact_if_needed` takes it with `StreamWriter::check_error` and returns it, `get_flushed`
-passes it up, and the shard loop's `?` ends the shard - and every client it was serving. This is
-what [item 16](resolved/hot-path-panics.md) used to say the eight `commit(..).unwrap()` sites
-did; they never could, since `commit` only stages bytes and the error arrives later.
+*Medium — misleading outcome.* `Shoal::exec_with` retries a bundle while each failure is
+`retriable` and the budget lasts. When it stops, it returns the failure that stopped it
+(`shoal-client/src/client.rs`, the `Err(error)` arm of the retry loop). `OutcomeUnknown` is
+retriable. `Shedding` is retriable too, but it is a definite refusal, and `StorageWrite` is a
+definite refusal that is not retriable. So a write whose first try is `OutcomeUnknown` and whose
+retry is refused by name reaches its caller as "this did not apply". The first try may have
+applied, and on a cluster node it may still commit after the refusal. Since
+[Resolved #122](resolved/intent-log-failure.md) a standalone table reaches this directly: the
+write behind a failed intent log is `OutcomeUnknown`, and its retry is `StorageWrite`.
 
-The writes behind the failed one are the hard part. They were committed to a buffer and some of
-them to the file; none of them is durable and none will be answered. **Fix direction:** fail
-every pending write past the durable watermark with `ErrorCode::StorageWrite` - which, unlike
-the refusals [Resolved #16](resolved/hot-path-panics.md) sends, is not a definite refusal,
-because part of the log may have landed - and decide what the table does with a log it can no
-longer write: refuse writes until an operator acts, or rotate to a new file and try again.
-**Established by reading the source.**
-
-### 123. A get reusing a parked get's id and index has its rows merged into it
-
-*Low.* `PendingGets` keys a parked get by `(meta.id, meta.index)`, both chosen by the client.
-[Resolved #16](resolved/hot-path-panics.md) refuses a get that collides with a parked one under
-another projection, but one under the *same* projection resumes the parked get's progress and
-the two gets' rows are merged into whichever answers first. Another client can only collide by
-guessing a v4 id, so this is a client confusing its own queries rather than reading anyone
-else's. **Fix direction:** key the map by `(meta.client, meta.id, meta.index)`, which the
-blocked-query maps would then have to agree with. **Established by reading the source**, while
-fixing the projection collision.
-
-### 124. An unsorted update to a loaded partition never re-stamps its generation
-
-*High — silent failure.* `PersistentUnsortedTable::update` applies to a loaded partition in place
-and leaves its `generation` where the partition's last insert set it. The sorted table's update
-sets it to the current log's generation, and so does the unsorted table's own replicated
-`apply`. A generation is what `mark_evictable` compares against: a compaction of the *older*
-log that holds the partition's insert finds it evictable while the update is still only in the
-current log, and an eviction in that window drops it. A read then loads the archive, which does
-not have the update, and serves the old row until the current log is compacted - and a resident
-copy loaded from that archive keeps serving it until it is itself evicted.
-**Fix direction:** stamp `generation: self.generation` on the loaded arm, as both other paths do,
-with a test that evicts between the two compactions. **Established by reading the source**,
-while reordering that update for [Resolved #16](resolved/hot-path-panics.md), which kept the
-behaviour exactly so this could be fixed with its own evidence.
+**Fix direction:** have the loop remember that an earlier try's outcome was unknown, and return
+`OutcomeUnknown` (carrying the last failure's message) when it stops on a definite refusal after
+one. A caller can then tell "never applied" from "may have applied, and then a retry was
+refused". **Established by reading the source**, while choosing the code for item 122's pending
+writes.
