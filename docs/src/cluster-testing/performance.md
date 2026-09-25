@@ -139,3 +139,27 @@ half as much. The cause is not isolated. It is filed as
 [O64](../appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab),
 the default stays at 5 s, and a planned restart no longer pays the window at all
 ([Resolved #139](../appendix/resolved/leadership-handoff-on-stop.md)).
+
+## Memory
+
+Every node holds its table data within `resources.memory` per shard, which the deployment wrote
+as the node's whole budget. The first long insert runs grew the nodes past their hosts' 14 GB, and
+the kernel killed hyperion and then titan. Four findings came out of taking that apart:
+[#149](../appendix/resolved/node-memory-budget.md) (the budget was every shard's, and its counter
+saw a hundredth of what a node held), [#150](../appendix/resolved/inline-partition-buckets.md)
+(the tables' partition maps held every row inline), [O68](../appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index)
+(every compaction copied the whole partition index), and
+[#151](../appendix/resolved/purge-ahead-of-its-marker.md) (a node killed at the wrong moment never
+started again).
+
+Resident memory under five minutes of 70% inserts, `node_memory: 8Gi` on 14 GB hosts, sampled
+every 30 s:
+
+| Build | europa | titan | hyperion |
+| --- | --- | --- | --- |
+| Before (`memory: 8Gi`, every shard's) | 8.9 → 12.8 GB | 7.9 → 12.1 GB, then OOM-killed | 4.2 → 10.8 GB, OOM-killed in an earlier run |
+| All four fixes, a fresh cluster with the whole dataset loaded (t13g) | 3.5 → 7.8 GiB, then 7.0–7.8 GiB | 3.6 → 7.6 GiB, then 7.0–7.6 GiB | 3.6 → 7.9 GiB, then 6.7–7.9 GiB |
+
+The nodes rise until the process passes the budget, then evict and hover under it. The fresh
+cluster's load after the rebuild ran at 33,283 rows/s. That is within the range of first loads after a
+bootstrap (35,800 last time), not a measured cost of the fixes.
