@@ -1337,6 +1337,11 @@ async fn cluster_server_child() {
             .replication_factor(1);
         // a member of a fixture cluster gets its ports, its seeds, its policy and where it
         // dials its peers ([F39](../../docs/src/features/membership.md))
+        // a server nobody staged binds ports from the fixture's block rather than the
+        // block's defaults, which a deployed node on the host may hold (item 134)
+        if let Some((data_port, control_port)) = request.ports {
+            block = block.port(data_port).control_port(control_port);
+        }
         if let Some(staged) = &request.cluster {
             use shoal::shared::identity::NodeId;
             block = block
@@ -17552,5 +17557,53 @@ async fn stats_follow_a_rebalance() -> Result<(), FixtureError> {
     for id in 0..4 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
+    Ok(())
+}
+
+/// A query stream that outlives the retry window still writes (item 138)
+///
+/// A stream used to send every bundle under the stream's own id, a time-ordered identity minted
+/// when the stream opened. Every group judged each write on it as old as the stream, so once a
+/// stream outlived `replication.retry_window` every write on it was refused `IdentityExpired`.
+/// And once a group forgot any newer identity, every write of every older stream still open
+/// was refused too. The lab's kill test saw a quarter of all operations refused this way for
+/// the rest of the run ([Resolved #138](../../docs/src/appendix/resolved/stream-bundle-identity.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_older_than_the_retry_window_still_writes() -> Result<(), FixtureError> {
+    use shoal::client::QuerySuceededOpts;
+    let cluster = Cluster::builder()
+        .cluster(1, CoreClaim::Count(1))
+        .replication_factor(1)
+        .write_timeout(Duration::from_secs(1))
+        .retry_window(Duration::from_secs(2))
+        .start()
+        .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await?;
+    // one stream, written to on either side of the retry window
+    let (mut queries_tx, mut results_rx) = client.stream_unordered()?;
+    for (round, key) in [(0, 13_800u64), (1, 13_801u64)] {
+        // the second round waits until the stream is older than the window
+        if round == 1 {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+        let queries = queries_tx.query().add(Note {
+            key,
+            text: format!("round {round}"),
+        });
+        queries_tx.send(queries).await?;
+        let response = results_rx
+            .next()
+            .await?
+            .expect("the stream ended before answering");
+        // a write on a stream older than the window is a new write, not a late retry
+        assert!(
+            response.suceeded(QuerySuceededOpts::default()).is_ok(),
+            "round {round} was refused: {:?}",
+            response.error().map(|error| (error.code(), error.msg().to_string()))
+        );
+    }
+    queries_tx.close().await?;
+    while results_rx.next().await?.is_some() {}
     Ok(())
 }

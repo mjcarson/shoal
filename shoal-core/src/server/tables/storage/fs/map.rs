@@ -339,7 +339,21 @@ impl SerializedMap {
         hasher.write(&archived);
         // get our maps archive
         let map_hash = hasher.finish();
-        // open a file to store our new map at temporarily
+        // a temp map is only ever a save that never reached its rename, so one found here was
+        // left by a process that died mid-save and holds nothing the committed map needs.
+        // refusing to replace it failed the shard on every start after such a crash
+        // ([Resolved #135](../../../../../../docs/src/appendix/resolved/leftover-temp-map.md))
+        match std::fs::remove_file(&map.temp_map_path) {
+            Ok(()) => event!(
+                Level::WARN,
+                msg = "removed a temp map a save that did not finish left behind",
+                path = %map.temp_map_path.display(),
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(ServerError::IO(error)),
+        }
+        // open a file to store our new map at temporarily; nobody else writes this shard's
+        // map, so a file here now is a second writer and still refused
         let temp_map = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -1012,6 +1026,50 @@ mod tests {
             assert!(!loaded.to_archive.contains_key(&stale.key));
             // and our logged entry should still be there
             assert!(loaded.to_archive.contains_key(&7));
+        });
+    }
+
+    /// A save a crash left half done does not stop the map being saved again (item 135)
+    ///
+    /// A save writes the whole map to a temp file and renames it over the live one. A process
+    /// killed between the two leaves the temp file behind, and the next start's first save
+    /// used to refuse to create it with `AlreadyExists`, which failed the shard and the node
+    /// on every restart after that ([Resolved #135](../../../../../../docs/src/appendix/resolved/leftover-temp-map.md)).
+    #[test]
+    fn a_leftover_temp_map_does_not_stop_a_save() {
+        use super::super::conf::FileSystemTableConf;
+        use super::ArchiveMap;
+        use futures::AsyncWriteExt as _;
+        LocalExecutor::default().run(async {
+            // a table's map under a directory of its own
+            let temp_dir = test_dir();
+            let conf = FileSystemTableConf::builder()
+                .latency_sensitive(
+                    super::super::conf::FileSystemLatencyWriterConf::builder()
+                        .path(temp_dir.path()),
+                )
+                .throughput_sensitive(
+                    super::super::conf::FileSystemThroughputWriterConf::builder()
+                        .path(temp_dir.path()),
+                );
+            conf.setup_paths("T").await.expect("paths");
+            let map = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
+            // what a save killed before its rename leaves: a partly written temp map
+            std::fs::write(&map.temp_map_path, vec![0xAB; 12_345]).expect("a leftover temp map");
+            // the next save goes through, and replaces the leftover rather than keeping it
+            let mut writer = map
+                .compact_map()
+                .await
+                .expect("a leftover temp map stopped the save");
+            writer.close().await.expect("a close");
+            assert!(
+                !map.temp_map_path.exists(),
+                "the save left its temp map behind instead of renaming it"
+            );
+            // and the map it saved loads back
+            let reopened = ArchiveMap::new("Shard-0", "T", &conf).await;
+            assert!(reopened.is_ok(), "the saved map did not load: {:?}", reopened.err());
+            map.close_all().await.expect("a close");
         });
     }
 

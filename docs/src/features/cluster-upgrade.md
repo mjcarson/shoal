@@ -26,7 +26,10 @@ upgrade, rebuild it (or point `server:` at another build) and run `upgrade`.
 
 1. **Gate.** The cluster has to be healthy enough to lose one node at a time. `judge_health`
    refuses, and names the reason, unless all of these hold:
-   - every recorded node is an `up` member in the `member` phase;
+   - every recorded node is an `up` member in the `member` phase, ~~with no exception~~ except a
+     node that is `down` and was named in `NODE...`, which is a repair: replacing the program of a
+     node that is already down costs no quorum its being down does not
+     ([Resolved #136](../appendix/resolved/upgrade-a-down-node.md));
    - default writes are admitted;
    - no replica set is under its factor;
    - no plan is unfinished.
@@ -50,7 +53,12 @@ upgrade, rebuild it (or point `server:` at another build) and run `upgrade`.
        wait `bootstrap` and `add` use);
      - until **the node itself** answers and reports `caught_up`: default writes admitted,
        `lag_max == 0` and no snapshot installing. `Readiness` and `Replication` are node-local,
-       so this is the restarted node's own view, not a peer's.
+       so this is the restarted node's own view, not a peer's. **Since
+       [Resolved #137](../appendix/resolved/upgrade-waits-for-groups.md)** it also has to report
+       as many shards and groups as it did before the restart (read just before it, or its
+       configured cores and one group for a node being repaired), with none still starting.
+       ~~Those three alone passed a node whose shards had not started, since zero groups lag
+       nothing.~~
    - **If the node does not come back**, swap `.prev` back in, restart, and wait again. Then
      stop the upgrade with an error that names:
      - the node and the step it failed at;
@@ -134,7 +142,8 @@ upgrade, rebuild it (or point `server:` at another build) and run `upgrade`.
 - **Every replacement is a rename**, and every rename is within the program's own directory, so
   a crash leaves one whole program at the path the unit runs.
 - **One node at a time, and the next starts only once the last is `caught_up` as it sees
-  itself** and every recorded node is up with the voters.
+  itself**, with every shard and group it had back and none starting, and every recorded node is
+  up with the voters.
 - **An upgrade never activates unless `--activate` was given, and a rollback never does.**
 - **`stage` and `upgrade` push and install the program through the same two functions**
   (`push_binary`, `install_binary`), so a digest check added to one is in both.

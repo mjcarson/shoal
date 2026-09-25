@@ -7,7 +7,7 @@ use rkyv::util::AlignedVec;
 use tracing::Span;
 use uuid::Uuid;
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use super::request_body::RequestBody;
 use super::shard::ShardContact;
@@ -33,8 +33,11 @@ pub struct ReadPlan {
     pub deadline: Stamp,
     /// The committed lower bounds this read has to be served past, on the tablets it names
     ///
-    /// Shared rather than cloned: every share of a bundle's query holds the same tokens.
-    pub tokens: Rc<[SessionToken]>,
+    /// Shared rather than cloned: every share of a bundle's query holds the same tokens. An
+    /// `Arc` and never an `Rc`: a share's plan is cloned on the coordinator and dropped on the
+    /// shard that ran it, so the count is touched from two threads
+    /// ([Resolved #133](../../../docs/src/appendix/resolved/read-plan-rc-across-shards.md)).
+    pub tokens: Arc<[SessionToken]>,
     /// Which slot of the coordinator's gather this share fills, if the query was split
     pub slot: u16,
     /// Which attempt at the bundle this is, so a late share is told apart by identity
@@ -57,7 +60,7 @@ impl ReadPlan {
         ReadPlan {
             level: ReadLevel::One,
             deadline,
-            tokens: Rc::from(Vec::new()),
+            tokens: Arc::from(Vec::new()),
             slot: 0,
             attempt: 0,
             ready: false,
@@ -1111,5 +1114,26 @@ impl<D: ShoalDatabase> Clone for LoadedPartitionKinds<D> {
             table: self.table.clone(),
             loaded: self.loaded.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{QueryMetadata, ReadPlan};
+
+    /// Everything a query carries from one shard to another is `Send` in its own right (item 133)
+    ///
+    /// `ServerMsg` asserts `Send` for the whole enum with an `unsafe impl`, so a field that is not
+    /// `Send` compiles anyway. A query's metadata crosses shards on every split get: its plan was
+    /// cloned on the coordinator and dropped on the shard that ran the share. When the plan held
+    /// an `Rc`, two threads raced on its count and freed it twice, and a two key get crashed the
+    /// node ([Resolved #133](../../../docs/src/appendix/resolved/read-plan-rc-across-shards.md)).
+    /// This makes the compiler check what the `unsafe impl` does not.
+    #[test]
+    fn what_a_query_carries_between_shards_is_send() {
+        /// Compiles only for a type that may be moved to another thread
+        fn assert_send<T: Send>() {}
+        assert_send::<ReadPlan>();
+        assert_send::<QueryMetadata>();
     }
 }

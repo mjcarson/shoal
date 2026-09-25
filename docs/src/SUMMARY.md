@@ -152,6 +152,13 @@
   - [C15. What is still open](distributed/open-issues.md)
   - [Milestones](distributed/milestones.md)
 
+# Distributed Cluster Testing
+
+- [Overview](cluster-testing/overview.md)
+  - [Correctness](cluster-testing/correctness.md)
+  - [Performance](cluster-testing/performance.md)
+  - [Findings](cluster-testing/findings.md)
+
 # Appendix
 
 - [Known Issues](appendix/known-issues.md)
@@ -194,6 +201,7 @@
   - [57. A missing archive was created empty rather than reported](appendix/resolved/missing-archive.md)
   - [56, 61. A response cannot say that a read failed](appendix/resolved/response-error-channel.md)
   - [54. `#[shoal::db]` needed crates the caller had never heard of](appendix/resolved/macro-emits-three-crates.md)
+  - [60, 130, 131. A stream's slot and the connections that owe it answers](appendix/resolved/stream-connection-accounting.md)
   - [65. Two `gxhash` majors, and partition keys hashed by the one without `deterministic`](appendix/resolved/gxhash-pin.md)
   - [67, 68. Chart labels collided, and the scope prefix strip never matched](appendix/resolved/chart-labels.md)
   - [69. Nothing in the workspace ever installed a tracing subscriber](appendix/resolved/benchmark-tracing.md)
@@ -239,6 +247,12 @@
   - [126. A storage directory the node could not create was refused without its path](appendix/resolved/storage-directory-unusable.md)
   - [127. The wizard saved an inventory bootstrap refused from the same host](appendix/resolved/wizard-loopback-address.md)
   - [128. A hopped write reported the replication rpc timed out for a leader that answered](appendix/resolved/hop-deadline-margin.md)
+  - [133. A get naming two partitions crashed the node that coordinated it](appendix/resolved/read-plan-rc-across-shards.md)
+  - [134. A deployed node on the development host failed six fixture tests](appendix/resolved/fixture-default-peer-ports.md)
+  - [135. A node killed while saving an archive map could never start again](appendix/resolved/leftover-temp-map.md)
+  - [136. A node crash-looping on a defect could not be given the program that fixes it](appendix/resolved/upgrade-a-down-node.md)
+  - [137. A rolling upgrade judged a node back before its shards had started](appendix/resolved/upgrade-waits-for-groups.md)
+  - [138. Every write on a long-lived query stream was refused IdentityExpired](appendix/resolved/stream-bundle-identity.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

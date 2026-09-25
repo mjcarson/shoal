@@ -3331,7 +3331,7 @@ where
                 Some(read) => ReadPlan {
                     level: read.level,
                     deadline,
-                    tokens: Rc::from(read.tokens),
+                    tokens: Arc::from(read.tokens),
                     slot: read.slot,
                     attempt: preamble.attempt,
                     ready: false,

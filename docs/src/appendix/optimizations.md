@@ -198,6 +198,7 @@ so they get worse by existing longer rather than under load.
 | **B16** | [**O58**](#o58-a-rehomes-moved-records-are-copied-and-a-donors-archives-keep-the-dead-ones) — a rehome's moved records are copied, and a donor's archives keep the dead ones | Argued — a read and a write per moved record at start, and a growth's donor holding dead records until its own compaction | M | `macro/rehome/shrink`, whose `bytes` over `millis` is the copy's pace | Contained | no |
 | **B17** | [**O59**](#o59-the-rehome-runs-on-one-core-and-blocks-the-start) — the rehome runs on one core and blocks the start | Argued — the start held for the whole move while every other core idles | M | `macro/rehome/shrink`, whose `millis` is the hold | Contained | no |
 | **B18** | [**O60**](#o60-a-nodes-figures-ride-its-status-report-as-verbose-json) — a node's figures ride its status report as verbose JSON | Measured in shape — about 7.4 KB a report for four busy tables, one report in four, 1.6× the leader's intake at 64 members | S | none; the spike's `fanout` table prices it, and no arm drives a cluster of that size | Contained | no |
+| **B19** | [**O61**](#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page) — a fast device syncs the WAL in batches too small to fill a page | Measured on the lab — 6.8× the device writes of the slower hosts for the same replicated rows, 5.6k `fdatasync`s a second against 680 | S–M | the lab's insert `bench` with disk counters | Latency for wear | yes, on the lab |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -2636,18 +2637,24 @@ barriers in flight per group on the shard, which is a design pass.
 | | |
 | --- | --- |
 | **Rank** | **B9** — argued, contained |
-| **Impact** | Argued — `read_plan` builds a `ReadPlan` per query on the coordinator and every local share clones it for its slot; the tokens are an `Rc<[SessionToken]>` so the clone is a count and two words, and a remote share copies the tokens into its entry |
+| **Impact** | Argued — `read_plan` builds a `ReadPlan` per query on the coordinator and every local share clones it for its slot; the tokens are an ~~`Rc<[SessionToken]>`~~ `Arc<[SessionToken]>` so the clone is ~~a count~~ an atomic count and two words, and a remote share copies the tokens into its entry |
 | **Difficulty** | S — a plan per query held once and a slot beside the metadata, or the tokens filtered once per bundle rather than once per query |
 | **Depends on** | nothing |
 | **Blocks** | nothing |
 | **Tradeoff** | Contained |
-| **Benchmark** | none that would show it: the clone is one `Rc` increment on a path that then sends over a channel |
+| **Benchmark** | none that would show it: the clone is one ~~`Rc`~~ atomic increment on a path that then sends over a channel |
 
 Filed by [F41](../features/read-consistency.md). Every query in a bundle filters the bundle's
 tokens to its table and builds a plan, and every share of it takes a clone; a bundle of a hundred
 gets over one table with sixteen tokens filters sixteen tokens a hundred times. It is a few
 hundred nanoseconds on the coordinator, which the `grid` arms did not move at smoke scale, and it
 is filed because the number of tokens is the one thing here a client controls.
+
+**The `Rc` was a defect, not an optimization.** A share's plan is cloned on the coordinator and
+dropped on the shard that runs it, so the count was raced on by two threads and a get naming two
+partitions crashed the node ([Resolved #133](resolved/read-plan-rc-across-shards.md)). The `Arc`
+that replaced it costs one atomic increment per share, which is still below anything a benchmark
+here could show.
 
 ### O51. Every committed write answers with a forty-eight byte token
 
@@ -2800,3 +2807,28 @@ Filed by [F47](../features/local-rehome.md).
 | **Benchmark** | none; the spike's `fanout` table is the price, and no arm drives a cluster of 64 |
 
 Filed by [F52](../features/cluster-stats.md).
+
+### O61. A fast device syncs the WAL in batches too small to fill a page
+
+| | |
+| --- | --- |
+| **Rank** | **B19** — measured on the lab, contained |
+| **Impact** | Measured — on the three-node lab, one 30 s insert run wrote 16.6 GB to europa's Optane and 2.45 GB to each Zen1 host's NVMe for the same replicated rows: 6.8×. The node process itself was charged 4,776 MB of writeback on europa and about 875 MB on each other host for 554,450 inserts, and it issued 5.6k `fdatasync`s a second against about 680 on titan |
+| **Difficulty** | S to M — a group-commit delay in the WAL writer: once a batch completes, wait a bounded time for more frames before taking the next, but only while batches are arriving back to back |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Latency for wear and CPU: every write on a node that delays waits up to the delay longer for that node's sync. On a node that is not the slowest of a write's quorum it may cost nothing, and on the slowest it costs the delay |
+| **Benchmark** | the lab's insert-only `bench` with `/proc/diskstats` and `/proc/<pid>/io` before and after ([cluster testing](../cluster-testing/performance.md#write-amplification-by-device-and-filesystem)); `macro/cluster/replication/durable` on the benchmark host for the latency side |
+
+Found by the [distributed cluster testing](../cluster-testing/performance.md#write-amplification-by-device-and-filesystem)
+chapter. The WAL writer takes whatever frames arrived while the last batch was being written and
+synced, writes them with one `write_at` and syncs them with one `fdatasync` (`server/wal/mod.rs`,
+`writer`). The faster the sync, the smaller the next batch. Every batch re-dirties the page that
+holds the file's tail, so the kernel writes that page back once per sync, and on btrfs each sync
+also commits log-tree metadata. On europa a sync completes about every millisecond per shard, so
+batches are small. The Zen1 hosts' NVMe completes one about every nine, so theirs are about eight
+times larger. `nodatacow` on europa's storage directory (`chattr +C`) left the device bytes
+unchanged at 16.6 GB, so this is not btrfs copying data. The remaining 1.8× between the process's
+writeback and the device's writes on europa, against 1.26× on ext4, is the filesystem's
+per-sync metadata. The group-commit delay is tried in [cluster testing](../cluster-testing/performance.md#o61-a-group-commit-delay),
+which records the outcome.

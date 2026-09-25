@@ -99,6 +99,12 @@ pub struct ChildRequest {
     /// ([Resolved #100](../../../docs/src/appendix/resolved/clone-fencing-under-load.md))
     #[serde(default)]
     pub observe_hold_ms: Option<u64>,
+    /// The data and control ports of a server with no staged cluster, from the fixture's block
+    ///
+    /// Without these such a node kept the cluster block's defaults, 12001 and 12002, which a
+    /// deployed node on the same host holds ([item 134](../../../docs/src/appendix/resolved/fixture-default-peer-ports.md)).
+    #[serde(default)]
+    pub ports: Option<(u16, u16)>,
 }
 
 /// What a restart may change about a child beyond its staging
@@ -467,6 +473,12 @@ impl Node {
             }
             (staged, _) => staged,
         };
+        // a server that is not staged into a cluster still binds a peer and a control port,
+        // and they come from the fixture's block like every other node's
+        let ports = match (kind, &cluster) {
+            (NodeKind::Server, None) => Some(super::ports::next_pair()?),
+            _ => None,
+        };
         let request = ChildRequest {
             kind,
             dir: dir.to_path_buf(),
@@ -487,6 +499,7 @@ impl Node {
             cluster,
             rehome_crash_at: overrides.rehome_crash_at,
             observe_hold_ms: overrides.observe_hold_ms,
+            ports,
         };
         let request = serde_json::to_string(&request).expect("a request serializes");
         // the test binary again, running only the child function - or another build of it,

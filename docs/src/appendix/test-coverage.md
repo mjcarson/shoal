@@ -4,7 +4,7 @@ What the test suite reaches, what it does not, and the one place where it ~~is~~
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
 `cargo test --workspace` passes: ~~**1,187 tests**~~ ~~**1,198 tests**~~ ~~**1,238 tests**~~
-~~**1,265 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,493 tests**~~ ~~**1,494 tests**~~ ~~**1,495 tests**~~ ~~**1,496 tests**~~ ~~**1,497 tests**~~ ~~**1,499 tests**~~ ~~**1,502 tests**~~ ~~**1,503 tests**~~ ~~**1,504 tests**~~ ~~**1,506 tests**~~ ~~**1,507 tests**~~ ~~**1,509 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ **1,619 tests**, seven ignored, plus ~~**13**~~ **14** behind
+~~**1,265 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,493 tests**~~ ~~**1,494 tests**~~ ~~**1,495 tests**~~ ~~**1,496 tests**~~ ~~**1,497 tests**~~ ~~**1,499 tests**~~ ~~**1,502 tests**~~ ~~**1,503 tests**~~ ~~**1,504 tests**~~ ~~**1,506 tests**~~ ~~**1,507 tests**~~ ~~**1,509 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ **1,629 tests**, seven ignored, plus ~~**13**~~ **14** behind
 `--features stage-profile` that a default run does not reach - ~~and one of those fourteen,
 `stage_join.rs`, had not *compiled* since [F36](../features/cluster-harness.md) added two fields
 to `RunRequest`~~ and one of those fourteen, `stage_join.rs`, ran only on a host with
@@ -17,6 +17,25 @@ nothing else builds them:
 cargo check -p shoal-bench --features stage-profile,hotpath --all-targets
 cargo test -p shoal-bench --features stage-profile --test stage_join
 ```
+
+**The [distributed cluster testing](../cluster-testing/overview.md) chapter added 10**, and the
+total went 1,619 → 1,629:
+
+| Binary | Added | Tests |
+| --- | --- | --- |
+| `shoal-client` unit tests | 2 | `a_frame_for_a_dropped_stream_does_not_end_the_read_loop`, `a_stream_is_failed_by_every_connection_that_owes_it` (items 130, 131) |
+| `shoal/tests/ephemeral_unsorted_table.rs` | 1 | `a_stream_dropped_early_is_not_tracked` (item 60) |
+| `shoal-core` unit tests | 2 | `what_a_query_carries_between_shards_is_send` (item 133), `a_leftover_temp_map_does_not_stop_a_save` (item 135) |
+| `shoalctl` unit tests | 2 | `a_down_node_named_for_upgrade_is_a_repair` (item 136), `a_node_still_starting_its_shards_has_not_caught_up` (item 137) |
+| `tmdb-dataset` unit tests | 2 | `a_mix_names_kinds_and_weights`, `synthetic_movies_are_apart_from_the_dataset` (the driver) |
+| `shoal/tests/cluster_fixture.rs` | 1 | `a_stream_older_than_the_retry_window_still_writes` (item 138) |
+
+The whole workspace run at six threads with `--no-fail-fast`, before the last of these was added,
+gave **1,620 passed, 1 failed, seven ignored**. The failure was
+`lost_response_retry_returns_original_result`, a checkpoint that did not land in time while the
+lab was loading the same host, and it passed alone. Two earlier runs that shared europa with lab
+load tests failed 15 and 9 fixture tests on handshake and election timeouts, all of which passed
+on an idle host: this suite is what a loaded machine makes it.
 
 **[Resolved #128](resolved/hop-deadline-margin.md) added 3**, and the total went 1,611 → 1,614: a
 fixture test and a `shoal-core` unit test for the hop's budget, and a `tmdb-dataset` unit test for

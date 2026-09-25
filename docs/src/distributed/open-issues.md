@@ -16,6 +16,11 @@ a second copy. A new defect goes to known issues at the next free number, never 
 | --- | --- | --- |
 | [113](../appendix/known-issues.md#113-glommios-dmafileopen_at-unwraps-statfs-after-a-successful-open) | glommio's `DmaFile::open_at` unwraps `statfs` after a successful open; fixed in the fork's working tree, uncommitted there | [C11](testing.md) |
 
+The [distributed cluster testing](../cluster-testing/overview.md) chapter ran the cluster on three
+physical hosts with a real dataset. What it found, fixed and left open is indexed on its
+[findings](../cluster-testing/findings.md) page; the defects it fixed are items 60 (in part), 130,
+131 and 133 to 138 on [Resolved Issues](../appendix/resolved-issues.md).
+
 ## Explicitly unsupported
 
 Closed by a decision that says no, with the supported path beside it.
@@ -67,7 +72,9 @@ an open-loop schedule, and a restore's cost. The failover objective of base plus
 not met as set: two to three times the base ([C7](failover.md#the-window-and-what-a-client-sees)),
 and measured at four on the development host at base one - the lease of twice the base, then a
 timeout ([Resolved #110](../appendix/resolved/dead-primary-write-failures.md)).
-A physical capture on unequal hardware has a launcher and a record and no run.
+~~A physical capture on unequal hardware has a launcher and a record and no run.~~ The
+[cluster testing](../cluster-testing/performance.md) chapter ran on unequal hardware (a Zen4 host
+with an Optane beside two Zen1 hosts with consumer NVMe). Its numbers are lab runs, not captures.
 
 ## Filed as unbuilt
 
