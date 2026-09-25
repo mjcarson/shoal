@@ -117,4 +117,11 @@ pub struct ShardTransportView {
     /// ([Resolved #15](../../../docs/src/appendix/resolved/shard-mesh-admission.md))
     #[serde(default)]
     pub shed: u64,
+    /// The connections this shard holds a channel for, peer lanes included
+    ///
+    /// Every connection is announced to every shard, so a connection that went away and is
+    /// still counted here is one this shard was never told about
+    /// ([Resolved #32](../../../docs/src/appendix/resolved/client-gone-broadcast.md)).
+    #[serde(default)]
+    pub clients: usize,
 }

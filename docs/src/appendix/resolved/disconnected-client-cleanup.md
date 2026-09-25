@@ -8,7 +8,7 @@ other client that shard was serving. The shard reported `KanalSend(ReceiveClosed
 and stopped; the pool reported a failure; every connection that had landed on that shard was
 refused from then on.
 
-[Item 32](../known-issues.md#32-a-disconnected-client-is-never-cleaned-up-anywhere) had filed the
+[Item 32](client-gone-broadcast.md) had filed the
 leak beside this: nothing retired a departed client's channel from any shard's `client_map`, so
 every shard held every connection's sender for the life of the process. The leak was known. That
 the same departure could take a shard down was not, until [F38](../../features/inter-node-transport.md)
@@ -80,7 +80,8 @@ framed with its index and whether it ends the stream, and a tuple of four could 
 - **Broadcasting `ClientGone` from the client relay too, in this change.** It is what item 32
   asks for and it is the same one-line broadcast, but it changes what every ordinary disconnect
   costs every shard - a message per shard per connection - and the bench captures that would
-  show the cost are the benchmark host's to take. Left open, on purpose, on item 32.
+  show the cost are the benchmark host's to take. Left open, on purpose, on item 32, and since
+  [done](client-gone-broadcast.md#performance) with the cost argued rather than measured.
 
 ## Invariants to uphold
 
@@ -95,11 +96,12 @@ framed with its index and whether it ends the stream, and a tuple of four could 
 
 ## Still open
 
-The remainder of [item 32](../known-issues.md#32-a-disconnected-client-is-never-cleaned-up-anywhere):
-an ordinary client's departure still retires nothing. `client_rx_relay` ends and tells nobody,
-and every shard keeps that connection's sender and map entry until the process exits. The
-broadcast is the one the peer listener already does; what is owed before it is added is a
-measurement of what it costs a disconnect-heavy client.
+~~The remainder of item 32: an ordinary client's departure still retires nothing.
+`client_rx_relay` ends and tells nobody, and every shard keeps that connection's sender and map
+entry until the process exits.~~ [Resolved](client-gone-broadcast.md): the client acceptor sends
+the same `ClientGone` the peer listener does. The measurement this page asked for first was not
+taken, because no workload churns connections. A connection-churn workload is filed in
+[Todos](../todos.md) as the benchmark that would take it, and the cost is argued on that page.
 
 ## Tests
 
@@ -110,8 +112,8 @@ measurement of what it costs a disconnect-heavy client.
 
 ## Related
 
-- [Item 32](../known-issues.md#32-a-disconnected-client-is-never-cleaned-up-anywhere), the leak
-  this was filed beside and the half that stays open
+- [Resolved #32](client-gone-broadcast.md), the leak this was filed beside. It was the half
+  left open here, and it is resolved too
 - [F38](../../features/inter-node-transport.md), which made the panic reachable and the send
   failure common
 - [F10](../../features/framing-and-protocol-evolution.md), which made a disconnect end the write

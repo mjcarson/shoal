@@ -173,3 +173,63 @@ async fn a_client_that_leaves_before_its_answers_does_not_end_the_shard() -> Res
     pool.exit()?;
     Ok(())
 }
+
+/// Wait for every shard to hold a channel for exactly this many connections
+///
+/// # Arguments
+///
+/// * `pool` - The server to ask
+/// * `want` - How many connections every shard should hold
+/// * `within` - How long to keep asking
+async fn wait_for_clients(
+    pool: &ShoalPool<TestDb>,
+    want: usize,
+    within: std::time::Duration,
+) -> Result<Vec<usize>, TestError> {
+    let started = std::time::Instant::now();
+    loop {
+        // ask every shard how many connections it holds a channel for
+        let held: Vec<usize> = pool.transport()?.iter().map(|view| view.clients).collect();
+        // done once every shard agrees, or once we have waited long enough to say they do not
+        if held.iter().all(|clients| *clients == want) || started.elapsed() > within {
+            return Ok(held);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// A client that goes away is forgotten by every shard, not only by the one that accepted it
+///
+/// Every connection is announced to every shard, and each keeps a channel to it. Before item 32
+/// was fixed nothing retired an ordinary client, so every shard kept every connection's channel
+/// and map entry until the process exited: a pool of fifty that did its work and left was fifty
+/// entries on every shard, forever.
+#[tokio::test]
+async fn a_client_that_leaves_is_forgotten_by_every_shard() -> Result<(), TestError> {
+    let temp_dir = utils::test_dir();
+    let conf = utils::build_config(&temp_dir);
+    let mut pool = ShoalPool::<TestDb>::start(conf)?;
+    let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
+    // open a handful of connections and keep them
+    let mut socks = Vec::with_capacity(8);
+    for _ in 0..8 {
+        socks.push(handshaken(&addr).await?);
+    }
+    // every shard is told of every one of them
+    let held = wait_for_clients(&pool, 8, std::time::Duration::from_secs(5)).await?;
+    assert!(
+        held.iter().all(|clients| *clients == 8),
+        "every shard should hold all eight connections, but they hold {held:?}"
+    );
+    // close every one of them
+    drop(socks);
+    // and every shard lets every one of them go
+    let held = wait_for_clients(&pool, 0, std::time::Duration::from_secs(5)).await?;
+    assert!(
+        held.iter().all(|clients| *clients == 0),
+        "every shard should have let its closed connections go, but they hold {held:?}"
+    );
+    assert_eq!(pool.failure(), None);
+    pool.exit()?;
+    Ok(())
+}

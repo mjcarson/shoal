@@ -55,6 +55,11 @@ the durability barrier says so, and everything else is behind that.
   1 KiB, and at 8 KiB rows a buffer holding *two* records was worth nothing over one holding none —
   the gain arrived at 8 to 32 records per buffer, which is why the rule is eight
   ([O34](../appendix/optimizations.md), [Row size](../tables/row-size.md)).
+- **`storage.flush_interval`** bounds how long a shard whose queue never drains leaves a
+  staged write unsubmitted, 1 ms by default. An idle shard never waits on it, and a write-heavy
+  one fills its buffers well inside it, so it only matters for a trickle of writes under a flood
+  of other traffic ([Resolved #36](../appendix/resolved/staged-tail-deadline.md)). **Nothing has
+  measured it**: it is not in the configuration sweep yet ([Todos](../appendix/todos.md)).
 - **`latency_sensitive.max_buffer_size`** is the ceiling that sizing stops at, 256 KiB by default,
   and it is the setting that matters if your rows are wide. Above it the writer is back to one
   record per DMA write and one DMA allocation per insert, with nothing left for the group commit to

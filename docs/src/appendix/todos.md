@@ -1534,6 +1534,22 @@ between the warmup and the queries after it, because the drivers count the warmu
 announcing when it ends. Adding one means the drivers gaining a notion of a phase boundary, which
 nothing else currently wants. Also found while fixing [item 76](resolved/stage-join.md).
 
+**A workload that churns connections.** Every benchmark client opens one pool and holds it for the
+whole run, so nothing measures what a connection costs to open and close. Since
+[Resolved #32](resolved/client-gone-broadcast.md) a close costs one `ClientGone` per shard, the
+same as a connect's `NewClient`. That cost is argued there, not measured. A workload that opens a
+connection, sends one bundle and closes it, over and over, beside the reference cell, would
+measure the handshake, both broadcasts and the teardown together, and would show whether either
+broadcast needs to go to fewer shards.
+
+**`storage.flush_interval` is not in the configuration sweep.** It bounds how long a shard whose
+queue never drains leaves a staged write unsubmitted
+([Resolved #36](resolved/staged-tail-deadline.md)), and its default of 1 ms is reasoned, not
+measured. A `conf/storage/flush_interval` sweep would bracket it (say `0ms`, `1ms`, `5ms`, `20ms`).
+That is a new workload family, and it changes every workload's fingerprint through `ConfOverrides`,
+so it was left out of the fix. The grid's mixed arms at depth are where the default would show if
+it cost anything.
+
 ### The row-size axis
 
 Six benchmarks that between them would turn most of

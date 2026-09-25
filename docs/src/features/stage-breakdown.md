@@ -85,7 +85,10 @@ Two things the design expected to find were not there:
 - **The staging buffer is not the p50.** `StreamWriter::sync` only runs when the shard's channel
   is empty, so the plan for this feature named `durable_staged` as a live suspect for the insert
   p50. It is **0.6% at p99** and does not appear in the top six anywhere. Under sustained load
-  the 4 KiB buffer fills long before the channel drains. *(That buffer is no longer 4 KiB — it
+  the 4 KiB buffer fills long before the channel drains. *(Since
+  [Resolved #36](../appendix/resolved/staged-tail-deadline.md) `sync` also runs on a busy channel
+  once `storage.flush_interval` has passed, so a buffer that does not fill waits at most that
+  long.)* *(That buffer is no longer 4 KiB — it
   sizes itself between a floor and a ceiling ([F23](self-sizing-staging-buffer.md)), so it holds
   more records before it fills. The measurement above was taken on a `tmdb` row against the old
   fixed buffer and has not been re-taken; the direction the change pushes `durable_staged` is

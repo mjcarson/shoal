@@ -144,7 +144,10 @@ reading the profile after this needs to know that, or the row looks like a regre
 the loop blocks on `recv().await`. Nothing is stranded by this: the arrival of the completion is
 itself a message.
 
-**[Item 37](../appendix/known-issues.md) is neither fixed nor made worse.** The unbounded
+**~~[Item 37](../appendix/known-issues.md)~~ Item 36 is neither fixed nor made worse.** *(The item
+was item 36, not 37, and it is [resolved](../appendix/resolved/staged-tail-deadline.md): the
+flush is now also issued on a busy queue once `storage.flush_interval` has passed, which does
+not touch this gate either.)* The unbounded
 acknowledgement delay for the last writes before a lull is about `tables.flush()` being gated on
 `shard_local_rx.is_empty()`, which this does not touch; and its escape hatch — an intent log
 rotation, which syncs unconditionally — still fires on exactly the message it fired on before,

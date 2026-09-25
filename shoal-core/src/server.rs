@@ -592,6 +592,40 @@ where
             })
     }
 
+    /// Keep one shard's queue from draining for so many milliseconds, for a test
+    ///
+    /// The shard handles one message over and over, each time queueing it again behind whatever
+    /// else arrived, so its queue is never empty and never grows: what a shard under a load that
+    /// never lets up looks like to anything that waits for it to go idle
+    /// ([Resolved #36](../../../docs/src/appendix/resolved/staged-tail-deadline.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `shard` - The shard
+    /// * `ms` - How long
+    ///
+    /// # Errors
+    ///
+    /// Fails if the shard is gone or is not one this pool runs.
+    #[doc(hidden)]
+    pub fn busy_shard(&self, shard: usize, ms: u64) -> Result<(), ServerError> {
+        // find the channel to this shard
+        let tx = self
+            .shard_txs
+            .get(shard)
+            .ok_or_else(|| ServerError::ShardFailed {
+                shard,
+                error: "this pool runs no such shard".to_string(),
+            })?;
+        // and hand it the one message it will keep queueing until this is over
+        let until = Instant::now() + Duration::from_millis(ms);
+        tx.send(messages::ServerMsg::Busy(until))
+            .map_err(|_| ServerError::ShardFailed {
+                shard,
+                error: "its mesh channel is closed".to_string(),
+            })
+    }
+
     /// Send the control leader one report behind the last, as a replay would be, for a test
     ///
     /// # Errors

@@ -561,6 +561,64 @@ fn tracks_the_positions_of_range_values() {
 }
 
 #[test]
+/// A doubled quote inside a string literal is one literal quote, as in SQL
+fn parses_doubled_quotes_in_string_literals() {
+    // a doubled quote in the middle of a literal is one quote in its value
+    let middle = parse_one("SELECT * FROM Movie WHERE title = 'it''s'");
+    assert_eq!(*middle.first(), Value::String("it's".to_string()));
+    // a literal that is nothing but a doubled quote is a single quote
+    let alone = parse_one("SELECT * FROM Movie WHERE title = ''''");
+    assert_eq!(*alone.first(), Value::String("'".to_string()));
+    // doubled quotes at either end and back to back each stand for one quote
+    let edges = parse_one("SELECT * FROM Movie WHERE title = '''a'''''");
+    assert_eq!(*edges.first(), Value::String("'a''".to_string()));
+    // two quotes with nothing between them are still the empty string
+    let empty = parse_one("SELECT * FROM Movie WHERE title = ''");
+    assert_eq!(*empty.first(), Value::String(String::new()));
+    // an escaped literal works inside an IN list too
+    let listed = parse_one("SELECT * FROM Movie WHERE title IN ('it''s', 'Alien')");
+    assert_eq!(
+        values_of(&listed)
+            .iter()
+            .map(|found| found.value.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            Value::String("it's".to_string()),
+            Value::String("Alien".to_string())
+        ]
+    );
+}
+
+#[test]
+/// The span of an escaped literal covers the literal as written, not its decoded value
+fn tracks_positions_across_doubled_quotes() {
+    // parse a query whose literal is longer as written than as decoded
+    let query = "SELECT * FROM Movie WHERE title = 'it''s' AND id = 550";
+    let parsed = parse(query);
+    // the recorded span should slice back to the raw literal, both of its quotes included
+    let title = &parsed.conditions[0];
+    assert_eq!(
+        &query[values_of(title)[0].start..values_of(title)[0].end],
+        "'it''s'"
+    );
+    // and the literal after it should still be found where it is
+    let id = &parsed.conditions[1];
+    assert_eq!(&query[values_of(id)[0].start..values_of(id)[0].end], "550");
+}
+
+#[test]
+/// A doubled quote does not close a literal, so one that ends on it is unterminated
+fn rejects_a_string_ending_in_a_doubled_quote() {
+    // the doubled quote is part of the value, and nothing closes the literal after it
+    let message = parse_err("SELECT * FROM Movie WHERE title = 'it''");
+    assert!(
+        message.contains("Expected a value for field 'title'"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
 /// An unterminated string literal is a parse error
 fn rejects_an_unterminated_string() {
     // a string with no closing quote cannot be parsed

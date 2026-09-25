@@ -1537,6 +1537,12 @@ impl<S: QuerySupport> Shoal<S> {
     /// and the last failure once the budget is gone, is the caller's. With no `retry` there is
     /// one try ([F42](../../../docs/src/features/primary-failover.md)).
     ///
+    /// A try whose outcome was unknown (`OutcomeUnknown`, `ConnectionLost`) may have applied,
+    /// and a later try refused by name says nothing about it. So once one has, whatever stops
+    /// the loop is returned as `OutcomeUnknown`, carrying the last failure in its message: a
+    /// caller can always tell "never applied" from "may have applied, and then a retry was
+    /// refused" ([Resolved #125](../../../docs/src/appendix/resolved/retry-unknown-outcome.md)).
+    ///
     /// # Arguments
     ///
     /// * `queries` - The queries to execute
@@ -1570,6 +1576,8 @@ impl<S: QuerySupport> Shoal<S> {
         let started = Instant::now();
         let mut pause = RETRY_BACKOFF_MIN;
         let mut attempts = 0u32;
+        // whether an earlier try may have applied, which no later refusal can take back
+        let mut unknown = false;
         loop {
             attempts += 1;
             // one try: track the identity, send the bytes, collect every answer
@@ -1615,8 +1623,12 @@ impl<S: QuerySupport> Shoal<S> {
                     let again = retriable(&error)
                         && budget.is_some_and(|within| started.elapsed() + pause < within);
                     if !again {
-                        return Err(error);
+                        // a refusal after a try that may have applied is still a bundle that
+                        // may have applied ([Resolved #125](../../../docs/src/appendix/resolved/retry-unknown-outcome.md))
+                        return Err(settle(error, unknown));
                     }
+                    // remember a try that may have applied before this one is sent again
+                    unknown |= outcome_unknown(&error);
                     event!(Level::DEBUG, msg = "trying a bundle again", id = %identity, attempts, ?error, ?pause);
                     tokio::time::sleep(pause).await;
                     pause = (pause * 2).min(RETRY_BACKOFF_MAX);
@@ -3432,8 +3444,8 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
 mod tests {
     use super::SendOptions;
     use super::{
-        endpoint_order, error, protocol, retriable, ClientMsg, ErrorCode, Errors, Frame, Span,
-        TcpProxy, TopologyState, Waiter,
+        endpoint_order, error, outcome_unknown, protocol, retriable, settle, ClientMsg, ErrorCode,
+        Errors, Frame, Span, TcpProxy, TopologyState, Waiter,
     };
     use papaya::HashMap;
     use std::sync::atomic::AtomicBool;
@@ -3499,6 +3511,83 @@ mod tests {
             "an identity or a budget is not a read options section"
         );
         assert_eq!(options.to_wire(), SendOptions::new().to_wire());
+    }
+
+    /// A refusal after a try that may have applied is reported as an unknown outcome (item 125)
+    ///
+    /// Only the two codes that say a try may have applied are remembered, and only a failure
+    /// that does not say so itself is relabelled; the last failure's bundle, query and words are
+    /// kept.
+    #[test]
+    fn a_refusal_after_an_unknown_outcome_stays_unknown() {
+        let query_id = uuid::Uuid::new_v4();
+        let server = |code: ErrorCode| Errors::Server {
+            query_id: Some(query_id),
+            index: Some(2),
+            code,
+            msg: "said the server".to_owned(),
+        };
+        // the codes that may have applied are exactly these two
+        assert!(outcome_unknown(&server(ErrorCode::OutcomeUnknown)));
+        assert!(outcome_unknown(&server(ErrorCode::ConnectionLost)));
+        for code in [
+            ErrorCode::Timeout,
+            ErrorCode::Shedding,
+            ErrorCode::StorageWrite,
+            ErrorCode::NotLeader,
+            ErrorCode::Unavailable,
+        ] {
+            assert!(!outcome_unknown(&server(code)), "{code:?} may have applied");
+        }
+        // with nothing unknown before it, a refusal is returned as itself
+        let alone = settle(server(ErrorCode::StorageWrite), false);
+        assert!(matches!(
+            alone,
+            Errors::Server {
+                code: ErrorCode::StorageWrite,
+                ..
+            }
+        ));
+        // after an unknown outcome it is one, naming what the refusal named and quoting it
+        let after = settle(server(ErrorCode::StorageWrite), true);
+        match &after {
+            Errors::Server {
+                query_id: found,
+                index,
+                code,
+                msg,
+            } => {
+                assert_eq!(code, &ErrorCode::OutcomeUnknown);
+                assert_eq!(found, &Some(query_id));
+                assert_eq!(index, &Some(2));
+                assert!(msg.contains("StorageWrite"), "{msg}");
+                assert!(msg.contains("said the server"), "{msg}");
+            }
+            other => panic!("a refusal after an unknown outcome came back as {other:?}"),
+        }
+        // a last failure that is itself unknown is left exactly as it was
+        let unknown = settle(server(ErrorCode::ConnectionLost), true);
+        assert!(matches!(
+            unknown,
+            Errors::Server {
+                code: ErrorCode::ConnectionLost,
+                ..
+            }
+        ));
+        // and a failure that is not the server's is relabelled with no bundle or query to name
+        let pooled = settle(
+            Errors::ConnectionPool("no connection to be had".to_owned()),
+            true,
+        );
+        assert!(matches!(
+            pooled,
+            Errors::Server {
+                query_id: None,
+                index: None,
+                code: ErrorCode::OutcomeUnknown,
+                ..
+            }
+        ));
     }
 
     /// Build the whole of an error frame, preamble and message together
@@ -4097,6 +4186,61 @@ mod endpoint_tests {
     #[test]
     fn no_endpoints_yields_nothing() {
         assert_eq!(endpoint_order(3, 0).count(), 0);
+    }
+}
+
+/// Whether a failed try of a bundle may have applied it
+///
+/// An `OutcomeUnknown` says so by name, and a connection that ended before the answer came
+/// back may have carried the bundle to a group that committed it. `Timeout` is not one: it is
+/// only answered to reads, and a write past its deadline is answered `OutcomeUnknown`. A lost
+/// connection the client saw for itself (`Errors::IO`) is not either, since it cannot tell a
+/// bundle that was never written from one that was
+/// ([Resolved #125](../../../docs/src/appendix/resolved/retry-unknown-outcome.md)).
+///
+/// # Arguments
+///
+/// * `error` - What the try came to
+fn outcome_unknown(error: &Errors) -> bool {
+    matches!(
+        error,
+        Errors::Server {
+            code: ErrorCode::OutcomeUnknown | ErrorCode::ConnectionLost,
+            ..
+        }
+    )
+}
+
+/// Decide what a retried bundle reports once its loop stops on a failure
+///
+/// The failure that stopped the loop is returned as it is, unless an earlier try may have
+/// applied the bundle and this one does not say so itself; then it is `OutcomeUnknown`,
+/// naming the bundle and the query the last failure did and quoting that failure
+/// ([Resolved #125](../../../docs/src/appendix/resolved/retry-unknown-outcome.md)).
+///
+/// # Arguments
+///
+/// * `error` - The failure that stopped the loop
+/// * `unknown` - Whether an earlier try's outcome was unknown
+fn settle(error: Errors, unknown: bool) -> Errors {
+    // nothing earlier may have applied, or this failure already says it may have
+    if !unknown || outcome_unknown(&error) {
+        return error;
+    }
+    // keep the bundle and the query the last failure named, if it named them
+    let (query_id, index) = match &error {
+        Errors::Server {
+            query_id, index, ..
+        } => (*query_id, *index),
+        _ => (None, None),
+    };
+    Errors::Server {
+        query_id,
+        index,
+        code: ErrorCode::OutcomeUnknown,
+        msg: format!(
+            "an earlier try's outcome is unknown and it may have applied; the last try failed with {error}"
+        ),
     }
 }
 

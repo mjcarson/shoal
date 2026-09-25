@@ -58,7 +58,7 @@ exact match is what keeps it out.
 | `Pong` | 8 | both | reserved — [D6](../direction/connection-pool.md) |
 | `Topology` | 9 | both | yes — [F39](../features/membership.md): a client's subscription after the handshake, and every frame the server pushes under the nil id; [D7](../direction/shard-aware-routing.md) is the routing that would read it |
 | `Error` | 10 | server → client | yes — [F11](../features/error-channel.md) |
-| `GoAway` | 11 | server → client | reserved — [item 32](../appendix/known-issues.md#32-a-disconnected-client-is-never-cleaned-up-anywhere) |
+| `GoAway` | 11 | server → client | reserved — the clean close [item 32](../appendix/resolved/client-gone-broadcast.md#alternatives-rejected) left to it |
 | `Cancel` | 12 | client → server | reserved — [item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client) |
 | 13 – 22 | | node ↔ node | the peer protocol — [F38](../features/inter-node-transport.md) |
 | `Admin` | 23 | client → server | yes — [F39](../features/membership.md): an operation as JSON under a query id |

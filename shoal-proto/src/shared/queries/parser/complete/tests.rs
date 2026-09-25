@@ -240,6 +240,26 @@ fn handles_multibyte_identifiers() {
 }
 
 #[test]
+/// A doubled quote inside a literal is one token, so what follows it is read as usual
+fn a_doubled_quote_does_not_split_a_string_literal() {
+    // a closed literal holding a doubled quote is followed by a continuation, like any other
+    assert_eq!(
+        at_end("SELECT * FROM Movie WHERE title = 'it''s' ").expecting,
+        Expecting::Continuation
+    );
+    // and a field after the AND that follows it
+    assert_eq!(
+        at_end("SELECT * FROM Movie WHERE title = 'it''s' AND ").expecting,
+        Expecting::Field
+    );
+    // a cursor after the doubled quote is still inside the literal
+    assert_eq!(
+        at_end("SELECT * FROM Movie WHERE title = 'it''").expecting,
+        Expecting::Nothing
+    );
+}
+
+#[test]
 fn handles_a_multibyte_value_before_the_cursor() {
     let context = at_end("SELECT * FROM Movie WHERE title = 'café' ");
     assert_eq!(context.expecting, Expecting::Continuation);

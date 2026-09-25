@@ -19,7 +19,7 @@ others. Every one of the following is a message the protocol has no way to expre
 | A client proving who it is | `Auth` / `AuthResponse` | [D3](authentication.md) — **built**, [F12](../features/authentication.md) |
 | A client learning which shard owns which tablet | `Topology` | [D7](shard-aware-routing.md) |
 | A server saying a read failed rather than returning nothing | `Error` | [items 51, 55, 56](../appendix/resolved/response-error-channel.md) |
-| A server draining a connection before it closes | `GoAway` | [item 32](../appendix/known-issues.md#32-a-disconnected-client-is-never-cleaned-up-anywhere) |
+| A server draining a connection before it closes | `GoAway` | [item 32](../appendix/resolved/client-gone-broadcast.md#alternatives-rejected), which handles the socket dying and leaves the clean close to this |
 | A client abandoning a query it will never read | `Cancel` | [item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client), and every deadline in D6 |
 
 There is no message-type field, so every row in that table is blocked on the same eight bytes.
@@ -139,7 +139,7 @@ it. That belongs in the invariants of whatever page describes the built version.
 | `Ping`, `Pong` | both | [D6](connection-pool.md)'s health check |
 | `Topology` | server → client | [D7](shard-aware-routing.md), pushed rather than polled |
 | `Error` | server → client | a failure that is not attached to a query |
-| `GoAway` | server → client | a drain before close — [item 32](../appendix/known-issues.md#32-a-disconnected-client-is-never-cleaned-up-anywhere) |
+| `GoAway` | server → client | a drain before close — [item 32](../appendix/resolved/client-gone-broadcast.md#alternatives-rejected) |
 | `Cancel` | client → server | a query nobody will read — [item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client) |
 
 ### The schema fingerprint

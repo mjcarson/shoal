@@ -344,9 +344,11 @@ it, and the response is released once the log has been fdatasynced that far. See
 At the bottom of every iteration of the shard loop:
 
 ```rust
-// if we have no more messages then flush our current queries to disk
-if self.shard_local_rx.is_empty() {
+// write out every table's staged writes when our queue drains, or when a queue that never
+// drains has kept them waiting past their bound
+if self.shard_local_rx.is_empty() || self.last_flush.elapsed() >= self.flush_interval {
     self.tables.flush().await?;
+    self.last_flush = std::time::Instant::now();
 }
 // sweep our tables only when that sweep could do something
 if self.data_flushed || self.tables.compaction_due() {
@@ -370,7 +372,11 @@ exactly when the partial buffer has to go out.
 **Flush-when-idle is the core write optimisation.** Under load the queue is never empty, so
 writes accumulate in the `StreamWriter`'s DMA buffer and go out in full-buffer batches. When
 the shard goes quiet, the partial buffer is flushed so a lightly loaded system does not
-stall. Batching is free and adaptive; no timer is involved.
+stall. Batching is free and adaptive; no timer is involved. ~~Under load the queue is never
+empty~~ Under a load that never lets the queue empty, the partial buffer used to wait for a lull
+or a rotation, so the loop also flushes once `storage.flush_interval` (1 ms) has passed since it
+last did. That is still no timer, only one clock read per message on a busy queue
+([Resolved #36](../appendix/resolved/staged-tail-deadline.md)).
 
 The completion path is asynchronous. `StreamWriter::write` spawns a detached task
 (`.../fs/stream.rs:189-194`) which, on completion, posts `ServerMsg::DataFlushed` back to the

@@ -625,8 +625,13 @@ pub enum TableSettings {
     FS(FileSystemTableConf),
 }
 
+/// Help serde default the longest a shard that never goes idle leaves a staged write unwritten
+fn default_flush_interval() -> DurationSpec {
+    DurationSpec::from(std::time::Duration::from_millis(1))
+}
+
 /// The storage settings for Shoal
-#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Storage {
     /// The default settings to apply to different storage engines
     #[serde(default)]
@@ -634,9 +639,40 @@ pub struct Storage {
     /// The table specific settings to use
     #[serde(default)]
     pub tables: HashMap<String, TableSettings>,
+    /// The longest a shard whose queue never drains leaves a staged intent log write unwritten
+    ///
+    /// A shard writes out every table's partially filled staging buffer whenever its queue
+    /// drains, which batches the writes that arrived together into one DMA write. A shard under
+    /// a load that never lets up never drains, so it also writes them out once this long has
+    /// passed since it last did; without it a write's answer waited for a lull or a log rotation
+    /// ([Resolved #36](../../../docs/src/appendix/resolved/staged-tail-deadline.md)). Zero
+    /// writes them out after every message, which gives the batching up.
+    #[serde(default = "default_flush_interval")]
+    pub flush_interval: DurationSpec,
+}
+
+impl Default for Storage {
+    /// The storage settings with nothing configured
+    fn default() -> Self {
+        Storage {
+            default: DefaultStorageSettings::default(),
+            tables: HashMap::default(),
+            flush_interval: default_flush_interval(),
+        }
+    }
 }
 
 impl Storage {
+    /// Set the longest a shard that never goes idle leaves a staged write unwritten
+    ///
+    /// # Arguments
+    ///
+    /// * `interval` - The bound
+    pub fn flush_interval(mut self, interval: std::time::Duration) -> Self {
+        self.flush_interval = DurationSpec::from(interval);
+        self
+    }
+
     /// Set the default storage settings
     pub fn default_settings(mut self, default: DefaultStorageSettings) -> Self {
         self.default = default;
