@@ -262,10 +262,15 @@ produce is a compile error rather than a runtime `UnexpectedResponseKind`.
 let (mut query_stream, mut result_stream) = client.stream()?;
 ```
 
-`stream()` and `stream_unordered()` return a pair sharing one query id.
+~~`stream()` and `stream_unordered()` return a pair sharing one query id.~~ Each bundle a
+query stream sends has **an identity of its own**, a `Uuid::now_v7()` minted as it is sent, and a
+slot in the shared map routed to the stream's channel, removed once the bundle's last answer
+arrives. A shared id made every write on a stream as old as the stream to a group's retry window,
+which refused all of them once the stream outlived it
+([Resolved #138](../appendix/resolved/stream-bundle-identity.md)).
 Queries can be pushed indefinitely; `ShoalQueryStream::send` advances `base_index` by the
-number of queries sent so indices stay globally ordered across bundles
-.
+number of queries sent so indices stay globally ordered across bundles, whatever identity each
+bundle carries.
 
 Both set `unbounded_queries: true`, which makes the result stream **ignore the server's `end`
 flag** and terminate only on `ShoalQueryStream::close`, which posts a local

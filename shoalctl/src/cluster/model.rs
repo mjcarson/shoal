@@ -81,6 +81,10 @@ pub struct ClusterModel {
     pub members: Vec<MemberRow>,
     /// How many tablet groups this node hosts
     pub groups: u64,
+    /// How many of this node's groups have no handle up yet
+    pub starting: u64,
+    /// How many of this node's shards have reported their groups
+    pub shards_reporting: u64,
     /// How many of them it leads
     pub leading: u64,
     /// The widest lag behind a leader among its groups, in entries
@@ -260,6 +264,10 @@ impl ClusterModel {
             ),
             members: rows,
             groups: replication["groups"].as_u64().unwrap_or(0),
+            starting: replication["starting"].as_u64().unwrap_or(0),
+            shards_reporting: replication["shards"]
+                .as_array()
+                .map_or(0, |shards| shards.len() as u64),
             leading: replication["leading"].as_u64().unwrap_or(0),
             lag_max: replication["lag_max"].as_u64().unwrap_or(0),
             installing: replication["installing"].as_u64().unwrap_or(0),

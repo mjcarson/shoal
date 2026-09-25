@@ -96,7 +96,7 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ **1,619 tests**, seven ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ **1,629 tests**, seven ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
@@ -108,8 +108,11 @@ run at six threads with `--no-fail-fast` passed every test.
 1,608, and [F54](../features/tmdb-dataset-deployment.md) 2 in the new `tmdb-dataset` crate and an ignored doctest,
 to 1,611. [Resolved #128](resolved/hop-deadline-margin.md) added 3 (a fixture test, a `shoal-core`
 unit test, a `tmdb-dataset` unit test) and took it to 1,614. Its workspace run failed eight
-fixture tests: two passed alone, and six could not bind port 12000 because a deployed lab node
-held it on the same host ([Test Coverage](test-coverage.md)).
+fixture tests: two passed alone, and six could not bind ~~port 12000~~ ports 12001 and 12002
+because a deployed lab node held them on the same host ([Test Coverage](test-coverage.md)), since
+[resolved](resolved/fixture-default-peer-ports.md) as item 134. The
+[distributed cluster testing](../cluster-testing/overview.md) chapter's fixes (items 60, 130, 131,
+133 to 138) and its driver added 10 and took it to 1,629 ([Test Coverage](test-coverage.md)).
 [Resolved #27](resolved/shql-quote-escape.md), [#32](resolved/client-gone-broadcast.md),
 [#36](resolved/staged-tail-deadline.md) and [#125](resolved/retry-unknown-outcome.md) added 11
 and took it to 1,587. There are two new binaries, `retry_outcome.rs` (3) and `staged_flush.rs`
@@ -333,7 +336,9 @@ disagree, and a partition has at most one read outstanding.
 
 ## Medium — robustness
 
-Items 129, 130 and 131 came out of one TMDB load against the lab. The four items that were
+Items 129, 130 and 131 came out of one TMDB load against the lab; ~~130 and 131~~ are
+[resolved](resolved/stream-connection-accounting.md), with the client half of item 60, from the
+[cluster testing](../cluster-testing/findings.md) chapter's first runs. The four items that were
 here before them are resolved, all in one change:
 [27](resolved/shql-quote-escape.md), SHQL strings that could not hold a quote;
 [32](resolved/client-gone-broadcast.md), an ordinary client's departure retiring nothing;
@@ -370,45 +375,6 @@ commit. That means an estimate of commit rate per group, or a bound on count or 
 from `write_timeout`, and a check on the leader for writes that arrive by hop. That is a
 behaviour change and needs a benchmark (the grid's high-depth rungs are where it would show).
 
-### 130. A frame for a stream dropped without its end ends that connection's read loop
-
-`ShoalTcpProxy::relay` (`shoal-client/src/client.rs:2420`) hands each frame to the stream it
-names with `waiter.tx.send(wrapped).await.map_err(send_failed)?`. A stream's slot in the channel
-map is removed only by `release`, which runs when `next()` returns the stream's end or an
-error. A caller that stops reading before that point and drops the result stream leaves the
-slot in place. kanal closes a channel when its last receiver drops (`AsyncReceiver::drop`,
-`terminate_signals`), so the slot now points at a closed channel. The next frame for that id
-fails the send, and the `?` ends the read loop of the connection it arrived on, with every other
-stream's answers on that connection still queued behind it. The comment under the `None` arm
-right below says this must not happen for a frame nobody is waiting on. A closed channel is the
-same case, and nothing catches it.
-
-**Established by reading the source**, from a hang that fits it. The TMDB loader's first run
-under [F54](../features/tmdb-dataset-deployment.md) with retries wrote the whole dataset, then
-stopped in its verify phase with four connections to one member holding 47–79 KB each in their
-receive queues, unread and not growing, while the server logged nothing. That loader's workers
-broke out of their loop once every query was answered and dropped the stream without reading
-its end (the pre-F54 loader did the same). They now read on to the end
-(`while results_rx.next().await?.is_some() {}`), and the next full run's verify returned all
-10,073 movies in 60ms. The late frame itself was not captured, because the loader installs no
-tracing subscriber and the `WARN`/`ERROR` lines that would have named it went nowhere. The fix is
-to treat a failed send like the `None` arm: drop the frame and remove the slot.
-
-### 131. A connection that dies fails only the streams it was the last connection for
-
-When a read loop ends, `fail_waiting` (`shoal-client/src/client.rs:2275`) fails each waiter whose
-`conn == Some(self.conn_id)`. A query stream records one connection per stream: `send` overwrites
-the waiter with whichever connection the pool handed that bundle. A stream that sent bundle A on
-connection 1 and bundle B on connection 2 is recorded against connection 2 only. If connection 1
-dies with A's answers owed, the stream is not told. Its `next()` waits for answers that will
-never come and has no deadline unless the caller set one. This is what turned item 130's dead
-read loop into a hang instead of a `ConnectionLost` the loader would have retried.
-
-**Established by reading the source.** A fix needs the set of connections a stream has written
-to and not yet been fully answered on, not just the last one, or `fail_waiting` has to fail
-every stream with any bundle outstanding on the connection. Either way the client has to track
-what each connection owes, not just what each stream is owed.
-
 ### 132. `ephemeral_sorted_table` aborted once in glibc's thread-cache teardown
 
 One workspace run aborted this test binary with SIGABRT after its first test passed. glibc
@@ -423,6 +389,15 @@ The suspects are the code that is `unsafe` about a heap it does not own: the zer
 responses, and the `Send` wrappers this page lists under **Unsafe `Send` invariant**. The next
 step is running the binary in a loop under ASan (`RUSTFLAGS=-Zsanitizer=address` on nightly)
 until it aborts, then reading the report's first frame.
+
+**A candidate cause was found and fixed, and is not shown to be this.**
+[Resolved #133](resolved/read-plan-rc-across-shards.md) was a shared `Rc` in every split query's
+metadata, raced on by two shard threads: heap corruption from exactly the `unsafe` `Send` this
+entry suspected. A standalone server splits gets across shards too. But this binary, run under
+ASan (`-Zsanitizer=address -Zsanitizer-recover=address`) on the unfixed tree, passed all fifteen
+tests and reported no use-after-free, only gxhash reading past the end of a 13-byte key, which it
+does on purpose within a page. So this stays open until it recurs on a tree with #133 fixed, or
+never does.
 
 ---
 
@@ -757,7 +732,11 @@ the way it already ignores `updates_after_delete`.
 
 ## Unsafe `Send` invariant
 
-Not a bug, but the most dangerous thing in the codebase to change without knowing.
+Not a bug, but the most dangerous thing in the codebase to change without knowing. **It was a
+bug once:** [Resolved #133](resolved/read-plan-rc-across-shards.md) was an `Rc` inside
+`QueryMetadata`, which crosses shards on every split get and which this section did not name.
+Anything a query carries between shards must be `Send` on its own, and
+`what_a_query_carries_between_shards_is_send` checks `ReadPlan` and `QueryMetadata`.
 
 ```rust
 /// # Safety
@@ -1036,6 +1015,13 @@ shape is probably a latch, warning on entry to the state and again on leaving it
 partition becomes evictable later.
 
 ### 60. A result stream that is not drained to the end leaks its slot in the client
+
+**The client half is [resolved](resolved/stream-connection-accounting.md)**: both stream types
+remove their slot on `Drop`, and a frame for a slot whose reader is gone is dropped and the slot
+removed rather than ending the connection's read loop (item 130). What is left open is the server
+half below - nothing tells the server to stop producing answers for a stream the client dropped -
+and the channel pair a dropped stream does not return to the reuse queue. The rest of this entry
+is the state before that fix.
 
 `ShoalResultStream::next` releases the client-side state for a query only when the response it
 just returned was the last one:

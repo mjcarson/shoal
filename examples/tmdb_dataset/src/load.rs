@@ -213,12 +213,30 @@ async fn connect_deployment(inventory: &PathBuf) -> color_eyre::Result<Vec<Arc<S
 ///
 /// When nothing could be connected to.
 async fn connect(args: &LoadArgs) -> color_eyre::Result<Vec<Arc<Shoal<TmdbClient>>>> {
-    match (&args.inventory, &args.addr) {
+    // the loader's two targets are the same as every other command's
+    connect_targets(args.inventory.as_ref(), args.addr.as_deref()).await
+}
+
+/// Connect to a deployment's members, or to one node by address
+///
+/// # Arguments
+///
+/// * `inventory` - The inventory of a deployed cluster, connected to as its admin
+/// * `addr` - A single node's client address, connected to without credentials
+///
+/// # Errors
+///
+/// When nothing could be connected to.
+pub async fn connect_targets(
+    inventory: Option<&PathBuf>,
+    addr: Option<&str>,
+) -> color_eyre::Result<Vec<Arc<Shoal<TmdbClient>>>> {
+    match (inventory, addr) {
         // a deployed cluster, as its admin
         (Some(inventory), _) => connect_deployment(inventory).await,
         // one node, as nobody
         (None, Some(addr)) => {
-            let client = Shoal::<TmdbClient>::new(addr.as_str())
+            let client = Shoal::<TmdbClient>::new(addr)
                 .await
                 .map_err(|error| eyre!("could not connect to {addr}: {error}"))?;
             println!("connected to {addr}");

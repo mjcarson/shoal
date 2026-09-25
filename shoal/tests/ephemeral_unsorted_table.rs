@@ -192,6 +192,44 @@ async fn insert() -> Result<(), TestError> {
     Ok(())
 }
 
+/// A stream dropped before its end gives its slot in the client back (item 60)
+///
+/// Before [Resolved #60, 130, 131](../../docs/src/appendix/resolved/stream-connection-accounting.md)
+/// a stream the caller stopped reading left its id tracked for the life of the client, and
+/// every late frame for it was routed into a channel nobody read.
+#[tokio::test]
+async fn a_stream_dropped_early_is_not_tracked() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // nothing is in flight yet
+    let before = client.tracked();
+    // open both kinds of stream, send on each, and drop them before reading an answer
+    for unordered in [false, true] {
+        let mut queries_tx = if unordered {
+            let (queries_tx, results_rx) = client.stream_unordered()?;
+            drop(results_rx);
+            queries_tx
+        } else {
+            let (queries_tx, results_rx) = client.stream_with(Default::default())?;
+            drop(results_rx);
+            queries_tx
+        };
+        let queries = queries_tx.query().add(TestRecord::new("dropped", "early"));
+        queries_tx.send(queries).await?;
+        drop(queries_tx);
+    }
+    // let the late answers land, which must not bring a slot back either
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(client.tracked(), before, "a dropped stream is still tracked");
+    // and the client still answers
+    client.send_one(TestRecord::new("after", "drop")).await?;
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
 /// Test deleting rows from an ephemeral table
 #[tokio::test]
 async fn delete() -> Result<(), TestError> {

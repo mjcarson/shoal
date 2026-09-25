@@ -41,7 +41,7 @@ all eight had drifted.
 | Location | TODO | What finishing it involves |
 | --- | --- | --- |
 | `shoal-client/src/client.rs`, `is_valid` | `implement a ping/pong type request?` | `is_valid` calls `peer_addr()`, which cannot detect a dead peer. ~~Needs a message-type field the wire format does not have~~ — the format has one since [F10](../features/framing-and-protocol-evolution.md), and `Ping` and `Pong` are message types 7 and 8 with nothing behind them. What is left is a send, a handler, and a deadline: [D6](../direction/connection-pool.md#health-checks-that-work). No longer a flag day. |
-| `shoal-client/src/client.rs`, `ShoalQueryStream::send` | `make it so we don't need to do this` | `ShoalQueryStream::send` overwrites `queries.id` on every bundle. The stream's id should be set at construction. |
+| ~~`shoal-client/src/client.rs`, `ShoalQueryStream::send`~~ | ~~`make it so we don't need to do this`~~ | ~~`ShoalQueryStream::send` overwrites `queries.id` on every bundle. The stream's id should be set at construction.~~ It still overwrites it, now with a fresh identity per bundle rather than the stream's, which is the point: [Resolved #138](resolved/stream-bundle-identity.md). The TODO is gone. |
 | `shoalctl/src/app.rs:465` | `Handle insert mode for editing rows` | Insert mode edits the query bar only; result rows are read-only. Writing would also need SHQL to parse mutations. |
 
 ## Larger unbuilt work
@@ -752,6 +752,18 @@ tablets alternative Q1 named is the expected shape for M4; and **fsyncs from ind
 one thread queue behind each other** (395 µs alone, 10.8 ms with sixty four leaders writing at
 once), which is the number Q2's shared physical WAL has to beat. Both are in the
 [decision record](../distributed/protocol.md#q1-and-q13-at-m1).
+
+#### `ServerMsg`'s `unsafe impl Send` covers every variant
+
+`shoal-core/src/server/messages.rs`. The enum asserts `Send` wholesale so it can travel kanal
+channels, and a handful of its variants carry state that must stay on one shard (a partition
+read, a built snapshot, a group's machine state). So the compiler checks nothing that goes into a
+message that does cross shards, and an `Rc` in `QueryMetadata` crashed every cluster node on a
+two-partition get ([Resolved #133](resolved/read-plan-rc-across-shards.md)). The fix there was a
+test asserting `Send` for `ReadPlan` and `QueryMetadata`. The shape that would check everything is
+two message types: a `MeshMsg` that is `Send` by the compiler's own judgement, for what crosses
+shards, and a shard-local message for the rest, received on the same loop. That touches every
+`send` into the mesh, so it was left for its own change.
 
 ### Rebalancing
 

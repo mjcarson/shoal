@@ -1,0 +1,88 @@
+# Performance
+
+Every number here is one run on the lab, labelled by what ran beside it. The
+[overview](overview.md#how-to-read-the-numbers) says why none of them is a capture.
+
+## Loading and the mixed workload
+
+| Workload | Throughput | Latency | Notes |
+| --- | --- | --- | --- |
+| `load`, the whole csv, eight workers, 1,024 in flight | 38,600–42,900 rows/s | not recorded by the loader | Two runs, [correctness test 1](correctness.md#1-loading-the-whole-dataset) |
+| `bench --mix insert:100`, eight workers, 128 in flight | 33,800–35,100 inserts/s | p50 20–21 ms, p99 111–124 ms | Latency is queueing: 1,024 in flight at 35k/s is 29 ms by Little's law |
+| `bench` mixed (`get:55,keyword:15,update:15,insert:15`) | 60,000–88,000 ops/s, a fifth of them writes | get p50 0.5–2 ms, p99 20–56 ms; writes p50 26–49 ms, p99 120–220 ms | The no-fault baseline of the [fault tests](correctness.md#4-faults-under-load) |
+
+### Where the time goes
+
+During the first load titan and hyperion were busy (31–35% user, 29% system) and waiting on their
+disks for a third of the time (32–36% iowait). Europa was three quarters idle. The Zen1 hosts'
+NVMe is the bottleneck, and every write waits for two of the three copies to sync, so a quorum
+always includes one of them.
+
+A `perf` profile of titan's node under the mixed bench is flat. No Shoal function takes more than
+1.2% of samples. The largest are the allocator (`_mi_page_malloc` 2.3%, `mi_free` 1.2%),
+`ArchiveMap::tablet_usage` at 1.1% (the per-report rescan
+[O57](../appendix/optimizations.md#o57-tablet-bytes-are-rescanned-from-the-whole-archive-map-on-every-report)
+describes, now measured), `sort_by_load` at 0.4%, and about 2% formatting strings for tracing
+fields. Titan's cpu is not what limits the cluster; its disk is.
+
+An io_uring trace of europa's node over the same 12 seconds counted about 124,000 cancelled
+timeouts a second: glommio arms a timer per timed operation and cancels it on completion. That is
+glommio's cost and shows as nothing in the profile, so it is recorded and not pursued.
+
+## Write amplification by device and filesystem
+
+For the same replicated rows, europa's device took far more writes than the other two:
+
+| Run | Acknowledged inserts | europa (Optane, btrfs) | titan (970 EVO, ext4) | hyperion (970 EVO, ext4) |
+| --- | --- | --- | --- | --- |
+| 30 s insert-only, first cluster | 1,048,800 | 16,577 MB | 2,454 MB | 2,474 MB |
+| 30 s insert-only, europa's directory `chattr +C` (nodatacow) on a fresh cluster | 1,087,480 | 16,610 MB | 1,992 MB | 1,982 MB |
+
+`nodatacow` changed nothing on europa, so btrfs copying data is not the cause. Splitting a 15 s
+run into what the node process was charged for and what the device wrote:
+
+| Host | Process `write_bytes` | Device writes | Ratio | `fdatasync`s in 12 s |
+| --- | --- | --- | --- | --- |
+| europa | 4,776 MB | 8,469 MB | 1.77× | 67,903 |
+| titan | 873 MB | 1,119 MB | 1.28× | 8,176 |
+| hyperion | 876 MB | 1,101 MB | 1.26× | — |
+
+The node on europa was charged five and a half times the writeback of the others for the same
+rows. It syncs its WAL eight times as often, because a sync on the Optane returns sooner, so each
+batch is smaller. Every batch re-dirties the page holding the WAL's tail, so that page is written
+back once per sync. btrfs then adds its own per-sync metadata (1.77× against ext4's 1.27×). Filed
+as [O61](../appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page).
+Throughput was the same either way, because the Zen1 hosts set it. The cost is device wear and cpu
+on the fastest node.
+
+### O61, a group-commit delay
+
+*Not yet run.* The experiment is a bounded wait in the WAL writer before it takes the next batch
+while batches are arriving back to back, run at several delays against the same insert bench.
+Success means fewer syncs and bytes on europa with no change in the cluster's write p50 and p99.
+
+## Leadership after a restart
+
+A node that restarts leads none of its groups when it comes back, and nothing moves leadership back
+to it. After two kills titan led 0 of its 36 groups, hyperion 12 and europa 24. Every write is
+proposed through its group's leader, so europa did two thirds of the leaders' work. Tracked as
+an [open question](../distributed/open-issues.md#filed-as-unbuilt) before this chapter, and taken
+up below.
+
+*Not yet measured*: the mixed bench with leadership skewed against the same bench with leadership
+balanced.
+
+## Failover time against `primary_failover_after`
+
+Killing the node that led 24 groups made writes to those groups fail for about 17 seconds, then
+stalled the two survivors on their disks for about seven
+([correctness](correctness.md#kill-the-node-leading-the-most-groups)). The data groups elected new
+leaders 14.5 s after the kill. That is what the configuration asks for: a group's election timeout
+is `primary_failover_after` to twice it (5–10 s by default), and a follower does not vote while
+its leader's lease, `election_timeout_max`, has not expired since the last acknowledgement. So the
+earliest election is the lease plus an election timeout, 15 to 20 s at the default. The documented
+objective of base + 2 s is not what that arithmetic gives.
+
+*Not yet measured*: the same kill at shorter bases, and whether a shorter base causes elections
+nobody wanted under this lab's load, where titan and hyperion spend a third of their time in
+iowait.

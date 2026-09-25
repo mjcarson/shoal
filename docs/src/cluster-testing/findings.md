@@ -1,0 +1,34 @@
+# Findings
+
+Every defect and optimization this chapter's testing found or measured, and what was done about
+it. A defect has an item number on [Known Issues](../appendix/known-issues.md) or
+[Resolved Issues](../appendix/resolved-issues.md). An optimization has an `O` number on
+[Optimizations](../appendix/optimizations.md). A finding about the lab or the deployment rather
+than Shoal says so.
+
+## Defects
+
+| Item | Found by | What | Outcome |
+| --- | --- | --- | --- |
+| [133](../appendix/resolved/read-plan-rc-across-shards.md) | `verify-acks`, the first read back in gets of 256 ids | A get naming two partitions crashed the coordinating node with `SIGSEGV`: a split query's plan held an `Rc`, raced on by two shard threads | **Fixed.** `Arc`, and a test that what a query carries between shards is `Send`. Rolled out with `cluster upgrade`, then 1,048,800 acknowledged inserts read back through every member |
+| [130, 131, 60](../appendix/resolved/stream-connection-accounting.md) | The first TMDB load with retries (F54), filed then and fixed here | A frame for a dropped stream ended its connection's read loop, and a stream was failed only by the last connection it wrote to, which together hung a client | **Fixed.** Per-connection owed counts, a frame that cannot be delivered is dropped, and both result streams give their slot back on `Drop` |
+| [132](../appendix/known-issues.md#132-ephemeral_sorted_table-aborted-once-in-glibcs-thread-cache-teardown) | Re-examined after 133 | The one-off heap corruption abort in a standalone test binary fits 133's cause | **Open.** The binary under ASan on the unfixed tree showed no use-after-free, so it is not shown to be 133 |
+| [134](../appendix/resolved/fixture-default-peer-ports.md) | The workspace suite run before the first commit | Six fixture tests failed on `AddrInUse` while the lab's europa node held ports 12001 and 12002 | **Fixed.** A fixture server not staged into a cluster takes its ports from the fixture's block |
+| [135](../appendix/resolved/leftover-temp-map.md) | [Kill a follower](correctness.md#kill-a-follower) | A node killed while saving an archive map failed every restart on `AlreadyExists` for the leftover temp file: titan crash-looped nine times | **Fixed.** A save removes a leftover temp map first |
+| [136](../appendix/resolved/upgrade-a-down-node.md) | Delivering 135's fix | `cluster upgrade titan` refused because titan was down, so no tool could repair a crash-looping node | **Fixed.** A named down node is a repair |
+| [137](../appendix/resolved/upgrade-waits-for-groups.md) | The repair's timing against titan's journal | An upgrade judged a node caught up while its shards were still starting: zero groups lag nothing | **Fixed.** The upgrade waits for the shards and groups the node had, with none starting |
+| [138](../appendix/resolved/stream-bundle-identity.md) | [Kill a follower](correctness.md#kill-a-follower) | Every write on a stream opened before a newer stream's identity was evicted, or older than the retry window, was refused `IdentityExpired`: a quarter of all operations after the kill | **Fixed.** Each stream bundle gets its own identity |
+
+## Deployment and lab findings
+
+| Finding | Evidence | What was done |
+| --- | --- | --- |
+| Europa's node was on a root device 98% full | `df` before the first test | Its group moved to the Optane |
+| Europa's Optane took 6.8× the device writes of the Zen1 hosts' NVMe for the same replicated rows | [Performance](performance.md#write-amplification-by-device-and-filesystem) | Not copy-on-write: `nodatacow` changed nothing. Most of it is the WAL syncing smaller batches on the faster device, filed as [O61](../appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page) |
+| gxhash reads a whole 16-byte block past the end of a short key | Every AddressSanitizer run | Recorded: it stays within a page by design, so it is not a fault. It means an ASan build needs `-Zsanitizer-recover=address`, and every run reports it once per location |
+
+## Optimizations
+
+| O | What | Outcome |
+| --- | --- | --- |
+| [O61](../appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page) | A fast device syncs the WAL in batches too small to fill a page | See [the experiment](performance.md#o61-a-group-commit-delay) |

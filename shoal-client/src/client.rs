@@ -20,7 +20,7 @@ use std::mem::MaybeUninit;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -211,13 +211,85 @@ impl TopologyState {
     }
 }
 
+/// How many answers each connection still owes one query stream
+///
+/// A stream takes whatever connection the pool hands it for each bundle, so its answers can be
+/// owed by several connections at once. Each one that dies owing any of them has to fail the
+/// stream, and one that dies owing none must not
+/// ([Resolved #131](../../../docs/src/appendix/resolved/stream-connection-accounting.md)).
+/// Counts are signed because an answer can be read before the send that owes it has recorded
+/// the write; the two always meet at the same total.
+#[derive(Debug, Default)]
+struct Owed {
+    /// Each connection this stream wrote to and what it still owes, as (connection, answers)
+    conns: std::sync::Mutex<Vec<(u64, i64)>>,
+}
+
+impl Owed {
+    /// Record that a bundle of some queries was written to a connection
+    ///
+    /// # Arguments
+    ///
+    /// * `conn` - The connection the bundle was written to
+    /// * `queries` - How many answers the bundle is owed
+    fn written(&self, conn: u64, queries: usize) {
+        // a poisoned lock only means another thread panicked mid-update of a counter
+        let mut conns = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
+        let queries = i64::try_from(queries).unwrap_or(i64::MAX);
+        // add to this connection's count, or start one
+        match conns.iter_mut().find(|(id, _)| *id == conn) {
+            Some((_, owed)) => *owed = owed.saturating_add(queries),
+            None => conns.push((conn, queries)),
+        }
+    }
+
+    /// Record that one answer arrived on a connection
+    ///
+    /// # Arguments
+    ///
+    /// * `conn` - The connection the answer arrived on
+    fn answered(&self, conn: u64) {
+        let mut conns = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
+        // take one off this connection's count, starting it below zero if the write is not
+        // recorded yet
+        match conns.iter_mut().find(|(id, _)| *id == conn) {
+            Some((_, owed)) => *owed -= 1,
+            None => conns.push((conn, -1)),
+        }
+    }
+
+    /// Whether a connection still owes this stream any answers
+    ///
+    /// # Arguments
+    ///
+    /// * `conn` - The connection to ask about
+    fn owes(&self, conn: u64) -> bool {
+        let conns = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
+        conns.iter().any(|(id, owed)| *id == conn && *owed > 0)
+    }
+
+    /// Whether every answer written for has arrived, on whichever connection
+    fn settled(&self) -> bool {
+        let conns = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
+        conns.iter().map(|(_, owed)| owed).sum::<i64>() <= 0
+    }
+}
+
 #[derive(Clone)]
 struct Waiter {
-    /// The connection this query was written to, if it has been written yet
+    /// What each connection this query was written to still owes it
     ///
-    /// A query that has been registered but not yet written has no connection to lose, which is
-    /// what makes `None` a meaningful state rather than a placeholder.
-    conn: Option<u64>,
+    /// Shared by every copy of the waiter, so a stream that is registered again for its next
+    /// bundle keeps what its earlier bundles are still owed. A query that has been registered
+    /// but not yet written owes nothing to any connection.
+    owed: Arc<Owed>,
+    /// Whether this slot is one bundle of a query stream, removed once its answers are all in
+    ///
+    /// A query stream gives each bundle an identity of its own, so a long-lived stream never
+    /// writes under an identity older than the group's retry window
+    /// ([Resolved #138](../../../docs/src/appendix/resolved/stream-bundle-identity.md)).
+    /// Nobody releases such a slot: it goes when its last answer arrives or its connection dies.
+    bundle: bool,
     /// The channel to hand this query's responses to
     tx: AsyncSender<ClientMsg>,
     /// The span this query's answers hang off
@@ -232,6 +304,36 @@ struct Waiter {
     /// would notice - every response span silently starts a **new trace**. This is the client's
     /// half of the trap `QueryMetadata.span` documents on the server's side.
     span: Span,
+}
+
+impl Waiter {
+    /// A waiter registered before anything was written for it
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The channel to hand its responses to
+    fn unwritten(tx: AsyncSender<ClientMsg>) -> Self {
+        Waiter {
+            owed: Arc::new(Owed::default()),
+            bundle: false,
+            tx,
+            span: Span::current(),
+        }
+    }
+
+    /// A waiter whose first bundle was written to a connection
+    ///
+    /// # Arguments
+    ///
+    /// * `conn` - The connection the bundle was written to
+    /// * `queries` - How many answers it is owed
+    /// * `tx` - The channel to hand its responses to
+    #[cfg(test)]
+    fn written(conn: u64, queries: usize, tx: AsyncSender<ClientMsg>) -> Self {
+        let waiter = Waiter::unwritten(tx);
+        waiter.owed.written(conn, queries);
+        waiter
+    }
 }
 
 /// The write half of a pooled connection, and which connection it is
@@ -1173,14 +1275,7 @@ impl<S: QuerySupport> Shoal<S> {
             conn.write_all(&preamble).await?;
             conn.write_all(&body).await?;
             // the answer is owed by this connection, so a dead one fails it
-            self.channel_map.pin().insert(
-                id,
-                Waiter {
-                    conn: Some(conn.id),
-                    tx: response_tx.clone(),
-                    span: Span::current(),
-                },
-            );
+            self.owe(&id, conn.id, 1, &response_tx);
             if self.dead_conns.pin().contains_key(&conn.id) {
                 return Err(Errors::Server {
                     query_id: Some(id),
@@ -1217,6 +1312,37 @@ impl<S: QuerySupport> Shoal<S> {
         self.peer_max_frame_bytes.load(Ordering::Relaxed)
     }
 
+    /// How many query ids this client is tracking an answer for
+    ///
+    /// Every bundle, stream and admin request in flight holds one, and gives it back when its
+    /// answer ends or it is dropped. A count that grows while nothing is in flight is a leak.
+    #[must_use]
+    pub fn tracked(&self) -> usize {
+        self.channel_map.len()
+    }
+
+    /// Record that a tracked id's bundle was written to a connection and is owed answers there
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The tracked id
+    /// * `conn` - The connection the bundle was written to
+    /// * `queries` - How many answers it is owed
+    /// * `tx` - The id's channel, to register it again if its slot is gone
+    fn owe(&self, id: &Uuid, conn: u64, queries: usize, tx: &AsyncSender<ClientMsg>) {
+        let map = self.channel_map.pin();
+        match map.get(id) {
+            // the usual case: the waiter `track_response` registered
+            Some(waiter) => waiter.owed.written(conn, queries),
+            // a slot that went already is registered again, so what it is owed can fail it
+            None => {
+                let waiter = Waiter::unwritten(tx.clone());
+                waiter.owed.written(conn, queries);
+                map.insert(*id, waiter);
+            }
+        }
+    }
+
     /// Add a response stream to our channel map
     ///
     /// A pinned id is the caller's identity for the bundle and is never re-minted: a collision
@@ -1243,16 +1369,11 @@ impl<S: QuerySupport> Shoal<S> {
             // check if this id already exists in our channel map
             if self.channel_map.pin().get(&*query_id).is_none() {
                 // insert this id, with no connection yet since nothing has been written
-                self.channel_map.pin().insert(
-                    *query_id,
-                    Waiter {
-                        conn: None,
-                        tx: tx.clone(),
-                        // the caller's own span, since this runs inside the send that is
-                        // registering the query rather than in a task of its own
-                        span: Span::current(),
-                    },
-                );
+                // the caller's own span, since this runs inside the send that is registering
+                // the query rather than in a task of its own
+                self.channel_map
+                    .pin()
+                    .insert(*query_id, Waiter::unwritten(tx.clone()));
                 // we found a unique query id so stop trying to find a new id
                 break;
             }
@@ -1368,6 +1489,7 @@ impl<S: QuerySupport> Shoal<S> {
         self.send_tracked(
             queries.id,
             &archived,
+            queries.queries.len(),
             options,
             stamps,
             response_tx,
@@ -1387,6 +1509,7 @@ impl<S: QuerySupport> Shoal<S> {
     ///
     /// * `id` - The bundle id, already tracked
     /// * `archived` - The bundle's bytes
+    /// * `queries` - How many queries are in the bundle, each owed one answer
     /// * `options` - How the bundle's reads are served
     /// * `stamps` - What the bundle has cost so far
     /// * `response_tx` - The tracked waiter's sender
@@ -1396,6 +1519,7 @@ impl<S: QuerySupport> Shoal<S> {
         &self,
         id: Uuid,
         archived: &AlignedVec,
+        queries: usize,
         options: &SendOptions,
         mut stamps: BatchStamps,
         response_tx: AsyncSender<ClientMsg>,
@@ -1476,18 +1600,11 @@ impl<S: QuerySupport> Shoal<S> {
         }
         // record that this bundle is now the sockets problem
         stamps.mark_written();
-        // record which connection this bundle is owed an answer on
+        // record which connection this bundle is owed its answers on
         //
         // this is done after the write rather than before it, because a bundle that never
         // reached the socket is not owed anything by that connection
-        self.channel_map.pin().insert(
-            id,
-            Waiter {
-                conn: Some(conn.id),
-                tx: response_tx.clone(),
-                span: Span::current(),
-            },
-        );
+        self.owe(&id, conn.id, queries, &response_tx);
         // check that this connection did not die between being handed to us and being written to
         //
         // the read loop marks itself dead before it fails what it owed, so a sweep that ran
@@ -1589,6 +1706,7 @@ impl<S: QuerySupport> Shoal<S> {
                     .send_tracked(
                         identity,
                         &archived,
+                        queries.queries.len(),
                         options,
                         stamps,
                         response_tx,
@@ -1984,6 +2102,7 @@ impl<S: QuerySupport> Shoal<S> {
             data_kind: PhantomData,
             base_index: 0,
             peer_max_frame_bytes: self.peer_max_frame_bytes.clone(),
+            dead_conns: self.dead_conns.clone(),
             options,
         };
         Ok((query_stream, result_stream))
@@ -1992,6 +2111,19 @@ impl<S: QuerySupport> Shoal<S> {
     /// Create a new stream to send and receive results on
     pub fn stream_unordered(
         &self,
+    ) -> Result<(ShoalQueryStream<S>, ShoalUnorderedResultStream<S>), Errors> {
+        // the client's own defaults for how reads are served
+        self.stream_unordered_with(self.read_options.clone())
+    }
+
+    /// Create a new unordered stream whose every bundle says how its reads are served
+    ///
+    /// # Arguments
+    ///
+    /// * `options` - How the stream's reads are served
+    pub fn stream_unordered_with(
+        &self,
+        options: SendOptions,
     ) -> Result<(ShoalQueryStream<S>, ShoalUnorderedResultStream<S>), Errors> {
         // generate a time-ordered ID to override all of the ids used in our queries
         let mut id = Uuid::now_v7();
@@ -2021,7 +2153,8 @@ impl<S: QuerySupport> Shoal<S> {
             data_kind: PhantomData,
             base_index: 0,
             peer_max_frame_bytes: self.peer_max_frame_bytes.clone(),
-            options: self.read_options.clone(),
+            dead_conns: self.dead_conns.clone(),
+            options,
         };
         Ok((query_stream, result_stream))
     }
@@ -2283,13 +2416,26 @@ impl TcpProxy {
         //
         // papaya's guard is bound to the thread that took it, so nothing may be awaited while
         // it is held. collecting first keeps the guard and the sends strictly apart
-        let waiting: Vec<AsyncSender<ClientMsg>> = self
-            .channel_map
-            .pin()
-            .values()
-            .filter(|waiter| waiter.conn == Some(self.conn_id))
-            .map(|waiter| waiter.tx.clone())
-            .collect();
+        let (waiting, bundles): (Vec<AsyncSender<ClientMsg>>, Vec<Uuid>) = {
+            let map = self.channel_map.pin();
+            let owing: Vec<(Uuid, &Waiter)> = map
+                .iter()
+                .filter(|(_, waiter)| waiter.owed.owes(self.conn_id))
+                .map(|(id, waiter)| (*id, waiter))
+                .collect();
+            (
+                owing.iter().map(|(_, waiter)| waiter.tx.clone()).collect(),
+                // a stream bundle's slot is released by nobody else, so it goes with the failure
+                owing
+                    .iter()
+                    .filter(|(_, waiter)| waiter.bundle)
+                    .map(|(id, _)| *id)
+                    .collect(),
+            )
+        };
+        for id in &bundles {
+            self.channel_map.pin().remove(id);
+        }
         // an idle connection has nobody to tell, but is still marked dead above so that the
         // pool discards it rather than handing it to the next query
         if waiting.is_empty() {
@@ -2339,6 +2485,38 @@ impl TcpProxy {
         outcome.map(|_| ())
     }
 
+    /// Hand one frame to the stream waiting for it, in the trace the query was sent in
+    ///
+    /// A send fails only when the stream's reader is gone: a result stream dropped before its
+    /// end. That is one caller's leak, and it must not end this loop and fail every other query
+    /// on this connection ([Resolved #130](../../../docs/src/appendix/resolved/stream-connection-accounting.md)),
+    /// so the slot goes and no later frame for it is sent into the closed channel again.
+    ///
+    /// # Arguments
+    ///
+    /// * `query_id` - The id the frame named
+    /// * `waiter` - The stream waiting for it
+    /// * `msg` - What to hand it
+    async fn deliver(&self, query_id: Uuid, waiter: &Waiter, msg: ClientMsg) {
+        // rejoin the trace the query was sent in
+        //
+        // this reader is shared by every query on one connection and inherits nothing from any
+        // of them, so the parent comes out of the waiter rather than out of the ambient context -
+        // which belongs to whatever the last frame was for. instrumented rather than entered
+        // around: a guard held across the await would leave this span current while another
+        // connection's task runs on this worker, and `tracing-opentelemetry` timestamps a span
+        // when it is exited, so one that is never entered exports with no duration
+        let span = info_span!(parent: &waiter.span, "Shoal::response", %query_id);
+        if waiter.tx.send(msg).instrument(span).await.is_err() {
+            self.channel_map.pin().remove(&query_id);
+            event!(
+                Level::WARN,
+                msg = "dropped a frame for a stream whose reader is gone",
+                %query_id,
+            );
+        }
+    }
+
     /// Relay messages from this tcp stream until it ends
     ///
     /// Returns the reason the server gave for ending this connection, if it gave one.
@@ -2363,6 +2541,19 @@ impl TcpProxy {
             // work out which query this frame belongs to and what to hand that query
             let (query_id, wrapped) = match frame {
                 Frame::Response(query_id, aligned_buff, token) => {
+                    // a response is one answer this connection no longer owes its query, and a
+                    // stream bundle whose last answer this is gives its slot back now, since
+                    // nothing else would ([Resolved #138](../../../docs/src/appendix/resolved/stream-bundle-identity.md))
+                    let found = self.channel_map.pin().get(&query_id).cloned();
+                    if let Some(waiter) = found {
+                        waiter.owed.answered(self.conn_id);
+                        if waiter.bundle && waiter.owed.settled() {
+                            self.channel_map.pin().remove(&query_id);
+                            let msg = ClientMsg::Response(aligned_buff, stamps, token);
+                            self.deliver(query_id, &waiter, msg).await;
+                            continue;
+                        }
+                    }
                     (query_id, ClientMsg::Response(aligned_buff, stamps, token))
                 }
                 Frame::Error(query_id, code, msg) => {
@@ -2376,6 +2567,14 @@ impl TcpProxy {
                             reason = msg,
                         );
                         return Ok(Some((code, msg)));
+                    }
+                    // a failure ends the stream a bundle belongs to, so its slot goes with it
+                    let found = self.channel_map.pin().get(&query_id).cloned();
+                    if let Some(waiter) = found.filter(|waiter| waiter.bundle) {
+                        self.channel_map.pin().remove(&query_id);
+                        let failure = ClientMsg::ServerError(code, msg, stamps);
+                        self.deliver(query_id, &waiter, failure).await;
+                        continue;
                     }
                     (query_id, ClientMsg::ServerError(code, msg, stamps))
                 }
@@ -2395,30 +2594,10 @@ impl TcpProxy {
                 Frame::Admin(query_id, json) => (query_id, ClientMsg::Admin(json)),
             };
             // get the channel for this query
-            match self.channel_map.pin_owned().get(&query_id) {
+            let waiter = self.channel_map.pin().get(&query_id).cloned();
+            match waiter {
                 // send our message to the right shoal stream
-                Some(waiter) => {
-                    // rejoin the trace the query was sent in
-                    //
-                    // this reader is shared by every query on one connection and inherits nothing
-                    // from any of them, so the parent comes out of the waiter rather than out of
-                    // the ambient context - which belongs to whatever the last frame was for
-                    //
-                    // opened here rather than around the frame read above because until the query
-                    // id is decoded there is no way to know whose span this frame belongs to
-                    let span = info_span!(parent: &waiter.span, "Shoal::response", %query_id);
-                    // instrumented rather than entered around: a guard held across the await below
-                    // would leave this span current while another connection's task runs on this
-                    // worker. `Instrumented` enters on each poll and exits on each return, which is
-                    // also what gives this span an end - `tracing-opentelemetry` timestamps a span
-                    // when it is *exited*, so one that is never entered exports with no duration
-                    waiter
-                        .tx
-                        .send(wrapped)
-                        .instrument(span)
-                        .await
-                        .map_err(send_failed)?;
-                }
+                Some(waiter) => self.deliver(query_id, &waiter, wrapped).await,
                 // a frame for a query nobody is waiting on is dropped, and this loop goes on
                 //
                 // that happens when a result stream was dropped before it was drained, which
@@ -2810,6 +2989,22 @@ pub struct ShoalResultStream<S: QuerySupport> {
     deadline: Option<tokio::time::Instant>,
 }
 
+/// A stream dropped before its end gives its slot in the channel map back
+///
+/// Without this a caller that stops reading early leaves the slot pointing at a channel with no
+/// reader, and every frame the server still sends for it is routed there
+/// ([Resolved #60, 130, 131](../../../docs/src/appendix/resolved/stream-connection-accounting.md)).
+/// Only the slot is removed: returning the channel pair to the reuse queue is an async send,
+/// which `drop` cannot await, and a lost pair is a missed reuse rather than a leak.
+impl<S: QuerySupport> Drop for ShoalResultStream<S> {
+    fn drop(&mut self) {
+        // a stream that reached its end or failed was released already and has nothing to give
+        if self.response_rx.is_some() {
+            self.channel_map.pin().remove(&self.id);
+        }
+    }
+}
+
 impl<S: QuerySupport> ShoalResultStream<S>
 where
     <S::ResponseKinds as Archive>::Archived:
@@ -3153,6 +3348,22 @@ pub struct ShoalUnorderedResultStream<S: QuerySupport> {
     span: Span,
 }
 
+/// A stream dropped before its end gives its slot in the channel map back
+///
+/// Without this a caller that stops reading early leaves the slot pointing at a channel with no
+/// reader, and every frame the server still sends for it is routed there
+/// ([Resolved #60, 130, 131](../../../docs/src/appendix/resolved/stream-connection-accounting.md)).
+/// Only the slot is removed: returning the channel pair to the reuse queue is an async send,
+/// which `drop` cannot await, and a lost pair is a missed reuse rather than a leak.
+impl<S: QuerySupport> Drop for ShoalUnorderedResultStream<S> {
+    fn drop(&mut self) {
+        // a stream that reached its end or failed was released already and has nothing to give
+        if self.response_rx.is_some() {
+            self.channel_map.pin().remove(&self.id);
+        }
+    }
+}
+
 impl<S: QuerySupport> ShoalUnorderedResultStream<S>
 where
     <S::ResponseKinds as Archive>::Archived:
@@ -3318,6 +3529,8 @@ pub struct ShoalQueryStream<Q: QuerySupport> {
     peer_max_frame_bytes: Arc<AtomicU32>,
     /// How every bundle on this stream says its reads are served
     options: SendOptions,
+    /// Where read loops record that their connection has stopped, checked after each write
+    dead_conns: Arc<HashMap<u64, ()>>,
 }
 
 impl<Q: QuerySupport> ShoalQueryStream<Q> {
@@ -3356,9 +3569,12 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
     pub async fn send(&mut self, mut queries: Queries<Q>) -> Result<BatchStamps, Errors> {
         // start timing this bundle
         let mut stamps = BatchStamps::entered_now();
-        // override our query id
-        // TODO make it so we don't need to do this
-        queries.id = self.id;
+        // every bundle is its own identity, time-ordered at the moment it is sent: a stream
+        // lives for minutes or hours, and a write under the stream's own id would be judged as
+        // old as the stream by every group's retry window and forgotten-identity watermark
+        // ([Resolved #138](../../../docs/src/appendix/resolved/stream-bundle-identity.md))
+        let bundle = Uuid::now_v7();
+        queries.id = bundle;
         // update the base index for this query bundle correctly
         queries.base_index = self.base_index;
         // archive our queries
@@ -3383,6 +3599,20 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
         //
         // this is where client side backpressure shows up once enough queries are in flight
         stamps.mark_pooled();
+        // the bundle's own slot, routed to this stream's channel, registered before the write
+        // so an answer that arrives at once finds it, and owed by this connection so its death
+        // fails the stream ([Resolved #131](../../../docs/src/appendix/resolved/stream-connection-accounting.md))
+        let owed = Arc::new(Owed::default());
+        owed.written(conn.id, queries.queries.len());
+        self.channel_map.pin().insert(
+            bundle,
+            Waiter {
+                owed,
+                bundle: true,
+                tx: self.response_tx.clone(),
+                span: Span::current(),
+            },
+        );
         // say how the reads are served, down a connection whose server reads the section
         if !self.options.is_empty() && conn.caps & read::CLIENT_CAP_READ_OPTIONS != 0 {
             head = protocol::request_preamble_with(
@@ -3411,19 +3641,18 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
         }
         // record that this bundle is now the sockets problem
         stamps.mark_written();
-        // record which connection this bundle is owed an answer on
-        //
-        // a query stream takes whatever connection the pool hands out per bundle, so this can
-        // move between bundles. it names the most recent one, which is the one the answers we
-        // are still waiting for are coming back over
-        self.channel_map.pin().insert(
-            self.id,
-            Waiter {
-                conn: Some(conn.id),
-                tx: self.response_tx.clone(),
-                span: Span::current(),
-            },
-        );
+        // a connection that died between being handed out and being written to swept its
+        // waiters before this bundle's was there to be failed; the read loop marks itself dead
+        // before it sweeps, so checking after the write is what closes that window
+        if self.dead_conns.pin().contains_key(&conn.id) {
+            self.channel_map.pin().remove(&bundle);
+            return Err(Errors::Server {
+                query_id: Some(bundle),
+                index: None,
+                code: ErrorCode::ConnectionLost,
+                msg: "the connection this bundle was written to had already stopped".to_owned(),
+            });
+        }
         // increment the number of queries sent and our base index
         self.queries_sent += 1;
         self.base_index += queries.queries.len();
@@ -3968,11 +4197,7 @@ mod tests {
         let (tx, rx) = kanal::unbounded_async();
         channel_map.pin().insert(
             query_id,
-            Waiter {
-                conn: Some(1),
-                tx,
-                span: Span::current(),
-            },
+            Waiter::written(1, 1, tx),
         );
         let dead_conns = Arc::new(HashMap::with_capacity(1));
         let is_shutting_down = Arc::new(AtomicBool::new(false));
@@ -4031,11 +4256,7 @@ mod tests {
         let (tx, rx) = kanal::unbounded_async();
         channel_map.pin().insert(
             known_id,
-            Waiter {
-                conn: Some(1),
-                tx,
-                span: Span::current(),
-            },
+            Waiter::written(1, 1, tx),
         );
         let dead_conns = Arc::new(HashMap::with_capacity(1));
         let is_shutting_down = Arc::new(AtomicBool::new(false));
@@ -4089,19 +4310,11 @@ mod tests {
         let (other_tx, other_rx) = kanal::unbounded_async();
         channel_map.pin().insert(
             Uuid::new_v4(),
-            Waiter {
-                conn: Some(1),
-                tx: doomed_tx,
-                span: Span::current(),
-            },
+            Waiter::written(1, 1, doomed_tx),
         );
         channel_map.pin().insert(
             Uuid::new_v4(),
-            Waiter {
-                conn: Some(2),
-                tx: other_tx,
-                span: Span::current(),
-            },
+            Waiter::written(2, 1, other_tx),
         );
         // read that connection until it ends
         let dead_conns = Arc::new(HashMap::with_capacity(1));
@@ -4129,6 +4342,134 @@ mod tests {
         assert!(
             other_rx.try_recv().expect("the channel closed").is_none(),
             "one dead connection failed a query belonging to another"
+        );
+    }
+
+    /// A frame for a stream whose reader was dropped does not end the read loop (item 130)
+    ///
+    /// A result stream dropped before its end leaves its slot in the channel map pointing at a
+    /// channel whose receiver is gone. The next frame for it fails the send, and before the fix
+    /// that failure ended the read loop, failing every other query on the connection with it.
+    #[tokio::test]
+    async fn a_frame_for_a_dropped_stream_does_not_end_the_read_loop() {
+        // stand up a socket pair
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind a listener");
+        let addr = listener.local_addr().expect("listener had no address");
+        // a response frame for a dropped stream, then one for a live one
+        let dropped_id = Uuid::new_v4();
+        let live_id = Uuid::new_v4();
+        let payload = vec![7u8; 32];
+        let mut frames = Vec::new();
+        for id in [&dropped_id, &live_id] {
+            frames.extend_from_slice(
+                &protocol::response_preamble(id, payload.len(), protocol::DEFAULT_MAX_FRAME_BYTES)
+                    .expect("failed to build a response preamble"),
+            );
+            frames.extend_from_slice(&payload);
+        }
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("failed to accept");
+            sock.write_all(&frames).await.expect("failed to write");
+            sock.flush().await.expect("failed to flush");
+            // hold the socket open so the loop can only end on a frame, not on EOF
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        });
+        let stream = TcpStream::connect(addr).await.expect("failed to connect");
+        let (reader, _writer) = stream.into_split();
+        let channel_map = Arc::new(HashMap::with_capacity(2));
+        // the dropped stream: its slot is still in the map, its receiver is gone
+        let (dropped_tx, dropped_rx) = kanal::unbounded_async();
+        drop(dropped_rx);
+        channel_map.pin().insert(dropped_id, Waiter::written(1, 1, dropped_tx));
+        // the live stream on the same connection
+        let (live_tx, live_rx) = kanal::unbounded_async();
+        channel_map.pin().insert(live_id, Waiter::written(1, 1, live_tx));
+        let dead_conns = Arc::new(HashMap::with_capacity(1));
+        let is_shutting_down = Arc::new(AtomicBool::new(false));
+        let proxy = TcpProxy::new(
+            reader,
+            1,
+            &channel_map,
+            &dead_conns,
+            &is_shutting_down,
+            &Arc::new(TopologyState::new()),
+        );
+        tokio::spawn(proxy.start());
+        // the live stream gets its response rather than a failure
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), live_rx.recv())
+            .await
+            .expect("the live stream was never answered")
+            .expect("the live stream's channel closed");
+        server.await.expect("the writer task panicked");
+        match msg {
+            ClientMsg::Response(buff, _, _) => assert_eq!(&buff[..], &payload[..]),
+            other => panic!("the live stream was answered with {other:?}, not its response"),
+        }
+        // and the dropped stream's slot is gone, so no later frame is sent into it again
+        assert!(
+            channel_map.pin().get(&dropped_id).is_none(),
+            "the dropped stream's slot was left in the channel map"
+        );
+    }
+
+    /// A stream is failed by any connection that still owes it answers, not only its last (item 131)
+    ///
+    /// A query stream takes whatever connection the pool hands it per bundle. Before the fix its
+    /// waiter named only the last one, so a stream whose first bundle went out on connection 1
+    /// and whose second went out on connection 2 was never told when connection 1 died with the
+    /// first bundle's answers still owed, and its `next()` waited forever.
+    #[tokio::test]
+    async fn a_stream_is_failed_by_every_connection_that_owes_it() {
+        // stand up a socket pair whose server side hangs up without answering
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind a listener");
+        let addr = listener.local_addr().expect("listener had no address");
+        let server = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.expect("failed to accept");
+            drop(sock);
+        });
+        let stream = TcpStream::connect(addr).await.expect("failed to connect");
+        let (reader, _writer) = stream.into_split();
+        let channel_map = Arc::new(HashMap::with_capacity(2));
+        // a stream that wrote a bundle of three on connection 1 and then one of two on 2
+        let (tx, rx) = kanal::unbounded_async();
+        let waiter = Waiter::written(1, 3, tx);
+        waiter.owed.written(2, 2);
+        channel_map.pin().insert(Uuid::new_v4(), waiter);
+        // and a stream whose one bundle on connection 1 was fully answered already
+        let (done_tx, done_rx) = kanal::unbounded_async();
+        let done = Waiter::written(1, 1, done_tx);
+        done.owed.answered(1);
+        done.owed.written(2, 1);
+        channel_map.pin().insert(Uuid::new_v4(), done);
+        let dead_conns = Arc::new(HashMap::with_capacity(1));
+        let is_shutting_down = Arc::new(AtomicBool::new(false));
+        let proxy = TcpProxy::new(
+            reader,
+            1,
+            &channel_map,
+            &dead_conns,
+            &is_shutting_down,
+            &Arc::new(TopologyState::new()),
+        );
+        let _ = proxy.start().await;
+        server.await.expect("the listener task panicked");
+        // connection 1 died owing the first stream three answers, so that stream is told
+        let msg = rx
+            .try_recv()
+            .expect("the channel closed")
+            .expect("a stream owed answers on a dead connection was not told");
+        match msg {
+            ClientMsg::ServerError(code, _, _) => assert_eq!(code, ErrorCode::ConnectionLost),
+            other => panic!("a dead connection delivered something else: {other:?}"),
+        }
+        // the second stream was owed nothing on it, so it is left alone
+        assert!(
+            done_rx.try_recv().expect("the channel closed").is_none(),
+            "a stream owed nothing on the dead connection was failed by it"
         );
     }
 }

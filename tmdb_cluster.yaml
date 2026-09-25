@@ -23,7 +23,7 @@ resources:
 groups:
   bd795i:
     storage:
-      latency: /opt/shoal
+      latency: /optane/shoal-tmdb
   v1000:
     storage:
       latency: /optane/shoal

@@ -31,6 +31,12 @@ use crate::cluster::ClusterModel;
 /// How many lines of a node's journal a failed upgrade prints
 const JOURNAL_LINES: usize = 50;
 
+/// How long to try reading a node's shards and groups before restarting it
+///
+/// Short, because a node that does not answer is one being repaired, and waiting for it
+/// would only delay the repair.
+const BEFORE_RESTART_POLL: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// What a node's host said about the program it runs
 struct Installed {
     /// The user that owns the program, which is the user the node runs as
@@ -47,15 +53,25 @@ struct Installed {
 /// writes have to be admitted, no set may be under its factor and no plan may be running,
 /// since a restart on top of any of those can cost the quorum a set is served by.
 ///
+/// The one exception is a node that is down and was named to be upgraded: that is a repair,
+/// and replacing the program of a node that is already down cannot cost a quorum more than
+/// its being down does. Without it a node crash-looping on a defect could not be given the
+/// program that fixes it ([Resolved #136](../../../docs/src/appendix/resolved/upgrade-a-down-node.md)).
+///
 /// # Arguments
 ///
 /// * `model` - The cluster as a member sees it
 /// * `record` - What the deployment recorded
+/// * `repairing` - The nodes named to be upgraded, which may be down
 ///
 /// # Errors
 ///
 /// Why the cluster is not ready, naming the node or the plan.
-pub fn judge_health(model: &ClusterModel, record: &ClusterRecord) -> Result<(), String> {
+pub fn judge_health(
+    model: &ClusterModel,
+    record: &ClusterRecord,
+    repairing: &[String],
+) -> Result<(), String> {
     // every recorded node is an up member of the cluster
     for (name, node) in &record.nodes {
         let Some(member) = model.members.iter().find(|member| member.node == node.node) else {
@@ -64,7 +80,10 @@ pub fn judge_health(model: &ClusterModel, record: &ClusterRecord) -> Result<(), 
                 node.node
             ));
         };
-        if !member.health.eq_ignore_ascii_case("up") {
+        // a down node named to be upgraded is being repaired, and is let through
+        let repair = repairing.iter().any(|named| named == name)
+            && member.health.eq_ignore_ascii_case("down");
+        if !member.health.eq_ignore_ascii_case("up") && !repair {
             return Err(format!("{name} is {}, not up", member.health));
         }
         if member.phase != "member" {
@@ -132,15 +151,34 @@ pub fn upgrade_order(
         .collect())
 }
 
+/// What a restarted node has to show before it counts as back
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackWhen {
+    /// How many of its shards have to have reported their groups
+    pub shards: u64,
+    /// How many groups it has to host
+    pub groups: u64,
+}
+
 /// Whether a node has caught up, as it sees itself
+///
+/// A node whose control thread answers while its shards are still starting has no groups to
+/// lag behind, so writes admitted and a lag of zero say nothing on their own. Every shard it
+/// had has to have reported, with at least the groups it had, and none of them still starting
+/// ([Resolved #137](../../../docs/src/appendix/resolved/upgrade-waits-for-groups.md)).
 ///
 /// # Arguments
 ///
 /// * `model` - The cluster as the node itself sees it
+/// * `back` - What the node has to show
 #[must_use]
-pub fn caught_up(model: &ClusterModel) -> bool {
+pub fn caught_up(model: &ClusterModel, back: BackWhen) -> bool {
+    // every shard reported, with every group it had, and none of them is still starting
+    let started = model.shards_reporting >= back.shards.max(1)
+        && model.groups >= back.groups.max(1)
+        && model.starting == 0;
     // it admits writes, none of its groups lags its leader, and none is installing a snapshot
-    model.default_writes == "admitted" && model.lag_max == 0 && model.installing == 0
+    started && model.default_writes == "admitted" && model.lag_max == 0 && model.installing == 0
 }
 
 /// The wire version to activate: the lowest every member speaks, if it is above the activated one
@@ -206,7 +244,7 @@ impl Deployment {
         let model = crate::cluster::poll(&shoal)
             .await
             .map_err(|error| eyre!(error))?;
-        judge_health(&model, &record).map_err(|why| {
+        judge_health(&model, &record, only).map_err(|why| {
             eyre!(
                 "{} is not ready for a rolling restart: {why}",
                 self.inventory.name
@@ -632,6 +670,24 @@ impl Deployment {
             target: node.target.clone(),
         };
         let unit = quote(&self.inventory.unit_name());
+        let address: std::net::IpAddr = node.address.parse()?;
+        let addr = super::inventory::socket(address, self.inventory.ports.client);
+        // what the node has to show to count as back: the shards and groups it had before this
+        // restart if it answers now, else the cores it is configured with. a node being
+        // repaired is down and answers nothing
+        let back = match self
+            .connect::<S>(&addr, Instant::now() + BEFORE_RESTART_POLL)
+            .await
+        {
+            Ok(before) => match crate::cluster::poll(&before).await {
+                Ok(model) => BackWhen {
+                    shards: model.shards_reporting,
+                    groups: model.groups,
+                },
+                Err(_) => self.back_by_resources(name),
+            },
+            Err(_) => self.back_by_resources(name),
+        };
         // the unit stops the old process with SIGTERM and starts the program now installed
         step(
             Some(name),
@@ -656,17 +712,22 @@ impl Deployment {
         wait_for_members(&member, ids, voters).await?;
         // and the node itself answers, admits writes, and has caught its groups up
         step(Some(name), "waiting for it to catch up");
-        let address: std::net::IpAddr = node.address.parse()?;
-        let addr = super::inventory::socket(address, self.inventory.ports.client);
         let itself = self.connect::<S>(&addr, deadline).await?;
         let mut last;
         loop {
             match crate::cluster::poll(&itself).await {
-                Ok(model) if caught_up(&model) => break,
+                Ok(model) if caught_up(&model, back) => break,
                 Ok(model) => {
                     last = format!(
-                        "writes {}, lag {}, {} installing",
-                        model.default_writes, model.lag_max, model.installing
+                        "{} of {} shards reported, {} of {} groups, {} starting, writes {}, lag {}, {} installing",
+                        model.shards_reporting,
+                        back.shards,
+                        model.groups,
+                        back.groups,
+                        model.starting,
+                        model.default_writes,
+                        model.lag_max,
+                        model.installing
                     );
                 }
                 Err(error) => last = error,
@@ -678,6 +739,22 @@ impl Deployment {
         }
         step(Some(name), "back and caught up");
         Ok(())
+    }
+
+    /// What a node that did not answer before its restart has to show to count as back
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The node's inventory name
+    fn back_by_resources(&self, name: &str) -> BackWhen {
+        // a shard per configured core, or one when the node takes every core it is given
+        let shards = self
+            .inventory
+            .node(name)
+            .ok()
+            .and_then(|node| node.resources.cores)
+            .map_or(1, |cores| cores as u64);
+        BackWhen { shards, groups: 1 }
     }
 
     /// Where every node's program is on its host
@@ -785,35 +862,35 @@ mod tests {
     #[test]
     fn an_unhealthy_cluster_is_refused_by_name() {
         let record = record();
-        assert_eq!(judge_health(&healthy(), &record), Ok(()));
+        assert_eq!(judge_health(&healthy(), &record, &[]), Ok(()));
         // a down member
         let mut model = healthy();
         model.members[1].health = "down".to_string();
-        assert!(judge_health(&model, &record)
+        assert!(judge_health(&model, &record, &[])
             .unwrap_err()
             .contains("b is down"));
         // a leaving member
         let mut model = healthy();
         model.members[2].phase = "leaving".to_string();
-        assert!(judge_health(&model, &record)
+        assert!(judge_health(&model, &record, &[])
             .unwrap_err()
             .contains("c is leaving"));
         // a recorded node the cluster does not know
         let mut model = healthy();
         model.members.pop();
-        assert!(judge_health(&model, &record)
+        assert!(judge_health(&model, &record, &[])
             .unwrap_err()
             .contains("c (id-c)"));
         // writes refused
         let mut model = healthy();
         model.default_writes = "refused: have 1 need 2".to_string();
-        assert!(judge_health(&model, &record)
+        assert!(judge_health(&model, &record, &[])
             .unwrap_err()
             .contains("refused"));
         // a set under its factor
         let mut model = healthy();
         model.under_replicated_sets = 2;
-        assert!(judge_health(&model, &record)
+        assert!(judge_health(&model, &record, &[])
             .unwrap_err()
             .contains("2 replica sets"));
         // a plan still running
@@ -826,7 +903,38 @@ mod tests {
             moved: 1,
             blocked: None,
         });
-        assert!(judge_health(&model, &record).unwrap_err().contains("op-1"));
+        assert!(judge_health(&model, &record, &[]).unwrap_err().contains("op-1"));
+    }
+
+    /// A down node named to be upgraded is a repair, and nothing else is let through (item 136)
+    #[test]
+    fn a_down_node_named_for_upgrade_is_a_repair() {
+        let record = record();
+        let mut model = healthy();
+        model.members[1].health = "down".to_string();
+        // named, it is repaired; named with another, still
+        assert_eq!(judge_health(&model, &record, &["b".to_string()]), Ok(()));
+        assert_eq!(
+            judge_health(&model, &record, &["b".to_string(), "c".to_string()]),
+            Ok(())
+        );
+        // not named, it still stops an upgrade of the others
+        assert!(judge_health(&model, &record, &["c".to_string()])
+            .unwrap_err()
+            .contains("b is down"));
+        // a named node that is leaving rather than down is not a repair
+        let mut model = healthy();
+        model.members[1].phase = "leaving".to_string();
+        assert!(judge_health(&model, &record, &["b".to_string()])
+            .unwrap_err()
+            .contains("b is leaving"));
+        // and a repair does not excuse refused writes
+        let mut model = healthy();
+        model.members[1].health = "down".to_string();
+        model.default_writes = "refused: have 1 need 2".to_string();
+        assert!(judge_health(&model, &record, &["b".to_string()])
+            .unwrap_err()
+            .contains("refused"));
     }
 
     /// The leader goes last, the rest keep the record's order, and a typo is refused
@@ -857,16 +965,52 @@ mod tests {
     /// A node has caught up only when it admits writes, lags nothing and installs nothing
     #[test]
     fn caught_up_needs_no_lag_and_no_install() {
+        let back = BackWhen {
+            shards: 6,
+            groups: 36,
+        };
         let mut model = healthy();
-        assert!(caught_up(&model));
+        model.shards_reporting = 6;
+        model.groups = 36;
+        assert!(caught_up(&model, back));
         model.lag_max = 3;
-        assert!(!caught_up(&model));
+        assert!(!caught_up(&model, back));
         model.lag_max = 0;
         model.installing = 1;
-        assert!(!caught_up(&model));
+        assert!(!caught_up(&model, back));
         model.installing = 0;
         model.default_writes = "unknown".to_string();
-        assert!(!caught_up(&model));
+        assert!(!caught_up(&model, back));
+    }
+
+    /// A node whose shards are still starting has not caught up, whatever its lag says (item 137)
+    ///
+    /// On the lab a rolling upgrade judged a node back five seconds before its shards had
+    /// started: it admitted writes and lagged nothing because it hosted nothing yet.
+    #[test]
+    fn a_node_still_starting_its_shards_has_not_caught_up() {
+        let back = BackWhen {
+            shards: 6,
+            groups: 36,
+        };
+        // the control thread answers and no shard has reported: zero lag, zero groups
+        let mut model = healthy();
+        assert!(!caught_up(&model, back));
+        // some shards reported
+        model.shards_reporting = 4;
+        model.groups = 24;
+        assert!(!caught_up(&model, back));
+        // every shard reported, and some groups are still starting
+        model.shards_reporting = 6;
+        model.groups = 36;
+        model.starting = 5;
+        assert!(!caught_up(&model, back));
+        // every group is up
+        model.starting = 0;
+        assert!(caught_up(&model, back));
+        // a repair, where nothing was known before: one shard and one group at least
+        let unknown = BackWhen { shards: 1, groups: 1 };
+        assert!(!caught_up(&healthy(), unknown));
     }
 
     /// Only a version every member speaks and that is above the activated one is activated

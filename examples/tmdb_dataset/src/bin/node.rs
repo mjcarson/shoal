@@ -10,11 +10,13 @@
 //! deployment rendered for that node - its cores, memory, storage, ports, TLS and admin
 //! credential ([F54](../../../../docs/src/features/tmdb-dataset-deployment.md)).
 
-use mimalloc::MiMalloc;
-
 /// The allocator every Shoal server program in this workspace runs with
+///
+/// Left out by the `system-allocator` feature, which a sanitizer build needs: AddressSanitizer
+/// watches the system allocator, and mimalloc's own heap is invisible to it.
+#[cfg(not(feature = "system-allocator"))]
 #[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Serve or claim a node of the TMDB dataset schema
 fn main() -> Result<(), shoal::server::ServerError> {

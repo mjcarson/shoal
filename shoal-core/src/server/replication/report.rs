@@ -430,6 +430,13 @@ pub struct NodeReplication {
     /// How many groups are installing a snapshot right now
     #[serde(default)]
     pub installing: usize,
+    /// How many groups have no handle up yet, because they are still starting
+    ///
+    /// A node whose groups are starting has nothing to lag behind, so `lag_max` alone reads zero
+    /// on a node that serves nothing yet; this is what says it is not back
+    /// ([Resolved #137](../../../../docs/src/appendix/resolved/upgrade-waits-for-groups.md)).
+    #[serde(default)]
+    pub starting: usize,
     /// How many of the node's copies are quarantined ([F44](../../../../docs/src/features/repair.md))
     #[serde(default)]
     pub quarantined: usize,
@@ -480,6 +487,10 @@ impl NodeReplication {
             installing: shards
                 .iter()
                 .map(|shard| shard.groups.iter().filter(|group| group.installing).count())
+                .sum(),
+            starting: shards
+                .iter()
+                .map(|shard| shard.groups.iter().filter(|group| !group.up).count())
                 .sum(),
             quarantined: shards
                 .iter()

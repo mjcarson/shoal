@@ -16,7 +16,7 @@
 //! gather would have accepted, or the test would prove nothing about lateness.
 
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use openraft::error::{LinearizableReadError, RaftError};
@@ -199,7 +199,7 @@ where
         Ok(ReadPlan {
             level,
             deadline,
-            tokens: Rc::from(tokens),
+            tokens: Arc::from(tokens),
             slot: 0,
             attempt,
             ready: false,
