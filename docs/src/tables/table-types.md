@@ -33,7 +33,9 @@ pub struct PersistentSortedTable<R: ShoalSortedTable, S: StorageSupport, N: Tabl
     pending_data: PendingGets,
     flushed: Vec<(Uuid, Uuid, Span, Response<R>)>,
     loader_tx: AsyncSender<LoaderMsg<N>>,
-    blocked: HashMap<u64, Vec<(QueryMetadata, SortedQuery<R>)>>,
+    blocked: ParkedQueries<SortedQuery<R>>,
+    max_pending_writes: usize,
+    max_parked_queries: usize,
     memory_usage: Arc<RefCell<usize>>,
     lru: Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<GxHasher>>>>,
 }

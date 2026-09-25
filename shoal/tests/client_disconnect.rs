@@ -110,7 +110,7 @@ async fn a_client_that_leaves_before_its_answers_does_not_end_the_shard() -> Res
                 data: "written and never read".to_owned(),
             });
         }
-        let payload = RkyvSupport::serialize(&bundle);
+        let payload = RkyvSupport::serialize(&bundle).expect("a bundle this test built archives");
         let preamble = protocol::request_preamble(payload.len(), protocol::DEFAULT_MAX_FRAME_BYTES)
             .expect("a request preamble");
         sock.write_all(&preamble).await?;

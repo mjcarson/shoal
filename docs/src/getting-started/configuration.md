@@ -170,6 +170,31 @@ retry asks again; nothing ran. The count is of every message on the queue, not o
 so a shard busy with releases and loads sheds sooner than one busy with clients alone. At the
 frame bound the default is a few gibibytes of queued queries at most.
 
+#### networking.max_pending_writes
+
+**How many writes one table on one shard may hold waiting to be made durable**, sixty-four
+thousand by default ([Resolved #15, the remainder](../appendix/resolved/backlog-bounds.md)). An
+insert, delete or update arriving at a table whose queue of unacknowledged writes already holds
+this many is answered `Shedding` before it is committed, so a device that cannot keep up turns
+writes away rather than growing the queue by arrival rate times fsync latency. It also bounds
+the burst of answers a log rotation releases. A cluster node's writes do not use this queue and
+are bounded by `cluster.replication.pending_bytes` instead.
+
+#### networking.max_parked_queries
+
+**How many queries one table on one shard may hold parked on partition reads**, sixty-four
+thousand by default. A query that needs a partition from disk while this many are already
+waiting is answered `Shedding` before it parks or asks for a read. A query already parked on
+one of its partitions is never shed at the next, and a query answered from memory never parks,
+so a slow disk sheds only reads that would have waited on it.
+
+#### networking.max_queued_replies
+
+**How many answers one client connection may owe before it stops being read**, 8,192 by
+default. Nothing is refused: the connection's read relay waits until its write relay has
+drained below this, so a client that stops reading its answers is pushed back on by TCP
+rather than having every answer held for it. At the frame bound this is also a byte bound.
+
 #### networking.tls
 
 **Omitting this block serves plaintext**, which is what every deployment before

@@ -178,6 +178,45 @@ fn default_max_queued_queries() -> usize {
 /// serving shard holds for long.
 pub const DEFAULT_MAX_QUEUED_QUERIES: usize = 65_536;
 
+/// The default bound on writes one table on one shard holds waiting to be made durable
+fn default_max_pending_writes() -> usize {
+    DEFAULT_MAX_PENDING_WRITES
+}
+
+/// The default bound on queries one table on one shard holds parked on partition reads
+fn default_max_parked_queries() -> usize {
+    DEFAULT_MAX_PARKED_QUERIES
+}
+
+/// The default bound on answers one client connection holds unwritten before it stops being read
+fn default_max_queued_replies() -> usize {
+    DEFAULT_MAX_QUEUED_REPLIES
+}
+
+/// The bound on writes one table on one shard holds unacknowledged while they wait on the device
+///
+/// A write leaves the mesh queue the moment it is handled and waits for its fdatasync in the
+/// table's pending queue, which the mesh bound never sees; this is where one the device cannot
+/// keep up with is shed instead, before it is committed
+/// ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md)).
+pub const DEFAULT_MAX_PENDING_WRITES: usize = 65_536;
+
+/// The bound on queries one table on one shard holds parked on partition reads
+///
+/// A query that parks on a read has left the mesh queue too, so a slow read device grew the
+/// parked set with nothing counting it; a query that would park past this is shed before it does
+/// ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md)).
+pub const DEFAULT_MAX_PARKED_QUERIES: usize = 65_536;
+
+/// The bound on answers one client connection holds unwritten before its read relay stops reading
+///
+/// A client that sends and never reads had every answer held for it until the process was
+/// killed; past this many its connection is simply not read until the answers drain, which is
+/// what the peer lanes' in-flight bound already did
+/// ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md)). A count times the
+/// frame bound is the byte bound.
+pub const DEFAULT_MAX_QUEUED_REPLIES: usize = 8_192;
+
 /// The networking settings for Shoal
 ///
 /// # Invariants
@@ -231,6 +270,29 @@ pub struct Networking {
     /// on it ([Resolved #15](../../../docs/src/appendix/resolved/shard-mesh-admission.md)).
     #[serde(default = "default_max_queued_queries")]
     pub max_queued_queries: usize,
+    /// How many writes one table on one shard may hold waiting to be made durable
+    ///
+    /// A write arriving at a table whose pending queue already holds this many is answered
+    /// `Shedding` before it is committed, so a device that cannot keep up turns writes away
+    /// rather than growing the queue by arrival rate times fsync latency
+    /// ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md)). A cluster
+    /// node's writes are bounded by `cluster.replication.pending_bytes` instead.
+    #[serde(default = "default_max_pending_writes")]
+    pub max_pending_writes: usize,
+    /// How many queries one table on one shard may hold parked on partition reads
+    ///
+    /// A query that would park while this many already are is answered `Shedding` before it
+    /// parks; a query already parked in part is never shed, and one answered from memory
+    /// never parks ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md)).
+    #[serde(default = "default_max_parked_queries")]
+    pub max_parked_queries: usize,
+    /// How many answers one client connection may hold unwritten before it stops being read
+    ///
+    /// Nothing is refused: the connection's read relay waits for its write relay to drain, so
+    /// a client that stops reading its answers is pushed back on by TCP rather than held for
+    /// ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md)).
+    #[serde(default = "default_max_queued_replies")]
+    pub max_queued_replies: usize,
 }
 
 impl Default for Networking {
@@ -243,6 +305,9 @@ impl Default for Networking {
             max_frame_bytes: default_max_frame_bytes(),
             query_deadline: default_query_deadline(),
             max_queued_queries: default_max_queued_queries(),
+            max_pending_writes: default_max_pending_writes(),
+            max_parked_queries: default_max_parked_queries(),
+            max_queued_replies: default_max_queued_replies(),
         }
     }
 }
@@ -277,6 +342,36 @@ impl Networking {
     /// * `bound` - The bound
     pub fn max_queued_queries(mut self, bound: usize) -> Self {
         self.max_queued_queries = bound;
+        self
+    }
+
+    /// Set how many writes one table on one shard may hold waiting to be made durable
+    ///
+    /// # Arguments
+    ///
+    /// * `bound` - The bound
+    pub fn max_pending_writes(mut self, bound: usize) -> Self {
+        self.max_pending_writes = bound;
+        self
+    }
+
+    /// Set how many queries one table on one shard may hold parked on partition reads
+    ///
+    /// # Arguments
+    ///
+    /// * `bound` - The bound
+    pub fn max_parked_queries(mut self, bound: usize) -> Self {
+        self.max_parked_queries = bound;
+        self
+    }
+
+    /// Set how many answers one client connection may hold unwritten before it stops being read
+    ///
+    /// # Arguments
+    ///
+    /// * `bound` - The bound
+    pub fn max_queued_replies(mut self, bound: usize) -> Self {
+        self.max_queued_replies = bound;
         self
     }
 
@@ -1256,9 +1351,18 @@ mod tests {
             conf.networking.max_queued_queries,
             super::DEFAULT_MAX_QUEUED_QUERIES
         );
-        let (_dir, conf) = load("networking:\n  max_queued_queries: 8\n");
+        // and the three bounds behind the mesh default the same way
+        assert_eq!(conf.networking.max_pending_writes, 65_536);
+        assert_eq!(conf.networking.max_parked_queries, 65_536);
+        assert_eq!(conf.networking.max_queued_replies, 8_192);
+        let (_dir, conf) = load(
+            "networking:\n  max_queued_queries: 8\n  max_pending_writes: 4\n  max_parked_queries: 2\n  max_queued_replies: 16\n",
+        );
         let conf = conf.expect("a config naming an admission bound failed to load");
         assert_eq!(conf.networking.max_queued_queries, 8);
+        assert_eq!(conf.networking.max_pending_writes, 4);
+        assert_eq!(conf.networking.max_parked_queries, 2);
+        assert_eq!(conf.networking.max_queued_replies, 16);
     }
 
     #[test]

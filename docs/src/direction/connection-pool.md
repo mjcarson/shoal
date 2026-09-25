@@ -92,8 +92,9 @@ stream type implements `Drop`
 ([item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client)).
 
 **Nothing is bounded and nothing is measured.** Response channels are `kanal::unbounded_async`
-([item 15](../appendix/known-issues.md#15-no-backpressure-anywhere-the-remainder); the mesh
-they answer through has an admission bound since [Resolved #15](../appendix/resolved/shard-mesh-admission.md)),
+(item 15; the mesh they answer through has an admission bound since
+[Resolved #15](../appendix/resolved/shard-mesh-admission.md), and a connection owing
+`networking.max_queued_replies` answers is not read since [its remainder](../appendix/resolved/backlog-bounds.md)),
 ~~and `client.rs` has no
 `tracing` spans and no `hotpath` scopes at all~~ — it has both since
 [F16](../features/client-builder.md), which is what makes
@@ -244,7 +245,7 @@ costed in [TODOs](../appendix/todos.md).
 
 ### Bounded channels
 
-[Item 15](../appendix/known-issues.md#15-no-backpressure-anywhere-the-remainder). Bounding requires deciding what
+[Item 15](../appendix/resolved/backlog-bounds.md). Bounding requires deciding what
 happens when the bound is hit, and every answer — shed, block, reject — has to be expressible to
 the client, ~~which is [D2](framing.md)'s error channel. Sequenced after it for that reason.~~
 **That prerequisite is met**: [F11](../features/error-channel.md) landed the error channel and
@@ -257,8 +258,11 @@ paragraph below said it would take.
 channels — the shard mesh, the per-client response channel, compaction jobs, and two loaders — and
 exactly one of them belongs to the pool. Bounding the client's half fixes none of the failure the
 item describes, which is a *shard* falling behind and growing its queue until the process is
-killed. This is a server backpressure feature wearing a pool feature's clothes. Item 15 stays open
-and `ErrorCode::Shedding` stays reserved.
+killed. This is a server backpressure feature wearing a pool feature's clothes. ~~Item 15 stays open
+and `ErrorCode::Shedding` stays reserved.~~ Item 15 closed on the server: the mesh sheds at
+admission, a table sheds a write or a parked read past its bound, and a client connection that
+owes `networking.max_queued_replies` answers is not read until they drain
+([the remainder](../appendix/resolved/backlog-bounds.md)).
 
 ### Instrumentation
 
@@ -350,7 +354,7 @@ repository, and it is the single most valuable test infrastructure this client c
   channel this page spends
 - [D3](authentication.md), [D4](encryption.md) — what goes into the builder
 - [D7. Shard-aware routing](shard-aware-routing.md) — what reshapes this pool later
-- [item 15](../appendix/known-issues.md#15-no-backpressure-anywhere-the-remainder),
+- ~~[item 15](../appendix/resolved/backlog-bounds.md),~~ (resolved)
   [item 23](../appendix/known-issues.md#23-client-stream-and-pool-rough-edges),
   [item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client)
   — the open items this page closes

@@ -25,9 +25,12 @@ use shoal::gxhash::GxHasher;
 use shoal::kanal::{self, AsyncReceiver, AsyncSender};
 use shoal::lru::LruCache;
 use shoal::server::conf::Conf;
-use shoal::server::messages::{LoadedPartition, QueryMetadata, ServerMsg};
-use shoal::shared::queries::{SortSelect, SortedGet, SortedQuery, UnsortedGet, UnsortedQuery};
-use shoal::shared::responses::Response;
+use shoal::server::messages::{Answer, LoadedPartition, QueryMetadata, ServerMsg};
+use shoal::server::shard::ShardContact;
+use shoal::shared::queries::{
+    SortSelect, SortedExists, SortedGet, SortedQuery, UnsortedGet, UnsortedQuery,
+};
+use shoal::shared::responses::{Response, ResponseAction};
 use shoal::shared::row_ref::RowRef;
 use shoal::shared::traits::{PartitionKeySupport, ShoalTableSupport};
 use shoal::storage::{FileSystem, FullArchiveMap, LoaderMsg, Loaders};
@@ -98,6 +101,12 @@ const FIRST: &str = "first";
 /// for the first one's by size alone.
 const SECOND: &str = "second";
 
+/// A partition the seed never wrote, which a test writes for itself
+const THIRD: &str = "third";
+
+/// A partition nothing ever writes
+const NOWHERE: &str = "nowhere";
+
 /// The shard a single shard server names its one executor
 const SHARD_NAME: &str = "Shard-0";
 
@@ -153,6 +162,8 @@ struct Harness {
     ),
     /// The shard's memory counter, which the tables charge and credit
     memory: Arc<RefCell<usize>>,
+    /// The lru cache the tables put a partition in once it may be evicted
+    lru: Arc<RefCell<Lru>>,
     /// The partition key of the first partition in each table
     first: PartitionKeys,
     /// The partition key of the second partition in each table
@@ -339,6 +350,7 @@ impl Harness {
             loader,
             shard,
             memory,
+            lru,
             first,
             second,
         })
@@ -402,6 +414,49 @@ impl Harness {
     fn memory(&self) -> usize {
         *self.memory.borrow()
     }
+
+    /// Wait for the next compaction to say what it archived, and hand that to both tables
+    ///
+    /// Returns the generation the compaction archived and the partitions it named.
+    async fn next_marking(&mut self) -> Result<(u64, Vec<u64>), String> {
+        loop {
+            // skip whatever else the shard is told while it waits
+            if let ServerMsg::MarkEvictable {
+                generation,
+                partitions,
+                ..
+            } = recv_within(&self.shard.1).await?
+            {
+                // hand the marking to both tables, since only the one it names holds its keys
+                self.db
+                    .sorted
+                    .mark_evictable(generation, partitions.clone());
+                self.db
+                    .unsorted
+                    .mark_evictable(generation, partitions.clone());
+                return Ok((generation, partitions));
+            }
+        }
+    }
+
+    /// Evict every partition the lru cache holds, the way a shard under pressure does
+    ///
+    /// `Shard::evict_data` pops the cache until it has freed enough; with the memory bound at
+    /// nothing that is all of it, so this is the same pass with nothing left out.
+    fn evict_evictable(&mut self) {
+        // sort what the cache holds into the table each partition belongs to
+        let mut sorted = Vec::new();
+        let mut unsorted = Vec::new();
+        while let Some(((table, key), _)) = self.lru.borrow_mut().pop_lru() {
+            match table {
+                ResidentDbTableNames::SortedRow => sorted.push(key),
+                ResidentDbTableNames::UnsortedRow => unsorted.push(key),
+            }
+        }
+        // and drop them from memory
+        self.db.sorted.evict(sorted);
+        self.db.unsorted.evict(unsorted);
+    }
 }
 
 /// Wait on the shard's channel for at most ten seconds
@@ -434,11 +489,26 @@ type Body = Box<
 ///
 /// * `body` - The test, handed the harness
 fn with_harness(body: Body) {
+    // the seed's own config serves the tables too
+    with_harness_under(|_| (), body);
+}
+
+/// Run a test body against a seeded harness whose tables are built under a changed config
+///
+/// The seed is written under the unchanged one, so what is on disk is the same for every test.
+///
+/// # Arguments
+///
+/// * `change` - What to change about the config the tables are built with
+/// * `body` - The test, handed the harness
+fn with_harness_under(change: fn(&mut Conf), body: Body) {
     // a directory on a real filesystem, and a single shard so everything lands on it
     let temp_dir: TempDir = utils::test_dir();
-    let conf = utils::build_single_shard_config(&temp_dir);
+    let mut conf = utils::build_single_shard_config(&temp_dir);
     // write the rows through a real server first
     seed(conf.clone());
+    // then change what this test asked for, for the tables alone
+    change(&mut conf);
     // then build the tables again on an executor this test owns
     let name = format!("resident_reads-{}", OPENED.fetch_add(1, Ordering::SeqCst));
     let outcome = LocalExecutorBuilder::default()
@@ -493,6 +563,180 @@ fn never_sealed_unsorted(
 /// The metadata of a get arriving from a client
 fn get_meta() -> QueryMetadata {
     QueryMetadata::untimed(Uuid::new_v4(), Uuid::new_v4(), 0, true, None, Span::none())
+}
+
+/// The metadata of a share of a split get, which is always answered with owned rows
+///
+/// A get that is answered in place is sealed, and these tests read the rows back instead.
+fn share_meta() -> QueryMetadata {
+    QueryMetadata::untimed(
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        0,
+        true,
+        Some(ShardContact::Local(0)),
+        Span::none(),
+    )
+}
+
+/// The metadata of a share of one bundle's query, under one attempt at that bundle
+///
+/// Two of these that differ only in `attempt` are what a client reusing a query id looks like
+/// to a table: the same client, id and index, sent in two bundles.
+///
+/// # Arguments
+///
+/// * `client` - The client the bundle came from
+/// * `id` - The bundle's query id
+/// * `attempt` - Which arrival of a bundle with this id this is
+fn attempt_meta(client: Uuid, id: Uuid, attempt: u64) -> QueryMetadata {
+    // a share, so the get is answered with owned rows rather than sealed
+    let mut meta = QueryMetadata::untimed(
+        client,
+        id,
+        0,
+        true,
+        Some(ShardContact::Local(0)),
+        Span::none(),
+    );
+    // the coordinator mints a new attempt for every bundle it takes off a socket
+    meta.read.attempt = attempt;
+    meta
+}
+
+/// Describe what a table answered with, for a failure message
+///
+/// # Arguments
+///
+/// * `answer` - What the table answered with
+fn describe<P: std::fmt::Debug>(answer: &Answer<Response<P>>) -> String {
+    match answer {
+        Answer::Open(response) => format!("{:?}", response.data),
+        Answer::Sealed(_) => "sealed".to_owned(),
+    }
+}
+
+/// Build the tables with an intent log that is due to rotate as soon as it holds anything
+///
+/// # Arguments
+///
+/// * `conf` - The config to change
+fn rotate_every_write(conf: &mut Conf) {
+    // any byte accepted takes the log past its size, so every sweep rotates it
+    conf.storage
+        .default
+        .filesystem
+        .latency_sensitive
+        .intent_log_size = 0;
+}
+
+/// Read a sorted partition's one row the way a client's get would, from disk if it has to
+///
+/// Returns the row's data, or `None` if the get found nothing.
+///
+/// # Arguments
+///
+/// * `harness` - The harness to read through, with its loader started
+/// * `key` - The partition to read
+async fn sorted_row_data(harness: &mut Harness, key: u64) -> Result<Option<String>, String> {
+    // a get of the whole partition
+    let get = SortedQuery::Get(SortedGet::<SortedRow> {
+        partition_keys: vec![key],
+        sort_select: SortSelect::All,
+        filters: None,
+        limit: None,
+        projection: <SortedRow as ShoalTableSupport>::Projection::default(),
+    });
+    let answered = match harness
+        .db
+        .sorted
+        .handle(share_meta(), get, never_sealed_sorted)
+        .await
+    {
+        Some(answered) => answered,
+        // the partition is on disk, so land its read and replay the get it released
+        None => {
+            let read = harness.next_read().await?;
+            let PartitionLoad::Loaded(released, _) =
+                landed(harness.db.sorted.load_partition(read).await)?
+            else {
+                return Err("a read released nothing".to_owned());
+            };
+            let (meta, query) = released
+                .into_iter()
+                .next()
+                .ok_or("a read released no get")?;
+            harness
+                .db
+                .sorted
+                .handle(meta, query, never_sealed_sorted)
+                .await
+                .ok_or("a replayed get parked again")?
+        }
+    };
+    // the one row the get found, if it found one
+    match answered.3 {
+        Answer::Open(Response {
+            data: ResponseAction::Get(found),
+            ..
+        }) => Ok(found.and_then(|found| found.rows.first().map(|row| row.data.clone()))),
+        Answer::Open(response) => Err(format!("a sorted get answered {:?}", response.data)),
+        Answer::Sealed(_) => Err("a share was answered sealed".to_owned()),
+    }
+}
+
+/// Read an unsorted partition's row the way a client's get would, from disk if it has to
+///
+/// Returns the row's data, or `None` if the get found nothing.
+///
+/// # Arguments
+///
+/// * `harness` - The harness to read through, with its loader started
+/// * `key` - The partition to read
+async fn unsorted_row_data(harness: &mut Harness, key: u64) -> Result<Option<String>, String> {
+    // a get of the partition's one row
+    let get = UnsortedQuery::Get(UnsortedGet::<UnsortedRow> {
+        partition_keys: vec![key],
+        filters: None,
+        limit: None,
+        projection: <UnsortedRow as ShoalTableSupport>::Projection::default(),
+    });
+    let answered = match harness
+        .db
+        .unsorted
+        .handle(share_meta(), get, never_sealed_unsorted)
+        .await
+    {
+        Some(answered) => answered,
+        // the partition is on disk, so land its read and replay the get it released
+        None => {
+            let read = harness.next_read().await?;
+            let PartitionLoad::Loaded(released, _) =
+                landed(harness.db.unsorted.load_partition(read).await)?
+            else {
+                return Err("a read released nothing".to_owned());
+            };
+            let (meta, query) = released
+                .into_iter()
+                .next()
+                .ok_or("a read released no get")?;
+            harness
+                .db
+                .unsorted
+                .handle(meta, query, never_sealed_unsorted)
+                .await
+                .ok_or("a replayed get parked again")?
+        }
+    };
+    // the row the get found, if it found one
+    match answered.3 {
+        Answer::Open(Response {
+            data: ResponseAction::Get(found),
+            ..
+        }) => Ok(found.and_then(|found| found.rows.first().map(|row| row.data.clone()))),
+        Answer::Open(response) => Err(format!("an unsorted get answered {:?}", response.data)),
+        Answer::Sealed(_) => Err("a share was answered sealed".to_owned()),
+    }
 }
 
 /// Land a read on a table, saying what went wrong if it failed
@@ -775,6 +1019,482 @@ fn an_unsorted_get_waits_on_an_applys_read_rather_than_asking_again() {
                 released.len(),
                 1,
                 "the get was not released by the apply's read"
+            );
+            Ok(())
+        })
+    }));
+}
+
+/// An unsorted update is not evicted before the log holding it is archived
+///
+/// Item 124: the update applied to a loaded partition in place and left its `generation` where
+/// the insert had set it. Once the log holding the insert was archived, `mark_evictable` found
+/// the partition evictable even though the update was still only in the current log. An
+/// eviction then dropped it, and the read loaded the archive, which did not have the update.
+#[test]
+fn an_unsorted_update_is_not_evicted_before_its_log_is_archived() {
+    with_harness_under(
+        rotate_every_write,
+        Box::new(|harness| {
+            Box::pin(async move {
+                harness.start_loader().await?;
+                // insert a row in a partition of its own
+                let row = UnsortedRow {
+                    partition_key: THIRD.to_owned(),
+                    data: "before".to_owned(),
+                };
+                let key = row.get_partition_key();
+                let answered = harness
+                    .db
+                    .unsorted
+                    .handle(
+                        get_meta(),
+                        UnsortedQuery::Insert { key, row },
+                        never_sealed_unsorted,
+                    )
+                    .await;
+                check!(
+                    answered.is_none(),
+                    "an insert answered before it was durable"
+                );
+                // rotate the log holding the insert, which starts archiving it
+                let released = harness
+                    .db
+                    .unsorted
+                    .get_flushed()
+                    .await
+                    .map_err(|error| format!("the sweep failed: {error:?}"))?
+                    .drain(..)
+                    .count();
+                check_eq!(released, 1, "the rotation did not release the insert");
+                // update the row, which lands in the log after the rotation
+                let update = ResidentDbQueryKinds::from(UnsortedRowUpdate {
+                    partition_key: THIRD.to_owned(),
+                    data: Some("after".to_owned()),
+                });
+                let ResidentDbQueryKinds::UnsortedRow(update) = update else {
+                    return Err("an unsorted update built another table's query".to_owned());
+                };
+                let answered = harness
+                    .db
+                    .unsorted
+                    .handle(get_meta(), update, never_sealed_unsorted)
+                    .await;
+                check!(
+                    answered.is_none(),
+                    "an update answered before it was durable"
+                );
+                // wait for the insert's log to be archived and marked
+                while !harness.next_marking().await?.1.contains(&key) {}
+                // evict whatever that marking made evictable
+                harness.evict_evictable();
+                // the update is still only in the current log, so the row has to carry it
+                check_eq!(
+                    unsorted_row_data(harness, key).await?,
+                    Some("after".to_owned()),
+                    "a read after the eviction lost the update"
+                );
+                Ok(())
+            })
+        }),
+    );
+}
+
+/// A sorted update is not evicted before the log holding it is archived
+///
+/// The sorted twin of item 124's test. The sorted update always stamped the current generation,
+/// so this held before the fix and is here so the two tables cannot drift apart again.
+#[test]
+fn a_sorted_update_is_not_evicted_before_its_log_is_archived() {
+    with_harness_under(
+        rotate_every_write,
+        Box::new(|harness| {
+            Box::pin(async move {
+                harness.start_loader().await?;
+                // insert a row in a partition of its own
+                let row = SortedRow {
+                    partition_key: THIRD.to_owned(),
+                    sort_key: "a".to_owned(),
+                    data: "before".to_owned(),
+                };
+                let key = row.get_partition_key();
+                let answered = harness
+                    .db
+                    .sorted
+                    .handle(
+                        get_meta(),
+                        SortedQuery::Insert { key, row },
+                        never_sealed_sorted,
+                    )
+                    .await;
+                check!(
+                    answered.is_none(),
+                    "an insert answered before it was durable"
+                );
+                // rotate the log holding the insert, which starts archiving it
+                let released = harness
+                    .db
+                    .sorted
+                    .get_flushed()
+                    .await
+                    .map_err(|error| format!("the sweep failed: {error:?}"))?
+                    .drain(..)
+                    .count();
+                check_eq!(released, 1, "the rotation did not release the insert");
+                // update the row, which lands in the log after the rotation
+                let update = ResidentDbQueryKinds::from(SortedRowUpdate {
+                    partition_key: THIRD.to_owned(),
+                    sort_key: "a".to_owned(),
+                    data: Some("after".to_owned()),
+                });
+                let ResidentDbQueryKinds::SortedRow(update) = update else {
+                    return Err("a sorted update built another table's query".to_owned());
+                };
+                let answered = harness
+                    .db
+                    .sorted
+                    .handle(get_meta(), update, never_sealed_sorted)
+                    .await;
+                check!(
+                    answered.is_none(),
+                    "an update answered before it was durable"
+                );
+                // wait for the insert's log to be archived and marked
+                while !harness.next_marking().await?.1.contains(&key) {}
+                // evict whatever that marking made evictable
+                harness.evict_evictable();
+                // the update is still only in the current log, so the row has to carry it
+                check_eq!(
+                    sorted_row_data(harness, key).await?,
+                    Some("after".to_owned()),
+                    "a read after the eviction lost the update"
+                );
+                Ok(())
+            })
+        }),
+    );
+}
+
+/// Two unsorted gets sharing a client, id and index from two bundles are answered apart
+///
+/// Item 123: a parked get was keyed by its id and index alone, so a second bundle reusing
+/// them picked up the first get's progress. The second get's own partition was not one the
+/// first had named, so it was skipped, and the second get parked on the first one's read and
+/// was never answered.
+#[test]
+fn unsorted_gets_reusing_an_id_are_answered_apart() {
+    with_harness(Box::new(|harness| {
+        Box::pin(async move {
+            let (client, id) = (Uuid::new_v4(), Uuid::new_v4());
+            // the first get parks on a read of a partition on disk, with no loader to serve it
+            let get = UnsortedQuery::Get(UnsortedGet::<UnsortedRow> {
+                partition_keys: vec![harness.first.unsorted],
+                filters: None,
+                limit: None,
+                projection: <UnsortedRow as ShoalTableSupport>::Projection::default(),
+            });
+            let answered = harness
+                .db
+                .unsorted
+                .handle(attempt_meta(client, id, 1), get, never_sealed_unsorted)
+                .await;
+            check!(
+                answered.is_none(),
+                "a get of a partition on disk did not park"
+            );
+            // a row in a partition of its own, resident
+            let row = UnsortedRow {
+                partition_key: THIRD.to_owned(),
+                data: "third".to_owned(),
+            };
+            let third = row.get_partition_key();
+            let answered = harness
+                .db
+                .unsorted
+                .handle(
+                    get_meta(),
+                    UnsortedQuery::Insert { key: third, row },
+                    never_sealed_unsorted,
+                )
+                .await;
+            check!(
+                answered.is_none(),
+                "an insert answered before it was durable"
+            );
+            // a second bundle reusing the id asks for that row, and is answered with it at once
+            let get = UnsortedQuery::Get(UnsortedGet::<UnsortedRow> {
+                partition_keys: vec![third],
+                filters: None,
+                limit: None,
+                projection: <UnsortedRow as ShoalTableSupport>::Projection::default(),
+            });
+            let Some(answered) = harness
+                .db
+                .unsorted
+                .handle(attempt_meta(client, id, 2), get, never_sealed_unsorted)
+                .await
+            else {
+                return Err("a get reusing a parked get's id was never answered".to_owned());
+            };
+            let data = match answered.3 {
+                Answer::Open(Response {
+                    data: ResponseAction::Get(found),
+                    ..
+                }) => found.map(|found| {
+                    found
+                        .rows
+                        .iter()
+                        .map(|row| row.data.clone())
+                        .collect::<Vec<_>>()
+                }),
+                other => return Err(format!("the second get answered {}", describe(&other))),
+            };
+            check_eq!(
+                data,
+                Some(vec!["third".to_owned()]),
+                "the second get was not answered with its own row"
+            );
+            // the first get's read lands, and it answers with its own row alone
+            harness.start_loader().await?;
+            let read = harness.next_read().await?;
+            let PartitionLoad::Loaded(released, _) =
+                landed(harness.db.unsorted.load_partition(read).await)?
+            else {
+                return Err("the first get's read released nothing".to_owned());
+            };
+            check_eq!(
+                released.len(),
+                1,
+                "the read released more than the first get"
+            );
+            let (meta, query) = released.into_iter().next().ok_or("nothing released")?;
+            let answered = harness
+                .db
+                .unsorted
+                .handle(meta, query, never_sealed_unsorted)
+                .await
+                .ok_or("the first get parked again")?;
+            let data = match answered.3 {
+                Answer::Open(Response {
+                    data: ResponseAction::Get(found),
+                    ..
+                }) => found.map(|found| {
+                    found
+                        .rows
+                        .iter()
+                        .map(|row| row.data.clone())
+                        .collect::<Vec<_>>()
+                }),
+                other => return Err(format!("the first get answered {}", describe(&other))),
+            };
+            check_eq!(
+                data,
+                Some(vec!["short".to_owned()]),
+                "the first get was not answered with its own row alone"
+            );
+            Ok(())
+        })
+    }));
+}
+
+/// Two sorted gets sharing a client, id and index from two bundles are answered apart
+///
+/// The sorted half of item 123.
+#[test]
+fn sorted_gets_reusing_an_id_are_answered_apart() {
+    with_harness(Box::new(|harness| {
+        Box::pin(async move {
+            let (client, id) = (Uuid::new_v4(), Uuid::new_v4());
+            // the first get parks on a read of a partition on disk, with no loader to serve it
+            let get = SortedQuery::Get(SortedGet::<SortedRow> {
+                partition_keys: vec![harness.first.sorted],
+                sort_select: SortSelect::All,
+                filters: None,
+                limit: None,
+                projection: <SortedRow as ShoalTableSupport>::Projection::default(),
+            });
+            let answered = harness
+                .db
+                .sorted
+                .handle(attempt_meta(client, id, 1), get, never_sealed_sorted)
+                .await;
+            check!(
+                answered.is_none(),
+                "a get of a partition on disk did not park"
+            );
+            // a row in a partition of its own, resident
+            let row = SortedRow {
+                partition_key: THIRD.to_owned(),
+                sort_key: "a".to_owned(),
+                data: "third".to_owned(),
+            };
+            let third = row.get_partition_key();
+            let answered = harness
+                .db
+                .sorted
+                .handle(
+                    get_meta(),
+                    SortedQuery::Insert { key: third, row },
+                    never_sealed_sorted,
+                )
+                .await;
+            check!(
+                answered.is_none(),
+                "an insert answered before it was durable"
+            );
+            // a second bundle reusing the id asks for that row, and is answered with it at once
+            let get = SortedQuery::Get(SortedGet::<SortedRow> {
+                partition_keys: vec![third],
+                sort_select: SortSelect::All,
+                filters: None,
+                limit: None,
+                projection: <SortedRow as ShoalTableSupport>::Projection::default(),
+            });
+            let Some(answered) = harness
+                .db
+                .sorted
+                .handle(attempt_meta(client, id, 2), get, never_sealed_sorted)
+                .await
+            else {
+                return Err("a get reusing a parked get's id was never answered".to_owned());
+            };
+            let data = match answered.3 {
+                Answer::Open(Response {
+                    data: ResponseAction::Get(found),
+                    ..
+                }) => found.map(|found| {
+                    found
+                        .rows
+                        .iter()
+                        .map(|row| row.data.clone())
+                        .collect::<Vec<_>>()
+                }),
+                other => return Err(format!("the second get answered {}", describe(&other))),
+            };
+            check_eq!(
+                data,
+                Some(vec!["third".to_owned()]),
+                "the second get was not answered with its own row"
+            );
+            // the first get's read lands, and it answers with its own row alone
+            harness.start_loader().await?;
+            let read = harness.next_read().await?;
+            let PartitionLoad::Loaded(released, _) =
+                landed(harness.db.sorted.load_partition(read).await)?
+            else {
+                return Err("the first get's read released nothing".to_owned());
+            };
+            check_eq!(
+                released.len(),
+                1,
+                "the read released more than the first get"
+            );
+            let (meta, query) = released.into_iter().next().ok_or("nothing released")?;
+            let answered = harness
+                .db
+                .sorted
+                .handle(meta, query, never_sealed_sorted)
+                .await
+                .ok_or("the first get parked again")?;
+            let data = match answered.3 {
+                Answer::Open(Response {
+                    data: ResponseAction::Get(found),
+                    ..
+                }) => found.map(|found| {
+                    found
+                        .rows
+                        .iter()
+                        .map(|row| row.data.clone())
+                        .collect::<Vec<_>>()
+                }),
+                other => return Err(format!("the first get answered {}", describe(&other))),
+            };
+            check_eq!(
+                data,
+                Some(vec!["short".to_owned()]),
+                "the first get was not answered with its own row alone"
+            );
+            Ok(())
+        })
+    }));
+}
+
+/// Two sorted exists sharing a client, id and index from two bundles are answered apart
+///
+/// The exists half of item 123. `pending_exists` was keyed the same way as the parked gets, so
+/// a second exists reusing the id took over the first one's list of partitions still to read,
+/// parked on the first one's read, and was never answered.
+#[test]
+fn sorted_exists_reusing_an_id_are_answered_apart() {
+    with_harness(Box::new(|harness| {
+        Box::pin(async move {
+            let (client, id) = (Uuid::new_v4(), Uuid::new_v4());
+            // the first exists parks on a read of a partition on disk, with no loader running
+            let exists = SortedQuery::Exists(SortedExists::<SortedRow> {
+                partition_keys: vec![harness.first.sorted],
+                sort_select: SortSelect::All,
+                filters: None,
+            });
+            let answered = harness
+                .db
+                .sorted
+                .handle(attempt_meta(client, id, 1), exists, never_sealed_sorted)
+                .await;
+            check!(
+                answered.is_none(),
+                "an exists of a partition on disk did not park"
+            );
+            // a second bundle reusing the id asks about a partition nothing ever wrote
+            let nowhere = keys_of(NOWHERE).sorted;
+            let exists = SortedQuery::Exists(SortedExists::<SortedRow> {
+                partition_keys: vec![nowhere],
+                sort_select: SortSelect::All,
+                filters: None,
+            });
+            let Some(answered) = harness
+                .db
+                .sorted
+                .handle(attempt_meta(client, id, 2), exists, never_sealed_sorted)
+                .await
+            else {
+                return Err("an exists reusing a parked one's id was never answered".to_owned());
+            };
+            check!(
+                matches!(
+                    answered.3,
+                    Answer::Open(Response {
+                        data: ResponseAction::Exists(false),
+                        ..
+                    })
+                ),
+                "the second exists answered {}",
+                describe(&answered.3)
+            );
+            // the first exists's read lands, and it finds its row
+            harness.start_loader().await?;
+            let read = harness.next_read().await?;
+            let PartitionLoad::Loaded(released, _) =
+                landed(harness.db.sorted.load_partition(read).await)?
+            else {
+                return Err("the first exists's read released nothing".to_owned());
+            };
+            let (meta, query) = released.into_iter().next().ok_or("nothing released")?;
+            let answered = harness
+                .db
+                .sorted
+                .handle(meta, query, never_sealed_sorted)
+                .await
+                .ok_or("the first exists parked again")?;
+            check!(
+                matches!(
+                    answered.3,
+                    Answer::Open(Response {
+                        data: ResponseAction::Exists(true),
+                        ..
+                    })
+                ),
+                "the first exists answered {}",
+                describe(&answered.3)
             );
             Ok(())
         })

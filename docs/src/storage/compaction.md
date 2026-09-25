@@ -69,6 +69,11 @@ if force || self.intent_log2.get_unflushed_pos() > max_size {
 }
 ```
 
+Since [Resolved #122](../appendix/resolved/intent-log-failure.md), neither a writer error nor a
+`refresh` that fails is returned with `?` any more. Either one fails the log and returns
+`FlushProgress { failed: true, .. }` at the watermark where it stopped, and a failed log is
+never rotated again.
+
 `.../fs.rs:365-409`
 
 `rotated` is what tells the caller it cannot compare positions across the boundary: the new
@@ -90,7 +95,10 @@ every table compacts whatever it just replayed immediately on startup.
 `generation` is a per-table counter incremented on each rotation. It names "the epoch whose
 writes are now sealed", and it is what makes eviction safe.
 
-Every in-memory partition records the generation it was last modified in:
+Every in-memory partition records the generation it was last modified in. Every write path
+stamps the generation it commits in; the unsorted update of a loaded partition did not until
+[Resolved #124](../appendix/resolved/unsorted-update-generation.md), and the older log's
+compaction could evict its update:
 
 ```rust
 pub enum MaybeLoaded<P: PartitionSupport> {

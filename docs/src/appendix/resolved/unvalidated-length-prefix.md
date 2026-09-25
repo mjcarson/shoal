@@ -111,8 +111,9 @@ Two things this fix deliberately did not do:
   **Closed** by [F25](../../features/read-buffers-are-filled-not-zeroed.md), which also found that
   `BytesMut::zeroed` is `alloc_zeroed` and therefore not always the write this line called it.
 
-The rest of [item 16](../known-issues.md#16-panics-on-the-hot-path) is also still open — this
-removed five of its sites, all in the two relays, and the table there is still long.
+~~The rest of [item 16](../known-issues.md#16-panics-on-the-hot-path) is also still open — this
+removed five of its sites, all in the two relays, and the table there is still long.~~ The rest of
+item 16 is [resolved](hot-path-panics.md) — this removed five of its sites, all in the two relays.
 
 ## Tests
 
@@ -131,8 +132,7 @@ removed five of its sites, all in the two relays, and the table there is still l
 - [F10. Framing and protocol evolution](../../features/framing-and-protocol-evolution.md) — the
   change this was part of
 - [Wire Protocol](../../architecture/wire-protocol.md) — the format as built
-- [item 16](../known-issues.md#16-panics-on-the-hot-path) — the panics, five of which went with
-  this
+- [Resolved #16](hot-path-panics.md) — the panics, five of which went with this
 - [item 61](response-error-channel.md) —
   what is left of the write side
 - [D2. Framing and protocol evolution](../../direction/framing.md) — the design

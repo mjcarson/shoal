@@ -957,10 +957,13 @@ wire change for a year when it was a local edit to one function.
 
 What this entry still holds:
 
-- **The eight `storage.commit(..).unwrap()` sites.** This entry's original claim — that an error
+- ~~**The eight `storage.commit(..).unwrap()` sites.** This entry's original claim — that an error
   variant "would unlock replacing most hot-path panics with recoverable errors"
   ([Known Issues #16](known-issues.md#16-panics-on-the-hot-path)) — is now true and untaken. A full
-  disk on an ordinary insert still panics the shard, and it now has somewhere to report instead.
+  disk on an ordinary insert still panics the shard, and it now has somewhere to report instead.~~
+  **Taken** — [Resolved #16](resolved/hot-path-panics.md). The claim was true; the full disk was
+  not what reached those sites, and was item 122, since
+  [resolved](resolved/intent-log-failure.md).
 - **`Flags::IS_ERROR` on a response frame whose payload is an error.** F11 sets it on `Error`
   frames only. Setting it on responses would mean threading a flag through `client_tx_relay`'s
   `(Uuid, Span, StageStamps, AlignedVec)` tuple, and so through `ServerMsg::NewClient`,
@@ -972,14 +975,17 @@ What this entry still holds:
 
 ### Backpressure
 
-~~Every channel is unbounded ([Known Issues #15](known-issues.md#15-no-backpressure-anywhere-the-remainder)).
+~~Every channel is unbounded (item 15).
 Bounding them requires deciding what to do when a shard is saturated — shed load, block the
 coordinator, or reject the client — which requires the error channel above.~~ **Built for the
 shard mesh** ([Resolved #15](resolved/shard-mesh-admission.md)): the decision is shed, at
 admission, by the coordinator routing a client's query to a shard whose queue already holds
 `networking.max_queued_queries` messages, answered `Shedding` at once and retried by the client.
-What is left is the remainder the known issues page keeps under the same number - the
-response and pending structures bounded by admitted work alone.
+~~What is left is the remainder the known issues page keeps under the same number - the
+response and pending structures bounded by admitted work alone.~~ **Built for the rest**
+([the remainder](resolved/backlog-bounds.md)): a write past `networking.max_pending_writes` and a
+read past `networking.max_parked_queries` are shed before they commit or park, and a client
+connection owing `networking.max_queued_replies` answers is not read until they drain.
 
 ### Timeouts
 
@@ -1984,6 +1990,23 @@ files into a directory nothing ever looks at is worse than the warning alone.
 
 The same argument applies on the recovery path, which discards a damaged tail with the same
 finality ([Recovery](../storage/recovery.md#truncation-and-corruption)).
+
+### Recovering a failed intent log without a restart
+
+A table whose intent log fails a write or an fdatasync refuses writes until the server is
+restarted ([Resolved #122](resolved/intent-log-failure.md)). That restart takes down every
+other table on the node, just to reopen one file. What is wanted is an admin operation that
+recovers one table's log in place:
+1. seal the failed log at its durable watermark, so the hole and anything past it are never replayed
+2. open a new log at the next generation
+3. hand the sealed prefix to the compactor
+4. clear the table's failed flag
+
+Two things keep this filed rather than done:
+- **Nothing can yet say the device is healthy again**, and the operation is only safe once it is.
+- **Sealing needs the compactor to accept a log whose valid prefix ends before its last byte.**
+  Today a log is read to its first empty record, which happens to be the hole, but nothing
+  promises that.
 
 ### Storage engine abstraction
 

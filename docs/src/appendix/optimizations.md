@@ -623,9 +623,11 @@ where a span belongs.
 (`.../persistent/sorted.rs:142`, `:167`, `:238`, `:257`; `.../persistent/unsorted.rs:95`, `:113`,
 `:184`, `:201`) all use std's default hasher. `partitions` is looked up at least once per query.
 
-Two more have joined them since this was filed, and both are keyed by `(Uuid, usize)` rather than
-by a `u64` — sixteen bytes of SipHash instead of eight: `PendingGets::parked`
-(`.../tables/persistent.rs:137`) and `pending_exists` (`.../persistent/sorted.rs:161`). They are
+Two more have joined them since this was filed, and both are keyed by ~~`(Uuid, usize)`~~ a
+`ParkKey` - client, id, index and attempt since
+[Resolved #123](resolved/parked-get-key.md) - rather than by a `u64`: ~~sixteen~~ forty-eight
+bytes of SipHash instead of eight: `PendingGets::parked`
+(`.../tables/persistent.rs`) and `pending_exists` (`.../persistent/sorted.rs`). They are
 touched only by a query that parked on a disk read, which is the path that is already waiting, so
 they are the less interesting half of the entry.
 

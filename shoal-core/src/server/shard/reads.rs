@@ -454,16 +454,20 @@ where
         let response =
             <D::ClientType as QuerySupport>::failed(table, meta.id, meta.index, meta.end, error);
         meta.stamps.mark_exec_done();
-        // a share of a split query fails its slot on the shard collecting it
-        let Some(gathered_meta) = gathered_meta else {
+        // a share of a split query fails its slot on the shard collecting it, and metadata
+        // naming no collector is a whole query, owed to its client
+        // ([Resolved #16](../../../../docs/src/appendix/resolved/hot-path-panics.md))
+        let share_of = gathered_meta.and_then(|gathered_meta| {
+            gathered_meta
+                .gather
+                .clone()
+                .map(|contact| (contact, gathered_meta))
+        });
+        let Some((contact, gathered_meta)) = share_of else {
             return self
                 .reply(meta.client, meta.id, span, meta.stamps, response)
                 .await;
         };
-        let contact = gathered_meta
-            .gather
-            .clone()
-            .expect("A gathered query always names the shard collecting it");
         let share = if contact.remote_node().is_some() {
             let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&response)?;
             meta.stamps.mark_replied();

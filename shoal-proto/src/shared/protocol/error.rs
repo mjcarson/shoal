@@ -74,6 +74,14 @@ pub enum ErrorCode {
     ArchiveMissing = 11,
     /// The archive holding this data is on disk and is not readable as an archive
     CorruptArchive = 12,
+    /// A write could not be committed to this table's log, and was not applied
+    ///
+    /// A definite refusal: a commit fails before it stages a byte, and a table that is refused
+    /// one leaves every row as it found it, so nothing of this write is in memory or on disk
+    /// ([Resolved #16](../../../../docs/src/appendix/resolved/hot-path-panics.md)). A table whose
+    /// intent log failed refuses every write this way until the server is restarted
+    /// ([Resolved #122](../../../../docs/src/appendix/resolved/intent-log-failure.md)).
+    StorageWrite = 13,
     /// This response is larger than the frame bound the connection agreed on
     ResponseTooLarge = 20,
     /// This request is larger than the frame bound the connection agreed on - reserved
@@ -98,12 +106,15 @@ pub enum ErrorCode {
     /// applied is not what this says: a read has no write behind it, and a write is answered
     /// [`ErrorCode::OutcomeUnknown`] instead ([F41](../../../../docs/src/features/read-consistency.md)).
     Timeout = 31,
-    /// This query was handed to another node and its outcome is not known
+    /// This write was accepted and whether it applied is not known
     ///
     /// The forwarding node accepted the query and then lost the peer, or the peer never answered
     /// within the deadline. A write may or may not have applied. This is deliberately not
     /// [`ErrorCode::Shedding`], which says the query was refused before anything accepted it
-    /// ([F38](../../../../docs/src/features/inter-node-transport.md)).
+    /// ([F38](../../../../docs/src/features/inter-node-transport.md)). A table also answers it
+    /// for a write committed to an intent log that then failed before the write was durable,
+    /// whose bytes may or may not have landed
+    /// ([Resolved #122](../../../../docs/src/appendix/resolved/intent-log-failure.md)).
     OutcomeUnknown = 32,
     /// The connection this query was sent on ended before it was answered
     ConnectionLost = 40,
@@ -207,6 +218,7 @@ impl ErrorCode {
             10 => ErrorCode::StorageRead,
             11 => ErrorCode::ArchiveMissing,
             12 => ErrorCode::CorruptArchive,
+            13 => ErrorCode::StorageWrite,
             20 => ErrorCode::ResponseTooLarge,
             21 => ErrorCode::RequestTooLarge,
             22 => ErrorCode::IdentityExpired,
@@ -248,6 +260,7 @@ impl ErrorCode {
             ErrorCode::StorageRead => "StorageRead",
             ErrorCode::ArchiveMissing => "ArchiveMissing",
             ErrorCode::CorruptArchive => "CorruptArchive",
+            ErrorCode::StorageWrite => "StorageWrite",
             ErrorCode::ResponseTooLarge => "ResponseTooLarge",
             ErrorCode::RequestTooLarge => "RequestTooLarge",
             ErrorCode::IdentityExpired => "IdentityExpired",

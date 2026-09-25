@@ -176,6 +176,8 @@ guarded by a comment rather than by the type system
 - No prioritisation between message kinds on the shard loop.
 - ~~All channels are unbounded, so there is no backpressure anywhere in the system.~~ The
   shard mesh has an admission bound - a query for a shard that has fallen behind is shed
-  `Shedding` at once ([Resolved #15](../appendix/resolved/shard-mesh-admission.md)); the
-  channels behind it are bounded by what was admitted and by nothing else
-  ([Known Issues](../appendix/known-issues.md#15-no-backpressure-anywhere-the-remainder)).
+  `Shedding` at once ([Resolved #15](../appendix/resolved/shard-mesh-admission.md)); ~~the
+  channels behind it are bounded by what was admitted and by nothing else~~ what leaves the
+  queue is bounded too - writes waiting on their fdatasync and queries parked on reads are shed
+  past `max_pending_writes` and `max_parked_queries`, and a client owing `max_queued_replies`
+  answers is not read until they drain ([the remainder](../appendix/resolved/backlog-bounds.md)).

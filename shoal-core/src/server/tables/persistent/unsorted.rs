@@ -29,12 +29,15 @@ use crate::server::replication::digest::{hash_partition, PartitionDigest, Pendin
 use crate::server::replication::{CommandResult, ResultKind};
 use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::UnsortedPartition;
-use crate::server::tables::persistent::{adjust_memory_usage, open, ApplyStep, RowSink};
 use crate::server::tables::persistent::{
-    apply_failure, corrupt_archive, eviction_totals, settle_resident_read, PartitionLoad,
+    adjust_memory_usage, open, read_not_asked, refuse, shed, storage_write, unreadable, ApplyStep,
+    ParkedQueries, Parking, RowSink,
+};
+use crate::server::tables::persistent::{
+    apply_failure, corrupt_archive, eviction_totals, settle_resident_read, ParkKey, PartitionLoad,
     PendingGets,
 };
-use crate::server::tables::storage::StorageSupport;
+use crate::server::tables::storage::{LogFault, StorageSupport};
 use crate::server::{Conf, ServerError};
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::protocol::peer::Command;
@@ -116,8 +119,12 @@ pub struct PersistentUnsortedTable<R: ShoalUnsortedTable, S: StorageSupport, N: 
     flushed: Vec<(Uuid, Uuid, Span, StageStamps, Response<R>)>,
     /// The channel to send loader jobs on
     loader_tx: AsyncSender<LoaderMsg<N>>,
-    /// A map of queries blocked on partitions being loaded from disk
-    blocked: HashMap<u64, Vec<(QueryMetadata, UnsortedQuery<R>)>>,
+    /// The queries blocked on partitions being loaded from disk, counted
+    blocked: ParkedQueries<UnsortedQuery<R>>,
+    /// The most writes this table holds waiting to be made durable before it sheds one
+    max_pending_writes: usize,
+    /// The most queries this table holds parked on partition reads before it sheds one
+    max_parked_queries: usize,
     /// The partitions a replicated apply asked to have read, and is waiting on
     ///
     /// Kept apart from `blocked`, which holds queries: an apply parks nothing here, the shard
@@ -277,7 +284,9 @@ where
             pending: PendingResponse::<R>::with_capacity(100),
             flushed: Vec::with_capacity(1000),
             loader_tx: loader_tx.clone(),
-            blocked: HashMap::with_capacity(1000),
+            blocked: ParkedQueries::with_capacity(1000),
+            max_pending_writes: conf.networking.max_pending_writes,
+            max_parked_queries: conf.networking.max_parked_queries,
             loading: HashSet::new(),
             stale: HashSet::new(),
             pending_data: PendingGets::with_capacity(500),
@@ -429,7 +438,7 @@ where
             }
         }
         // get the queries that were blocked on this partition
-        Ok(match self.blocked.remove(&partition_id) {
+        Ok(match self.blocked.take(&partition_id) {
             Some(unblocked) => {
                 // put every query this read released in the same trace as the read
                 link_released(&unblocked, &read_span);
@@ -464,7 +473,7 @@ where
         // a read an apply asked for gave up, whatever else was waiting on it
         self.loading.remove(&partition_id);
         // take the queries that were parked on this partition
-        let mut blocked = self.blocked.remove(&partition_id)?;
+        let mut blocked = self.blocked.take(&partition_id)?;
         // log how many queries this failure released
         event!(
             Level::WARN,
@@ -489,8 +498,11 @@ where
 
     /// Block a query on a partition being loaded from disk
     ///
-    /// Returns true if this query was parked and false if this partition has no
-    /// data on disk to wait for, in which case the caller should answer now.
+    /// Says whether this query was parked, whether this partition has no data on disk to wait
+    /// for, in which case the caller should answer now, or whether it was shed because this
+    /// table already holds `max_parked_queries` parked queries. A query is only ever shed
+    /// before anything was pushed or asked for, and only when `may_shed` says no part of it
+    /// is parked already ([Resolved #15](../../../../docs/src/appendix/resolved/backlog-bounds.md)).
     ///
     /// A read already in flight for this partition - one a parked query asked for, or one a
     /// replicated apply asked for through `request_load` - is waited on rather than asked for
@@ -501,39 +513,42 @@ where
     /// * `partition_key` - The key of the partition this query needs
     /// * `meta` - The metadata for the query to park
     /// * `query` - The query to replay once this partition has been loaded
+    /// * `may_shed` - Whether this query has parked nothing yet, so it may still be shed
     #[instrument(name = "PersistentTable::block_on_load", skip_all)]
     async fn block_on_load(
         &mut self,
         partition_key: u64,
         meta: &QueryMetadata,
         query: UnsortedQuery<R>,
-    ) -> bool {
+        may_shed: bool,
+    ) -> Parking {
+        // a query released by a failed load answers without the read that just failed, since
+        // asking for it again would only park this query on the same failure - unless another
+        // read of it is already in flight, which it queues behind like any other query
+        if meta.skip_disk == Some(partition_key) && !self.blocked.contains_key(&partition_key) {
+            return Parking::Absent;
+        }
+        // a table holding as many parked queries as it may sheds this one before it parks,
+        // rather than growing the parked set by arrival rate times read latency
+        if may_shed && self.blocked.len() >= self.max_parked_queries {
+            return Parking::Shed;
+        }
         // if this partition already has blocked queries then a load is in flight
         // for it, so queue behind that load rather than requesting it again
-        if let Some(entry) = self.blocked.get_mut(&partition_key) {
-            // park this query behind the load we have already requested
-            entry.push((meta.clone(), query));
-            return true;
-        }
-        // a query released by a failed load answers without the read that just failed,
-        // since asking for it again would only park this query on the same failure
-        if meta.skip_disk == Some(partition_key) {
-            return false;
-        }
+        let Err(query) = self.blocked.join(partition_key, meta, query) else {
+            return Parking::Parked;
+        };
         // a read a replicated apply asked for is in flight too, and its landing drains
         // `blocked` like any other, so park behind it rather than asking for a second read
         // that would land on the copy the first one made resident
         // ([Resolved #121](../../../../docs/src/appendix/resolved/resident-copy-collision.md))
         if self.loading.contains(&partition_key) {
             // park this query behind the read the apply already requested
-            self.blocked
-                .entry(partition_key)
-                .or_default()
-                .push((meta.clone(), query));
-            return true;
+            self.blocked.park(partition_key, meta, query);
+            return Parking::Parked;
         }
         // try to load this partition from disk if it exists
-        let will_load = self
+        let will_load = match self
             .storage
             .load_partition(
                 self.table_name,
@@ -543,17 +558,56 @@ where
                 &self.loader_tx,
             )
             .await
-            .unwrap();
+        {
+            Ok(will_load) => will_load,
+            // the loader could not take the request, so nothing was parked and nothing will land
+            Err(error) => return read_not_asked(self.table_name, partition_key, &error),
+        };
         // if this partition has no data on disk then there is nothing to wait for
         if !will_load {
-            return false;
+            return Parking::Absent;
         }
         // park this query until its partition has been loaded from disk
-        self.blocked
-            .entry(partition_key)
-            .or_default()
-            .push((meta.clone(), query));
-        true
+        self.blocked.park(partition_key, meta, query);
+        Parking::Parked
+    }
+
+    /// Shed a query that would have parked past this table's bound
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The metadata of the query being shed
+    fn shed_parked<P>(
+        &self,
+        meta: QueryMetadata,
+    ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
+        // say which table and which bound, never anything about the partition
+        shed(
+            meta,
+            format!(
+                "{} holds {} queries parked on partition reads and this one was not parked behind them",
+                self.table_name, self.max_parked_queries
+            ),
+        )
+    }
+
+    /// Shed a write the device has not kept up with
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The metadata of the write being shed
+    fn shed_pending<P>(
+        &self,
+        meta: QueryMetadata,
+    ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
+        // say which table and which bound
+        shed(
+            meta,
+            format!(
+                "{} holds {} writes waiting to be made durable and this one was not committed behind them",
+                self.table_name, self.max_pending_writes
+            ),
+        )
     }
 
     /// Cast and handle a serialized query
@@ -604,6 +658,17 @@ where
         meta.stamps.set_durability(self.storage.durability());
         // keep the failure this query was released with, if a read it was parked on gave up
         let failed = meta.failed.take();
+        // a write the device has not kept up with is shed before it is committed, rather than
+        // growing the pending queue by arrival rate times fsync latency. A write released from a
+        // parked read is judged again here, which is sound: it has committed nothing yet
+        // ([Resolved #15](../../../../docs/src/appendix/resolved/backlog-bounds.md))
+        if matches!(
+            query,
+            UnsortedQuery::Insert { .. } | UnsortedQuery::Delete { .. } | UnsortedQuery::Update(_)
+        ) && self.pending.len() >= self.max_pending_writes
+        {
+            return apply_failure(open(self.shed_pending(meta)), failed);
+        }
         // execute the correct query type
         let answered = match query {
             // insert a row into this partition
@@ -650,8 +715,11 @@ where
         let key = row.get_partition_key();
         // wrap our row in an insert intent
         let intent = UnsortedIntents::insert(row);
-        // persist this new row to storage
-        let pos = self.storage.commit(&intent).await.unwrap();
+        // persist this new row to storage, or refuse it having changed nothing
+        let pos = match self.storage.commit(&intent).await {
+            Ok(pos) => pos,
+            Err(error) => return storage_write(meta, self.table_name, key, &error),
+        };
         // record that this writes synchronous work is finished
         //
         // a write returns nothing to the shard, so it stamps this itself rather than having
@@ -712,10 +780,23 @@ where
         if self.can_answer_in_place(&meta, &get.partition_keys) {
             return Some(self.get_sealed::<P>(meta, &get, seal));
         }
+        // the key this get parks under, which every replay of it carries
+        let key = ParkKey::of(&meta);
+        // a get that parked on an earlier execution is never shed, since part of it is held
+        //
+        // this is read before `resume`, which takes the parked state out
+        let fresh = !self.pending_data.is_parked(&key);
+        // whether this execution has parked this get on any partition yet
+        let mut parked_any = false;
         // pick this get up where its last execution left off, or start it fresh
-        let mut pending =
-            self.pending_data
-                .resume::<P>(&(meta.id, meta.index), &get.partition_keys, get.limit);
+        let mut pending = match self
+            .pending_data
+            .resume::<P>(&key, &get.partition_keys, get.limit)
+        {
+            Ok(pending) => pending,
+            // another get parked under this key, and it is left to finish
+            Err(error) => return open(refuse(meta, error)),
+        };
         // check each of the partition keys this execution was handed
         for partition_key in &get.partition_keys {
             // find where this partitions row belongs in the answer
@@ -749,10 +830,24 @@ where
                 None => {
                     // build a query for just this blocked partition
                     let blocked_get = UnsortedQuery::Get(get.to_blocked(*partition_key));
-                    // block this query if this partition has data on disk to load
-                    if !self.block_on_load(*partition_key, &meta, blocked_get).await {
+                    // block this query if this partition has data on disk to load, shedding it
+                    // only while no part of it is parked
+                    let may_shed = fresh && !parked_any;
+                    match self
+                        .block_on_load(*partition_key, &meta, blocked_get, may_shed)
+                        .await
+                    {
+                        // leave this slot empty for the replay to fill
+                        Parking::Parked => parked_any = true,
                         // the requested partition doesn't exist so it has no row to give
-                        pending.fill(rank, rows.into_owned());
+                        Parking::Absent => pending.fill(rank, rows.into_owned()),
+                        // nothing of this get is parked, so what it found so far is dropped
+                        Parking::Shed => {
+                            return open(self.shed_parked(meta));
+                        }
+                        // this partition could not be read, which this get answers with once
+                        // nothing of it is parked
+                        Parking::Failed(error) => pending.fail(rank, error),
                     }
                 }
             }
@@ -760,9 +855,13 @@ where
         // hold this get until every partition it named has been read
         if pending.is_pending() {
             // remember what we have found so far for the replay to carry on from
-            self.pending_data.park((meta.id, meta.index), pending);
+            self.pending_data.park(key, pending);
             // we have blocked partitions so return None
             return None;
+        }
+        // a partition this get named could not be read, so it answers with why
+        if let Some(error) = pending.take_failure() {
+            return open(refuse(meta, error));
         }
         // fold our slots into the rows this get answers with, keeping which partition each
         // run came from so the gather never has to ask a row where it belongs
@@ -804,7 +903,7 @@ where
             return false;
         }
         // a get that has already parked holds rows from an execution that has ended
-        if self.pending_data.is_parked(&(meta.id, meta.index)) {
+        if self.pending_data.is_parked(&ParkKey::of(&meta)) {
             return false;
         }
         // and every partition it names has to be one we can read without going to disk
@@ -955,21 +1054,26 @@ where
                 // build the query to replay once this partition has been loaded
                 let blocked = UnsortedQuery::Exists(exists_query.clone());
                 // block this query if this partition has data on disk to load
-                if self
-                    .block_on_load(exists_query.partition_key, &meta, blocked)
+                match self
+                    .block_on_load(exists_query.partition_key, &meta, blocked, true)
                     .await
                 {
                     // return None since we don't yet have a response for this query
-                    None
-                } else {
-                    // the partition doesn't exist so data doesn't exist
-                    let response = Response {
-                        id: meta.id,
-                        index: meta.index,
-                        data: ResponseAction::Exists(false),
-                        end: meta.end,
-                    };
-                    Some((meta.client, meta.id, meta.stamps, response))
+                    Parking::Parked => None,
+                    // too many queries are parked on this table to park another
+                    Parking::Shed => self.shed_parked(meta),
+                    // the read could not be asked for, so this query answers with why
+                    Parking::Failed(error) => refuse(meta, error),
+                    Parking::Absent => {
+                        // the partition doesn't exist so data doesn't exist
+                        let response = Response {
+                            id: meta.id,
+                            index: meta.index,
+                            data: ResponseAction::Exists(false),
+                            end: meta.end,
+                        };
+                        Some((meta.client, meta.id, meta.stamps, response))
+                    }
                 }
             }
         }
@@ -1005,8 +1109,11 @@ where
                     let old_size = partition.size();
                     // wrap our key in a delete intent
                     let intent = UnsortedIntents::<R>::delete(key);
-                    // wite this delete to our intent log
-                    let pos = self.storage.commit(&intent).await.unwrap();
+                    // wite this delete to our intent log, or refuse it having changed nothing
+                    let pos = match self.storage.commit(&intent).await {
+                        Ok(pos) => pos,
+                        Err(error) => return storage_write(meta, self.table_name, key, &error),
+                    };
                     // record that this writes synchronous work is finished
                     //
                     // a write returns nothing to the shard, so it stamps this itself rather than having
@@ -1045,12 +1152,17 @@ where
             None => {
                 // this partition may still be on disk so check there before
                 // telling our client it doesn't exist
-                if self
-                    .block_on_load(key, &meta, UnsortedQuery::Delete { key })
+                match self
+                    .block_on_load(key, &meta, UnsortedQuery::Delete { key }, true)
                     .await
                 {
                     // wait for this partition to be loaded and this query replayed
-                    return None;
+                    Parking::Parked => return None,
+                    // too many queries are parked on this table to park another
+                    Parking::Shed => return self.shed_parked(meta),
+                    // the read could not be asked for, so this query answers with why
+                    Parking::Failed(error) => return refuse(meta, error),
+                    Parking::Absent => (),
                 }
                 // cast this action to a response
                 let response = Response {
@@ -1093,20 +1205,47 @@ where
                 if !partition.is_tombstoned() {
                     // get our old partition size
                     let old_size = partition.size();
-                    // update this paritions data
-                    if let Some(loaded) = partition.update(&update) {
-                        // replace our accessible partition with our loaded one
-                        *partition = MaybeLoaded::Loaded {
-                            partition: loaded,
-                            generation: self.generation,
-                        };
-                    }
                     // get our partition key so we can remove this from our lru cache later
                     let key = update.partition_key;
-                    // wrap our row in an delete intent
+                    // an accessible partition is read into rows before the commit, so a copy
+                    // that cannot be read commits nothing
+                    let archived = match partition {
+                        MaybeLoaded::Accessible(read) => {
+                            match UnsortedPartition::<R>::deserialize(read.archived()) {
+                                Ok(loaded) => Some(loaded),
+                                Err(error) => {
+                                    return unreadable(meta, self.table_name, key, &error)
+                                }
+                            }
+                        }
+                        MaybeLoaded::Loaded { .. } => None,
+                    };
+                    // wrap our row in an update intent
                     let intent = UnsortedIntents::<R>::update(update);
-                    // write this update to storage
-                    let pos = self.storage.commit(&intent).await.unwrap();
+                    // write this update to storage, or refuse it with the row untouched
+                    let pos = match self.storage.commit(&intent).await {
+                        Ok(pos) => pos,
+                        Err(error) => return storage_write(meta, self.table_name, key, &error),
+                    };
+                    // take our update back out of its intent
+                    let update = match intent {
+                        UnsortedIntents::Update(update) => update,
+                        // SAFETY we just wrapped this in an update intent before
+                        _ => unsafe { std::hint::unreachable_unchecked() },
+                    };
+                    // apply the committed update to this partitions row
+                    match archived {
+                        // the archives row, read above, takes the update and replaces it
+                        Some(mut loaded) => {
+                            loaded.update(&update);
+                            *partition = MaybeLoaded::Loaded {
+                                partition: loaded,
+                                generation: self.generation,
+                            };
+                        }
+                        // a partition that was not read above is loaded, and updates in place
+                        None => partition.update_loaded(&update, self.generation),
+                    }
                     // record that this writes synchronous work is finished
                     //
                     // a write returns nothing to the shard, so it stamps this itself rather than having
@@ -1142,12 +1281,17 @@ where
                 let partition_key = update.partition_key;
                 // this partition may still be on disk so check there before
                 // telling our client it doesn't exist
-                if self
-                    .block_on_load(partition_key, &meta, UnsortedQuery::Update(update))
+                match self
+                    .block_on_load(partition_key, &meta, UnsortedQuery::Update(update), true)
                     .await
                 {
                     // wait for this partition to be loaded and this query replayed
-                    return None;
+                    Parking::Parked => return None,
+                    // too many queries are parked on this table to park another
+                    Parking::Shed => return self.shed_parked(meta),
+                    // the read could not be asked for, so this query answers with why
+                    Parking::Failed(error) => return refuse(meta, error),
+                    Parking::Absent => (),
                 }
                 // we didn't find any data to update
                 let action = ResponseAction::Update(false);
@@ -1171,8 +1315,14 @@ where
     /// # Arguments
     ///
     /// * `query` - The query
-    #[must_use]
-    pub fn build_intent(&self, query: &UnsortedQuery<R>) -> Option<(u64, Vec<u8>)>
+    ///
+    /// # Errors
+    ///
+    /// Fails if the intent cannot be archived, which fails this write and nothing else.
+    pub fn build_intent(
+        &self,
+        query: &UnsortedQuery<R>,
+    ) -> Result<Option<(u64, Vec<u8>)>, ServerError>
     where
         for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -1192,9 +1342,11 @@ where
                 update.partition_key,
                 UnsortedIntents::<R>::update(update.clone()),
             ),
-            UnsortedQuery::Get(_) | UnsortedQuery::Exists(_) => return None,
+            UnsortedQuery::Get(_) | UnsortedQuery::Exists(_) => return Ok(None),
         };
-        Some((key, RkyvSupport::serialize(&intent).to_vec()))
+        // archive it once, for every replica's log and state machine
+        let payload = RkyvSupport::serialize(&intent)?;
+        Ok(Some((key, payload.to_vec())))
     }
 
     /// Apply a committed command to this table, deriving its result from the state it finds
@@ -1311,7 +1463,15 @@ where
                             false
                         } else {
                             let before = partition.size();
-                            if let Some(loaded) = partition.update(&update) {
+                            let loaded = match partition.update(&update) {
+                                Ok(loaded) => loaded,
+                                Err(error) => {
+                                    return ApplyStep::Refused(format!(
+                                        "the resident archive does not decode: {error}"
+                                    ))
+                                }
+                            };
+                            if let Some(loaded) = loaded {
                                 *partition = MaybeLoaded::Loaded {
                                     partition: loaded,
                                     generation,
@@ -1401,12 +1561,12 @@ where
             // a resident row as it is, an archived one read back
             let bytes = match self.partitions.get(&key) {
                 Some(MaybeLoaded::Loaded { partition, .. }) => match &partition.row {
-                    MaybeRow::Row(row) => RkyvSupport::serialize(row),
+                    MaybeRow::Row(row) => RkyvSupport::serialize(row)?,
                     MaybeRow::Tombstone => continue,
                 },
                 Some(MaybeLoaded::Accessible(read)) => match &read.archived().row {
                     ArchivedMaybeRow::Row(row) => match <R as RkyvSupport>::deserialize(row) {
-                        Ok(row) => RkyvSupport::serialize(&row),
+                        Ok(row) => RkyvSupport::serialize(&row)?,
                         Err(_) => continue,
                     },
                     ArchivedMaybeRow::Tombstone => continue,
@@ -1419,7 +1579,7 @@ where
                     let archived = <UnsortedPartition<R> as RkyvSupport>::access(&read)?;
                     match &archived.row {
                         ArchivedMaybeRow::Row(row) => match <R as RkyvSupport>::deserialize(row) {
-                            Ok(row) => RkyvSupport::serialize(&row),
+                            Ok(row) => RkyvSupport::serialize(&row)?,
                             Err(_) => continue,
                         },
                         ArchivedMaybeRow::Tombstone => continue,
@@ -1467,13 +1627,16 @@ where
             resident_keys.insert(*key);
             let bytes = match entry {
                 MaybeLoaded::Loaded { partition, .. } => match &partition.row {
-                    MaybeRow::Row(row) => Some(RkyvSupport::serialize(row)),
+                    MaybeRow::Row(row) => Some(RkyvSupport::serialize(row)?),
                     MaybeRow::Tombstone => None,
                 },
                 MaybeLoaded::Accessible(read) => match &read.archived().row {
-                    ArchivedMaybeRow::Row(row) => <R as RkyvSupport>::deserialize(row)
-                        .ok()
-                        .map(|row| RkyvSupport::serialize(&row)),
+                    // a row that does not read back is left out, as before; one that does not
+                    // write back fails the cut, since it would be left out on one replica alone
+                    ArchivedMaybeRow::Row(row) => match <R as RkyvSupport>::deserialize(row) {
+                        Ok(row) => Some(RkyvSupport::serialize(&row)?),
+                        Err(_) => None,
+                    },
                     ArchivedMaybeRow::Tombstone => None,
                 },
             };
@@ -1502,7 +1665,7 @@ where
         let row = match &archived.row {
             ArchivedMaybeRow::Row(row) => Some(RkyvSupport::serialize(
                 &<R as RkyvSupport>::deserialize(row)?,
-            )),
+            )?),
             ArchivedMaybeRow::Tombstone => None,
         };
         Ok(hash_partition(
@@ -1739,6 +1902,19 @@ where
         self.storage.compaction_due()
     }
 
+    /// Make the next write or fdatasync of this table's intent log fail as a device error would
+    ///
+    /// For the tests of what a table does with a log it can no longer write
+    /// ([Resolved #122](../../../../docs/src/appendix/resolved/intent-log-failure.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `fault` - Which IO fails
+    #[doc(hidden)]
+    pub fn inject_log_fault(&mut self, fault: LogFault) {
+        self.storage.inject_log_fault(fault);
+    }
+
     /// Get all flushed response actions
     ///
     /// # Arguments
@@ -1752,7 +1928,20 @@ where
         // update our current generation
         self.generation = progress.generation;
         // release the responses whose data is now durable
-        if progress.rotated {
+        if progress.failed {
+            // everything below where the log stopped is durable and answered as it was
+            self.pending.get(progress.durable_pos, &mut self.flushed);
+            // and everything past it may or may not be on disk, which is what it is answered
+            // with ([Resolved #122](../../../../docs/src/appendix/resolved/intent-log-failure.md))
+            let unknown = ResponseError::new(
+                ErrorCode::OutcomeUnknown,
+                format!(
+                    "{} could not make this write durable: its intent log failed, and the write may or may not have landed",
+                    self.table_name
+                ),
+            );
+            self.pending.fail_all(&unknown, &mut self.flushed);
+        } else if progress.rotated {
             // rotation fdatasynced everything in the old log and restarted our
             // positions at 0, so every pending response is durable and none of
             // their positions can be compared against the new files watermark
@@ -1915,7 +2104,7 @@ where
                         // get the size of not yet updated partition
                         let old_size = partition.size();
                         // update our row in place if its loaded or by replacement if its not
-                        if let Some(loaded) = partition.update(&update) {
+                        if let Some(loaded) = partition.update(&update)? {
                             // replace our old partition with its updated data
                             *partition = MaybeLoaded::Loaded {
                                 partition: loaded,

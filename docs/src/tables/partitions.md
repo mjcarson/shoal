@@ -445,9 +445,12 @@ being easy to get wrong, and it is wrong in the ways noted above.
   written to continuously is never marked, so its tombstones are never swept either.
 - `UnsortedPartition` computes its size two different ways.
 - Sorted partition sizes drift, since they are maintained by delta rather than recomputed.
-- `access(...).unwrap()` on `Accessible` partitions in many places
+- ~~`access(...).unwrap()` on `Accessible` partitions in many places
   (`.../persistent/sorted.rs:245`, `:355`, `:453`, `:599`, `:734`, `:890`) — a corrupt archive
-  panics the shard rather than surfacing an error.
+  panics the shard rather than surfacing an error.~~ An accessible partition is a
+  `ValidatedArchive`, and one that validates and still does not deserialize is answered
+  `CorruptArchive` on a write and refused on a replay
+  ([Resolved #16](../appendix/resolved/hot-path-panics.md)).
 - ~~No partition-level checksum; corruption in an archive is caught only if rkyv validation
   happens to reject it.~~ Every record of a format 2 archive carries a checksum verified before
   rkyv sees the bytes, and a mismatch is `CorruptArchive` by name and quarantines the copy

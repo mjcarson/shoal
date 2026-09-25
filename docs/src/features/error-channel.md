@@ -32,7 +32,8 @@ waits on never closes.
 
 **A query that failed says so, and says what kind of failure it was.** `ResponseAction::Error`
 carries a `ResponseError { code, msg }`, where the code is one of a pinned set
-(`StorageRead`, `ArchiveMissing`, `CorruptArchive`, `ResponseTooLarge`, `ConnectionLost`, …). It
+(`StorageRead`, `ArchiveMissing`, `CorruptArchive`, `StorageWrite`, `ResponseTooLarge`,
+`ConnectionLost`, …). It
 travels in an ordinary response frame, routed by query id like every other answer.
 
 **A failure that cannot be a response is a frame of its own.** `MessageType::Error`, reserved and
@@ -153,9 +154,14 @@ The two reserved bytes after the code are where an index would go.
 unblocked but not closed: "found nothing" and "failed" are now distinguishable on the wire, and what
 remains is letting `send_one` take a `QuerySuceededOpts`.
 
-**The eight `storage.commit(..).unwrap()` sites still panic.** A full disk on an ordinary insert now
+~~**The eight `storage.commit(..).unwrap()` sites still panic.** A full disk on an ordinary insert now
 has somewhere to go and does not yet use it. That is the largest remaining piece of
-[item 16](../appendix/known-issues.md).
+[item 16](../appendix/known-issues.md).~~ **Done** — they answer `StorageWrite`, code 13, a definite
+refusal with the table left as it was ([Resolved #16](../appendix/resolved/hot-path-panics.md)).
+A full disk never reached them; it ~~ends~~ ended the shard through the sweep instead, and was
+item 122, since [resolved](../appendix/resolved/intent-log-failure.md): a table whose log failed
+answers the writes past its durable watermark `OutcomeUnknown` and every later write
+`StorageWrite`.
 
 **A query stream registers only its most recent connection.** `ShoalQueryStream::send` takes
 whatever connection the pool hands out per bundle and overwrites the waiter's connection each time.

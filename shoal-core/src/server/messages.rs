@@ -896,9 +896,19 @@ where
     Shutdown,
 }
 
-impl<D: ShoalDatabase> Clone for ServerMsg<D> {
-    fn clone(&self) -> Self {
-        match self {
+impl<D: ShoalDatabase> ServerMsg<D> {
+    /// Copy this message for another shard, if it is one a broadcast may send
+    ///
+    /// Not `Clone`: most variants belong to the one shard they are sent to, and a `Clone` that
+    /// panicked on them made every broadcast a place a routing mistake could take the process
+    /// down. A variant that cannot be copied says why instead, and [`Comms::broadcast`] refuses
+    /// it before any shard is sent anything
+    /// ([Resolved #16](../../../docs/src/appendix/resolved/hot-path-panics.md)).
+    ///
+    /// [`Comms::broadcast`]: crate::server::comms::Comms::broadcast
+    pub fn try_clone(&self) -> Result<Self, &'static str> {
+        // copy the variants a broadcast may carry, and name why each of the others cannot be
+        let copy = match self {
             ServerMsg::Map(map) => ServerMsg::Map(map.clone()),
             ServerMsg::Client {
                 peer,
@@ -920,18 +930,18 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             ServerMsg::ClientGone(client) => ServerMsg::ClientGone(*client),
             // a forward is handed to the shard that accepted it and is never broadcast
             ServerMsg::Forward { .. } => {
-                panic!("A forwarded bundle is only ever handed to the shard that accepted it")
+                return Err("A forwarded bundle is only ever handed to the shard that accepted it")
             }
             // a link's events go to the shard that owns the link and nowhere else
             ServerMsg::Peer(_) => {
-                panic!("A peer event is only ever sent to the shard that owns the link")
+                return Err("A peer event is only ever sent to the shard that owns the link")
             }
             ServerMsg::BulkProbe { node, bytes } => ServerMsg::BulkProbe {
                 node: *node,
                 bytes: *bytes,
             },
             // a view is asked of one shard, on a channel that answers once
-            ServerMsg::Transport(_) => panic!("A transport view is asked of one shard"),
+            ServerMsg::Transport(_) => return Err("A transport view is asked of one shard"),
             ServerMsg::Hold(ms) => ServerMsg::Hold(*ms),
             ServerMsg::Query {
                 meta,
@@ -948,12 +958,12 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             // a released query is replayed on the shard that parked it and is never
             // broadcast, so there is nothing that would ever ask us to duplicate one
             ServerMsg::Released { .. } => {
-                panic!("A released query is only ever replayed on the shard that parked it")
+                return Err("A released query is only ever replayed on the shard that parked it")
             }
             // a gathered response travels to exactly one shard and is never broadcast,
             // so there is nothing that would ever ask us to duplicate one
             ServerMsg::Gathered { .. } => {
-                panic!("A gathered response is only ever sent to one shard")
+                return Err("A gathered response is only ever sent to one shard")
             }
             ServerMsg::Partition(loaded) => ServerMsg::Partition(loaded.clone()),
             ServerMsg::PartitionLoadFailed {
@@ -978,66 +988,79 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
                 partitions: partitions.clone(),
             },
             // a failure is asked of one shard
-            ServerMsg::Fail => panic!("A failure is asked of one shard"),
+            ServerMsg::Fail => return Err("A failure is asked of one shard"),
             // everything a tablet group sends its own shard stays on that shard
-            ServerMsg::Apply { .. } => panic!("An apply batch is for the shard hosting the group"),
+            ServerMsg::Apply { .. } => {
+                return Err("An apply batch is for the shard hosting the group")
+            }
             ServerMsg::Proposed { .. } => {
-                panic!("A proposal's outcome is for the shard that proposed it")
+                return Err("A proposal's outcome is for the shard that proposed it")
             }
             ServerMsg::Replication { .. } => {
-                panic!("A replication request is for the shard the head names")
+                return Err("A replication request is for the shard the head names")
             }
-            ServerMsg::GroupUp { .. } => panic!("A group handle is for the shard that built it"),
+            ServerMsg::GroupUp { .. } => {
+                return Err("A group handle is for the shard that built it")
+            }
             ServerMsg::ReadReady { .. } => {
-                panic!("A ready read is for the shard that waited on it")
+                return Err("A ready read is for the shard that waited on it")
             }
-            ServerMsg::GroupsDown => panic!("A groups-down notice is for one shard"),
-            ServerMsg::WalSealed { .. } => panic!("A sealed segment is the writing shard's"),
+            ServerMsg::GroupsDown => return Err("A groups-down notice is for one shard"),
+            ServerMsg::WalSealed { .. } => return Err("A sealed segment is the writing shard's"),
             ServerMsg::SegmentCompacted { .. } => {
-                panic!("A compacted segment is the writing shard's")
+                return Err("A compacted segment is the writing shard's")
             }
             ServerMsg::CheckpointWritten { .. } => {
-                panic!("A checkpoint write is the writing shard's")
+                return Err("A checkpoint write is the writing shard's")
             }
             ServerMsg::BuildSnapshot { .. } => {
-                panic!("A snapshot is built for the shard hosting the group")
+                return Err("A snapshot is built for the shard hosting the group")
             }
             ServerMsg::InstallSnapshot { .. } => {
-                panic!("A snapshot is installed on the shard hosting the group")
+                return Err("A snapshot is installed on the shard hosting the group")
             }
             ServerMsg::SnapshotBytes { .. } => {
-                panic!("A snapshot chunk goes to the shard hosting its group")
+                return Err("A snapshot chunk goes to the shard hosting its group")
             }
             ServerMsg::BulkLaneEnded { node } => ServerMsg::BulkLaneEnded { node: *node },
             ServerMsg::SnapshotInstalled { .. } => {
-                panic!("An installed snapshot is the installing shard's")
+                return Err("An installed snapshot is the installing shard's")
             }
             ServerMsg::SnapshotRecords { .. } => {
-                panic!("A snapshot's records are the installing shard's")
+                return Err("A snapshot's records are the installing shard's")
             }
             ServerMsg::SnapshotCleaned { .. } => {
-                panic!("A cleaned install is the installing shard's")
+                return Err("A cleaned install is the installing shard's")
             }
-            ServerMsg::Digested { .. } => panic!("A digest is the scrubbing shard's"),
-            ServerMsg::Quarantine { .. } => panic!("A quarantine is the holding shard's"),
-            ServerMsg::RepairDone { .. } => panic!("A repair driver is one shard's"),
-            ServerMsg::BackupDone { .. } => panic!("A backup driver is one shard's"),
-            ServerMsg::RestoreDone { .. } => panic!("A restore driver is one shard's"),
-            ServerMsg::GroupHandle { .. } => panic!("A group handle is one shard's"),
-            ServerMsg::MoveDone { .. } => panic!("A move driver is one shard's"),
-            ServerMsg::TabletsDropped { .. } => panic!("A dropped copy is the retiring shard's"),
-            ServerMsg::RepairInstall { .. } => panic!("A repair install is the holding shard's"),
-            ServerMsg::RepairRotate { .. } => panic!("A rotation is one shard's"),
-            ServerMsg::SnapshotBuilt { .. } => panic!("A built snapshot is the cutting shard's"),
-            ServerMsg::ReplicationView(_) => panic!("A replication view is asked of one shard"),
-            ServerMsg::ReplicationVerb { .. } => panic!("A replication verb is for one shard"),
-            ServerMsg::ReadVerb { .. } => panic!("A read verb is for one shard"),
-            ServerMsg::ReleaseHeld => panic!("A release is for the shard that held"),
+            ServerMsg::Digested { .. } => return Err("A digest is the scrubbing shard's"),
+            ServerMsg::Quarantine { .. } => return Err("A quarantine is the holding shard's"),
+            ServerMsg::RepairDone { .. } => return Err("A repair driver is one shard's"),
+            ServerMsg::BackupDone { .. } => return Err("A backup driver is one shard's"),
+            ServerMsg::RestoreDone { .. } => return Err("A restore driver is one shard's"),
+            ServerMsg::GroupHandle { .. } => return Err("A group handle is one shard's"),
+            ServerMsg::MoveDone { .. } => return Err("A move driver is one shard's"),
+            ServerMsg::TabletsDropped { .. } => {
+                return Err("A dropped copy is the retiring shard's")
+            }
+            ServerMsg::RepairInstall { .. } => {
+                return Err("A repair install is the holding shard's")
+            }
+            ServerMsg::RepairRotate { .. } => return Err("A rotation is one shard's"),
+            ServerMsg::SnapshotBuilt { .. } => {
+                return Err("A built snapshot is the cutting shard's")
+            }
+            ServerMsg::ReplicationView(_) => {
+                return Err("A replication view is asked of one shard")
+            }
+            ServerMsg::ReplicationVerb { .. } => return Err("A replication verb is for one shard"),
+            ServerMsg::ReadVerb { .. } => return Err("A read verb is for one shard"),
+            ServerMsg::ReleaseHeld => return Err("A release is for the shard that held"),
             // a subscription and an admin request go to the accepting shard alone
-            ServerMsg::Subscribe { .. } => panic!("A subscription is for one shard"),
-            ServerMsg::Admin { .. } => panic!("An admin request is for one shard"),
+            ServerMsg::Subscribe { .. } => return Err("A subscription is for one shard"),
+            ServerMsg::Admin { .. } => return Err("An admin request is for one shard"),
             ServerMsg::Shutdown => ServerMsg::Shutdown,
-        }
+        };
+        Ok(copy)
     }
 }
 

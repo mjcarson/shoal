@@ -149,7 +149,9 @@ it, and a slow follower blocks neither the other follower nor the shard's other 
 holds a consensus or storage resource while waiting on a queue whose consumer needs it. The
 local kanal mesh between a node's own shards is unbounded as a channel and bounded at
 admission: a query routed to a shard whose queue holds `networking.max_queued_queries`
-messages is shed at once ([Resolved #15](../appendix/resolved/shard-mesh-admission.md)).
+messages is shed at once ([Resolved #15](../appendix/resolved/shard-mesh-admission.md)). A
+client connection is bounded the way a peer lane is: one owing `networking.max_queued_replies`
+answers is not read until they drain ([the remainder](../appendix/resolved/backlog-bounds.md)).
 
 ### Compatibility and the wire version
 

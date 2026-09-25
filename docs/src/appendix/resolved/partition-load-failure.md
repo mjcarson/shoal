@@ -1,9 +1,11 @@
 # 16, 51. A partition read that failed panicked its shard and stranded its queries
 
-*Partial fixes of [item 16](../known-issues.md#16-panics-on-the-hot-path) and
+*Partial fixes of [item 16](hot-path-panics.md) and
 [item 51](response-error-channel.md).
-Item 16's other twelve panic sites and item 51's early exits inside `load_partition` are still
-open; both entries say which half is which.*
+~~Item 16's other twelve panic sites and item 51's early exits inside `load_partition` are still
+open; both entries say which half is which.~~ Both are closed: item 51's exits by
+[Resolved #56, 61](response-error-channel.md), and item 16's other sites by
+[Resolved #16](hot-path-panics.md).*
 
 ## Symptom
 
@@ -44,7 +46,8 @@ the only thing that drains a table's `blocked` map** (`.../persistent/sorted.rs:
 `.../persistent/unsorted.rs:310-314`). Every query parked on a partition is waiting for a
 `ServerMsg::Partition` that only a successful read sends. A read that fails and says nothing
 leaves those queries parked for the life of the process, and their clients waiting, because
-there is no timeout anywhere ([item 15](../known-issues.md#15-no-backpressure-anywhere-the-remainder)).
+there was no timeout anywhere (the Timeouts entry in [todos](../todos.md), since answered by
+[Resolved #33](gather-expiry.md)).
 
 So the loader had two ways to fail and neither was survivable: panic the shard, or strand the
 queries silently. The `todo!()` was the first.
@@ -182,7 +185,10 @@ log is what stops it being silent.
 
 ## Still open
 
-- Item 16's other twelve panic sites, none of them on the storage read path.
+- ~~Item 16's other twelve panic sites, none of them on the storage read path.~~ **Done** —
+  [Resolved #16](hot-path-panics.md). Two of them were on the storage read path after all: the
+  request to the loader that `block_on_load` unwrapped, which fails once the loader built here
+  has gone, and now answers `StorageRead` through the same slots a released query fills.
 - ~~Item 51's remainder: `load_partition`'s own early exits, which still return `Err` past the
   drain of `blocked`. `fail_partition` now exists and does the releasing, so this is a matter of
   routing those errors into it.~~ **Done** — [Resolved #56, 61](response-error-channel.md), and the
@@ -199,8 +205,11 @@ log is what stops it being silent.
   than merely mislead, and it is routed into the `Fatal` class and the release path built here.
   The filed fix direction was wrong about why: `get_archive` has no caller that wants the file
   created, so nothing had to be split.
-- Nothing bounds how many reads are in flight, and each holds a duplicated file handle. That is
-  what makes `Retryable` worth having, and it is [item 15](../known-issues.md#15-no-backpressure-anywhere-the-remainder).
+- ~~Nothing bounds how many reads are in flight, and each holds a duplicated file handle. That is
+  what makes `Retryable` worth having, and it is item 15.~~ At most one read per partition is in
+  flight, and since [the remainder of item 15](backlog-bounds.md) the queries parked on reads are
+  bounded by `networking.max_parked_queries`; the number of distinct partitions being read is
+  bounded by that and nothing smaller.
 
 ## Tests
 
@@ -216,8 +225,8 @@ log is what stops it being silent.
 
 ## Related
 
-- [Item 15](../known-issues.md#15-no-backpressure-anywhere-the-remainder) — no timeouts, which is why a
-  stranded query is stranded permanently rather than briefly.
+- [Item 15](backlog-bounds.md) — at the time no timeouts either, which is why a stranded query was
+  stranded permanently rather than briefly; the parked set it was stranded in is now bounded.
 - [~~Item 33~~ Resolved #33](gather-expiry.md) — this was the
   concrete route by which a `Gather` leaked. That route is closed, ~~the general defect is not~~
   and since [F41](../../features/read-consistency.md) the general defect is too: a gather
