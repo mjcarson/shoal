@@ -400,3 +400,25 @@ keyword partitions, exactly the backup's records, and a `verify` found 0 missing
 
 **Verdict:** backup **pass**; restore **pass** with #153, and a restore that fails part way is
 still unrecoverable (155).
+
+### Fill a node's disk
+
+hyperion's storage moved onto a 2 GiB ext4 filesystem on a loop device, through an inventory group
+of its own, so a full disk stayed inside the test and away from the host's root. Then the dataset
+was loaded.
+
+- **The disk filled 70 s in.** hyperion's WAL writes failed with ENOSPC, and openraft stopped every
+  group core on the node with a fatal storage error (`when Write Log`), on groups hyperion led and
+  groups it followed alike. The node stayed up, its copies serving nothing, as a dead core is
+  documented to do ("until the process restarts").
+- **Writes through hyperion failed from then on**, `Unavailable: writing to group …: when Write
+  Log`, rather than going to the groups' new leaders elsewhere. The loader, connected to every
+  member, stopped at them. Groups led elsewhere kept committing on europa and titan.
+- **Nothing was corrupted.** With the filesystem grown to 4 GiB online and hyperion restarted, it
+  started at once, caught up, and every movie and keyword partition read through hyperion alone at
+  `One` equalled the csv.
+
+**Verdict:** durability **pass**. Availability through a node with a full disk **fail**, filed as
+[known issue 156](../appendix/known-issues.md#156-a-full-disk-stops-every-group-on-a-node-until-it-is-restarted).
+Cleaning up also found `cluster destroy` unable to remove a storage path that is itself a mount
+point ([known issue 157](../appendix/known-issues.md#157-cluster-destroy-fails-on-a-storage-path-that-is-a-mount-point)).

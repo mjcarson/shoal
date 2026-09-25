@@ -464,6 +464,26 @@ and against the same files, would finish it: every other group is verified and i
 again. Found by the [distributed cluster testing](../cluster-testing/correctness.md#back-up-destroy-and-restore)
 chapter.
 
+### 156. A full disk stops every group on a node until it is restarted
+
+When a node's WAL write fails for want of space, openraft stops the core of every group the write
+was for with a fatal storage error, and the shard's probe marks each copy dead "until the process
+restarts" (`probe_cores`). Nothing refuses writes while the disk nears full: `disk_reserve` guards
+snapshot installs, not appends. And a write coordinated through the node goes to its own dead core,
+failing `Unavailable` for as long as the node runs, rather than hopping to the group's new leader.
+Found on the lab ([cluster testing](../cluster-testing/correctness.md#fill-a-node-s-disk)), where
+a loader connected to every member stopped at those writes. Nothing was corrupted: freed and
+restarted, the node caught up exactly. The fixes it needs are three and separate: shed appends
+below a reserve with a retriable refusal, hop a write whose local core is dead to the group's
+leader, and restart a dead core once space returns.
+
+### 157. `cluster destroy` fails on a storage path that is a mount point
+
+`cluster destroy` removes each node's storage directory with the directory itself. When the
+directory is a mount point, as the disk-full test's loop filesystem was, the removal fails
+(`Device or resource busy`) and the command stops with the node half destroyed. Emptying the
+directory rather than removing it would work for both.
+
 ---
 
 ## Low — hygiene and documentation drift
