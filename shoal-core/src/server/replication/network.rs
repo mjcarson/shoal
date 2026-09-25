@@ -460,6 +460,16 @@ impl RateLimiter {
 struct Shared {
     /// One link per peer node, opened on first use
     links: RefCell<HashMap<NodeId, Rc<ReplicationLink>>>,
+    /// When this shard last heard anything from each peer node over the replication lane,
+    /// a request it sent or an answer to one of this shard's
+    ///
+    /// A follower expects a heartbeat from its group's leader every tenth of the failover
+    /// base, so a leader heard from not at all for seconds is cut off, whatever this shard's
+    /// own link to it has outstanding ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)).
+    heard: RefCell<HashMap<NodeId, Instant>>,
+    /// How long a peer may be silent before a write is not hopped to it: four heartbeats at the
+    /// failover base the map carries, and never under `HOP_SILENCE`
+    hop_silence: Cell<Duration>,
     /// One bulk link per peer node, opened on the first snapshot sent to it, each with the
     /// number it was opened under ([F43](../../../../docs/src/features/node-recovery.md))
     bulk: RefCell<HashMap<NodeId, (u64, Rc<peer::Link>)>>,
@@ -528,6 +538,8 @@ impl ShardNetwork {
         ShardNetwork {
             shared: Rc::new(Shared {
                 links: RefCell::new(HashMap::new()),
+                heard: RefCell::new(HashMap::new()),
+                hop_silence: Cell::new(HOP_SILENCE),
                 bulk: RefCell::new(HashMap::new()),
                 next_bulk: Cell::new(1),
                 builder,
@@ -686,6 +698,50 @@ impl ShardNetwork {
         Some(link)
     }
 
+    /// Set the silence a hop is refused after from the failover base the groups run at
+    ///
+    /// A group heartbeats its followers every tenth of the base, so four heartbeats is a tenth
+    /// of that times four; a long base must not make a healthy leader look silent.
+    ///
+    /// # Arguments
+    ///
+    /// * `failover_ms` - The base, in milliseconds
+    pub fn set_failover_base(&self, failover_ms: u64) {
+        let heartbeats = Duration::from_millis(failover_ms.saturating_mul(4) / 10);
+        self.shared.hop_silence.set(heartbeats.max(HOP_SILENCE));
+    }
+
+    /// The silence after which a write is not hopped to a peer
+    #[must_use]
+    pub fn hop_silence(&self) -> Duration {
+        self.shared.hop_silence.get()
+    }
+
+    /// Note that a peer node was just heard from over the replication lane
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The peer
+    pub fn heard_from(&self, node: NodeId) {
+        self.shared.heard.borrow_mut().insert(node, Instant::now());
+    }
+
+    /// How long a peer node has been silent, if it was heard from before and not for `after`
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The peer
+    /// * `after` - How long silence has to last to count
+    #[must_use]
+    pub fn silent_for(&self, node: NodeId, after: Duration) -> Option<Duration> {
+        self.shared
+            .heard
+            .borrow()
+            .get(&node)
+            .map(|heard| heard.elapsed())
+            .filter(|silent| *silent >= after)
+    }
+
     /// Complete the RPC a response frame from a node answers
     ///
     /// # Arguments
@@ -694,6 +750,8 @@ impl ShardNetwork {
     /// * `head` - The response's head
     /// * `payload` - Its payload
     pub fn answered(&self, node: NodeId, head: &[u8], payload: Vec<u8>) {
+        // an answer is the peer speaking
+        self.heard_from(node);
         let Ok(raw) = <[u8; REPLICATE_RESPONSE_HEAD_LEN]>::try_from(head) else {
             return;
         };
@@ -752,11 +810,11 @@ impl ShardNetwork {
     }
 }
 
-/// How long a replication link may have RPCs outstanding with no answer before a write is not
-/// hopped over it
+/// The least silence from a peer after which a write is not hopped to it
 ///
 /// Four heartbeats at the default failover base: a leader replicating to anyone answers
-/// something several times in that long, and one that answers nothing is cut off or stopped.
+/// something several times in that long, and one that answers nothing is cut off or stopped. A
+/// longer base raises it to four of its own heartbeats (`ShardNetwork::set_failover_base`).
 const HOP_SILENCE: Duration = Duration::from_secs(2);
 
 /// The most a forwarded proposal holds back from the leader's budget for its answer's trip home
@@ -829,9 +887,14 @@ impl ShardPeer {
         };
         // a leader that has answered nothing for a while is not handed a write to wait on:
         // the refusal is definite, since nothing was sent, and the caller retries elsewhere
-        // rather than holding the write for its whole deadline
+        // rather than holding the write for its whole deadline. silent either way counts: this
+        // shard's own requests unanswered, or the leader's heartbeats to this follower stopped
         // ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md))
-        if let Some(silent) = link.silent_for(HOP_SILENCE) {
+        let silence = self.network.hop_silence();
+        if let Some(silent) = link
+            .silent_for(silence)
+            .or_else(|| self.network.silent_for(self.target.node, silence))
+        {
             return Err(RpcFailure::NotSent(format!(
                 "{} has answered nothing on the replication lane for {silent:?}; the write was not sent",
                 self.target.node

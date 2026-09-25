@@ -42,15 +42,24 @@ for 2.658s; the write was not sent".
 
 ## The fix
 
-`ReplicationLink` keeps `waiting_since`: since when RPCs have been outstanding on the link with no
-answer to any of them. It starts when the first request goes out on an idle link, restarts with
-every answer, and clears when nothing is pending. `ShardPeer::propose` refuses a hop over a link
-silent for `HOP_SILENCE` (two seconds) with `RpcFailure::NotSent`, which the proposal answers as
-`NotLeader`: definite, retriable, immediate (`shoal-core/src/server/replication/network.rs`).
+`ShardPeer::propose` refuses a hop to a peer that has been silent for four of the groups'
+heartbeats, and never less than two seconds, with `RpcFailure::NotSent`, which the proposal
+answers as `NotLeader`: definite, retriable, immediate
+(`shoal-core/src/server/replication/network.rs`). Silence is judged both ways:
 
-Every shard leads some groups that replicate to every other node, so a link carries requests,
-heartbeats at least, every tenth of the failover base. Two seconds of silence while requests are
-outstanding is a peer that is cut off or stopped.
+- **outbound:** `ReplicationLink::waiting_since`, since when this shard's RPCs over the link have
+  had no answer. It starts when the first request goes out on an idle link, restarts with every
+  answer, and clears when nothing is pending;
+- **inbound:** `ShardNetwork::heard`, when anything last arrived from the peer over the replication
+  lane, a request it sent or an answer to one of ours.
+
+The first cut judged only the outbound side, and the fixture test passed three runs in five: a
+coordinating shard that led no group replicating to the cut-off node had nothing outstanding on its
+link, so its hop was the first request and waited out its deadline. The inbound side covers it: a
+hop goes to a node believed to lead a group this shard follows, and a leader heartbeats its
+followers every tenth of the failover base, so it is heard from several times a second while it
+is reachable. The threshold follows the base (`set_failover_base`, on every map install), so a long
+base does not make a healthy leader look silent.
 
 On the lab, the rerun served 60,000–110,000 operations a second from two seconds into the partition
 until the next problem appeared, with writes to hyperion's groups refused `NotLeader` at once:
@@ -84,6 +93,8 @@ suppressing tens of thousands of lines, is the subject of
 - **`waiting_since` moves only with the pending set.** Starting it on the first outstanding
   request, never on an idle link, is what keeps a link that was merely quiet from reading as
   silent.
+- **A peer is judged silent only after it was heard from once**, and only against four of its own
+  heartbeats. A node never heard from, or one whose base is long, is hopped to as before.
 
 ## Still open
 
