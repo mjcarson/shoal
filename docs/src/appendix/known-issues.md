@@ -96,7 +96,7 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ **1,642 tests**, seven ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ **1,644 tests**, seven ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
@@ -112,7 +112,7 @@ fixture tests: two passed alone, and six could not bind ~~port 12000~~ ports 120
 because a deployed lab node held them on the same host ([Test Coverage](test-coverage.md)), since
 [resolved](resolved/fixture-default-peer-ports.md) as item 134. The
 [distributed cluster testing](../cluster-testing/overview.md) chapter's fixes (items 60, 130, 131,
-133 to 147, O62, O63, O65, O66, O67) and its driver added 23 and took it to 1,642 ([Test Coverage](test-coverage.md)).
+133 to 148, O62, O63, O65, O66, O67) and its driver added 25 and took it to 1,644 ([Test Coverage](test-coverage.md)).
 [Resolved #27](resolved/shql-quote-escape.md), [#32](resolved/client-gone-broadcast.md),
 [#36](resolved/staged-tail-deadline.md) and [#125](resolved/retry-unknown-outcome.md) added 11
 and took it to 1,587. There are two new binaries, `retry_outcome.rs` (3) and `staged_flush.rs`
@@ -437,6 +437,9 @@ race, now fixed: *"the senders counted 6 transfers and node two installed 7"*. A
 an install when it lands, and its sender counts the transfer only when the end's answer reaches
 it, so a read of both in between finds one more install than transfers. The test now waits up
 to ten seconds for the senders' count.
+The `shoal-core` change for [#148](resolved/stale-intent-log-tail.md) was followed by one failure
+in the first four runs of `shoal/tests/persistent_unsorted_table.rs` at six threads, whose name the
+run did not keep, and none in the next nine.
 
 ---
 
@@ -1753,41 +1756,6 @@ an error. **Established by reading the source** while writing the golden key tes
 what `Hash for str` writes - `write_str`, which the std hasher contract spells as the bytes then
 `0xff` - and freeze the archived hash beside the live one in `partition_keys.rs` so the two cannot
 drift again.
-
-### 113. glommio's `DmaFile::open_at` unwraps `statfs` after a successful open
-
-`~/projects/claude/glommio/glommio/src/io/dma_file.rs:214`, `DmaFile::open_at`, the local fork
-the workspace builds against
-
-```rust
-let file = GlommioFile::open_at(dir, path, flags, mode).await?;
-let buf = statfs(path).unwrap();
-```
-
-The open goes through io_uring and the `statfs` is a synchronous call on the same path
-straight after it. A directory whose permissions change between the two - which is exactly
-what `UnreadableArchives` does to a table's archives in the storage tests - makes the second
-fail with `EACCES` on a path the first just opened, and the `unwrap` panics the task that
-called it. In a loader task that is a partition read that never answers, so every query parked
-on it waits to its deadline.
-
-**Established by running it**, once in twelve runs of `shoal/tests/persistent_unsorted_table.rs`
-at six threads while [Resolved #91, 107](resolved/compaction-retry.md) was being traced:
-
-```text
-thread 'unnamed-17' panicked at .../glommio/glommio/src/io/dma_file.rs:214:32:
-called `Result::unwrap()` on an `Err` value: EACCES
-```
-
-after which `a_get_whose_partition_cannot_be_read_does_not_hang` failed on its first get's
-twenty-second timeout rather than on its answer.
-
-**Fix direction, taken in the fork's working tree the same day and not yet committed there:**
-`fstatfs` on the descriptor just opened, which cannot disagree with the open, with its error
-returned the way the open's is. The workspace builds against the fork by path, so it builds
-against that change now; this item closes when the fork commits it. Shoal's side has nothing
-to change: a load that panics is a load that never answers, and the fix for that is the open
-not panicking.
 
 ### 117. A restore under the fixture suite's load finds its target table not yet empty
 

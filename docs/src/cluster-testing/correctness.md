@@ -318,3 +318,27 @@ socket buffers and were answered once it ran again, which no server change can s
 
 **Verdict:** correctness **pass**; with #146 and #147, a paused node, the control leader included,
 costs its own writes a second or two around the resume and leaves the record right.
+
+### Kill every node at once
+
+Fifteen seconds into the mixed bench, every node's process is sent `SIGKILL` at the same moment
+(`target/lab/kill-all.sh`), and `Restart=on-failure` starts each one again. This is a power cut
+without the power cut: the page cache survives, so it tests what the processes wrote and synced,
+not what the devices kept.
+
+**t12, the first run.** europa and titan were back in about ten seconds. Writes were refused
+`NotLeader` until elections finished, and 20 s after the kill the cluster served 36,000–49,000
+operations a second. **hyperion never started again**: thirteen restarts, each failing
+`ShardFailed { shard: 1, error: "Rkyv(Error { inner: Failure })" }` while replaying its Movie
+table's archive map intent log. Every one of the 306,375 acknowledged inserts was read back
+through europa and titan.
+
+The damaged log held, past its logical end, archive records of the same table, with framing and
+checksums that an intent shares, in the tail of its last 128 KiB block. A partial flush writes a
+whole buffer, and glommio recycles buffers without zeroing them. A scan of the other nodes' logs,
+copied while they ran, found **titan's** Movie `Shard-5` log damaged the same way. titan would not
+have started again either, and with hyperion down that would have lost the cluster's quorum.
+Fixed as [#148](../appendix/resolved/stale-intent-log-tail.md), in the glommio fork and in the
+reader.
+
+**Verdict:** correctness of acknowledged data **pass**. Recovery **fail** until #148.

@@ -111,9 +111,8 @@ the queries parked on it.
 - glommio's `DmaFile::open_at` unwrapped `statfs(path)` after a successful open; a directory
   whose permissions change between the two panicked the task that opened the file, which is a
   load that never answers. Four of nineteen runs here once the compactor stopped dying. Fixed in
-  the fork's working tree by `fstatfs` on the descriptor and filed as
-  [item 113](../known-issues.md#113-glommios-dmafileopen_at-unwraps-statfs-after-a-successful-open)
-  until the fork commits it.
+  the fork's working tree by `fstatfs` on the descriptor and filed as item 113 until the fork
+  commits it. ~~Open~~ [Resolved #113](glommio-open-statfs.md): the fork committed it.
 
 ## Tests
 

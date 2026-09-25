@@ -247,10 +247,24 @@ impl SerializedMap {
         let mut reader = IntentLogReader::new(intent_path).await?;
         // read all of the intent from this intent log
         while let Some(read) = reader.next_buff().await? {
-            // try to deserialize this archive entry from our intent log
-            let archived = rkyv::access::<ArchivedMapIntent, rkyv::rancor::Error>(&read[..])?;
-            // deserialize this entry
-            let intent = rkyv::deserialize::<MapIntent, rkyv::rancor::Error>(archived)?;
+            // try to deserialize this archive entry from our intent log. A whole frame that is
+            // no intent can only be what a partial flush left past the log's end - recycled
+            // buffer memory, whose archive records share an intent's framing and checksum -
+            // so it ends the log the way a torn frame does, rather than failing the shard
+            // ([Resolved #148](../../../../../../docs/src/appendix/resolved/stale-intent-log-tail.md))
+            let decoded = rkyv::access::<ArchivedMapIntent, rkyv::rancor::Error>(&read[..])
+                .and_then(rkyv::deserialize::<MapIntent, rkyv::rancor::Error>);
+            let intent = match decoded {
+                Ok(intent) => intent,
+                Err(error) => {
+                    tracing::warn!(
+                        "A frame at position {} of {} is no map intent ({error}) - treating it as the end of the intent log",
+                        reader.position,
+                        intent_path.display()
+                    );
+                    break;
+                }
+            };
             // add this map intent to our map
             match intent {
                 MapIntent::DeleteArchive(id) => {
@@ -974,7 +988,9 @@ impl ArchiveMap {
 
 #[cfg(test)]
 mod tests {
+    use glommio::io::{DmaFile, DmaStreamWriterBuilder, OpenOptions};
     use glommio::LocalExecutor;
+    use futures::AsyncWriteExt;
     use std::hash::Hasher;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -1152,6 +1168,122 @@ mod tests {
                 reader.device_reads
             );
             reader.close().await.expect("a close");
+        });
+    }
+
+    /// An archive entry for a key, somewhere in a made up archive
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition's key
+    fn entry_for(key: u64) -> ArchiveEntry {
+        ArchiveEntry {
+            key,
+            archive: Uuid::nil(),
+            offset: key * 128,
+            size: 128,
+        }
+    }
+
+    /// Frame some bytes the way an archive record is framed, which is how an intent is too
+    ///
+    /// # Arguments
+    ///
+    /// * `payload` - What the record holds
+    fn archive_framed(payload: &[u8]) -> Vec<u8> {
+        // the same checksum an intent carries, over the payload alone
+        let mut hasher = GxHasher::default();
+        hasher.write(payload);
+        let mut record = Vec::with_capacity(16 + payload.len());
+        record.extend_from_slice(&payload.len().to_le_bytes());
+        record.extend_from_slice(&hasher.finish().to_le_bytes());
+        record.extend_from_slice(payload);
+        record
+    }
+
+    /// A whole frame past an intent log's end that is no intent ends the log (item 148)
+    ///
+    /// A partial flush wrote a whole aligned buffer, and what lay past the log's end in it was
+    /// recycled memory: on the lab, archive records of the same table, whose framing and
+    /// checksum an intent's share. After a crash the reader took the first one for an intent,
+    /// passed its checksum, failed to decode it, and failed the shard, so the node never started
+    /// again ([Resolved #148](../../../../../../docs/src/appendix/resolved/stale-intent-log-tail.md)).
+    #[test]
+    fn a_foreign_frame_past_an_intent_logs_end_ends_it() {
+        LocalExecutor::default().run(async {
+            let temp_dir = test_dir();
+            let path = temp_dir.path().join("intents");
+            // three intents, then an archive record the way the lab's file had one, then zeros
+            let mut log = Vec::new();
+            for key in 0..3u64 {
+                log.extend_from_slice(&framed(&MapIntent::Remove(key)));
+            }
+            log.extend_from_slice(&archive_framed(b"My Boss, My Hero2001-12-14/ovLJAwkA28f8lwLL5Pq"));
+            log.resize(4096, 0);
+            std::fs::write(&path, &log).expect("a log");
+            // every intent before it is applied, and the shard opens
+            let mut map = SerializedMap {
+                all_archives: HashSet::default(),
+                to_archive: std::collections::HashMap::default(),
+            };
+            for key in 0..4u64 {
+                map.to_archive.insert(key, entry_for(key));
+            }
+            map.load_intent_log(&path).await.expect("a log with a stale tail loads");
+            assert_eq!(map.to_archive.len(), 1, "the three removes were not applied");
+            assert!(map.to_archive.contains_key(&3));
+        });
+    }
+
+    /// An intent log copied while it is written holds zeros past its end, never stale memory (item 148)
+    ///
+    /// What a crash leaves: the writer synced a partial buffer and was never closed, so nothing
+    /// truncated the file to its end. glommio recycles DMA buffers without zeroing them, and a
+    /// partial flush wrote the whole buffer
+    /// ([Resolved #148](../../../../../../docs/src/appendix/resolved/stale-intent-log-tail.md)).
+    #[test]
+    fn an_intent_log_synced_but_not_closed_holds_zeros_past_its_end() {
+        LocalExecutor::default().run(async {
+            let temp_dir = test_dir();
+            let path = temp_dir.path().join("intents");
+            let file = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .dma_open(&path)
+                .await
+                .expect("a file");
+            // recycled buffers full of archive records, which a fresh allocation may reuse
+            let record = archive_framed(&[b'x'; 360]);
+            let pollute = |file: &DmaFile| {
+                for _ in 0..16 {
+                    let mut stale = file.alloc_dma_buffer(128 * 1024);
+                    for chunk in stale.as_bytes_mut().chunks_mut(record.len()) {
+                        let len = chunk.len();
+                        chunk.copy_from_slice(&record[..len]);
+                    }
+                    drop(stale);
+                }
+            };
+            pollute(&file);
+            let mut writer = DmaStreamWriterBuilder::new(file.dup().expect("a dup"))
+                .with_buffer_size(128 * 1024)
+                .build();
+            // intents, synced the way the compactor syncs its map writer
+            let mut written = 0usize;
+            for key in 0..100u64 {
+                let frame = framed(&MapIntent::Remove(key));
+                written += frame.len();
+                writer.write_all(&frame).await.expect("a write");
+            }
+            pollute(&file);
+            writer.sync().await.expect("a sync");
+            // the file as a crash leaves it
+            let on_disk = std::fs::read(&path).expect("the file");
+            let stale = on_disk[written..].iter().filter(|byte| **byte != 0).count();
+            assert_eq!(stale, 0, "{stale} bytes past the intent log's end are not zero");
+            writer.close().await.expect("a close");
+            file.close().await.expect("a close");
         });
     }
 
