@@ -46,7 +46,7 @@ use crate::server::peer::handshake::PeerAddr;
 use crate::server::peer::{self, Frame, FrameKey, Lane, LinkEvent, LinkView, Local};
 use crate::shared::identity::{GroupId, NodeId, ShardAddr};
 use crate::shared::protocol::peer::{
-    checksum, ReplicateKind, ReplicateRequestHead, ReplicateResponseHead, ReplicateStatus,
+    checksum, ReplicateKind, ReplicateRequestHead, CAP_PRE_VOTE_V1, ReplicateResponseHead, ReplicateStatus,
     SnapshotBegin, SnapshotChunk, SnapshotEnd, SnapshotStatus, REPLICATE_RESPONSE_HEAD_LEN,
 };
 use crate::shared::protocol::MessageType;
@@ -256,6 +256,16 @@ impl ReplicationLink {
     #[must_use]
     pub fn wire_version(&self) -> u8 {
         self.link.negotiated().version
+    }
+
+    /// Whether the peer answers pre-votes, or nothing while the link is not up
+    ///
+    /// ([Resolved #144](../../../../docs/src/appendix/resolved/post-heal-elections.md))
+    #[must_use]
+    pub fn answers_pre_votes(&self) -> Option<bool> {
+        self.link
+            .negotiated_if_up()
+            .map(|negotiated| negotiated.has(CAP_PRE_VOTE_V1))
     }
 
     /// Send one RPC whose payload was encoded at a named version, and wait for its answer
@@ -1218,6 +1228,50 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
             .map_err(ShardPeer::unreachable)?;
         postcard::from_bytes(&answer).map_err(|error| {
             ShardPeer::unreachable(RpcFailure::Unreachable(format!("decoding vote: {error}")))
+        })
+    }
+
+    /// Ask the member whether it would grant a vote at the next term, without it moving its term
+    ///
+    /// A member whose build does not answer pre-votes is granted locally, which is openraft's
+    /// own default and what the election did before pre-vote was on; one that cannot be reached
+    /// is an error, never a grant, or a node cut off from every peer would grant itself a
+    /// quorum and stand at a new term anyway
+    /// ([Resolved #144](../../../../docs/src/appendix/resolved/post-heal-elections.md)).
+    async fn pre_vote(
+        &mut self,
+        rpc: VoteRequest<DataConfig>,
+        option: RPCOption,
+    ) -> Result<VoteResponse<DataConfig>, RPCError<DataConfig>> {
+        // whether the member's build answers a pre-vote, judged on the link it would go over
+        let answers = self
+            .peer
+            .network
+            .link(self.peer.target.node)
+            .and_then(|link| link.answers_pre_votes());
+        match answers {
+            // up with a peer that answers them: ask it
+            Some(true) => (),
+            // up with an older build: grant, as openraft does for a network without pre-vote
+            Some(false) => return Ok(VoteResponse::new(rpc.vote, None, true)),
+            // down: no answer, and so no grant
+            None => {
+                return Err(ShardPeer::unreachable(RpcFailure::NotSent(format!(
+                    "the link to {} is not up",
+                    self.peer.target.node
+                ))))
+            }
+        }
+        let payload = postcard::to_allocvec(&rpc).map_err(|error| {
+            ShardPeer::unreachable(RpcFailure::NotSent(format!("encoding pre_vote: {error}")))
+        })?;
+        let answer = self
+            .peer
+            .rpc(ReplicateKind::PreVote, self.group, payload, option.hard_ttl())
+            .await
+            .map_err(ShardPeer::unreachable)?;
+        postcard::from_bytes(&answer).map_err(|error| {
+            ShardPeer::unreachable(RpcFailure::Unreachable(format!("decoding pre_vote: {error}")))
         })
     }
 

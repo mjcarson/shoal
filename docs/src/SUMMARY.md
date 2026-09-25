@@ -257,6 +257,7 @@
   - [140. A shard read its intent logs one direct read per field, and a long one failed the start](appendix/resolved/intent-log-read-ahead.md)
   - [141. A stream that failed handed its channel, and its late answers, to the next stream](appendix/resolved/recycled-stream-channels.md)
   - [143. A write to a leader cut off by dropped packets waited out its whole deadline](appendix/resolved/silent-partition-hops.md)
+  - [144. A node cut off by dropped packets came back at a higher term and unseated healthy leaders](appendix/resolved/post-heal-elections.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

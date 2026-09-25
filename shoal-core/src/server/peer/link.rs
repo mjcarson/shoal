@@ -452,6 +452,15 @@ impl Link {
             .unwrap_or_else(|| Negotiated::floor(protocol_default_max()))
     }
 
+    /// What the link negotiated at its hello, or nothing while it is not up
+    ///
+    /// Unlike [`Link::negotiated`], which assumes the floor for a link that is down, this tells
+    /// a link that is down apart from one up with a peer that lacks a capability.
+    #[must_use]
+    pub fn negotiated_if_up(&self) -> Option<Negotiated> {
+        self.queue.borrow().negotiated
+    }
+
     /// Whether the link's owner let it go, after which nothing queued is ever written
     #[must_use]
     pub fn is_closed(&self) -> bool {

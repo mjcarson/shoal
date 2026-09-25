@@ -2289,8 +2289,10 @@ where
                 }
             }
         }
+        // once per flush per shard, so it is detail rather than news
+        // ([O66](../../../../../docs/src/appendix/optimizations.md#o66-a-partitioned-peer-floods-the-log))
         event!(
-            Level::INFO,
+            Level::DEBUG,
             marked,
             swept,
             flushed_generation = self.flushed_generation

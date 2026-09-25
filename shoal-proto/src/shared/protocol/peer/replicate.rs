@@ -108,6 +108,14 @@ pub enum ReplicateKind {
     /// leader's own lease is the first to lapse and it wins its own election back
     /// ([F45](../../../../../docs/src/features/replica-migration.md)).
     TransferLeader = 10,
+    /// The consensus library's pre-vote: would this member grant a vote at the next term
+    ///
+    /// The payload is the library's vote request; the member hands it to its handle, which
+    /// answers by the same lease and log rules as a vote without persisting one or moving its
+    /// term. Sent only over a link whose peer granted `CAP_PRE_VOTE_V1`, so a build that does
+    /// not know this kind never receives it
+    /// ([Resolved #144](../../../../../docs/src/appendix/resolved/post-heal-elections.md)).
+    PreVote = 11,
 }
 
 impl ReplicateKind {
@@ -135,6 +143,7 @@ impl ReplicateKind {
             8 => Ok(ReplicateKind::Applied),
             9 => Ok(ReplicateKind::Retired),
             10 => Ok(ReplicateKind::TransferLeader),
+            11 => Ok(ReplicateKind::PreVote),
             unknown => Err(ProtocolError::UnknownReplicateKind(unknown)),
         }
     }
@@ -153,6 +162,7 @@ impl ReplicateKind {
             ReplicateKind::Applied => "applied",
             ReplicateKind::Retired => "retired",
             ReplicateKind::TransferLeader => "transfer_leader",
+            ReplicateKind::PreVote => "pre_vote",
         }
     }
 }

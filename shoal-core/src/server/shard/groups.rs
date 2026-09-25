@@ -1837,7 +1837,9 @@ where
                     },
                     Err(error) => ReplicateReply::error(head.id, format!("decoding append_entries: {error}")),
                 },
-                ReplicateKind::Vote => match postcard::from_bytes::<openraft::raft::VoteRequest<DataConfig>>(&payload) {
+                // a vote, or a pre-vote asking whether one would be granted, judged by the same rules
+                // ([Resolved #144](../../../../docs/src/appendix/resolved/post-heal-elections.md))
+                ReplicateKind::Vote | ReplicateKind::PreVote => match postcard::from_bytes::<openraft::raft::VoteRequest<DataConfig>>(&payload) {
                     Ok(rpc) => {
                         // an empty volatile copy grants nothing to a candidate as empty as
                         // itself, so two members that lost their memory at once cannot elect
@@ -1858,13 +1860,19 @@ where
                             let refused = openraft::raft::VoteResponse::<DataConfig>::new(own_vote, None, false);
                             encode_reply(head.id, &refused)
                         } else {
-                            match raft.vote(rpc).await {
+                            // a pre-vote never persists a vote or moves this copy's term
+                            let answered = if head.kind == ReplicateKind::PreVote {
+                                raft.pre_vote(rpc).await
+                            } else {
+                                raft.vote(rpc).await
+                            };
+                            match answered {
                                 Ok(response) => encode_reply(head.id, &response),
-                                Err(error) => ReplicateReply::error(head.id, format!("vote: {error}")),
+                                Err(error) => ReplicateReply::error(head.id, format!("{}: {error}", head.kind.name())),
                             }
                         }
                     }
-                    Err(error) => ReplicateReply::error(head.id, format!("decoding vote: {error}")),
+                    Err(error) => ReplicateReply::error(head.id, format!("decoding {}: {error}", head.kind.name())),
                 },
                 // the lead handed to this member, or to another it is told about
                 // ([F45](../../../../docs/src/features/replica-migration.md))
@@ -3314,8 +3322,20 @@ fn group_config(
     let config = Config {
         cluster_name: format!("group-{group}"),
         heartbeat_interval: (base / 10).max(10),
+        // a follower that acknowledged replication within a heartbeat interval is not sent a
+        // heartbeat as well: the acknowledgement proves the same liveness and moves the lease
+        // the same way ([O65](../../../../docs/src/appendix/optimizations.md#o65-heartbeats-to-followers-that-just-acknowledged-replication)).
+        // openraft needs interval + this + a tick under the election timeout, and a tenth, a
+        // tenth and a fifth of a tenth are
+        heartbeat_min_interval: Some((base / 10).max(10)),
         election_timeout_min: base,
         election_timeout_max: base * 2,
+        // a member asks whether it would be granted before it stands, so one that nobody
+        // answers, or whose group still has a leader its peers hear from, never raises its
+        // term: a node cut off by dropped packets keeps its links up and is not isolated as
+        // #106 judges it, and its return at a higher term unseated healthy leaders
+        // ([Resolved #144](../../../../docs/src/appendix/resolved/post-heal-elections.md))
+        enable_pre_vote: Some(true),
         enable_leader_restore: Some(false),
         snapshot_policy: SnapshotPolicy::LogsSinceLast(cluster.replication.checkpoint_entries),
         max_in_snapshot_log_to_keep: cluster.replication.retained_entries,
@@ -3843,4 +3863,28 @@ mod tests {
             grace
         ));
     }
+    /// The timers a group runs with are the ones derived from the base, not openraft's defaults (O65)
+    ///
+    /// `group_config` falls back to openraft's defaults if its config does not validate, which
+    /// would silently drop every timer derived from the failover base; heartbeat suppression
+    /// adds a constraint (interval + minimum interval + a tick under the election timeout) that
+    /// could be the one that fails ([O65](../../../../docs/src/appendix/optimizations.md#o65-heartbeats-to-followers-that-just-acknowledged-replication)).
+    #[test]
+    fn a_group_config_keeps_the_timers_its_base_derives() {
+        let cluster = crate::server::conf::Cluster::default();
+        for base in [100u64, 1_000, 5_000, 30_000] {
+            let config = super::group_config(&cluster, base, crate::shared::identity::GroupId(7));
+            assert_eq!(config.election_timeout_min, base, "base {base}");
+            assert_eq!(config.election_timeout_max, base * 2, "base {base}");
+            assert_eq!(config.heartbeat_interval, base / 10, "base {base}");
+            assert_eq!(
+                config.heartbeat_min_interval,
+                Some(base / 10),
+                "base {base}: heartbeat suppression was not applied"
+            );
+            // and pre-vote is on (item 144)
+            assert_eq!(config.enable_pre_vote, Some(true), "base {base}");
+        }
+    }
+
 }

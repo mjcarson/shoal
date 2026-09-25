@@ -45,6 +45,11 @@ pub enum ControlKind {
     StatusReport = 6,
     /// A command a member proposes through the leader, answered with what applying it produced
     Propose = 7,
+    /// openraft's `VoteRequest` as a pre-vote: would the member grant it, without it moving its term
+    ///
+    /// Sent only to a peer that granted `CAP_PRE_VOTE_V1`
+    /// ([Resolved #144](../../../../../docs/src/appendix/resolved/post-heal-elections.md)).
+    PreVote = 8,
 }
 
 impl ControlKind {
@@ -69,6 +74,7 @@ impl ControlKind {
             5 => Ok(ControlKind::Join),
             6 => Ok(ControlKind::StatusReport),
             7 => Ok(ControlKind::Propose),
+            8 => Ok(ControlKind::PreVote),
             unknown => Err(ProtocolError::UnknownControlKind(unknown)),
         }
     }
@@ -84,6 +90,7 @@ impl ControlKind {
             ControlKind::Join => "join",
             ControlKind::StatusReport => "status_report",
             ControlKind::Propose => "propose",
+            ControlKind::PreVote => "pre_vote",
         }
     }
 }

@@ -17845,3 +17845,95 @@ async fn a_write_to_a_silently_cut_leader_fails_fast() -> Result<(), FixtureErro
     );
     Ok(())
 }
+
+/// Every group's term as one node sees it, by group
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node to ask
+fn group_terms(
+    cluster: &mut Cluster,
+    node: usize,
+) -> Result<std::collections::BTreeMap<u64, u64>, FixtureError> {
+    let view = groups_of(cluster, node)?;
+    Ok(view["shards"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
+        .filter_map(|group| Some((group["group"].as_u64()?, group["term"].as_u64()?)))
+        .collect())
+}
+
+/// A node cut off by dropped packets neither raises its terms nor unseats a leader when it heals (item 144)
+///
+/// A blackholed node's links stay up, so it is not isolated as #106 judges it and its groups
+/// kept standing for election, a term per timeout that nobody answered. On the lab it came
+/// back from twenty seconds at terms above every leader's and made healthy leaders on both
+/// other nodes step down, and the cluster served nothing for seconds at a time after the heal.
+/// With pre-vote a member first asks whether it would be granted, which nobody reachable
+/// answers and no leader's follower grants, so its term never moves
+/// ([Resolved #144](../../docs/src/appendix/resolved/post-heal-elections.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_silently_cut_node_rejoins_without_elections() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        // a short base, so the cut-off node's timers fire many times in the window
+        .primary_failover_after(Duration::from_secs(1))
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    // write through every group so each has a log
+    let addr = cluster.node(0).endpoints.client.to_string();
+    for key in 14_200..14_260u64 {
+        write_note_eventually(&addr, key, "before", Duration::from_secs(20)).await?;
+    }
+    // node one is cut off by dropped packets for ten election timeouts
+    let before = group_terms(&mut cluster, 1)?;
+    let control_before = cluster.node_mut(1).command("MEMBERS")?["ok"]["term"].as_u64().unwrap_or_default();
+    cluster.blackhole(1);
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    // what node one's groups stood at while cut off, read over its command lane
+    let isolated = group_terms(&mut cluster, 1)?;
+    let control_isolated = cluster.node_mut(1).command("MEMBERS")?["ok"]["term"].as_u64().unwrap_or_default();
+    eprintln!("node one's control term {control_before} before, {control_isolated} cut off");
+    // the control group stood for nothing either
+    assert!(
+        control_isolated <= control_before,
+        "node one's control term went from {control_before} to {control_isolated} while it was cut off"
+    );
+    // node zero's groups have elected around node one by now
+    let settled = group_terms(&mut cluster, 0)?;
+    cluster.heal(1);
+    // several election timeouts for node one to stand, and for the leaders it unseats to settle
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let healed = group_terms(&mut cluster, 0)?;
+    eprintln!("node one's terms before {before:?}, cut off {isolated:?}");
+    eprintln!("node zero's terms before the heal {settled:?}, after {healed:?}");
+    // node one stood for nothing while nobody answered it
+    for (group, term) in &isolated {
+        let was = before.get(group).copied().unwrap_or(0);
+        assert!(
+            *term <= was,
+            "group {group}'s term on node one went from {was} to {term} while it was cut off"
+        );
+    }
+    // and no leader on the healthy side was unseated by its return: one more term is a group
+    // handed back to its placement primary, more is an election
+    for (group, term) in &healed {
+        let was = settled.get(group).copied().unwrap_or(0);
+        assert!(
+            *term <= was + 1,
+            "group {group}'s term on node zero went from {was} to {term} after node one healed"
+        );
+    }
+    // and node one serves writes again
+    let one = cluster.node(1).endpoints.client.to_string();
+    write_note_eventually(&one, 14_260, "after", Duration::from_secs(20)).await?;
+    Ok(())
+}

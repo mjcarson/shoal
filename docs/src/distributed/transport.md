@@ -19,9 +19,9 @@ wrote), [F43](../features/node-recovery.md) (the snapshot stream), [F48](../feat
 | Lane | Port | Owned by | Carries | Byte bound |
 | --- | --- | --- | --- | --- |
 | `Data` (1) | `cluster.port` | every shard, `SO_REUSEPORT` | `Forward` / `Forwarded`: a bundle's shares as the client's bytes, answers and shares back | `transport.data_queue_bytes` per peer |
-| `Control` (2) | `cluster.control_port` | the control thread | the control group's `append_entries`, `vote` and `full_snapshot` as JSON; `Join`, `Ping`/`Pong`, `StatusReport`, `Propose` | `transport.control_queue_bytes` |
+| `Control` (2) | `cluster.control_port` | the control thread | the control group's `append_entries`, `vote`, `pre_vote` and `full_snapshot` as JSON; `Join`, `Ping`/`Pong`, `StatusReport`, `Propose` | `transport.control_queue_bytes` |
 | `Bulk` (3) | `cluster.port` | every shard | `SnapshotBegin`, `SnapshotChunk`, `SnapshotEnd`: a snapshot's bytes, routed to the target slot | `transport.bulk_queue_bytes` |
-| `Replication` (4) | `cluster.port` | every shard, one link per peer node per shard | `Replicate` / `ReplicateResponse`: the tablet groups' `AppendEntries`, `Vote`, `Propose`, `Snapshot` (`Begin`/`End`), `ReadBarrier`, `Digest`, `Quarantine`, `Applied`, `Retired`, `TransferLeader` as postcard under a 24 byte head | `transport.replication_queue_bytes` |
+| `Replication` (4) | `cluster.port` | every shard, one link per peer node per shard | `Replicate` / `ReplicateResponse`: the tablet groups' `AppendEntries`, `Vote`, `Propose`, `Snapshot` (`Begin`/`End`), `ReadBarrier`, `Digest`, `Quarantine`, `Applied`, `Retired`, `TransferLeader`, `PreVote` as postcard under a 24 byte head | `transport.replication_queue_bytes` |
 
 ```mermaid
 flowchart LR
@@ -164,8 +164,10 @@ wire is a range, `MIN_PEER_VERSION..=PROTOCOL_VERSION` (4 to 5), narrowed by
 its body is encoded at, a receiver refuses a frame above what was negotiated, and the one body
 with two codecs is the snapshot manifest. Every capability the build defines is required
 (`CAP_FORWARD_V1`, `CAP_CONTROL_RAFT_V1`, `CAP_BULK_SNAPSHOT_V1`, `CAP_MEMBERSHIP_V1`,
-`CAP_REPLICATION_V1`, `CAP_READ_CONSISTENCY_V1`); an optional one would be gated by
-`Negotiated::has`. The cluster's activated wire (`Activate { wire }`) is the committed boundary
+`CAP_REPLICATION_V1`, `CAP_READ_CONSISTENCY_V1`) except `CAP_PRE_VOTE_V1`, which is optional and
+gated by `Negotiated::has` where a pre-vote is sent
+([Resolved #144](../appendix/resolved/post-heal-elections.md)). The replication lane's
+`PreVote` kind is 11 and the control lane's is 8. The cluster's activated wire (`Activate { wire }`) is the committed boundary
 past which no member rolls back: a hello below it is `BelowActivatedWire`, and a node whose
 build is below it stops at start. Between a client and a node the version is exact at
 `CLIENT_WIRE_VERSION` and the hello's capability byte gates the read options section and the

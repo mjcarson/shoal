@@ -1399,6 +1399,11 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
     let config = Config {
         cluster_name,
         enable_leader_restore: Some(false),
+        // a member asks whether it would be granted before it stands, so one cut off by
+        // dropped packets, whose links stay up and so is not isolated as #106 judges it, does
+        // not come back at a term that unseats the leader
+        // ([Resolved #144](../../../../docs/src/appendix/resolved/post-heal-elections.md))
+        enable_pre_vote: Some(true),
         // a member that wins its identity from a copy of its directory holds a log shorter
         // than what its earlier run acknowledged - the copy was taken before those entries -
         // and the leader, which now dials the winner where it is, meets the reversion the

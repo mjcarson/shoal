@@ -65,11 +65,14 @@ version it does not read refuses it by name. Nothing is ever written that a memb
 could still roll back would meet.
 
 **Capabilities are intersected and load-bearing.** `Negotiated::capabilities` is `ours &
-theirs`; every bit this build defines is in `REQUIRED_CAPABILITIES`, since each is what some
+theirs`; ~~every bit this build defines is in `REQUIRED_CAPABILITIES`~~ every bit this build
+defines but `CAP_PRE_VOTE_V1` is in `REQUIRED_CAPABILITIES`, since each is what some
 version in the range acts on, and a peer without one is refused `CapabilityMissing` rather
-than half served. A capability a future build adds as optional is left out of that set and
+than half served. A capability a later build adds as optional is left out of that set and
 gated by `Negotiated::has` at the one place it is acted on, the way `CLIENT_CAP_READ_OPTIONS`
-gates a client.
+gates a client. The first was `CAP_PRE_VOTE_V1`
+([Resolved #144](../appendix/resolved/post-heal-elections.md)): a pre-vote goes only to a peer
+that granted it, and one to an older peer is granted locally.
 
 **The client lane is exact at `CLIENT_WIRE_VERSION`, which stayed at 4.** The client lane took
 no part in the change, so a client writes every frame at 4, a server answers a client at 4
@@ -231,7 +234,9 @@ into a new directory. The refusals say so now rather than naming a milestone.
   SNAPSHOT_V2_FROM_WIRE`.** The activation is the rollback boundary for disk because of this
   and nothing else.
 - **Every capability this build defines is in `REQUIRED_CAPABILITIES`** until one is made
-  optional on purpose, with a gate at the place it is acted on.
+  optional on purpose, with a gate at the place it is acted on. `CAP_PRE_VOTE_V1` is the one
+  made optional so far, gated in `GroupPeer::pre_vote` and `ControlPeer::pre_vote`
+  ([Resolved #144](../appendix/resolved/post-heal-elections.md)).
 - **A member's reported `wire_max` is its running build's, from `Local`, never copied from a
   record.**
 

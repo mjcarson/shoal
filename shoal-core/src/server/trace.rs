@@ -90,9 +90,29 @@ fn directives_from(env: Option<String>, conf: &Tracing) -> String {
     // RUST_LOG replaces the configured level entirely when it is set to anything
     match env {
         Some(directives) if !directives.trim().is_empty() => directives,
-        _ => conf.level.to_filter().to_string(),
+        _ => {
+            let level = conf.level.to_filter();
+            // openraft's per-heartbeat and per-replication-attempt lines are held to errors at
+            // any level that would show warnings: a peer cut off makes every group warn twice a
+            // heartbeat, a thousand lines a second on the lab, which journald suppressed in the
+            // tens of thousands while it and the node spent a slow host's cpu on them. The peer
+            // being gone is said once by the link and by the detector
+            // ([O66](../../../docs/src/appendix/optimizations.md#o66-a-partitioned-peer-floods-the-log))
+            if level >= tracing_subscriber::filter::LevelFilter::WARN {
+                format!("{level},{QUIET_REPEATING}")
+            } else {
+                level.to_string()
+            }
+        }
     }
 }
+
+/// The targets that log once per heartbeat or replication attempt, held to errors by default
+///
+/// `RUST_LOG` replaces the whole default, these included, so anyone who wants them back names
+/// them there.
+const QUIET_REPEATING: &str = "openraft::core::heartbeat=error,\
+openraft::engine::handler::replication_handler=error,openraft::replication=error";
 
 /// Setup local tracing to the console
 ///
@@ -710,7 +730,8 @@ mod tests {
     fn one_source_decides_what_every_layer_filters_on() {
         // the level a config names is the default
         let conf = Tracing::default().level(TraceLevel::Warn);
-        assert_eq!(super::directives_from(None, &conf), "warn");
+        let warn = format!("warn,{}", super::QUIET_REPEATING);
+        assert_eq!(super::directives_from(None, &conf), warn);
         // and RUST_LOG replaces it entirely rather than raising or lowering it
         assert_eq!(
             super::directives_from(Some("shoal_core=debug".to_owned()), &conf),
@@ -718,8 +739,27 @@ mod tests {
         );
         // an empty override is not an override, or a shell exporting RUST_LOG= would silence
         // everything rather than change nothing
-        assert_eq!(super::directives_from(Some(String::new()), &conf), "warn");
-        assert_eq!(super::directives_from(Some("  ".to_owned()), &conf), "warn");
+        assert_eq!(super::directives_from(Some(String::new()), &conf), warn);
+        assert_eq!(super::directives_from(Some("  ".to_owned()), &conf), warn);
+    }
+
+    #[test]
+    /// openraft's per-heartbeat lines are held to errors by default, and only where they would show (O66)
+    ///
+    /// A cut-off peer made every group on every node warn twice a heartbeat, and journald on the
+    /// lab suppressed tens of thousands of lines a node. The quieting directives are added only
+    /// at a level that would show warnings: at `Off` or `Error` they would turn those targets on
+    /// rather than down.
+    fn repeating_openraft_targets_are_quiet_by_default() {
+        // at info the quieting is appended to the level
+        let info = super::directives_from(None, &Tracing::default().level(TraceLevel::Info));
+        assert!(info.starts_with("info,"), "{info}");
+        assert!(info.contains("openraft::core::heartbeat=error"), "{info}");
+        // and every directive parses, or the filter would drop the whole string
+        assert!(tracing_subscriber::EnvFilter::try_new(&info).is_ok(), "{info}");
+        // at error and off it is left out, since it could only enable those targets
+        assert_eq!(super::directives_from(None, &Tracing::default().level(TraceLevel::Error)), "error");
+        assert_eq!(super::directives_from(None, &Tracing::default().level(TraceLevel::Off)), "off");
     }
 
     #[test]
