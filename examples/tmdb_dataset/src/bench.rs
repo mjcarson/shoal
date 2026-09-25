@@ -1038,6 +1038,10 @@ pub struct VerifyArgs {
     /// How many members read in parallel, each a share of the ids
     #[clap(long, default_value_t = 4)]
     pub parallel: usize,
+    /// Read through this member alone, by its place in the connect order printed at the start,
+    /// so with `--read one` it is that member's own copy that is compared with the csv
+    #[clap(long)]
+    pub member: Option<usize>,
 }
 
 /// A hash of one keyword row's sort key, so a partition's rows compare as a set of numbers
@@ -1091,7 +1095,14 @@ pub async fn verify(args: VerifyArgs) -> color_eyre::Result<()> {
         keywords.len(),
         started.elapsed()
     );
-    let clients = connect_targets(args.inventory.as_ref(), args.addr.as_deref()).await?;
+    let mut clients = connect_targets(args.inventory.as_ref(), args.addr.as_deref()).await?;
+    // one member alone, when asked: its own copy is what a `One` read through it serves
+    if let Some(member) = args.member {
+        let Some(client) = clients.get(member).cloned() else {
+            bail!("there is no member {member}: {} connected", clients.len());
+        };
+        clients = vec![client];
+    }
     let options = Level::options(Some(args.read));
     // movies: split the ids over parallel readers, each through a member
     let started = Instant::now();

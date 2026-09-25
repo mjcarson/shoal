@@ -348,3 +348,25 @@ kill then brought every node back after one restart each. Service was back 17 s 
 were read back through every member.
 
 **Verdict:** correctness of acknowledged data **pass**; recovery **pass** with #148.
+
+### Corrupt an archive, then scrub and repair it
+
+On the rebuilt cluster with the whole dataset, through `cluster admin` (the tab's command line,
+scripted, added for this test):
+
+1. **`repair Movie verify` on a healthy cluster:** all 18 Movie groups `Clean` in 46 s. Every
+   group's three copies were hashed and compared.
+2. **64 random bytes written into titan's largest Movie archive**, 200 MB in, in place, with the
+   node running (`dd … conv=notrunc`). The node reads its archives with direct I/O, so nothing
+   cached hid the damage.
+3. **`repair Movie verify` again:** 17 groups `Clean`, one `Divergent`, naming titan's copy
+   quarantined for `Checksum`, in 48 s. The corruption was found where it was and nowhere else.
+4. **`repair Movie repair`:** titan's copy was reinstalled from europa's, verified at its
+   boundary, and reported `Repaired`, in 95 s. A further `repair Movie verify` found every group
+   `Clean`.
+5. **Every row read back through titan alone** at `One`, which is titan's own copy
+   (`verify --member 2 --read one`, the option added for this): all 1,187,691 movies and 58,418
+   keyword partitions equal to the csv.
+
+**Verdict: pass.** Detection, quarantine and repair behaved as [F44](../features/repair.md) says,
+on real hardware and a real dataset.
