@@ -6,7 +6,9 @@ own eviction loop.
 
 ## Accounting
 
-One counter per shard, shared with all of its tables:
+One counter per shard, shared with all of its tables, and one budget per shard: `resources.memory`,
+or the shard's share of `resources.node_memory` where that is set
+([Resolved #149](../appendix/resolved/node-memory-budget.md)).
 
 ```rust
 memory_usage: Arc<RefCell<usize>>,

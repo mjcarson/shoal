@@ -500,6 +500,14 @@ fn default_retained_bytes() -> u64 {
 }
 
 /// The default window a write's identity may be retried within
+/// The longest WAL group commit delay a configuration may ask for
+const MAX_WAL_COMMIT_DELAY: Duration = Duration::from_millis(10);
+
+/// The default WAL group commit delay: none
+fn default_wal_commit_delay() -> DurationSpec {
+    DurationSpec(Duration::ZERO)
+}
+
 fn default_retry_window() -> DurationSpec {
     DurationSpec(Duration::from_secs(300))
 }
@@ -581,6 +589,14 @@ pub struct Replication {
     /// group remembers it ([F45](../../../../docs/src/features/replica-migration.md)).
     #[serde(default = "default_retry_window")]
     pub retry_window: DurationSpec,
+    /// How long a shard's WAL writer waits after a sync completes before it takes the next batch
+    ///
+    /// Appends that arrive in the wait join the batch, so a device whose syncs return quickly
+    /// syncs fewer, larger batches. Zero, the default, takes the next batch at once. It delays
+    /// only a writer that has just synced: the first append after an idle spell is written
+    /// straight away ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page)).
+    #[serde(default = "default_wal_commit_delay")]
+    pub wal_commit_delay: DurationSpec,
 }
 
 impl Default for Replication {
@@ -598,6 +614,7 @@ impl Default for Replication {
             snapshot_timeout: default_snapshot_timeout(),
             install_bytes: default_install_bytes(),
             retained_bytes: default_retained_bytes(),
+            wal_commit_delay: default_wal_commit_delay(),
             retry_window: default_retry_window(),
         }
     }
@@ -1430,6 +1447,13 @@ impl Cluster {
                 "cluster.replication.retained_bytes is under twice segment_bytes; the budget cannot hold two segments".to_string(),
             )));
         }
+        // a group commit delay is a wait added to every write's sync, so it is bounded well
+        // under anything a client would call slow
+        if self.replication.wal_commit_delay.duration() > MAX_WAL_COMMIT_DELAY {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                "cluster.replication.wal_commit_delay is over {MAX_WAL_COMMIT_DELAY:?}; it is added to every write's sync"
+            ))));
+        }
         // the timers the groups derive from the failover base have to be timers at all
         if self.primary_failover_after.duration() < Duration::from_millis(100) {
             return Err(ServerError::Shoal(ShoalError::InvalidConfig(
@@ -1950,6 +1974,7 @@ mod tests {
         assert_eq!(defaults.retry_window.duration(), Duration::from_secs(300));
         assert_eq!(defaults.install_bytes, 2 * 1024 * 1024 * 1024);
         assert_eq!(defaults.retained_bytes, 1024 * 1024 * 1024);
+        assert_eq!(defaults.wal_commit_delay.duration(), Duration::ZERO);
         // a block naming every field, in the sizes an operator writes
         let parsed: super::Replication = serde_yaml::from_str(
             "write_timeout: \"2s\"\npending_bytes: \"8MiB\"\nsegment_bytes: \"1MiB\"\ncheckpoint_entries: 64\nretained_entries: 128\nlog_cache_bytes: \"1MiB\"\nvolatile_log_bytes: \"4MiB\"\nsnapshot_chunk_bytes: \"256KiB\"\nsnapshot_timeout: \"1m\"\ninstall_bytes: \"64MiB\"\nretained_bytes: \"4MiB\"\nretry_window: \"2m\"\n",

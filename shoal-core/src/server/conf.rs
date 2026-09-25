@@ -35,9 +35,21 @@ pub struct Resources {
     /// threads.
     #[serde(default)]
     pub exclude_cores: Vec<usize>,
-    /// The max amount of memory to use in bytes
+    /// The max amount of memory to use in bytes, per shard: each shard evicts past it on its own
     #[serde(deserialize_with = "utils::deserialize_byte_size")]
     pub memory: usize,
+    /// The most memory the node's shards hold together, in bytes, divided evenly among them
+    ///
+    /// Where it is set, a shard's budget is the smaller of `memory` and its share of this. A
+    /// deployment names a node's memory, and a node runs as many shards as it has cores, so a
+    /// budget written as `memory` alone is multiplied by the core count
+    /// ([Resolved #149](../../../docs/src/appendix/resolved/node-memory-budget.md)).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "utils::deserialize_optional_byte_size"
+    )]
+    pub node_memory: Option<usize>,
 }
 
 impl Resources {
@@ -51,6 +63,34 @@ impl Resources {
     pub fn exclude_cores(mut self, exclude_cores: Vec<usize>) -> Self {
         self.exclude_cores = exclude_cores;
         self
+    }
+
+    /// Set the most memory the node's shards hold together, divided evenly among them
+    ///
+    /// # Arguments
+    ///
+    /// * `memory` - The node's budget
+    ///
+    /// # Errors
+    ///
+    /// When the size cannot be read.
+    pub fn node_memory<M: IntoStorageSize>(mut self, memory: M) -> Result<Self, ServerError> {
+        self.node_memory = Some(memory.into_bytes()?);
+        Ok(self)
+    }
+
+    /// The memory one shard may hold before it evicts, for a node running some number of shards
+    ///
+    /// # Arguments
+    ///
+    /// * `shards` - How many shards the node runs
+    #[must_use]
+    pub fn shard_budget(&self, shards: usize) -> usize {
+        // a node's budget is shared evenly, and never raises a shard past its own
+        match self.node_memory {
+            Some(node) => (node / shards.max(1)).min(self.memory),
+            None => self.memory,
+        }
     }
 
     /// Set the maximum amount of memory to use
@@ -1188,6 +1228,33 @@ mod tests {
         AuthMechanism, Conf, OtlpTracing, PathBuf, RemoteTracing, Resources, TraceLevel,
         DEFAULT_ITERATIONS, DEFAULT_MAX_FRAME_BYTES,
     };
+
+    /// A node's memory budget is shared among its shards, and never raises one past its own (item 149)
+    ///
+    /// Each shard evicts against its own budget, so a node's memory written as `memory` alone let a
+    /// node of six shards hold six times it, which on the lab was the kernel's OOM kill
+    /// ([Resolved #149](../../../docs/src/appendix/resolved/node-memory-budget.md)).
+    #[test]
+    fn a_nodes_memory_is_shared_among_its_shards() {
+        let gib = 1usize << 30;
+        // memory alone is every shard's own, as it always was
+        let per_shard = Resources::default().memory("8Gi").unwrap();
+        assert_eq!(per_shard.shard_budget(6), 8 * gib);
+        // a node's budget is divided evenly
+        let node = Resources::default()
+            .memory("8Gi")
+            .unwrap()
+            .node_memory("12Gi")
+            .unwrap();
+        assert_eq!(node.shard_budget(6), 2 * gib);
+        // and never lifts a shard past its own ceiling
+        assert_eq!(node.shard_budget(1), 8 * gib);
+        // a file names it the way it names memory
+        let (_dir, conf) = load("resources:\n  memory: 8Gi\n  node_memory: 6Gi\n");
+        let conf = conf.expect("a config with a node budget loads");
+        assert_eq!(conf.resources.node_memory, Some(6 * gib));
+        assert_eq!(conf.resources.shard_budget(6), gib);
+    }
 
     /// Write a config file into a temp dir and load it
     ///

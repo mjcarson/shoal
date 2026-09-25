@@ -198,7 +198,7 @@ so they get worse by existing longer rather than under load.
 | **B16** | [**O58**](#o58-a-rehomes-moved-records-are-copied-and-a-donors-archives-keep-the-dead-ones) — a rehome's moved records are copied, and a donor's archives keep the dead ones | Argued — a read and a write per moved record at start, and a growth's donor holding dead records until its own compaction | M | `macro/rehome/shrink`, whose `bytes` over `millis` is the copy's pace | Contained | no |
 | **B17** | [**O59**](#o59-the-rehome-runs-on-one-core-and-blocks-the-start) — the rehome runs on one core and blocks the start | Argued — the start held for the whole move while every other core idles | M | `macro/rehome/shrink`, whose `millis` is the hold | Contained | no |
 | **B18** | [**O60**](#o60-a-nodes-figures-ride-its-status-report-as-verbose-json) — a node's figures ride its status report as verbose JSON | Measured in shape — about 7.4 KB a report for four busy tables, one report in four, 1.6× the leader's intake at 64 members | S | none; the spike's `fanout` table prices it, and no arm drives a cluster of that size | Contained | no |
-| **B19** | [**O61**](#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page) — a fast device syncs the WAL in batches too small to fill a page | Measured on the lab — 6.8× the device writes of the slower hosts for the same replicated rows, 5.6k `fdatasync`s a second against 680 | S–M | the lab's insert `bench` with disk counters | Latency for wear | yes, on the lab |
+| ~~**B19**~~ | ~~[**O61**](#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page) — a fast device syncs the WAL in batches too small to fill a page~~ **done**, a per-node setting off by default | Measured on the lab — 6.8× the device writes of the slower hosts for the same replicated rows, 5.6k `fdatasync`s a second against 680 | S–M | the lab's insert `bench` with disk counters | Latency for wear | yes, on the lab |
 | ~~**B20**~~ | ~~[**O62**](#o62-every-compaction-rewrites-the-shards-whole-archive-map) — every compaction rewrites the shard's whole archive map~~ **done**, measured and kept | Measured — 70% of a node's writes under load, in bursts that stalled its fsyncs | S | the lab's mixed `bench` with bytes per file | A longer replay at start | it was |
 | ~~**B21**~~ | ~~[**O63**](#o63-leadership-never-returns-to-a-groups-placement-primary) — leadership never returns to a group's placement primary~~ **done**, measured and kept | Measured — one node leading every group cost about a sixth of the throughput and a quarter of the write p99 | S | the lab's mixed `bench`, skewed against spread | One transfer per group handed back | it was |
 | **B22** | [**O64**](#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab) — a shorter failover base halves write throughput on the lab | Measured — 1 s: 20–24k rows/s and 4 s failover; 5 s: 40–46k rows/s and 16 s failover | ? | the lab's load at each base | Crash failover against write throughput | yes, on the lab |
@@ -2818,7 +2818,7 @@ Filed by [F52](../features/cluster-stats.md).
 
 | | |
 | --- | --- |
-| **Rank** | **B19** — measured on the lab, contained |
+| **Rank** | ~~**B19**~~ **done** — applied as a per-node setting, measured on the lab; off by default |
 | **Impact** | Measured — on the three-node lab, one 30 s insert run wrote 16.6 GB to europa's Optane and 2.45 GB to each Zen1 host's NVMe for the same replicated rows: 6.8×. The node process itself was charged 4,776 MB of writeback on europa and about 875 MB on each other host for 554,450 inserts, and it issued 5.6k `fdatasync`s a second against about 680 on titan |
 | **Difficulty** | S to M — a group-commit delay in the WAL writer: once a batch completes, wait a bounded time for more frames before taking the next, but only while batches are arriving back to back |
 | **Depends on** | nothing |
@@ -2838,6 +2838,32 @@ unchanged at 16.6 GB, so this is not btrfs copying data. The remaining 1.8× bet
 writeback and the device's writes on europa, against 1.26× on ext4, is the filesystem's
 per-sync metadata. The group-commit delay is tried in [cluster testing](../cluster-testing/performance.md#o61-a-group-commit-delay),
 which records the outcome.
+
+**Applied:** `cluster.replication.wal_commit_delay`, at most 10 ms, zero by default. After each
+sync the shard's WAL writer waits that long before it takes the next batch, and appends that
+arrive in the wait join it (`writer` in `server/wal/mod.rs`, set by `ShardWal::set_commit_delay`
+at the shard's open). Only a writer that has just synced waits, so the first append after an idle
+spell is written at once. `a_commit_delay_groups_appends_into_fewer_syncs` checks the mechanism:
+200 appends half a millisecond apart took 200 syncs with no delay and 22 with 5 ms.
+
+**Outcome on the lab**, europa alone set in its `shoal.yml`, the insert bench at each setting,
+europa's syncs counted by a probe on its io_uring submissions and its device writes read from
+`/proc/diskstats`:
+
+| europa's delay | europa's syncs in 10 s | europa's device writes in 30 s | Cluster inserts | p50 | p99 |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 45,123 | 15.6 GB | 18,357/s | 25.3 ms | 506 ms |
+| 3 ms | 14,215 | 7.7 GB | 18,649/s | 25.3 ms | 520 ms |
+| 0 | 44,162 | 14.9 GB | 17,401/s | 25.9 ms | 601 ms |
+
+Three milliseconds cut europa's syncs by two thirds and its device writes by half, with the
+cluster's throughput and latency unchanged. A write's latency is set by the quorum, and a quorum
+always includes a Zen1 host whose own sync takes longer than the delay. An earlier sequence, 0,
+1 ms, 3 ms and 0 in that order, put 1 ms at 13.1 GB, −18%. Its throughput numbers could not be
+used, because the table's growth moved them by more than the settings did. **Kept, off by
+default.** On a device whose syncs are already slow, a batch fills while the last one syncs, and
+the delay would only add latency. It is for the fast device in a mixed cluster, which the lab
+has. A deployment inventory cannot set it per group yet, filed in [todos](todos.md).
 
 ### O62. Every compaction rewrites the shard's whole archive map
 

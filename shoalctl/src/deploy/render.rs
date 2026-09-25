@@ -50,8 +50,11 @@ pub struct ResourcesConf {
     /// Physical cores to keep off
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub exclude_cores: Vec<usize>,
-    /// The memory limit
+    /// The memory limit, per shard, which the node's budget below bounds
     pub memory: String,
+    /// The node's memory budget, which the server divides among the shards it runs
+    /// ([Resolved #149](../../../docs/src/appendix/resolved/node-memory-budget.md))
+    pub node_memory: String,
 }
 
 /// The `networking:` section
@@ -256,7 +259,10 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
         resources: ResourcesConf {
             cores: node.resources.cores,
             exclude_cores: node.resources.exclude_cores.clone(),
+            // the inventory names a node's memory; a node runs a shard per core, and each
+            // shard evicts against its own budget, so the node's is divided by the server
             memory: node.resources.memory.clone(),
+            node_memory: node.resources.memory.clone(),
         },
         networking: NetworkingConf {
             interface: "0.0.0.0".to_string(),
@@ -391,6 +397,29 @@ mod tests {
         quick.retire_after = Some("15s".into());
         let fourth = render(&quick, &a, &Entry::Bootstrap, "x").unwrap();
         assert!(fourth.contains("migration:\n    retire_after: 15s"));
+    }
+
+    /// A node's memory is written as the node's budget, which the server divides among its shards (item 149)
+    ///
+    /// The inventory's `memory` is a node's, and was written as `resources.memory`, which each
+    /// shard evicts against on its own: six cores made an 8 GiB node a 48 GiB one, and a lab node
+    /// on a 14 GB host was killed by the kernel for it
+    /// ([Resolved #149](../../../docs/src/appendix/resolved/node-memory-budget.md)).
+    #[test]
+    fn a_node_file_names_its_memory_as_the_nodes_budget() {
+        let server = std::env::current_exe().expect("the test binary");
+        let inventory: Inventory = serde_yaml::from_str(&format!(
+            "server: {}\nname: lab\nreplication_factor: 1\nresources: {{cores: 6, memory: 8Gi}}\nnodes:\n  - {{name: a, address: 10.0.0.1}}\n",
+            server.display()
+        ))
+        .expect("an inventory");
+        let a = inventory.node("a").unwrap();
+        let file = render(&inventory, &a, &Entry::Bootstrap, "x").unwrap();
+        let conf: serde_yaml::Value = serde_yaml::from_str(&file).unwrap();
+        // the node's budget, which the server shares among the shards it starts
+        assert_eq!(conf["resources"]["node_memory"].as_str(), Some("8Gi"), "{file}");
+        // and each shard's own ceiling is no more than the whole
+        assert_eq!(conf["resources"]["memory"].as_str(), Some("8Gi"), "{file}");
     }
 
     /// A node's own two directories are the ones its file names, each under its own writer

@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::io::{self, Cursor};
 use std::rc::Rc;
+use std::time::Duration;
 
 use futures::{Stream, StreamExt as _};
 use openraft::entry::RaftEntry as _;
@@ -1100,3 +1101,50 @@ fn checkpoint_and_retries_are_checksummed() {
         );
     });
 }
+
+/// A group commit delay lets appends that arrive back to back share a sync (O61)
+///
+/// On the lab europa's Optane returned a sync so fast that its WAL synced batches of a few
+/// hundred bytes, eight times as often as the slower hosts, and wrote 1.8 times the bytes for it.
+/// A writer that waits a moment after each sync takes everything appended meanwhile as one batch
+/// ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page)).
+#[test]
+fn a_commit_delay_groups_appends_into_fewer_syncs() {
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        // the same appends, spaced half a millisecond apart, with no delay and with five
+        let mut batches = Vec::new();
+        for delay in [Duration::ZERO, Duration::from_millis(5)] {
+            let dir = tempfile::tempdir().expect("failed to build a temp dir");
+            let wal = ShardWal::open(&dir.path().join("wal"), 1 << 30, 1 << 20)
+                .await
+                .expect("failed to open");
+            wal.set_commit_delay(delay);
+            let mut stores: Vec<GroupStore> =
+                (1..=4).map(|group| wal.store(GroupId(group))).collect();
+            let before = wal.synced_batches();
+            for round in 1..=50u64 {
+                for store in &mut stores {
+                    let (tx, _rx) = DataConfig::oneshot::<Result<(), io::Error>>();
+                    let callback = openraft::storage::IOFlushed::<DataConfig>::signal(tx);
+                    store
+                        .append(vec![normal(round, 200)], callback)
+                        .await
+                        .expect("failed to append");
+                    glommio::timer::sleep(Duration::from_micros(500)).await;
+                }
+            }
+            wal.flush().await.expect("failed to flush");
+            batches.push(wal.synced_batches() - before);
+        }
+        eprintln!("two hundred appends took {} syncs with no delay and {} with 5 ms", batches[0], batches[1]);
+        // every append with no delay is nearly a sync of its own; with it, a batch holds several
+        assert!(
+            batches[1] * 3 < batches[0],
+            "a 5 ms commit delay took {} syncs against {} without it",
+            batches[1],
+            batches[0]
+        );
+    });
+}
+

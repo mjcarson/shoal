@@ -405,6 +405,8 @@ where
         )
         .await
         .map_err(ServerError::IO)?;
+        // the group commit delay this node is configured with, none by default
+        wal.set_commit_delay(cluster.replication.wal_commit_delay.duration());
         // a sealed segment is the loop's to judge, so the writer tells it
         let sealed_tx = self.shard_local_tx.clone_sync();
         wal.on_sealed(Rc::new(move |generation| {

@@ -30,6 +30,22 @@ where
         .map_err(serde::de::Error::custom)
 }
 
+/// Deserialize an optional human byte size, like `"8Gi"`, into bytes
+///
+/// # Arguments
+///
+/// * `deserializer` - Where the size is read from
+pub fn deserialize_optional_byte_size<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    // an absent or null size is none, anything else is read the way a required one is
+    let byte_size: Option<Byte> = serde::de::Deserialize::deserialize(deserializer)?;
+    byte_size
+        .map(|size| size.as_u64().try_into().map_err(serde::de::Error::custom))
+        .transpose()
+}
+
 /// A trait for types that can be converted to a byte size (usize)
 ///
 /// This allows builder methods to accept strings like "4Gi", "100MB",

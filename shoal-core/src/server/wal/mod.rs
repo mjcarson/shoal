@@ -58,6 +58,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 use futures_channel::oneshot;
 use glommio::io::{BufferedFile, Directory, OpenOptions};
@@ -269,6 +270,11 @@ impl Batch {
 struct WalInner {
     /// The directory the segments are in
     dir: PathBuf,
+    /// How long the writer waits after a sync before it takes the next batch
+    /// ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page))
+    commit_delay: Duration,
+    /// How many batches have been written and synced
+    synced_batches: u64,
     /// Every group's logical log
     groups: HashMap<GroupId, GroupLog>,
     /// The generation appends go to
@@ -1191,6 +1197,14 @@ async fn writer(inner: Rc<RefCell<WalInner>>) {
             Ok(()) => complete_batch(&inner, batch),
             Err(error) => fail_batch(&inner, batch, error),
         }
+        // a group commit: after a sync, let the appends that arrive for a moment join the next
+        // batch rather than sync each on its own. Only a writer that just synced waits, so an
+        // append after an idle spell is still written at once
+        // ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page))
+        let delay = inner.borrow().commit_delay;
+        if !delay.is_zero() {
+            glommio::timer::sleep(delay).await;
+        }
     }
     // closing: sync whatever file is open and let it go
     if let Some((_, handle)) = file.take() {
@@ -1211,6 +1225,7 @@ fn complete_batch(inner: &Rc<RefCell<WalInner>>, batch: Batch) {
         let mut guard = inner.borrow_mut();
         guard.durable = (batch.generation, batch.end());
         guard.writing = false;
+        guard.synced_batches += 1;
         // a stalled group's completions are held; everybody else's fire now
         for (group, callback) in batch.callbacks {
             if guard.stalled.contains(&group) {
@@ -1286,6 +1301,8 @@ impl ShardWal {
         generations.sort_unstable();
         let mut inner = WalInner {
             dir: dir.to_path_buf(),
+            commit_delay: Duration::ZERO,
+            synced_batches: 0,
             groups: HashMap::new(),
             generation: 1,
             next_offset: 0,
@@ -1565,6 +1582,24 @@ impl ShardWal {
     #[must_use]
     pub fn held(&self) -> usize {
         self.inner.borrow().held.len()
+    }
+
+    /// Set how long the writer waits after a sync before it takes the next batch
+    ///
+    /// Zero takes the next batch at once, which is the default
+    /// ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page)).
+    ///
+    /// # Arguments
+    ///
+    /// * `delay` - The wait
+    pub fn set_commit_delay(&self, delay: Duration) {
+        self.inner.borrow_mut().commit_delay = delay;
+    }
+
+    /// How many batches have been written and synced since the WAL was opened
+    #[must_use]
+    pub fn synced_batches(&self) -> u64 {
+        self.inner.borrow().synced_batches
     }
 
     /// Wait until every queued batch is durable

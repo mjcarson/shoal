@@ -1468,6 +1468,9 @@ pub(super) struct Shard<D: ShoalDatabase> {
     tasks: Vec<Task<Result<(), ServerError>>>,
     /// The total size of all data on this shard
     memory_usage: Arc<RefCell<usize>>,
+    /// How much data this shard holds before it evicts: its share of the node's budget
+    /// ([Resolved #149](../../../docs/src/appendix/resolved/node-memory-budget.md))
+    memory_budget: usize,
     /// The most recently used tables/partitions on this shard
     lru: Arc<RefCell<LruCache<(D::TableNames, u64), usize, BuildHasherDefault<GxHasher>>>>,
     /// The address our client listener bound, once it has
@@ -1674,6 +1677,7 @@ where
             _medium_priority: medium_priority,
             tasks: Vec::with_capacity(100),
             memory_usage,
+            memory_budget: conf.resources.shard_budget(shard_count),
             lru,
             bound: None,
             peer_setup,
@@ -4393,7 +4397,7 @@ where
                 self.handle_flushed().await?;
             }
             // check if we need to evict any data
-            if *self.memory_usage.borrow() > self.conf.resources.memory {
+            if *self.memory_usage.borrow() > self.memory_budget {
                 // try to evict our least recently used data
                 self.evict_data().await?;
             }

@@ -28,6 +28,7 @@ than Shoal says so.
 | [146](../appendix/resolved/apply-wait-on-a-lagging-copy.md) | [Pause one node](correctness.md#pause-one-node) | Writes through a node resumed after a 20 s `SIGSTOP` waited for its copy to apply its whole backlog: up to 5.3 s for twelve seconds | **Fixed.** The apply wait is bounded at two heartbeat intervals |
 | [147](../appendix/resolved/paused-detector-verdicts.md) | [Pause one node](correctness.md#pause-one-node) | A control leader paused and resumed called the live members down by its own silence; the new leader it called down stayed `down` for good, and `cluster upgrade` refused to run | **Fixed.** A stalled loop re-seeds its detector; a leader held down commits itself up |
 | [148](../appendix/resolved/stale-intent-log-tail.md) | [Kill every node at once](correctness.md#kill-every-node-at-once) | After `SIGKILL`, hyperion never started again: its archive map's intent log held recycled DMA buffer memory past its end, archive records whose framing an intent shares. titan's log was damaged the same way while running | **Fixed** in the glommio fork (a partial flush zeroes its buffer's tail) and in the reader (a frame that is no intent ends the log) |
+| [149](../appendix/resolved/node-memory-budget.md) | The O61 experiment | hyperion was killed by the kernel's OOM killer at 14 GB resident: the inventory's 8 GiB node budget was rendered as every one of six shards' budget, so nothing was ever evicted | **Fixed.** `resources.node_memory`, divided among a node's shards, which the renderer writes |
 
 ## Deployment and lab findings
 
@@ -41,7 +42,7 @@ than Shoal says so.
 
 | O | What | Outcome |
 | --- | --- | --- |
-| [O61](../appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page) | A fast device syncs the WAL in batches too small to fill a page | See [the experiment](performance.md#o61-a-group-commit-delay) |
+| [O61](../appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page) | A fast device syncs the WAL in batches too small to fill a page | **Applied as a per-node setting, off by default.** 3 ms on europa: syncs −68%, device writes −50%, cluster throughput and p99 unchanged |
 | [O62](../appendix/optimizations.md#o62-every-compaction-rewrites-the-shards-whole-archive-map) | Every compaction rewrote the shard's whole archive map: 70% of a node's writes | **Applied and kept.** Map saves 1,573 MB → 26 MB over the same run, worst write down by a third |
 | [O65](../appendix/optimizations.md#o65-heartbeats-to-followers-that-just-acknowledged-replication) | A heartbeat to every follower every tenth of the base, even under sustained replication | **Applied, no measurable effect, kept.** Not the cause of O64 |
 | [O67](../appendix/optimizations.md#o67-ten-thousand-retained-entries-is-seconds-of-a-busy-group) | A node back from a 20 s partition was behind every group's purge point and fed snapshots repeatedly | **Applied and kept.** 13 installs and 70 s of refused reads → 0, with no measured cost but WAL bytes |
