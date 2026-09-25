@@ -53,10 +53,11 @@ happened only at a few moments, not every second.
 - this copy applied the write's index (as before);
 - this copy is **installing** a snapshot, which `MachineState::installing` says, and so will
   apply nothing until the install ends;
-- this copy's applied index has **not moved for two heartbeat intervals** (a fifth of the
-  failover base, 1 s by default). A follower that is keeping up hears a commit within one
+- ~~this copy's applied index has **not moved for two heartbeat intervals**~~ (a fifth of the
+  failover base, 1 s by default) ~~. A follower that is keeping up hears a commit within one
   heartbeat under no load and at once under load, so a copy that does not move in two is not
-  applying: it is waiting for a snapshot, or stuck;
+  applying: it is waiting for a snapshot, or stuck;~~ **two heartbeat intervals have passed**,
+  whatever the copy is doing, since [#146](apply-wait-on-a-lagging-copy.md);
 - the deadline.
 
 Whichever ends it, the outcome is what the leader answered. `propose_through` now takes the copy's
@@ -68,9 +69,13 @@ and never waits.
 - **Drop the apply wait.** Then a `One` read through the node that accepted a write could miss it
   in the ordinary case, a follower a few milliseconds behind. The wait is cheap when the copy is
   applying, and it is what [F40](../../features/replication.md) promises.
-- **A fixed short bound on the wait.** A slow disk on a follower that *is* applying would lose
+- ~~**A fixed short bound on the wait.** A slow disk on a follower that *is* applying would lose
   read-your-writes it could have kept by waiting. Stall detection gives up only on a copy that is
-  not moving.
+  not moving.~~ **Taken by [#146](apply-wait-on-a-lagging-copy.md).** A copy catching up from the
+  log after a stall *is* applying, all the time, and stall detection waited for its whole
+  backlog: up to 5.3 s a write on the lab. The wait is now bounded at two heartbeat intervals,
+  which is the same window the stall rule used, and a follower that needs longer than that to
+  apply one write is behind rather than slow.
 - **Refuse the write, or answer `OutcomeUnknown`, when the local copy is stalled.** The write
   committed. Any answer but success would make a client retry a write that happened, and pay
   the identity machinery to recognise it.
@@ -84,8 +89,9 @@ and never waits.
 - **A write answered before its apply here still carries its session token**, and a `Session`
   or `Quorum` read is what sees it for certain. A `One` read through the same node sees it
   whenever that node's copy was applying.
-- **The stall window is at least one heartbeat interval.** Anything shorter would give up on
-  an idle healthy follower that simply has not heard the commit yet.
+- **The wait's bound is at least one heartbeat interval.** Anything shorter would give up on
+  an idle healthy follower that simply has not heard the commit yet
+  ([#146](apply-wait-on-a-lagging-copy.md) made it the only bound).
 - **No `RefCell` borrow of the state is held across the wait's `.await`.**
 
 ## Still open

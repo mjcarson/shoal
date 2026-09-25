@@ -3730,15 +3730,17 @@ async fn propose_through<D: ShoalDatabase>(
     outcome
 }
 
-/// Wait for this copy to apply a committed write, unless it is not applying
+/// Wait for this copy to apply a committed write, for at most two heartbeat intervals
 ///
-/// A copy that is installing a snapshot applies nothing until the install ends, and one waiting
-/// for a snapshot to begin applies nothing at all. Waiting on either held a committed write for
-/// the whole write timeout and then answered it anyway. So the wait ends when the index is
-/// applied, when the copy is installing, or when its applied index has not moved for two
-/// heartbeat intervals, within which a follower that is keeping up hears the commit. The
-/// write's session token is what a later read is served past either way
-/// ([Resolved #145](../../../../docs/src/appendix/resolved/apply-wait-on-a-stalled-copy.md)).
+/// A copy that is installing a snapshot applies nothing until the install ends, one waiting for
+/// a snapshot to begin applies nothing at all, and one catching up from the log applies the
+/// whole backlog before this write. Waiting on any of them held a committed write for up to the
+/// whole write timeout and then answered it anyway. A follower that is keeping up hears a
+/// commit within one heartbeat, so the wait ends when the index is applied, when the copy is
+/// installing, or two heartbeat intervals after it began. The write's session token is what a
+/// later read is served past either way
+/// ([Resolved #145](../../../../docs/src/appendix/resolved/apply-wait-on-a-stalled-copy.md),
+/// [Resolved #146](../../../../docs/src/appendix/resolved/apply-wait-on-a-lagging-copy.md)).
 ///
 /// # Arguments
 ///
@@ -3752,24 +3754,21 @@ async fn wait_applied_here<D: ShoalDatabase>(
     index: u64,
     remaining: Duration,
 ) {
-    // how long an applied index may stand still before this copy counts as not applying
-    let stall = Duration::from_millis(raft.config().heartbeat_interval.saturating_mul(2));
-    let until = Instant::now() + remaining;
-    // the applied index last seen, and when it last moved
-    let mut seen = applied_of(raft);
-    let mut moved = Instant::now();
+    // two heartbeats, or what is left of the deadline if that is less
+    let bound = Duration::from_millis(raft.config().heartbeat_interval.saturating_mul(2));
+    let until = Instant::now() + bound.min(remaining);
     loop {
         // applied here: the answer can go
-        if seen >= index {
+        if applied_of(raft) >= index {
             return;
         }
         // an install applies nothing until it ends
         if state.borrow().installing {
             return;
         }
-        // out of deadline, or stalled for two heartbeats
+        // out of time
         let now = Instant::now();
-        if now >= until || now.duration_since(moved) >= stall {
+        if now >= until {
             return;
         }
         // wait a little for the apply, then look again
@@ -3778,11 +3777,6 @@ async fn wait_applied_here<D: ShoalDatabase>(
             .wait(Some(step))
             .applied_index_at_least(Some(index), "the write applied on this replica")
             .await;
-        let applied = applied_of(raft);
-        if applied > seen {
-            seen = applied;
-            moved = Instant::now();
-        }
     }
 }
 

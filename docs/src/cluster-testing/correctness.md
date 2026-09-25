@@ -265,3 +265,34 @@ t05f), hyperion caught up from the log: no installs, no refused reads, and the r
 through every member first time.
 
 **Verdict:** correctness **pass**, availability **good after the first three seconds**.
+
+### Pause one node
+
+For 20 s under the mixed bench, a node's process is stopped with `SIGSTOP` and then resumed with
+`SIGCONT` (`systemctl kill --signal` on its unit, `target/lab/stall.sh`). A paused process is not
+a partition: every one of its sockets stays open, its client port included, and it answers
+nothing. When it resumes, every timer it had has expired at once. This is the "GC pause" case,
+and it is where [Pre-Vote](../appendix/resolved/post-heal-elections.md) is meant to earn its
+keep.
+
+| Run | Paused | Pause | After the resume |
+| --- | --- | --- | --- |
+| t11 | hyperion, leading 12 | 0 for 3 s, then 36,000–73,000 ops/s with its groups refused `NotLeader` until they re-elected about 16–20 s in | 47,000–80,000 ops/s; write p99 2–4.5 s every few seconds |
+| t11b | europa, leading the most (`--slow-ms 1000`) | 0 for 3 s, then about 48,000 | 37,000–70,000 ops/s; slow writes only in the first 2 s, all through europa, at most 1.7 s |
+| t11c | hyperion (`--slow-ms 1000`) | the same shape as t11 | 1,210 writes over a second in the 12 s after the resume, all through hyperion, up to 5.3 s |
+
+Every acknowledged insert was read back through every member in all three runs, and no node
+restarted. No leader was unseated by the resumed node's expired timers.
+
+**What t11 and t11c showed.** The periodic write p99 spikes in t11 first looked like the leadership
+handbacks ([O63](../appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary)),
+which happened at the same moments. openraft's own log showed every transfer landing, none
+ignored for an out-of-date log. The bench's new `--slow-ms`, which logs each slow operation with
+the member it went through, took it apart in t11c. Every slow write went through the resumed node,
+whose copies were catching up from the log. The coordinator was waiting for its own copy to apply
+the whole backlog before answering, a case #145's stall rule had deliberately left waiting. Fixed
+as [#146](../appendix/resolved/apply-wait-on-a-lagging-copy.md): the wait is bounded at two
+heartbeat intervals.
+
+**Verdict:** correctness **pass**; availability the same as a partition's, with the resumed node's
+writes slow until #146.

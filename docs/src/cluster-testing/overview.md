@@ -60,7 +60,7 @@ The loader is the test driver. Beside `load` it has three commands, all in
 | --- | --- | --- |
 | `load` | Writes the whole csv, retrying the codes that say to try again, then reads a sample back | The dataset can be loaded, and at what rate |
 | `verify` | Reads every movie back and compares it field by field with the csv, then reads every keyword partition whole and compares its set of sort keys | Nothing written was lost, changed or misplaced, on either table |
-| `bench` | Drives a mix of `get`, `keyword` (a partition read, limited to 50 rows), `update` (an overview rewritten to the value it has) and `insert` (a synthetic movie above id 2⁴⁰) for a fixed time, printing a line a second with throughput, p50, p99 and max per kind, and the failures by code | Throughput and latency under a mix, and what a fault does to both second by second |
+| `bench` | Drives a mix of `get`, `keyword` (a partition read, limited to 50 rows), `update` (an overview rewritten to the value it has) and `insert` (a synthetic movie above id 2⁴⁰) for a fixed time, printing a line a second with throughput, p50, p99 and max per kind, and the failures by code. `--slow-ms` also logs each operation slower than the threshold, with the member it went through and when it was sent | Throughput and latency under a mix, and what a fault does to both second by second |
 | `verify-acks` | Reads back every synthetic insert a `bench` run was acknowledged for, through one member, each member in turn, or all of them | No acknowledged write was lost, whatever happened during the run |
 
 Updates rewrite a value the row already has, so a `verify` after a `bench` still matches the csv.

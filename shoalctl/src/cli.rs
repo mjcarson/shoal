@@ -119,6 +119,21 @@ pub enum ClusterCommand {
         #[clap(flatten)]
         inventory: InventoryArg,
     },
+    /// Send an operation the cluster tab's command line takes and follow it until it is done
+    ///
+    /// `repair <table> [verify|repair]`, `backup [table] <dir>`, `restore <dir>`, `status <op>`
+    /// and the rest of the tab's operations, sent without its preview.
+    Admin {
+        /// The inventory
+        #[clap(flatten)]
+        inventory: InventoryArg,
+        /// How many seconds to follow the operation's record before giving up on it
+        #[clap(long, default_value_t = 3600)]
+        timeout_secs: u64,
+        /// The operation, as the cluster tab takes it
+        #[clap(required = true, trailing_var_arg = true)]
+        line: Vec<String>,
+    },
     /// Print every node, its unit, and the cluster as a member sees it
     Status {
         /// The inventory
@@ -330,6 +345,19 @@ where
             let record = deployment.state.record()?;
             let shoal = deployment.any_member::<S>(&record).await?;
             deployment.rebalance(&shoal).await
+        }
+        ClusterCommand::Admin {
+            inventory,
+            timeout_secs,
+            line,
+        } => {
+            // any member answers, and forwards what only the leader can do
+            let deployment = Deployment::open(&inventory.inventory)?;
+            let record = deployment.state.record()?;
+            let shoal = deployment.any_member::<S>(&record).await?;
+            deployment
+                .admin(&shoal, &line.join(" "), std::time::Duration::from_secs(timeout_secs))
+                .await
         }
         ClusterCommand::Status { inventory } => {
             Deployment::open(&inventory.inventory)?.status::<S>().await

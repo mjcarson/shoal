@@ -6113,16 +6113,25 @@ async fn returning_node_catches_up_by_log_or_snapshot() -> Result<(), FixtureErr
         "node two did not install a snapshot for both tables: {by_snapshot}"
     );
     assert_eq!(by_snapshot["dropped_chunks"], 0, "{by_snapshot}");
-    // the senders counted what they sent
-    let sent: u64 = (0..2)
-        .map(|node| snapshots_of(&mut cluster, node).map(|s| s["sent"].as_u64().unwrap_or(0)))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .sum();
-    assert!(
-        sent >= installed,
-        "the senders counted {sent} transfers and node two installed {installed}"
-    );
+    // the senders counted what they sent. A sender counts a transfer once the end's answer
+    // reaches it, which is after the receiver counted the install, so the count is waited for
+    // rather than read once (item 142)
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let sent: u64 = (0..2)
+            .map(|node| snapshots_of(&mut cluster, node).map(|s| s["sent"].as_u64().unwrap_or(0)))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .sum();
+        if sent >= installed {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the senders counted {sent} transfers and node two installed {installed}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     // every row is readable through the returning node, from the installed archives
     let addr2 = cluster.node(2).endpoints.client.to_string();
     for key in [8000u64, 8011, 8150] {
@@ -18019,5 +18028,86 @@ async fn a_write_through_an_installing_copy_is_answered_at_commit() -> Result<()
     );
     // and the leader has it
     wait_note(&addr0, key, Some("during"), Duration::from_secs(5)).await?;
+    Ok(())
+}
+
+/// A write through a node whose copy is catching up is answered within two heartbeats of its commit (item 146)
+///
+/// A coordinator whose copy of the group follows waits for its copy to apply a committed write
+/// before it answers, and since [#145](../../docs/src/appendix/resolved/apply-wait-on-a-stalled-copy.md)
+/// stops waiting on a copy that is installing or has stood still. A copy catching up from the
+/// log after a stall is neither: it applies all the time, only thousands of entries behind, and
+/// every write through it waited for all of them. On the lab, writes through a node resumed
+/// after a 20 s `SIGSTOP` took up to 5.3 s for twelve seconds. The wait is now bounded at two
+/// heartbeat intervals ([Resolved #146](../../docs/src/appendix/resolved/apply-wait-on-a-lagging-copy.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_through_a_lagging_copy_is_answered_within_two_heartbeats() -> Result<(), FixtureError> {
+    let base = Duration::from_secs(1);
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .primary_failover_after(base)
+        .write_timeout(Duration::from_secs(5))
+        .query_deadline(Duration::from_secs(10))
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    cluster.wait_voters(0, 3)?;
+    // a key of a group node zero leads, which is where node two's writes will hop to
+    let (key, _group) = key_led_by(&mut cluster, "Note", 0, 23_000)?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let addr2 = cluster.node(2).endpoints.client.to_string();
+    write_note(&addr0, key, "before").await.map_err(ok)?;
+    // node two stops where it stands while node zero takes a long run of wide writes to the key
+    cluster.node(2).pause()?;
+    // a hundred and fifty writers of a hundred single writes each, so every write is an entry
+    // of its own
+    let client0 = std::sync::Arc::new(Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?);
+    let wide = std::sync::Arc::new("x".repeat(4096));
+    let mut writers = Vec::new();
+    for writer in 0..150u64 {
+        let client0 = client0.clone();
+        let wide = wide.clone();
+        writers.push(tokio::spawn(async move {
+            for n in 0..100u64 {
+                client0
+                    .send_one(Note {
+                        key,
+                        text: format!("{wide}-{writer}-{n}"),
+                    })
+                    .await?;
+            }
+            Ok::<(), shoal::client::Errors>(())
+        }));
+    }
+    for writer in writers {
+        writer
+            .await
+            .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?
+            .map_err(ok)?;
+    }
+    // back: its copy has fifteen thousand wide entries to apply, and writes go through it at once
+    cluster.node(2).resume()?;
+    let client2 = Shoal::<TestDbClient>::new(&addr2).await.map_err(ok)?;
+    let mut worst = Duration::ZERO;
+    for n in 0..20u64 {
+        let sent = Instant::now();
+        client2
+            .send_one(Note {
+                key,
+                text: format!("after-{n}"),
+            })
+            .await
+            .map_err(ok)?;
+        worst = worst.max(sent.elapsed());
+    }
+    eprintln!("the slowest of twenty writes through the catching-up node took {worst:?}");
+    // a heartbeat is a tenth of the base: two of them and the round trips, with room for a
+    // loaded host; the unbounded wait took 1.6 to 1.8 s here
+    assert!(
+        worst < Duration::from_millis(800),
+        "a write through a catching-up copy took {worst:?}; its commit is not what it waited on"
+    );
     Ok(())
 }
