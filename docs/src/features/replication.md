@@ -122,7 +122,7 @@ does not serve ~~- `Snapshot` is M7's -~~ is answered by name; `Snapshot` is ser
 **Configuration.** A `replication:` block under `cluster:`, node-local, with every default
 written on the [configuration page](../getting-started/configuration.md#cluster):
 `write_timeout` 5s, `pending_bytes` 64 MiB, `segment_bytes` 10 MiB, `checkpoint_entries`
-1024, `retained_entries` 10000, `log_cache_bytes` 16 MiB, `volatile_log_bytes` 256 MiB; and
+1024, `retained_entries` ~~10000~~ 100000 ([O67](../appendix/optimizations.md#o67-ten-thousand-retained-entries-is-seconds-of-a-busy-group)), `log_cache_bytes` 16 MiB, `volatile_log_bytes` 256 MiB; and
 `transport.replication_queue_bytes` 64 MiB beside the other lanes' bounds. Validation refuses
 `write_consistency: One`, a `write_timeout` past `forward_timeout`, and a
 `primary_failover_after` under 100 ms. A cluster node's storage directory is claimed at

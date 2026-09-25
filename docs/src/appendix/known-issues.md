@@ -426,6 +426,11 @@ that the next change to that path, or the next run, can say more.
 The suite run for [Resolved #144](resolved/post-heal-elections.md) at six threads failed
 `lost_response_retry_returns_original_result` again, and also `scheduled_scrub_quarantines_without_an_operator`,
 which had not failed before. Both passed alone afterwards: two and six runs out of two and six.
+The run for [O67](optimizations.md#o67-ten-thousand-retained-entries-is-seconds-of-a-busy-group)
+failed the lost-response test again, with `local_rehome_recovers_after_each_crash_point` and
+`returning_node_catches_up_by_log_or_snapshot` (which sets its own retention, so the new default
+does not reach it). All three passed alone straight after. What the loaded failures share is a
+deadline the suite's load outruns, which is what this item is now tracking.
 
 ---
 

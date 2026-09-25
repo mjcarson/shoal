@@ -464,7 +464,7 @@ cluster:
     pending_bytes: "64MiB"        # proposed and unanswered bytes one shard holds per group; a write past it is shed
     segment_bytes: "10MiB"        # a WAL segment is sealed once it grows past this
     checkpoint_entries: 1024      # entries a group commits between snapshots at its checkpoint
-    retained_entries: 10000       # entries kept behind the snapshot for a slow member to catch up from
+    retained_entries: 100000      # entries kept behind the snapshot for a slow member to catch up from (O67)
     log_cache_bytes: "16MiB"      # entries the WAL keeps in memory past its durable tail
     volatile_log_bytes: "256MiB"  # every ephemeral table's in-memory log together; a write past it is shed
     snapshot_chunk_bytes: "1MiB"  # one chunk of a snapshot stream on the bulk lane (F43); under max_frame_bytes and bulk_queue_bytes

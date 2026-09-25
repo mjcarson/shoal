@@ -204,6 +204,7 @@ so they get worse by existing longer rather than under load.
 | **B22** | [**O64**](#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab) — a shorter failover base halves write throughput on the lab | Measured — 1 s: 20–24k rows/s and 4 s failover; 5 s: 40–46k rows/s and 16 s failover | ? | the lab's load at each base | Crash failover against write throughput | yes, on the lab |
 | ~~**B23**~~ | ~~[**O65**](#o65-heartbeats-to-followers-that-just-acknowledged-replication) — heartbeats to followers that just acknowledged replication~~ **done**, no measurable effect, kept | Indicated — a heartbeat per follower per group every tenth of the base, under load and in a partition | S | the lab's load at 1 s and 5 s | none expected | yes, on the lab |
 | ~~**B24**~~ | ~~[**O66**](#o66-a-partitioned-peer-floods-the-log) — a partitioned peer floods the log~~ **done**, measured and kept | Measured — 50–60k lines suppressed by journald per node in a 20 s partition | S | the lab's partition test | Per-attempt warnings need `RUST_LOG` | it was |
+| ~~**B25**~~ | ~~[**O67**](#o67-ten-thousand-retained-entries-is-seconds-of-a-busy-group) — ten thousand retained entries is seconds of a busy group~~ **done**, measured and kept | Measured — a 20 s partition cost 13 snapshot installs and 70 s of refused reads on the returning node | S | the lab's partition test | About 0.5 GB more WAL a node under load | it was |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -3046,3 +3047,55 @@ any node's lines, against 50,000–60,000 before, and each node logged about 7,0
 the whole run. Throughput during the partition did not measurably change: the lines were a cost to
 the host, not the cause of the stalls that followed the heal, which the
 [partition test](../cluster-testing/correctness.md#partition-one-node) follows up. **Kept.**
+
+### O67. Ten thousand retained entries is seconds of a busy group
+
+| | |
+| --- | --- |
+| **Rank** | ~~**B25**~~ **done** — applied, measured and kept |
+| **Impact** | Measured on the lab — a node partitioned for 20 s under the mixed bench came back behind the purge point of its groups. Several were fed a snapshot two or three times over, because the leader purged past each install's boundary while it ran. Its reads of those groups were refused `Unavailable` for about 70 s after the heal, and a read-back through it 35 s after the heal timed out |
+| **Difficulty** | S — a default |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | more WAL on disk under a heavy load (about 0.5 GB a node on the lab), still bounded per shard by `retained_bytes` |
+| **Benchmark** | the lab's [partition test](../cluster-testing/correctness.md#partition-one-node), counting installs; a restart timed after a minute of load; each node's resident memory after 90 s of inserts |
+
+Found by the [distributed cluster testing](../cluster-testing/correctness.md#partition-one-node)
+chapter. `replication.retained_entries` is how far behind its snapshot a group keeps its log for
+a member to catch up from. openraft purges to it after every snapshot, and a snapshot is taken
+every `checkpoint_entries` (1,024). Under the lab's mixed bench a group purged about 7,000 entries
+every few seconds, so ten thousand held roughly ten seconds of log. None of the purges in the
+test were the bytes bound's (`enforce_retention` forced nothing). The entries preference alone
+decided it. [F43](../features/node-recovery.md#retention-in-bytes) describes the repeated
+snapshot as what a stream that cannot keep up pays. Here it was paid by a node that was only
+twenty seconds away.
+
+**Applied:** the default is 100,000. It changes nothing about the bound: `retained_bytes` still
+forces a purge past a member that would hold the WAL past a gibibyte a shard.
+
+**Outcome**, one partition test each on the running cluster (the setting edited into each node's
+`shoal.yml` and the nodes restarted one at a time):
+
+| | 10,000 (t05e) | 100,000 (t05f) |
+| --- | --- | --- |
+| Snapshot installs on hyperion after the heal | 13 over 72 s, up to three per group | 0 |
+| Reads refused `Unavailable` after the heal | 90–1,300 a second until the run ended | none |
+| Read-back of every acknowledged insert through hyperion 10 s after the run | timed out | passed first time |
+| Throughput from the heal to the end | 29,000–74,000 ops/s | 39,000–81,000 ops/s |
+
+The costs, measured in matched pairs (set everywhere, nodes restarted, settled, then loaded):
+
+| | 10,000 | 100,000 |
+| --- | --- | --- |
+| Titan's WAL after a minute of the mixed bench | 1.6, 1.7 GB | 2.1, 2.3 GB |
+| Titan's restart to every member up | 24.3, 27.5 s | 22.9, 27.5 s |
+| Resident memory after 90 s of inserts (europa, titan, hyperion) | 5.5, 4.8, 5.8 GB | 4.7, 4.6, 6.0 GB |
+| Mixed bench, gets a second | 36,900, 33,900 | 32,900, 37,400 |
+
+Restart time, memory and throughput did not move beyond run-to-run noise. The WAL index holds a
+slot per retained entry, but a bundle's rows share one entry per tablet, so the entries are far
+fewer than the rows. **Kept.**
+
+A cluster benchmark arm that runs at the default retention (`macro/cluster/catchup/log`) now runs
+a different server. Its captures from before this change do not describe it, and a new capture
+belongs to the benchmark host, not the lab.

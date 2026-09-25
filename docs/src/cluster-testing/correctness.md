@@ -253,4 +253,15 @@ The first two to three seconds of a silent partition still stop pipelined client
 to the cut-off node wait for the two second silence to be judged; that remains
 [#143](../appendix/resolved/silent-partition-hops.md#still-open)'s open part.
 
+**With #145 fixed** (t05e) the 5 s writes were gone, and the worst write in a second after the heal
+was about a second: the two heartbeats the wait gives a copy that is not applying. That run also
+showed why hyperion was not applying. It came back behind the purge point of its groups and was
+fed thirteen snapshots over 72 s, up to three per group, because the leader purged past each
+install's boundary while it ran. Its reads of those groups were refused the whole time, and a
+read-back through it 35 s after the heal timed out (a second attempt later passed, nothing lost).
+With the default retention raised to 100,000 entries
+([O67](../appendix/optimizations.md#o67-ten-thousand-retained-entries-is-seconds-of-a-busy-group),
+t05f), hyperion caught up from the log: no installs, no refused reads, and the read-back passed
+through every member first time.
+
 **Verdict:** correctness **pass**, availability **good after the first three seconds**.
