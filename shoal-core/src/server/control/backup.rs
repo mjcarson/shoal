@@ -327,6 +327,10 @@ pub struct GroupRestore {
     pub files: Vec<String>,
     /// What it came to, once done
     pub outcome: Option<RestoreOutcome>,
+    /// How many drives were given up because a member could not be reached, and tried again
+    /// ([Resolved #155](../../../../docs/src/appendix/resolved/restore-retries-unreachable.md))
+    #[serde(default)]
+    pub attempts: u32,
 }
 
 impl Default for GroupRestore {
@@ -337,6 +341,7 @@ impl Default for GroupRestore {
             driver: None,
             files: Vec::new(),
             outcome: None,
+            attempts: 0,
         }
     }
 }

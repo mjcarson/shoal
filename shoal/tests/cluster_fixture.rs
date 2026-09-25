@@ -18227,3 +18227,72 @@ async fn a_paused_control_leader_calls_nobody_down() -> Result<(), FixtureError>
     );
     Ok(())
 }
+
+/// A restore rides out a member that cannot be reached for a while (item 155)
+///
+/// On the lab a member restarted in the middle of a restore, a group's driver could not reach it
+/// to quarantine its copy, and the group was failed for good: a restore runs once per cluster, so
+/// the rows were lost to it. A driver that cannot reach a member now waits and drives the group
+/// again from where it got to ([Resolved #155](../../docs/src/appendix/resolved/restore-retries-unreachable.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_rides_out_an_unreachable_member() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::PROTOCOL_VERSION;
+    let backups = utils::test_dir();
+    // a backup of some notes from one cluster
+    let mut old = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    old.wait_voters(0, 3)?;
+    old.node_mut(0).command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
+    for node in 0..3 {
+        wait_activated(&mut old, node, PROTOCOL_VERSION, Duration::from_secs(30))?;
+    }
+    let addr = old.node(0).endpoints.client.to_string();
+    let keys: Vec<u64> = (12500..12540).collect();
+    for key in &keys {
+        write_note(&addr, *key, &format!("v-{key}")).await?;
+    }
+    wait_digests_equal(&mut old, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    let op = plan_as_process(&mut old, 0, &format!("BACKUP {}", backups.path().display()))?;
+    wait_operation_done(&mut old, 0, "BACKUP_STATUS", op, Duration::from_secs(120))?;
+    let backup_dir = backups.path().join(op.to_string());
+    drop(old);
+    // restored into a new cluster
+    let mut new = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .repair_timeout(Duration::from_secs(20))
+        .start()
+        .await?;
+    new.wait_voters(0, 3)?;
+    // node two cut off on every lane before the restore starts, and back twenty-five seconds
+    // in: longer than the phase deadline (`repair_timeout`, 20 s here) a driver waits on a
+    // member, so a driver is answered that the member could not be reached, which is what a
+    // member's restart answered on the lab
+    new.isolate(2);
+    let restore = plan_as_process(&mut new, 0, &format!("RESTORE {}", backup_dir.display()))?;
+    tokio::time::sleep(Duration::from_secs(25)).await;
+    new.heal(2);
+    let record = wait_operation_done(&mut new, 0, "RESTORE_STATUS", restore, Duration::from_secs(300))?;
+    // every persistent group restored, none failed, whatever node two missed
+    for (group, progress) in record["groups"].as_object().expect("groups") {
+        let outcome = &progress["outcome"];
+        assert!(
+            outcome["Restored"].is_object() || outcome["Skipped"].is_object(),
+            "group {group} came to {outcome}, where a member was only out of reach for a while: {record}"
+        );
+    }
+    // and every note reads back
+    let new_addr = new.node(0).endpoints.client.to_string();
+    for key in &keys {
+        wait_note(&new_addr, *key, Some(&format!("v-{key}")), Duration::from_secs(20)).await?;
+    }
+    Ok(())
+}

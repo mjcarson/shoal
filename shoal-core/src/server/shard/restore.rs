@@ -34,12 +34,24 @@ use tracing::{event, Level};
 use uuid::Uuid;
 
 use super::repair::{scrub_group, NOT_LEADER};
+
+/// What an error begins with when a member could not be reached, as against refusing
+///
+/// A group's restore that meets one is driven again rather than failed
+/// ([Resolved #155](../../../../docs/src/appendix/resolved/restore-retries-unreachable.md)).
+pub const TRANSIENT: &str = "a member could not be reached: ";
+
+/// How many times a group's restore is driven again for want of a member before it fails
+const RESTORE_ATTEMPTS: u32 = 12;
+
+/// How long a group's restore waits for an unreachable member before it is driven again
+const RESTORE_RETRY_PAUSE: Duration = Duration::from_secs(5);
 use super::ServerMsg;
 use crate::server::control::backup::{BackupManifest, GroupRestore, RestoreOutcome, RestorePhase};
 use crate::server::control::plane::ControlRequest;
 use crate::server::control::repair::{Quarantine, QuarantineAction, QuarantineReason};
 use crate::server::control::types::{ControlCommand, ControlResponse};
-use crate::server::replication::network::RepairSend;
+use crate::server::replication::network::{RepairSend, RpcFailure};
 use crate::server::replication::snapshot::{
     self, SnapshotManifest, SnapshotProvenance, SnapshotReader, SnapshotWriter, SNAPSHOTS_DIR,
 };
@@ -91,6 +103,10 @@ pub struct RestoreContext<D: ShoalDatabase> {
     pub files: Vec<String>,
     /// The phase the record stands at, which decides where the driver starts
     pub phase: RestorePhase,
+    /// The phase this driver last committed, which is where a group it hands back stands
+    pub reached: RefCell<RestorePhase>,
+    /// How many drives of this group were handed back for want of a member, before this one
+    pub attempts: u32,
     /// The structural fingerprint of the schema this node serves
     pub schema_id: u64,
     /// Where the built file goes
@@ -116,6 +132,10 @@ impl<D: ShoalDatabase> RestoreContext<D> {
     ///
     /// * `progress` - Where it stands
     async fn commit(&self, progress: GroupRestore) -> Result<(), String> {
+        // the phase a hand-back resumes from is the one committed last, never the one started at
+        if progress.phase != RestorePhase::Done {
+            *self.reached.borrow_mut() = progress.phase.clone();
+        }
         let started = Instant::now();
         let mut last = String::new();
         while started.elapsed() < PROGRESS_TIMEOUT {
@@ -161,6 +181,7 @@ impl<D: ShoalDatabase> RestoreContext<D> {
             driver: Some(self.me.node),
             files: self.files.clone(),
             outcome: None,
+            attempts: self.attempts,
         }
     }
 
@@ -193,7 +214,13 @@ impl<D: ShoalDatabase> RestoreContext<D> {
             .await
         {
             Ok(_) => Ok(()),
-            Err(failure) => Err(format!("{member} did not take the quarantine: {failure}")),
+            // a peer that refused has said no; one that could not be reached may yet say yes
+            Err(RpcFailure::Remote(msg)) => {
+                Err(format!("{member} did not take the quarantine: {msg}"))
+            }
+            Err(failure) => Err(format!(
+                "{TRANSIENT}{member} did not take the quarantine: {failure}"
+            )),
         }
     }
 
@@ -249,15 +276,35 @@ pub async fn drive_group_restore<D: ShoalDatabase>(context: RestoreContext<D>) {
     let phase = match outcome {
         Ok(phase) => phase,
         Err(error) if error.starts_with(NOT_LEADER) => {
-            // a driver that lost the lead leaves the group where it stood for the new leader
+            // a driver that lost the lead leaves the group where it got to for the new leader:
+            // the phase it reached, since a phase it passed may not be run twice (a loading
+            // phase refuses a table an install already filled)
             event!(Level::INFO, msg = "a group's restore is left for its new leader", op = %context.op, group = %context.group, error);
+            let reached = context.reached.borrow().clone();
             let _ = context
                 .commit(GroupRestore {
                     driver: None,
-                    ..context.at(context.phase.clone())
+                    ..context.at(reached.clone())
                 })
                 .await;
-            context.phase.clone()
+            reached
+        }
+        // a member that could not be reached - restarting, cut off - is waited for and the
+        // group driven again from where it got to, a bounded number of times, rather than
+        // failed: on the lab one member's restart failed a group, and a restore cannot be run
+        // twice ([Resolved #155](../../../../docs/src/appendix/resolved/restore-retries-unreachable.md))
+        Err(error) if error.starts_with(TRANSIENT) && context.attempts < RESTORE_ATTEMPTS => {
+            event!(Level::WARN, msg = "a group's restore could not reach a member; trying again", op = %context.op, group = %context.group, attempt = context.attempts + 1, error);
+            glommio::timer::sleep(RESTORE_RETRY_PAUSE).await;
+            let reached = context.reached.borrow().clone();
+            let _ = context
+                .commit(GroupRestore {
+                    driver: None,
+                    attempts: context.attempts + 1,
+                    ..context.at(reached.clone())
+                })
+                .await;
+            reached
         }
         Err(error) => {
             event!(Level::ERROR, msg = "a group's restore failed", op = %context.op, group = %context.group, error);
@@ -329,7 +376,7 @@ async fn drive_inner<D: ShoalDatabase>(
                 Ok(_) => {}
                 Err(error) => {
                     return Err(format!(
-                        "{member} did not report before the restore: {error}"
+                        "{TRANSIENT}{member} did not report before the restore: {error}"
                     ))
                 }
             }
@@ -707,6 +754,8 @@ where
                     op: record.op,
                     path: PathBuf::from(&record.path),
                     files: progress.files.clone(),
+                    reached: RefCell::new(phase.clone()),
+                    attempts: progress.attempts,
                     phase,
                     schema_id,
                     snapshots_dir: snapshots_dir.clone(),
