@@ -17713,3 +17713,78 @@ async fn a_stopped_leader_hands_its_groups_off() -> Result<(), FixtureError> {
     wait_note(&addr, key, Some(&format!("after {last}")), Duration::from_secs(10)).await?;
     Ok(())
 }
+
+/// How many data groups a node leads, as its own GROUPS reports them
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+fn groups_led(cluster: &mut Cluster, node: usize) -> Result<usize, FixtureError> {
+    let view = groups_of(cluster, node)?;
+    Ok(view["shards"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
+        .filter(|group| group["is_leader"].as_bool().unwrap_or(false))
+        .count())
+}
+
+/// A node that comes back is handed back the groups it is the placement primary of (O63)
+///
+/// A crash moves a node's leads to the survivors, and nothing moved them back: on the lab, after
+/// a few restarts one node led all 36 groups and proposed every write, at a quarter less
+/// throughput than a balanced cluster. A shard now hands a group it has led for a while back to
+/// the group's placement primary once that member is up and caught up
+/// ([O63](../../docs/src/appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_returning_node_is_handed_back_its_groups() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .primary_failover_after(Duration::from_secs(1))
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    // write through every group so each has a log to be caught up on
+    let addr = cluster.node(0).endpoints.client.to_string();
+    for key in 14_000..14_060u64 {
+        write_note_eventually(&addr, key, "before", Duration::from_secs(20)).await?;
+    }
+    // every node leads a share once the placement's primaries have taken their groups
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let before = loop {
+        let led: Vec<usize> = (0..3)
+            .map(|node| groups_led(&mut cluster, node))
+            .collect::<Result<_, _>>()?;
+        if led.iter().all(|count| *count > 0) || Instant::now() > deadline {
+            break led;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    assert!(before[1] > 0, "node one led nothing to begin with: {before:?}");
+    // node one crashes: its leads move to the survivors
+    cluster.kill(1)?;
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    cluster.restart(1, NodeKind::Server)?;
+    cluster.wait_joined(&[1])?;
+    // and within a settle and a few intervals, it leads its share again
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let after = loop {
+        let led = groups_led(&mut cluster, 1)?;
+        if led >= before[1] || Instant::now() > deadline {
+            break led;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    eprintln!("node one led {} groups before the crash and {after} after it came back", before[1]);
+    assert!(
+        after >= before[1],
+        "node one led {} groups before it crashed and only {after} a minute after it came back",
+        before[1]
+    );
+    Ok(())
+}

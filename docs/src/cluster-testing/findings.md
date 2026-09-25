@@ -37,3 +37,4 @@ than Shoal says so.
 | --- | --- | --- |
 | [O61](../appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page) | A fast device syncs the WAL in batches too small to fill a page | See [the experiment](performance.md#o61-a-group-commit-delay) |
 | [O62](../appendix/optimizations.md#o62-every-compaction-rewrites-the-shards-whole-archive-map) | Every compaction rewrote the shard's whole archive map: 70% of a node's writes | **Applied and kept.** Map saves 1,573 MB → 26 MB over the same run, worst write down by a third |
+| [O63](../appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary) | Leadership never returned to a restarted node: one node led all 36 groups | **Applied and kept.** Leads spread 12/12/12 within 30 s; about a sixth more throughput, a quarter off the write p99 |

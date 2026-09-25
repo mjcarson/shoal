@@ -3433,6 +3433,8 @@ where
                 self.sweep_gathers().await?;
                 self.sweep_deadlines().await?;
                 self.maybe_report_replication();
+                // a lead an election or a stop moved off its placement primary goes back
+                self.balance_leadership();
                 // a repair or a move a group this shard now leads is waiting on, and a scrub
                 // that is due; a backup or a restore the same
                 self.drive_repairs();

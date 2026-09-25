@@ -753,6 +753,17 @@ one thread queue behind each other** (395 µs alone, 10.8 ms with sixty four lea
 once), which is the number Q2's shared physical WAL has to beat. Both are in the
 [decision record](../distributed/protocol.md#q1-and-q13-at-m1).
 
+#### Leadership is spread evenly, whatever each member can do
+
+`shoal-core/src/server/shard/groups.rs`, `balance_leadership`. Since
+[O63](optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary) a group's lead
+goes back to its placement primary, and the placement spreads primaries evenly over the members.
+On the lab's unequal hosts, the fastest node leading more than its share did better than an even
+split. The planner already weighs members by `weight` for data ([F46](../features/capacity-rebalancing.md));
+choosing primaries by the same weight, or by measured commit latency, would put more leads where
+writes commit fastest. Not done because it changes the placement's primaries, which every group
+identity and every initialization reads, and deserves its own design.
+
 #### The inventory wizard has no field for `failover`
 
 `shoalctl/src/wizard/form.rs`. The [cluster testing](../cluster-testing/performance.md#failover-time-against-primary_failover_after)

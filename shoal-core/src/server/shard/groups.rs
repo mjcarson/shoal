@@ -74,6 +74,22 @@ use std::path::{Path, PathBuf};
 /// How long a proposer waits before asking its own group again while its lease starts
 const LEASE_POLL: Duration = Duration::from_millis(20);
 
+/// How often a shard looks for a group it leads that its placement primary should lead
+const BALANCE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long a shard has to have led a group before it hands it back to the placement primary
+///
+/// Long enough that a lead that just moved, by an election or a handoff, is not moved again
+/// before the member it left has come back and caught up.
+const BALANCE_SETTLE: Duration = Duration::from_secs(10);
+
+/// How many entries behind this shard's log any voter may be for a group's lead to be handed
+/// back, so a transfer never lands on, or restarts the stream to, a member still catching up
+const BALANCE_LAG: u64 = 16;
+
+/// How long after trying to hand a group back a shard waits before trying that group again
+const BALANCE_RETRY: Duration = Duration::from_secs(60);
+
 /// How many deadline ticks pass between two sweeps of the WAL segments
 const REPORT_EVERY_TICKS: u32 = 10;
 
@@ -302,6 +318,14 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) last_report: Option<ShardReplication>,
     /// Whether the groups are being stopped
     pub(super) stopping: bool,
+    /// When this shard began leading each group it leads, for the settle before it hands one
+    /// back to its placement primary ([O63](../../../../docs/src/appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary))
+    pub(super) led_since: HashMap<GroupId, Instant>,
+    /// When this shard last looked for a group to hand back
+    pub(super) last_balance: Instant,
+    /// When this shard last tried to hand each group back, so a transfer that did not take is
+    /// not tried again, with the leader change each try costs, until `BALANCE_RETRY` has passed
+    pub(super) handed_back: HashMap<GroupId, Instant>,
     /// Whether a segment sweep is wanted before the next message
     pub(super) sweep_due: bool,
     /// The shard's WAL directory, where quarantine markers live
@@ -433,6 +457,9 @@ where
             last_report: None,
             writes: HashMap::new(),
             stopping: false,
+            led_since: HashMap::new(),
+            last_balance: Instant::now(),
+            handed_back: HashMap::new(),
             sweep_due: false,
             wal_dir: dir.clone(),
             quarantines,
@@ -2474,6 +2501,120 @@ where
             },
             groups,
         }
+    }
+
+    /// Hand one group this shard leads back to its placement primary, if one is due
+    ///
+    /// The placement spreads primaries evenly over the members, and a group's lead starts there.
+    /// An election, a crash or a planned stop moves it, and nothing moved it back, so after a
+    /// few restarts one node could lead every group and propose every write
+    /// ([O63](../../../../docs/src/appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary)).
+    /// Every `BALANCE_INTERVAL` a shard hands at most one group back, and only one it has led
+    /// for `BALANCE_SETTLE` whose primary is an up voter and whose every voter is within
+    /// `BALANCE_LAG` of its log, so no member's catch-up is restarted by the move.
+    pub(super) fn balance_leadership(&mut self) {
+        let node = self.node_id();
+        let map = self.map.get();
+        let Some(replication) = self.replication.as_mut() else {
+            return;
+        };
+        // nothing moves while the groups stop, or more often than the interval
+        if replication.stopping || replication.last_balance.elapsed() < BALANCE_INTERVAL {
+            return;
+        }
+        replication.last_balance = Instant::now();
+        let now = Instant::now();
+        // a group a repair, a move, a backup or a restore is working on keeps its lead where
+        // that operation put it: a repair hands the lead to a verified copy on purpose
+        let mut busy: HashSet<GroupId> = replication
+            .driving
+            .iter()
+            .chain(&replication.driving_moves)
+            .chain(&replication.driving_backups)
+            .chain(&replication.driving_restores)
+            .map(|(_, group)| *group)
+            .collect();
+        busy.extend(
+            map.repairs
+                .iter()
+                .filter(|record| !record.is_done())
+                .flat_map(|record| record.groups.keys().copied()),
+        );
+        busy.extend(
+            map.moves
+                .iter()
+                .filter(|record| record.outcome.is_none())
+                .flat_map(|record| record.groups.keys().copied()),
+        );
+        let mut target = None;
+        let mut leading = HashSet::new();
+        for (id, group) in &replication.groups {
+            let Some(raft) = &group.raft else { continue };
+            let metrics = raft.metrics().borrow_watched().clone();
+            // only a group this shard leads
+            if metrics.current_leader != Some(metrics.id) {
+                continue;
+            }
+            leading.insert(*id);
+            let since = *replication.led_since.entry(*id).or_insert(now);
+            // one handback a round, and only for a lead that has settled, of a group no
+            // operation is working on and none of whose copies here is quarantined
+            if target.is_some()
+                || now.duration_since(since) < BALANCE_SETTLE
+                || busy.contains(id)
+                || group.state.borrow().quarantined.is_some()
+                || replication
+                    .handed_back
+                    .get(id)
+                    .is_some_and(|tried| now.duration_since(*tried) < BALANCE_RETRY)
+            {
+                continue;
+            }
+            // the placement primary, when it is not this member
+            let Some(primary) = group.spec.voters.first().copied() else {
+                continue;
+            };
+            if primary == metrics.id || !map.is_up(primary.node) || primary.node == node {
+                continue;
+            }
+            // and every voter close enough to this log that nothing is being fed: a new
+            // leader would start a member's snapshot or catch-up stream over again, so a group
+            // with a member still catching up keeps its lead where it is
+            let last = metrics.last_log_index.unwrap_or(0);
+            let Some(progress) = metrics.replication.as_ref() else {
+                continue;
+            };
+            // a voter the leader has no progress for is behind, not at index zero: a group
+            // with a short log would otherwise read a member mid-install as caught up, and the
+            // transfer to it would fail, elect someone else, and restart its install
+            let behind = group.spec.voters.iter().filter(|voter| **voter != metrics.id).any(|voter| {
+                match progress.get(voter).cloned().flatten() {
+                    Some(matched) => matched.index + BALANCE_LAG < last,
+                    None => true,
+                }
+            });
+            if behind {
+                continue;
+            }
+            target = Some((*id, raft.clone(), primary));
+        }
+        // a lead this shard no longer holds is forgotten, so it settles afresh next time
+        replication.led_since.retain(|id, _| leading.contains(id));
+        let Some((group, raft, primary)) = target else {
+            return;
+        };
+        replication.led_since.remove(&group);
+        replication.handed_back.insert(group, now);
+        replication
+            .handed_back
+            .retain(|_, tried| now.duration_since(*tried) < BALANCE_RETRY);
+        event!(Level::INFO, msg = "handing a group back to its placement primary", group = %group, to = %primary);
+        glommio::spawn_local(async move {
+            if let Err(error) = raft.trigger().transfer_leader(primary).await {
+                event!(Level::WARN, msg = "a lead could not be handed back", group = %group, ?error);
+            }
+        })
+        .detach();
     }
 
     /// Post a replication report to the control thread every so many deadline ticks

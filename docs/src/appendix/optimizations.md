@@ -200,6 +200,7 @@ so they get worse by existing longer rather than under load.
 | **B18** | [**O60**](#o60-a-nodes-figures-ride-its-status-report-as-verbose-json) — a node's figures ride its status report as verbose JSON | Measured in shape — about 7.4 KB a report for four busy tables, one report in four, 1.6× the leader's intake at 64 members | S | none; the spike's `fanout` table prices it, and no arm drives a cluster of that size | Contained | no |
 | **B19** | [**O61**](#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page) — a fast device syncs the WAL in batches too small to fill a page | Measured on the lab — 6.8× the device writes of the slower hosts for the same replicated rows, 5.6k `fdatasync`s a second against 680 | S–M | the lab's insert `bench` with disk counters | Latency for wear | yes, on the lab |
 | ~~**B20**~~ | ~~[**O62**](#o62-every-compaction-rewrites-the-shards-whole-archive-map) — every compaction rewrites the shard's whole archive map~~ **done**, measured and kept | Measured — 70% of a node's writes under load, in bursts that stalled its fsyncs | S | the lab's mixed `bench` with bytes per file | A longer replay at start | it was |
+| ~~**B21**~~ | ~~[**O63**](#o63-leadership-never-returns-to-a-groups-placement-primary) — leadership never returns to a group's placement primary~~ **done**, measured and kept | Measured — one node leading every group cost about a sixth of the throughput and a quarter of the write p99 | S | the lab's mixed `bench`, skewed against spread | One transfer per group handed back | it was |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -2872,3 +2873,54 @@ Zen1 hosts' fsyncs are gone. The median run moved less than the spread between r
 change is not claimed for the median. The first rollout exposed [#140](resolved/intent-log-read-ahead.md):
 hyperion's longer intent log, read one direct read per field, failed its start. **Kept**, with
 #140.
+
+### O63. Leadership never returns to a group's placement primary
+
+| | |
+| --- | --- |
+| **Rank** | ~~**B21**~~ **done** — measured on the lab, applied, kept |
+| **Impact** | Measured — after a few restarts and rolling upgrades, one Zen1 node led all 36 groups and proposed every write: 81,000 operations a second at a write p99 of 300 ms, against 90,000–97,000 at 217–234 ms with the leads spread 12, 12, 12 |
+| **Difficulty** | S — a shard hands a group it has led for a while back to the group's placement primary |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | One leader change per group handed back, which costs that group's writes one transfer. An even spread is right for equal members, and not the best spread for unequal ones: on this lab, europa leading more than its share beat the even split |
+| **Benchmark** | the lab's mixed `bench` with every group led by one node against the same with the leads spread ([cluster testing](../cluster-testing/performance.md#leadership-after-a-restart)) |
+
+Found by the [distributed cluster testing](../cluster-testing/performance.md#leadership-after-a-restart)
+chapter, and listed before that as unbuilt on [C15](../distributed/open-issues.md#filed-as-unbuilt)
+("leadership moved … back to a returning node"). The placement puts each group's primary first in
+its voters and spreads primaries evenly, and a group's first leader is its primary. An election
+after a crash, or a handoff on a planned stop ([Resolved #139](resolved/leadership-handoff-on-stop.md)),
+moves the lead to another voter, and nothing moved it back. The handoff made it worse: it picks the
+most caught-up voter, so a rolling upgrade that ends with the leader tends to pile the leads onto
+whichever node was restarted first.
+
+**Applied:** `Shard::balance_leadership`, on the shard's tick. Every five seconds a shard hands at
+most one group back to its placement primary, and only when all of these hold:
+
+- it has led the group for ten seconds;
+- the primary is up in the map;
+- every voter is within 16 entries of its log, and a voter it has no progress for counts as behind;
+- no repair, move, backup or restore is working on the group, and none of its copies here is
+  quarantined;
+- it has not tried to hand this group back in the last minute.
+
+**The first cut restarted a snapshot install.** `snapshot_duplicates_and_resume_are_safe` failed
+three times in three. A member being fed a snapshot had no progress in the leader's metrics, which
+the check read as index zero, and in a group whose log was shorter than the allowed lag that
+counted as caught up. The transfer to it failed, another voter was elected, and the member's
+install started over, every fifteen seconds. Treating no progress as behind, and a one minute
+retry per group, fixed it (three of three, then the whole fixture suite).
+
+**Outcome:** after a rolling upgrade the leads went from 6/24/6 to 12/12/12 within 30 seconds.
+Against every group led by titan, two runs each and the first after the upgrade excluded:
+
+| Leads (europa/titan/hyperion) | Operations per second | Write p99 | Write max |
+| --- | --- | --- | --- |
+| 0/36/0 | 81,000, 81,000 | 300 ms, 299 ms | 614 ms, 610 ms |
+| 12/12/12 | 96,700, 90,300 | 235 ms, 217 ms | 612 ms, 539 ms |
+
+**Kept.** Earlier runs with europa leading 18 or 24 groups reached 99,000–143,000 operations a
+second, because europa is the fastest host. Weighting the primaries by a member's capacity, which
+the planner already reads for data placement, would do better than an even spread on unequal
+hardware. It is filed in [todos](todos.md#leadership-is-spread-evenly-whatever-each-member-can-do).

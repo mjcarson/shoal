@@ -87,11 +87,15 @@ write fell by about a third. The first rollout of O62 also failed a node's start
 A node that restarts leads none of its groups when it comes back, and nothing moves leadership back
 to it. After two kills titan led 0 of its 36 groups, hyperion 12 and europa 24. Every write is
 proposed through its group's leader, so europa did two thirds of the leaders' work. Tracked as
-an [open question](../distributed/open-issues.md#filed-as-unbuilt) before this chapter, and taken
-up below.
+an [open question](../distributed/open-issues.md#filed-as-unbuilt) before this chapter.
 
-*Not yet measured*: the mixed bench with leadership skewed against the same bench with leadership
-balanced.
+Measured, and fixed as [O63](../appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary):
+the rolling upgrades that tested [#139](../appendix/resolved/leadership-handoff-on-stop.md) left
+titan, a Zen1 host, leading all 36 groups. With every write proposed through it, the mixed bench
+did 81,000 operations a second at a write p99 of 300 ms. Once shards hand a group back to its
+placement primary, the leads settle at 12, 12 and 12 within 30 seconds of an upgrade, and the same
+bench did 90,000–97,000 at 217–235 ms. With europa, the fastest host, leading more than its share
+it did better again, which is filed as a todo.
 
 ## Failover time against `primary_failover_after`
 
