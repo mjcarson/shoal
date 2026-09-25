@@ -423,6 +423,26 @@ was loaded.
 Cleaning up also found `cluster destroy` unable to remove a storage path that is itself a mount
 point ([#157](../appendix/resolved/destroy-mount-point.md), fixed).
 
+**Rerun with #156's fix deployed**, on the same 2 GiB filesystem and the same load:
+
+- **The disk filled 70 s in, and hyperion stopped** 115 ms after its first failed WAL batch. The
+  first exit was shard 3's checkpoint write (`the checkpoint file could not be written: … No space
+  left on device`), a few milliseconds ahead of the WAL check. Either path stops the node, which is
+  the point: no core was left dead inside a running process. The loader's writes went to the
+  groups' new leaders on europa and titan.
+- **While the disk stayed full, hyperion kept failing to start**, with systemd's restart count
+  climbing 3, 6, 9, 12 over a minute. Each start stopped at its first shard: the compactor's
+  archive map rewrite at open (`Movie/maps/temp/Shard-0`) found no space. It never came up half
+  able to write.
+- **Once the filesystem grew to 4 GiB online, hyperion came back with no restart by hand.** The
+  next scheduled restart started it, and 15 s later all three voters were up. A second load of
+  200,000 movies ran without a failure, and every one of them read back through hyperion alone at
+  `One` (`verify --member 1 --read one --movies-only`): 0 missing, 0 different.
+
+**Verdict:** availability through a node with a full disk **pass**, in the sense #156's fix
+promises: the node leaves the cluster instead of holding dead copies, and returns on its own once
+space does. Shedding writes before the disk is full remains open (156).
+
 ## 5. Regression pass
 
 The fault suite again on the rebuilt cluster with every fix above deployed (#143 to #154, O61 to

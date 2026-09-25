@@ -1622,6 +1622,17 @@ impl ShardWal {
         self.inner.borrow_mut().commit_delay = delay;
     }
 
+    /// Why a write or sync of this WAL failed, if one has
+    ///
+    /// Once one has, nothing more is taken, and the state past the durable watermark is not
+    /// known: a failed `fdatasync` in particular says nothing about which pages reached the
+    /// device. The shard stops on it, and a restart recovers from what the segments hold
+    /// ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md)).
+    #[must_use]
+    pub fn failure(&self) -> Option<String> {
+        self.inner.borrow().error.clone()
+    }
+
     /// How many batches have been written and synced since the WAL was opened
     #[must_use]
     pub fn synced_batches(&self) -> u64 {

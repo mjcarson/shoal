@@ -4442,6 +4442,21 @@ where
                 self.sweep_segments().await?;
                 // and whether every group's core is still there to sweep for
                 self.probe_cores().await;
+                // a WAL that could not be written takes nothing more, and what it holds past its
+                // durable watermark is unknown: the shard stops, the node with it, and a restart
+                // recovers from what is on disk rather than serving on as copies that take
+                // nothing ([Resolved #156](../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md))
+                if let Some(error) = self
+                    .replication
+                    .as_ref()
+                    .and_then(|replication| replication.wal.failure())
+                {
+                    event!(Level::ERROR, msg = "this shard's wal could not be written; stopping", shard = self.shard_id, %error);
+                    return Err(ServerError::ShardFailed {
+                        shard: self.shard_id,
+                        error: format!("the shard's wal could not be written: {error}"),
+                    });
+                }
             }
             // write out every table's staged writes when our queue drains, which batches the
             // writes that arrived together, or when a queue that never drains has kept them

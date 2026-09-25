@@ -269,6 +269,7 @@
   - [153. A restore on a shard that had received no stream killed the shard](appendix/resolved/install-dir-absent.md)
   - [154. `cluster admin` reported a restore with a failed group as done](appendix/resolved/admin-hides-failed-groups.md)
   - [155. A restore failed a group for good when a member was out of reach for a while](appendix/resolved/restore-retries-unreachable.md)
+  - [156. A node whose WAL could not be written stayed up, serving nothing](appendix/resolved/wal-failure-stops-the-node.md)
   - [157. `cluster destroy` failed on a storage path that is a mount point](appendix/resolved/destroy-mount-point.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)

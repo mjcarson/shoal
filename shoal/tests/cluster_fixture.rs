@@ -18296,3 +18296,49 @@ async fn a_restore_rides_out_an_unreachable_member() -> Result<(), FixtureError>
     }
     Ok(())
 }
+
+/// A node whose WAL cannot be written stops, rather than serving on as a copy that takes nothing (item 156)
+///
+/// On the lab a node's disk filled: its WAL writes failed, every group core on the node died,
+/// and the node stayed up answering every write through it `Unavailable` until someone restarted
+/// it. A WAL whose write or sync failed holds a state nothing can trust, so the shard now stops,
+/// the process with it, and a restart recovers from what is durable
+/// ([Resolved #156](../../docs/src/appendix/resolved/wal-failure-stops-the-node.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_whose_wal_cannot_be_written_stops() -> Result<(), FixtureError> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .segment_bytes(64 * 1024)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    write_note(&addr, 12600, "before").await?;
+    // node two's WAL directory taken read-only: its next segment cannot be made, which fails a
+    // batch the way a full disk does
+    let wal = cluster.dir(2).join("wal").join("Shard-0");
+    assert!(wal.is_dir(), "no wal at {}", wal.display());
+    std::fs::set_permissions(&wal, std::fs::Permissions::from_mode(0o555)).expect("read only");
+    // enough wide writes through node zero to rotate node two's segments several times over
+    let wide = "x".repeat(4096);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut key = 12601u64;
+    while cluster.node(2).failure().is_none() {
+        let _ = write_note(&addr, key, &wide).await;
+        key += 1;
+        assert!(
+            Instant::now() < deadline,
+            "node two's wal could not be written for {} writes and the node is still up",
+            key - 12601
+        );
+    }
+    std::fs::set_permissions(&wal, std::fs::Permissions::from_mode(0o755)).expect("writable");
+    eprintln!("node two stopped after {} writes: {:?}", key - 12601, cluster.node(2).failure());
+    // and the other two still take writes
+    write_note_eventually(&addr, key, "after", Duration::from_secs(30)).await?;
+    Ok(())
+}
