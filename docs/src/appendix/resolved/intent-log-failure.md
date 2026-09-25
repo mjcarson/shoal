@@ -157,11 +157,11 @@ the same background task and the same `record_error` a device error does.
   WAL (`server/wal/`), which records its own failures and answers the waiting batches with them.
   What a group does after that is openraft's storage-error handling, and this change did not
   examine it.
-- **A retrying client reports the retry's refusal, not the first try's unknown.** A write behind
+- ~~**A retrying client reports the retry's refusal, not the first try's unknown.** A write behind
   the failure is answered `OutcomeUnknown`, which the client retries. The retry is refused
-  `StorageWrite`, and that is what the caller sees, which reads as "never applied". Filed as
-  [item 125](../known-issues.md#125-a-retried-write-whose-first-try-was-outcomeunknown-reports-the-last-trys-refusal),
-  since a cluster node's retries meet the same thing.
+  `StorageWrite`, and that is what the caller sees, which reads as "never applied".~~ Filed as
+  item 125 and [resolved](retry-unknown-outcome.md): the retry loop remembers an unknown
+  outcome and reports the refusal after it as `OutcomeUnknown`.
 - **No operator command clears a failed log** short of a restart. It is filed in
   [To-dos](../todos.md#recovering-a-failed-intent-log-without-a-restart), with what it needs.
 

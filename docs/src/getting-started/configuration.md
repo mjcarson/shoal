@@ -90,6 +90,7 @@ storage:
         path: "/opt/shoal"
         buffer_size: "128KiB"
         write_behind: 4
+  flush_interval: 1ms                # longest a busy shard leaves a staged write unwritten
   tables:                            # per-table overrides, keyed by table name
     movies:
       FS:
@@ -335,6 +336,16 @@ shallow queue depth.
 
 `intent_log_size` is the rotation threshold — once the active intent log exceeds it,
 compaction is triggered ([Compaction](../storage/compaction.md)). It defaults to 10 MiB.
+
+`flush_interval` sits beside `default` and `tables` rather than inside a profile, because it is
+the shard's and not a table's. A shard writes out every table's partly filled staging buffer
+whenever its queue drains, which is what batches writes that arrived together. A shard whose
+queue never drains also writes them out once this long has passed since it last did, so a write
+waits at most about this long before it is submitted. It defaults to `1ms` and takes the
+`500ms`/`5s` form every duration here does. `0ms` writes them out after every message, which
+gives up the batching. Before it existed, that wait was unbounded
+([Resolved #36](../appendix/resolved/staged-tail-deadline.md)). It applies to a standalone
+node's intent logs; a cluster node's WAL has a writer of its own.
 
 `buffer_size` is a *floor*, and `max_buffer_size` is the ceiling above it. At startup the floor is
 rounded up to at least one block of the backing device's direct IO alignment, because every write to

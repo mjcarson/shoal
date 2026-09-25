@@ -31,10 +31,10 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at ~~15~~ ~~16~~ 19 and skips 25, 26, 30, 31, 33, 34, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
+list starts at ~~15~~ ~~16~~ 19 and skips 25, 26, 27, 30, 31, 32, 33, 34, 36, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
 76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 120, 121, 122, 123 and 124, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ item 125 is the newest entry here, ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ and the newest number, and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120, 121, 122, 123 and 124 are on the resolved page. **120 and 121 never appeared here**:
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ item 119 is the newest entry here again, ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ with 125 the newest number, on the resolved page, and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
+83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120, 121, 122, 123, 124 and 125 are on the resolved page, with 27, 32 and 36 beside them. **120 and 121 never appeared here**:
 they were found by reading the code around item 30 - the unsorted table's version of its arm
 charging the shard twice, and the duplicate read that let either arm be reached - reproduced by
 a harness that builds a shard's tables without a shard, and fixed with it
@@ -65,7 +65,8 @@ fixture test each, and fixed before the milestone's own work began
 ([Resolved #33](resolved/gather-expiry.md)): it was the oldest open hang, and it was reproduced
 before it was fixed. **94 never appeared here either**: it
 was found and fixed while [F38](../features/inter-node-transport.md) made a peer link a client,
-and is the fixed half of item 32 ([Resolved #94](resolved/disconnected-client-cleanup.md)). **38, 58 and 88 moved together**
+and was the first half of item 32 ([Resolved #94](resolved/disconnected-client-cleanup.md)), whose
+second half is now [resolved](resolved/client-gone-broadcast.md) too. **38, 58 and 88 moved together**
 ([Resolved #38, 58, 88](resolved/pool-readiness.md)): three symptoms of one cause, the pool
 returning before its shards had bound. **91 was found by fixing them** — the honest `exit` that
 closed 58 surfaced a compactor that had been dying silently for as long as one test had existed. **79, 82, 83, 84, 85 and 86 never appeared here at all**: each was
@@ -78,8 +79,8 @@ found and fixed in the same change ([Resolved #79](resolved/micro-only-capture-c
 worth noting because it makes the numbering look like six entries went missing. Item 80 is the other way round —
 it was filed here rather than fixed, because the fix turned on a question about the storage layer
 that reading `block_on_load` alone could not answer, and stayed here until somebody answered it
-([Resolved #80](resolved/never-flushed-partitions.md)). The exceptions are items 20, 24, 32, 54 and 73, which were only
-partly fixed: the open remainder is here and the rest is there. Items 9, 15, 16 and 51 were each one such
+([Resolved #80](resolved/never-flushed-partitions.md)). The exceptions are items 20, 24, ~~32,~~ 54 and 73, which were only
+partly fixed: the open remainder is here and the rest is there. Items 9, 15, 16, 32 and 51 were each one such
 exception until their last part was fixed, and are now on the resolved page alone - 16 in four
 parts, the last of which ([Resolved #16](resolved/hot-path-panics.md)) also found that the item's
 write path claim was wrong and filed what it should have said as item 122, since
@@ -88,11 +89,19 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ **1,576 tests**, six ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ **1,587 tests**, six ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
 two of `persistent_unsorted_table.rs` fail about one run in five of that binary (item 107).
+[Resolved #27](resolved/shql-quote-escape.md), [#32](resolved/client-gone-broadcast.md),
+[#36](resolved/staged-tail-deadline.md) and [#125](resolved/retry-unknown-outcome.md) added 11
+and took it to 1,587. There are two new binaries, `retry_outcome.rs` (3) and `staged_flush.rs`
+(1), plus one test in each of `shql.rs` and `client_disconnect.rs`, four in `shoal-proto` and
+one in `shoal-client`. The workspace run at six threads with `--no-fail-fast` failed two fixture
+tests, and each passed when run alone: `a_dead_primary_fails_writes_only_until_its_election`
+(item 100's shape) and `local_rehome_recovers_after_each_crash_point`, which no earlier run had
+recorded failing under load.
 [Resolved #122](resolved/intent-log-failure.md), [#123](resolved/parked-get-key.md) and
 [#124](resolved/unsorted-update-generation.md) added 12 and took it to 1,576: one new binary,
 `intent_log_failure.rs` (4), five in `resident_reads.rs`, and three `shoal-core` unit tests. They
@@ -307,115 +316,13 @@ disagree, and a partition has at most one read outstanding.
 
 ## Medium — robustness
 
-### 27. SHQL cannot express a string containing a single quote
-
-`string_literal` is `delimited("'", take_till(0.., |c| c == '\''), "'")`
-(`shoal-core/src/shared/queries/parser.rs:470-472`). There is no escape syntax — not doubling
-(`''`), not backslash.
-
-This is worse than a missing convenience. Any row whose **partition key** is a string
-containing an apostrophe is unreachable from SHQL entirely, because the partition key is the one
-condition every query must supply. `WHERE title = 'it''s'` does not parse, and there is no
-spelling that works.
-
-**Fix direction:** doubling is the SQL-standard form and the smaller change — replace the
-`take_till` with a loop that accumulates until an unescaped quote, treating `''` as a literal
-quote. Backslash escapes would also work but diverge from SQL. Either way the byte offsets
-recorded in `WhereClause` must continue to span the *raw* literal including its quotes, since
-that is what error rendering slices; the decoded value and the source span will no longer be the
-same length.
-
-### 32. A disconnected client is never cleaned up anywhere
-
-Nothing removes an entry from `client_map` (`shard.rs:279`, inserted at `:914`), and `ServerMsg`
-has no variant for a client going away. `client_rx_relay` breaks its loop on EOF
-(`shard.rs:58-65`) and tells nobody.
-
-Because `client_acceptor` broadcasts `NewClient` to every shard, every shard holds a clone of
-that client's `client_tx` for as long as the process runs. So the channel never closes and
-`client_tx_relay`'s `recv()` never returns `Err`.
-
-Per connection that has already gone away, permanently:
-
-| Leaked | Where |
-| --- | --- |
-| One `client_map` entry | Every shard |
-| One `kanal` channel | Every shard holds the sender |
-
-**The socket and the tasks are no longer among them.**
-[F10](../features/framing-and-protocol-evolution.md) put both relays under one per-connection task
-that owns the write task's handle and cancels it when the read relay ends, so a disconnect now
-drops both halves of the split stream and closes the socket. This was found by a test that hung:
-the two halves of a split stream keep the stream alive between them, so a read relay that ended on
-its own left the write relay parked on an empty channel holding a socket nobody would ever read
-from again. What is still leaked is the bookkeeping every *other* shard holds, which is what
-`ClientGone` below is for.
-
-~~A response that arrives for a dead client is not an error either — it is sent into an unbounded
-channel ([item 15](resolved/backlog-bounds.md)) that nothing will ever read.~~ It was worse than
-that, and it is fixed: the send used `?`, so an answer owed to a client that had left ended the
-shard ([Resolved #94](resolved/disconnected-client-cleanup.md)). An answer with nowhere to go is
-now logged at `DEBUG` and dropped, whether the receiver is gone or the map entry is.
-
-**The peer half is done.** [F38](../features/inter-node-transport.md) made a peer link a client
-of the node it dials, and the peer listener broadcasts `ServerMsg::ClientGone(conn)` when a lane
-ends (`shoal-core/src/server/peer/listener.rs`); every shard removes the entry. So the variant
-exists and the retirement path is exercised - by peers. **What remains is the ordinary client:**
-`client_rx_relay` still ends and tells nobody, and the table above still describes every
-connection a client opens.
-
-This is the cost of a *disconnect*, not of a failure: an ordinary client that opens a pool, does
-its work, and exits leaves all of it behind. The client's own pool is 50 connections
-(`shoal-core/src/client.rs:140-148`).
-
-**Fix direction:** ~~a `ServerMsg::ClientGone` broadcast from `client_rx_relay` when its loop ends~~
-the same `ClientGone` broadcast the peer listener does, from `client_rx_relay` when its loop ends.
-Dropping the sender from every `client_map` is what closes the channel, which is what lets
-`client_tx_relay` return on its own. It was deliberately not done with the peer half, because it
-changes what every ordinary disconnect costs every shard - one message per shard per connection -
-and the capture that would show that cost is the benchmark host's to take
-([Resolved #94, Alternatives rejected](resolved/disconnected-client-cleanup.md#alternatives-rejected)).
-
-That handles the socket dying. The *clean* case — a client shutting down deliberately — is better
-served by [D2](../direction/framing.md#message-types)'s `GoAway`, which lets the server drain
-before the socket closes rather than discovering the disconnect afterwards. The two are
-complementary: `ClientGone` is what the server tells itself, `GoAway` is what the peers tell each
-other, and [D6](../direction/connection-pool.md#connection-death) needs the second to fail the
-right streams on the client side.
-
-### 36. A partial intent log buffer is only written when the shard's channel drains
-
-```rust
-// if we have no more messages then flush our current queries to disk
-if self.shard_local_rx.is_empty() {
-    self.tables.flush().await?;
-}
-```
-
-`shard.rs:970-973`
-
-`StreamWriter::prep` and `consume` (`.../fs/stream.rs:655-682`) write only when the staging buffer
-fills, so this `is_empty()` check is the only other path by which staged data reaches disk. Writes
-are acknowledged only once durable ([Resolved Issues #1-3](resolved/durability.md)), so whether a
-client hears back depends on the shard's channel happening to run dry.
-
-Under sustained load it does not. Worse, the writer's own `DataFlushed` wakeups
-(`.../fs/stream.rs:455`, `:506`, sent per completed write) are themselves messages on that channel,
-so write traffic helps keep the condition false. The escape is an intent log rotation, which
-refreshes the writer and reports its flushed position unconditionally (`.../fs.rs:442-450`) —
-meaning a trailing write can wait for up to `intent_log_size`, 10 MiB by default, of *other*
-traffic before its client is answered.
-
-Not a durability bug: nothing is acknowledged that is not durable. It is an unbounded
-acknowledgement delay for the last writes before a lull.
-
-**[F23](../features/self-sizing-staging-buffer.md) widened this without changing its bound.** The
-staging buffer now sizes itself to hold about eight records rather than however many of them
-happened to fit in 4096 bytes, so more writes can be sitting in it when a lull does not come. The
-worst case is still `intent_log_size` of other traffic, because the escape is still a rotation — but
-the number of clients waiting behind it goes up with the buffer, and for a table with 8 KiB rows it
-goes from one to eight. Recorded here rather than as a new item, since it is this defect being worse
-rather than a second one.
+*Nothing is currently filed at this severity.* The four items that were here are resolved, all
+in one change: [27](resolved/shql-quote-escape.md), SHQL strings that could not hold a quote;
+[32](resolved/client-gone-broadcast.md), an ordinary client's departure retiring nothing;
+[36](resolved/staged-tail-deadline.md), a staged write that waited for a queue to drain; and
+[125](resolved/retry-unknown-outcome.md), a retried write whose unknown first outcome was
+reported as the last try's refusal. Item 125 was filed at the end of this page, with the
+entries that came after the triage order, and carried its severity in its first line.
 
 ---
 
@@ -814,13 +721,17 @@ addressed to.
 4. **Item 47** — cheap, and it is making the recovery counters harder to trust the longer it sits.
    Every unclean shutdown currently reports discarded data, so the warning that means real
    corruption is buried under warnings that mean a process was killed.
-5. **Items 27 and 42** — data that SHQL cannot reach at all: a partition key containing a quote,
-   and a composite sort key. Item 42 is the sharper of the two now that
-   [item 8](resolved/sort-keys.md) is fixed, since a sort key is a thing you can query with.
-6. **Items 32 and 33** — two leaks with one shape: state keyed by something that goes away and is
-   never told. They are cheap together, since a `ClientGone` broadcast is what both want - and
-   the broadcast now exists, sent for peer lanes ([Resolved #94](resolved/disconnected-client-cleanup.md));
-   what is left of 32 is sending it for ordinary clients, once the cost is measured.
+5. ~~**Items 27 and 42**~~ **Item 42** — data that SHQL cannot reach at all: ~~a partition key
+   containing a quote, and~~ a composite sort key. Item 27, the quote, is
+   [resolved](resolved/shql-quote-escape.md): a literal doubles it, as SQL does. Item 42 was
+   already the sharper of the two now that [item 8](resolved/sort-keys.md) is fixed, since a
+   sort key is a thing you can query with.
+6. ~~**Items 32 and 33**~~ — two leaks with one shape: state keyed by something that goes away and is
+   never told. Both are resolved: [33](resolved/gather-expiry.md) at M5, and
+   [32](resolved/client-gone-broadcast.md) by sending the `ClientGone` broadcast the peer lanes
+   already sent ([Resolved #94](resolved/disconnected-client-cleanup.md)) for ordinary clients
+   too. The cost it was waiting on is one message per shard per disconnect, the same as
+   `NewClient` per connect; the capture of a connection-churn workload is still owed.
 7. **Items 43 and 46** — the two remaining holes in the storage marker. Worth doing together,
    since both are changes to what `StorageMeta::claim` looks at before it writes.
 
@@ -1057,7 +968,7 @@ memory: every response the server later sends for that query id is delivered int
 no reader, which is unbounded. And `channel_queue` is a reuse pool, so a leaked pair is a channel
 the next query has to allocate instead of reusing (`:188-191`).
 
-**This is the client-side twin of [item 32](#32-a-disconnected-client-is-never-cleaned-up-anywhere)**
+**This is the client-side twin of [item 32](resolved/client-gone-broadcast.md)**, since resolved,
 — state keyed by something that goes away, with nothing told about it — and it has the same
 consequence, which is that an ordinary well-behaved caller leaks. It is bounded differently,
 though: the server's leak is per connection and this one is per query.
@@ -1813,21 +1724,3 @@ needs a control quorum, and its kill can land before that quorum exists. The fix
 three voters before killing. **Established by running it**: it failed once in the
 whole-workspace run for [Resolved #115](resolved/retry-sidecar-crash-window.md) and passed
 alone at once.
-
-### 125. A retried write whose first try was `OutcomeUnknown` reports the last try's refusal
-
-*Medium — misleading outcome.* `Shoal::exec_with` retries a bundle while each failure is
-`retriable` and the budget lasts. When it stops, it returns the failure that stopped it
-(`shoal-client/src/client.rs`, the `Err(error)` arm of the retry loop). `OutcomeUnknown` is
-retriable. `Shedding` is retriable too, but it is a definite refusal, and `StorageWrite` is a
-definite refusal that is not retriable. So a write whose first try is `OutcomeUnknown` and whose
-retry is refused by name reaches its caller as "this did not apply". The first try may have
-applied, and on a cluster node it may still commit after the refusal. Since
-[Resolved #122](resolved/intent-log-failure.md) a standalone table reaches this directly: the
-write behind a failed intent log is `OutcomeUnknown`, and its retry is `StorageWrite`.
-
-**Fix direction:** have the loop remember that an earlier try's outcome was unknown, and return
-`OutcomeUnknown` (carrying the last failure's message) when it stops on a definite refusal after
-one. A caller can then tell "never applied" from "may have applied, and then a retry was
-refused". **Established by reading the source**, while choosing the code for item 122's pending
-writes.

@@ -23,7 +23,7 @@ comparison := identifier ws ( "=" ws value
 range_op   := ">=" | "<=" | ">" | "<"
 limit      := "LIMIT" ws1 digits
 value      := string | float | integer | boolean | null
-string     := "'" { any character except "'" } "'"
+string     := "'" { any character except "'" | "''" } "'"
 float      := ["-"|"+"] digits "." digits
 integer    := ["-"|"+"] digits
 boolean    := "true" | "false"        (case-insensitive)
@@ -34,6 +34,10 @@ identifier := xid_start { xid_continue }
 Keywords are case-insensitive (`winnow::ascii::Caseless`). The trailing
 semicolon is optional (`ParsedSelect::new`). Identifiers are **not** case-insensitive — the name
 after `FROM` is matched against the table's Rust struct name.
+
+A string literal writes a quote inside it twice, as SQL does: `'it''s'` is the value `it's`,
+and `''''` is a single quote ([Resolved #27](../appendix/resolved/shql-quote-escape.md)). A
+backslash is an ordinary character.
 
 Identifiers follow the same rules Rust does, which is to say
 [UAX #31](https://www.unicode.org/reports/tr31/): an `XID_Start` character or an underscore,
@@ -48,6 +52,7 @@ SELECT * FROM Movie WHERE id IN (12345, 12346)
 SELECT * FROM Movie WHERE id = 12345 OR id = 12346
 select * from Movie where id = 12345 limit 10
 SELECT * FROM MovieByKeyword WHERE keyword = 'alien' AND title > 'Gravity' LIMIT 20
+SELECT * FROM Movie WHERE id = 12345 AND title = 'Ocean''s Eleven'
 ```
 
 ## Projections
@@ -184,9 +189,10 @@ inside a conjunction.
   fields has a tuple `PartitionKey`, and no SHQL literal can produce one.
 - **No `ORDER BY`, `GROUP BY`, `JOIN`, or aggregates.**
 - **No `INSERT`, `UPDATE`, or `DELETE`.** Writes must be built as typed queries.
-- **No escape syntax in string literals.** `string_literal` is
-  `delimited("'", take_till(0.., '\''), "'")` (`string_literal`, `parser.rs`), so a value containing a
-  single quote cannot be expressed at all — not by doubling it, not by backslash.
+- ~~**No escape syntax in string literals.** A value containing a single quote cannot be
+  expressed at all.~~ A quote inside a literal is written twice, as SQL writes it: `'it''s'` is
+  `it's` ([Resolved #27](../appendix/resolved/shql-quote-escape.md)). There is still no backslash
+  escape, so a backslash is an ordinary character.
 - **No exponent form for floats, and digits required on both sides of the point.**
   `float_number` is `(opt(sign), digit1, ".", digit1)` (`float_number`, `parser.rs`), so `1e9`, `.5`, and
   `5.` all fail. `1e9` is especially confusing: it parses as the integer `1` and then fails as
@@ -578,9 +584,9 @@ by `shoalctl/tests/completion.rs`.
   another table, is a binding error rather than a query
   ([F2](../features/projections.md#what-it-does)).
 - Composite partition keys cannot be expressed, since no literal can produce a tuple.
-- String literals have no escape syntax, so they cannot contain a single quote — which makes
-  rows whose partition key holds an apostrophe unreachable
-  ([Known Issues #27](../appendix/known-issues.md#27-shql-cannot-express-a-string-containing-a-single-quote)).
+- ~~String literals have no escape syntax, so they cannot contain a single quote.~~ A quote is
+  written twice inside a literal, so a row whose partition key holds an apostrophe is reachable
+  ([Resolved #27](../appendix/resolved/shql-quote-escape.md)).
 - Floats need digits on both sides of the point and have no exponent form, and `1e9` fails with
   a misleading trailing-input error
   ([#29](../appendix/known-issues.md#29-shql-rejects-exponent-notation-with-a-misleading-error)).

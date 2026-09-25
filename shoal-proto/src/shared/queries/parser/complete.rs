@@ -160,8 +160,9 @@ fn word_start(query: &str, cursor: usize) -> usize {
 
 /// Whether the cursor is inside an unterminated string literal
 ///
-/// String literals have no escape syntax, so an odd number of quotes before the cursor means we
-/// are inside one and have no business suggesting identifiers.
+/// A quote inside a string literal is written twice, which adds two quotes and so never changes
+/// the parity, so an odd number of quotes before the cursor still means we are inside one and
+/// have no business suggesting identifiers.
 ///
 /// # Arguments
 ///
@@ -206,11 +207,12 @@ fn tokenize(head: &str) -> Vec<Token> {
             ',' => tokens.push(Token::Comma),
             // the optional query terminator
             ';' => tokens.push(Token::Semicolon),
-            // a string literal, which runs until the next quote or the end of the text
+            // a string literal, which runs until a quote that is not doubled or the end of the text
             '\'' => {
                 // consume everything up to and including the closing quote
-                for (_, next) in chars.by_ref() {
-                    if next == '\'' {
+                while let Some((_, next)) = chars.next() {
+                    // a quote followed by another is one quote inside the literal, not its end
+                    if next == '\'' && chars.next_if(|(_, after)| *after == '\'').is_none() {
                         break;
                     }
                 }

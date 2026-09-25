@@ -17,7 +17,7 @@
 //! range_op   := ">=" | "<=" | ">" | "<"
 //! limit      := "LIMIT" ws1 digits
 //! value      := string | float | integer | boolean | null
-//! string     := "'" { any character except "'" } "'"
+//! string     := "'" { any character except "'" | "''" } "'"
 //! float      := ["-" | "+"] digits "." digits
 //! integer    := ["-" | "+"] digits
 //! boolean    := "true" | "false"
@@ -27,6 +27,9 @@
 //!
 //! Keywords and the `true`/`false`/`null` literals are case-insensitive. Identifiers are not —
 //! the name after `FROM` is matched against the table's Rust struct name.
+//!
+//! A string literal writes a quote inside it twice, as SQL does: `'it''s'` is the value `it's`.
+//! There is no backslash escape, so a backslash is an ordinary character.
 //!
 //! Identifiers follow the same rules as Rust identifiers, which is to say [Unicode Standard
 //! Annex #31](https://www.unicode.org/reports/tr31/): they start with an `XID_Start` character
@@ -177,7 +180,7 @@
 use serde_json::Value;
 use std::any;
 use winnow::ascii::{digit1, multispace0, multispace1};
-use winnow::combinator::{alt, delimited, opt};
+use winnow::combinator::{alt, opt};
 use winnow::prelude::*;
 use winnow::token::{take_till, take_while};
 
@@ -456,9 +459,23 @@ pub fn is_ident_continue(c: char) -> bool {
     unicode_ident::is_xid_continue(c)
 }
 
+/// Parse one run of a string literal: its characters up to a quote, and the quote closing them
+///
+/// # Arguments
+///
+/// * `input` - Mutable reference to the input string slice being parsed
+fn string_run<'s>(input: &mut &'s str) -> winnow::Result<&'s str> {
+    (take_till(0.., |c| c == '\''), "'")
+        .map(|(run, _): (&str, &str)| run)
+        .parse_next(input)
+}
+
 /// Parse a string literal (single-quoted)
 ///
-/// Parses a string enclosed in single quotes ('string').
+/// Parses a string enclosed in single quotes ('string'). A quote inside the literal is written
+/// twice, as SQL writes it, so `'it''s'` is the value `it's`
+/// ([Resolved #27](../../../../docs/src/appendix/resolved/shql-quote-escape.md)). The span the
+/// caller records is the literal as written, which is longer than its value when it holds one.
 ///
 /// # Arguments
 ///
@@ -467,10 +484,29 @@ pub fn is_ident_continue(c: char) -> bool {
 /// # Returns
 ///
 /// A Value::String containing the parsed string on success, or a parse error
-fn string_literal<'s>(input: &mut &'s str) -> winnow::Result<Value> {
-    delimited("'", take_till(0.., |c| c == '\''), "'")
-        .map(|s: &str| Value::String(s.to_string()))
-        .parse_next(input)
+fn string_literal(input: &mut &str) -> winnow::Result<Value> {
+    // consume the opening quote and the first run, up to and including the quote after it
+    let first = ("'", string_run)
+        .map(|(_, run): (&str, &str)| run)
+        .parse_next(input)?;
+    // a quote that is not followed by another closes the literal, which is the common case and
+    // costs the one copy it always did
+    if !input.starts_with('\'') {
+        return Ok(Value::String(first.to_string()));
+    }
+    // this literal holds a doubled quote, so its value has to be built rather than sliced
+    let mut decoded = String::with_capacity(first.len() + 1);
+    decoded.push_str(first);
+    // each doubled quote is one quote in the value, followed by the run up to the next quote
+    while input.starts_with('\'') {
+        // consume the second quote of this pair and keep one quote for it
+        "'".parse_next(input)?;
+        decoded.push('\'');
+        // then the run after it, which ends at a quote that may close the literal or pair again
+        let run = string_run.parse_next(input)?;
+        decoded.push_str(run);
+    }
+    Ok(Value::String(decoded))
 }
 
 /// Parse a boolean literal

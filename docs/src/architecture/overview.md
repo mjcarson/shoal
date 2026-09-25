@@ -156,8 +156,9 @@ this enum is the complete list.
 and control, all shard-local work arrives on a single `kanal` channel. This gives a natural
 serialization point — the shard is a single-threaded state machine — and makes the
 "flush when idle" optimisation possible: the loop checks `shard_local_rx.is_empty()` and only
-then issues a flush (`shoal-core/src/server/shard.rs:655-657`), batching writes for free
-under load.
+then issues a flush (`Shard::start`), batching writes for free under load. A queue that never
+drains is flushed anyway once `storage.flush_interval` has passed, since without that a staged
+write waited for a lull ([Resolved #36](../appendix/resolved/staged-tail-deadline.md)).
 
 The cost is that there is no prioritisation. A backlog of client queries delays IO
 completions and shutdown alike.

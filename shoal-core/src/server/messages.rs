@@ -423,6 +423,13 @@ where
     /// behind looks like from the mesh
     /// ([Resolved #15](../../../docs/src/appendix/resolved/shard-mesh-admission.md)).
     Hold(u64),
+    /// Keep this shard's queue from draining until this instant, for a test of what waits on one
+    ///
+    /// The shard pauses briefly on it, as though it were work, and sends it back behind whatever
+    /// else is queued, so the queue always holds one more message and never grows past it: a
+    /// shard under a load that never lets up
+    /// ([Resolved #36](../../../docs/src/appendix/resolved/staged-tail-deadline.md)).
+    Busy(std::time::Instant),
     /// A message from a client
     Client {
         /// This peers id
@@ -943,6 +950,7 @@ impl<D: ShoalDatabase> ServerMsg<D> {
             // a view is asked of one shard, on a channel that answers once
             ServerMsg::Transport(_) => return Err("A transport view is asked of one shard"),
             ServerMsg::Hold(ms) => ServerMsg::Hold(*ms),
+            ServerMsg::Busy(until) => ServerMsg::Busy(*until),
             ServerMsg::Query {
                 meta,
                 body,

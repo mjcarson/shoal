@@ -97,8 +97,9 @@ add.
 - ~~The local mesh queues are still unbounded~~ (an admission bound since
   [Resolved #15](shard-mesh-admission.md)); a deadline bounds how long a client waits, not how
   much a shard holds behind what it admitted.
-- [Item 32](../known-issues.md#32-a-disconnected-client-is-never-cleaned-up-anywhere)'s remainder:
-  a departed ordinary client's gathers are dropped now, its channel is not yet retired.
+- ~~[Item 32](client-gone-broadcast.md)'s remainder: a departed ordinary client's gathers are
+  dropped now, its channel is not yet retired.~~ Its channel is retired too since
+  [Resolved #32](client-gone-broadcast.md), by the same `ClientGone` that drops its gathers.
 
 ## Tests
 

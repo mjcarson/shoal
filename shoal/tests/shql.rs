@@ -143,6 +143,23 @@ fn parse_review(query: &str) -> shoal::shared::queries::SortedGet<Review> {
 }
 
 #[test]
+/// A string partition key holding a quote is reachable, written with the quote doubled
+///
+/// Before item 27 no spelling reached it: the partition key is the one condition every query
+/// has to name, and a string literal could not hold a quote at all.
+fn binds_a_partition_key_holding_a_quote() {
+    // parse a query naming a partition whose key holds an apostrophe
+    let get = parse_review("SELECT * FROM Review WHERE movie = 'ocean''s eleven'");
+    // the key is hashed from the decoded value, the same as a typed query would hash it
+    assert_eq!(
+        get.partition_keys,
+        vec![Review::get_partition_key_from_values(
+            &"ocean's eleven".to_string()
+        )]
+    );
+}
+
+#[test]
 /// A query naming a table that is not in the schema is rejected
 fn rejects_an_unknown_table() {
     // this table does not exist in our schema

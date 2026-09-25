@@ -228,8 +228,10 @@ whole extra block. Buffers are therefore allocated one block larger than their u
 there is always room.
 
 **Cost:** one partial block per partial flush. This scales *inversely* with load — the shard
-only flushes a partial buffer when its queue drains (`shard.rs:651-653`), so under load
-buffers fill and pad regions are rare, while at idle every insert rounds up to a block.
+flushes a partial buffer when its queue drains, or on a busy queue once `storage.flush_interval`
+(1 ms) has passed since it last did ([Resolved #36](../appendix/resolved/staged-tail-deadline.md)),
+so under load buffers fill and pad regions are rare, while at idle every insert rounds up to a
+block.
 
 ### Completion notification
 
@@ -335,7 +337,8 @@ flight on the same ring: an fdatasync only has to cover writes that completed be
 issued, and every byte below `written_pos` did.
 
 `sync` still just issues the partial buffer as a background write and returns — it is the
-shard's idle flush and is not a durability barrier. `sync_blocking` is the waiting version:
+shard's idle flush, and its flush on a busy queue once `storage.flush_interval` has passed, and
+is not a durability barrier. `sync_blocking` is the waiting version:
 it writes the tail, drains every in-flight write, waits out any group commit, fdatasyncs, and
 records the result. It is reached from `refresh` during rotation, from `close`, and from
 `FileSystem::shutdown`, so a clean shutdown now fsyncs on the way out.
@@ -388,9 +391,12 @@ never be compared against the new file's watermark. Rotation handles this by con
 read without an index and truncated safely at any point.
 
 **The buffer is the batch.** There is no separate batching layer, no group-commit timer, and
-no explicit flush policy beyond "flush when the shard has nothing else to do"
-(`shard.rs:655-657`). Under load, batching happens because the buffer fills; under light
-load, latency stays low because the queue drains.
+~~no explicit flush policy beyond "flush when the shard has nothing else to do"~~ one flush policy:
+"flush when the shard has nothing else to do, or when it has been busy for
+`storage.flush_interval`" (`Shard::start`). Under load, batching happens because the buffer
+fills; under light load, latency stays low because the queue drains; and under a load that never
+lets the queue drain, the interval bounds the wait, which used to be unbounded
+([Resolved #36](../appendix/resolved/staged-tail-deadline.md)).
 
 **Write-behind converts latency into throughput.** Up to `max_write_behind` buffers (default
 128 for latency-sensitive writers) can be in flight, keeping the device queue deep.

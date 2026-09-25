@@ -335,8 +335,10 @@ a partition, so there is no way to express a full scan. `SELECT * FROM Movie` an
 `SELECT * FROM Movie WHERE title = 'Fight Club'` are both errors — the second parses fine and
 then fails to bind because `title` is a filter, not the partition key.
 
-**Strings use single quotes and have no escapes.** `'Fight Club'` is a string; `"Fight Club"` is
-not. There is no escape syntax, so a value containing a single quote cannot be written at all.
+**Strings use single quotes, and a quote inside one is written twice.** `'Fight Club'` is a
+string; `"Fight Club"` is not. ~~There is no escape syntax, so a value containing a single quote
+cannot be written at all.~~ `'Ocean''s Eleven'` is the value `Ocean's Eleven`, as in SQL
+([Resolved #27](../appendix/resolved/shql-quote-escape.md)).
 
 **`OR` and `IN` choose values, `AND` joins fields.** To read two partitions at once write
 `id IN (550, 551)`, or `id = 550 OR id = 551` — they mean the same thing. `AND` is for conditions

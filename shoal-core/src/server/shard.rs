@@ -833,6 +833,13 @@ fn control_reply(id: Uuid, kind: ReplyKind, json: &[u8]) -> Reply {
 /// deliberately so — it is here to bound a stalled peer, not to police a slow one.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a shard kept busy by a test pauses on each pass of its busy message
+///
+/// Long enough that the relays on this shard's executor get to run between passes, since a
+/// message that re-queued itself with no pause would never let the loop yield; short enough to
+/// look like ordinary work rather than a stall.
+const BUSY_PAUSE: Duration = Duration::from_micros(100);
+
 /// The largest handshake frame this server will read
 ///
 /// A handshake body is sixteen bytes. Anything claiming more than this is not a peer whose version
@@ -1236,6 +1243,12 @@ async fn client_acceptor<S: ShoalDatabase>(
             // stop writing to a client that is not reading, which drops the last half of the
             // stream and closes the socket
             tx_task.cancel().await;
+            // then tell every shard this client is gone, the way a peer lane's end is told:
+            // every shard was told of it, so every shard holds its channel until told otherwise
+            // ([Resolved #32](../../../docs/src/appendix/resolved/client-gone-broadcast.md))
+            if let Err(error) = comms.broadcast(&ServerMsg::ClientGone(client)).await {
+                event!(Level::ERROR, msg = "failed to retire a client", %client, ?error);
+            }
         })
         .detach();
     }
@@ -1440,6 +1453,13 @@ pub(super) struct Shard<D: ShoalDatabase> {
     /// completed IO sends a [`ServerMsg::DataFlushed`], so no pending response can
     /// become releasable until one of those messages has arrived.
     data_flushed: bool,
+    /// The longest this shard leaves a staged intent log write unwritten while its queue is busy
+    ///
+    /// Read once from `storage.flush_interval` so the loop compares two durations and parses
+    /// nothing ([Resolved #36](../../../docs/src/appendix/resolved/staged-tail-deadline.md)).
+    flush_interval: Duration,
+    /// When this shard last wrote out every table's staged writes
+    last_flush: std::time::Instant,
     /// The latency sensitive task queue
     high_priority: TaskQueueHandle,
     /// The medium priority task queue
@@ -1648,6 +1668,8 @@ where
             loader_channels,
             flushed: Vec::with_capacity(1000),
             data_flushed: false,
+            flush_interval: conf.storage.flush_interval.duration(),
+            last_flush: std::time::Instant::now(),
             high_priority,
             _medium_priority: medium_priority,
             tasks: Vec::with_capacity(100),
@@ -1763,6 +1785,10 @@ where
     ///
     /// * `client` - The client
     fn subscribe(&mut self, client: Uuid) {
+        // a client already retired is not subscribed, or nothing would ever take it back out
+        if !self.client_map.contains_key(&client) {
+            return;
+        }
         self.subscribed.insert(client);
         let map = self.map.get();
         let json = match serde_json::to_vec(&map.frame()) {
@@ -3781,6 +3807,7 @@ where
             links,
             bulk_received: self.bulk_received.get(),
             shed: self.shed,
+            clients: self.client_map.len(),
         }
     }
 
@@ -4136,6 +4163,15 @@ where
                     );
                     glommio::timer::sleep(Duration::from_millis(ms)).await;
                 }
+                // a test is keeping this queue from draining
+                ServerMsg::Busy(until) => {
+                    // stand in for a little work, which also lets this shard's relays run
+                    glommio::timer::sleep(BUSY_PAUSE).await;
+                    // and queue this again behind whatever arrived meanwhile, until it is due
+                    if std::time::Instant::now() < until {
+                        self.shard_local_tx.send(ServerMsg::Busy(until)).await?;
+                    }
+                }
                 // a tablet group's committed batch, applied here in committed order
                 ServerMsg::Apply {
                     group,
@@ -4332,9 +4368,13 @@ where
                 // and whether every group's core is still there to sweep for
                 self.probe_cores().await;
             }
-            // if we have no more messages then flush our current queries to disk
-            if self.shard_local_rx.is_empty() {
+            // write out every table's staged writes when our queue drains, which batches the
+            // writes that arrived together, or when a queue that never drains has kept them
+            // waiting past their bound; the clock is only read while the queue is busy
+            // ([Resolved #36](../../../docs/src/appendix/resolved/staged-tail-deadline.md))
+            if self.shard_local_rx.is_empty() || self.last_flush.elapsed() >= self.flush_interval {
                 self.tables.flush().await?;
+                self.last_flush = std::time::Instant::now();
             }
             // sweep our tables only when that sweep could do something
             //
