@@ -341,4 +341,10 @@ have started again either, and with hyperion down that would have lost the clust
 Fixed as [#148](../appendix/resolved/stale-intent-log-tail.md), in the glommio fork and in the
 reader.
 
-**Verdict:** correctness of acknowledged data **pass**. Recovery **fail** until #148.
+**With #148 fixed** (t12b), deployed by repairing hyperion with `cluster upgrade hyperion`: its
+reader stopped at a foreign frame in two shards' Movie logs, 1 and 4, and it caught up. The same
+kill then brought every node back after one restart each. Service was back 17 s after the kill
+(18 s in t12), at 85,000–90,000 ops/s within two seconds, and all 309,478 acknowledged inserts
+were read back through every member.
+
+**Verdict:** correctness of acknowledged data **pass**; recovery **pass** with #148.
