@@ -35,7 +35,7 @@ than Shoal says so.
 | [154](../appendix/resolved/admin-hides-failed-groups.md) | [Back up, destroy and restore](correctness.md#back-up-destroy-and-restore) | `cluster admin` said the restore was done with a group failed | **Fixed.** The command fails naming the groups |
 | [155](../appendix/known-issues.md#155-a-restore-whose-group-failed-cannot-be-finished) | [Back up, destroy and restore](correctness.md#back-up-destroy-and-restore) | A restore with a failed group cannot be finished, only redone on a new cluster | **Filed** |
 | [156](../appendix/known-issues.md#156-a-full-disk-stops-every-group-on-a-node-until-it-is-restarted) | [Fill a node's disk](correctness.md#fill-a-nodes-disk) | A full disk killed every group core on the node, and writes through it failed until a restart; nothing was corrupted | **Filed** |
-| [157](../appendix/known-issues.md#157-cluster-destroy-fails-on-a-storage-path-that-is-a-mount-point) | [Fill a node's disk](correctness.md#fill-a-nodes-disk) | `cluster destroy` could not remove a storage path that is a mount point | **Filed** |
+| [157](../appendix/resolved/destroy-mount-point.md) | [Fill a node's disk](correctness.md#fill-a-nodes-disk) | `cluster destroy` could not remove a storage path that is a mount point | **Fixed.** Such a root is emptied |
 
 ## Deployment and lab findings
 

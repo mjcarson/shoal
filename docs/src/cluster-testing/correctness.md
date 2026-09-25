@@ -421,7 +421,7 @@ was loaded.
 **Verdict:** durability **pass**. Availability through a node with a full disk **fail**, filed as
 [known issue 156](../appendix/known-issues.md#156-a-full-disk-stops-every-group-on-a-node-until-it-is-restarted).
 Cleaning up also found `cluster destroy` unable to remove a storage path that is itself a mount
-point ([known issue 157](../appendix/known-issues.md#157-cluster-destroy-fails-on-a-storage-path-that-is-a-mount-point)).
+point ([#157](../appendix/resolved/destroy-mount-point.md), fixed).
 
 ## 5. Regression pass
 

@@ -133,3 +133,4 @@ rejected**, together, because a fix is only understandable next to what it is no
 | 151 | [A WAL segment was deleted behind a purge whose marker a crash then lost](resolved/purge-ahead-of-its-marker.md) | Segments are deleted only behind a durable purge point, which moves when the marker's batch is synced |
 | 153 | [A restore on a shard that had received no stream killed the shard](resolved/install-dir-absent.md) | An install's clean-up syncs the install directory only if it exists |
 | 154 | [`cluster admin` reported a restore with a failed group as done](resolved/admin-hides-failed-groups.md) | The command fails, naming each failed group |
+| 157 | [`cluster destroy` failed on a storage path that is a mount point](resolved/destroy-mount-point.md) | A root that cannot be removed is emptied instead |
