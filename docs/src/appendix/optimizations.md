@@ -202,6 +202,7 @@ so they get worse by existing longer rather than under load.
 | ~~**B20**~~ | ~~[**O62**](#o62-every-compaction-rewrites-the-shards-whole-archive-map) — every compaction rewrites the shard's whole archive map~~ **done**, measured and kept | Measured — 70% of a node's writes under load, in bursts that stalled its fsyncs | S | the lab's mixed `bench` with bytes per file | A longer replay at start | it was |
 | ~~**B21**~~ | ~~[**O63**](#o63-leadership-never-returns-to-a-groups-placement-primary) — leadership never returns to a group's placement primary~~ **done**, measured and kept | Measured — one node leading every group cost about a sixth of the throughput and a quarter of the write p99 | S | the lab's mixed `bench`, skewed against spread | One transfer per group handed back | it was |
 | **B22** | [**O64**](#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab) — a shorter failover base halves write throughput on the lab | Measured — 1 s: 20–24k rows/s and 4 s failover; 5 s: 40–46k rows/s and 16 s failover | ? | the lab's load at each base | Crash failover against write throughput | yes, on the lab |
+| **B23** | [**O65**](#o65-heartbeats-to-followers-that-just-acknowledged-replication) — heartbeats to followers that just acknowledged replication | Indicated — a heartbeat per follower per group every tenth of the base, under load and in a partition | S | the lab's load at 1 s and 5 s | none expected | yes, on the lab |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -2963,3 +2964,18 @@ per follower per group, and a follower applying commits in batches a fifth the s
 ([Resolved #139](resolved/leadership-handoff-on-stop.md)), and only a crash pays the window. An
 operator who prefers the shorter window can set `failover` in the inventory, now knowing its cost
 on hardware like this.
+
+### O65. Heartbeats to followers that just acknowledged replication
+
+| | |
+| --- | --- |
+| **Rank** | **B23** — measured in shape on the lab, being tried |
+| **Impact** | Indicated — every group's leader heartbeats every follower every tenth of the failover base, whether or not replication just proved the follower alive: at the default base, 36 groups × 2 followers × 2 a second on a three node cluster, and five times that at a 1 s base, where the load ran at half the throughput ([O64](#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)). In a partition every missed one is an openraft warning, and journald on the lab suppressed 43,954 of a node's lines |
+| **Difficulty** | S — openraft 0.10's `heartbeat_min_interval`, off by default |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | none expected: a replication response proves what a heartbeat does and moves the lease the same way |
+| **Benchmark** | the lab's full load at 1 s and at 5 s ([O64](#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)) |
+
+Found by the [distributed cluster testing](../cluster-testing/correctness.md#partition-one-node)
+chapter. Being tried; the outcome goes here.

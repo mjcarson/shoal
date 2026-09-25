@@ -30,6 +30,12 @@ pub enum LinkState {
     /// milliseconds, so a cut can land in the middle of one
     /// ([F43](../../../docs/src/features/node-recovery.md)).
     Throttle(u64),
+    /// Hold everything: live connections stay open and carry nothing, new ones are accepted
+    /// and carry nothing, until the link is healed or cut
+    ///
+    /// A partition by dropped packets rather than by a reset: nothing a peer sends reaches the
+    /// other side and nothing says so ([Resolved #143](../../../docs/src/appendix/resolved/silent-partition-hops.md)).
+    Blackhole,
 }
 
 /// A directed proxy
@@ -116,6 +122,11 @@ impl Link {
         *self.state.lock().unwrap() = LinkState::Throttle(bytes_per_second);
     }
 
+    /// Hold every byte on every connection, live or new, without closing any
+    pub fn blackhole(&self) {
+        *self.state.lock().unwrap() = LinkState::Blackhole;
+    }
+
     /// Forward again
     pub fn heal(&self) {
         *self.state.lock().unwrap() = LinkState::Pass;
@@ -156,8 +167,8 @@ async fn accept_loop(
             // accepted and closed at once: the sender sees a connection that ended, which is
             // what a reconnect into a cut link is meant to see
             LinkState::Cut => drop(inbound),
-            LinkState::Pass | LinkState::Delay(_) | LinkState::Throttle(_) => {
-                let handle = tokio::spawn(forward(inbound, target, current));
+            LinkState::Pass | LinkState::Delay(_) | LinkState::Throttle(_) | LinkState::Blackhole => {
+                let handle = tokio::spawn(forward(inbound, target, current, state.clone()));
                 streams.lock().unwrap().push(handle);
             }
         }
@@ -165,7 +176,19 @@ async fn accept_loop(
 }
 
 /// Forward one connection both ways until either side ends it
-async fn forward(mut inbound: TcpStream, target: SocketAddr, state: LinkState) {
+///
+/// # Arguments
+///
+/// * `inbound` - The sender's connection
+/// * `target` - Where it goes
+/// * `state` - The link's state when the connection arrived
+/// * `live` - The link's state as it changes, which a blackhole is read from on every chunk
+async fn forward(
+    mut inbound: TcpStream,
+    target: SocketAddr,
+    state: LinkState,
+    live: Arc<Mutex<LinkState>>,
+) {
     // a delayed link holds the connection before opening its other half
     if let LinkState::Delay(delay) = state {
         tokio::time::sleep(delay).await;
@@ -181,8 +204,43 @@ async fn forward(mut inbound: TcpStream, target: SocketAddr, state: LinkState) {
         tokio::join!(trickle(in_rx, out_tx, rate), trickle(out_rx, in_tx, rate));
         return;
     }
-    // copy until one side closes; the error of a reset is the end of the stream
-    let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+    // copy until one side closes, holding every chunk while the link is a blackhole
+    let (in_rx, in_tx) = inbound.into_split();
+    let (out_rx, out_tx) = outbound.into_split();
+    tokio::join!(
+        hold_or_copy(in_rx, out_tx, live.clone()),
+        hold_or_copy(out_rx, in_tx, live)
+    );
+}
+
+/// Copy one direction until it ends, holding each chunk while the link is a blackhole
+///
+/// # Arguments
+///
+/// * `from` - The side to read
+/// * `to` - The side to write
+/// * `live` - The link's state as it changes
+async fn hold_or_copy(
+    mut from: tokio::net::tcp::OwnedReadHalf,
+    mut to: tokio::net::tcp::OwnedWriteHalf,
+    live: Arc<Mutex<LinkState>>,
+) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let read = match from.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        // a blackhole keeps the bytes and the connection, and says nothing
+        while matches!(*live.lock().unwrap(), LinkState::Blackhole) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if to.write_all(&buffer[..read]).await.is_err() {
+            break;
+        }
+    }
+    let _ = to.shutdown().await;
 }
 
 /// Copy one direction at a bounded rate until it ends

@@ -195,3 +195,35 @@ operations in flight on the node being restarted, as `ConnectionLost` (retriable
 `NotLeader`. It no longer costs every write to that node's groups for 15 to 20 seconds.
 Graceful restarts of titan and of europa on their own (`systemctl restart` under a 30 second bench)
 cost no `NotLeader` at all.
+
+### Partition one node
+
+For 20 seconds under the mixed bench, `iptables` on hyperion drops every packet to and from its
+peers' data and control ports (12001–12002), both ways, while its client port stays reachable
+(`target/lab/partition.sh`). Nothing resets a connection, so nothing says the peer is gone.
+
+**The first run: the whole cluster stopped.** From two seconds into the partition until five
+seconds after it healed, throughput was zero, reads included, except for one second in five when
+exactly 1,024 writes failed `OutcomeUnknown`. Every write hopped to hyperion, which still led twelve
+groups as everyone else saw it, waited the full `write_timeout`. The bench's eight workers each
+keep 128 queries outstanding, so each window filled with those writes and nothing else was sent.
+All 222,819 acknowledged inserts were read back.
+
+**With [#143](../appendix/resolved/silent-partition-hops.md) fixed**, a hop over a link that has
+answered nothing for two seconds is refused `NotLeader` at once. From two seconds into the
+partition the cluster served 22,000–110,000 operations a second, refusing only writes to hyperion's
+groups, and all 262,583 acknowledged inserts were read back through every member.
+
+**What is still wrong.** From about 17 seconds into the partition until 20 seconds after it healed,
+throughput fell to zero for a second or two at a time, reads included, with writes timing out at
+5 s again:
+
+- europa and titan contended for hyperion's twelve groups in election rounds seven to eight seconds
+  apart, a new leader stepping down at the other's higher term;
+- journald on titan reported suppressing 43,954 lines from the node, most of them openraft warnings
+  for every failed heartbeat to hyperion, per group, twice a second.
+
+Both are followed up as
+[O65](../appendix/optimizations.md#o65-heartbeats-to-followers-that-just-acknowledged-replication).
+
+**Verdict:** correctness **pass**, availability **improved and not yet good enough**.

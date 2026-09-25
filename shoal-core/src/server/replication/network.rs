@@ -112,6 +112,12 @@ pub struct ReplicationLink {
     next_id: Cell<u64>,
     /// The largest frame the peer accepts
     max_frame_bytes: u32,
+    /// Since when RPCs have been outstanding on this link with no answer to any of them
+    ///
+    /// A peer cut off by dropped packets leaves the connection up and answers nothing, so every
+    /// RPC to it waits its whole deadline. This is what lets a caller see that before it sends
+    /// ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)).
+    waiting_since: Rc<Cell<Option<Instant>>>,
 }
 
 impl ReplicationLink {
@@ -138,6 +144,38 @@ impl ReplicationLink {
             pending: Rc::new(RefCell::new(HashMap::new())),
             next_id: Cell::new(1),
             max_frame_bytes,
+            waiting_since: Rc::new(Cell::new(None)),
+        }
+    }
+
+    /// Whether this link has had RPCs outstanding for `after` with no answer to any of them
+    ///
+    /// # Arguments
+    ///
+    /// * `after` - How long silence has to last to count
+    #[must_use]
+    pub fn silent_for(&self, after: Duration) -> Option<Duration> {
+        self.waiting_since
+            .get()
+            .map(|since| since.elapsed())
+            .filter(|silent| *silent >= after)
+    }
+
+    /// Note that the pending set changed, keeping `waiting_since` in step with it
+    ///
+    /// # Arguments
+    ///
+    /// * `progress` - Whether an answer arrived, which restarts the silence
+    fn note_pending(&self, progress: bool) {
+        let empty = self.pending.borrow().is_empty();
+        match (empty, progress, self.waiting_since.get()) {
+            // nothing outstanding is nothing to be silent about
+            (true, _, _) => self.waiting_since.set(None),
+            // an answer is the peer speaking, so the silence starts again from now
+            (false, true, _) => self.waiting_since.set(Some(Instant::now())),
+            // the first request outstanding starts the clock; later ones do not move it
+            (false, false, None) => self.waiting_since.set(Some(Instant::now())),
+            (false, false, Some(_)) => {}
         }
     }
 
@@ -148,7 +186,10 @@ impl ReplicationLink {
     /// * `head` - The response's head
     /// * `payload` - Its payload
     fn answered(&self, head: &ReplicateResponseHead, payload: Vec<u8>) {
-        if let Some(tx) = self.pending.borrow_mut().remove(&head.id) {
+        let removed = self.pending.borrow_mut().remove(&head.id);
+        // any answer is the peer speaking, known id or not
+        self.note_pending(true);
+        if let Some(tx) = removed {
             let outcome = match head.status {
                 ReplicateStatus::Ok => Outcome::Ok(payload),
                 ReplicateStatus::Error => {
@@ -172,7 +213,9 @@ impl ReplicationLink {
     /// * `reason` - Why
     /// * `unsent` - Every frame the link never wrote
     fn down(&self, reason: &str, unsent: &[FrameKey]) {
-        for (id, tx) in self.pending.borrow_mut().drain() {
+        let drained: Vec<_> = self.pending.borrow_mut().drain().collect();
+        self.waiting_since.set(None);
+        for (id, tx) in drained {
             // never written is never seen, which is the one thing a caller can act on at once
             let outcome = if unsent.contains(&FrameKey::Replication(id)) {
                 Outcome::NotSent(format!(
@@ -271,6 +314,7 @@ impl ReplicationLink {
         self.next_id.set(id.wrapping_add(1));
         let (tx, rx) = oneshot::channel();
         self.pending.borrow_mut().insert(id, tx);
+        self.note_pending(false);
         // truncation cannot happen for any deadline a replication RPC uses
         #[allow(clippy::cast_possible_truncation)]
         let deadline_ms = budget.as_millis().min(u128::from(u32::MAX)) as u32;
@@ -309,6 +353,7 @@ impl ReplicationLink {
         // a queue that is full or a link that is down is a definite non-answer
         if self.link.enqueue(frame).is_err() {
             self.pending.borrow_mut().remove(&id);
+            self.note_pending(false);
             return Err(RpcFailure::NotSent(
                 "the replication link's queue is full or its link is down".to_string(),
             ));
@@ -321,12 +366,14 @@ impl ReplicationLink {
             Ok(Ok(Outcome::Unreachable(msg))) => Err(RpcFailure::Unreachable(msg)),
             Ok(Err(_)) => {
                 self.pending.borrow_mut().remove(&id);
+                self.note_pending(false);
                 Err(RpcFailure::Unreachable(
                     "the replication rpc was cancelled".to_string(),
                 ))
             }
             Err(_) => {
                 self.pending.borrow_mut().remove(&id);
+                self.note_pending(false);
                 Err(RpcFailure::Unreachable(
                     "the replication rpc timed out".to_string(),
                 ))
@@ -705,6 +752,13 @@ impl ShardNetwork {
     }
 }
 
+/// How long a replication link may have RPCs outstanding with no answer before a write is not
+/// hopped over it
+///
+/// Four heartbeats at the default failover base: a leader replicating to anyone answers
+/// something several times in that long, and one that answers nothing is cut off or stopped.
+const HOP_SILENCE: Duration = Duration::from_secs(2);
+
 /// The most a forwarded proposal holds back from the leader's budget for its answer's trip home
 const HOP_MARGIN: Duration = Duration::from_millis(250);
 
@@ -773,6 +827,16 @@ impl ShardPeer {
                 self.target.node
             )));
         };
+        // a leader that has answered nothing for a while is not handed a write to wait on:
+        // the refusal is definite, since nothing was sent, and the caller retries elsewhere
+        // rather than holding the write for its whole deadline
+        // ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md))
+        if let Some(silent) = link.silent_for(HOP_SILENCE) {
+            return Err(RpcFailure::NotSent(format!(
+                "{} has answered nothing on the replication lane for {silent:?}; the write was not sent",
+                self.target.node
+            )));
+        }
         link.rpc_budgeted(
             ReplicateKind::Propose,
             group,
