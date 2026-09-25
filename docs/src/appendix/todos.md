@@ -2273,6 +2273,15 @@ every I/O buffer sit outside it, and nothing reports them. A deployment sizes th
 the host's memory by guessing the headroom. Each shard's `memory_usage` and budget, and the
 process's resident memory, on the node's `Stats`, would let an operator read it instead.
 
+## Per-group write rates in `Stats`
+
+Filed by [O64](optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab).
+`Stats` reports each member's applied rates, and every member applies every row, so nothing shows
+which leader is doing the work. The lab's load is bimodal across restarts with the leads evenly
+counted, and the hypothesis is that the keyword table's hottest partitions' groups decide it by
+where they are led. A leader's proposal rate per group would test it, and would let leadership
+balancing weigh groups by load rather than count them.
+
 ## The WAL group commit delay per inventory group
 
 Filed by [O61](optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page).

@@ -3016,6 +3016,44 @@ change it, and nothing here moved the tick.
 operator who prefers the shorter window can set `failover` in the inventory, now knowing its cost
 on hardware like this.
 
+**Revisited on 2026-09-25, with every fix through [#157](resolved/destroy-mount-point.md)
+deployed: the halving does not reproduce.** Each arm was a fresh bootstrap, one load to fill it
+and then measured loads (`target/lab/sys-count.sh`), with the leads 12/12/12 before each measured
+load (`wait-balanced.sh`):
+
+| Arm | Load, rows a second |
+| --- | --- |
+| 1 s base, fresh bootstrap | 46,400, 48,300, 49,700 |
+| 5 s base, fresh bootstrap | 34,300, 34,500, 33,500 |
+
+The direction had reversed, so the 1 s base's timers were separated one at a time on the 5 s
+cluster, through a temporary environment override that was never committed:
+
+| Arm at the 5 s base, leads balanced first | Load, rows a second |
+| --- | --- |
+| defaults | 35,300, 34,300 |
+| heartbeat 100 ms (a fiftieth of the base) | 48,100, 48,700 |
+| heartbeat 100 ms, election timeout 1–2 s | 44,100, 46,700 |
+| heartbeat 500 ms, apply wait bounded at 200 ms | 45,500, 46,200, then 35,200 on the next build |
+
+The apply wait (`wait_applied_here`) was instrumented next. Over a whole load it never reached
+its bound: europa's writes waited 5.6 ms on average when they waited at all, titan's 25 ms, and
+none of 2.5 million waits ran out. With the bound at 200 ms the same instrumented build loaded at
+35,200. So the high arms above are not explained by what each changed. **The load's throughput on
+this cluster is bimodal, near 35,000 or near 46,000–50,000 rows a second, from one restart to the
+next**, and none of the timer settings chose the mode reliably. The earlier figures for this entry
+(19,800–24,200 at 1 s, 40,200–46,500 at 5 s) are what that variance looks like beside a real
+difference. The candidate not yet tested is which node leads the groups holding the keyword
+table's hottest partitions. Twelve leads each do not mean equal work, and europa is the fastest
+host. Per-member stats cannot show it, since every member applies every row.
+
+**Status:** the cause of the original halving is not established, and it is not present on the
+current tree. The default stays at 5 s. What would settle the mode question is per-group write
+rates in `Stats`, filed in [todos](todos.md#per-group-write-rates-in-stats).
+
+The investigation also found [#158](resolved/runtime-waker-lists.md), and tried
+[O69](#o69-every-idle-moment-parks-an-executor).
+
 ### O65. Heartbeats to followers that just acknowledged replication
 
 | | |
@@ -3158,4 +3196,39 @@ ends, so an archive's entries gathered then are the ones the old copy held.
 `archives_are_ordered_by_load_and_gathered_one_at_a_time` pins both halves. The memory is no
 longer allocated. The node-level effect is folded into [#149](resolved/node-memory-budget.md)'s
 runs, which changed several things at once, so it has no figure of its own. **Kept.**
+
+### O69. Every idle moment parks an executor
+
+| | |
+| --- | --- |
+| **Rank** | **B27** — tried on the lab, not kept |
+| **Impact** | Measured — a lab node under the TMDB load issued 7,700 `membarrier` calls a second, and 16,800 context switches, from executors going to sleep. A 200 µs spin before parking cut the barriers tenfold, and the load's throughput did not move |
+| **Difficulty** | S — glommio's `spin_before_park` on the shards' pool |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | cpu time on an idle core, and power, for fewer sleeps |
+| **Benchmark** | `target/lab/sys-count.sh`: a TMDB load with `perf stat` counting titan's syscalls for 10 s |
+
+Found by the [distributed cluster testing](../cluster-testing/performance.md#spinning-before-parking)
+chapter while chasing [O64](#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab). O64
+counted 170,000 io_uring timer operations a second on titan. glommio's reactor re-arms its two
+preemption timers on every turn, so those count reactor turns, not openraft's timers. And every
+time an executor sleeps it issues `membarrier(PRIVATE_EXPEDITED)`, which interrupts every core
+the process runs on. A thread-per-core server usually polls briefly before sleeping, and Shoal
+never set glommio's `spin_before_park`.
+
+**Tried:** a `resources.spin_before_park` setting, applied to the shards' pool. Titan, over 10 s
+of the load:
+
+| Spin | Rows a second | `membarrier` | `io_uring_enter` | Context switches |
+| --- | --- | --- | --- | --- |
+| none | 33,900 | 102,000 | 4.4 M | 208,000 |
+| 50 µs | 34,200 | 54,000 | 5.6 M | 150,000 |
+| 200 µs | 33,700 | 11,400 | 8.2 M | 133,000 |
+
+**Not kept.** The barriers fell tenfold and the throughput stayed where it was, while spinning
+executors entered the ring twice as often. A setting with no measured benefit is surface
+area and a way to burn a core, so the change was reverted. Worth trying again only on a
+workload that is latency-bound at low load, where a sleep is on the critical path, and against
+the microbenchmarks, not the lab's load.
 

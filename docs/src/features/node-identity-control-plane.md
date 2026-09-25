@@ -133,8 +133,12 @@ The `single-threaded` feature is what changed the answer: with it, openraft asks
 runtime that a `LocalExecutor` does not already have, and the alternative was a second reactor,
 a second timer wheel and a second family of channel types in a process that has one of each -
 plus a `Send` bound on every store that glommio's `!Send` file handles would have had to be hidden
-from behind a channel. Writing the five runtime primitives was under a thousand lines, and the
-library's conformance suite is what says they are right.
+from behind a channel. Writing the five runtime primitives was under a thousand lines, and ~~the
+library's conformance suite is what says they are right~~. The conformance suite passed while the
+watch and the mutex mishandled a future dropped mid-wait: the watch kept a waker per poll, and the
+mutex could wake an abandoned attempt instead of a waiting one
+([Resolved #158](../appendix/resolved/runtime-waker-lists.md)). The suite says the semantics are
+right when nothing is cancelled. The primitives' own tests cover cancellation.
 
 **The format is checked first, alone, and from a one-field struct.** A marker's other fields mean
 what they mean only under a format the reader understands, so `FormatOnly` reads `format` and
@@ -340,6 +344,7 @@ fsyncs, about eight. Both are unit tests of `shoal-core`.
 | `cluster_fixture::documented_cluster_defaults_match_policy_bootstrap` | The `cluster:` block on the configuration page loading to exactly `Cluster::default().bootstrap(true)` - Quorum, One, three voters, a finite grace - and a bootstrap seeding exactly that policy into the control state |
 | `cluster_fixture::cluster_fixture_accounts_for_all_cores_and_endpoints` | Every server owning a control core disjoint from its data cores; the squeezed machine giving control cores in node order and recording the rest as shared |
 | `control::runtime::tests::glommio_runtime_passes_the_openraft_suite` | The whole of `openraft_rt::testing::Suite` on the glommio runtime: spawn, sleep, timeout, mpsc backpressure and weak senders, watch seen/unseen, oneshot, mutex, task locals, deterministic rng |
+| `control::runtime::watch::tests::*` and `control::runtime::mutex::tests::*` (five) | The watch and the mutex with a future dropped mid-wait: one waker per receiver and per attempt, a dropped receiver taking its waker, a waiter woken past an abandoned attempt, and a wake handed on ([#158](../appendix/resolved/runtime-waker-lists.md)) |
 | `control::store::tests::control_store_passes_the_openraft_storage_suite` | The whole of `openraft::testing::log::Suite` on the control store: every read after every write, membership from log and state machine, truncate, purge, snapshot build and install |
 | `control::store::tests::control_store_recovers_from_a_torn_append` | A frame cut off mid-body and a frame with a wrong checksum both truncated at open, the entries before them whole, the vote intact, the next append landing after the last whole frame |
 | `control::types::tests::a_bootstrap_is_applied_once` | `ControlState::apply`: a second bootstrap refused, an observation before one refused, an unchanged observation moving nothing, a changed one moving the version |

@@ -140,6 +140,27 @@ half as much. The cause is not isolated. It is filed as
 the default stays at 5 s, and a planned restart no longer pays the window at all
 ([Resolved #139](../appendix/resolved/leadership-handoff-on-stop.md)).
 
+### Revisited, and the throughput is bimodal
+
+With every fix through #157 deployed, the halving did not reproduce. Measured the same way, on
+fresh bootstraps with the leads 12/12/12 before each load, the 1 s base loaded at 46,400–49,700
+rows a second and the 5 s base at 33,500–34,500. That reverses the table above. Separating the
+1 s base's timers one at a time on the 5 s cluster gave high arms and low arms that did not
+follow the setting: a 200 ms apply wait bound gave 45,500 and 46,200 on one build and 35,200 on
+the next, and an instrumented run showed that bound was never reached. The load on this cluster
+runs near 35,000 or near 46,000–50,000 rows a second from one restart to the next, and the timer
+settings do not pick which. The details, and the hypothesis still to test (which node leads the
+hottest keyword partitions' groups), are in
+[O64](../appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab).
+Reading the runtime along the way found [#158](../appendix/resolved/runtime-waker-lists.md).
+
+## Spinning before parking
+
+Titan's node, under the load, issued 7,700 `membarrier` calls a second: one each time an executor
+went to sleep, each interrupting every core the process runs on. A 200 µs spin before parking cut
+them to 1,100 a second, and the load ran at 33,700 rows a second against 33,900 without it.
+Filed and reverted as [O69](../appendix/optimizations.md#o69-every-idle-moment-parks-an-executor).
+
 ## Memory
 
 Every node holds its table data within `resources.memory` per shard, which the deployment wrote

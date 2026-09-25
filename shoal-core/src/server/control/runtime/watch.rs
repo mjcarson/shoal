@@ -30,17 +30,46 @@ struct Shared<T> {
     senders: usize,
     /// How many receivers exist; zero means a send has nobody to reach
     receivers: usize,
-    /// Every receiver waiting for a change
-    wakers: Vec<Waker>,
+    /// Every receiver waiting for a change, by the receiver's id, one waker each
+    ///
+    /// One slot per receiver rather than a waker per poll: a receiver polled again replaces its
+    /// waker, and one dropped takes its slot away. A list that grew on every poll grew without
+    /// bound on a watch that seldom changes ([Resolved #158](../../../../../docs/src/appendix/resolved/runtime-waker-lists.md)).
+    wakers: Vec<(u64, Waker)>,
+    /// The id the next receiver is given
+    next_receiver: u64,
 }
 
 impl<T> Shared<T> {
     /// Record a change and wake everyone waiting for one
     fn changed(&mut self) {
         self.version += 1;
-        for waker in self.wakers.drain(..) {
+        for (_, waker) in self.wakers.drain(..) {
             waker.wake();
         }
+    }
+
+    /// An id for a new receiver
+    fn receiver_id(&mut self) -> u64 {
+        let id = self.next_receiver;
+        self.next_receiver += 1;
+        id
+    }
+
+    /// Register a receiver's waker, replacing the one it registered before
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The receiver
+    /// * `waker` - The waker to wake it with
+    fn register(&mut self, id: u64, waker: &Waker) {
+        // a receiver that waited before has a slot already, which this poll's waker replaces
+        if let Some((_, slot)) = self.wakers.iter_mut().find(|(slot_id, _)| *slot_id == id) {
+            slot.clone_from(waker);
+            return;
+        }
+        // a first wait takes a slot
+        self.wakers.push((id, waker.clone()));
     }
 }
 
@@ -64,12 +93,17 @@ impl Watch for GlommioWatch {
             senders: 1,
             receivers: 1,
             wakers: Vec::new(),
+            next_receiver: 1,
         }));
         (
             Sender {
                 shared: shared.clone(),
             },
-            Receiver { shared, seen: 0 },
+            Receiver {
+                shared,
+                seen: 0,
+                id: 0,
+            },
         )
     }
 }
@@ -96,7 +130,7 @@ impl<T> Drop for Sender<T> {
         let mut shared = self.shared.borrow_mut();
         shared.senders -= 1;
         if shared.senders == 0 {
-            for waker in shared.wakers.drain(..) {
+            for (_, waker) in shared.wakers.drain(..) {
                 waker.wake();
             }
         }
@@ -140,6 +174,7 @@ impl<T: OptionalSend + OptionalSync> WatchSender<GlommioWatch, T> for Sender<T> 
         Receiver {
             shared: self.shared.clone(),
             seen: shared.version,
+            id: shared.receiver_id(),
         }
     }
 }
@@ -150,15 +185,19 @@ pub struct Receiver<T> {
     shared: Rc<RefCell<Shared<T>>>,
     /// The version this receiver last marked as seen
     seen: u64,
+    /// This receiver's slot in the waker list
+    id: u64,
 }
 
 impl<T> Clone for Receiver<T> {
     /// Another receiver, having seen what this one has
     fn clone(&self) -> Self {
-        self.shared.borrow_mut().receivers += 1;
+        let mut shared = self.shared.borrow_mut();
+        shared.receivers += 1;
         Receiver {
             shared: self.shared.clone(),
             seen: self.seen,
+            id: shared.receiver_id(),
         }
     }
 }
@@ -166,7 +205,10 @@ impl<T> Clone for Receiver<T> {
 impl<T> Drop for Receiver<T> {
     /// One fewer receiver
     fn drop(&mut self) {
-        self.shared.borrow_mut().receivers -= 1;
+        let mut shared = self.shared.borrow_mut();
+        shared.receivers -= 1;
+        // its waker goes with it
+        shared.wakers.retain(|(id, _)| *id != self.id);
     }
 }
 
@@ -214,7 +256,47 @@ impl<T> Future for Changed<'_, T> {
             return Poll::Ready(Err(RecvError(())));
         }
         // wait for a send
-        shared.wakers.push(cx.waker().clone());
+        let id = self.receiver.id;
+        shared.register(id, cx.waker());
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GlommioWatch;
+    use futures::FutureExt;
+    use openraft_rt::{Watch, WatchReceiver, WatchSender};
+
+    /// A receiver polled again and again on a value that never changes keeps one waker
+    ///
+    /// openraft polls `changed` on its replication task's cancel watch once per session, and
+    /// that watch changes only when the task is cancelled. A waker per poll was a list that grew
+    /// for as long as the group had a leader.
+    #[test]
+    fn an_unchanged_watch_keeps_one_waker_per_receiver() {
+        let (sender, mut receiver) = GlommioWatch::channel(0u32);
+        // poll the way openraft's `now_or_never` does, a thousand sessions over
+        for _ in 0..1000 {
+            assert!(receiver.changed().now_or_never().is_none());
+        }
+        // one receiver, so one waker at most
+        let wakers = sender.shared.borrow().wakers.len();
+        assert!(wakers <= 1, "a receiver that polled 1000 times left {wakers} wakers");
+        // and a change still reaches it
+        sender.send(1).expect("a receiver exists");
+        assert!(receiver.changed().now_or_never().is_some());
+    }
+
+    /// A receiver that goes away takes its waker with it
+    #[test]
+    fn a_dropped_receiver_leaves_no_waker() {
+        let (sender, receiver) = GlommioWatch::channel(0u32);
+        // a second receiver waits once and is dropped
+        let mut other = receiver.clone();
+        assert!(other.changed().now_or_never().is_none());
+        drop(other);
+        let wakers = sender.shared.borrow().wakers.len();
+        assert_eq!(wakers, 0, "a dropped receiver left its waker");
     }
 }
