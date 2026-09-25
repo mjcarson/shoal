@@ -17788,3 +17788,60 @@ async fn a_returning_node_is_handed_back_its_groups() -> Result<(), FixtureError
     );
     Ok(())
 }
+
+/// A write to a leader cut off by dropped packets is refused at once, not held to its deadline (item 143)
+///
+/// A partition that drops packets leaves every connection up and answers nothing. A write whose
+/// coordinator believed the cut-off node led its group was hopped to it and waited the whole
+/// `write_timeout` before failing `OutcomeUnknown`. On the lab that held every client pipeline
+/// full of such writes, and the whole cluster's throughput went to zero while one node was cut
+/// off. A hop over a link that has answered nothing for two seconds is now refused retriably
+/// ([Resolved #143](../../docs/src/appendix/resolved/silent-partition-hops.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_to_a_silently_cut_leader_fails_fast() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::error::ErrorCode;
+    let write_timeout = Duration::from_secs(5);
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        // the default base: a lease of ten seconds, so the group cannot elect around node one
+        // within the window this test writes in
+        .primary_failover_after(Duration::from_secs(5))
+        .write_timeout(write_timeout)
+        .query_deadline(Duration::from_secs(8))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let (key, _group) = key_led_by(&mut cluster, "Note", 1, 14_100)?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    write_note(&addr, key, "before").await?;
+    // node one is cut off by dropped packets: every connection stays up and carries nothing
+    cluster.blackhole(1);
+    // long enough for node zero to have heard nothing from it for the silence it judges by,
+    // and well inside the lease, so node one still leads the group as node zero sees it
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    let sent = Instant::now();
+    let outcome = client
+        .send_one(Note {
+            key,
+            text: "during".to_string(),
+        })
+        .await;
+    let waited = sent.elapsed();
+    cluster.heal(1);
+    eprintln!("a write to the cut-off leader's group was answered in {waited:?}: {outcome:?}");
+    match outcome {
+        Err(shoal::client::Errors::Server { code, .. }) => assert!(
+            matches!(code, ErrorCode::NotLeader | ErrorCode::Unavailable),
+            "a write to a silently cut leader failed {code:?}, not a retriable refusal"
+        ),
+        other => panic!("a write to a silently cut leader was answered {other:?}"),
+    }
+    assert!(
+        waited < Duration::from_secs(1),
+        "a write to a silently cut leader waited {waited:?}, where the write timeout is {write_timeout:?}"
+    );
+    Ok(())
+}

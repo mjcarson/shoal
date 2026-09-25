@@ -22,6 +22,7 @@ than Shoal says so.
 | [140](../appendix/resolved/intent-log-read-ahead.md) | The first rollout of O62 | A 29.7 MB map intent log took minutes to replay, three direct reads a record, and failed hyperion's start on both programs | **Fixed.** A 4 MiB read-ahead window: 3.2 s to serve |
 | [141](../appendix/resolved/recycled-stream-channels.md) | Rolling upgrade under load | A failed stream's channel went to the next stream with its late answers: thousands of answers for indexes already answered, and streams that never ended | **Fixed.** Closed streams drop late answers, failed streams do not recycle, duplicates are dropped |
 | [142](../appendix/known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host) | The suite run after 139–141 and O62 | Two fixture tests fail intermittently on an idle host; a restarted member's checkpoint stays at zero | **Open**, with rates |
+| [143](../appendix/resolved/silent-partition-hops.md) | [Partition one node](correctness.md#partition-one-node) | With one node cut off by dropped packets, every write hopped to it waited the whole write timeout, and pipelined clients stopped: zero throughput cluster-wide | **Fixed.** A hop over a link silent for two seconds is refused at once |
 
 ## Deployment and lab findings
 
@@ -37,5 +38,6 @@ than Shoal says so.
 | --- | --- | --- |
 | [O61](../appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page) | A fast device syncs the WAL in batches too small to fill a page | See [the experiment](performance.md#o61-a-group-commit-delay) |
 | [O62](../appendix/optimizations.md#o62-every-compaction-rewrites-the-shards-whole-archive-map) | Every compaction rewrote the shard's whole archive map: 70% of a node's writes | **Applied and kept.** Map saves 1,573 MB → 26 MB over the same run, worst write down by a third |
+| [O65](../appendix/optimizations.md#o65-heartbeats-to-followers-that-just-acknowledged-replication) | A heartbeat to every follower every tenth of the base, even under sustained replication; log floods in a partition | Being tried |
 | [O64](../appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab) | A shorter failover base halves write throughput on this hardware | **Measured, not applied.** Default kept at 5 s; cause not isolated |
 | [O63](../appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary) | Leadership never returned to a restarted node: one node led all 36 groups | **Applied and kept.** Leads spread 12/12/12 within 30 s; about a sixth more throughput, a quarter off the write p99 |

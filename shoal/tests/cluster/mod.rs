@@ -1149,6 +1149,22 @@ impl Cluster {
         }
     }
 
+    /// Hold every lane in both directions between a node and every other, without closing any
+    ///
+    /// A partition by dropped packets: every connection stays up and carries nothing
+    /// ([Resolved #143](../../../docs/src/appendix/resolved/silent-partition-hops.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node to cut off
+    pub fn blackhole(&self, id: usize) {
+        for ((from, to), link) in self.control_links.iter().chain(self.data_links.iter()) {
+            if *from == id || *to == id {
+                link.blackhole();
+            }
+        }
+    }
+
     /// Heal every lane in both directions between a node and every other
     ///
     /// # Arguments

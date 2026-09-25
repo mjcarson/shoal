@@ -531,6 +531,8 @@ where
         } else {
             cluster.primary_failover_after.duration().as_millis() as u64
         };
+        // a hop is refused after four of the groups' heartbeats of silence at this base
+        replication.network.set_failover_base(failover_ms);
         // stop what the map no longer names
         let gone: Vec<GroupId> = replication
             .groups
@@ -1716,6 +1718,9 @@ where
             ));
             return;
         };
+        // a request from a peer is the peer speaking, which a hop to it is judged by
+        // ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md))
+        replication.network.heard_from(origin);
         // whether a retired copy is gone is asked of a shard that may not host the group at all
         // ([F45](../../../../docs/src/features/replica-migration.md))
         if head.kind == ReplicateKind::Retired {
