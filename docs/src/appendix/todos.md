@@ -2253,3 +2253,15 @@ The reason none of these was taken is that each one costs a field shape's worth 
 for a schema nobody has yet written, while the fallback is already correct. What makes them cheap
 now is that the hard part — the trait, `ArchivedRef`, and the resolver that keeps a materialized
 value alive — is built and tested.
+
+## Position-keyed intent frames
+
+Filed by [Resolved #148](resolved/stale-intent-log-tail.md). A map intent frame is
+`[size][gxhash64][payload]` and says nothing about where it belongs. A whole frame found past a
+log's end, in bytes a partial flush left there, passes its checksum wherever it came from: an
+archive record, or an older intent of the same log, which decodes and would be replayed. The
+glommio fork now zeroes those bytes, so a log written since cannot hold one. A log written before
+cannot be told apart. Keying each frame's checksum by its offset (or giving it a sequence number)
+would make a frame valid only where it was written, at the cost of a format change the reader has
+to accept both sides of.
+

@@ -14,7 +14,6 @@ a second copy. A new defect goes to known issues at the next free number, never 
 
 | Item | What | Page |
 | --- | --- | --- |
-| [113](../appendix/known-issues.md#113-glommios-dmafileopen_at-unwraps-statfs-after-a-successful-open) | glommio's `DmaFile::open_at` unwraps `statfs` after a successful open; fixed in the fork's working tree, uncommitted there | [C11](testing.md) |
 
 The [distributed cluster testing](../cluster-testing/overview.md) chapter ran the cluster on three
 physical hosts with a real dataset. What it found, fixed and left open is indexed on its
