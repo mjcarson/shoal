@@ -302,5 +302,19 @@ replaced it, committed the verdicts. titan's next report set it up again. Nothin
 leader to itself, so europa stayed down in the record. Fixed as
 [#147](../appendix/resolved/paused-detector-verdicts.md).
 
-**Verdict:** correctness **pass** for the data; the control plane's record was wrong until #147.
-Availability was the same as a partition's, with the resumed node's writes slow until #146.
+**With #146 and #147 deployed** (t11d), the sequence that left europa down was run again: pause
+the control leader for 20 s under the mixed bench, then, 20 s after that run, pause whichever node
+led next. Control leadership went europa, titan, europa. After each run every member read `up`,
+and every acknowledged insert (380,990, then 469,395) was read back through every member.
+
+| Run | Paused | Writes over 1 s after the resume | The slowest |
+| --- | --- | --- | --- |
+| t11c (before #146) | hyperion | 1,210, for 12 s, all through hyperion | 5.3 s |
+| t11d-61 | europa, the control leader | 628 in the 2 s around the resume, all through europa | 1.48 s |
+| t11d-62 | titan, the control leader | 569 in the 2 s around the resume, through all three | 1.73 s |
+
+What remains around the resume is writes sent while the node was still stopped. They sat in its
+socket buffers and were answered once it ran again, which no server change can shorten.
+
+**Verdict:** correctness **pass**; with #146 and #147, a paused node, the control leader included,
+costs its own writes a second or two around the resume and leaves the record right.
