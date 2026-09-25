@@ -134,4 +134,5 @@ rejected**, together, because a fix is only understandable next to what it is no
 | 153 | [A restore on a shard that had received no stream killed the shard](resolved/install-dir-absent.md) | An install's clean-up syncs the install directory only if it exists |
 | 154 | [`cluster admin` reported a restore with a failed group as done](resolved/admin-hides-failed-groups.md) | The command fails, naming each failed group |
 | 155 | [A restore failed a group for good when a member was out of reach for a while](resolved/restore-retries-unreachable.md) | *Partly.* A group whose driver could not reach a member is driven again, from the phase it reached; other failures remain open |
+| 156 | [A node whose WAL could not be written stayed up, serving nothing](resolved/wal-failure-stops-the-node.md) | *Partly.* The shard stops on a failed WAL, and a restart recovers from what is durable; shedding appends before the disk fills remains open |
 | 157 | [`cluster destroy` failed on a storage path that is a mount point](resolved/destroy-mount-point.md) | A root that cannot be removed is emptied instead |
