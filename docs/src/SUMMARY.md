@@ -272,6 +272,7 @@
   - [156. A node whose WAL could not be written stayed up, serving nothing](appendix/resolved/wal-failure-stops-the-node.md)
   - [157. `cluster destroy` failed on a storage path that is a mount point](appendix/resolved/destroy-mount-point.md)
   - [158. The glommio runtime's watch and mutex kept a waker per poll, and the mutex could lose a wakeup](appendix/resolved/runtime-waker-lists.md)
+  - [159. A crash mid compaction could leave the archive map naming records its archive never got](appendix/resolved/map-ahead-of-archive.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

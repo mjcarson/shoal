@@ -11017,6 +11017,82 @@ async fn retry_table_survives_a_crash_between_sidecar_and_checkpoint() -> Result
     Ok(())
 }
 
+/// A crash while a compaction pass writes leaves no map entry ahead of its record (Resolved #159)
+///
+/// One node at a factor of one. It is armed to die inside a compaction pass: once that pass's
+/// archive map has reached disk past where the pass began, before either writer is synced.
+/// Eight thousand one byte notes make a pass whose map entries are larger than its records, so
+/// the map's first buffer fills and is written while every record it names is still in the
+/// archive's first buffer, unwritten. That is the shape of the lab's torn entries. Started again, the node has to come up, and every note has to read back
+/// ([Resolved #159](../../docs/src/appendix/resolved/map-ahead-of-archive.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crash_mid_compaction_leaves_every_note_readable() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    let mut cluster = Cluster::builder()
+        .cluster(1, CoreClaim::Count(1))
+        .start()
+        .await?;
+    wait_group_leader(&mut cluster, "Note", 1)?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    // armed before the writes, so the pass that compacts them is the one that dies
+    let armed = cluster.node_mut(0).command("CRASH_AT mid_compaction")?;
+    assert!(armed.get("ok").is_some(), "{armed}");
+    let text = "n".to_string();
+    let keys: Vec<u64> = (1..=8_000).collect();
+    for chunk in keys.chunks(500) {
+        write_notes_batch(&addr, chunk, &text).await?;
+    }
+    // seal the segment and compact it, until the node dies inside the pass
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        // a command the node dies during is answered by nobody, which is the point
+        let rotated = cluster.node_mut(0).command("ROTATE");
+        let compacted = cluster.node_mut(0).command("COMPACT");
+        if rotated.is_err() || compacted.is_err() || cluster.node(0).failure().is_some() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the node never died inside a compaction pass"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // started again, it comes up: every entry above its checkpoint is applied over the archive
+    cluster.restart(0, NodeKind::Server)?;
+    cluster.wait_joined(&[0])?;
+    wait_group_leader(&mut cluster, "Note", 1)?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    // and every note reads back whole
+    let mut found = 0usize;
+    for chunk in keys.chunks(500) {
+        let notes = read_notes(&addr, chunk, None, &SendOptions::new())
+            .await
+            .map_err(|error| FixtureError::NotReady(format!("a read after the crash failed: {error:?}")))?;
+        for (key, note) in &notes {
+            assert_eq!(note, &text, "note {key} came back changed");
+        }
+        found += notes.len();
+    }
+    assert_eq!(found, keys.len(), "notes were lost to a crash mid compaction");
+    // the pass that died is compacted again, and another after it, each reading the archived
+    // copies of what it rewrites: no read may meet a record the map names and the disk lacks
+    write_notes_batch(&addr, &keys[..500], "again").await?;
+    let _ = cluster.node_mut(0).command("ROTATE")?;
+    let _ = cluster.node_mut(0).command("COMPACT")?;
+    std::thread::sleep(Duration::from_secs(3));
+    let integrity = groups_of(&mut cluster, 0)?["integrity"].clone();
+    assert_eq!(
+        integrity["checksum_failures"], 0,
+        "a compaction read a record the map named past what was on disk: {integrity}"
+    );
+    assert_eq!(
+        integrity["unverified_reads"], 0,
+        "a compaction read an archive whose header never reached disk as a format 1 archive: {integrity}"
+    );
+    assert_eq!(cluster.node(0).failure(), None, "node 0 died");
+    Ok(())
+}
+
 /// A session token is served past its lower bound on a behind replica, and through a leader change (C6 M6, F42)
 ///
 /// A write through the leader hands back a token; the lane to one follower is cut and a

@@ -219,6 +219,13 @@ pub enum CrashPoint {
     /// Not an install point, so not in [`CrashPoint::ALL`]
     /// ([Resolved #115](../../../../docs/src/appendix/resolved/retry-sidecar-crash-window.md)).
     SidecarWritten = 8,
+    /// A compaction pass's map has reached disk past where the pass began, or, if it never
+    /// does before every record is written, the pass has written every record and synced
+    /// nothing
+    ///
+    /// Not an install point, so not in [`CrashPoint::ALL`]
+    /// ([Resolved #159](../../../../docs/src/appendix/resolved/map-ahead-of-archive.md)).
+    MidCompaction = 9,
 }
 
 impl CrashPoint {
@@ -233,8 +240,8 @@ impl CrashPoint {
         CrashPoint::AfterCleanup,
     ];
 
-    /// Every point a name can arm: the install's, then the checkpoint write's
-    pub const NAMED: [CrashPoint; 8] = [
+    /// Every point a name can arm: the install's, then the checkpoint write's, then the compactor's
+    pub const NAMED: [CrashPoint; 9] = [
         CrashPoint::BeforePending,
         CrashPoint::PendingWritten,
         CrashPoint::MidInstall,
@@ -243,6 +250,7 @@ impl CrashPoint {
         CrashPoint::AfterCheckpoint,
         CrashPoint::AfterCleanup,
         CrashPoint::SidecarWritten,
+        CrashPoint::MidCompaction,
     ];
 
     /// The name the fixture arms a point by
@@ -258,6 +266,7 @@ impl CrashPoint {
             CrashPoint::AfterCheckpoint => "after_checkpoint",
             CrashPoint::AfterCleanup => "after_cleanup",
             CrashPoint::SidecarWritten => "sidecar_written",
+            CrashPoint::MidCompaction => "mid_compaction",
         }
     }
 

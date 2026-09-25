@@ -275,6 +275,12 @@ request is recorded and runs when it can, and the record says what it waits behi
   window is served from a copy that stops receiving entries; the window is a crash's width.
 - **An expiry refusal depends on the coordinator's replica.** Two coordinators can answer the
   same late retry differently when one has evicted more; neither applies it twice.
+- **Under load the window is the table's, not five minutes.** A group remembers
+  `REMEMBERED_REQUESTS` (4,096) identities, and evicting one raises the watermark to its time.
+  A group taking 580 writes a second remembers about seven seconds of them, so a client retrying
+  across a failover of ten seconds or more is refused `IdentityExpired`, by name and never
+  applied twice. Measured on the lab under nine SIGKILLs: 3 refusals among some 1.5 million
+  updates ([cluster testing](../cluster-testing/correctness.md#nine-sigkills-under-load)).
 - **The manifest gained a field**, which is a wire change for a snapshot's begin RPC and its
   pending marker; ~~M10's compatibility rules are where that is judged~~ judged at
   [F48](rolling-compatibility.md): the field is in both codecs, since every build in the

@@ -96,7 +96,7 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ **1,661 tests**, seven ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ **1,663 tests**, seven ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
@@ -112,7 +112,7 @@ fixture tests: two passed alone, and six could not bind ~~port 12000~~ ports 120
 because a deployed lab node held them on the same host ([Test Coverage](test-coverage.md)), since
 [resolved](resolved/fixture-default-peer-ports.md) as item 134. The
 [distributed cluster testing](../cluster-testing/overview.md) chapter's fixes (items 60, 130, 131,
-133 to 157, O61, O62, O63, O65 to O68) and its driver added 37 and took it to 1,656 ([Test Coverage](test-coverage.md)). [Resolved #158](resolved/runtime-waker-lists.md) added 5 `shoal-core` unit tests and took it to 1,661, every one passing at six threads.
+133 to 157, O61, O62, O63, O65 to O68) and its driver added 37 and took it to 1,656 ([Test Coverage](test-coverage.md)). [Resolved #158](resolved/runtime-waker-lists.md) added 5 `shoal-core` unit tests and took it to 1,661, every one passing at six threads. [Resolved #159](resolved/map-ahead-of-archive.md) added 2 and took it to 1,663. Its run at six threads failed two fixture tests from item 142's list, each of which passed alone three times.
 [Resolved #27](resolved/shql-quote-escape.md), [#32](resolved/client-gone-broadcast.md),
 [#36](resolved/staged-tail-deadline.md) and [#125](resolved/retry-unknown-outcome.md) added 11
 and took it to 1,587. There are two new binaries, `retry_outcome.rs` (3) and `staged_flush.rs`
@@ -437,6 +437,9 @@ race, now fixed: *"the senders counted 6 transfers and node two installed 7"*. A
 an install when it lands, and its sender counts the transfer only when the end's answer reaches
 it, so a read of both in between finds one more install than transfers. The test now waits up
 to ten seconds for the senders' count.
+The run for [#159](resolved/map-ahead-of-archive.md) failed
+`scheduled_scrub_quarantines_without_an_operator` and `local_rehome_recovers_after_each_crash_point`
+again, and both passed alone, three runs each.
 The first suite run after [#155](resolved/restore-retries-unreachable.md) failed its new test,
 `a_restore_rides_out_an_unreachable_member`, which passes alone (ten of ten, four at the time and
 six more after the disk-full rerun on the lab) and passed in the next full suite run. That run's log kept only the summary line, so the failure's message was not
@@ -467,7 +470,13 @@ in which one group failed for another reason leaves a cluster with that group's 
 the only way to finish is to delete the cluster, bootstrap another, and restore everything again. On the lab that was 3 minutes of restore, and
 it would be hours for a large backup. A retry of the failed groups alone, under the same operation
 and against the same files, would finish it: every other group is verified and is not touched
-again. Found by the [distributed cluster testing](../cluster-testing/correctness.md#back-up-destroy-and-restore)
+again. What such a retry needs, worked out on the way to building it: a failed
+group's record keeps only `Done` and the reason, so the phase it failed in has to be kept too
+(`Installing` and `Verifying` can be run again, and `Loading` checks the copies are empty
+anyway). And either a new control command or a change to what `Restore` or a group's progress
+does on a restored cluster. Both change what every control replica applies, so a node on an
+older build would apply the same entry differently. So it waits for a wire version 6 under
+[F48](../features/rolling-compatibility.md)'s rules, not a change that could be made alone. Found by the [distributed cluster testing](../cluster-testing/correctness.md#back-up-destroy-and-restore)
 chapter.
 
 ### 156. A full disk stops every group on a node until it is restarted
@@ -488,6 +497,35 @@ now stops instead of holding dead cores, so writes through it are never answered
 a restart once space returns brings it back (on the lab with no restart by hand). The one fix still
 wanted is to shed appends below a reserve with a retriable refusal, so that a nearly full node
 keeps serving reads rather than stopping.
+
+### 160. A copy that cannot read one partition stops its node
+
+A replicated apply that needs a partition's archived copy parks on the read, and a read that
+fails outright fails the shard: *"partition … could not be read for a replicated apply"*
+(`resume_parked`, `shard/groups.rs`). That is the right choice for the group, since a replica
+that applied without the read would diverge from its leader. But the shard hosts every group on
+its core, and a failed shard stops the node. So one bad record stops every copy the node holds.
+If the record is in the log above the checkpoint, the node stops again at every start: on the
+lab, hyperion did so 31 times after [#159](resolved/map-ahead-of-archive.md) left a torn entry in
+its map. Its other 35 groups had healthy copies the cluster could not use.
+
+What it needs: the read's failure quarantines that group's copy, as a scrub's checksum failure
+does ([F44](../features/repair.md)), and the group stops applying on this node until a repair
+restarts it from a snapshot. The shard, and every other group on it, keeps running. The hard
+part is the apply stream: openraft hands the state machine entries in order and has no way to
+skip one. So the group has to be stopped here, not its entry, and its copy restarted by the
+repair path, which already knows how to do that for a quarantined durable copy. Found by the
+[distributed cluster testing](../cluster-testing/correctness.md#5-regression-pass) chapter.
+
+### 161. A start that fails leaves an empty archive behind
+
+`ArchiveMap::new` gives every open a new active archive id, and the compactor creates the file
+when it starts. A start that fails after that and before anything is compacted leaves an empty
+archive file, which the next start does not know to remove, since the map never recorded it. A
+clean shutdown deletes its own empty active archive (`FileSystemCompactor::shutdown`), but a
+failed start does not shut down. On the lab, hyperion's 31 failed starts left 30 empty files
+under `Movie/archives/`. Harmless beyond the clutter and an inode each. Found with
+[#159](resolved/map-ahead-of-archive.md).
 
 ---
 

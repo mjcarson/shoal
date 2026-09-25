@@ -84,28 +84,43 @@ pub(crate) fn classify_tail(truncated: bool, read_any: bool) -> TailLoss {
     }
 }
 
-/// Write a new intent to our maps intent log
+/// Frame a map intent onto the end of a job's staged intents: its size, its checksum, its bytes
+///
+/// A job's intents are staged rather than written to the map's intent log as they are made,
+/// because the log's writer flushes each buffer as it fills: an intent on disk ahead of the
+/// record it names is an entry past the end of its archive after a crash
+/// ([Resolved #159](../../../../../../docs/src/appendix/resolved/map-ahead-of-archive.md)).
 ///
 /// # Arguments
 ///
-/// * `map_writer` - The writer for our maps intent log
-/// * `intent` - The entry intent to write
-macro_rules! write_map_intent {
-    ($map_writer:expr, $intent:expr, $variant:ident) => {{
-        // archive this intent log entry
-        let archived_intent = rkyv::to_bytes::<Error>(&$intent)?;
-        // get the size of the data to write
-        let size = archived_intent.len();
-        // compute a checksum over our serialized data
-        let mut hasher = GxHasher::default();
-        hasher.write(archived_intent.as_slice());
-        let checksum = hasher.finish();
-        // write the size of our archived entry data
-        $map_writer.write_all(&size.to_le_bytes()).await?;
-        // write our checksum
-        $map_writer.write_all(&checksum.to_le_bytes()).await?;
-        // write our archived partition map data
-        $map_writer.write_all(archived_intent.as_slice()).await?;
+/// * `staged` - The job's staged intents
+/// * `intent` - The intent to stage
+fn stage_intent(staged: &mut Vec<u8>, intent: &MapIntent) -> Result<(), ServerError> {
+    // archive this intent log entry
+    let archived_intent = rkyv::to_bytes::<Error>(intent)?;
+    // get the size of the data to write
+    let size = archived_intent.len();
+    // compute a checksum over our serialized data
+    let mut hasher = GxHasher::default();
+    hasher.write(archived_intent.as_slice());
+    let checksum = hasher.finish();
+    // the size, the checksum and the intent, the framing the intent log reader expects
+    staged.extend_from_slice(&size.to_le_bytes());
+    staged.extend_from_slice(&checksum.to_le_bytes());
+    staged.extend_from_slice(archived_intent.as_slice());
+    Ok(())
+}
+
+/// Stage a new intent for our maps intent log, and hand back the entry it carries
+///
+/// # Arguments
+///
+/// * `staged` - The job's staged intents
+/// * `intent` - The entry intent to stage
+macro_rules! stage_map_intent {
+    ($staged:expr, $intent:expr, $variant:ident) => {{
+        // frame this intent onto the job's staged intents
+        stage_intent(&mut $staged, &$intent)?;
         // ensure that during testing/development we always have an entry intent
         debug_assert!($intent.is_kind(MapIntentKinds::$variant));
         // we should only have this variant for the intent since we just wrapped it
@@ -116,6 +131,59 @@ macro_rules! write_map_intent {
             _ => unsafe { std::hint::unreachable_unchecked() },
         }
     }};
+}
+
+/// How many bytes of staged map intents a job holds before it writes them early
+///
+/// About sixty thousand partitions' intents. A job that rewrites more than that syncs its
+/// archive and writes what it staged, so its memory is bounded by this and not by the job.
+const STAGED_MAP_LIMIT: usize = 4 << 20;
+
+/// Write a job's staged map intents to the intent log, once the records they name are durable
+///
+/// The archive is synced first, so nothing in the intent log ever names a record the archive
+/// could lose ([Resolved #159](../../../../../../docs/src/appendix/resolved/map-ahead-of-archive.md)).
+/// The intent log itself is not synced here; the job syncs it before it repoints the map.
+///
+/// # Arguments
+///
+/// * `writer` - The archive writer the staged intents' records went to
+/// * `map_writer` - The map's intent log writer
+/// * `staged` - The job's staged intents, emptied
+async fn write_staged(
+    writer: &mut DmaStreamWriter,
+    map_writer: &mut DmaStreamWriter,
+    staged: &mut Vec<u8>,
+) -> Result<(), ServerError> {
+    // nothing staged is nothing to order
+    if staged.is_empty() {
+        return Ok(());
+    }
+    // the records first
+    writer.sync().await?;
+    // then the intents that name them
+    map_writer.write_all(staged).await?;
+    staged.clear();
+    Ok(())
+}
+
+/// Write a job's staged intents early if they have grown past their bound
+///
+/// # Arguments
+///
+/// * `writer` - The archive writer the staged intents' records went to
+/// * `map_writer` - The map's intent log writer
+/// * `staged` - The job's staged intents
+async fn bound_staged(
+    writer: &mut DmaStreamWriter,
+    map_writer: &mut DmaStreamWriter,
+    staged: &mut Vec<u8>,
+) -> Result<(), ServerError> {
+    // under the bound, the intents wait for the job's end
+    if staged.len() < STAGED_MAP_LIMIT {
+        return Ok(());
+    }
+    write_staged(writer, map_writer, staged).await
 }
 
 /// The first wait before a compaction job that failed before writing is tried again
@@ -201,6 +269,11 @@ pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport, 
     entries: Vec<(u64, ArchiveEntry)>,
     /// The partitions that were pruned and so must be dropped from our archive map
     removals: Vec<u64>,
+    /// The map intents of the job in progress, framed and not yet written to the intent log
+    ///
+    /// Written only once the archive holding the records they name is synced
+    /// ([Resolved #159](../../../../../docs/src/appendix/resolved/map-ahead-of-archive.md)).
+    staged: Vec<u8>,
     /// The channel to listen for paths to intent logs to compact
     jobs_rx: AsyncReceiver<CompactionJob>,
     /// The channel to send shard local messages on
@@ -245,6 +318,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             loaded: HashMap::with_capacity(capacity),
             entries: Vec::with_capacity(capacity),
             removals: Vec::with_capacity(capacity),
+            staged: Vec::new(),
             jobs_rx,
             shard_local_tx: shard_local_tx.clone(),
             archive_path: conf.get_archive_path(R::name()),
@@ -252,6 +326,19 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             row_kind: PhantomData,
         };
         Ok(compactor)
+    }
+
+    /// End a job's writes: its records durable, then the map intents naming them, then those
+    ///
+    /// Everything a job writes to the map's intent log goes through here, so an intent is never
+    /// on disk before its record ([Resolved #159](../../../../../docs/src/appendix/resolved/map-ahead-of-archive.md)).
+    async fn sync_job(&mut self) -> Result<(), ServerError> {
+        // the records, then the intents that name them
+        self.writer.sync().await?;
+        write_staged(&mut self.writer, &mut self.map_writer, &mut self.staged).await?;
+        // and the intents durable before the map is repointed
+        self.map_writer.sync().await?;
+        Ok(())
     }
 
     /// Read and sort this intent log by partition
@@ -378,6 +465,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         let mut to_mark = Vec::with_capacity(1000);
         // get a copy of our active archive id
         let active_id = *self.map.active.borrow();
+        // where the map stood when this pass began, for the fixture's crash point
+        let (map_written_at_start, map_flushed_at_start) = (
+            self.map_writer.current_pos(),
+            self.map_writer.current_flushed_pos(),
+        );
         // write all of our compacted partitions to disk
         for (key, partition) in &self.loaded {
             // serialize this partitions data
@@ -386,18 +478,37 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             let offset = write_record(&mut self.writer, archived.as_slice()).await?;
             // build the archive entry for this partitions data
             let intent = MapIntent::entry(*key, active_id, offset, archived.len());
-            // write this map intent to our map intent log
-            let entry = write_map_intent!(self.map_writer, intent, Entry);
+            // stage this map intent, for the intent log once the record is durable
+            let entry = stage_map_intent!(self.staged, intent, Entry);
+            // a long job writes what it staged early, its records first, to bound its memory
+            bound_staged(&mut self.writer, &mut self.map_writer, &mut self.staged).await?;
             // add this entry to our entries list
             self.entries.push((*key, entry));
             // add this partition to the list of partitions we want to mark
             // as potentially evictable
             to_mark.push(*key);
+            // the fixture dies here once a whole buffer of this pass's map is on disk
+            if crate::server::replication::install::crash_point::armed()
+                == crate::server::replication::install::CrashPoint::MidCompaction
+                && self.map_writer.current_pos() - map_written_at_start >= 128 << 10
+            {
+                // the buffer was handed to a write in the background; let it land first
+                while self.map_writer.current_flushed_pos() <= map_flushed_at_start {
+                    glommio::timer::sleep(Duration::from_millis(1)).await;
+                }
+                crate::server::replication::install::crash_point::hit(
+                    crate::server::replication::install::CrashPoint::MidCompaction,
+                );
+            }
         }
+        // or here, every record written and nothing synced, if it never did
+        crate::server::replication::install::crash_point::hit(
+            crate::server::replication::install::CrashPoint::MidCompaction,
+        );
         // log the removal of every partition we pruned
         for key in &self.removals {
             // write this removal to our map intent log
-            write_map_intent!(self.map_writer, MapIntent::Remove(*key), Remove);
+            stage_map_intent!(self.staged, MapIntent::Remove(*key), Remove);
             // a pruned partitions tombstone can be evicted once this removal lands
             to_mark.push(*key);
         }
@@ -405,8 +516,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         // copies instead of rewriting every partition this compactor has ever loaded
         self.loaded.clear();
         // flush our current writers
-        self.writer.sync().await?;
-        self.map_writer.sync().await?;
+        self.sync_job().await?;
         // add the archive entries for the data we just synced
         for (id, entry) in self.entries.drain(..) {
             // add this entry to our shared map
@@ -883,6 +993,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             .install_snapshot_records(&tablets, &path)
             .await
             .map_err(|error| format!("{error:?}"));
+        // an install that failed part way leaves nothing for the next job to publish: its
+        // entries, removals and staged intents name a file the loop is about to refuse
+        if outcome.is_err() {
+            self.reset_job();
+        }
         // the loop hears the trailer, or why the archives were not touched
         self.shard_local_tx
             .send(ServerMsg::SnapshotInstalled {
@@ -950,11 +1065,13 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     "the snapshot holds partition {key:016x} of tablet {tablet}, which it does not claim to cover"
                 )));
             }
-            // written as a compaction writes a partition: the record, then the map intent, so
-            // an installed record carries a checksum whatever the sender's archive did
+            // written as a compaction writes a partition: the record, then the map intent staged
+            // behind it, so an installed record carries a checksum whatever the sender's archive
+            // did and its intent never reaches the log before it
             let offset = write_record(&mut self.writer, &bytes).await?;
             let intent = MapIntent::entry(key, active_id, offset, bytes.len());
-            let entry = write_map_intent!(self.map_writer, intent, Entry);
+            let entry = stage_map_intent!(self.staged, intent, Entry);
+            bound_staged(&mut self.writer, &mut self.map_writer, &mut self.staged).await?;
             self.entries.push((key, entry));
             written.insert(key);
             if first {
@@ -979,12 +1096,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             .copied()
             .collect();
         for key in &absent {
-            write_map_intent!(self.map_writer, MapIntent::Remove(*key), Remove);
+            stage_map_intent!(self.staged, MapIntent::Remove(*key), Remove);
             self.removals.push(*key);
         }
         // the data, then the map intent log, durable before the map is repointed
-        self.writer.sync().await?;
-        self.map_writer.sync().await?;
+        self.sync_job().await?;
         for (id, entry) in self.entries.drain(..) {
             self.map.set_partition(id, entry);
         }
@@ -1047,11 +1163,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             .copied()
             .collect();
         for key in &absent {
-            write_map_intent!(self.map_writer, MapIntent::Remove(*key), Remove);
+            stage_map_intent!(self.staged, MapIntent::Remove(*key), Remove);
             self.removals.push(*key);
         }
         // the map intent log durable before the map is repointed
-        self.map_writer.sync().await?;
+        self.sync_job().await?;
         for id in self.removals.drain(..) {
             self.map.remove_partition(id);
         }
@@ -1085,9 +1201,15 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         fault: ArchiveFault,
         key: u64,
     ) -> Result<serde_json::Value, String> {
-        self.inject_fault_inner(fault, key)
+        let outcome = self
+            .inject_fault_inner(fault, key)
             .await
-            .map_err(|error| format!("{error:?}"))
+            .map_err(|error| format!("{error:?}"));
+        // a fault that failed part way leaves nothing staged for the next job to write
+        if outcome.is_err() {
+            self.reset_job();
+        }
+        outcome
     }
 
     /// The fault itself, with the engine's own errors
@@ -1135,8 +1257,8 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             }
             ArchiveFault::Forget => {
                 // log the removal the way a prune does, then drop the entry
-                write_map_intent!(self.map_writer, MapIntent::Remove(key), Remove);
-                self.map_writer.sync().await?;
+                stage_map_intent!(self.staged, MapIntent::Remove(key), Remove);
+                self.sync_job().await?;
                 self.map.remove_partition(key);
                 event!(Level::WARN, msg = "forgot a partition, as the fixture asked", table = %self.table_name, partition = format!("{key:016x}"));
                 Ok(serde_json::json!({ "fault": "forget", "archive": entry.archive.to_string() }))
@@ -1148,9 +1270,8 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 let active_id = *self.map.active.borrow();
                 let offset = write_record(&mut self.writer, archived.as_slice()).await?;
                 let intent = MapIntent::entry(key, active_id, offset, archived.len());
-                let entry = write_map_intent!(self.map_writer, intent, Entry);
-                self.writer.sync().await?;
-                self.map_writer.sync().await?;
+                let entry = stage_map_intent!(self.staged, intent, Entry);
+                self.sync_job().await?;
                 self.map.set_partition(key, entry);
                 event!(Level::WARN, msg = "erased a partition, as the fixture asked", table = %self.table_name, partition = format!("{key:016x}"));
                 Ok(
@@ -1236,31 +1357,19 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                         entry.offset = start;
                         // wrap our entry in a map intent
                         let intent = MapIntent::Entry(entry);
-                        // write this map intent to our map intent log
-                        let entry = write_map_intent!(self.map_writer, intent, Entry);
+                        // stage this map intent, for the intent log once the record is durable
+                        let entry = stage_map_intent!(self.staged, intent, Entry);
+                        // a long rewrite writes what it staged early, its records first
+                        bound_staged(&mut self.writer, &mut self.map_writer, &mut self.staged)
+                            .await?;
                         // add this entry to our entries list
                         self.entries.push((entry.key, entry))
                     }
                     // close our archive
                     archive.close().await?;
-                    // build an intent that we are deleting this archive
-                    let intent = MapIntent::DeleteArchive(*old_id);
-                    // archive this intent log entry
-                    let archived_intent = rkyv::to_bytes::<Error>(&intent)?;
-                    // get the size of the data to write
-                    let size = archived_intent.len();
-                    // compute checksum
-                    let mut hasher = GxHasher::default();
-                    hasher.write(archived_intent.as_slice());
-                    let checksum = hasher.finish();
-                    // write the size of our archived entry data
-                    self.map_writer.write_all(&size.to_le_bytes()).await?;
-                    // write our checksum
-                    self.map_writer.write_all(&checksum.to_le_bytes()).await?;
-                    // write our archived partition map data
-                    self.map_writer
-                        .write_all(archived_intent.as_slice())
-                        .await?;
+                    // stage an intent that we are deleting this archive, written after the
+                    // records copied out of it are durable
+                    stage_intent(&mut self.staged, &MapIntent::DeleteArchive(*old_id))?;
                     // save this archive path for deletion
                     old_paths.push((old_id, path));
                     // add this to our total compacted size
@@ -1272,24 +1381,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                         // since we just might not have written to it yet
                         continue;
                     }
-                    // build an intent that we are deleting this archive
-                    let intent = MapIntent::DeleteArchive(*old_id);
-                    // archive this intent log entry
-                    let archived_intent = rkyv::to_bytes::<Error>(&intent)?;
-                    // get the size of the data to write
-                    let size = archived_intent.len();
-                    // compute checksum
-                    let mut hasher = GxHasher::default();
-                    hasher.write(archived_intent.as_slice());
-                    let checksum = hasher.finish();
-                    // write the size of our archived entry data
-                    self.map_writer.write_all(&size.to_le_bytes()).await?;
-                    // write our checksum
-                    self.map_writer.write_all(&checksum.to_le_bytes()).await?;
-                    // write our archived partition map data
-                    self.map_writer
-                        .write_all(archived_intent.as_slice())
-                        .await?;
+                    // stage an intent that we are deleting this archive, written after the
+                    // records copied out of it are durable
+                    stage_intent(&mut self.staged, &MapIntent::DeleteArchive(*old_id))?;
                     // build the path to this now unused archive file
                     let path = self.archive_path.join(old_id.to_string());
                     // add this unused archive to the list of archives to remove
@@ -1303,8 +1397,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             return Ok(());
         }
         // flush our current writers
-        self.writer.sync().await?;
-        self.map_writer.sync().await?;
+        self.sync_job().await?;
         // calculate the stats for this round of compaction
         let post_compaction = self.writer.current_pos() - start_pos;
         // log out total amount of compacted data
@@ -1355,24 +1448,8 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         let file = OpenOptions::new().read(true).dma_open(&active_path).await?;
         // check if our archive file is empty
         if file.file_size().await? == 0 {
-            // build an intent that we are deleting this archive
-            let intent = MapIntent::DeleteArchive(active_id);
-            // archive this intent log entry
-            let archived_intent = rkyv::to_bytes::<Error>(&intent)?;
-            // get the size of the data to write
-            let size = archived_intent.len();
-            // compute checksum
-            let mut hasher = GxHasher::default();
-            hasher.write(archived_intent.as_slice());
-            let checksum = hasher.finish();
-            // write the size of our archived entry data
-            self.map_writer.write_all(&size.to_le_bytes()).await?;
-            // write our checksum
-            self.map_writer.write_all(&checksum.to_le_bytes()).await?;
-            // write our archived partition map data
-            self.map_writer
-                .write_all(archived_intent.as_slice())
-                .await?;
+            // stage an intent that we are deleting this archive
+            stage_intent(&mut self.staged, &MapIntent::DeleteArchive(active_id))?;
             // remove this empty active archive from our map
             self.map
                 .all_archives
@@ -1383,6 +1460,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         }
         // close our file handle
         file.close().await?;
+        // the archive was synced before it closed, so nothing staged names a record it could lose
+        self.map_writer.write_all(&self.staged).await?;
+        self.staged.clear();
         // flush and close our map writer
         self.map_writer.sync().await?;
         self.map_writer.close().await?;
@@ -1400,6 +1480,8 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         self.loaded.clear();
         self.entries.clear();
         self.removals.clear();
+        // and what it staged for the map, which names records the job never finished
+        self.staged.clear();
     }
 
     /// Run one compaction job

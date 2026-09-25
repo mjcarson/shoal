@@ -263,7 +263,11 @@ map.load_intent_log(intent_path).await?;
 
 Snapshot first, then replay the intent log over it (`.../fs/map.rs:99-123`) — `Entry` inserts
 or overwrites, `DeleteArchive` removes from `all_archives`. Last write wins, so replay order
-matters and the log is read strictly in order.
+matters and the log is read strictly in order. An `Entry` whose record lies past the end of its archive on disk is
+skipped, and the entry before it stands: a build before
+[Resolved #159](../appendix/resolved/map-ahead-of-archive.md) could log an intent ahead of its
+record, and a crash between them left one. The snapshot is not checked the same way, since it
+has no earlier entry to fall back on.
 
 Note `DeleteArchive` removes only from `all_archives`, never from `to_archive`. That is
 consistent with how compaction works — every entry on a deleted archive is rewritten and

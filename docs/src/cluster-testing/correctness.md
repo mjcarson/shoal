@@ -464,3 +464,65 @@ remains is filed: the first two to three seconds of a silent partition or a paus
 ([156](../appendix/known-issues.md#156-a-full-disk-stops-every-group-on-a-node-until-it-is-restarted)),
 and a restore that fails part way
 ([155](../appendix/known-issues.md#155-a-restore-whose-group-failed-cannot-be-finished)).
+
+## 6. A second regression pass, and a crash mid compaction
+
+The fault suite once more, on the build with [#158](../appendix/resolved/runtime-waker-lists.md)'s
+runtime fix, after the timer experiments of
+[O64](performance.md#revisited-and-the-throughput-is-bimodal) had restarted each node many times
+(`target/lab/suite-r158.log`):
+
+| Fault | Acknowledged inserts | Lost | Seconds at zero |
+| --- | --- | --- | --- |
+| Kill the node leading the most groups (titan) | 630,714 | 0 | 0 |
+| Partition hyperion by dropped packets, 20 s | 530,157 | 0 | 3 |
+| Pause the control leader (titan), 20 s | 514,526 | 0 | 2 |
+| Kill every node at once | 321,077 | 0 through europa; not read through the others | 13 |
+
+The first three matched section 5. Kill-all did not: hyperion never came back. Every start
+failed on *"partition 10483307249282197527 of Movie could not be read for a replicated apply"*,
+31 restarts until it was stopped. The map named a record past the end of its archive, and that
+archive had last been written 50 minutes before. Earlier that evening, restarts during the
+timer experiments had outrun the unit's 60 s stop timeout four times, and systemd had SIGKILLed
+hyperion each time while loads were running.
+
+The cause was the compactor's write order. A pass wrote each record into its archive and each
+record's map intent into the map's intent log through two writers, each writing buffers out as
+they filled, and synced both only at its end. So a kill between a map buffer landing and the
+archive buffer it names landing left the map pointing at bytes the disk never got. After that,
+the redo of the pass could not read the partition, and every compaction of the shard failed.
+Then the kill-all's restart replayed a write over it, and a replica that cannot read its archive
+stops. Filed, reproduced with a crash point that dies inside the window, and fixed as
+[#159](../appendix/resolved/map-ahead-of-archive.md): a job's map intents are staged and written
+only after its archive is synced, and a torn entry in the intent log is skipped at load. That
+hyperion stopped altogether over one partition is filed as
+[160](../appendix/known-issues.md#160-a-copy-that-cannot-read-one-partition-stops-its-node).
+
+hyperion's torn entry had been folded into its map's snapshot by the crash-loop starts, which
+the fix does not repair, so the lab was bootstrapped again on the fixed build and reloaded.
+
+### Nine SIGKILLs under load
+
+The failure's own trigger, repeated: an insert-heavy bench (`insert:60,update:25,get:15`) while
+one node after another is SIGKILLed every 25 s and left to systemd to restart
+(`target/lab/kill-loop.sh`).
+
+| | |
+| --- | --- |
+| Kills | 9, europa, titan and hyperion in turn, from 23:16:42 to 23:20:05 |
+| Restarts after | 3 on each node, every one by systemd, none by hand |
+| Acknowledged inserts | 3,644,280, every one read back through each member alone: 0 lost |
+| Corrupt reads, failed shards, skipped map entries | 0 on every node |
+| Compactions failed | 0 on every node |
+| Bench, 256 s | get 5,311/s, update 5,926/s, insert 14,235/s; 667,187 updates refused `NotLeader` and retried |
+
+Three updates were refused `IdentityExpired`: a client retry of a write whose outcome was unknown,
+after the group had evicted its identity. That is by design, and it is safe, since nothing is
+applied twice. But under this load a group remembers about seven seconds of identities, not
+the five minutes the window promises, and that is now written down in
+[F45's limitations](../features/replica-migration.md#limitations).
+
+**Verdict:** **pass**. A kill cannot be aimed at the compactor's window from the outside, so this
+run shows the fixed build surviving the failure's trigger nine times, not that the window was
+hit. The fixture's `mid_compaction` crash point is what aims at it.
+
