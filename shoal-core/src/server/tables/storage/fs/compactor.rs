@@ -1,6 +1,5 @@
 //! The file system compaction utilties for intent logs/archives
 
-use byte_unit::Byte;
 use futures::{select, AsyncWriteExt, FutureExt};
 use glommio::io::{BufferedFile, DmaFile, DmaStreamWriter, OpenOptions};
 use gxhash::GxHasher;
@@ -419,7 +418,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             self.map.remove_partition(id);
         }
         // check how large our map intent log is and if needed compact it
-        if self.map_writer.current_flushed_pos() > Byte::MEBIBYTE {
+        if self.map.compaction_due(self.map_writer.current_flushed_pos()) {
             // close our current map writer
             self.map_writer.close().await?;
             // compact our map data and get a new intent writer
@@ -1000,7 +999,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             removed = absent.len(),
         );
         // a map intent log that grew past its bound is compacted, as after any job
-        if self.map_writer.current_flushed_pos() > Byte::MEBIBYTE {
+        if self.map.compaction_due(self.map_writer.current_flushed_pos()) {
             self.map_writer.close().await?;
             self.map_writer = self.map.compact_map().await?;
         }
@@ -1062,7 +1061,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             removed = absent.len()
         );
         // a map intent log that grew past its bound is compacted, as after any job
-        if self.map_writer.current_flushed_pos() > Byte::MEBIBYTE {
+        if self.map.compaction_due(self.map_writer.current_flushed_pos()) {
             self.map_writer.close().await?;
             self.map_writer = self.map.compact_map().await?;
         }
@@ -1318,7 +1317,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             self.map.remove_archive(old_id).await?;
         }
         // check how large our map intent log is and if needed compact it
-        if self.map_writer.current_flushed_pos() > Byte::MEBIBYTE {
+        if self.map.compaction_due(self.map_writer.current_flushed_pos()) {
             // close our current map writer
             self.map_writer.close().await?;
             // compact our map data and get a new intent writer

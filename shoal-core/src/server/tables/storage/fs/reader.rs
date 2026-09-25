@@ -9,6 +9,14 @@ use tracing::instrument;
 use super::stream::{PAD_SENTINEL, PAD_SENTINEL_SIZE};
 use crate::server::ServerError;
 
+/// How many bytes one device read of a log pulls in, from the record being read onwards
+///
+/// A log holds records of tens of bytes. Reading each one's size, checksum and payload with a
+/// direct read of its own made a 30 MB map intent log half a million records and a million and
+/// a half device reads, which took a shard minutes to start
+/// ([Resolved #140](../../../../../../docs/src/appendix/resolved/intent-log-read-ahead.md)).
+const READ_AHEAD: u64 = 4 * 1024 * 1024;
+
 /// Reads an intent log from disk
 pub struct IntentLogReader {
     /// The stream to read and intent log from
@@ -26,6 +34,12 @@ pub struct IntentLogReader {
     /// part way through. Only the damaged cases set this - the two shapes a normally
     /// padded log ends in do not, or every clean startup would look damaged.
     pub truncated: bool,
+    /// The last block of the file read from the device, which records are sliced out of
+    window: Option<ReadResult>,
+    /// Where in the file that block starts
+    window_start: u64,
+    /// How many reads this reader has made of the device
+    pub device_reads: u64,
 }
 
 impl IntentLogReader {
@@ -45,6 +59,9 @@ impl IntentLogReader {
             position: 0,
             alignment,
             truncated: false,
+            window: None,
+            window_start: 0,
+            device_reads: 0,
         };
         Ok(reader)
     }
@@ -65,7 +82,7 @@ impl IntentLogReader {
                 return Ok(None);
             }
             // try to read the size of the next entry in this intent log
-            let size_read = self.file.read_at(self.position, 8).await?;
+            let size_read = self.read(self.position, 8).await?;
             // check if we read a complete size header
             if size_read.len() < 8 {
                 tracing::warn!("Truncated size header at position {} (got {} bytes) - treating as end of intent log", self.position, size_read.len());
@@ -112,7 +129,7 @@ impl IntentLogReader {
                 return Ok(None);
             }
             // read the checksum
-            let checksum_read = self.file.read_at(self.position, 8).await?;
+            let checksum_read = self.read(self.position, 8).await?;
             if checksum_read.len() < 8 {
                 tracing::warn!(
                     "Truncated checksum at position {} - treating as end of intent log",
@@ -125,7 +142,7 @@ impl IntentLogReader {
             let expected_checksum = u64::from_le_bytes(checksum_read[..8].try_into()?);
             self.position += 8;
             // read the data
-            let row_read = self.file.read_at(self.position, size).await?;
+            let row_read = self.read(self.position, size).await?;
             // check if we read the full entry data
             if row_read.len() < size {
                 tracing::warn!("Truncated data at position {} (expected {} bytes, got {}) - treating as end of intent log", self.position, size, row_read.len());
@@ -150,6 +167,44 @@ impl IntentLogReader {
             self.position += size as u64;
             return Ok(Some(row_read));
         }
+    }
+
+    /// Read some bytes of the log, from the block last read if it holds them
+    ///
+    /// Returns fewer bytes than asked for only at the end of the file, which the caller
+    /// treats as a truncated log exactly as it did a short direct read.
+    ///
+    /// # Arguments
+    ///
+    /// * `position` - Where in the file to read from
+    /// * `len` - How many bytes to read
+    async fn read(&mut self, position: u64, len: usize) -> Result<ReadResult, ServerError> {
+        // a read inside the block already held is a slice of it, with no device read
+        if let Some(window) = &self.window {
+            let end = self.window_start + window.len() as u64;
+            if position >= self.window_start && position + len as u64 <= end {
+                let offset = (position - self.window_start) as usize;
+                if let Some(slice) = ReadResult::slice(window, offset, len) {
+                    return Ok(slice);
+                }
+            }
+        }
+        // otherwise read a new block, from the aligned block holding this position onwards
+        let aligned = position / self.alignment * self.alignment;
+        let wanted = (position - aligned + len as u64)
+            .max(READ_AHEAD)
+            .min(self.size.saturating_sub(aligned));
+        let window = self.file.read_at(aligned, wanted as usize).await?;
+        self.device_reads += 1;
+        self.window_start = aligned;
+        // what of the ask the block holds: all of it, unless the file ends first
+        let offset = (position - aligned) as usize;
+        let held = window.len().saturating_sub(offset).min(len);
+        let slice = ReadResult::slice(&window, offset.min(window.len()), held).ok_or_else(|| {
+            ServerError::Shoal(crate::server::errors::ShoalError::TruncatedIntentLog)
+        })?;
+        self.window = Some(window);
+        Ok(slice)
     }
 
     /// Close this reader and its file

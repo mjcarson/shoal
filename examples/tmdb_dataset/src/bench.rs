@@ -44,6 +44,12 @@ const SYNTHETIC_PER_WORKER: u64 = 1 << 32;
 /// How many movies one get asks for when reading back
 const READ_BACK_CHUNK: usize = 256;
 
+/// How long a worker waits for its next answer before it says what it is still owed
+const HUNG_CHECK: Duration = Duration::from_secs(10);
+
+/// How long past the end of the run a worker waits for answers before it records them as hung
+const HUNG_AFTER: Duration = Duration::from_secs(60);
+
 /// The most rows a keyword read in the bench asks for
 ///
 /// A popular keyword holds thousands of movies, and the bench is timing a read, not a scan.
@@ -608,11 +614,48 @@ async fn drive_stream(
             if outstanding.is_empty() {
                 return Ok(());
             }
-            // wait for the next answer, however long the cluster takes to give it
-            let Some(response) = results_rx.next().await? else {
-                return Ok(());
+            // wait for the next answer; a stream owed answers well past the run's end says so,
+            // and one owed them a minute past it gives up on them as hung, since a query stream
+            // has no deadline of its own on the client
+            let response = match tokio::time::timeout(HUNG_CHECK, results_rx.next()).await {
+                Ok(next) => match next? {
+                    Some(response) => response,
+                    None => return Ok(()),
+                },
+                Err(_) => {
+                    let now = Instant::now();
+                    if now > until + HUNG_AFTER {
+                        return Err(Errors::Server {
+                            query_id: None,
+                            index: None,
+                            code: shoal::shared::protocol::error::ErrorCode::Timeout,
+                            msg: format!("{} answers never came", outstanding.len()),
+                        });
+                    }
+                    if now > until {
+                        let oldest = outstanding.values().map(|sent| sent.at).min();
+                        let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
+                        for sent in outstanding.values() {
+                            *kinds.entry(sent.kind.name()).or_default() += 1;
+                        }
+                        eprintln!(
+                            "a stream is owed {} answers ({kinds:?}), the oldest sent {:.1?} ago",
+                            outstanding.len(),
+                            oldest.map(|at| at.elapsed()).unwrap_or_default()
+                        );
+                    }
+                    continue;
+                }
             };
             let Some(sent) = outstanding.remove(&response.get_index()) else {
+                // an answer for a query that was answered already, or never sent: each query is
+                // owed exactly one, so this is said rather than dropped in silence
+                eprintln!(
+                    "an unexpected answer for index {}: {:?} {:?}",
+                    response.get_index(),
+                    response.kind(),
+                    response.error().map(|error| (error.code(), error.msg().to_string()))
+                );
                 continue;
             };
             // a failure is counted by its code, a success by its latency
@@ -656,9 +699,29 @@ async fn drive_stream(
         }
         return outcome;
     }
-    // close the stream and read it to its end, which releases its slot in the client
+    // close the stream and read it to its end, which releases its slot in the client; a
+    // stream that does not reach its end in time says so rather than holding the run open
+    let queries_tx_base = queries_tx.base_index;
     queries_tx.close().await?;
-    while results_rx.next().await?.is_some() {}
+    let drained = tokio::time::timeout(HUNG_AFTER, async {
+        let mut after_close = 0usize;
+        while results_rx.next().await?.is_some() {
+            after_close += 1;
+        }
+        Ok::<usize, Errors>(after_close)
+    })
+    .await;
+    match drained {
+        Ok(Ok(0)) => {}
+        Ok(Ok(extra)) => eprintln!("a stream answered {extra} more queries after its close"),
+        Ok(Err(error)) => return Err(error),
+        Err(_) => eprintln!(
+            "a stream did not reach its end within {HUNG_AFTER:?} of its close, with nothing owed; \
+             it stood at (next, end, pending) {:?} having sent {} queries",
+            results_rx.progress(),
+            queries_tx_base
+        ),
+    }
     Ok(())
 }
 

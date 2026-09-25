@@ -753,6 +753,15 @@ one thread queue behind each other** (395 µs alone, 10.8 ms with sixty four lea
 once), which is the number Q2's shared physical WAL has to beat. Both are in the
 [decision record](../distributed/protocol.md#q1-and-q13-at-m1).
 
+#### The inventory wizard has no field for `failover`
+
+`shoalctl/src/wizard/form.rs`. The [cluster testing](../cluster-testing/performance.md#failover-time-against-primary_failover_after)
+chapter added `failover` to the inventory (rendered as `cluster.primary_failover_after`) to
+measure failover against it. The wizard carries an inventory's value through an edit unchanged,
+but cannot set or show one, so a `failover` is written by hand. It was left out because the
+form's field list, its layout and its validation messages are each their own change, and the key
+had one user.
+
 #### `ServerMsg`'s `unsafe impl Send` covers every variant
 
 `shoal-core/src/server/messages.rs`. The enum asserts `Send` wholesale so it can travel kanal

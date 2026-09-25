@@ -176,3 +176,22 @@ All 452,629 acknowledged inserts were read back through each member.
 fail for the lease plus an election timeout (15–20 s at the default `primary_failover_after` of
 5 s), and the two remaining nodes then stall on their disks for about seven seconds. The documented
 failover objective is base + 2 s. Both are followed up on the [performance page](performance.md#failover-time-against-primary_failover_after).
+
+### Rolling upgrade under load
+
+A 70 second mixed bench, with `cluster upgrade --force` started 10 seconds in: every node's program
+replaced and its unit restarted, one node at a time, the control leader last. Each row is one run.
+
+| Run | Upgrade | Write refusals | Other failures | Acknowledged inserts lost | What it found |
+| --- | --- | --- | --- | --- | --- |
+| Before #139 | the previous build, restarted by the new one | 84,418 `NotLeader` in the 30 s after the upgrade | none | 0 | Every restarted node took its groups' leaders down, and each group waited for a lease and an election ([Resolved #139](../appendix/resolved/leadership-handoff-on-stop.md)) |
+| Handoff, first cut | completed | about 100 `NotLeader` | 384 `ConnectionLost` on europa's connections | 0 of 342,315 | The handoff works, but each stopping shard logged `handed=0` after waiting out its timeout: it had taken its groups' handles before the transfer, so it never saw that it had lost the lead |
+| Handoff, two phases | **hyperion never came back**: `ReadyTimeout { ready: 5, of: 6 }` on the new program and again on the reverted old one | — | five bench workers hung for good | — | Shard 2's 29.7 MB map intent log took minutes to replay, three direct reads a record ([Resolved #140](../appendix/resolved/intent-log-read-ahead.md)) |
+| Read-ahead | completed | 14 `NotLeader` | `ConnectionLost` for the workers on each restarted node; three streams never reached their end | 0 | A stream that failed handed its channel, and its late answers, to the next stream ([Resolved #141](../appendix/resolved/recycled-stream-channels.md)) |
+| All of the above | completed | 14 `NotLeader` | 640 `ConnectionLost` | **0 of 288,942**, read back through every member | nothing: no unexpected answer, no stream that did not end |
+
+**Verdict: pass**, after #139 to #141. A rolling upgrade under load now costs the clients the
+operations in flight on the node being restarted, as `ConnectionLost` (retriable), and a handful of
+`NotLeader`. It no longer costs every write to that node's groups for 15 to 20 seconds.
+Graceful restarts of titan and of europa on their own (`systemctl restart` under a 30 second bench)
+cost no `NotLeader` at all.

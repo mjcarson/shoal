@@ -15,6 +15,18 @@ use std::sync::Arc;
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
+/// The share of the saved map the intent log may reach before it is folded into a new map
+///
+/// Four: the log is folded at a quarter of the map, so a fold writes at most four bytes of map
+/// per byte of intent, and a restart replays at most a quarter of the map
+/// ([O62](../../../../../../docs/src/appendix/optimizations.md#o62-every-compaction-rewrites-the-shards-whole-archive-map)).
+const MAP_FOLD_RATIO: u64 = 4;
+
+/// The smallest intent log that is folded into a new map, whatever the map's size
+///
+/// The bound every fold used before the ratio, which is what a small map still gets.
+const MAP_FOLD_FLOOR: u64 = 1024 * 1024;
+
 use crate::server::errors::ShoalError;
 use crate::server::ServerError;
 use crate::shared::traits::TableNameSupport;
@@ -371,6 +383,8 @@ impl SerializedMap {
         writer.close().await?;
         // rename our temp path to our current one
         glommio::io::rename(&map.temp_map_path, &map.map_path).await?;
+        // the size the next fold of the intent log is measured against: the hash and the map
+        map.saved_bytes.set(archived.len() as u64 + 8);
         // fsync the parent directory to ensure the rename is durable
         if let Some(parent) = map.map_path.parent() {
             let dir = glommio::io::Directory::open(parent).await?;
@@ -496,6 +510,12 @@ pub struct ArchiveMap {
     pub temp_map_path: PathBuf,
     /// The path to this shards archive map intent log
     pub intent_path: PathBuf,
+    /// How large the map was when it was last saved, which the intent log is folded against
+    ///
+    /// A save rewrites the whole map, so folding the log each time it passes a fixed size makes
+    /// the bytes written per intent grow with the map
+    /// ([O62](../../../../../../docs/src/appendix/optimizations.md#o62-every-compaction-rewrites-the-shards-whole-archive-map)).
+    pub saved_bytes: Cell<u64>,
     /// The config for this table
     conf: FileSystemTableConf,
 }
@@ -519,6 +539,8 @@ impl ArchiveMap {
         // load our serializable map from disk so we can load it into our papaya map
         // TODO make issue about SerializedMap not needing to track active
         let serializable = SerializedMap::new(&map_path, &intent_path, "new").await?;
+        // how large the map on disk is, which the intent log is folded against
+        let saved_bytes = std::fs::metadata(&map_path).map_or(0, |meta| meta.len());
         // start out with an empty hash map with room for 1k partitions
         let to_archive = RefCell::new(HashMap::with_capacity(1000));
         // load all of this shards keys into this map
@@ -538,6 +560,7 @@ impl ArchiveMap {
             map_path,
             temp_map_path,
             intent_path,
+            saved_bytes: Cell::new(saved_bytes),
             conf: conf.clone(),
         };
         Ok(map)
@@ -895,6 +918,23 @@ impl ArchiveMap {
         sorted
     }
 
+    /// Whether the intent log has grown enough to be folded into a new map
+    ///
+    /// A fold rewrites the whole map, so the log is folded once it passes a share of the map as
+    /// last saved, and never below a floor: the bytes a fold writes per byte of intent stay
+    /// bounded by the ratio, and a restart replays at most that share of the map
+    /// ([O62](../../../../../../docs/src/appendix/optimizations.md#o62-every-compaction-rewrites-the-shards-whole-archive-map)).
+    ///
+    /// # Arguments
+    ///
+    /// * `intent_bytes` - How many bytes the intent log holds
+    #[must_use]
+    pub fn compaction_due(&self, intent_bytes: u64) -> bool {
+        // a quarter of the saved map, or the old fixed bound for a small one
+        let bound = (self.saved_bytes.get() / MAP_FOLD_RATIO).max(MAP_FOLD_FLOOR);
+        intent_bytes > bound
+    }
+
     /// Serialize and save an archive map to disk
     #[instrument(name = "ArchiveMap::compact_map", skip_all)]
     pub async fn compact_map(&self) -> Result<DmaStreamWriter, ServerError> {
@@ -1026,6 +1066,92 @@ mod tests {
             assert!(!loaded.to_archive.contains_key(&stale.key));
             // and our logged entry should still be there
             assert!(loaded.to_archive.contains_key(&7));
+        });
+    }
+
+    /// The intent log is folded at a quarter of the saved map, and never below the floor (O62)
+    ///
+    /// A fold rewrites the whole map. At the old fixed bound of a mebibyte, a shard holding a
+    /// million partitions rewrote a 125 MB map for every mebibyte of intents: on the lab that
+    /// was 70% of everything a node wrote, in bursts that stalled its fsyncs.
+    #[test]
+    fn the_intent_log_is_folded_against_the_map_it_rewrites() {
+        use super::super::conf::FileSystemTableConf;
+        use super::{ArchiveMap, MAP_FOLD_FLOOR};
+        LocalExecutor::default().run(async {
+            // a table's map under a directory of its own
+            let temp_dir = test_dir();
+            let conf = FileSystemTableConf::builder()
+                .latency_sensitive(
+                    super::super::conf::FileSystemLatencyWriterConf::builder()
+                        .path(temp_dir.path()),
+                )
+                .throughput_sensitive(
+                    super::super::conf::FileSystemThroughputWriterConf::builder()
+                        .path(temp_dir.path()),
+                );
+            conf.setup_paths("T").await.expect("paths");
+            let map = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
+            // an empty map folds at the floor, as every map did before
+            assert!(!map.compaction_due(MAP_FOLD_FLOOR));
+            assert!(map.compaction_due(MAP_FOLD_FLOOR + 1));
+            // a map of 125 MB folds at a quarter of it, not at the floor
+            map.saved_bytes.set(125_000_000);
+            assert!(!map.compaction_due(2 * MAP_FOLD_FLOOR));
+            assert!(!map.compaction_due(31_250_000));
+            assert!(map.compaction_due(31_250_001));
+            // a save records the size of what it wrote, and an open reads it back
+            map.saved_bytes.set(0);
+            let mut writer = map.compact_map().await.expect("a save");
+            futures::AsyncWriteExt::close(&mut writer).await.expect("a close");
+            let saved = map.saved_bytes.get();
+            assert!(saved > 8, "a save did not record its size");
+            let reopened = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
+            assert_eq!(reopened.saved_bytes.get(), saved);
+            map.close_all().await.expect("a close");
+        });
+    }
+
+    /// A long intent log is read back in blocks, not with three device reads a record (item 140)
+    ///
+    /// Each record's size, checksum and payload were direct reads of their own, so a map
+    /// intent log of half a million records took a shard minutes to replay and failed the
+    /// node's readiness timeout on every restart ([Resolved #140](../../../../../../docs/src/appendix/resolved/intent-log-read-ahead.md)).
+    #[test]
+    fn a_long_intent_log_is_read_in_blocks() {
+        use super::super::reader::IntentLogReader;
+        LocalExecutor::default().run(async {
+            // a hundred thousand framed intents in one log
+            let temp_dir = test_dir();
+            let path = temp_dir.path().join("intents");
+            let mut log = Vec::new();
+            for key in 0..100_000u64 {
+                log.extend_from_slice(&framed(&MapIntent::Remove(key)));
+            }
+            std::fs::write(&path, &log).expect("a log");
+            // every one comes back, in order
+            let mut reader = IntentLogReader::new(&path).await.expect("a reader");
+            let mut next = 0u64;
+            while let Some(read) = reader.next_buff().await.expect("a record") {
+                let archived =
+                    rkyv::access::<super::ArchivedMapIntent, rkyv::rancor::Error>(&read[..])
+                        .expect("an intent");
+                let intent = rkyv::deserialize::<MapIntent, rkyv::rancor::Error>(archived)
+                    .expect("an intent");
+                assert!(matches!(intent, MapIntent::Remove(key) if key == next), "{intent:?}");
+                next += 1;
+            }
+            assert_eq!(next, 100_000, "the log was not read to its end");
+            assert!(!reader.truncated, "a whole log was read as a damaged one");
+            // in a handful of device reads, not three hundred thousand
+            let blocks = (log.len() as u64).div_ceil(4 * 1024 * 1024) + 1;
+            assert!(
+                reader.device_reads <= blocks,
+                "{} records took {} device reads",
+                next,
+                reader.device_reads
+            );
+            reader.close().await.expect("a close");
         });
     }
 

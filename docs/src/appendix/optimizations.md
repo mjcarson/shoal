@@ -199,6 +199,7 @@ so they get worse by existing longer rather than under load.
 | **B17** | [**O59**](#o59-the-rehome-runs-on-one-core-and-blocks-the-start) — the rehome runs on one core and blocks the start | Argued — the start held for the whole move while every other core idles | M | `macro/rehome/shrink`, whose `millis` is the hold | Contained | no |
 | **B18** | [**O60**](#o60-a-nodes-figures-ride-its-status-report-as-verbose-json) — a node's figures ride its status report as verbose JSON | Measured in shape — about 7.4 KB a report for four busy tables, one report in four, 1.6× the leader's intake at 64 members | S | none; the spike's `fanout` table prices it, and no arm drives a cluster of that size | Contained | no |
 | **B19** | [**O61**](#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page) — a fast device syncs the WAL in batches too small to fill a page | Measured on the lab — 6.8× the device writes of the slower hosts for the same replicated rows, 5.6k `fdatasync`s a second against 680 | S–M | the lab's insert `bench` with disk counters | Latency for wear | yes, on the lab |
+| ~~**B20**~~ | ~~[**O62**](#o62-every-compaction-rewrites-the-shards-whole-archive-map) — every compaction rewrites the shard's whole archive map~~ **done**, measured and kept | Measured — 70% of a node's writes under load, in bursts that stalled its fsyncs | S | the lab's mixed `bench` with bytes per file | A longer replay at start | it was |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -2832,3 +2833,42 @@ unchanged at 16.6 GB, so this is not btrfs copying data. The remaining 1.8× bet
 writeback and the device's writes on europa, against 1.26× on ext4, is the filesystem's
 per-sync metadata. The group-commit delay is tried in [cluster testing](../cluster-testing/performance.md#o61-a-group-commit-delay),
 which records the outcome.
+
+### O62. Every compaction rewrites the shard's whole archive map
+
+| | |
+| --- | --- |
+| **Rank** | ~~**B20**~~ **done** — measured on the lab, applied, kept |
+| **Impact** | Measured — on the lab under a mixed load, map saves were 1,573 MB of the 2,235 MB one Zen1 node wrote in 28 seconds (70%), in bursts of up to 400 MB in one second that stalled every fsync behind them |
+| **Difficulty** | S — a fold threshold proportional to the map instead of a fixed mebibyte |
+| **Depends on** | [Resolved #140](resolved/intent-log-read-ahead.md), without which the longer intent logs it leaves failed a start |
+| **Blocks** | nothing |
+| **Tradeoff** | A restart replays up to a quarter of the map as intents instead of at most a mebibyte, and the intent log on disk is that much larger. With #140's read-ahead that replay costs seconds, not minutes |
+| **Benchmark** | the lab's mixed `bench` with a bpftrace count of bytes written per file ([cluster testing](../cluster-testing/performance.md#o62-the-archive-map-rewrite)) |
+
+Found by the [distributed cluster testing](../cluster-testing/performance.md#o62-the-archive-map-rewrite)
+chapter. A table's archive map is saved whole, the map of every archived partition on the shard,
+and changes between saves go to its intent log. The compactor folded the log into a new map
+whenever the log passed one mebibyte (`current_flushed_pos() > Byte::MEBIBYTE`, at four places in
+`compactor.rs`). With about a million partitions per shard a map is about 85–125 MB, so every
+mebibyte of intents cost a hundred mebibytes of map rewrite.
+
+**Applied:** `ArchiveMap::compaction_due` folds the log once it passes a quarter of the map as last
+saved (`saved_bytes`, set at every save and read from the file at open), and never below the old
+mebibyte (`MAP_FOLD_RATIO`, `MAP_FOLD_FLOOR`). A fold now writes at most four bytes of map per byte
+of intent.
+
+**Outcome:** over the same 30 second mixed bench, map saves on hyperion went from 1,573 MB to
+26 MB. An A/B on the same cluster, rolling back to the old fold with `cluster upgrade --rollback`
+and forward again, excluding the first run after each roll (caches cold, leadership moved):
+
+| | Operations per second | Write p99 | Write max |
+| --- | --- | --- | --- |
+| Old fold, two runs | 91,000–106,000 | 174–198 ms | 461–596 ms |
+| New fold, five runs | 99,500–142,800 | 128–201 ms | 290–389 ms |
+
+Throughput rose and the worst write fell by about a third, because the bursts that stalled the
+Zen1 hosts' fsyncs are gone. The median run moved less than the spread between runs, so the
+change is not claimed for the median. The first rollout exposed [#140](resolved/intent-log-read-ahead.md):
+hyperion's longer intent log, read one direct read per field, failed its start. **Kept**, with
+#140.

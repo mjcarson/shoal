@@ -18,6 +18,10 @@ than Shoal says so.
 | [136](../appendix/resolved/upgrade-a-down-node.md) | Delivering 135's fix | `cluster upgrade titan` refused because titan was down, so no tool could repair a crash-looping node | **Fixed.** A named down node is a repair |
 | [137](../appendix/resolved/upgrade-waits-for-groups.md) | The repair's timing against titan's journal | An upgrade judged a node caught up while its shards were still starting: zero groups lag nothing | **Fixed.** The upgrade waits for the shards and groups the node had, with none starting |
 | [138](../appendix/resolved/stream-bundle-identity.md) | [Kill a follower](correctness.md#kill-a-follower) | Every write on a stream opened before a newer stream's identity was evicted, or older than the retry window, was refused `IdentityExpired`: a quarter of all operations after the kill | **Fixed.** Each stream bundle gets its own identity |
+| [139](../appendix/resolved/leadership-handoff-on-stop.md) | [Rolling upgrade under load](correctness.md#rolling-upgrade-under-load) | Stopping a node took its groups' leaders with it: 84,418 writes refused `NotLeader` around one rolling upgrade | **Fixed.** A stopping shard hands off what it leads first: 14 refusals |
+| [140](../appendix/resolved/intent-log-read-ahead.md) | The first rollout of O62 | A 29.7 MB map intent log took minutes to replay, three direct reads a record, and failed hyperion's start on both programs | **Fixed.** A 4 MiB read-ahead window: 3.2 s to serve |
+| [141](../appendix/resolved/recycled-stream-channels.md) | Rolling upgrade under load | A failed stream's channel went to the next stream with its late answers: thousands of answers for indexes already answered, and streams that never ended | **Fixed.** Closed streams drop late answers, failed streams do not recycle, duplicates are dropped |
+| [142](../appendix/known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host) | The suite run after 139–141 and O62 | Two fixture tests fail intermittently on an idle host; a restarted member's checkpoint stays at zero | **Open**, with rates |
 
 ## Deployment and lab findings
 
@@ -32,3 +36,4 @@ than Shoal says so.
 | O | What | Outcome |
 | --- | --- | --- |
 | [O61](../appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page) | A fast device syncs the WAL in batches too small to fill a page | See [the experiment](performance.md#o61-a-group-commit-delay) |
+| [O62](../appendix/optimizations.md#o62-every-compaction-rewrites-the-shards-whole-archive-map) | Every compaction rewrote the shard's whole archive map: 70% of a node's writes | **Applied and kept.** Map saves 1,573 MB → 26 MB over the same run, worst write down by a third |

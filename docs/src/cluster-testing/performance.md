@@ -61,6 +61,27 @@ on the fastest node.
 while batches are arriving back to back, run at several delays against the same insert bench.
 Success means fewer syncs and bytes on europa with no change in the cluster's write p50 and p99.
 
+## O62, the archive map rewrite
+
+Stalls after the leader kill sent titan and hyperion to 78–85% iowait with their cpus idle, after a
+burst of writes. A bpftrace probe on `ext4_file_write_iter` and `ext4_sync_file`, summing each
+node's writes by file name for a second at a time (`target/lab/files.bt`), found what the bursts
+were: the archive map's temp file, `maps/temp/Shard-N`, 85–125 MB per save. Over 28 seconds of the
+mixed bench on hyperion:
+
+| Kind of file | Written |
+| --- | --- |
+| Archive map saves (`Shard-N`) | 1,573 MB, in bursts of up to 400 MB in one second |
+| Archives | 433 MB |
+| WAL segments | 227 MB |
+
+The compactor folded the map's intent log into a whole new map every time the log passed a
+mebibyte. The fold now waits for a quarter of the map
+([O62](../appendix/optimizations.md#o62-every-compaction-rewrites-the-shards-whole-archive-map),
+which has the A/B). After it, the same run wrote 26 MB of map saves. Throughput rose and the worst
+write fell by about a third. The first rollout of O62 also failed a node's start, which is
+[Resolved #140](../appendix/resolved/intent-log-read-ahead.md).
+
 ## Leadership after a restart
 
 A node that restarts leads none of its groups when it comes back, and nothing moves leadership back

@@ -651,6 +651,9 @@ where
     },
     /// Every tablet group this shard hosts has shut down, from the task that stopped them
     GroupsDown,
+    /// The groups this shard led have been handed to other members, or the wait ran out, and
+    /// they can be stopped ([Resolved #139](../../../docs/src/appendix/resolved/leadership-handoff-on-stop.md))
+    HandedOff,
     /// The WAL sealed a segment, so the loop can judge whether it is resolved
     WalSealed {
         /// The segment's generation
@@ -1017,6 +1020,7 @@ impl<D: ShoalDatabase> ServerMsg<D> {
                 return Err("A ready read is for the shard that waited on it")
             }
             ServerMsg::GroupsDown => return Err("A groups-down notice is for one shard"),
+            ServerMsg::HandedOff => return Err("A handed-off notice is for one shard"),
             ServerMsg::WalSealed { .. } => return Err("A sealed segment is the writing shard's"),
             ServerMsg::SegmentCompacted { .. } => {
                 return Err("A compacted segment is the writing shard's")

@@ -1410,6 +1410,17 @@ where
                 .answer_proposal(meta, table, tablet, None, outcome, 0)
                 .await;
         };
+        // a stopping shard has taken its groups' handles to hand them off and stop them, and
+        // none is coming back: the write is refused now, retriably, rather than parked on a
+        // handle that will never be built ([Resolved #139](../../../../docs/src/appendix/resolved/leadership-handoff-on-stop.md))
+        if replication.stopping {
+            let outcome = ProposalOutcome::NotLeader(format!(
+                "group {id} is stopping on this node; its lead is being handed to another member"
+            ));
+            return self
+                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .await;
+        }
         // a group whose handle is still being built takes the write once it is up
         if group.raft.is_none() {
             group.waiting.push((meta, table, key, payload));
@@ -2913,16 +2924,49 @@ where
         }
     }
 
-    /// Stop every group, on a task that posts back once they are down
+    /// Begin stopping the groups: refuse new writes, hand off what this shard leads, then stop
     ///
-    /// Parked batches are dropped first, so a state machine waiting on one returns and its
-    /// group can stop.
+    /// Returns whether there is anything to wait for; the shard loop keeps running until
+    /// `GroupsDown`. The groups keep their handles while they hand off, so the new leaders'
+    /// messages still reach them and each can see it no longer leads; they are taken and shut
+    /// down once `HandedOff` arrives ([Resolved #139](../../../../docs/src/appendix/resolved/leadership-handoff-on-stop.md)).
     pub(super) fn stop_groups(&mut self) -> bool {
         let Some(replication) = self.replication.as_mut() else {
             return false;
         };
+        // no write is proposed through this shard from here on
         replication.stopping = true;
         replication.parked.clear();
+        // the handles stay where they are; the handoff works on clones of them
+        let rafts: Vec<Raft<DataConfig, GroupMachine<D>>> = replication
+            .groups
+            .values()
+            .filter_map(|slot| slot.raft.clone())
+            .collect();
+        let tx = self.shard_local_tx.clone();
+        glommio::spawn_local(async move {
+            // a planned stop hands every group this shard leads to another member first, so
+            // its writes wait for one transfer rather than for the lease and an election
+            let (led, handed) = hand_off_leadership(&rafts).await;
+            if led > 0 {
+                event!(
+                    Level::INFO,
+                    msg = "handed off the groups this shard led before stopping",
+                    led,
+                    handed
+                );
+            }
+            let _ = tx.send(ServerMsg::HandedOff).await;
+        })
+        .detach();
+        true
+    }
+
+    /// Stop every group once their leads are handed off, on a task that posts `GroupsDown`
+    pub(super) fn stop_groups_now(&mut self) {
+        let Some(replication) = self.replication.as_mut() else {
+            return;
+        };
         let rafts: Vec<Raft<DataConfig, GroupMachine<D>>> = replication
             .groups
             .values_mut()
@@ -2936,7 +2980,6 @@ where
             let _ = tx.send(ServerMsg::GroupsDown).await;
         })
         .detach();
-        true
     }
 
     /// Close the WAL once the groups are down
@@ -2947,6 +2990,67 @@ where
             }
         }
     }
+}
+
+/// How long a stopping shard waits for the groups it leads to take another leader
+///
+/// All of them at once, so this is the whole wait however many groups the shard led. Past it
+/// the shard stops anyway, and a group that did not move waits for its lease and an election
+/// as it would have without the handoff.
+const HANDOFF_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Hand every group a stopping shard leads to its most caught-up voter, and wait until it moved
+///
+/// Returns how many groups the shard led, and how many of them took another leader within
+/// [`HANDOFF_TIMEOUT`].
+///
+/// # Arguments
+///
+/// * `rafts` - The shard's groups
+async fn hand_off_leadership<D: ShoalDatabase>(
+    rafts: &[Raft<DataConfig, GroupMachine<D>>],
+) -> (usize, usize) {
+    // one transfer per group this shard leads, to the voter whose log matches furthest
+    let transfers: Vec<_> = rafts
+        .iter()
+        .filter_map(|raft| {
+            let metrics = raft.metrics().borrow_watched().clone();
+            // only a group this shard leads has anything to hand off
+            if metrics.current_leader != Some(metrics.id) {
+                return None;
+            }
+            let voters: HashSet<ShardAddr> =
+                metrics.membership_config.membership().voter_ids().collect();
+            let target = metrics
+                .replication
+                .as_ref()?
+                .iter()
+                .filter(|(member, _)| **member != metrics.id && voters.contains(member))
+                .max_by_key(|(_, matched)| matched.as_ref().map(|log_id| log_id.index))
+                .map(|(member, _)| *member)?;
+            Some(async move {
+                // ask the target to take over, then wait until this member no longer leads
+                if raft.trigger().transfer_leader(target).await.is_err() {
+                    return false;
+                }
+                raft.wait(Some(HANDOFF_TIMEOUT))
+                    .metrics(
+                        |metrics| metrics.current_leader != Some(metrics.id),
+                        "the lead moved to another member",
+                    )
+                    .await
+                    .is_ok()
+            })
+        })
+        .collect();
+    let led = transfers.len();
+    // every group at once, bounded by the one timeout each wait carries
+    let handed = futures::future::join_all(transfers)
+        .await
+        .into_iter()
+        .filter(|moved| *moved)
+        .count();
+    (led, handed)
 }
 
 /// Write a volatile group's snapshot from its resident partitions, on a task of its own

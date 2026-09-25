@@ -82,6 +82,16 @@ and the failover arm records what a client without the retry sees: the dead node
 the writes refused within a hundred milliseconds, the rest served, until the election
 ([C10](performance.md#the-arms)).
 
+### A planned stop
+
+A node stopped by its supervisor is not a primary that is down. Since
+[Resolved #139](../appendix/resolved/leadership-handoff-on-stop.md) each of its shards refuses new
+writes retriably, hands every group it leads to the voter whose log matches furthest
+(`transfer_leader`), waits up to three seconds for the lead to move, and only then stops its
+groups. None of the lease and election wait above applies: on the lab a rolling upgrade under load
+refused 14 writes where it had refused 84,418. A killed node still costs its groups the whole
+window.
+
 ### A returning node
 
 A node restarts on its directory, recovers each group's term and vote, configuration,

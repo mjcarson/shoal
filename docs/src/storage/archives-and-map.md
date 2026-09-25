@@ -143,7 +143,7 @@ The map is persisted twice over, for two different reasons.
               │
               ├──▶ archives/intents/Shard-N     append MapIntent  (incremental, cheap)
               │
-              └──▶ (when intent log > 1 MiB)
+              └──▶ (when intent log > a quarter of the saved map, and > 1 MiB)
                    maps/temp/Shard-N ──rename──▶ maps/Shard-N     (full snapshot, atomic)
                    then delete the intent log
 ```
@@ -283,9 +283,13 @@ pub async fn compact_map(&self) -> Result<DmaStreamWriter, ServerError> {
 
 `.../fs/map.rs:522-544`
 
-Snapshot, drop the log, start a new one. Triggered whenever the map intent log passes 1 MiB
-(`.../fs/compactor.rs:247-252`, `:467-472`) and once at compactor construction
-(`.../fs/compactor.rs:108`).
+Snapshot, drop the log, start a new one. Triggered ~~whenever the map intent log passes 1 MiB~~
+whenever the map intent log passes a quarter of the map as last saved, and never below 1 MiB
+(`ArchiveMap::compaction_due`), and once at compactor construction. The fixed mebibyte made
+every mebibyte of intents cost a whole map rewrite, which at a million partitions a shard was
+70% of what a node wrote ([O62](../appendix/optimizations.md#o62-every-compaction-rewrites-the-shards-whole-archive-map)).
+The log a restart replays is up to a quarter of the map, which the reader takes in 4 MiB blocks
+([Resolved #140](../appendix/resolved/intent-log-read-ahead.md)).
 
 There is a window here: the snapshot is renamed into place, then the intent log is deleted.
 A crash between the two replays intents already folded into the snapshot. That is safe — the

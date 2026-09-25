@@ -96,7 +96,7 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ **1,629 tests**, seven ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ **1,633 tests**, seven ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
@@ -112,7 +112,7 @@ fixture tests: two passed alone, and six could not bind ~~port 12000~~ ports 120
 because a deployed lab node held them on the same host ([Test Coverage](test-coverage.md)), since
 [resolved](resolved/fixture-default-peer-ports.md) as item 134. The
 [distributed cluster testing](../cluster-testing/overview.md) chapter's fixes (items 60, 130, 131,
-133 to 138) and its driver added 10 and took it to 1,629 ([Test Coverage](test-coverage.md)).
+133 to 141, O62) and its driver added 14 and took it to 1,633 ([Test Coverage](test-coverage.md)).
 [Resolved #27](resolved/shql-quote-escape.md), [#32](resolved/client-gone-broadcast.md),
 [#36](resolved/staged-tail-deadline.md) and [#125](resolved/retry-unknown-outcome.md) added 11
 and took it to 1,587. There are two new binaries, `retry_outcome.rs` (3) and `staged_flush.rs`
@@ -398,6 +398,30 @@ ASan (`-Zsanitizer=address -Zsanitizer-recover=address`) on the unfixed tree, pa
 tests and reported no use-after-free, only gxhash reading past the end of a 13-byte key, which it
 does on purpose within a page. So this stays open until it recurs on a tree with #133 fixed, or
 never does.
+
+### 142. Two fixture tests fail intermittently on an idle host
+
+`lost_response_retry_returns_original_result` stops at `group …'s checkpoint never reached 5:
+[(0, Some(0))]`: node zero, killed and restarted, catches up (its digest matches) but reports
+checkpoint 0 for the group for the whole 60 second wait, through repeated `ROTATE` and `COMPACT`
+verbs. `migration_resumes_after_each_phase_failure` fails less often.
+
+**Established by running it**, on the development host with nothing else running, at the commit
+that fixed items 139 to 141 and applied O62:
+
+| Test | Current tree | `b681dcc` (before 139–141, O62) |
+| --- | --- | --- |
+| `lost_response_retry_returns_original_result` | 4 of 17 runs failed | 0 of 6 |
+| `migration_resumes_after_each_phase_failure` | 2 of 8 runs failed | 0 of 3 |
+
+Restoring the old fixed map fold on the current tree gave 8 of 8 passes, but the next 8 runs with
+O62 on passed too, and the lost-response test had also failed once in an earlier loaded run from
+before these changes. With logs on (`SHOAL_CHILD_LOG`), 6 of 6 runs passed. The samples are too
+small to say whether the changes made the failure more likely, and nothing found links them. What
+decides a restarted member's checkpoint is that a sealed WAL segment is handed to the compactor
+only once every group on the shard has applied past it. A group on node zero that has not applied
+past a segment would hold every other group's checkpoint on that shard. Filed with its rates so
+that the next change to that path, or the next run, can say more.
 
 ---
 

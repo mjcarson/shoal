@@ -1580,6 +1580,8 @@ async fn cluster_server_child() {
     // watching for a shard death; ~~a standalone node has no peers and just watches~~ a
     // standalone node answers the verbs that need no peer too, since the rehome is tested on
     // one ([F47](../../docs/src/features/local-rehome.md))
+    // whether the parent asked for the stop a supervisor's SIGTERM gives a deployed node
+    let mut exit_asked = false;
     {
         use tokio::io::AsyncBufReadExt as _;
         // resolve a node index in a command to the NodeId the fixture minted for it
@@ -1604,6 +1606,12 @@ async fn cluster_server_child() {
                 line = stdin.next_line() => match line {
                     Ok(Some(line)) => {
                         let line = line.trim();
+                        // a planned stop leaves the loop and stops the pool the way
+                        // `node::serve` does on SIGTERM ([Resolved #139](../../docs/src/appendix/resolved/leadership-handoff-on-stop.md))
+                        if line == "EXIT" {
+                            exit_asked = true;
+                            break;
+                        }
                         if line.starts_with("FAIL_SHARD") {
                             tolerate_failure = true;
                         }
@@ -1626,6 +1634,16 @@ async fn cluster_server_child() {
                 }
             }
         }
+    }
+    // a planned stop: the pool stops, the reply says how, and the process ends
+    if exit_asked {
+        let stopped = pool.exit();
+        report(&format!(
+            "{} {}",
+            cluster::REPLY_LINE,
+            serde_json::json!({ "exited": stopped.is_ok(), "error": stopped.err().map(|error| format!("{error:?}")) })
+        ));
+        std::process::exit(0);
     }
     // then relay a shard's death, should one happen, and otherwise run until killed
     loop {
@@ -17605,5 +17623,93 @@ async fn a_stream_older_than_the_retry_window_still_writes() -> Result<(), Fixtu
     }
     queries_tx.close().await?;
     while results_rx.next().await?.is_some() {}
+    Ok(())
+}
+
+/// A node stopped the way a supervisor stops it hands its lead off first (item 139)
+///
+/// Stopping a node took its groups' leaders with it, and the survivors could elect only once
+/// the lease had run out and an election timeout had passed: at the default failover base of
+/// five seconds, 15 to 20 seconds of refused writes for every planned restart. On the lab a
+/// rolling upgrade refused 84,418 writes this way. A stop now transfers each group it leads to
+/// its most caught-up voter before the groups shut down
+/// ([Resolved #139](../../docs/src/appendix/resolved/leadership-handoff-on-stop.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_leader_hands_its_groups_off() -> Result<(), FixtureError> {
+    let base = Duration::from_secs(5);
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .primary_failover_after(base)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let (key, _group) = key_led_by(&mut cluster, "Note", 1, 13_900)?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    write_note(&addr, key, "before").await?;
+    // a writer keeps writing to the group through node zero for the whole stop, recording
+    // when each write was sent and whether it landed
+    let writing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let writer = {
+        let writing = writing.clone();
+        let addr = addr.clone();
+        tokio::spawn(async move {
+            let client = Shoal::<TestDbClient>::new(&addr)
+                .await
+                .expect("a client of node zero");
+            let mut outcomes = Vec::new();
+            let mut round = 0u32;
+            while writing.load(std::sync::atomic::Ordering::Relaxed) {
+                let sent = Instant::now();
+                let landed = client
+                    .send_one(Note {
+                        key,
+                        text: format!("after {round}"),
+                    })
+                    .await
+                    .is_ok();
+                outcomes.push((sent, landed));
+                round += 1;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            outcomes
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    // node one stops the way systemd stops a deployed node, leading the key's group
+    let answer = cluster.stop(1)?;
+    assert_eq!(answer["exited"], serde_json::json!(true), "{answer}");
+    tokio::time::sleep(base).await;
+    writing.store(false, std::sync::atomic::Ordering::Relaxed);
+    let outcomes = writer.await.expect("the writer panicked");
+    // the longest run of refused writes, from the first refusal to the next write that landed
+    let mut longest = Duration::ZERO;
+    let mut refused_since: Option<Instant> = None;
+    for (sent, landed) in &outcomes {
+        match (landed, refused_since) {
+            (false, None) => refused_since = Some(*sent),
+            (true, Some(since)) => {
+                longest = longest.max(sent.duration_since(since));
+                refused_since = None;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        refused_since.is_none(),
+        "writes to the group node one led were still refused {base:?} after it stopped"
+    );
+    eprintln!(
+        "the longest run of refused writes across the stop was {longest:?}, over {} writes",
+        outcomes.len()
+    );
+    assert!(
+        longest < base,
+        "writes to the stopped leader's group were refused for {longest:?}, as long as a lease and an election"
+    );
+    let last = outcomes.len() - 1;
+    wait_note(&addr, key, Some(&format!("after {last}")), Duration::from_secs(10)).await?;
     Ok(())
 }

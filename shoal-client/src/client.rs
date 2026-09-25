@@ -290,6 +290,13 @@ struct Waiter {
     /// ([Resolved #138](../../../docs/src/appendix/resolved/stream-bundle-identity.md)).
     /// Nobody releases such a slot: it goes when its last answer arrives or its connection dies.
     bundle: bool,
+    /// Whether the stream a bundle belongs to is still reading, for a bundle's slot
+    ///
+    /// A bundle's slot outlives its stream until its answers are in, and the stream's channel
+    /// pair may be handed to the next stream by then. A late answer for a closed stream is
+    /// dropped here rather than delivered into that channel
+    /// ([Resolved #141](../../../docs/src/appendix/resolved/recycled-stream-channels.md)).
+    open: Option<Arc<AtomicBool>>,
     /// The channel to hand this query's responses to
     tx: AsyncSender<ClientMsg>,
     /// The span this query's answers hang off
@@ -316,6 +323,7 @@ impl Waiter {
         Waiter {
             owed: Arc::new(Owed::default()),
             bundle: false,
+            open: None,
             tx,
             span: Span::current(),
         }
@@ -1638,6 +1646,7 @@ impl<S: QuerySupport> Shoal<S> {
             phantom: PhantomData,
             span: Span::current(),
             deadline,
+            open: Arc::new(AtomicBool::new(true)),
         };
         Ok((result_stream, stamps))
     }
@@ -2077,6 +2086,8 @@ impl<S: QuerySupport> Shoal<S> {
         let mut id = Uuid::now_v7();
         // start tracking this response
         let (response_tx, response_rx) = self.track_response(&mut id, false)?;
+        // whether the result half still reads, which every bundle slot checks
+        let open = Arc::new(AtomicBool::new(true));
         // build a new shoal result stream
         let result_stream = ShoalResultStream {
             id,
@@ -2091,6 +2102,7 @@ impl<S: QuerySupport> Shoal<S> {
             span: Span::current(),
             // a stream never stops waiting on its own: its queries keep coming
             deadline: None,
+            open: open.clone(),
         };
         // wraap our result in a stream that supports queries and results
         let query_stream = ShoalQueryStream {
@@ -2103,6 +2115,7 @@ impl<S: QuerySupport> Shoal<S> {
             base_index: 0,
             peer_max_frame_bytes: self.peer_max_frame_bytes.clone(),
             dead_conns: self.dead_conns.clone(),
+            open,
             options,
         };
         Ok((query_stream, result_stream))
@@ -2129,6 +2142,8 @@ impl<S: QuerySupport> Shoal<S> {
         let mut id = Uuid::now_v7();
         // start tracking this response
         let (response_tx, response_rx) = self.track_response(&mut id, false)?;
+        // whether the result half still reads, which every bundle slot checks
+        let open = Arc::new(AtomicBool::new(true));
         // build a new shoal result stream
         let result_stream = ShoalUnorderedResultStream {
             id,
@@ -2142,6 +2157,7 @@ impl<S: QuerySupport> Shoal<S> {
             phantom: PhantomData,
             end: None,
             span: Span::current(),
+            open: open.clone(),
         };
         // wraap our result in a stream that supports queries and results
         let query_stream = ShoalQueryStream {
@@ -2154,6 +2170,7 @@ impl<S: QuerySupport> Shoal<S> {
             base_index: 0,
             peer_max_frame_bytes: self.peer_max_frame_bytes.clone(),
             dead_conns: self.dead_conns.clone(),
+            open,
             options,
         };
         Ok((query_stream, result_stream))
@@ -2418,13 +2435,24 @@ impl TcpProxy {
         // it is held. collecting first keeps the guard and the sends strictly apart
         let (waiting, bundles): (Vec<AsyncSender<ClientMsg>>, Vec<Uuid>) = {
             let map = self.channel_map.pin();
+            // a closed stream's bundle is owed nothing anyone is reading, so it is not failed,
+            // only forgotten below with the others
             let owing: Vec<(Uuid, &Waiter)> = map
                 .iter()
                 .filter(|(_, waiter)| waiter.owed.owes(self.conn_id))
                 .map(|(id, waiter)| (*id, waiter))
                 .collect();
             (
-                owing.iter().map(|(_, waiter)| waiter.tx.clone()).collect(),
+                owing
+                    .iter()
+                    .filter(|(_, waiter)| {
+                        waiter
+                            .open
+                            .as_ref()
+                            .is_none_or(|open| open.load(Ordering::Acquire))
+                    })
+                    .map(|(_, waiter)| waiter.tx.clone())
+                    .collect(),
                 // a stream bundle's slot is released by nobody else, so it goes with the failure
                 owing
                     .iter()
@@ -2498,6 +2526,16 @@ impl TcpProxy {
     /// * `waiter` - The stream waiting for it
     /// * `msg` - What to hand it
     async fn deliver(&self, query_id: Uuid, waiter: &Waiter, msg: ClientMsg) {
+        // a late answer for a stream that has ended goes nowhere: its channel may belong to
+        // another stream by now ([Resolved #141](../../../docs/src/appendix/resolved/recycled-stream-channels.md))
+        if waiter
+            .open
+            .as_ref()
+            .is_some_and(|open| !open.load(Ordering::Acquire))
+        {
+            self.channel_map.pin().remove(&query_id);
+            return;
+        }
         // rejoin the trace the query was sent in
         //
         // this reader is shared by every query on one connection and inherits nothing from any
@@ -2987,6 +3025,8 @@ pub struct ShoalResultStream<S: QuerySupport> {
     /// the stream ends with `Timeout` and the outcome is unknown
     /// ([F42](../../../docs/src/features/primary-failover.md)).
     deadline: Option<tokio::time::Instant>,
+    /// Whether this stream is still reading, which its bundles' slots check before delivering
+    open: Arc<AtomicBool>,
 }
 
 /// A stream dropped before its end gives its slot in the channel map back
@@ -2999,6 +3039,8 @@ pub struct ShoalResultStream<S: QuerySupport> {
 impl<S: QuerySupport> Drop for ShoalResultStream<S> {
     fn drop(&mut self) {
         // a stream that reached its end or failed was released already and has nothing to give
+        // no bundle slot delivers to a stream that is gone
+        self.open.store(false, Ordering::Release);
         if self.response_rx.is_some() {
             self.channel_map.pin().remove(&self.id);
         }
@@ -3101,6 +3143,12 @@ where
                     let response = ShoalResponse::<S>::new(response, stamps, token, self.id)?;
                     // get the index for this message
                     let index = response.get_index();
+                    // a duplicate would sit in the reorder buffer below the next index forever
+                    // ([Resolved #141](../../../docs/src/appendix/resolved/recycled-stream-channels.md))
+                    if index < self.next_index || self.pending.contains_key(&index) {
+                        event!(Level::WARN, msg = "dropped a second answer for one index", stream = %self.id, index);
+                        continue;
+                    }
                     // if this is the next row then return it
                     if self.next_index == index {
                         // increment the index of our next response
@@ -3195,15 +3243,25 @@ where
     /// The entry in the channel map is what the proxy routes a response through, so a stream that
     /// ended without removing it leaves every later response for that id being delivered into a
     /// channel with no reader.
-    async fn release(&mut self) -> Result<(), Errors> {
+    ///
+    /// # Arguments
+    ///
+    /// * `clean` - Whether the stream reached its end, rather than failing on the way
+    async fn release(&mut self, clean: bool) -> Result<(), Errors> {
+        // no bundle slot delivers to this stream from here on
+        self.open.store(false, Ordering::Release);
         // remove this stream id from our channel map
         self.channel_map.pin().remove(&self.id);
-        // take the ends of our channel
+        // take the ends of our channel, and hand them to the next stream only after a clean end:
+        // a stream that failed may still have answers queued in it or on their way to it
+        // ([Resolved #141](../../../docs/src/appendix/resolved/recycled-stream-channels.md))
         if let (Some(tx), Some(rx)) = (self.response_tx.take(), self.response_rx.take()) {
-            self.channel_queue_tx
-                .send((tx, rx))
-                .await
-                .map_err(send_failed)?;
+            if clean {
+                self.channel_queue_tx
+                    .send((tx, rx))
+                    .await
+                    .map_err(send_failed)?;
+            }
         }
         Ok(())
     }
@@ -3237,7 +3295,7 @@ where
             // response, so leaving the release to the end arm alone is what made a failed
             // query leak the channel map entry its responses are routed through
             if matches!(outcome, Err(_) | Ok((true, _))) {
-                self.release().await?;
+                self.release(outcome.is_ok()).await?;
             }
             // return our accessable response, or the failure that ended this stream
             let (_, resp) = outcome?;
@@ -3346,6 +3404,8 @@ pub struct ShoalUnorderedResultStream<S: QuerySupport> {
     /// never sent anything. This is the same span the query's `Waiter` parked, so a response and
     /// the delivery of it are siblings under the send that asked for them.
     span: Span,
+    /// Whether this stream is still reading, which its bundles' slots check before delivering
+    open: Arc<AtomicBool>,
 }
 
 /// A stream dropped before its end gives its slot in the channel map back
@@ -3358,6 +3418,8 @@ pub struct ShoalUnorderedResultStream<S: QuerySupport> {
 impl<S: QuerySupport> Drop for ShoalUnorderedResultStream<S> {
     fn drop(&mut self) {
         // a stream that reached its end or failed was released already and has nothing to give
+        // no bundle slot delivers to a stream that is gone
+        self.open.store(false, Ordering::Release);
         if self.response_rx.is_some() {
             self.channel_map.pin().remove(&self.id);
         }
@@ -3396,6 +3458,13 @@ where
                     let response = ShoalResponse::<S>::new(archived, stamps, token, self.id)?;
                     // get the index for this message
                     let index = response.get_index();
+                    // an index answered already is a duplicate: kept, it would sit ahead of every
+                    // gap forever and the stream would never reach its end
+                    // ([Resolved #141](../../../docs/src/appendix/resolved/recycled-stream-channels.md))
+                    if index < self.next_index || self.pending.contains(&index) {
+                        event!(Level::WARN, msg = "dropped a second answer for one index", stream = %self.id, index);
+                        continue;
+                    }
                     // if this is our next index then increment next as far as we can
                     if self.next_index == index {
                         // increment our next index since we are returning the next item
@@ -3456,17 +3525,36 @@ where
     /// The entry in the channel map is what the proxy routes a response through, so a stream that
     /// ended without removing it leaves every later response for that id being delivered into a
     /// channel with no reader.
-    async fn release(&mut self) -> Result<(), Errors> {
+    ///
+    /// # Arguments
+    ///
+    /// * `clean` - Whether the stream reached its end, rather than failing on the way
+    async fn release(&mut self, clean: bool) -> Result<(), Errors> {
+        // no bundle slot delivers to this stream from here on
+        self.open.store(false, Ordering::Release);
         // remove this stream id from our channel map
         self.channel_map.pin().remove(&self.id);
-        // take the ends of our channel
+        // take the ends of our channel, and hand them to the next stream only after a clean end:
+        // a stream that failed may still have answers queued in it or on their way to it
+        // ([Resolved #141](../../../docs/src/appendix/resolved/recycled-stream-channels.md))
         if let (Some(tx), Some(rx)) = (self.response_tx.take(), self.response_rx.take()) {
-            self.channel_queue_tx
-                .send((tx, rx))
-                .await
-                .map_err(send_failed)?;
+            if clean {
+                self.channel_queue_tx
+                    .send((tx, rx))
+                    .await
+                    .map_err(send_failed)?;
+            }
         }
         Ok(())
+    }
+
+    /// Where this stream stands: the next index it waits for, the end it was told of, and the
+    /// indexes it has received past a gap
+    ///
+    /// For a caller that wants to say why a stream has not ended.
+    #[must_use]
+    pub fn progress(&self) -> (usize, Option<usize>, Vec<usize>) {
+        (self.next_index, self.end, self.pending.iter().copied().take(8).collect())
     }
 
     /// Get the next available response to our query
@@ -3494,7 +3582,7 @@ where
             // release this stream whichever way that went, for the same reason the ordered
             // stream does - a stream that failed has ended and owes its slot back
             if matches!(outcome, Err(_) | Ok((true, _))) {
-                self.release().await?;
+                self.release(outcome.is_ok()).await?;
             }
             // return our accessable response, or the failure that ended this stream
             let (_, resp) = outcome?;
@@ -3531,6 +3619,8 @@ pub struct ShoalQueryStream<Q: QuerySupport> {
     options: SendOptions,
     /// Where read loops record that their connection has stopped, checked after each write
     dead_conns: Arc<HashMap<u64, ()>>,
+    /// Whether the result stream this sends for is still reading, shared with every bundle slot
+    open: Arc<AtomicBool>,
 }
 
 impl<Q: QuerySupport> ShoalQueryStream<Q> {
@@ -3609,6 +3699,7 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
             Waiter {
                 owed,
                 bundle: true,
+                open: Some(self.open.clone()),
                 tx: self.response_tx.clone(),
                 span: Span::current(),
             },
@@ -4411,6 +4502,66 @@ mod tests {
         assert!(
             channel_map.pin().get(&dropped_id).is_none(),
             "the dropped stream's slot was left in the channel map"
+        );
+    }
+
+    /// A late answer for a stream that has ended never reaches the channel it used (item 141)
+    ///
+    /// A bundle's slot outlives its stream until the bundle's answers are in, and a stream that
+    /// ended used to hand its channel pair to the next stream at once. A late answer for the
+    /// old stream's bundle was then delivered into the new stream's channel, where its index
+    /// collided with the new stream's own: on the lab, hundreds of answers a second arrived
+    /// for indexes nobody had asked about, and some streams never reached their end.
+    #[tokio::test]
+    async fn a_late_answer_for_a_closed_stream_is_dropped() {
+        // stand up a socket pair
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind a listener");
+        let addr = listener.local_addr().expect("listener had no address");
+        // a response frame for the closed stream's bundle
+        let bundle = Uuid::new_v4();
+        let payload = vec![9u8; 16];
+        let mut frame = protocol::response_preamble(&bundle, payload.len(), protocol::DEFAULT_MAX_FRAME_BYTES)
+            .expect("failed to build a response preamble")
+            .to_vec();
+        frame.extend_from_slice(&payload);
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("failed to accept");
+            sock.write_all(&frame).await.expect("failed to write");
+            sock.flush().await.expect("failed to flush");
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        });
+        let stream = TcpStream::connect(addr).await.expect("failed to connect");
+        let (reader, _writer) = stream.into_split();
+        let channel_map = Arc::new(HashMap::with_capacity(1));
+        // the bundle's slot, owed one answer, for a stream that has since ended; its channel
+        // is the one the next stream would be handed
+        let (tx, rx) = kanal::unbounded_async();
+        let mut waiter = Waiter::written(1, 1, tx);
+        waiter.bundle = true;
+        waiter.open = Some(Arc::new(AtomicBool::new(false)));
+        channel_map.pin().insert(bundle, waiter);
+        let dead_conns = Arc::new(HashMap::with_capacity(1));
+        let is_shutting_down = Arc::new(AtomicBool::new(false));
+        let proxy = TcpProxy::new(
+            reader,
+            1,
+            &channel_map,
+            &dead_conns,
+            &is_shutting_down,
+            &Arc::new(TopologyState::new()),
+        );
+        tokio::spawn(proxy.start());
+        server.await.expect("the writer task panicked");
+        // nothing reached the channel, and the slot is gone
+        assert!(
+            rx.try_recv().expect("the channel closed").is_none(),
+            "a late answer for a closed stream was delivered into its channel"
+        );
+        assert!(
+            channel_map.pin().get(&bundle).is_none(),
+            "a closed stream's bundle kept its slot"
         );
     }
 

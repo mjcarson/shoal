@@ -4215,6 +4215,10 @@ where
                 ServerMsg::GroupUp { group, raft } => self.handle_group_up(group, raft).await?,
                 // every group is down: the shutdown that asked for it can finish
                 ServerMsg::GroupsDown => break,
+                // the led groups have been handed off, so the groups can stop now
+                ServerMsg::HandedOff => {
+                    self.stop_groups_now();
+                }
                 // the WAL sealed a segment, which may be resolved already
                 ServerMsg::WalSealed { generation } => {
                     event!(Level::DEBUG, msg = "the wal sealed a segment", generation);
