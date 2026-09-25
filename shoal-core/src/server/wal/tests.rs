@@ -1148,3 +1148,51 @@ fn a_commit_delay_groups_appends_into_fewer_syncs() {
     });
 }
 
+
+/// A segment may be deleted only behind a purge whose marker is durable (item 151)
+///
+/// A purge moved the group's purge point the moment its marker was staged, and the shard deleted
+/// sealed segments behind that point. On the lab a node was killed by the kernel after a segment
+/// was deleted behind a purge whose marker had not been synced: the restart read the old purge
+/// point, the entries after it were gone, and the group could not be built, on every start after
+/// ([Resolved #151](../../../../docs/src/appendix/resolved/purge-ahead-of-its-marker.md)).
+#[test]
+fn a_purge_is_durable_only_once_its_marker_is() {
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let path = dir.path().join("wal");
+        let wal = ShardWal::open(&path, 1 << 30, 1 << 20)
+            .await
+            .expect("failed to open");
+        let group = GroupId(7);
+        let mut store = wal.store(group);
+        // twenty entries, durable
+        let (tx, _rx) = DataConfig::oneshot::<Result<(), io::Error>>();
+        let entries: Vec<Entry> = (1..=20).map(|index| normal(index, 100)).collect();
+        store
+            .append(entries, openraft::storage::IOFlushed::<DataConfig>::signal(tx))
+            .await
+            .expect("failed to append");
+        wal.flush().await.expect("failed to flush");
+        // a purge staged: the log's own view moves at once, and nothing may be deleted behind it
+        store.purge(log_id(1, 10)).await.expect("failed to purge");
+        assert_eq!(store.purged_index(), Some(10));
+        assert_eq!(
+            store.durable_purged_index(),
+            None,
+            "a purge whose marker is only staged counted as durable"
+        );
+        // once the batch holding the marker is synced, it is durable
+        wal.flush().await.expect("failed to flush");
+        assert_eq!(store.durable_purged_index(), Some(10));
+        // and a marker read back from disk is durable by being there
+        wal.close().await.expect("failed to close");
+        let reopened = ShardWal::open(&path, 1 << 30, 1 << 20)
+            .await
+            .expect("failed to reopen");
+        assert_eq!(reopened.store(group).durable_purged_index(), Some(10));
+        reopened.close().await.expect("failed to close");
+    });
+}
+

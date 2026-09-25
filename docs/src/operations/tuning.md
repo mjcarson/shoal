@@ -128,8 +128,9 @@ mostly stopped being your job at all
   is holding 48 GiB. This is the single most common way to size a deployment wrong by an order of
   magnitude. The deployment tool made exactly this mistake until
   [#149](../appendix/resolved/node-memory-budget.md): it now writes the inventory's memory as
-  `resources.node_memory`, which the server shares among the node's shards. Set `node_memory`
-  yourself to size a node rather than a shard.
+  `resources.node_memory`, which the server judges against the process's resident memory. Set
+  `node_memory` yourself to size a node rather than a shard, and leave headroom under the host's
+  memory for the allocator.
 - The memory sweep is a **cliff**, not a curve: flat while the working set fits, stepping once a read
   has to find its partition on disk. The number to take off it is *where the step is*, and if no rung
   steps, the capture's working set fit inside the smallest limit measured and the cliff is somewhere

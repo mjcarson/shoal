@@ -738,7 +738,7 @@ where
         let new_size = partition.size;
         // wrap our new partition that we have loaded
         let wrapped = MaybeLoaded::Loaded {
-            partition,
+            partition: Box::new(partition),
             generation: self.generation,
         };
         // insert our row and get the change in memory usage
@@ -1124,7 +1124,7 @@ where
                     // since a pre-delete copy may still be sitting in an archive and
                     // any later read would load it back
                     *partition = MaybeLoaded::Loaded {
-                        partition: UnsortedPartition::tombstone(key),
+                        partition: Box::new(UnsortedPartition::tombstone(key)),
                         generation: self.generation,
                     };
                     // get the difference in size between our tombstone and our row
@@ -1239,7 +1239,7 @@ where
                         Some(mut loaded) => {
                             loaded.update(&update);
                             *partition = MaybeLoaded::Loaded {
-                                partition: loaded,
+                                partition: Box::new(loaded),
                                 generation: self.generation,
                             };
                         }
@@ -1402,7 +1402,7 @@ where
                 let partition = UnsortedPartition::new(key, row);
                 let new_size = partition.size;
                 let wrapped = MaybeLoaded::Loaded {
-                    partition,
+                    partition: Box::new(partition),
                     generation,
                 };
                 let diff = match self.partitions.insert(key, wrapped) {
@@ -1425,7 +1425,7 @@ where
                         } else {
                             let before = partition.size();
                             *partition = MaybeLoaded::Loaded {
-                                partition: UnsortedPartition::tombstone(key),
+                                partition: Box::new(UnsortedPartition::tombstone(key)),
                                 generation,
                             };
                             adjust_memory_usage(
@@ -1473,7 +1473,7 @@ where
                             };
                             if let Some(loaded) = loaded {
                                 *partition = MaybeLoaded::Loaded {
-                                    partition: loaded,
+                                    partition: Box::new(loaded),
                                     generation,
                                 };
                             } else if let MaybeLoaded::Loaded {
@@ -1696,7 +1696,7 @@ where
             let bytes = match entry {
                 MaybeLoaded::Loaded { partition, .. } => match &partition.row {
                     MaybeRow::Row(_) => {
-                        rkyv::to_bytes::<rkyv::rancor::Error>(partition).map(|bytes| bytes.to_vec())
+                        rkyv::to_bytes::<rkyv::rancor::Error>(&**partition).map(|bytes| bytes.to_vec())
                     }
                     MaybeRow::Tombstone => continue,
                 },
@@ -1806,7 +1806,7 @@ where
             self.partitions.insert(
                 key,
                 MaybeLoaded::Loaded {
-                    partition,
+                    partition: Box::new(partition),
                     generation,
                 },
             );
@@ -2045,7 +2045,7 @@ where
                 match partitions.insert(
                     key,
                     MaybeLoaded::Loaded {
-                        partition,
+                        partition: Box::new(partition),
                         generation,
                     },
                 ) {
@@ -2072,7 +2072,7 @@ where
                 let size = tombstone.size;
                 // wrap our tombstone as a loaded partition
                 let wrapped = MaybeLoaded::Loaded {
-                    partition: tombstone,
+                    partition: Box::new(tombstone),
                     generation,
                 };
                 // replace this partition with its tombstone
@@ -2109,7 +2109,7 @@ where
                         if let Some(loaded) = partition.update(&update)? {
                             // replace our old partition with its updated data
                             *partition = MaybeLoaded::Loaded {
-                                partition: loaded,
+                                partition: Box::new(loaded),
                                 generation,
                             };
                         }

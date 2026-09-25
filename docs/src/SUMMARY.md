@@ -264,6 +264,8 @@
   - [147. A paused control leader, once resumed, called live members down, and the leader stayed down](appendix/resolved/paused-detector-verdicts.md)
   - [148. A node could not start after a crash: its archive map's intent log held stale buffer memory past its end](appendix/resolved/stale-intent-log-tail.md)
   - [149. A deployed node's memory budget was every shard's, so a node could hold its core count times it](appendix/resolved/node-memory-budget.md)
+  - [150. A table's partition map held every loaded row inline in its buckets, at its peak capacity](appendix/resolved/inline-partition-buckets.md)
+  - [151. A WAL segment was deleted behind a purge whose marker a crash then lost](appendix/resolved/purge-ahead-of-its-marker.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

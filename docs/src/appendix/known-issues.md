@@ -96,7 +96,7 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ **1,647 tests**, seven ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ **1,651 tests**, seven ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
@@ -112,7 +112,7 @@ fixture tests: two passed alone, and six could not bind ~~port 12000~~ ports 120
 because a deployed lab node held them on the same host ([Test Coverage](test-coverage.md)), since
 [resolved](resolved/fixture-default-peer-ports.md) as item 134. The
 [distributed cluster testing](../cluster-testing/overview.md) chapter's fixes (items 60, 130, 131,
-133 to 149, O61, O62, O63, O65, O66, O67) and its driver added 28 and took it to 1,647 ([Test Coverage](test-coverage.md)).
+133 to 151, O61, O62, O63, O65 to O68) and its driver added 32 and took it to 1,651 ([Test Coverage](test-coverage.md)).
 [Resolved #27](resolved/shql-quote-escape.md), [#32](resolved/client-gone-broadcast.md),
 [#36](resolved/staged-tail-deadline.md) and [#125](resolved/retry-unknown-outcome.md) added 11
 and took it to 1,587. There are two new binaries, `retry_outcome.rs` (3) and `staged_flush.rs`
@@ -440,6 +440,18 @@ to ten seconds for the senders' count.
 The `shoal-core` change for [#148](resolved/stale-intent-log-tail.md) was followed by one failure
 in the first four runs of `shoal/tests/persistent_unsorted_table.rs` at six threads, whose name the
 run did not keep, and none in the next nine.
+
+### 152. `a_compaction_that_meets_an_unreadable_archive_is_tried_again` fails intermittently
+
+`shoal/tests/persistent_unsorted_table.rs`: the rotated intent logs are not all compacted within
+the test's 30 s once the archives are readable again (*"the rotated logs were never compacted once
+the archives were readable again: N left"*). Found during the
+[distributed cluster testing](../cluster-testing/overview.md) chapter: one failure in the first
+four runs of the suite at six threads before [#148](resolved/stale-intent-log-tail.md)'s change,
+one in the first of six after [#150](resolved/inline-partition-buckets.md)'s, and none in the
+ten other runs or in three runs of the test alone. The test takes the permissions off a table's
+archives, so it is the family item 113's `statfs` panic came from. That panic is fixed, so this
+is another timing. Filed with its rate so the next change to the retry path can say more.
 
 ---
 

@@ -33,7 +33,7 @@ resources:
   cores: 16                          # optional; default is all usable cores
   exclude_cores: [28, 29, 30, 31]    # optional
   memory: "4Gi"                      # REQUIRED if `resources` is present; every shard's own budget
-  node_memory: "8Gi"                 # optional; the node's shards together, divided evenly among them (item 149)
+  node_memory: "8Gi"                 # optional; the most the process may hold, judged by its resident memory (item 149)
 
 networking:
   interface: "127.0.0.1"             # default
@@ -121,9 +121,10 @@ practice there is no separate coordinator process — see
 
 `memory` is the shard-wide budget that drives eviction: **each shard's own**, so a node holds up to
 its shard count times it. It accepts human sizes (`"4Gi"`, `"512MiB"`) via a custom deserializer.
-`node_memory`, optional, is a budget for the node's shards together. Where it is set, a shard's
-budget is the smaller of `memory` and `node_memory` divided by the shards the node runs. A deployed
-node's file sets it from the inventory's `memory`
+`node_memory`, optional, is a budget for the whole node, judged against the process's resident
+memory as the kernel reports it: every shard reads it at most four times a second, and a process
+past it has every shard evict. A shard's rows are also held to the smaller of `memory` and its
+share of `node_memory`. A deployed node's file sets it from the inventory's `memory`
 ([Resolved #149](../appendix/resolved/node-memory-budget.md)).
 
 > **`memory` has no serde default.** It is the one field in `Resources` without a `#[serde(default)]`

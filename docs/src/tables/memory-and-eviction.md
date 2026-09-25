@@ -7,7 +7,9 @@ own eviction loop.
 ## Accounting
 
 One counter per shard, shared with all of its tables, and one budget per shard: `resources.memory`,
-or the shard's share of `resources.node_memory` where that is set
+or the shard's share of `resources.node_memory` where that is set. The counter covers rows alone.
+On the lab it was about a hundred megabytes of a nine gigabyte node, so a node's own budget,
+`node_memory`, is judged against the process's resident memory instead
 ([Resolved #149](../appendix/resolved/node-memory-budget.md)).
 
 ```rust

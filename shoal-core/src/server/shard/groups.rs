@@ -2026,9 +2026,12 @@ where
                 let purged = segment.last.iter().all(|(group, last)| {
                     replication.groups.get(group).is_none_or(|slot| {
                         slot.state.borrow().checkpoint_index() >= last.index
+                            // durably purged: a purge staged but not synced is one a crash
+                            // loses, and the entries behind it would be gone with the segment
+                            // ([Resolved #151](../../../../docs/src/appendix/resolved/purge-ahead-of-its-marker.md))
                             && slot
                                 .store
-                                .purged_index()
+                                .durable_purged_index()
                                 .is_some_and(|purged| purged >= last.index)
                     })
                 });

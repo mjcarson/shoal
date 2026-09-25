@@ -205,6 +205,7 @@ so they get worse by existing longer rather than under load.
 | ~~**B23**~~ | ~~[**O65**](#o65-heartbeats-to-followers-that-just-acknowledged-replication) — heartbeats to followers that just acknowledged replication~~ **done**, no measurable effect, kept | Indicated — a heartbeat per follower per group every tenth of the base, under load and in a partition | S | the lab's load at 1 s and 5 s | none expected | yes, on the lab |
 | ~~**B24**~~ | ~~[**O66**](#o66-a-partitioned-peer-floods-the-log) — a partitioned peer floods the log~~ **done**, measured and kept | Measured — 50–60k lines suppressed by journald per node in a 20 s partition | S | the lab's partition test | Per-attempt warnings need `RUST_LOG` | it was |
 | ~~**B25**~~ | ~~[**O67**](#o67-ten-thousand-retained-entries-is-seconds-of-a-busy-group) — ten thousand retained entries is seconds of a busy group~~ **done**, measured and kept | Measured — a 20 s partition cost 13 snapshot installs and 70 s of refused reads on the returning node | S | the lab's partition test | About 0.5 GB more WAL a node under load | it was |
+| ~~**B26**~~ | ~~[**O68**](#o68-every-archive-compaction-copies-the-shards-whole-partition-index) — every archive compaction copies the shard's whole partition index~~ **done**, contained | Measured in shape — the one Shoal frame in a page fault profile, 9.5% | S | a page fault profile under the insert bench | CPU for memory | no |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -3131,3 +3132,30 @@ fewer than the rows. **Kept.**
 A cluster benchmark arm that runs at the default retention (`macro/cluster/catchup/log`) now runs
 a different server. Its captures from before this change do not describe it, and a new capture
 belongs to the benchmark host, not the lab.
+
+### O68. Every archive compaction copies the shard's whole partition index
+
+| | |
+| --- | --- |
+| **Rank** | ~~**B26**~~ **done** — applied, contained |
+| **Impact** | Measured in shape — `ArchiveMap::sort_by_load` was the one Shoal function in a page fault profile of a lab node under load, 9.5% of its faults. It copies every entry of the table's index, five million a shard on the lab, into vectors per archive, on every archive compaction, which runs after every sealed 10 MiB WAL segment |
+| **Difficulty** | S |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | an archive's entries are gathered with a pass over the index when it is compacted, so a compaction of several archives passes over it several times: CPU for memory |
+| **Benchmark** | the lab's insert bench with a page fault profile; `macro/grid/unsorted/*` for the compaction path's CPU |
+
+Found by the [distributed cluster testing](../cluster-testing/performance.md) chapter while chasing
+[#149](resolved/node-memory-budget.md). `sort_by_load` ranks a table's archives by the bytes they
+still hold, so the compactor can rewrite the least used. It also built, for every archive, a vector
+of every entry in it: a transient copy of the whole index, 40 bytes an entry, about 200 MB a shard
+at the lab's size, on every compaction. The compactor uses the entries of the archives it
+compacts, which is those under half used, not all of them.
+
+**Applied:** `sort_by_load` counts bytes per archive and copies nothing, and the compactor asks
+`entries_of(archive)` for each archive as it compacts it. The index is not changed until the pass
+ends, so an archive's entries gathered then are the ones the old copy held.
+`archives_are_ordered_by_load_and_gathered_one_at_a_time` pins both halves. The memory is no
+longer allocated. The node-level effect is folded into [#149](resolved/node-memory-budget.md)'s
+runs, which changed several things at once, so it has no figure of its own. **Kept.**
+

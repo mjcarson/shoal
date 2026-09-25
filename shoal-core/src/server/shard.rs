@@ -840,6 +840,36 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// look like ordinary work rather than a stall.
 const BUSY_PAUSE: Duration = Duration::from_micros(100);
 
+/// How often a shard reads the process's resident memory against the node's budget
+///
+/// Each shard reads it on its own loop, so a node of six shards reads it 24 times a second; a
+/// process past the budget has every shard evict its share once per read
+/// ([Resolved #149](../../../docs/src/appendix/resolved/node-memory-budget.md)).
+const MEMORY_CHECK: Duration = Duration::from_millis(250);
+
+/// The process's resident memory in bytes, as the kernel counts it, or nothing if unreadable
+///
+/// `/proc/self/statm`'s second field, resident pages. A read of procfs, which touches no device.
+fn process_resident_bytes() -> Option<usize> {
+    // the pages, read fresh, and the page size they are counted in
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    // SAFETY: sysconf reads a constant of the running system and has no preconditions
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    resident_from_statm(&statm, usize::try_from(page).ok()?)
+}
+
+/// The resident bytes a `/proc/<pid>/statm` line says, at a page size
+///
+/// # Arguments
+///
+/// * `statm` - The line: size, resident, shared, text, lib, data, dirty, in pages
+/// * `page` - The page size in bytes
+fn resident_from_statm(statm: &str, page: usize) -> Option<usize> {
+    // the second field is the resident set
+    let pages: usize = statm.split_whitespace().nth(1)?.parse().ok()?;
+    pages.checked_mul(page)
+}
+
 /// The largest handshake frame this server will read
 ///
 /// A handshake body is sixteen bytes. Anything claiming more than this is not a peer whose version
@@ -1471,6 +1501,10 @@ pub(super) struct Shard<D: ShoalDatabase> {
     /// How much data this shard holds before it evicts: its share of the node's budget
     /// ([Resolved #149](../../../docs/src/appendix/resolved/node-memory-budget.md))
     memory_budget: usize,
+    /// The node's memory budget, which the process's resident memory is judged against
+    node_memory: Option<usize>,
+    /// When this shard last read the process's resident memory
+    memory_checked: Option<std::time::Instant>,
     /// The most recently used tables/partitions on this shard
     lru: Arc<RefCell<LruCache<(D::TableNames, u64), usize, BuildHasherDefault<GxHasher>>>>,
     /// The address our client listener bound, once it has
@@ -1678,6 +1712,8 @@ where
             tasks: Vec::with_capacity(100),
             memory_usage,
             memory_budget: conf.resources.shard_budget(shard_count),
+            node_memory: conf.resources.node_memory,
+            memory_checked: None,
             lru,
             bound: None,
             peer_setup,
@@ -3938,6 +3974,35 @@ where
         Ok(())
     }
 
+    /// Whether this shard should evict: its rows past its own budget, or the process past the node's
+    ///
+    /// The shard's counter is an estimate of its rows alone, and on the lab it was a hundred
+    /// megabytes of a node holding nine gigabytes: every index, cache and allocator page outside
+    /// it grew with the data and nothing stopped them. Where a node budget is set, the process's
+    /// resident memory is read, at most every [`MEMORY_CHECK`], and a process past it has every
+    /// shard evict its share once per read
+    /// ([Resolved #149](../../../docs/src/appendix/resolved/node-memory-budget.md)).
+    fn over_memory(&mut self) -> bool {
+        // the shard's own rows past its own budget
+        if *self.memory_usage.borrow() > self.memory_budget {
+            return true;
+        }
+        // the process past the node's budget, read no more often than the check interval, so a
+        // process that stays over evicts once an interval rather than on every message
+        let Some(node_memory) = self.node_memory else {
+            return false;
+        };
+        let now = std::time::Instant::now();
+        if self
+            .memory_checked
+            .is_some_and(|at| now.duration_since(at) < MEMORY_CHECK)
+        {
+            return false;
+        }
+        self.memory_checked = Some(now);
+        process_resident_bytes().is_some_and(|resident| resident > node_memory)
+    }
+
     /// Find partitions to evict
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn evict_data(&mut self) -> Result<(), ServerError> {
@@ -4397,7 +4462,9 @@ where
                 self.handle_flushed().await?;
             }
             // check if we need to evict any data
-            if *self.memory_usage.borrow() > self.memory_budget {
+            // the rows it caches past its own budget, or the process past the node's
+            // ([Resolved #149](../../../docs/src/appendix/resolved/node-memory-budget.md))
+            if self.over_memory() {
                 // try to evict our least recently used data
                 self.evict_data().await?;
             }
@@ -4542,6 +4609,25 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The process's resident memory is read from `statm`, which is what a node's budget is judged by (item 149)
+    ///
+    /// A shard's own counter saw a hundred megabytes of a node holding nine gigabytes, so a
+    /// node's budget is judged against what the kernel says the process holds
+    /// ([Resolved #149](../../../docs/src/appendix/resolved/node-memory-budget.md)).
+    #[test]
+    fn a_nodes_resident_memory_is_read_from_statm() {
+        // the second field, in pages
+        assert_eq!(
+            resident_from_statm("6011045 1309075 5000 1024 0 900000 0\n", 4096),
+            Some(1_309_075 * 4096)
+        );
+        // a line that is not one is nothing, never zero
+        assert_eq!(resident_from_statm("", 4096), None);
+        assert_eq!(resident_from_statm("12 x", 4096), None);
+        // and this process has some
+        assert!(process_resident_bytes().is_some_and(|bytes| bytes > 0));
+    }
 
     /// A reply of a kind, with nothing else worth reading
     fn reply(kind: ReplyKind, id: Uuid) -> Reply {

@@ -860,7 +860,7 @@ where
                 let inserted = partition.insert(row);
                 // replace our accessible partition with the loaded one
                 occupied.insert(MaybeLoaded::Loaded {
-                    partition,
+                    partition: Box::new(partition),
                     generation: self.generation,
                 });
                 inserted
@@ -887,7 +887,7 @@ where
                 let mut partition = SortedPartition::new(key);
                 let inserted = partition.insert(row);
                 vacant.insert(MaybeLoaded::Loaded {
-                    partition,
+                    partition: Box::new(partition),
                     generation: self.generation,
                 });
                 inserted
@@ -1419,7 +1419,7 @@ where
                             self.lru.borrow_mut().pop(&(self.table_name, key));
                             // convert to Loaded state since we've deserialized it
                             *maybe_loaded = MaybeLoaded::Loaded {
-                                partition,
+                                partition: Box::new(partition),
                                 generation: self.generation,
                             };
                             // we can't acknowledge this delete until its intent is flushed
@@ -1427,7 +1427,7 @@ where
                         } else {
                             // row wasn't found but we deserialized this partition so keep it
                             *maybe_loaded = MaybeLoaded::Loaded {
-                                partition,
+                                partition: Box::new(partition),
                                 generation: self.generation,
                             };
                             // build the failed delete response
@@ -1622,7 +1622,7 @@ where
                             *self.memory_usage.borrow_mut() = new_size;
                             // convert to Loaded state since we've deserialized it
                             *maybe_loaded = MaybeLoaded::Loaded {
-                                partition,
+                                partition: Box::new(partition),
                                 generation: self.generation,
                             };
                             None
@@ -1630,7 +1630,7 @@ where
                             // this row wasn't found but we deserialized this row so keep it
                             // to avoid future deserialization costs
                             *maybe_loaded = MaybeLoaded::Loaded {
-                                partition,
+                                partition: Box::new(partition),
                                 generation: self.generation,
                             };
                             // build the failed update response
@@ -1752,7 +1752,7 @@ where
                     .partitions
                     .entry(key)
                     .or_insert_with(|| MaybeLoaded::Loaded {
-                        partition: SortedPartition::new(key),
+                        partition: Box::new(SortedPartition::new(key)),
                         generation,
                     });
                 let (size_diff, _) = match entry {
@@ -1776,7 +1776,7 @@ where
                         partition.check_disk = false;
                         let outcome = partition.insert(row);
                         *entry = MaybeLoaded::Loaded {
-                            partition,
+                            partition: Box::new(partition),
                             generation,
                         };
                         outcome
@@ -1834,7 +1834,7 @@ where
                         let removed = partition.remove(&sort);
                         let before = entry.size();
                         *entry = MaybeLoaded::Loaded {
-                            partition,
+                            partition: Box::new(partition),
                             generation,
                         };
                         adjust_memory_usage(
@@ -1897,7 +1897,7 @@ where
                         let updated = partition.update(&update).is_some();
                         let before = entry.size();
                         *entry = MaybeLoaded::Loaded {
-                            partition,
+                            partition: Box::new(partition),
                             generation,
                         };
                         adjust_memory_usage(
@@ -2135,7 +2135,7 @@ where
                     {
                         continue;
                     }
-                    rkyv::to_bytes::<rkyv::rancor::Error>(partition).map(|bytes| bytes.to_vec())
+                    rkyv::to_bytes::<rkyv::rancor::Error>(&**partition).map(|bytes| bytes.to_vec())
                 }
                 MaybeLoaded::Accessible(read) => Ok(read.as_bytes().to_vec()),
             };
@@ -2244,7 +2244,7 @@ where
             self.partitions.insert(
                 key,
                 MaybeLoaded::Loaded {
-                    partition,
+                    partition: Box::new(partition),
                     generation,
                 },
             );
@@ -2491,7 +2491,7 @@ where
                     partitions
                         .entry(partition_key)
                         .or_insert_with(|| MaybeLoaded::Loaded {
-                            partition: SortedPartition::new(partition_key),
+                            partition: Box::new(SortedPartition::new(partition_key)),
                             generation,
                         });
                 match entry {
@@ -2517,7 +2517,7 @@ where
                         let (diff, _) = partition.insert(row);
                         // update this partition entry
                         *entry = MaybeLoaded::Loaded {
-                            partition,
+                            partition: Box::new(partition),
                             generation,
                         };
                         // return the change in memory usage
@@ -2539,7 +2539,7 @@ where
                     partitions
                         .entry(partition_key)
                         .or_insert_with(|| MaybeLoaded::Loaded {
-                            partition: SortedPartition::new(partition_key),
+                            partition: Box::new(SortedPartition::new(partition_key)),
                             generation,
                         });
                 match entry {
@@ -2563,7 +2563,7 @@ where
                         let diff = partition.tombstone(&sort_key);
                         // update this partition entry
                         *entry = MaybeLoaded::Loaded {
-                            partition,
+                            partition: Box::new(partition),
                             generation,
                         };
                         // return the change in memory usage
@@ -2579,7 +2579,7 @@ where
                     partitions
                         .entry(update.partition_key)
                         .or_insert_with(|| MaybeLoaded::Loaded {
-                            partition: SortedPartition::new(update.partition_key),
+                            partition: Box::new(SortedPartition::new(update.partition_key)),
                             generation,
                         });
                 match entry {
@@ -2603,7 +2603,7 @@ where
                         let diff = replay_update(&mut partition, &update, stats);
                         // update this partition entry
                         *entry = MaybeLoaded::Loaded {
-                            partition,
+                            partition: Box::new(partition),
                             generation,
                         };
                         diff

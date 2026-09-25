@@ -2281,3 +2281,26 @@ deployment says which nodes have which storage. A deployment cannot set it at al
 experiment edited europa's `shoal.yml` by hand. A group-level key the renderer writes would let a
 mixed cluster set it on its fast nodes alone.
 
+## A node's archive map is bounded by nothing
+
+Filed by [Resolved #150](resolved/inline-partition-buckets.md). The archive map holds an entry per
+partition the shard has ever archived, about 49 bytes each, and nothing evicts it: 2.5 GB of a lab
+node at 31 million partitions. [#149](resolved/node-memory-budget.md) bounds the process, so a map
+that outgrows the budget now empties the row cache instead of killing the node. Keeping the
+index on disk, or paging it, would make the budget the rows' again.
+
+## Re-render a deployment's node files
+
+Filed by [Resolved #149](resolved/node-memory-budget.md). `cluster upgrade` swaps a node's program
+and never rewrites its `shoal.yml`, so a change to what the renderer writes reaches no deployed
+node. The lab's nodes had `node_memory` added by hand. Re-rendering needs the admin's credential,
+which the tool deliberately does not keep, so a `cluster reconfigure` would ask for it.
+
+## Rebuild a node from its peers
+
+Filed by [Resolved #151](resolved/purge-ahead-of-its-marker.md). A node whose disk cannot start
+it, like titan with a hole in its WAL, has to be wiped and fed by its peers. The only path today
+is `cluster destroy` of the whole deployment or a hand-made removal and re-add. A `cluster rebuild
+<node>`, meaning stop, wipe and rejoin under a new identity with a `Replace`, would make it an
+operation.
+
