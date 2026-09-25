@@ -74,6 +74,22 @@ use std::path::{Path, PathBuf};
 /// How long a proposer waits before asking its own group again while its lease starts
 const LEASE_POLL: Duration = Duration::from_millis(20);
 
+/// How often a shard looks for a group it leads that its placement primary should lead
+const BALANCE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long a shard has to have led a group before it hands it back to the placement primary
+///
+/// Long enough that a lead that just moved, by an election or a handoff, is not moved again
+/// before the member it left has come back and caught up.
+const BALANCE_SETTLE: Duration = Duration::from_secs(10);
+
+/// How many entries behind this shard's log any voter may be for a group's lead to be handed
+/// back, so a transfer never lands on, or restarts the stream to, a member still catching up
+const BALANCE_LAG: u64 = 16;
+
+/// How long after trying to hand a group back a shard waits before trying that group again
+const BALANCE_RETRY: Duration = Duration::from_secs(60);
+
 /// How many deadline ticks pass between two sweeps of the WAL segments
 const REPORT_EVERY_TICKS: u32 = 10;
 
@@ -302,6 +318,14 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) last_report: Option<ShardReplication>,
     /// Whether the groups are being stopped
     pub(super) stopping: bool,
+    /// When this shard began leading each group it leads, for the settle before it hands one
+    /// back to its placement primary ([O63](../../../../docs/src/appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary))
+    pub(super) led_since: HashMap<GroupId, Instant>,
+    /// When this shard last looked for a group to hand back
+    pub(super) last_balance: Instant,
+    /// When this shard last tried to hand each group back, so a transfer that did not take is
+    /// not tried again, with the leader change each try costs, until `BALANCE_RETRY` has passed
+    pub(super) handed_back: HashMap<GroupId, Instant>,
     /// Whether a segment sweep is wanted before the next message
     pub(super) sweep_due: bool,
     /// The shard's WAL directory, where quarantine markers live
@@ -433,6 +457,9 @@ where
             last_report: None,
             writes: HashMap::new(),
             stopping: false,
+            led_since: HashMap::new(),
+            last_balance: Instant::now(),
+            handed_back: HashMap::new(),
             sweep_due: false,
             wal_dir: dir.clone(),
             quarantines,
@@ -1410,6 +1437,17 @@ where
                 .answer_proposal(meta, table, tablet, None, outcome, 0)
                 .await;
         };
+        // a stopping shard has taken its groups' handles to hand them off and stop them, and
+        // none is coming back: the write is refused now, retriably, rather than parked on a
+        // handle that will never be built ([Resolved #139](../../../../docs/src/appendix/resolved/leadership-handoff-on-stop.md))
+        if replication.stopping {
+            let outcome = ProposalOutcome::NotLeader(format!(
+                "group {id} is stopping on this node; its lead is being handed to another member"
+            ));
+            return self
+                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .await;
+        }
         // a group whose handle is still being built takes the write once it is up
         if group.raft.is_none() {
             group.waiting.push((meta, table, key, payload));
@@ -2465,6 +2503,120 @@ where
         }
     }
 
+    /// Hand one group this shard leads back to its placement primary, if one is due
+    ///
+    /// The placement spreads primaries evenly over the members, and a group's lead starts there.
+    /// An election, a crash or a planned stop moves it, and nothing moved it back, so after a
+    /// few restarts one node could lead every group and propose every write
+    /// ([O63](../../../../docs/src/appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary)).
+    /// Every `BALANCE_INTERVAL` a shard hands at most one group back, and only one it has led
+    /// for `BALANCE_SETTLE` whose primary is an up voter and whose every voter is within
+    /// `BALANCE_LAG` of its log, so no member's catch-up is restarted by the move.
+    pub(super) fn balance_leadership(&mut self) {
+        let node = self.node_id();
+        let map = self.map.get();
+        let Some(replication) = self.replication.as_mut() else {
+            return;
+        };
+        // nothing moves while the groups stop, or more often than the interval
+        if replication.stopping || replication.last_balance.elapsed() < BALANCE_INTERVAL {
+            return;
+        }
+        replication.last_balance = Instant::now();
+        let now = Instant::now();
+        // a group a repair, a move, a backup or a restore is working on keeps its lead where
+        // that operation put it: a repair hands the lead to a verified copy on purpose
+        let mut busy: HashSet<GroupId> = replication
+            .driving
+            .iter()
+            .chain(&replication.driving_moves)
+            .chain(&replication.driving_backups)
+            .chain(&replication.driving_restores)
+            .map(|(_, group)| *group)
+            .collect();
+        busy.extend(
+            map.repairs
+                .iter()
+                .filter(|record| !record.is_done())
+                .flat_map(|record| record.groups.keys().copied()),
+        );
+        busy.extend(
+            map.moves
+                .iter()
+                .filter(|record| record.outcome.is_none())
+                .flat_map(|record| record.groups.keys().copied()),
+        );
+        let mut target = None;
+        let mut leading = HashSet::new();
+        for (id, group) in &replication.groups {
+            let Some(raft) = &group.raft else { continue };
+            let metrics = raft.metrics().borrow_watched().clone();
+            // only a group this shard leads
+            if metrics.current_leader != Some(metrics.id) {
+                continue;
+            }
+            leading.insert(*id);
+            let since = *replication.led_since.entry(*id).or_insert(now);
+            // one handback a round, and only for a lead that has settled, of a group no
+            // operation is working on and none of whose copies here is quarantined
+            if target.is_some()
+                || now.duration_since(since) < BALANCE_SETTLE
+                || busy.contains(id)
+                || group.state.borrow().quarantined.is_some()
+                || replication
+                    .handed_back
+                    .get(id)
+                    .is_some_and(|tried| now.duration_since(*tried) < BALANCE_RETRY)
+            {
+                continue;
+            }
+            // the placement primary, when it is not this member
+            let Some(primary) = group.spec.voters.first().copied() else {
+                continue;
+            };
+            if primary == metrics.id || !map.is_up(primary.node) || primary.node == node {
+                continue;
+            }
+            // and every voter close enough to this log that nothing is being fed: a new
+            // leader would start a member's snapshot or catch-up stream over again, so a group
+            // with a member still catching up keeps its lead where it is
+            let last = metrics.last_log_index.unwrap_or(0);
+            let Some(progress) = metrics.replication.as_ref() else {
+                continue;
+            };
+            // a voter the leader has no progress for is behind, not at index zero: a group
+            // with a short log would otherwise read a member mid-install as caught up, and the
+            // transfer to it would fail, elect someone else, and restart its install
+            let behind = group.spec.voters.iter().filter(|voter| **voter != metrics.id).any(|voter| {
+                match progress.get(voter).cloned().flatten() {
+                    Some(matched) => matched.index + BALANCE_LAG < last,
+                    None => true,
+                }
+            });
+            if behind {
+                continue;
+            }
+            target = Some((*id, raft.clone(), primary));
+        }
+        // a lead this shard no longer holds is forgotten, so it settles afresh next time
+        replication.led_since.retain(|id, _| leading.contains(id));
+        let Some((group, raft, primary)) = target else {
+            return;
+        };
+        replication.led_since.remove(&group);
+        replication.handed_back.insert(group, now);
+        replication
+            .handed_back
+            .retain(|_, tried| now.duration_since(*tried) < BALANCE_RETRY);
+        event!(Level::INFO, msg = "handing a group back to its placement primary", group = %group, to = %primary);
+        glommio::spawn_local(async move {
+            if let Err(error) = raft.trigger().transfer_leader(primary).await {
+                event!(Level::WARN, msg = "a lead could not be handed back", group = %group, ?error);
+            }
+        })
+        .detach();
+    }
+
     /// Post a replication report to the control thread every so many deadline ticks
     pub(super) fn maybe_report_replication(&mut self) {
         let Some(replication) = self.replication.as_mut() else {
@@ -2913,16 +3065,49 @@ where
         }
     }
 
-    /// Stop every group, on a task that posts back once they are down
+    /// Begin stopping the groups: refuse new writes, hand off what this shard leads, then stop
     ///
-    /// Parked batches are dropped first, so a state machine waiting on one returns and its
-    /// group can stop.
+    /// Returns whether there is anything to wait for; the shard loop keeps running until
+    /// `GroupsDown`. The groups keep their handles while they hand off, so the new leaders'
+    /// messages still reach them and each can see it no longer leads; they are taken and shut
+    /// down once `HandedOff` arrives ([Resolved #139](../../../../docs/src/appendix/resolved/leadership-handoff-on-stop.md)).
     pub(super) fn stop_groups(&mut self) -> bool {
         let Some(replication) = self.replication.as_mut() else {
             return false;
         };
+        // no write is proposed through this shard from here on
         replication.stopping = true;
         replication.parked.clear();
+        // the handles stay where they are; the handoff works on clones of them
+        let rafts: Vec<Raft<DataConfig, GroupMachine<D>>> = replication
+            .groups
+            .values()
+            .filter_map(|slot| slot.raft.clone())
+            .collect();
+        let tx = self.shard_local_tx.clone();
+        glommio::spawn_local(async move {
+            // a planned stop hands every group this shard leads to another member first, so
+            // its writes wait for one transfer rather than for the lease and an election
+            let (led, handed) = hand_off_leadership(&rafts).await;
+            if led > 0 {
+                event!(
+                    Level::INFO,
+                    msg = "handed off the groups this shard led before stopping",
+                    led,
+                    handed
+                );
+            }
+            let _ = tx.send(ServerMsg::HandedOff).await;
+        })
+        .detach();
+        true
+    }
+
+    /// Stop every group once their leads are handed off, on a task that posts `GroupsDown`
+    pub(super) fn stop_groups_now(&mut self) {
+        let Some(replication) = self.replication.as_mut() else {
+            return;
+        };
         let rafts: Vec<Raft<DataConfig, GroupMachine<D>>> = replication
             .groups
             .values_mut()
@@ -2936,7 +3121,6 @@ where
             let _ = tx.send(ServerMsg::GroupsDown).await;
         })
         .detach();
-        true
     }
 
     /// Close the WAL once the groups are down
@@ -2947,6 +3131,67 @@ where
             }
         }
     }
+}
+
+/// How long a stopping shard waits for the groups it leads to take another leader
+///
+/// All of them at once, so this is the whole wait however many groups the shard led. Past it
+/// the shard stops anyway, and a group that did not move waits for its lease and an election
+/// as it would have without the handoff.
+const HANDOFF_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Hand every group a stopping shard leads to its most caught-up voter, and wait until it moved
+///
+/// Returns how many groups the shard led, and how many of them took another leader within
+/// [`HANDOFF_TIMEOUT`].
+///
+/// # Arguments
+///
+/// * `rafts` - The shard's groups
+async fn hand_off_leadership<D: ShoalDatabase>(
+    rafts: &[Raft<DataConfig, GroupMachine<D>>],
+) -> (usize, usize) {
+    // one transfer per group this shard leads, to the voter whose log matches furthest
+    let transfers: Vec<_> = rafts
+        .iter()
+        .filter_map(|raft| {
+            let metrics = raft.metrics().borrow_watched().clone();
+            // only a group this shard leads has anything to hand off
+            if metrics.current_leader != Some(metrics.id) {
+                return None;
+            }
+            let voters: HashSet<ShardAddr> =
+                metrics.membership_config.membership().voter_ids().collect();
+            let target = metrics
+                .replication
+                .as_ref()?
+                .iter()
+                .filter(|(member, _)| **member != metrics.id && voters.contains(member))
+                .max_by_key(|(_, matched)| matched.as_ref().map(|log_id| log_id.index))
+                .map(|(member, _)| *member)?;
+            Some(async move {
+                // ask the target to take over, then wait until this member no longer leads
+                if raft.trigger().transfer_leader(target).await.is_err() {
+                    return false;
+                }
+                raft.wait(Some(HANDOFF_TIMEOUT))
+                    .metrics(
+                        |metrics| metrics.current_leader != Some(metrics.id),
+                        "the lead moved to another member",
+                    )
+                    .await
+                    .is_ok()
+            })
+        })
+        .collect();
+    let led = transfers.len();
+    // every group at once, bounded by the one timeout each wait carries
+    let handed = futures::future::join_all(transfers)
+        .await
+        .into_iter()
+        .filter(|moved| *moved)
+        .count();
+    (led, handed)
 }
 
 /// Write a volatile group's snapshot from its resident partitions, on a task of its own

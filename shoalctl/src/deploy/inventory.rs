@@ -275,6 +275,14 @@ pub struct Inventory {
     /// reclaimed the copy, so this is the floor under every step of a rebalance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retire_after: Option<String>,
+    /// The base data election timeout every group derives its timers from, as `shoal.yml` writes
+    /// a duration (`1s`, `2500ms`); the engine's default of five seconds if absent
+    ///
+    /// Rendered as `cluster.primary_failover_after`. A crashed leader's groups refuse writes for
+    /// its lease and an election, three to four times this, so it is the unplanned failover
+    /// window ([cluster testing](../../../docs/src/cluster-testing/performance.md#failover-time-against-primary_failover_after)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failover: Option<String>,
     /// The nodes `bootstrap` forms the cluster from, in placement order; every node if absent
     ///
     /// The first is the node that mints the cluster. A node listed in `nodes` but not here is
@@ -487,6 +495,24 @@ impl Inventory {
             let (number, unit) = retire_after.split_at(split);
             if number.is_empty() || !matches!(unit, "ms" | "s" | "m" | "h") {
                 bail!("retire_after is {retire_after:?}; write it as 500ms, 15s, 5m or 1h");
+            }
+        }
+        // the failover base the same way, and at least the 100ms the engine requires
+        if let Some(failover) = &self.failover {
+            let split = failover
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(failover.len());
+            let (number, unit) = failover.split_at(split);
+            let millis = number.parse::<u64>().ok().and_then(|number| match unit {
+                "ms" => Some(number),
+                "s" => number.checked_mul(1_000),
+                "m" => number.checked_mul(60_000),
+                _ => None,
+            });
+            match millis {
+                Some(millis) if millis >= 100 => {}
+                Some(_) => bail!("failover is {failover:?}; the engine needs at least 100ms"),
+                None => bail!("failover is {failover:?}; write it as 1500ms, 2s or 1m"),
             }
         }
         // a group name is a key an operator types, so it is held to the cluster name's alphabet
@@ -942,6 +968,16 @@ mod tests {
         // at a factor that fits, the same bootstrap set is fine and c is left for add
         inventory.replication_factor = 2;
         inventory.validate().expect("a two node bootstrap at factor two");
+        // a failover base is a duration of at least the engine's hundred milliseconds
+        let mut inventory = parse(THREE);
+        inventory.failover = Some("2s".into());
+        inventory.validate().expect("a two second failover base");
+        inventory.failover = Some("1500ms".into());
+        inventory.validate().expect("a millisecond failover base");
+        inventory.failover = Some("50ms".into());
+        assert!(inventory.validate().unwrap_err().to_string().contains("100ms"));
+        inventory.failover = Some("2".into());
+        assert!(inventory.validate().unwrap_err().to_string().contains("failover"));
         // a bootstrap set naming a node that is not listed
         inventory.bootstrap = Some(vec!["a".into(), "z".into()]);
         assert!(inventory.validate().unwrap_err().to_string().contains("\"z\""));

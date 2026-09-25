@@ -151,6 +151,13 @@ last, waits for each to be up and caught up, swaps a node that does not come bac
 previous program, and stops. `--activate` ends the window, and `--rollback` is the rollback
 before it ([F55](../features/cluster-upgrade.md)).
 
+**What a restart costs the clients.** A node stopped by its supervisor (`SIGTERM`) hands every
+group it leads to another member before its groups stop, and refuses new writes retriably while
+it does ([Resolved #139](../appendix/resolved/leadership-handoff-on-stop.md)). A rolling upgrade
+under load then costs the operations in flight on the restarted node (`ConnectionLost`) and a
+handful of `NotLeader`. A node that is killed rather than stopped costs its groups' writes the
+lease and an election, 15 to 20 seconds at the default `primary_failover_after`.
+
 **Rollback.** Before the activation, reinstall the previous build on any node; after it, none.
 A schema change is not a rolling operation: a node with another `schema_id` is refused, and
 the path is a new cluster and a restore ([F48](../features/rolling-compatibility.md)).

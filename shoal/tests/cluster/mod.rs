@@ -1392,6 +1392,23 @@ impl Cluster {
         Ok(())
     }
 
+    /// Stop a node the way a supervisor's `SIGTERM` stops a deployed one, and reap it
+    ///
+    /// The child stops its pool, which is what `node::serve` does on the signal, so a group it
+    /// leads is handed off first ([Resolved #139](../../../docs/src/appendix/resolved/leadership-handoff-on-stop.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node to stop
+    pub fn stop(&mut self, id: usize) -> Result<serde_json::Value, FixtureError> {
+        let node = self.nodes[id]
+            .as_mut()
+            .ok_or_else(|| FixtureError::NotReady(format!("node {id} is not running")))?;
+        let answer = node.command("EXIT")?;
+        node.kill()?;
+        Ok(answer)
+    }
+
     /// Copy a node's directory, for a clone of it to start on
     ///
     /// # Arguments

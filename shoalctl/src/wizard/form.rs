@@ -526,6 +526,9 @@ pub struct Draft {
     pub control_voters: String,
     /// How long a moved copy is kept, blank for the engine's
     pub retire_after: String,
+    /// The failover base an inventory being edited named, kept as it was; the form has no field
+    /// for it yet
+    pub failover: Option<String>,
     /// The client port
     pub client_port: String,
     /// The peer port
@@ -561,6 +564,7 @@ impl Default for Draft {
             replication_factor: "3".to_string(),
             control_voters: "3".to_string(),
             retire_after: String::new(),
+            failover: None,
             client_port: ports.client.to_string(),
             peer_port: ports.peer.to_string(),
             control_port: ports.control.to_string(),
@@ -700,6 +704,7 @@ impl Draft {
             replication_factor: inventory.replication_factor.to_string(),
             control_voters: inventory.control_voters.to_string(),
             retire_after: inventory.retire_after.clone().unwrap_or_default(),
+            failover: inventory.failover.clone(),
             client_port: inventory.ports.client.to_string(),
             peer_port: inventory.ports.peer.to_string(),
             control_port: inventory.ports.control.to_string(),
@@ -897,6 +902,7 @@ impl Draft {
             user: text(&self.user),
             admin: text(&self.admin).unwrap_or_else(|| "admin".to_string()),
             retire_after: text(&self.retire_after),
+            failover: self.failover.clone(),
             bootstrap,
             nodes,
         };

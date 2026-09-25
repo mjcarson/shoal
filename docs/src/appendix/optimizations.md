@@ -199,6 +199,9 @@ so they get worse by existing longer rather than under load.
 | **B17** | [**O59**](#o59-the-rehome-runs-on-one-core-and-blocks-the-start) — the rehome runs on one core and blocks the start | Argued — the start held for the whole move while every other core idles | M | `macro/rehome/shrink`, whose `millis` is the hold | Contained | no |
 | **B18** | [**O60**](#o60-a-nodes-figures-ride-its-status-report-as-verbose-json) — a node's figures ride its status report as verbose JSON | Measured in shape — about 7.4 KB a report for four busy tables, one report in four, 1.6× the leader's intake at 64 members | S | none; the spike's `fanout` table prices it, and no arm drives a cluster of that size | Contained | no |
 | **B19** | [**O61**](#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page) — a fast device syncs the WAL in batches too small to fill a page | Measured on the lab — 6.8× the device writes of the slower hosts for the same replicated rows, 5.6k `fdatasync`s a second against 680 | S–M | the lab's insert `bench` with disk counters | Latency for wear | yes, on the lab |
+| ~~**B20**~~ | ~~[**O62**](#o62-every-compaction-rewrites-the-shards-whole-archive-map) — every compaction rewrites the shard's whole archive map~~ **done**, measured and kept | Measured — 70% of a node's writes under load, in bursts that stalled its fsyncs | S | the lab's mixed `bench` with bytes per file | A longer replay at start | it was |
+| ~~**B21**~~ | ~~[**O63**](#o63-leadership-never-returns-to-a-groups-placement-primary) — leadership never returns to a group's placement primary~~ **done**, measured and kept | Measured — one node leading every group cost about a sixth of the throughput and a quarter of the write p99 | S | the lab's mixed `bench`, skewed against spread | One transfer per group handed back | it was |
+| **B22** | [**O64**](#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab) — a shorter failover base halves write throughput on the lab | Measured — 1 s: 20–24k rows/s and 4 s failover; 5 s: 40–46k rows/s and 16 s failover | ? | the lab's load at each base | Crash failover against write throughput | yes, on the lab |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -2832,3 +2835,131 @@ unchanged at 16.6 GB, so this is not btrfs copying data. The remaining 1.8× bet
 writeback and the device's writes on europa, against 1.26× on ext4, is the filesystem's
 per-sync metadata. The group-commit delay is tried in [cluster testing](../cluster-testing/performance.md#o61-a-group-commit-delay),
 which records the outcome.
+
+### O62. Every compaction rewrites the shard's whole archive map
+
+| | |
+| --- | --- |
+| **Rank** | ~~**B20**~~ **done** — measured on the lab, applied, kept |
+| **Impact** | Measured — on the lab under a mixed load, map saves were 1,573 MB of the 2,235 MB one Zen1 node wrote in 28 seconds (70%), in bursts of up to 400 MB in one second that stalled every fsync behind them |
+| **Difficulty** | S — a fold threshold proportional to the map instead of a fixed mebibyte |
+| **Depends on** | [Resolved #140](resolved/intent-log-read-ahead.md), without which the longer intent logs it leaves failed a start |
+| **Blocks** | nothing |
+| **Tradeoff** | A restart replays up to a quarter of the map as intents instead of at most a mebibyte, and the intent log on disk is that much larger. With #140's read-ahead that replay costs seconds, not minutes |
+| **Benchmark** | the lab's mixed `bench` with a bpftrace count of bytes written per file ([cluster testing](../cluster-testing/performance.md#o62-the-archive-map-rewrite)) |
+
+Found by the [distributed cluster testing](../cluster-testing/performance.md#o62-the-archive-map-rewrite)
+chapter. A table's archive map is saved whole, the map of every archived partition on the shard,
+and changes between saves go to its intent log. The compactor folded the log into a new map
+whenever the log passed one mebibyte (`current_flushed_pos() > Byte::MEBIBYTE`, at four places in
+`compactor.rs`). With about a million partitions per shard a map is about 85–125 MB, so every
+mebibyte of intents cost a hundred mebibytes of map rewrite.
+
+**Applied:** `ArchiveMap::compaction_due` folds the log once it passes a quarter of the map as last
+saved (`saved_bytes`, set at every save and read from the file at open), and never below the old
+mebibyte (`MAP_FOLD_RATIO`, `MAP_FOLD_FLOOR`). A fold now writes at most four bytes of map per byte
+of intent.
+
+**Outcome:** over the same 30 second mixed bench, map saves on hyperion went from 1,573 MB to
+26 MB. An A/B on the same cluster, rolling back to the old fold with `cluster upgrade --rollback`
+and forward again, excluding the first run after each roll (caches cold, leadership moved):
+
+| | Operations per second | Write p99 | Write max |
+| --- | --- | --- | --- |
+| Old fold, two runs | 91,000–106,000 | 174–198 ms | 461–596 ms |
+| New fold, five runs | 99,500–142,800 | 128–201 ms | 290–389 ms |
+
+Throughput rose and the worst write fell by about a third, because the bursts that stalled the
+Zen1 hosts' fsyncs are gone. The median run moved less than the spread between runs, so the
+change is not claimed for the median. The first rollout exposed [#140](resolved/intent-log-read-ahead.md):
+hyperion's longer intent log, read one direct read per field, failed its start. **Kept**, with
+#140.
+
+### O63. Leadership never returns to a group's placement primary
+
+| | |
+| --- | --- |
+| **Rank** | ~~**B21**~~ **done** — measured on the lab, applied, kept |
+| **Impact** | Measured — after a few restarts and rolling upgrades, one Zen1 node led all 36 groups and proposed every write: 81,000 operations a second at a write p99 of 300 ms, against 90,000–97,000 at 217–234 ms with the leads spread 12, 12, 12 |
+| **Difficulty** | S — a shard hands a group it has led for a while back to the group's placement primary |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | One leader change per group handed back, which costs that group's writes one transfer. An even spread is right for equal members, and not the best spread for unequal ones: on this lab, europa leading more than its share beat the even split |
+| **Benchmark** | the lab's mixed `bench` with every group led by one node against the same with the leads spread ([cluster testing](../cluster-testing/performance.md#leadership-after-a-restart)) |
+
+Found by the [distributed cluster testing](../cluster-testing/performance.md#leadership-after-a-restart)
+chapter, and listed before that as unbuilt on [C15](../distributed/open-issues.md#filed-as-unbuilt)
+("leadership moved … back to a returning node"). The placement puts each group's primary first in
+its voters and spreads primaries evenly, and a group's first leader is its primary. An election
+after a crash, or a handoff on a planned stop ([Resolved #139](resolved/leadership-handoff-on-stop.md)),
+moves the lead to another voter, and nothing moved it back. The handoff made it worse: it picks the
+most caught-up voter, so a rolling upgrade that ends with the leader tends to pile the leads onto
+whichever node was restarted first.
+
+**Applied:** `Shard::balance_leadership`, on the shard's tick. Every five seconds a shard hands at
+most one group back to its placement primary, and only when all of these hold:
+
+- it has led the group for ten seconds;
+- the primary is up in the map;
+- every voter is within 16 entries of its log, and a voter it has no progress for counts as behind;
+- no repair, move, backup or restore is working on the group, and none of its copies here is
+  quarantined;
+- it has not tried to hand this group back in the last minute.
+
+**The first cut restarted a snapshot install.** `snapshot_duplicates_and_resume_are_safe` failed
+three times in three. A member being fed a snapshot had no progress in the leader's metrics, which
+the check read as index zero, and in a group whose log was shorter than the allowed lag that
+counted as caught up. The transfer to it failed, another voter was elected, and the member's
+install started over, every fifteen seconds. Treating no progress as behind, and a one minute
+retry per group, fixed it (three of three, then the whole fixture suite).
+
+**Outcome:** after a rolling upgrade the leads went from 6/24/6 to 12/12/12 within 30 seconds.
+Against every group led by titan, two runs each and the first after the upgrade excluded:
+
+| Leads (europa/titan/hyperion) | Operations per second | Write p99 | Write max |
+| --- | --- | --- | --- |
+| 0/36/0 | 81,000, 81,000 | 300 ms, 299 ms | 614 ms, 610 ms |
+| 12/12/12 | 96,700, 90,300 | 235 ms, 217 ms | 612 ms, 539 ms |
+
+**Kept.** Earlier runs with europa leading 18 or 24 groups reached 99,000–143,000 operations a
+second, because europa is the fastest host. Weighting the primaries by a member's capacity, which
+the planner already reads for data placement, would do better than an even spread on unequal
+hardware. It is filed in [todos](todos.md#leadership-is-spread-evenly-whatever-each-member-can-do).
+
+### O64. A shorter failover base halves write throughput on the lab
+
+| | |
+| --- | --- |
+| **Rank** | **B22** — measured on the lab, cause not isolated, default kept |
+| **Impact** | Measured — the full TMDB load at `primary_failover_after` 1 s ran at 19,800–24,200 rows a second in four runs, at 2 s at 30,300, and at the default 5 s at 40,200–46,500 in four runs. Crash failover went the other way: about 4 s of refused writes at 1 s, 8 s at 2 s, 16 s at 5 s |
+| **Difficulty** | Unknown until the cause is found |
+| **Depends on** | finding the cause |
+| **Blocks** | a shorter default failover base |
+| **Tradeoff** | Crash failover time against write throughput, on this hardware |
+| **Benchmark** | `target/lab/failover-test.sh` and `profile-load.sh` in the [cluster testing](../cluster-testing/performance.md#failover-time-against-primary_failover_after) chapter |
+
+Found by the [distributed cluster testing](../cluster-testing/performance.md#failover-time-against-primary_failover_after)
+chapter while measuring failover against the base. A group's timers derive from the base alone
+(`group_config`): a heartbeat every tenth of it, an election timeout of one to two bases, and a
+leader lease of two. The mixed bench barely moved (108,000 operations a second at 1 s, 118,000 at
+2 s and at 5 s), and no election happened under load at any base. The write-only load halved.
+
+What was measured on titan during a load, over the same 10 seconds:
+
+| Base | WAL `fdatasync`s | WAL bytes | user / system / idle / iowait |
+| --- | --- | --- | --- |
+| 5 s | 3,576 | 107 MB | 36 / 32 / 12 / 20 |
+| 1 s | 1,836 | 51 MB | 22 / 41 / 9 / 28 |
+
+At 1 s the node wrote and synced half as much. Its disk was busier and its cpu spent more of its
+time in the kernel, with context switches up from 25,000 to 27,700 a second on half the work. A
+`perf` profile of titan at 1 s is flat. The allocator leads (`_mi_page_malloc` 4.4%), and glommio's
+`insert_timer` appears at 0.5%, which it does not in the 5 s profile. What is ruled out:
+heartbeats do not fsync (an empty append completes without a batch), and the committed index is
+staged, not waited on. The leading hypotheses are the heartbeat timers themselves, ten a second
+per follower per group, and a follower applying commits in batches a fifth the size.
+
+**Not applied.** The default stays at 5 s: a planned stop no longer waits for failover at all
+([Resolved #139](resolved/leadership-handoff-on-stop.md)), and only a crash pays the window. An
+operator who prefers the shorter window can set `failover` in the inventory, now knowing its cost
+on hardware like this.

@@ -33,7 +33,7 @@ fn inventory(dir: &std::path::Path) -> Inventory {
     // this test binary stands in for the server program, which the inventory only checks is an executable file
     let server = std::env::current_exe().expect("the test binary");
     let yaml = format!(
-        "name: render\nserver: {server}\nremote_dir: {dir}\nreplication_factor: 1\ncontrol_voters: 1\nretire_after: 15s\n\
+        "name: render\nserver: {server}\nremote_dir: {dir}\nreplication_factor: 1\ncontrol_voters: 1\nretire_after: 15s\nfailover: 1500ms\n\
          ports: {{client: {CLIENT_PORT}, peer: {peer}, control: {control}}}\n\
          resources: {{cores: 1, memory: 512Mi, control_core_shared: true}}\n\
          nodes:\n  - {{name: a, address: 127.0.0.1}}\n  - {{name: b, address: 127.0.0.2}}\n\
@@ -101,6 +101,11 @@ fn a_rendered_node_claims_starts_and_initializes() {
     assert_eq!(
         conf.cluster.as_ref().unwrap().migration.retire_after.duration(),
         Duration::from_secs(15)
+    );
+    // the failover base the inventory names reaches the cluster block the engine reads
+    assert_eq!(
+        conf.cluster.as_ref().unwrap().primary_failover_after.duration(),
+        std::time::Duration::from_millis(1500)
     );
     // a join file for the second node validates too, against the same authority
     let second = render::render(

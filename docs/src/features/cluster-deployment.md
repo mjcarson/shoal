@@ -80,6 +80,11 @@ An inventory is YAML, one per cluster (`shoalctl/src/deploy/inventory.rs`). It n
 - the admin principal;
 - the system user nodes run as (`user`, created where missing);
 - `retire_after`, the one move setting rendered;
+- `failover`, rendered as `cluster.primary_failover_after`, the base every group's election
+  timeout and lease derive from; the engine's five seconds if absent. Added by the
+  [cluster testing](../cluster-testing/performance.md#failover-time-against-primary_failover_after)
+  chapter to measure failover against it. The wizard keeps an inventory's value when it edits one
+  and has no field for it yet;
 - the hosts, as a name, an ssh target and an address;
 - optionally, the bootstrap set.
 

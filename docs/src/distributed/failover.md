@@ -82,6 +82,16 @@ and the failover arm records what a client without the retry sees: the dead node
 the writes refused within a hundred milliseconds, the rest served, until the election
 ([C10](performance.md#the-arms)).
 
+### A planned stop
+
+A node stopped by its supervisor is not a primary that is down. Since
+[Resolved #139](../appendix/resolved/leadership-handoff-on-stop.md) each of its shards refuses new
+writes retriably, hands every group it leads to the voter whose log matches furthest
+(`transfer_leader`), waits up to three seconds for the lead to move, and only then stops its
+groups. None of the lease and election wait above applies: on the lab a rolling upgrade under load
+refused 14 writes where it had refused 84,418. A killed node still costs its groups the whole
+window.
+
 ### A returning node
 
 A node restarts on its directory, recovers each group's term and vote, configuration,
@@ -193,8 +203,8 @@ Recovery time is never attributed to one timer alone.
 
 ## Limitations
 
-A failover completes in two to three times the base, not base plus two seconds. A returning
-leader waits out its old lease. Leadership is never moved. A snapshot is per group, so a
+A failover completes in ~~two to three times~~ three to four times the base, not base plus two seconds: on the physical lab at 1, 2 and 5 seconds, writes to a killed leader's groups were refused for about 4, 8 and 16 seconds ([cluster testing](../cluster-testing/performance.md#failover-time-against-primary_failover_after)). A returning
+leader waits out its old lease. ~~Leadership is never moved.~~ A lead is handed back to its group's placement primary once that member is up and every voter is caught up ([O63](../appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary)), and a planned stop hands its leads off first ([Resolved #139](../appendix/resolved/leadership-handoff-on-stop.md)). A snapshot is per group, so a
 returning node installs every tablet its replica set shares. A dead leader's stream may still
 be installed beside a new leader's (two generations in flight). A resume survives a lane cut,
 not a receiver restart. Installs run concurrently through one compactor. ~~The kill arm's client

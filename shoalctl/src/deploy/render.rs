@@ -145,6 +145,9 @@ pub struct ClusterConf {
     /// The move settings the inventory names, if any
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migration: Option<MigrationConf>,
+    /// The failover base the inventory names, if any
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_failover_after: Option<String>,
 }
 
 /// `cluster.migration`, only the keys an inventory can set
@@ -300,6 +303,7 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
                 .retire_after
                 .clone()
                 .map(|retire_after| MigrationConf { retire_after }),
+            primary_failover_after: inventory.failover.clone(),
         },
     }
 }
@@ -377,6 +381,12 @@ mod tests {
         assert!(third.contains("cores: 2"));
         // the move settings are left to the engine unless the inventory names them
         assert!(!first.contains("migration"));
+        // and so is the failover base
+        assert!(!first.contains("primary_failover_after"));
+        let mut fast = inventory.clone();
+        fast.failover = Some("1s".into());
+        let failover = render(&fast, &a, &Entry::Bootstrap, "x").unwrap();
+        assert!(failover.contains("primary_failover_after: 1s"), "{failover}");
         let mut quick = inventory.clone();
         quick.retire_after = Some("15s".into());
         let fourth = render(&quick, &a, &Entry::Bootstrap, "x").unwrap();

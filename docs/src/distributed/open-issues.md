@@ -84,8 +84,9 @@ the complete record; the ones an operator meets first:
 - A `shoalctl` verb for `SetControlVoters`, `SetTableReadPolicy` and `Move`; a cluster-wide
   `ReloadTls`; per-tablet readiness and a lag histogram in the cluster tab
   ([F50](../features/cluster-operations.md)).
-- Leader hints and deltas on the map; leadership moved toward a reader or back to a returning
-  node ([F41](../features/read-consistency.md), [F42](../features/primary-failover.md)).
+- Leader hints and deltas on the map; leadership moved toward a reader ~~or back to a returning
+  node~~ ([F41](../features/read-consistency.md), [F42](../features/primary-failover.md)). A lead
+  now goes back to the group's placement primary ([O63](../appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary)).
 - A coverage list on the response frame; a cross-tablet snapshot ([F41](../features/read-consistency.md)).
 - A learner fed a log tail rather than a whole-group snapshot
   ([O55](../appendix/optimizations.md#o55-a-learner-inside-the-retained-log-is-fed-a-snapshot-when-the-leaders-cached-cut-is-newer-than-its-purge-point));
