@@ -86,19 +86,28 @@ passwordless sudo on every host ([F51](../features/cluster-deployment.md)):
 
 | Command | What it does |
 | --- | --- |
+| `cluster new -o <inv> [--from <inv>]` | Build or edit an inventory in a full-screen form that judges it on every key, shows what each node resolves to, probes hosts with `p`, and writes it with `s` ([F53](../features/inventory-wizard.md)) |
 | `cluster bootstrap -i <inv> [--wipe]` | Stage, claim, issue a leaf, and start every bootstrap node under systemd, then `Initialize` once and wait for writes |
 | `cluster add -i <inv> <node> [--wipe] [--rebalance]` | Join a listed node through every member, and optionally follow a `Rebalance` onto it |
 | `cluster rebalance -i <inv>` | Send `Rebalance` and follow its plan |
 | `cluster status -i <inv>` | Every node's id, address and unit, then the cluster tab's lines |
 | `cluster stats -i <inv> [--table <t>] [--watch [s]] [--json]` | Every member's standing, groups, tablets, archived partitions and bytes, and write and stream rates over 10s/1m/5m, the cluster's led totals, and every plan's progress, pace and estimate, from the control leader ([F52](../features/cluster-stats.md)) |
 | `cluster start/stop/restart -i <inv> [node]` | systemctl on one node or every deployed node |
+| `cluster upgrade -i <inv> [node...] [--force] [--activate] [--rollback]` | Replace every node's program with the inventory's, one node at a time and the leader last, waiting for each to be up and caught up; a node that does not come back is swapped back onto its previous program and the run stops. `--activate` activates the wire version every member speaks afterwards; `--rollback` swaps the previous program back ([F55](../features/cluster-upgrade.md)) |
 | `cluster logs -i <inv> <node> [-n N]` | The node's journal |
-| `cluster destroy -i <inv> --yes` | Delete every node, its data and the local state |
+| `cluster destroy -i <inv> --yes` | Delete every node, its data (every storage directory it resolves) and the local state |
 | `tui [-i <inv> \| --addr <a>]` | The terminal UI, as the cluster's admin with an inventory |
 
 The server program the inventory names is `shoal::server::node::main::<Db>()` for the same
-schema. `shoal-bench`'s `shoal-node` and `shoal-benchctl` are the bench pair and `tmdb_node` and
-`tmdbctl` the TMDB pair; `shoalctl/inventories/lab.yml` is a worked inventory.
+schema. `shoal-bench`'s `shoal-node` and `shoal-benchctl` are the bench pair, `tmdb_node` and
+`tmdbctl` the TMDB pair, and `tmdb-dataset-node` and `tmdb-dataset-loader` the dataset pair
+([F54](../features/tmdb-dataset-deployment.md)); `shoalctl/inventories/lab.yml` is a worked
+inventory. A program with commands of its own flattens the public `shoalctl::cli::Command` into
+its own subcommand enum and hands the rest to `shoalctl::cli::run`, as the dataset loader does
+with its `load`. `tui -i` needs only the deployment's state, not the node binary the inventory
+names. A node's storage
+directories can be set for the whole deployment, for a named group of nodes, or for one node, each
+directory on its own ([F53](../features/inventory-wizard.md)).
 
 ## Architecture
 

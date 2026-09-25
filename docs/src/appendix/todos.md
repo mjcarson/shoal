@@ -262,6 +262,24 @@ list rather than from the diff:
   operator's to write with local storage paths; the launcher copies the staged file and nothing
   else, and refuses a build that is not its own by digest.
 
+**What F55 left undone, deliberately.** Recorded here so the next change starts from the list
+rather than from the diff ([F55](../features/cluster-upgrade.md)):
+
+- **A schema, archive or marker upgrade.** `cluster upgrade` replaces the program only. A schema
+  change is still a new cluster and a restore, and a format change has no migration in place.
+  The upgrade's gate and waits are where a migration step would go.
+- **Configuration and unit changes.** The rendered `shoal.yml` and the unit are left as they
+  are. A `--reconfigure` that re-renders both from the inventory needs the claim's identity
+  and a leaf that is still valid, and neither changes, so it is mostly plumbing.
+- **Failure domains.** The inventory has no rack or zone, so the upgrade restarts one node at a
+  time where runbook 7 allows a whole domain at once.
+- **A grace hold for an up member.** `Maintenance` suspends only a grace that is already open,
+  so nothing stops a short `auto_remove_after` from expiring during a restart. A
+  `Maintenance` that marks an up member as expected down would close this, but it is a
+  control-state change.
+- **More than one `.prev`.** One generation is kept. A numbered history would need a policy
+  for how many to keep and a way to name which one to roll back to.
+
 **What F52 left undone, deliberately.** Recorded here so the next change starts from the list
 rather than from the diff:
 
@@ -300,6 +318,25 @@ rather than from the diff:
   unit is the shape.
 - **Building the program.** The inventory names a program the operator built for the oldest
   cpu; the deployment refuses a wrong one at the claim by its SIGILL rather than building one.
+
+**What F53 left undone, deliberately.** Recorded here so the next change starts from the list
+rather than from the diff ([F53](../features/inventory-wizard.md)):
+
+- **Per-table storage in an inventory.** The engine takes `storage.tables.<name>` with its own
+  latency and throughput paths. An inventory renders only the default pair per node, so every
+  table of a node shares its two directories. A `tables:` map under each level's `storage` is
+  the shape, and its roots would have to join `NodeStorage::roots` in the engine's order.
+- **Moving a deployed node's storage.** Its directories are rendered at `bootstrap` or `add`,
+  and an edited inventory describes directories the running node does not use. A
+  `cluster restage <node>` that stops the node, moves its roots and renders the file again is
+  the shape. Until then a node's storage changes by `destroy` and a fresh deployment, or by
+  removing it and adding it back.
+- **Keeping an inventory's comments through `--from`.** The wizard re-serializes the parsed
+  inventory, so every comment in the source (`lab.yml`'s notes included) is dropped and every
+  default is written out.
+- **Judging a node's resources against its probe.** A probe reports a host's cpus, memory and
+  free space, and nothing compares them to the cores and memory the node is given or to a
+  minimum free space.
 
 **What F49 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
@@ -2042,6 +2079,18 @@ The original note's warning stands and is worth repeating: the storage tests del
 want a memory-backed engine underneath them. They run against a real filesystem on purpose,
 because glommio silently disables O_DIRECT on tmpfs, and running them on `NoStorage` would hide
 exactly the alignment and `fdatasync` behaviour they exist to check.
+
+### Overriding a nested configuration key from the environment
+
+`Conf::from_file` overlays `config::Environment::with_prefix("shoal")` with no separator, so
+`SHOAL_PORT`-style variables reach top level keys only. Nothing nested, such as
+`storage.default.filesystem.latency_sensitive.path`, can be set without a file. That is why the
+`tmdb_dataset` example grew a `--storage` flag
+([Resolved #126](resolved/storage-directory-unusable.md)), since removed with the example
+([F54](../features/tmdb-dataset-deployment.md)): a deployed node reads the `shoal.yml` rendered
+for it. Adding `.separator("__")` would open
+every key to the environment. The work is checking that no deployment already sets a `SHOAL_`
+variable that a separator would reinterpret.
 
 ### Build and packaging
 

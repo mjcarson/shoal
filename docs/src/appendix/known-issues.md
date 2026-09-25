@@ -33,8 +33,15 @@ carrying the reasoning and the invariants the fix depends on. Item numbers are s
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at ~~15~~ ~~16~~ 19 and skips 25, 26, 27, 30, 31, 32, 33, 34, 36, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
 76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 120, 121, 122, 123 and 124, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ item 119 is the newest entry here again, ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ with 125 the newest number, on the resolved page, and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120, 121, 122, 123, 124 and 125 are on the resolved page, with 27, 32 and 36 beside them. **120 and 121 never appeared here**:
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ item 132 is the newest entry and the newest number, and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
+83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120, 121, 122, 123, 124, 125, 126, 127 and 128 are on the resolved page, with 27, 32 and 36 beside them. **126 never appeared here**:
+it was filed and fixed in one change, from a user's run of `tmdb_dataset` on a host without
+`/opt/shoal` ([Resolved #126](resolved/storage-directory-unusable.md)). **127 never appeared here**
+either: it was filed and fixed in one change, from a user's bootstrap of a wizard-built inventory
+([Resolved #127](resolved/wizard-loopback-address.md)). **128 never appeared here** either:
+it was found by the same user's TMDB load against the lab, reproduced by a fixture test, and
+fixed in the change that filed [item 129](#129-an-overloaded-group-answers-outcomeunknown-rather-than-shedding)
+beside it ([Resolved #128](resolved/hop-deadline-margin.md)). **120 and 121 never appeared here**:
 they were found by reading the code around item 30 - the unsorted table's version of its arm
 charging the shard twice, and the duplicate read that let either arm be reached - reproduced by
 a harness that builds a shard's tables without a shard, and fixed with it
@@ -89,11 +96,20 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ **1,587 tests**, six ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ **1,619 tests**, seven ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
 two of `persistent_unsorted_table.rs` fail about one run in five of that binary (item 107).
+[F53](../features/inventory-wizard.md) added 16 and took it to 1,605: thirteen `shoalctl` unit
+tests, a new binary `shoalctl/tests/wizard.rs` (2), and one in `deploy_render.rs`. The workspace
+run at six threads with `--no-fail-fast` passed every test.
+[Resolved #127](resolved/wizard-loopback-address.md) added 3 `shoalctl` unit tests and took it to
+1,608, and [F54](../features/tmdb-dataset-deployment.md) 2 in the new `tmdb-dataset` crate and an ignored doctest,
+to 1,611. [Resolved #128](resolved/hop-deadline-margin.md) added 3 (a fixture test, a `shoal-core`
+unit test, a `tmdb-dataset` unit test) and took it to 1,614. Its workspace run failed eight
+fixture tests: two passed alone, and six could not bind port 12000 because a deployed lab node
+held it on the same host ([Test Coverage](test-coverage.md)).
 [Resolved #27](resolved/shql-quote-escape.md), [#32](resolved/client-gone-broadcast.md),
 [#36](resolved/staged-tail-deadline.md) and [#125](resolved/retry-unknown-outcome.md) added 11
 and took it to 1,587. There are two new binaries, `retry_outcome.rs` (3) and `staged_flush.rs`
@@ -289,7 +305,8 @@ were 136, 178 and 11; before
 item 14 were 135, 178 and 11;
 before item 13 were 135, 177 and 11; before items 11 and 12 were 133, 168 and 10; before
 items 9 and 31 were 132, 159 and 10; before F1 they were 115, 129, and 8, and before item 8
-were 105 and 116.
+were 105 and 116. [Resolved #126](resolved/storage-directory-unusable.md) added 2, both
+`shoal-core` unit tests in `meta.rs`.
 
 ---
 
@@ -316,13 +333,96 @@ disagree, and a partition has at most one read outstanding.
 
 ## Medium — robustness
 
-*Nothing is currently filed at this severity.* The four items that were here are resolved, all
-in one change: [27](resolved/shql-quote-escape.md), SHQL strings that could not hold a quote;
+Items 129, 130 and 131 came out of one TMDB load against the lab. The four items that were
+here before them are resolved, all in one change:
+[27](resolved/shql-quote-escape.md), SHQL strings that could not hold a quote;
 [32](resolved/client-gone-broadcast.md), an ordinary client's departure retiring nothing;
 [36](resolved/staged-tail-deadline.md), a staged write that waited for a queue to drain; and
 [125](resolved/retry-unknown-outcome.md), a retried write whose unknown first outcome was
 reported as the last try's refusal. Item 125 was filed at the end of this page, with the
 entries that came after the triage order, and carried its severity in its first line.
+
+### 129. An overloaded group answers `OutcomeUnknown` rather than `Shedding`
+
+A client that keeps more writes outstanding than a cluster commits within
+`replication.write_timeout` gets `OutcomeUnknown` for the writes at the back of the queue. It
+does not get `Shedding`, the refusal that says nothing was applied. The only admission bound
+on a group's proposals is `replication.pending_bytes` (`GroupSlot::pending_bytes`, checked in
+`ShardGroups::propose` in `server/shard/groups.rs`). At its default of 64 MiB per group, with
+rows of a few kilobytes, that is tens of thousands of writes, far more than a group commits in
+5s. The bound is also counted on the shard that proposes. A write that hops to its leader
+(the `ReplicateKind::Propose` arm) goes straight into `propose_through` there, and is counted
+against no budget on the leader.
+
+So overload shows up as timeouts. A caller has to treat `OutcomeUnknown` as retriable to get
+through it, and that is safe only for a write that replaces its row. A cheap refusal at
+admission would be definite.
+
+**Established by running it**: the [TMDB loader](../features/tmdb-dataset-deployment.md) at its
+old defaults (8 workers × 4096 in flight, plus each movie's keyword rows) against the three-node
+lab cluster. `OutcomeUnknown` came six seconds in, one `write_timeout` after the load started,
+with every member up and no election. The loader now retries and ships with a smaller gate,
+which works around this item without fixing it. Where the reason was lost on the way back is
+[Resolved #128](resolved/hop-deadline-margin.md).
+
+A fix would shed at admission once a group's queue would take longer than `write_timeout` to
+commit. That means an estimate of commit rate per group, or a bound on count or bytes derived
+from `write_timeout`, and a check on the leader for writes that arrive by hop. That is a
+behaviour change and needs a benchmark (the grid's high-depth rungs are where it would show).
+
+### 130. A frame for a stream dropped without its end ends that connection's read loop
+
+`ShoalTcpProxy::relay` (`shoal-client/src/client.rs:2420`) hands each frame to the stream it
+names with `waiter.tx.send(wrapped).await.map_err(send_failed)?`. A stream's slot in the channel
+map is removed only by `release`, which runs when `next()` returns the stream's end or an
+error. A caller that stops reading before that point and drops the result stream leaves the
+slot in place. kanal closes a channel when its last receiver drops (`AsyncReceiver::drop`,
+`terminate_signals`), so the slot now points at a closed channel. The next frame for that id
+fails the send, and the `?` ends the read loop of the connection it arrived on, with every other
+stream's answers on that connection still queued behind it. The comment under the `None` arm
+right below says this must not happen for a frame nobody is waiting on. A closed channel is the
+same case, and nothing catches it.
+
+**Established by reading the source**, from a hang that fits it. The TMDB loader's first run
+under [F54](../features/tmdb-dataset-deployment.md) with retries wrote the whole dataset, then
+stopped in its verify phase with four connections to one member holding 47–79 KB each in their
+receive queues, unread and not growing, while the server logged nothing. That loader's workers
+broke out of their loop once every query was answered and dropped the stream without reading
+its end (the pre-F54 loader did the same). They now read on to the end
+(`while results_rx.next().await?.is_some() {}`), and the next full run's verify returned all
+10,073 movies in 60ms. The late frame itself was not captured, because the loader installs no
+tracing subscriber and the `WARN`/`ERROR` lines that would have named it went nowhere. The fix is
+to treat a failed send like the `None` arm: drop the frame and remove the slot.
+
+### 131. A connection that dies fails only the streams it was the last connection for
+
+When a read loop ends, `fail_waiting` (`shoal-client/src/client.rs:2275`) fails each waiter whose
+`conn == Some(self.conn_id)`. A query stream records one connection per stream: `send` overwrites
+the waiter with whichever connection the pool handed that bundle. A stream that sent bundle A on
+connection 1 and bundle B on connection 2 is recorded against connection 2 only. If connection 1
+dies with A's answers owed, the stream is not told. Its `next()` waits for answers that will
+never come and has no deadline unless the caller set one. This is what turned item 130's dead
+read loop into a hang instead of a `ConnectionLost` the loader would have retried.
+
+**Established by reading the source.** A fix needs the set of connections a stream has written
+to and not yet been fully answered on, not just the last one, or `fail_waiting` has to fail
+every stream with any bundle outstanding on the connection. Either way the client has to track
+what each connection owes, not just what each stream is owed.
+
+### 132. `ephemeral_sorted_table` aborted once in glibc's thread-cache teardown
+
+One workspace run aborted this test binary with SIGABRT after its first test passed. glibc
+printed `tcache_thread_shutdown(): unaligned tcache chunk detected`. That message means a heap
+chunk on a thread's cache list was corrupted before the thread exited: something wrote past an
+allocation or freed one twice. The other fourteen tests in the binary never reported.
+
+**Established by running it, once.** The run was `cargo test --workspace --no-fail-fast --
+--test-threads 6` for [F55](../features/cluster-upgrade.md), a change that touches no engine
+code. Run alone straight after, the binary passed all fifteen tests. The cause is not known.
+The suspects are the code that is `unsafe` about a heap it does not own: the zero-copy archived
+responses, and the `Send` wrappers this page lists under **Unsafe `Send` invariant**. The next
+step is running the binary in a loop under ASan (`RUSTFLAGS=-Zsanitizer=address` on nightly)
+until it aborts, then reading the report's first frame.
 
 ---
 

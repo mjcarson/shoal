@@ -5244,6 +5244,51 @@ async fn quorum_success_requires_distinct_durable_voters() -> Result<(), Fixture
     Ok(())
 }
 
+/// A hopped write that its leader cannot commit is answered with the leader's reason
+///
+/// Three nodes at a factor of three, every lane through a proxy. The replication lanes out of
+/// the group's leader are cut, so it can take a proposal and not commit it. The lane from a
+/// follower into the leader stays up, and the follower's own write hops to the leader over it.
+/// The leader answers within its deadline that it did not commit the write, and that answer
+/// reaches the client as `OutcomeUnknown` naming the group. Before the fix the forwarder waited
+/// exactly the budget it handed the leader, so its own timer always fired first and the client
+/// read "the replication rpc timed out" from a leader that was up and answering
+/// ([Resolved #128](../../docs/src/appendix/resolved/hop-deadline-margin.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hopped_write_reports_the_leaders_outcome() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_secs(1))
+        .start()
+        .await?;
+    // a key whose group node 0 leads, written through node 1 so the write has to hop
+    let (key, _group) = key_led_by(&mut cluster, "Note", 0, 1000)?;
+    let leader = 0;
+    let forwarder = 1;
+    let addr = cluster.node(forwarder).endpoints.client.to_string();
+    // a write before the cut lands through the hop, proving the path
+    write_note(&addr, key, "before").await?;
+    // the leader can no longer replicate to either follower, but the forwarder still reaches it
+    cluster.data_link(leader, 1).cut();
+    cluster.data_link(leader, 2).cut();
+    // the hopped write is not committed, and the reason is the leader's own
+    let refused = write_note(&addr, key, "during").await;
+    assert_eq!(
+        failure_code(&refused),
+        Some(ErrorCode::OutcomeUnknown),
+        "{refused:?}"
+    );
+    let text = format!("{refused:?}");
+    assert!(
+        text.contains("did not commit the write within the deadline"),
+        "the hop did not carry the leader's answer back: {text}"
+    );
+    Ok(())
+}
+
 /// A bootstrap under a factor of three does not serve default writes until placed (C5 M4)
 ///
 /// RF=3 on one node: readiness reports one active copy of three and refuses default writes, and

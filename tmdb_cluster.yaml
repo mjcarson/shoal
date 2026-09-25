@@ -1,0 +1,40 @@
+# Written by `shoalctl cluster new`. Edit it by hand, or again with `cluster new --from <this file>`.
+#
+# Build the server program for the oldest cpu among the hosts, never native - a build for a newer
+# one dies of SIGILL at its claim:
+#
+#   RUSTFLAGS="-C target-cpu=<oldest host's cpu>" cargo build --release --bin <your node program>
+#
+# then deploy it with:
+#
+#   <your shoalctl program> cluster bootstrap -i <this file>
+name: tmdb
+server: target/deploy/release/tmdb-dataset-node
+ports:
+  client: 12000
+  peer: 12001
+  control: 12002
+replication_factor: 3
+control_voters: 3
+resources:
+  cores: 6
+  memory: 8Gi
+  control_core_shared: false
+groups:
+  bd795i:
+    storage:
+      latency: /opt/shoal
+  v1000:
+    storage:
+      latency: /optane/shoal
+tracing: Info
+user: shoal
+admin: admin
+nodes:
+- name: europa
+  address: 172.16.2.10
+  group: bd795i
+- name: titan
+  group: v1000
+- name: hyperion
+  group: v1000

@@ -5426,9 +5426,7 @@ name = "shoal"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "clap",
  "criterion",
- "csv",
  "deepsize2",
  "futures",
  "libc",
@@ -5654,6 +5652,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "shoal",
+ "tempfile",
  "tokio",
  "unicode-width 0.2.2",
  "uuid",
@@ -6225,6 +6224,22 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
+name = "tmdb-dataset"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "color-eyre",
+ "csv",
+ "deepsize2",
+ "mimalloc",
+ "rkyv 0.8.12",
+ "serde",
+ "shoal",
+ "shoalctl",
+ "tokio",
+]
 
 [[package]]
 name = "tokio"

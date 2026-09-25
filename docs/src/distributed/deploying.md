@@ -241,10 +241,13 @@ bootstrapper's rule put it.
 ## Deploying with shoalctl
 
 Everything above, done by a program ([F51](../features/cluster-deployment.md)). Write an inventory naming the server
-program, the hosts and the cluster's shape - `shoalctl/inventories/lab.yml` is a worked one -
-and, from a machine with keyless ssh and passwordless sudo on every host:
+program, the hosts and the cluster's shape - `shoalctl/inventories/lab.yml` is a worked one, and
+`cluster new` builds one in a form that judges it as you type
+([F53](../features/inventory-wizard.md)) - and, from a machine with keyless ssh and passwordless
+sudo on every host:
 
 ```sh
+shoal-benchctl cluster new -o lab.yml                 # or --from an inventory to edit it
 # the server program, built for the oldest cpu among the hosts - never `native`
 CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
     cargo build --release -p shoal-bench --bin shoal-node --bin shoal-benchctl
@@ -257,7 +260,9 @@ shoal-benchctl tui -i lab.yml                         # the cluster tab, as the 
 It renders every file on this page, issues the leaves above from an authority it keeps under
 `~/.shoal/clusters/<name>/`, runs each node as a systemd unit, waits for exactly what the steps
 above wait for, and sends `Initialize` once. Any schema: `tmdbctl` and `tmdb_node` are the same
-pair for TMDB.
+pair for TMDB, and `tmdb-dataset-loader` and `tmdb-dataset-node` for the full dataset, with a
+`load -i <inventory>` that fills the deployed cluster
+([F54](../features/tmdb-dataset-deployment.md)).
 
 ## Connect an application
 
@@ -351,7 +356,7 @@ done, and `status <op>` follows one from any connection.
 | A node is retired | [4](../operations/runbooks.md#4-decommission) | `decommission <node>`; its process stops itself when done |
 | A node is down for maintenance | [5](../operations/runbooks.md#5-automatic-removal-and-maintenance) | `maintenance <node> on`, then `off` |
 | A removed node's directory turns up | [6](../operations/runbooks.md#6-a-removed-node-returns) | Nothing: it is refused at every door |
-| A new build | [7](../operations/runbooks.md#7-rolling-upgrade) | One node at a time, `wire` on the tab, then `activate <wire>` |
+| A new build | [7](../operations/runbooks.md#7-rolling-upgrade) | One node at a time, `wire` on the tab, then `activate <wire>`; on a deployed cluster, `shoalctl cluster upgrade -i <inv> [--activate]` ([F55](../features/cluster-upgrade.md)) |
 | The control voters are down | [8](../operations/runbooks.md#8-control-quorum-lost) | Restart them; tablets with a quorum keep serving meanwhile |
 | The control voters are gone | [9](../operations/runbooks.md#9-permanent-quorum-loss) | `force_recover(&conf, &[survivor])` on one stopped survivor |
 | A backup | [10](../operations/runbooks.md#10-backup-and-restore) | `backup /var/backups/shoal`, copy `<dir>/<op>` off the hosts; `restore` into a fresh cluster |

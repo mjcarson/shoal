@@ -323,6 +323,19 @@ pub struct DirectoryLock {
     path: PathBuf,
 }
 
+/// Wrap an io error from preparing a storage directory with the path it was about
+///
+/// # Arguments
+///
+/// * `path` - The directory or file that could not be created or opened
+/// * `error` - What the os said
+fn unusable(path: &Path, error: std::io::Error) -> ServerError {
+    ServerError::Shoal(ShoalError::StorageDirectoryUnusable {
+        path: path.to_path_buf(),
+        error,
+    })
+}
+
 impl DirectoryLock {
     /// Take the lock on a storage directory, refusing if another process holds it
     ///
@@ -333,16 +346,20 @@ impl DirectoryLock {
     /// # Errors
     ///
     /// Refuses with [`ShoalError::StorageDirectoryLocked`] when another process holds the lock,
-    /// and with an IO error when the lock file cannot be opened.
+    /// with [`ShoalError::StorageDirectoryUnusable`] naming the path when the directory or the
+    /// lock file cannot be created or opened, and with an IO error when `flock` itself fails.
     pub fn acquire(root: &Path) -> Result<Self, ServerError> {
-        // the lock file lives beside the marker, and is created if this is a fresh directory
-        std::fs::create_dir_all(root)?;
+        // the lock file lives beside the marker, and is created if this is a fresh directory.
+        // this is the first thing a start writes, so a root it may not write is refused here
+        // and has to say which root it was
+        std::fs::create_dir_all(root).map_err(|error| unusable(root, error))?;
         let path = root.join(LOCK_FILE);
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(&path)?;
+            .open(&path)
+            .map_err(|error| unusable(&path, error))?;
         // an exclusive, non blocking lock: another holder means refuse now rather than wait
         // SAFETY: `flock` on a descriptor this function just opened and still owns
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -451,7 +468,8 @@ impl StorageMeta {
         let raw = match std::fs::read(Self::path(root)) {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(ServerError::IO(error)),
+            // anything else is a root this node may not use, and says which marker it was
+            Err(error) => return Err(unusable(&Self::path(root), error)),
         };
         // settle the format before anything else in the file is trusted. the format is the first
         // thing checked and is checked alone, so a marker from another build fails on its format
@@ -488,11 +506,11 @@ impl StorageMeta {
     ///
     /// * `root` - The root of the storage directory
     pub fn write(&self, root: &Path) -> Result<(), ServerError> {
-        // make sure the directory we are writing into exists
-        std::fs::create_dir_all(root)?;
+        // make sure the directory we are writing into exists, naming it if it cannot
+        std::fs::create_dir_all(root).map_err(|error| unusable(root, error))?;
         // stage the new marker beside the old one
         let staged = root.join(META_TEMP_FILE);
-        let mut file = File::create(&staged)?;
+        let mut file = File::create(&staged).map_err(|error| unusable(&staged, error))?;
         file.write_all(&serde_json::to_vec_pretty(self)?)?;
         file.sync_all()?;
         drop(file);
@@ -1408,6 +1426,79 @@ mod tests {
         // releasing the first frees the directory
         drop(first);
         DirectoryLock::acquire(dir.path()).expect("failed to retake a released lock");
+    }
+
+    /// A storage directory that cannot be created is refused with the path that failed
+    ///
+    /// Before [Resolved #126](../../../docs/src/appendix/resolved/storage-directory-unusable.md)
+    /// this was a bare `IO(PermissionDenied)` that never said which directory it was about.
+    #[test]
+    fn an_unusable_storage_directory_names_its_path() {
+        use std::os::unix::fs::PermissionsExt;
+        // root ignores directory permissions, so there is nothing to refuse
+        // SAFETY: `geteuid` reads the calling process's effective uid and cannot fail
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        // a parent nobody may write into, standing in for `/opt`
+        let parent = tempfile::tempdir().expect("failed to build a temp dir");
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o555))
+            .expect("failed to make the parent read only");
+        let root = parent.path().join("shoal");
+        let error = DirectoryLock::acquire(&root);
+        // give the permission back before asserting, so a failure still cleans up
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("failed to make the parent writable again");
+        // the refusal names the directory that could not be created, and keeps the os error
+        match error {
+            Err(ServerError::Shoal(ShoalError::StorageDirectoryUnusable { path, error })) => {
+                assert_eq!(path, root);
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            Err(other) => panic!("refused without naming the directory: {other:?}"),
+            Ok(_) => panic!("a lock was taken under a read only parent"),
+        }
+    }
+
+    /// A second storage root that cannot be created is refused with its path too
+    ///
+    /// A configuration can point its throughput writer somewhere other than its primary root,
+    /// and the mirror is the first write that root sees
+    /// ([Resolved #126](../../../docs/src/appendix/resolved/storage-directory-unusable.md)).
+    #[test]
+    fn an_unusable_mirror_root_names_its_path() {
+        use std::os::unix::fs::PermissionsExt;
+        // root ignores directory permissions, so there is nothing to refuse
+        // SAFETY: `geteuid` reads the calling process's effective uid and cannot fail
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        // claim a primary root the ordinary way
+        let primary = tempfile::tempdir().expect("failed to build a temp dir");
+        let identity = StorageMeta::claim(primary.path(), 2, None, ClusterIntent::Standalone)
+            .expect("failed to claim the primary");
+        let meta = StorageMeta::read(primary.path())
+            .expect("failed to read the primary")
+            .expect("the claim wrote no marker");
+        assert_eq!(meta.node, identity.node);
+        // a second root under a parent nobody may write into
+        let parent = tempfile::tempdir().expect("failed to build a temp dir");
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o555))
+            .expect("failed to make the parent read only");
+        let other = parent.path().join("throughput");
+        let result = StorageMeta::mirror(&other, &meta);
+        // give the permission back before asserting, so a failure still cleans up
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("failed to make the parent writable again");
+        // the refusal names the second root, not the primary
+        match result {
+            Err(ServerError::Shoal(ShoalError::StorageDirectoryUnusable { path, error })) => {
+                assert_eq!(path, other);
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            Err(other) => panic!("refused without naming the root: {other:?}"),
+            Ok(()) => panic!("a marker was mirrored under a read only parent"),
+        }
     }
 
     /// A second root takes a mirror of the primary's marker, and keeps it across a claim

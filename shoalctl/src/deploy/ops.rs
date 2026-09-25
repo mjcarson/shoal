@@ -32,7 +32,7 @@ use super::unit;
 use crate::cluster::{ClusterModel, Follow};
 
 /// How long a started node has to be seen up
-const UP_TIMEOUT: Duration = Duration::from_secs(180);
+pub(super) const UP_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// How long the cluster has to admit default writes after `Initialize`
 const READY_TIMEOUT: Duration = Duration::from_secs(180);
@@ -41,7 +41,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(180);
 const PLAN_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// How often a wait polls
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
+pub(super) const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The file the authority's certificate is kept in
 const CA_CERT: &str = "ca.pem";
@@ -70,13 +70,22 @@ pub struct Deployment {
     pub state: State,
 }
 
+/// Quote every directory for a shell and join them with spaces
+///
+/// # Arguments
+///
+/// * `paths` - The directories
+pub(super) fn quoted(paths: &[String]) -> String {
+    paths.iter().map(|path| quote(path)).collect::<Vec<_>>().join(" ")
+}
+
 /// Say what the deployment is doing, on stderr so stdout stays the command's answer
 ///
 /// # Arguments
 ///
 /// * `node` - The node it is about, if one
 /// * `message` - What is happening
-fn step(node: Option<&str>, message: &str) {
+pub(super) fn step(node: Option<&str>, message: &str) {
     match node {
         Some(node) => eprintln!("[{node}] {message}"),
         None => eprintln!("{message}"),
@@ -96,6 +105,26 @@ impl Deployment {
     pub fn open(path: &Path) -> color_eyre::Result<Self> {
         // the inventory, validated
         let inventory = Inventory::load(path)?;
+        // and where its state lives
+        let state = State::locate(&inventory.name)?;
+        Ok(Deployment { inventory, state })
+    }
+
+    /// Open a deployed cluster to talk to it, without the server program it was deployed with
+    ///
+    /// Everything that connects as the admin and nothing more - the terminal UI, a loader -
+    /// opens a deployment this way, so it runs on a machine that never built the node binary.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The inventory file
+    ///
+    /// # Errors
+    ///
+    /// When the inventory describes no cluster or its state cannot be located.
+    pub fn attach(path: &Path) -> color_eyre::Result<Self> {
+        // the inventory, judged as a cluster only
+        let inventory = Inventory::read(path)?;
         // and where its state lives
         let state = State::locate(&inventory.name)?;
         Ok(Deployment { inventory, state })
@@ -145,14 +174,22 @@ impl Deployment {
             target: node.target.clone(),
         };
         let layout = self.layout();
+        // a node is claimed if any of its roots holds a marker, since every root past the
+        // primary carries a mirror of it and refuses a node that is not the one it names
+        let markers = node
+            .storage
+            .roots()
+            .iter()
+            .map(|root| format!("test -e {}", quote(&format!("{root}/shoal-meta.json"))))
+            .collect::<Vec<_>>()
+            .join(" || ");
         // one round trip that reports everything as key=value lines
         let script = format!(
             "echo user=$(id -un); echo cpus=$(nproc); \
              if sudo -n true 2>/dev/null; then echo sudo=yes; else echo sudo=no; fi; \
-             if test -e {marker}; then echo claimed=yes; else echo claimed=no; fi; \
+             if {markers}; then echo claimed=yes; else echo claimed=no; fi; \
              if lsmod | grep -qw '^tls' || modinfo tls >/dev/null 2>&1; then echo tls=yes; else echo tls=no; fi; \
              if command -v systemctl >/dev/null; then echo systemd=yes; else echo systemd=no; fi",
-            marker = quote(&format!("{}/shoal-meta.json", layout.data())),
         );
         let output = host.run(&script)?;
         let facts: std::collections::HashMap<&str, &str> = output
@@ -182,9 +219,9 @@ impl Deployment {
             }
             step(Some(&node.name), "wiping the node that was there");
             host.run(&format!(
-                "sudo -n systemctl disable --now {unit} 2>/dev/null || true; sudo -n rm -rf {data} {tls}",
+                "sudo -n systemctl disable --now {unit} 2>/dev/null || true; sudo -n rm -rf {roots} {tls}",
                 unit = quote(&self.inventory.unit_name()),
-                data = quote(&layout.data()),
+                roots = quoted(&node.storage.roots()),
                 tls = quote(&layout.tls()),
             ))?;
             claimed = false;
@@ -236,40 +273,54 @@ impl Deployment {
         let server = self.inventory.server_name()?;
         // the directories, owned by the user the node runs as
         step(Some(&node.name), &format!("staging {} for {}", layout.dir, facts.user));
+        // a storage root outside the remote directory is handed over on its own (F53)
+        let roots = quoted(&node.storage.roots());
         host.run(&format!(
-            "set -e; sudo -n mkdir -p {bin} {data} {tls}; sudo -n chown -R {user}: {dir}; sudo -n chmod 700 {tls}",
+            "set -e; sudo -n mkdir -p {bin} {roots} {tls}; sudo -n chown -R {user}: {dir} {roots}; sudo -n chmod 700 {tls}",
             bin = quote(&format!("{}/bin", layout.dir)),
-            data = quote(&layout.data()),
             tls = quote(&layout.tls()),
             user = quote(&facts.user),
             dir = quote(&layout.dir),
         ))?;
         // the program, copied to the login's own temp dir and checked before it replaces anything,
         // since the node's directory is not the login's to write
-        let binary = layout.binary(&server);
+        let partial = self.push_binary(&host, &node.name)?;
+        install_binary(&host, &partial, &layout.binary(&server), &facts.user)?;
+        // the configuration, which holds a credential and so is the node's alone
+        let conf = render::render(&self.inventory, node, entry, password)?;
+        host.write(&layout.conf(), conf.as_bytes(), 0o600, Some(&facts.user))?;
+        Ok(())
+    }
+
+    /// Copy the inventory's server program to a host's temp dir and check its digest there
+    ///
+    /// Nothing the node runs is touched: the copy lands in the login's own temp dir, which
+    /// the caller installs from once it has judged the program.
+    ///
+    /// # Arguments
+    ///
+    /// * `host` - The host
+    /// * `name` - The node's inventory name, for the refusal
+    ///
+    /// # Errors
+    ///
+    /// When the copy fails or lands with another digest than the local program's.
+    pub(super) fn push_binary(&self, host: &Host, name: &str) -> color_eyre::Result<String> {
+        let server = self.inventory.server_name()?;
+        // the login's own temp dir, since the node's directory is not the login's to write
         let partial = format!("/tmp/shoalctl-{}-{server}.new", self.inventory.name);
         host.copy(&self.inventory.server, &partial)?;
+        // and the bytes that landed are the bytes we meant to send
         let local = digest(&self.inventory.server)?;
         let remote = host.run(&format!("sha256sum {}", quote(&partial)))?;
         let remote = remote.split_whitespace().next().unwrap_or_default();
         if remote != local {
             bail!(
-                "{partial} on {} has digest {remote}, but {} has {local}",
-                node.name,
+                "{partial} on {name} has digest {remote}, but {} has {local}",
                 self.inventory.server.display()
             );
         }
-        host.run(&format!(
-            "set -e; sudo -n install -o {user} -g {user} -m 755 {partial} {binary}.new; \
-             sudo -n mv -f {binary}.new {binary}; rm -f {partial}",
-            user = quote(&facts.user),
-            partial = quote(&partial),
-            binary = quote(&binary),
-        ))?;
-        // the configuration, which holds a credential and so is the node's alone
-        let conf = render::render(&self.inventory, node, entry, password)?;
-        host.write(&layout.conf(), conf.as_bytes(), 0o600, Some(&facts.user))?;
-        Ok(())
+        Ok(partial)
     }
 
     /// Claim a node's directory on its host and read back who it is
@@ -472,16 +523,23 @@ impl Deployment {
         let layout = self.layout();
         let unit_name = self.inventory.unit_name();
         for spec in &self.inventory.nodes {
-            step(Some(&spec.name), &format!("removing {unit_name} and {}", layout.dir));
+            // the directories this node's data was given, which need no address to resolve
+            let (storage, _) = self.inventory.resolve_storage(spec);
+            let roots = storage.roots();
+            step(
+                Some(&spec.name),
+                &format!("removing {unit_name}, {} and {}", layout.dir, roots.join(", ")),
+            );
             let host = Host {
                 target: spec.target().to_string(),
             };
             host.run(&format!(
                 "sudo -n systemctl disable --now {unit} 2>/dev/null || true; \
                  sudo -n rm -f /etc/systemd/system/{unit}; sudo -n systemctl daemon-reload; \
-                 sudo -n systemctl reset-failed {unit} 2>/dev/null || true; sudo -n rm -rf {dir}",
+                 sudo -n systemctl reset-failed {unit} 2>/dev/null || true; sudo -n rm -rf {dir} {roots}",
                 unit = quote(&unit_name),
                 dir = quote(&layout.dir),
+                roots = quoted(&roots),
             ))?;
         }
         // and the local state, authority and all
@@ -1004,12 +1062,44 @@ impl Deployment {
     }
 }
 
+/// Install a program pushed by `push_binary` over a node's program and delete the push
+///
+/// The program is installed beside its target and renamed over it, so a node running the
+/// old one keeps its inode and a crash leaves one whole program or the other.
+///
+/// # Arguments
+///
+/// * `host` - The host
+/// * `partial` - Where `push_binary` left the program
+/// * `binary` - The node's program
+/// * `user` - The user the node runs as, who owns it
+///
+/// # Errors
+///
+/// When the install or the rename fails.
+pub(super) fn install_binary(
+    host: &Host,
+    partial: &str,
+    binary: &str,
+    user: &str,
+) -> color_eyre::Result<()> {
+    // beside the target first, then over it in one rename
+    host.run(&format!(
+        "set -e; sudo -n install -o {user} -g {user} -m 755 {partial} {binary}.new; \
+         sudo -n mv -f {binary}.new {binary}; rm -f {partial}",
+        user = quote(user),
+        partial = quote(partial),
+        binary = quote(binary),
+    ))?;
+    Ok(())
+}
+
 /// The sha256 of a local file as hex, which is what `sha256sum` prints
 ///
 /// # Arguments
 ///
 /// * `path` - The file
-fn digest(path: &Path) -> color_eyre::Result<String> {
+pub(super) fn digest(path: &Path) -> color_eyre::Result<String> {
     // read it whole: a server program is tens of megabytes
     let bytes = std::fs::read(path).wrap_err_with(|| format!("failed to read {}", path.display()))?;
     let hash = Sha256::digest(&bytes);
@@ -1043,7 +1133,7 @@ pub fn members_ready(model: &ClusterModel, ids: &[NodeId], voters: usize) -> boo
 /// * `shoal` - The admin client
 /// * `ids` - The nodes that have to be up
 /// * `voters` - How many voters the control group has to have
-async fn wait_for_members<S>(
+pub(super) async fn wait_for_members<S>(
     shoal: &Arc<Shoal<S>>,
     ids: &[NodeId],
     voters: usize,

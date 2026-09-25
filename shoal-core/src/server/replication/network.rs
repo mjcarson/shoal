@@ -234,6 +234,38 @@ impl ReplicationLink {
         payload: Vec<u8>,
         deadline: Duration,
     ) -> Result<Vec<u8>, RpcFailure> {
+        // the peer is given exactly as long as this side waits
+        self.rpc_budgeted(kind, group, target_shard, version, payload, deadline, deadline)
+            .await
+    }
+
+    /// Send one RPC telling the peer one budget, and wait for its answer for another
+    ///
+    /// A peer that acts on a request until its budget runs out and then answers needs this side
+    /// to wait past that budget, or its answer always loses the race to this side's timer and a
+    /// peer that was up and answering is reported as having timed out
+    /// ([Resolved #128](../../../../docs/src/appendix/resolved/hop-deadline-margin.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - Which RPC this is
+    /// * `group` - The group it is for
+    /// * `target_shard` - The shard on the peer that hosts the group
+    /// * `version` - The version the payload is encoded at, or none for a body the same at every version
+    /// * `payload` - Its serialized request
+    /// * `budget` - How long the peer is told it has
+    /// * `deadline` - How long to wait for an answer, no shorter than `budget`
+    #[allow(clippy::too_many_arguments)]
+    pub async fn rpc_budgeted(
+        &self,
+        kind: ReplicateKind,
+        group: GroupId,
+        target_shard: u16,
+        version: Option<u8>,
+        payload: Vec<u8>,
+        budget: Duration,
+        deadline: Duration,
+    ) -> Result<Vec<u8>, RpcFailure> {
         // mint an id and a oneshot for the answer
         let id = self.next_id.get();
         self.next_id.set(id.wrapping_add(1));
@@ -241,7 +273,7 @@ impl ReplicationLink {
         self.pending.borrow_mut().insert(id, tx);
         // truncation cannot happen for any deadline a replication RPC uses
         #[allow(clippy::cast_possible_truncation)]
-        let deadline_ms = deadline.as_millis().min(u128::from(u32::MAX)) as u32;
+        let deadline_ms = budget.as_millis().min(u128::from(u32::MAX)) as u32;
         let head = ReplicateRequestHead {
             id,
             group: group.0,
@@ -673,6 +705,27 @@ impl ShardNetwork {
     }
 }
 
+/// The most a forwarded proposal holds back from the leader's budget for its answer's trip home
+const HOP_MARGIN: Duration = Duration::from_millis(250);
+
+/// How long a leader is told it has for a proposal the forwarder waits `remaining` for
+///
+/// A tenth of what is left, never more than [`HOP_MARGIN`], is kept back for the answer to
+/// travel home, so a leader that did not commit in time says so before the forwarder's own
+/// timer fires. With the whole budget handed on, the two timers were the same and the
+/// forwarder's always won: a leader that was up and answering reached the client as "the
+/// replication rpc timed out" ([Resolved #128](../../../../docs/src/appendix/resolved/hop-deadline-margin.md)).
+///
+/// # Arguments
+///
+/// * `remaining` - How long the forwarder will wait for the leader's answer
+#[must_use]
+pub fn hop_budget(remaining: Duration) -> Duration {
+    // a tenth of the budget, capped, so a short deadline is not eaten by a fixed margin
+    let margin = (remaining / 10).min(HOP_MARGIN);
+    remaining.saturating_sub(margin)
+}
+
 /// The network to one member on one node, which a group's peer wraps
 pub struct ShardPeer {
     /// Who it reaches
@@ -695,6 +748,9 @@ impl ShardPeer {
 
     /// Send a proposal to the member and wait for its answer
     ///
+    /// The member is told [`hop_budget`] of `deadline`, so a leader that cannot commit in time
+    /// answers why before this side gives up on it.
+    ///
     /// # Arguments
     ///
     /// * `group` - The group
@@ -710,8 +766,23 @@ impl ShardPeer {
         payload: Vec<u8>,
         deadline: Duration,
     ) -> Result<Vec<u8>, RpcFailure> {
-        self.rpc(ReplicateKind::Propose, group, payload, deadline)
-            .await
+        // the member is told less than this side waits, so its answer arrives before our timer
+        let Some(link) = self.network.link(self.target.node) else {
+            return Err(RpcFailure::Unreachable(format!(
+                "{} is not a member the map knows",
+                self.target.node
+            )));
+        };
+        link.rpc_budgeted(
+            ReplicateKind::Propose,
+            group,
+            self.target.shard,
+            None,
+            payload,
+            hop_budget(deadline),
+            deadline,
+        )
+        .await
     }
 
     /// Ask the member, which should be the group's leader, for a read barrier
@@ -1477,7 +1548,7 @@ impl std::error::Error for LinkFailed {}
 
 #[cfg(test)]
 mod tests {
-    use super::RateLimiter;
+    use super::{hop_budget, RateLimiter, HOP_MARGIN};
     use std::time::{Duration, Instant};
 
     /// The bucket admits a second's worth at once, then paces at the rate; zero is unlimited
@@ -1504,5 +1575,25 @@ mod tests {
         // zero is no limit at all
         let mut unlimited = RateLimiter::new(0);
         assert_eq!(unlimited.take(u64::MAX, start), None);
+    }
+
+    /// A hop keeps a tenth of its budget back for the answer, capped, and never underflows
+    /// ([Resolved #128](../../../../docs/src/appendix/resolved/hop-deadline-margin.md))
+    #[test]
+    fn a_hop_leaves_the_leader_less_than_it_waits() {
+        // a short budget loses a tenth, not the whole fixed margin
+        assert_eq!(hop_budget(Duration::from_millis(500)), Duration::from_millis(450));
+        // a long one loses the cap and no more
+        assert_eq!(
+            hop_budget(Duration::from_secs(5)),
+            Duration::from_secs(5) - HOP_MARGIN
+        );
+        // whatever is left, the leader is told strictly less while there is anything to tell
+        for millis in [1u64, 9, 10, 100, 2_499, 2_500, 60_000] {
+            let remaining = Duration::from_millis(millis);
+            assert!(hop_budget(remaining) < remaining, "{remaining:?}");
+        }
+        // nothing left is nothing handed on, not an underflow
+        assert_eq!(hop_budget(Duration::ZERO), Duration::ZERO);
     }
 }
