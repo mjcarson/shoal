@@ -471,7 +471,7 @@ was for with a fatal storage error, and the shard's probe marks each copy dead "
 restarts" (`probe_cores`). Nothing refuses writes while the disk nears full: `disk_reserve` guards
 snapshot installs, not appends. And a write coordinated through the node goes to its own dead core,
 failing `Unavailable` for as long as the node runs, rather than hopping to the group's new leader.
-Found on the lab ([cluster testing](../cluster-testing/correctness.md#fill-a-node-s-disk)), where
+Found on the lab ([cluster testing](../cluster-testing/correctness.md#fill-a-nodes-disk)), where
 a loader connected to every member stopped at those writes. Nothing was corrupted: freed and
 restarted, the node caught up exactly. The fixes it needs are three and separate: shed appends
 below a reserve with a retriable refusal, hop a write whose local core is dead to the group's

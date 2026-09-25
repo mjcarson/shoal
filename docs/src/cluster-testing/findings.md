@@ -34,8 +34,8 @@ than Shoal says so.
 | [153](../appendix/resolved/install-dir-absent.md) | [Back up, destroy and restore](correctness.md#back-up-destroy-and-restore) | A restore killed a shard: its install clean-up synced an install directory the shard had never made; one group's restore failed with it | **Fixed** |
 | [154](../appendix/resolved/admin-hides-failed-groups.md) | [Back up, destroy and restore](correctness.md#back-up-destroy-and-restore) | `cluster admin` said the restore was done with a group failed | **Fixed.** The command fails naming the groups |
 | [155](../appendix/known-issues.md#155-a-restore-whose-group-failed-cannot-be-finished) | [Back up, destroy and restore](correctness.md#back-up-destroy-and-restore) | A restore with a failed group cannot be finished, only redone on a new cluster | **Filed** |
-| [156](../appendix/known-issues.md#156-a-full-disk-stops-every-group-on-a-node-until-it-is-restarted) | [Fill a node's disk](correctness.md#fill-a-node-s-disk) | A full disk killed every group core on the node, and writes through it failed until a restart; nothing was corrupted | **Filed** |
-| [157](../appendix/known-issues.md#157-cluster-destroy-fails-on-a-storage-path-that-is-a-mount-point) | [Fill a node's disk](correctness.md#fill-a-node-s-disk) | `cluster destroy` could not remove a storage path that is a mount point | **Filed** |
+| [156](../appendix/known-issues.md#156-a-full-disk-stops-every-group-on-a-node-until-it-is-restarted) | [Fill a node's disk](correctness.md#fill-a-nodes-disk) | A full disk killed every group core on the node, and writes through it failed until a restart; nothing was corrupted | **Filed** |
+| [157](../appendix/known-issues.md#157-cluster-destroy-fails-on-a-storage-path-that-is-a-mount-point) | [Fill a node's disk](correctness.md#fill-a-nodes-disk) | `cluster destroy` could not remove a storage path that is a mount point | **Filed** |
 
 ## Deployment and lab findings
 
