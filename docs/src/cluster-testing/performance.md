@@ -108,6 +108,22 @@ its leader's lease, `election_timeout_max`, has not expired since the last ackno
 earliest election is the lease plus an election timeout, 15 to 20 s at the default. The documented
 objective of base + 2 s is not what that arithmetic gives.
 
-*Not yet measured*: the same kill at shorter bases, and whether a shorter base causes elections
-nobody wanted under this lab's load, where titan and hyperion spend a third of their time in
-iowait.
+Each base was measured on a fresh bootstrap (`target/lab/failover-test.sh`, with the inventory's
+new `failover` key): a full load, a minute of the mixed bench with elections counted from every
+node's journal, and then the kill of whichever node led the most groups, in the middle of the
+mixed bench.
+
+| Base | Writes refused after the kill | Elections in a minute under load | Full load | Mixed bench |
+| --- | --- | --- | --- | --- |
+| 1 s | about 4 s (t=16–19), then a few hundred as leads went back | 0 | 23,200 rows/s | 108,000 ops/s |
+| 2 s | about 8 s, then a two second stall | 0 | 30,300 rows/s | 118,000 ops/s |
+| 5 s (default) | about 16 s (t=15–31) | 0 | 41,100 rows/s | 118,000 ops/s |
+
+Failover is three to four times the base, as the lease-plus-election arithmetic says: the objective
+of base + 2 s in [C7](../distributed/failover.md) does not hold at any base. No base caused an
+unwanted election under this load. But a shorter base cost write throughput: repeated loads at 1 s
+ran at 19,800–24,200 rows a second against 40,200–46,500 at 5 s, with titan syncing and writing
+half as much. The cause is not isolated. It is filed as
+[O64](../appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab),
+the default stays at 5 s, and a planned restart no longer pays the window at all
+([Resolved #139](../appendix/resolved/leadership-handoff-on-stop.md)).

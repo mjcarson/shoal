@@ -201,6 +201,7 @@ so they get worse by existing longer rather than under load.
 | **B19** | [**O61**](#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page) — a fast device syncs the WAL in batches too small to fill a page | Measured on the lab — 6.8× the device writes of the slower hosts for the same replicated rows, 5.6k `fdatasync`s a second against 680 | S–M | the lab's insert `bench` with disk counters | Latency for wear | yes, on the lab |
 | ~~**B20**~~ | ~~[**O62**](#o62-every-compaction-rewrites-the-shards-whole-archive-map) — every compaction rewrites the shard's whole archive map~~ **done**, measured and kept | Measured — 70% of a node's writes under load, in bursts that stalled its fsyncs | S | the lab's mixed `bench` with bytes per file | A longer replay at start | it was |
 | ~~**B21**~~ | ~~[**O63**](#o63-leadership-never-returns-to-a-groups-placement-primary) — leadership never returns to a group's placement primary~~ **done**, measured and kept | Measured — one node leading every group cost about a sixth of the throughput and a quarter of the write p99 | S | the lab's mixed `bench`, skewed against spread | One transfer per group handed back | it was |
+| **B22** | [**O64**](#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab) — a shorter failover base halves write throughput on the lab | Measured — 1 s: 20–24k rows/s and 4 s failover; 5 s: 40–46k rows/s and 16 s failover | ? | the lab's load at each base | Crash failover against write throughput | yes, on the lab |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -2924,3 +2925,41 @@ Against every group led by titan, two runs each and the first after the upgrade 
 second, because europa is the fastest host. Weighting the primaries by a member's capacity, which
 the planner already reads for data placement, would do better than an even spread on unequal
 hardware. It is filed in [todos](todos.md#leadership-is-spread-evenly-whatever-each-member-can-do).
+
+### O64. A shorter failover base halves write throughput on the lab
+
+| | |
+| --- | --- |
+| **Rank** | **B22** — measured on the lab, cause not isolated, default kept |
+| **Impact** | Measured — the full TMDB load at `primary_failover_after` 1 s ran at 19,800–24,200 rows a second in four runs, at 2 s at 30,300, and at the default 5 s at 40,200–46,500 in four runs. Crash failover went the other way: about 4 s of refused writes at 1 s, 8 s at 2 s, 16 s at 5 s |
+| **Difficulty** | Unknown until the cause is found |
+| **Depends on** | finding the cause |
+| **Blocks** | a shorter default failover base |
+| **Tradeoff** | Crash failover time against write throughput, on this hardware |
+| **Benchmark** | `target/lab/failover-test.sh` and `profile-load.sh` in the [cluster testing](../cluster-testing/performance.md#failover-time-against-primary_failover_after) chapter |
+
+Found by the [distributed cluster testing](../cluster-testing/performance.md#failover-time-against-primary_failover_after)
+chapter while measuring failover against the base. A group's timers derive from the base alone
+(`group_config`): a heartbeat every tenth of it, an election timeout of one to two bases, and a
+leader lease of two. The mixed bench barely moved (108,000 operations a second at 1 s, 118,000 at
+2 s and at 5 s), and no election happened under load at any base. The write-only load halved.
+
+What was measured on titan during a load, over the same 10 seconds:
+
+| Base | WAL `fdatasync`s | WAL bytes | user / system / idle / iowait |
+| --- | --- | --- | --- |
+| 5 s | 3,576 | 107 MB | 36 / 32 / 12 / 20 |
+| 1 s | 1,836 | 51 MB | 22 / 41 / 9 / 28 |
+
+At 1 s the node wrote and synced half as much. Its disk was busier and its cpu spent more of its
+time in the kernel, with context switches up from 25,000 to 27,700 a second on half the work. A
+`perf` profile of titan at 1 s is flat. The allocator leads (`_mi_page_malloc` 4.4%), and glommio's
+`insert_timer` appears at 0.5%, which it does not in the 5 s profile. What is ruled out:
+heartbeats do not fsync (an empty append completes without a batch), and the committed index is
+staged, not waited on. The leading hypotheses are the heartbeat timers themselves, ten a second
+per follower per group, and a follower applying commits in batches a fifth the size.
+
+**Not applied.** The default stays at 5 s: a planned stop no longer waits for failover at all
+([Resolved #139](resolved/leadership-handoff-on-stop.md)), and only a crash pays the window. An
+operator who prefers the shorter window can set `failover` in the inventory, now knowing its cost
+on hardware like this.

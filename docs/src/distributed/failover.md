@@ -203,7 +203,7 @@ Recovery time is never attributed to one timer alone.
 
 ## Limitations
 
-A failover completes in two to three times the base, not base plus two seconds. A returning
+A failover completes in ~~two to three times~~ three to four times the base, not base plus two seconds: on the physical lab at 1, 2 and 5 seconds, writes to a killed leader's groups were refused for about 4, 8 and 16 seconds ([cluster testing](../cluster-testing/performance.md#failover-time-against-primary_failover_after)). A returning
 leader waits out its old lease. Leadership is never moved. A snapshot is per group, so a
 returning node installs every tablet its replica set shares. A dead leader's stream may still
 be installed beside a new leader's (two generations in flight). A resume survives a lane cut,
