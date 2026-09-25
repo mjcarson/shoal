@@ -38,6 +38,17 @@ node two's wal could not be written for 2890 writes and the node is still up
 
 With the fix: `node two stopped after 20 writes: Some("exited")`, and node zero's writes went on.
 
+**On the lab**, with the fix deployed and hyperion's storage on a 2 GiB filesystem that the load
+filled: hyperion exited 115 ms after its first failed batch, failed each start while the disk was
+full (systemd's restart count 3 to 12 in a minute), and started on its own at the next restart
+after the filesystem grew. Its copy then read back whole at `One`. See
+[fill a node's disk](../../cluster-testing/correctness.md#fill-a-nodes-disk).
+
+The first exit on the lab went through a different write from the fixture's: shard 3's group
+checkpoint, which already ended its shard on failure, got there a few milliseconds before the
+WAL check did. Both paths end in the same place. The WAL check is still what stops a node whose
+only failed write is a WAL batch, which is what the fixture pins.
+
 ## The fix
 
 On every segment sweep, after the core probe, the shard checks its WAL's `failure()`. A WAL that
