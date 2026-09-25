@@ -438,8 +438,8 @@ an install when it lands, and its sender counts the transfer only when the end's
 it, so a read of both in between finds one more install than transfers. The test now waits up
 to ten seconds for the senders' count.
 The first suite run after [#155](resolved/restore-retries-unreachable.md) failed its new test,
-`a_restore_rides_out_an_unreachable_member`, which passes alone (four of four) and passed in the
-next full suite run. That run's log kept only the summary line, so the failure's message was not
+`a_restore_rides_out_an_unreachable_member`, which passes alone (ten of ten, four at the time and
+six more after the disk-full rerun on the lab) and passed in the next full suite run. That run's log kept only the summary line, so the failure's message was not
 captured. The test waits out a 25 s isolation with a 20 s phase deadline and a 5 s retry pause, and
 the margins are what a loaded host erodes.
 The `shoal-core` change for [#148](resolved/stale-intent-log-tail.md) was followed by one failure
