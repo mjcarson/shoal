@@ -3314,6 +3314,12 @@ fn group_config(
     let config = Config {
         cluster_name: format!("group-{group}"),
         heartbeat_interval: (base / 10).max(10),
+        // a follower that acknowledged replication within a heartbeat interval is not sent a
+        // heartbeat as well: the acknowledgement proves the same liveness and moves the lease
+        // the same way ([O65](../../../../docs/src/appendix/optimizations.md#o65-heartbeats-to-followers-that-just-acknowledged-replication)).
+        // openraft needs interval + this + a tick under the election timeout, and a tenth, a
+        // tenth and a fifth of a tenth are
+        heartbeat_min_interval: Some((base / 10).max(10)),
         election_timeout_min: base,
         election_timeout_max: base * 2,
         enable_leader_restore: Some(false),
@@ -3843,4 +3849,26 @@ mod tests {
             grace
         ));
     }
+    /// The timers a group runs with are the ones derived from the base, not openraft's defaults (O65)
+    ///
+    /// `group_config` falls back to openraft's defaults if its config does not validate, which
+    /// would silently drop every timer derived from the failover base; heartbeat suppression
+    /// adds a constraint (interval + minimum interval + a tick under the election timeout) that
+    /// could be the one that fails ([O65](../../../../docs/src/appendix/optimizations.md#o65-heartbeats-to-followers-that-just-acknowledged-replication)).
+    #[test]
+    fn a_group_config_keeps_the_timers_its_base_derives() {
+        let cluster = crate::server::conf::Cluster::default();
+        for base in [100u64, 1_000, 5_000, 30_000] {
+            let config = super::group_config(&cluster, base, crate::shared::identity::GroupId(7));
+            assert_eq!(config.election_timeout_min, base, "base {base}");
+            assert_eq!(config.election_timeout_max, base * 2, "base {base}");
+            assert_eq!(config.heartbeat_interval, base / 10, "base {base}");
+            assert_eq!(
+                config.heartbeat_min_interval,
+                Some(base / 10),
+                "base {base}: heartbeat suppression was not applied"
+            );
+        }
+    }
+
 }

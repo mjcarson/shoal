@@ -2960,6 +2960,22 @@ heartbeats do not fsync (an empty append completes without a batch), and the com
 staged, not waited on. The leading hypotheses are the heartbeat timers themselves, ten a second
 per follower per group, and a follower applying commits in batches a fifth the size.
 
+**Timers, measured after.** A count of titan's io_uring submissions by opcode over ten seconds of a
+load:
+
+| Base | Rows/s | `TIMEOUT` | `ASYNC_CANCEL` | Timer submissions per row |
+| --- | --- | --- | --- | --- |
+| 5 s | 43,900 | 84,700/s | 82,700/s | 3.8 |
+| 1 s | 18,700 | 115,300/s | 113,700/s | 12.2 |
+
+glommio arms an io_uring timeout for every timer and cancels it when the future completes first.
+openraft ticks each group every 13/64 of a heartbeat interval, about 20 ms per group at a 1 s base,
+and times out every RPC, heartbeat and replication wait through the runtime Shoal gives it. At 1 s
+a node does three times the timer work per row, and even at 5 s a four core Zen1 host submits
+170,000 timer operations a second. That is the leading explanation, not a proven one: heartbeat
+suppression ([O65](#o65-heartbeats-to-followers-that-just-acknowledged-replication)) did not
+change it, and nothing here moved the tick.
+
 **Not applied.** The default stays at 5 s: a planned stop no longer waits for failover at all
 ([Resolved #139](resolved/leadership-handoff-on-stop.md)), and only a crash pays the window. An
 operator who prefers the shorter window can set `failover` in the inventory, now knowing its cost
@@ -2969,7 +2985,7 @@ on hardware like this.
 
 | | |
 | --- | --- |
-| **Rank** | **B23** — measured in shape on the lab, being tried |
+| **Rank** | ~~**B23**~~ **done** — applied, no measurable effect, kept |
 | **Impact** | Indicated — every group's leader heartbeats every follower every tenth of the failover base, whether or not replication just proved the follower alive: at the default base, 36 groups × 2 followers × 2 a second on a three node cluster, and five times that at a 1 s base, where the load ran at half the throughput ([O64](#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)). In a partition every missed one is an openraft warning, and journald on the lab suppressed 43,954 of a node's lines |
 | **Difficulty** | S — openraft 0.10's `heartbeat_min_interval`, off by default |
 | **Depends on** | nothing |
@@ -2978,4 +2994,24 @@ on hardware like this.
 | **Benchmark** | the lab's full load at 1 s and at 5 s ([O64](#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)) |
 
 Found by the [distributed cluster testing](../cluster-testing/correctness.md#partition-one-node)
-chapter. Being tried; the outcome goes here.
+chapter.
+
+**Applied:** `group_config` sets `heartbeat_min_interval` to the heartbeat interval, so a follower
+that acknowledged replication within the last interval is not also sent a heartbeat. openraft
+requires the interval, this and one tick to fit under the minimum election timeout, which a tenth,
+a tenth and a fiftieth of the base do. `group_config` falls back to openraft's defaults when a
+config does not validate, so `a_group_config_keeps_the_timers_its_base_derives` checks the derived
+timers survive at bases from 100 ms to 30 s.
+
+**Outcome: no measurable effect on throughput.** Two loads each, fresh bootstraps:
+
+| Base | Before | With suppression |
+| --- | --- | --- |
+| 5 s | 40,200–46,500 rows/s | 35,800 (the first after a bootstrap) and 43,000 rows/s |
+| 1 s | 19,800–24,200 rows/s | 18,600 and 18,800 rows/s |
+
+So heartbeats are not what makes a short base slow
+([O64](#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab) has what was found instead).
+It does nothing in a partition either, where the heartbeats that fail are to a follower that
+acknowledges nothing. **Kept**, as the configuration openraft documents for sustained writes, at no
+measured cost. The log flood in a partition is not addressed by it.
