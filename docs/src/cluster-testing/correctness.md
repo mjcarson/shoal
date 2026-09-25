@@ -422,3 +422,25 @@ was loaded.
 [known issue 156](../appendix/known-issues.md#156-a-full-disk-stops-every-group-on-a-node-until-it-is-restarted).
 Cleaning up also found `cluster destroy` unable to remove a storage path that is itself a mount
 point ([known issue 157](../appendix/known-issues.md#157-cluster-destroy-fails-on-a-storage-path-that-is-a-mount-point)).
+
+## 5. Regression pass
+
+The fault suite again on the rebuilt cluster with every fix above deployed (#143 to #154, O61 to
+O68), one 60 s mixed bench per fault, each verified through every member
+(`target/lab/suite.sh`):
+
+| Fault | Acknowledged inserts | Lost | Seconds at zero | Refusals |
+| --- | --- | --- | --- | --- |
+| Kill the node leading the most groups (hyperion) | 676,227 | 0 | 0 | 110,167 `NotLeader`, 20,495 `Unavailable`, 603 `OutcomeUnknown` |
+| Partition hyperion by dropped packets, 20 s | 595,558 | 0 | 3, at the partition's start | 340,039 `NotLeader`, 1,493 `OutcomeUnknown` |
+| No fault (the pause's first run, which found no leader to pause) | 644,994 | 0 | 0 | none |
+| Kill every node at once | 353,107 | 0 | 13 | 37,378 `NotLeader`, 573 `OutcomeUnknown` |
+| Pause the control leader (hyperion), 20 s | 592,733 | 0 | 2, at the pause's start | 99,953 `NotLeader`, 773 `OutcomeUnknown` |
+
+Every acknowledged insert was read back through every member after every fault. No node needed
+more than the one restart its fault gave it, and after the pause every member read `up`. What
+remains is filed: the first two to three seconds of a silent partition or a pause
+([#143](../appendix/resolved/silent-partition-hops.md#still-open)), a full disk
+([156](../appendix/known-issues.md#156-a-full-disk-stops-every-group-on-a-node-until-it-is-restarted)),
+and a restore that fails part way
+([155](../appendix/known-issues.md#155-a-restore-whose-group-failed-cannot-be-finished)).
