@@ -230,4 +230,27 @@ did not touch it. The elections are not a load problem. They continue after the 
 hyperion's groups kept their election timers running through the partition, and on the heal it
 campaigned at a higher term and made healthy leaders on europa and titan step down.
 
-**Verdict:** correctness **pass**, availability **improved and not yet good enough**.
+**With [#144](../appendix/resolved/post-heal-elections.md) fixed** (Pre-Vote on every group,
+`target/lab/t05d-partition-prevote`, rolled onto the running cluster by `cluster upgrade`), the
+same test:
+
+| Seconds | Before #144 (t05c) | With Pre-Vote (t05d) |
+| --- | --- | --- |
+| Partition, first 2–3 s | 0 | 0 (#143's *Still open*) |
+| Partition, the rest | 5,000–121,000 ops/s, hyperion's groups refused | 27,000–127,000 ops/s, hyperion's groups refused |
+| From the heal for 20 s | 0–85,000, zero for 1–2 s at a time, writes at 5 s | 63,000–84,000, never zero |
+| journald suppressions | 50,000–60,000 per node | 0 |
+
+All 529,759 acknowledged inserts were read back through each of the three members. The fixture
+test that reproduced #144 showed hyperion's terms staying where they were while it was cut off.
+On the lab no leader on europa or titan stepped down at a higher term from hyperion.
+
+**What the rerun still showed.** Every second after the heal, a few hundred writes took exactly
+the 5 s write timeout and then succeeded. Those were writes coordinated on hyperion while its
+copies were waiting for or installing snapshots: the coordinator waited for its own copy to apply
+an entry it could not apply. Fixed as [#145](../appendix/resolved/apply-wait-on-a-stalled-copy.md).
+The first two to three seconds of a silent partition still stop pipelined clients, while the hops
+to the cut-off node wait for the two second silence to be judged; that remains
+[#143](../appendix/resolved/silent-partition-hops.md#still-open)'s open part.
+
+**Verdict:** correctness **pass**, availability **good after the first three seconds**.

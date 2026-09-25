@@ -17937,3 +17937,87 @@ async fn a_silently_cut_node_rejoins_without_elections() -> Result<(), FixtureEr
     write_note_eventually(&one, 14_260, "after", Duration::from_secs(20)).await?;
     Ok(())
 }
+
+/// A write accepted by a node whose copy is installing a snapshot is answered when it commits (item 145)
+///
+/// A coordinator whose own copy of the group follows answers a committed write only once its
+/// copy has applied it, so a read on the same node sees it. A copy installing a snapshot
+/// applies nothing until the install ends, so every write through it waited out the whole write
+/// timeout and was then answered as a success. On the lab, after a partition healed, a steady
+/// few hundred writes a second took exactly five seconds. The wait now ends when the copy is
+/// installing, or stops applying
+/// ([Resolved #145](../../docs/src/appendix/resolved/apply-wait-on-a-stalled-copy.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_through_an_installing_copy_is_answered_at_commit() -> Result<(), FixtureError> {
+    let write_timeout = Duration::from_secs(3);
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(16)
+        .write_timeout(write_timeout)
+        .query_deadline(Duration::from_secs(8))
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    // a base every node holds, then enough to leave node two behind the purge point
+    for key in 22_000..22_010u64 {
+        write_note(&addr0, key, &format!("old-{key}")).await.map_err(ok)?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    leave_behind_purge(&mut cluster, 2, 0, 22_000, 100, "new").await?;
+    // back, with every install held well past the write timeout
+    let mut staged = cluster.staged(2).clone();
+    staged.install_hold_ms = Some(10_000);
+    cluster.restart_with(2, NodeKind::Server, Some(staged))?;
+    cluster.wait_joined(&[2])?;
+    let addr2 = cluster.node(2).endpoints.client.to_string();
+    // a key of a Note group that node two is installing
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let key = loop {
+        let view = groups_of(&mut cluster, 2)?;
+        let tablets = view["shards"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
+            .find(|group| group["table_name"] == "Note" && group["installing"] == true)
+            .map(|group| group["tablet_ids"].as_array().cloned().unwrap_or_default());
+        if let Some(tablets) = tablets {
+            let key = (22_000..22_100u64).find(|key| {
+                tablets
+                    .iter()
+                    .any(|tablet| tablet.as_u64() == Some(tablet_of(*key) as u64))
+            });
+            if let Some(key) = key {
+                break key;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no Note group was ever installing on node two: {view}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    // a write through node two: it hops to the leader, commits there, and is answered
+    let client = Shoal::<TestDbClient>::new(&addr2).await.map_err(ok)?;
+    let sent = Instant::now();
+    let outcome = client
+        .send_one(Note {
+            key,
+            text: "during".to_string(),
+        })
+        .await;
+    let waited = sent.elapsed();
+    eprintln!("a write through an installing copy was answered in {waited:?}: {outcome:?}");
+    outcome.map_err(ok)?;
+    assert!(
+        waited < Duration::from_secs(1),
+        "a write through an installing copy waited {waited:?}, where the write timeout is {write_timeout:?}"
+    );
+    // and the leader has it
+    wait_note(&addr0, key, Some("during"), Duration::from_secs(5)).await?;
+    Ok(())
+}

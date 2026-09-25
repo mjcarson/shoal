@@ -24,6 +24,7 @@ than Shoal says so.
 | [142](../appendix/known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host) | The suite run after 139–141 and O62 | Two fixture tests fail intermittently on an idle host; a restarted member's checkpoint stays at zero | **Open**, with rates |
 | [143](../appendix/resolved/silent-partition-hops.md) | [Partition one node](correctness.md#partition-one-node) | With one node cut off by dropped packets, every write hopped to it waited the whole write timeout, and pipelined clients stopped: zero throughput cluster-wide | **Fixed.** A hop over a link silent for two seconds is refused at once |
 | [144](../appendix/resolved/post-heal-elections.md) | [Partition one node](correctness.md#partition-one-node) | The cut-off node kept standing for election at a term per timeout, and on the heal unseated healthy leaders on both other nodes: stalls for about 20 s after the partition ended | **Fixed.** Pre-Vote on every data group and the control group |
+| [145](../appendix/resolved/apply-wait-on-a-stalled-copy.md) | [Partition one node](correctness.md#partition-one-node) | After the heal, writes coordinated on the node catching up were committed at once and then held the whole 5 s write timeout for its copy to apply, which it could not while installing | **Fixed.** The apply wait ends on an installing or stalled copy |
 
 ## Deployment and lab findings
 

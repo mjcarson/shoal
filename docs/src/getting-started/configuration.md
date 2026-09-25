@@ -542,7 +542,7 @@ wherever a node is placed, until M4 replicates.~~ **Since [F40](../features/repl
 the factor is what a tablet is replicated at**: `min(replication_factor, nodes placed)`
 copies, on distinct nodes, and the topology reports the desired factor beside that active
 one; a `Quorum` write is acknowledged once a majority of the group has fsynced it and this
-node applied it, an `All` write once every voter has it, and `One` is refused at startup
+node applied it (or this node's copy is shown not to be applying, [#145](../appendix/resolved/apply-wait-on-a-stalled-copy.md)), an `All` write once every voter has it, and `One` is refused at startup
 naming C5 - as is a persistent table configured `Async` on a cluster node, since a receipt
 that precedes an fsync cannot make a durable quorum. **Since [F41](../features/read-consistency.md)
 `read_consistency` is read**: it is the level a read is served at when neither the bundle nor

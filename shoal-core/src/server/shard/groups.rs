@@ -1510,6 +1510,8 @@ where
         };
         let raft = group.raft.clone();
         let network = replication.network.clone();
+        // this copy's state, which says whether it is installing a snapshot
+        let state = group.state.clone();
         // this node's member of the group: the slot hosting it, not the executor
         // ([F47](../../../../docs/src/features/local-rehome.md))
         let me = group.spec.me(node);
@@ -1529,6 +1531,7 @@ where
             let outcome = propose_through(
                 raft.as_ref(),
                 &network,
+                &state,
                 id,
                 me,
                 command,
@@ -1828,6 +1831,8 @@ where
             .up_since
             .map_or(Duration::ZERO, |since| since.elapsed());
         let _ = origin;
+        // this copy's state, which a proposal's wait for its own apply reads
+        let state = slot.state.clone();
         glommio::spawn_local(async move {
             let answer = match head.kind {
                 ReplicateKind::AppendEntries => match postcard::from_bytes(&payload) {
@@ -1886,7 +1891,7 @@ where
                 ReplicateKind::Propose => match Command::decode(&payload) {
                     Ok(command) => {
                         // one hop only: a proposal that arrived here is not forwarded again
-                        let outcome = propose_through(Some(&raft), &network, group, me, command, deadline, false, all).await;
+                        let outcome = propose_through(Some(&raft), &network, &state, group, me, command, deadline, false, all).await;
                         encode_reply(head.id, &outcome)
                     }
                     Err(error) => ReplicateReply::error(head.id, format!("decoding a proposal: {error}")),
@@ -3552,6 +3557,7 @@ async fn start_group<D: ShoalDatabase>(
 ///
 /// * `raft` - This shard's handle on the group, if it is up
 /// * `network` - The shard's network, for the hop
+/// * `state` - This copy's state, which says whether it is installing a snapshot
 /// * `group` - The group
 /// * `me` - This shard's address
 /// * `command` - The command
@@ -3562,6 +3568,7 @@ async fn start_group<D: ShoalDatabase>(
 async fn propose_through<D: ShoalDatabase>(
     raft: Option<&Raft<DataConfig, GroupMachine<D>>>,
     network: &ShardNetwork,
+    state: &Rc<RefCell<MachineState>>,
     group: GroupId,
     me: ShardAddr,
     command: Command,
@@ -3718,13 +3725,85 @@ async fn propose_through<D: ShoalDatabase>(
     // answers, a follower once the commit reaches it, which is what the wait is for
     if let ProposalOutcome::Answered { index, .. } = &outcome {
         let remaining = deadline.saturating_sub(started.elapsed());
-        let _ = raft
-            .wait(Some(remaining))
-            .applied_index_at_least(Some(*index), "the write applied on this replica")
-            .await;
+        wait_applied_here(raft, state, *index, remaining).await;
     }
     outcome
 }
+
+/// Wait for this copy to apply a committed write, unless it is not applying
+///
+/// A copy that is installing a snapshot applies nothing until the install ends, and one waiting
+/// for a snapshot to begin applies nothing at all. Waiting on either held a committed write for
+/// the whole write timeout and then answered it anyway. So the wait ends when the index is
+/// applied, when the copy is installing, or when its applied index has not moved for two
+/// heartbeat intervals, within which a follower that is keeping up hears the commit. The
+/// write's session token is what a later read is served past either way
+/// ([Resolved #145](../../../../docs/src/appendix/resolved/apply-wait-on-a-stalled-copy.md)).
+///
+/// # Arguments
+///
+/// * `raft` - This copy's handle
+/// * `state` - This copy's state, which says whether it is installing
+/// * `index` - The index the write committed at
+/// * `remaining` - What is left of the write's deadline
+async fn wait_applied_here<D: ShoalDatabase>(
+    raft: &Raft<DataConfig, GroupMachine<D>>,
+    state: &Rc<RefCell<MachineState>>,
+    index: u64,
+    remaining: Duration,
+) {
+    // how long an applied index may stand still before this copy counts as not applying
+    let stall = Duration::from_millis(raft.config().heartbeat_interval.saturating_mul(2));
+    let until = Instant::now() + remaining;
+    // the applied index last seen, and when it last moved
+    let mut seen = applied_of(raft);
+    let mut moved = Instant::now();
+    loop {
+        // applied here: the answer can go
+        if seen >= index {
+            return;
+        }
+        // an install applies nothing until it ends
+        if state.borrow().installing {
+            return;
+        }
+        // out of deadline, or stalled for two heartbeats
+        let now = Instant::now();
+        if now >= until || now.duration_since(moved) >= stall {
+            return;
+        }
+        // wait a little for the apply, then look again
+        let step = APPLY_POLL.min(until - now);
+        let _ = raft
+            .wait(Some(step))
+            .applied_index_at_least(Some(index), "the write applied on this replica")
+            .await;
+        let applied = applied_of(raft);
+        if applied > seen {
+            seen = applied;
+            moved = Instant::now();
+        }
+    }
+}
+
+/// The last index a copy applied, or zero
+///
+/// # Arguments
+///
+/// * `raft` - The copy's handle
+fn applied_of<D: ShoalDatabase>(raft: &Raft<DataConfig, GroupMachine<D>>) -> u64 {
+    // the metrics hold what the state machine last reported
+    let metrics = raft.metrics();
+    let applied = metrics
+        .borrow_watched()
+        .last_applied
+        .as_ref()
+        .map_or(0, |log_id| log_id.index);
+    applied
+}
+
+/// How often a wait for a write's apply here looks again at whether the copy is applying
+const APPLY_POLL: Duration = Duration::from_millis(50);
 
 /// Whether a group has ever voted, as this copy knows it
 ///
