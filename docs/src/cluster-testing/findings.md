@@ -31,6 +31,9 @@ than Shoal says so.
 | [149](../appendix/resolved/node-memory-budget.md) | The O61 experiment, then five-minute memory runs | hyperion and titan were killed by the kernel's OOM killer at 14 GB: the inventory's 8 GiB was every shard's budget, and the budget's counter saw about 100 MB of a 9 GB node | **Fixed.** `resources.node_memory`, judged against the process's resident memory; nodes level at their budget |
 | [150](../appendix/resolved/inline-partition-buckets.md) | A heap profile under load | 3 GB of a 7 GB node was the tables' partition maps, holding every loaded row inline in buckets sized for their peak | **Fixed.** A loaded partition is boxed |
 | [151](../appendix/resolved/purge-ahead-of-its-marker.md) | titan after an OOM kill | titan never started again: a WAL segment had been deleted behind a purge whose marker the kill lost, leaving a hole after the purge point | **Fixed.** Deletion waits for a durable purge point; titan was rebuilt |
+| [153](../appendix/resolved/install-dir-absent.md) | [Back up, destroy and restore](correctness.md#back-up-destroy-and-restore) | A restore killed a shard: its install clean-up synced an install directory the shard had never made; one group's restore failed with it | **Fixed** |
+| [154](../appendix/resolved/admin-hides-failed-groups.md) | [Back up, destroy and restore](correctness.md#back-up-destroy-and-restore) | `cluster admin` said the restore was done with a group failed | **Fixed.** The command fails naming the groups |
+| [155](../appendix/known-issues.md#155-a-restore-whose-group-failed-cannot-be-finished) | [Back up, destroy and restore](correctness.md#back-up-destroy-and-restore) | A restore with a failed group cannot be finished, only redone on a new cluster | **Filed** |
 
 ## Deployment and lab findings
 

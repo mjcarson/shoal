@@ -370,3 +370,33 @@ scripted, added for this test):
 
 **Verdict: pass.** Detection, quarantine and repair behaved as [F44](../features/repair.md) says,
 on real hardware and a real dataset.
+
+### Back up, destroy and restore
+
+A backup of every table from the cluster that held the dataset and the t13g bench's inserts, the
+cluster destroyed, a fresh one bootstrapped, and the backup restored into it
+([runbook 10](../operations/runbooks.md#10-backup-and-restore)), all through `cluster admin`:
+
+1. **Wire version 5 activated** (`cluster upgrade --activate`), which a backup needs.
+2. **`backup /optane/shoal-backup`:** 36 groups `Written` in 2 min 49 s. Each group's leader
+   wrote its file to its own disk: 1.1 GB on each host, 3.2 GB in all.
+3. **Every host's files gathered and copied to every host** with `rsync`, since a restore reads
+   each group's file on that group's new leader. Nothing ships them, as the runbook says.
+4. **`cluster destroy`, `cluster bootstrap`, activate, `restore <dir>/<op>`.**
+
+**First run (t14): a group lost.** The command printed `done` and exited 0. A `verify` against the
+csv found **66,191 movies missing**. The backup's Movie records summed to 7,893,508, the restored
+table held 7,453,644, and the gap of 439,864 was exactly one group's file. On hyperion, shard 1
+had died during the restore, over a clean-up that synced an install directory a restore never
+creates ([#153](../appendix/resolved/install-dir-absent.md)). Its restart reset a peer connection
+at the moment another group's restore was quarantining that member, and that group failed. The
+command did not say so ([#154](../appendix/resolved/admin-hides-failed-groups.md)), and nothing
+could finish the restore short of doing it again on a new cluster
+([known issue 155](../appendix/known-issues.md#155-a-restore-whose-group-failed-cannot-be-finished)).
+
+**With #153 and #154 fixed (t14b):** the same backup restored in 1 min 50 s, with every group
+`Restored` and verified and no node restarted. The table held 7,893,508 Movie partitions and 58,418
+keyword partitions, exactly the backup's records, and a `verify` found 0 missing and 0 different.
+
+**Verdict:** backup **pass**; restore **pass** with #153, and a restore that fails part way is
+still unrecoverable (155).

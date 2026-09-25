@@ -131,3 +131,5 @@ rejected**, together, because a fix is only understandable next to what it is no
 | 149 | [A deployed node's memory budget was every shard's, so a node could hold its core count times it](resolved/node-memory-budget.md) | `resources.node_memory`, judged against the process's resident memory; the deployment renderer writes the inventory's memory there |
 | 150 | [A table's partition map held every loaded row inline in its buckets, at its peak capacity](resolved/inline-partition-buckets.md) | `MaybeLoaded::Loaded` holds its partition boxed, so a bucket is a pointer whatever the row |
 | 151 | [A WAL segment was deleted behind a purge whose marker a crash then lost](resolved/purge-ahead-of-its-marker.md) | Segments are deleted only behind a durable purge point, which moves when the marker's batch is synced |
+| 153 | [A restore on a shard that had received no stream killed the shard](resolved/install-dir-absent.md) | An install's clean-up syncs the install directory only if it exists |
+| 154 | [`cluster admin` reported a restore with a failed group as done](resolved/admin-hides-failed-groups.md) | The command fails, naming each failed group |

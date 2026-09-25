@@ -1043,19 +1043,9 @@ where
         let dir = replication.installs.dir.clone();
         let tx = self.shard_local_tx.clone();
         glommio::spawn_local(async move {
-            let outcome = async {
-                // the marker first: once it is gone the install is complete and the file is nobody's
-                if marker.exists() {
-                    glommio::io::remove(&marker).await?;
-                }
-                crate::server::replication::snapshot::sync_dir(&dir).await?;
-                if part.exists() {
-                    glommio::io::remove(&part).await?;
-                }
-                Ok::<(), std::io::Error>(())
-            }
-            .await
-            .map_err(|error| error.to_string());
+            let outcome = remove_install_files(&marker, &part, &dir)
+                .await
+                .map_err(|error| error.to_string());
             let _ = tx.send(ServerMsg::SnapshotCleaned { group, outcome }).await;
         })
         .detach();
@@ -1360,5 +1350,72 @@ fn encode_answer(id: u64, answer: &SnapshotAnswer) -> ReplicateReply {
     match postcard::to_allocvec(answer) {
         Ok(bytes) => ReplicateReply::ok(id, bytes),
         Err(error) => ReplicateReply::error(id, format!("encoding a snapshot answer: {error}")),
+    }
+}
+
+/// Remove an install's marker and partial file, whichever of them exist
+///
+/// A restore installs the leader's own copy from the file it built, and never writes a partial
+/// or a marker into the shard's install directory. On a shard that had received no stream the
+/// directory did not exist, the sync of it failed, the install failed with it, and the shard
+/// died ([Resolved #153](../../../../docs/src/appendix/resolved/install-dir-absent.md)).
+///
+/// # Arguments
+///
+/// * `marker` - The install's pending marker
+/// * `part` - The install's partial file
+/// * `dir` - The shard's install directory
+///
+/// # Errors
+///
+/// When a file that exists cannot be removed, or a directory that exists cannot be synced.
+pub(super) async fn remove_install_files(
+    marker: &std::path::Path,
+    part: &std::path::Path,
+    dir: &std::path::Path,
+) -> std::io::Result<()> {
+    // the marker first: once it is gone the install is complete and the file is nobody's
+    if marker.exists() {
+        glommio::io::remove(marker).await?;
+    }
+    // the removal made durable, where there is a directory that could hold it
+    if dir.exists() {
+        crate::server::replication::snapshot::sync_dir(dir).await?;
+    }
+    if part.exists() {
+        glommio::io::remove(part).await?;
+    }
+    Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::remove_install_files;
+
+    /// Cleaning up an install that wrote nothing to an install directory that was never made succeeds (item 153)
+    ///
+    /// A restore installs the leader's own copy from the file it built, so on a shard that had
+    /// received no stream there was no install directory, and syncing it failed the install and
+    /// killed the shard in the middle of the lab's restore
+    /// ([Resolved #153](../../../../docs/src/appendix/resolved/install-dir-absent.md)).
+    #[test]
+    fn cleaning_up_an_install_needs_no_install_directory() {
+        glommio::LocalExecutor::default().run(async {
+            let root = tempfile::tempdir().expect("a temp dir");
+            let dir = root.path().join("install");
+            // nothing there at all
+            remove_install_files(&dir.join("g.pending"), &dir.join("g.part"), &dir)
+                .await
+                .expect("an install that wrote nothing cleans up");
+            // and an install that wrote both has both removed
+            std::fs::create_dir_all(&dir).expect("a dir");
+            std::fs::write(dir.join("g.pending"), b"x").expect("a marker");
+            std::fs::write(dir.join("g.part"), b"x").expect("a part");
+            remove_install_files(&dir.join("g.pending"), &dir.join("g.part"), &dir)
+                .await
+                .expect("a clean up");
+            assert!(!dir.join("g.pending").exists() && !dir.join("g.part").exists());
+        });
     }
 }
