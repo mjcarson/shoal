@@ -294,5 +294,13 @@ the whole backlog before answering, a case #145's stall rule had deliberately le
 as [#146](../appendix/resolved/apply-wait-on-a-lagging-copy.md): the wait is bounded at two
 heartbeat intervals.
 
-**Verdict:** correctness **pass**; availability the same as a partition's, with the resumed node's
-writes slow until #146.
+**What the next rolling upgrade found.** `cluster upgrade` refused to start: *"europa is down,
+not up"*. europa was running and was the control leader. When t11c's paused control leader,
+hyperion, resumed, its detector still took itself for the leader and saw 20 s of silence from
+everyone. That silence was its own. It called europa and titan down, and europa, which had
+replaced it, committed the verdicts. titan's next report set it up again. Nothing ever reports a
+leader to itself, so europa stayed down in the record. Fixed as
+[#147](../appendix/resolved/paused-detector-verdicts.md).
+
+**Verdict:** correctness **pass** for the data; the control plane's record was wrong until #147.
+Availability was the same as a partition's, with the resumed node's writes slow until #146.

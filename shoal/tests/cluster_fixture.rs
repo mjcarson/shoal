@@ -8526,13 +8526,24 @@ async fn down_within_grace_moves_no_replicas() -> Result<(), FixtureError> {
         stats["installed"].as_u64().unwrap_or(0) >= 1,
         "the returning member caught up without a snapshot: {stats}"
     );
-    // it leads nothing on its return: every group it hosted is led by a survivor
+    // it won nothing on its return: a group it leads is one it is the placement primary of,
+    // handed back by the leader once it caught up
+    // ([O63](../../docs/src/appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary)),
+    // never one an election gave it
     let view = groups_of(&mut cluster, 1)?;
-    let leading = view["leading"].as_u64().unwrap_or(0);
-    assert_eq!(
-        leading, 0,
-        "the returning member leads {leading} groups before any election: {view}"
-    );
+    let me = cluster.node_ids()[1].clone();
+    for group in view["shards"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
+        .filter(|group| group["is_leader"] == true)
+    {
+        assert_eq!(
+            group["members"][0]["node"], me,
+            "the returning member leads a group it is not the primary of: {group}"
+        );
+    }
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
@@ -18108,6 +18119,111 @@ async fn a_write_through_a_lagging_copy_is_answered_within_two_heartbeats() -> R
     assert!(
         worst < Duration::from_millis(800),
         "a write through a catching-up copy took {worst:?}; its commit is not what it waited on"
+    );
+    Ok(())
+}
+
+/// A control leader paused and resumed calls nobody down, and a leader held down comes back up (item 147)
+///
+/// On the lab the control leader was paused for 20 s, so another led; the next pause was of that
+/// other one. When it resumed, its detector still took itself for the leader and saw 20 s of
+/// silence from everybody, which was its own. It called both others down, and the verdicts were
+/// committed through the leader that had replaced it. The member called down was that leader,
+/// which never hears a report from itself, so it stayed down in the record for good: "up 2" and a
+/// rolling upgrade refused. Now a detector whose own tick stood still re-seeds its evidence rather
+/// than judge by it, and a leader held down commits itself up
+/// ([Resolved #147](../../docs/src/appendix/resolved/paused-detector-verdicts.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paused_control_leader_calls_nobody_down() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let ids = cluster.node_ids();
+    // the health every node's map records for every member
+    let healths = |cluster: &mut Cluster| -> Result<Vec<(usize, usize, String)>, FixtureError> {
+        let mut all = Vec::new();
+        for at in 0..3 {
+            let map = cluster.node_mut(at).command("MAP")?;
+            for (member, id) in ids.iter().enumerate() {
+                let health = map["ok"]["members"][id]["health"].as_str().unwrap_or("?").to_string();
+                all.push((at, member, health));
+            }
+        }
+        Ok(all)
+    };
+    // wait for every member to read up everywhere, or say what never did
+    let wait_all_up = |cluster: &mut Cluster, within: Duration| -> Result<(), FixtureError> {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            let seen = healths(cluster)?;
+            if seen.iter().all(|(_, _, health)| health == "up") {
+                return Ok(());
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(FixtureError::NotReady(format!(
+                    "not every member is up everywhere: {seen:?}"
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    // wait for a node other than one to lead the control group, and say which
+    let wait_led_elsewhere = |cluster: &mut Cluster, not: usize, ask: usize| -> Result<usize, FixtureError> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(leader) = cluster.leader_index(ask)? {
+                if leader != not {
+                    return Ok(leader);
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(FixtureError::NotReady(format!("node {not} still leads")));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    wait_all_up(&mut cluster, Duration::from_secs(20))?;
+    // the first leader is paused long enough to be replaced and called down, then resumed
+    let first = cluster.leader_index(0)?.expect("a leader");
+    let witness = (first + 1) % 3;
+    cluster.node(first).pause()?;
+    let second = wait_led_elsewhere(&mut cluster, first, witness)?;
+    std::thread::sleep(Duration::from_secs(6));
+    cluster.node(first).resume()?;
+    wait_all_up(&mut cluster, Duration::from_secs(20))?;
+    // now the second leader is paused, and resumed once another leads and time has passed
+    let witness = (second + 1) % 3;
+    cluster.node(second).pause()?;
+    let third = wait_led_elsewhere(&mut cluster, second, witness)?;
+    std::thread::sleep(Duration::from_secs(6));
+    cluster.node(second).resume()?;
+    eprintln!("control leaders: {first}, then {second}, then {third}");
+    // for five seconds after it resumes, nobody but the node that was paused is ever down: the
+    // resumed node's silence was its own and calls nobody down
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < until {
+        let seen = healths(&mut cluster)?;
+        let wrongly: Vec<_> = seen
+            .iter()
+            .filter(|(_, member, health)| *member != second && health == "down")
+            .collect();
+        assert!(
+            wrongly.is_empty(),
+            "the resumed node {second} called a live member down: {wrongly:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // and every member is up everywhere within a few reports
+    wait_all_up(&mut cluster, Duration::from_secs(15))?;
+    // and stays so
+    std::thread::sleep(Duration::from_secs(3));
+    let seen = healths(&mut cluster)?;
+    assert!(
+        seen.iter().all(|(_, _, health)| health == "up"),
+        "a member was left down after a paused leader resumed: {seen:?}"
     );
     Ok(())
 }

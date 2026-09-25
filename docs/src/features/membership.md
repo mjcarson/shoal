@@ -132,7 +132,10 @@ the last `window` of them with the deviation floored at a quarter of the interva
 every tick computes phi, `-log10` of the probability that a report arrives later than now. Past
 `phi_threshold` it proposes `SetHealth Down` with a fresh episode; the member's next fresh
 report proposes `Up`. One verdict is in flight per member, the leader never judges itself, and
-a minority can never call anybody down since it cannot commit. A report is fresh when its
+a minority can never call anybody down since it cannot commit. Since
+[#147](../appendix/resolved/paused-detector-verdicts.md), a control loop that stood still for
+more than four intervals re-seeds its detector rather than judging by that silence, which was its
+own, and a leader held `Down` in the record commits itself `Up`, since nobody else reports it. A report is fresh when its
 sequence is above the last from the same run; a replayed or reordered one is counted as
 `stale_ignored` and changes nothing, and one from an older run is answered fenced. A new leader
 seeds every up member with the expected pace and a grace of five intervals, so the election

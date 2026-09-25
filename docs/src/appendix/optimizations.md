@@ -2929,6 +2929,12 @@ second, because europa is the fastest host. Weighting the primaries by a member'
 the planner already reads for data placement, would do better than an even spread on unequal
 hardware. It is filed in [todos](todos.md#leadership-is-spread-evenly-whatever-each-member-can-do).
 
+**A test it made stale, found later.** `down_within_grace_moves_no_replicas` asserted that a
+member back within its grace "leads nothing on its return". Once catching up took longer than
+the settle time, which it did under the full suite's load, the member had been handed back a
+group it is the primary of, and the test failed. It now asserts what still holds: a group the
+returning member leads is one it is the placement primary of, never one an election gave it.
+
 ### O64. A shorter failover base halves write throughput on the lab
 
 | | |
