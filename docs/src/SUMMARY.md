@@ -115,6 +115,9 @@
   - [F50. Certificate rotation, the cluster tab, the runbooks and the physical cluster](features/cluster-operations.md)
   - [F51. Deploying a cluster with shoalctl cluster](features/cluster-deployment.md)
   - [F52. Cluster stats: what every node holds and does, and how fast a plan moves](features/cluster-stats.md)
+  - [F53. An inventory wizard, and storage per node group](features/inventory-wizard.md)
+  - [F54. The TMDB dataset as a deployable database, and a loader for it](features/tmdb-dataset-deployment.md)
+  - [F55. A rolling upgrade with `shoalctl cluster upgrade`](features/cluster-upgrade.md)
 
 # Direction
 
@@ -233,6 +236,9 @@
   - [123. A query reusing a parked query's id and index was never answered](appendix/resolved/parked-get-key.md)
   - [124. An unsorted update to a loaded partition never re-stamped its generation](appendix/resolved/unsorted-update-generation.md)
   - [125. A retried write whose first try was OutcomeUnknown reported the last try's refusal](appendix/resolved/retry-unknown-outcome.md)
+  - [126. A storage directory the node could not create was refused without its path](appendix/resolved/storage-directory-unusable.md)
+  - [127. The wizard saved an inventory bootstrap refused from the same host](appendix/resolved/wizard-loopback-address.md)
+  - [128. A hopped write reported the replication rpc timed out for a leader that answered](appendix/resolved/hop-deadline-margin.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

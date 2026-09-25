@@ -160,33 +160,44 @@ The benchmark harness it used to be is now twenty-three purpose-built workloads 
 See
 [Benchmarking](../performance/benchmarking.md) for how to run them and what the numbers mean.
 
-### `tmdb_dataset` — the same tour, on a real dataset
+### `tmdb-dataset` — the real dataset, deployed
+
+~~`cargo run --release --example tmdb_dataset`~~ The dataset example started its own server and
+needed a config, a storage flag and a tracing flag to do it. Since
+[F54](../features/tmdb-dataset-deployment.md) it is a crate, `examples/tmdb_dataset/`, with a
+node program to deploy and a loader to fill the deployed cluster:
 
 ```bash
-cargo run --release --example tmdb_dataset
+# built for the oldest cpu among the hosts, never native, in its own target dir
+CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
+    cargo build --release -p tmdb-dataset
+# an inventory whose server is target/deploy/release/tmdb-dataset-node, then the cluster
+target/deploy/release/tmdb-dataset-loader cluster new -o tmdb.yml
+target/deploy/release/tmdb-dataset-loader cluster bootstrap -i tmdb.yml
+# the dataset, into every member, then a sample read back
+target/deploy/release/tmdb-dataset-loader load -i tmdb.yml \
+    --dataset ~/datasets/TMDB_movie_dataset_v11.csv
 ```
 
-Same two tables, but the row is the full 24 column TMDB record read out of a csv rather than a
-literal in the source, and there are 1.19 million of them instead of twelve. It needs two things
-the other one does not:
+The dataset is `TMDB_movie_dataset_v11.csv`, about 538 MB and 1.19 million movies, from
+[Kaggle](https://www.kaggle.com/datasets/asaniczka/tmdb-movies-dataset-2023-930k-movies).
+Nothing in this repository fetches it. `--limit` loads a slice, and `--workers`, `--batch` and
+`--in-flight` size the pipeline. A row that will not deserialize is skipped and counted. A write
+that fails with a code saying to try again (`OutcomeUnknown`, `Shedding`, `NotLeader` and the
+like) is sent again after a backoff, up to `--retries` times. Any other failed write stops the
+load, and running it again finishes it, since every insert is keyed by the movie. A large retry
+count means the pipeline is deeper than the cluster commits: lower `--in-flight`.
+`--addr <host:port>` loads one node started by hand instead of a deployed cluster.
 
-- **The dataset.** `TMDB_movie_dataset_v11.csv`, about 538 MB, from
-  [Kaggle](https://www.kaggle.com/datasets/asaniczka/tmdb-movies-dataset-2023-930k-movies).
-  Nothing in this repository fetches it. It is looked for at
-  `~/datasets/TMDB_movie_dataset_v11.csv`, and `--dataset` points at it anywhere else.
-- **Somewhere to write.** `./shoal.yml` if there is one and the built-in defaults if there is not,
-  which put storage at `/opt/shoal`. A full load writes several gigabytes into it.
+**It is not a benchmark**, despite printing a rows-per-second figure. There is no warmup,
+repetition, percentile or baseline behind that number. Measuring Shoal is `shoal-bench`'s job;
+see [Benchmarking](../performance/benchmarking.md).
 
-`--limit` loads a slice of the file instead of all of it, which is what a first run wants;
-`--workers`, `--batch` and `--in-flight` size the client pipeline. A row that will not deserialize
-is skipped and counted rather than ending the load.
-
-**It is not a benchmark**, despite printing a rows-per-second figure — there is no warmup, no
-repetition, no percentile and no baseline behind that number. Measuring Shoal is `shoal-bench`'s
-job; see [Benchmarking](../performance/benchmarking.md).
-
-Note that the checked-in `shoal.yml` points storage at `/opt/shoal`, which must exist and be
-writable. It is also the benchmark configuration, so changing it invalidates the recorded
+Note that the checked-in `shoal.yml` points storage at `/opt/shoal`, which must be writable
+(`sudo mkdir -p /opt/shoal && sudo chown $USER /opt/shoal`). A
+root the server cannot create is refused with its path, `cannot use the storage directory
+/opt/shoal: Permission denied` ([Resolved #126](../appendix/resolved/storage-directory-unusable.md)).
+ It is also the benchmark configuration, so changing it invalidates the recorded
 baseline ([Performance Baseline](../performance/baseline.md)). It used to carry a
 typo that silently disabled core exclusion; a misspelled resource key now fails the load
 instead ([Configuration](configuration.md#the-exluded_cores-typo--fixed)).

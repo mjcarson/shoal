@@ -419,6 +419,15 @@ pub enum ShoalError {
     /// Two servers on one directory would both claim the same node identity and write the same
     /// files. The lock is what refuses the second one.
     StorageDirectoryLocked { path: PathBuf },
+    /// A storage directory or its lock file could not be created or opened
+    ///
+    /// Carries the path that failed, because the os error alone does not name it and a
+    /// configuration can point at several roots
+    /// ([Resolved #126](../../../docs/src/appendix/resolved/storage-directory-unusable.md)).
+    StorageDirectoryUnusable {
+        path: PathBuf,
+        error: std::io::Error,
+    },
     /// A root a table or a writer is pointed at carries another server's marker
     ///
     /// Every distinct root a configuration names carries a mirror of the primary root's marker
@@ -674,6 +683,11 @@ impl std::fmt::Display for ShoalError {
             ShoalError::StorageDirectoryLocked { path } => write!(
                 f,
                 "another process holds the storage directory, locked at {}",
+                path.display()
+            ),
+            ShoalError::StorageDirectoryUnusable { path, error } => write!(
+                f,
+                "cannot use the storage directory {}: {error}",
                 path.display()
             ),
             ShoalError::ControlCoreNotAllowed { cpu, allowed } => write!(

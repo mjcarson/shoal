@@ -13,6 +13,8 @@ members = [
     "shoal-spike",
     "shoal-top",
     "shoalctl",
+    # the TMDB dataset as a deployable database: a node program and a loader (F54)
+    "examples/tmdb_dataset",
 ]
 
 [workspace.dependencies]

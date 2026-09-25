@@ -10,7 +10,10 @@
 //! - [`render`] writes each node's `shoal.yml` and [`unit`] its systemd unit;
 //! - [`pki`] issues each node a leaf naming the id its `claim` printed;
 //! - [`remote`] runs every command over ssh in batch mode;
-//! - [`ops`] puts them together and waits on the cluster's own admin frames between steps.
+//! - [`ops`] puts them together and waits on the cluster's own admin frames between steps;
+//! - [`upgrade`] replaces every node's program one node at a time, runbook
+//!   [7](../../docs/src/operations/runbooks.md#7-rolling-upgrade)
+//!   ([F55](../../docs/src/features/cluster-upgrade.md)).
 //!
 //! Nothing here links the engine: the server program is a build of `shoal::server::node::main`
 //! for the same schema this program's client was built for, and it is copied, not compiled.
@@ -22,6 +25,7 @@ pub mod remote;
 pub mod render;
 pub mod state;
 pub mod unit;
+pub mod upgrade;
 
 pub use inventory::Inventory;
 pub use ops::Deployment;

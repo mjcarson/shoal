@@ -42,6 +42,9 @@ Two pairs are built:
 - **Bench:** `shoal-bench`'s `shoal-node` and `shoal-benchctl`.
 - **TMDB:** `shoal/examples/tmdb_node.rs` and `shoalctl/examples/tmdbctl.rs`. Both include one
   tables file, `shoalctl/examples/tmdb/tables.rs`, so they cannot drift apart.
+- **TMDB dataset** ([F54](tmdb-dataset-deployment.md)): the `tmdb-dataset` crate's
+  `tmdb-dataset-node` and `tmdb-dataset-loader`, one crate and one schema type. The tool half is
+  `shoalctl::cli::run` with a `load` of its own beside the shoalctl commands.
 
 `tmdbctl` with no arguments still opens the terminal UI at `127.0.0.1:12000`.
 
@@ -69,7 +72,11 @@ An inventory is YAML, one per cluster (`shoalctl/src/deploy/inventory.rs`). It n
 - the remote directory (default `/opt/shoal-deploy/<name>`);
 - the ports;
 - the factor and the voters;
-- default resources and each node's own;
+- default resources and each node's own, and since [F53](inventory-wizard.md) a named group's
+  that a node takes by naming it;
+- since F53, the storage directories (`latency`, `throughput`) for the deployment, a group or a
+  node, each directory resolved on its own. ~~Every node's data lives in `<remote_dir>/data`.~~
+  That is now only the default;
 - the admin principal;
 - the system user nodes run as (`user`, created where missing);
 - `retire_after`, the one move setting rendered;
@@ -82,10 +89,16 @@ An inventory is YAML, one per cluster (`shoalctl/src/deploy/inventory.rs`). It n
 - duplicate names or addresses;
 - colliding ports;
 - a server program that has not been built;
-- any unknown key.
+- any unknown key;
+- since [F53](inventory-wizard.md), a node naming a missing group, and any storage directory
+  `destroy` could not safely delete: relative, shallow, holding `..`, nested, or overlapping the
+  remote directory's `bin` or `tls`.
 
 An address that is not given is resolved locally, and a loopback answer is refused. A
 machine's own `/etc/hosts` commonly maps its name to `127.0.1.1`, which no peer can dial.
+`cluster new` resolves the same way while the inventory is written, and will not save a node
+whose name answers only loopback ([Resolved #127](../appendix/resolved/wizard-loopback-address.md)).
+The `server` program has to be an executable file. A source file is refused by name.
 
 What the deployment mints is kept on the operator's machine under `~/.shoal/clusters/<name>/`
 (`$SHOAL_DEPLOY_HOME` overrides the root). The directory is `0700` and every secret in it `0600`:
@@ -99,7 +112,8 @@ What the deployment mints is kept on the operator's machine under `~/.shoal/clus
 For the inventory's bootstrap set, in order:
 1. **Preflight every host before touching any.** One ssh round trip reports the user, the cpus,
    whether sudo needs a password, whether systemd and the kernel `tls` module are there, and
-   whether the remote directory already holds a claimed marker. A claimed marker is refused
+   ~~whether the remote directory already holds a claimed marker~~ whether any of the node's
+   storage directories holds a marker ([F53](inventory-wizard.md)). A claimed marker is refused
    unless `--wipe` is given. The inventory's `user` is created as a system user where it is
    missing.
 2. **Stage each node.**
@@ -136,9 +150,12 @@ For a node the inventory lists and the state does not:
   lines as a member draws them.
 - `start`, `stop`, `restart [node]`: systemctl on one node or every deployed node.
 - `logs <node> [-n]`: its journal.
+- `upgrade [node...]`: since [F55](cluster-upgrade.md), runbook 7 - a new program on every
+  node, one at a time, with a swap back for a node that does not come back.
 - `rebalance`.
 - `destroy --yes`: visits every host the inventory lists, deployed or not. It disables and
-  deletes the unit, deletes the remote directory, and deletes the local state.
+  deletes the unit, deletes the remote directory and, since [F53](inventory-wizard.md), every
+  storage directory the node resolves, and deletes the local state.
 - `tui --inventory`: the terminal UI against the first node that answers, authenticated as the
   admin.
 
@@ -225,7 +242,8 @@ target/deploy/release/shoal-benchctl cluster bootstrap -i shoalctl/inventories/l
   (SCRAM never sends the password itself).
 - **The program is the operator's to build**, for the oldest cpu among the hosts. A build for a
   newer one is caught at the claim by its SIGILL (exit 132) and refused by name, before
-  anything starts.
+  anything starts. Since [F55](cluster-upgrade.md), `upgrade` refuses it the same way, from a
+  `--version` run on the host, before the node's program is replaced.
 - **Losing the state directory loses the authority**, and with it the ability to issue a leaf
   to a node added later. The cluster itself is untouched. Nothing backs the directory up.
 - **`add` never decommissions, and `destroy` is all or nothing.** Removing one node is still
@@ -256,7 +274,8 @@ target/deploy/release/shoal-benchctl cluster bootstrap -i shoalctl/inventories/l
   than hiding in a view.
 - **Every file under the node's directory is its user's**, written through sudo and handed over
   before its rename, and `claim` runs as that user: a directory claimed by one user and served by
-  another is refused at the lock.
+  another is refused at the lock. Since [F53](inventory-wizard.md) that includes every storage
+  root outside the remote directory, which `stage` hands over on its own.
 
 ## Performance
 

@@ -30,7 +30,7 @@ const PASSWORD: &str = "deploy-render-test";
 ///
 /// * `dir` - The directory standing in for the remote one
 fn inventory(dir: &std::path::Path) -> Inventory {
-    // this test binary stands in for the server program, which the inventory only checks exists
+    // this test binary stands in for the server program, which the inventory only checks is an executable file
     let server = std::env::current_exe().expect("the test binary");
     let yaml = format!(
         "name: render\nserver: {server}\nremote_dir: {dir}\nreplication_factor: 1\ncontrol_voters: 1\nretire_after: 15s\n\
@@ -178,4 +178,60 @@ async fn initialize(node: NodeId) {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+/// A group splitting a node's logs from its archives renders the roots the engine claims
+///
+/// The deployment creates, wipes and destroys the roots `Node::storage` names, and preflight
+/// looks for a marker in each, so they have to be exactly the roots the engine locks and marks
+/// ([F53](../../docs/src/features/inventory-wizard.md)).
+#[test]
+fn a_group_split_renders_the_roots_the_engine_claims() {
+    // a directory under target/, since the storage paths have to take direct io
+    let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("a temp dir");
+    let base = inventory(root.path());
+    // the same deployment with a group whose nodes keep logs and archives apart
+    let fast = root.path().join("fast");
+    let bulk = root.path().join("bulk");
+    let mut inventory = base.clone();
+    inventory.groups.insert(
+        "split".to_string(),
+        shoalctl::deploy::inventory::GroupSpec {
+            resources: None,
+            storage: Some(shoalctl::deploy::inventory::StorageSpec {
+                latency: Some(fast.display().to_string()),
+                throughput: Some(format!("{}/", bulk.display())),
+            }),
+        },
+    );
+    inventory.nodes[0].group = Some("split".to_string());
+    inventory.validate().expect("a valid inventory");
+    let a = inventory.node("a").expect("node a");
+    // the rendered file, loaded by the engine's own loader
+    let layout = Layout {
+        dir: inventory.remote_dir(),
+    };
+    std::fs::create_dir_all(&layout.dir).expect("a remote dir");
+    let conf_path = std::path::PathBuf::from(layout.conf());
+    let file = render::render(&inventory, &a, &Entry::Bootstrap, PASSWORD).expect("a file");
+    std::fs::write(&conf_path, file).expect("the file");
+    let conf = Conf::from_file(conf_path.to_str().unwrap()).expect("a Conf");
+    // the engine's roots are the deployment's, in the same order
+    let roots: Vec<String> = conf
+        .storage
+        .roots()
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    assert_eq!(roots, a.storage.roots());
+    assert_eq!(roots, vec![fast.display().to_string(), bulk.display().to_string()]);
+    // a claim marks the primary, the first root, which is what preflight finds on a node that
+    // was claimed and never started; a start mirrors it into the rest, which preflight also reads
+    shoal::server::node::claim(&conf).expect("a claim");
+    let roots = a.storage.roots();
+    assert!(
+        std::path::Path::new(&roots[0]).join("shoal-meta.json").is_file(),
+        "{} holds no marker after a claim",
+        roots[0]
+    );
 }

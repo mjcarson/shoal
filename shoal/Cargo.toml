@@ -65,7 +65,7 @@ shoal-core = { version = "0.1.0", path = "../shoal-core", features = ["shql-comp
 shoal-model = { version = "0.1.0", path = "../shoal-model" }
 futures = "0.3"
 # the `tmdb` example builds its config in code and stores it under a temp dir, so it needs no
-# shoal.yml. `tmdb_dataset` is the other half of that pair and reads one off disk instead
+# shoal.yml. the dataset's deployable half is its own crate, `examples/tmdb_dataset` (F54)
 tempfile = "3"
 criterion = { workspace = true }
 # the wire bench allocates a request body both of the ways the relay can, so it needs the same
@@ -87,11 +87,8 @@ tracing-subscriber = "0.3"
 opentelemetry = "0.28"
 opentelemetry_sdk = "0.28"
 tracing-opentelemetry = "0.29"
-# the `tmdb_dataset` example reads the TMDB csv off disk. the sync reader rather than an async one:
-# it runs on a blocking thread and is the faster of the two on a half gigabyte file
-csv = "1"
-# and deserializes each row straight into the table struct. this facade re-exports `serde_json` but
-# not `serde`, so a schema that derives `serde::Deserialize` has to name it here
+# the cluster fixture's children report their endpoints and take their overrides as json. this
+# facade re-exports `serde_json` but not `serde`, so the derive has to be named here
 serde = { version = "1", features = ["derive"] }
 # the cluster fixture (F36) sends SIGSTOP/SIGCONT to its children and asks whether a pid is
 # still there, which `std::process` cannot do. already a dependency of `shoal-core`, so this adds
@@ -101,9 +98,6 @@ libc = "0.2"
 # way the pool reserves the client port ([F38])
 # and its children report their bound endpoints on one line of json
 serde_json = "1"
-# `tmdb_dataset` takes flags, unlike `tmdb` which takes none. pinned to the same version the other
-# two crates in this workspace that use it ask for
-clap = { version = "4.2", features = ["derive"] }
 
 # the micro benchmarks reach crate private internals of shoal-core through its `bench`
 # feature, so they cannot be built without it

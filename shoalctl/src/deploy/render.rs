@@ -263,11 +263,16 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
             required: true,
             users,
         },
+        // the directories this node resolved over its group and the deployment (F53)
         storage: StorageConf {
             default: StorageDefault {
                 filesystem: FilesystemConf {
-                    latency_sensitive: PathConf { path: layout.data() },
-                    throughput_sensitive: PathConf { path: layout.data() },
+                    latency_sensitive: PathConf {
+                        path: node.storage.latency.clone(),
+                    },
+                    throughput_sensitive: PathConf {
+                        path: node.storage.throughput.clone(),
+                    },
                 },
             },
         },
@@ -376,5 +381,25 @@ mod tests {
         quick.retire_after = Some("15s".into());
         let fourth = render(&quick, &a, &Entry::Bootstrap, "x").unwrap();
         assert!(fourth.contains("migration:\n    retire_after: 15s"));
+    }
+
+    /// A node's own two directories are the ones its file names, each under its own writer
+    #[test]
+    fn a_node_file_names_the_directories_its_group_gives_it() {
+        // a group splitting the logs from the archives, and a node that names none of its own
+        let server = std::env::current_exe().expect("the test binary");
+        let inventory: Inventory = serde_yaml::from_str(&format!(
+            "server: {}\nname: lab\nreplication_factor: 1\ngroups:\n  split:\n    storage: {{latency: /mnt/nvme/shoal, throughput: /mnt/bulk/shoal}}\nnodes:\n  - {{name: a, address: 10.0.0.1, group: split}}\n",
+            server.display()
+        ))
+        .expect("an inventory");
+        inventory.validate().expect("a valid inventory");
+        let a = inventory.node("a").unwrap();
+        // the file is parsed back rather than searched, so the path is judged under its writer
+        let file = render(&inventory, &a, &Entry::Bootstrap, "x").unwrap();
+        let conf: serde_yaml::Value = serde_yaml::from_str(&file).unwrap();
+        let filesystem = &conf["storage"]["default"]["filesystem"];
+        assert_eq!(filesystem["latency_sensitive"]["path"].as_str(), Some("/mnt/nvme/shoal"));
+        assert_eq!(filesystem["throughput_sensitive"]["path"].as_str(), Some("/mnt/bulk/shoal"));
     }
 }

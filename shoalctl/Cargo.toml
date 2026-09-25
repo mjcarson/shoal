@@ -37,6 +37,8 @@ sha2 = "0.10"
 [dev-dependencies]
 # the pki test reads the leaf's der back the way the peer lanes do
 rustls-pemfile = "2"
+# the wizard test writes an inventory somewhere it can throw away
+tempfile = "3"
 
 
 [profile.release]

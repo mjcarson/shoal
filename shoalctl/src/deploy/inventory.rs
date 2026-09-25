@@ -7,9 +7,9 @@
 
 use color_eyre::eyre::{bail, eyre, WrapErr};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, ToSocketAddrs};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The default client port
 fn default_client_port() -> u16 {
@@ -107,6 +107,91 @@ impl Default for Resources {
     }
 }
 
+/// Where a node keeps its data, at any of the three levels an inventory sets it
+///
+/// Each field is looked up on the node, then its group, then the deployment, on its own
+/// ([F53](../../../docs/src/features/inventory-wizard.md)): a group that names only a
+/// `throughput` directory keeps whatever `latency` the deployment gives.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StorageSpec {
+    /// Where the intent logs, archive maps and the node's marker live (`latency_sensitive`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency: Option<String>,
+    /// Where the archives live (`throughput_sensitive`), the latency directory if none is set
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput: Option<String>,
+}
+
+impl StorageSpec {
+    /// Whether this sets nothing, so it is left out of a written inventory
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.latency.is_none() && self.throughput.is_none()
+    }
+}
+
+/// Settings every node naming this group shares, so they are written once
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GroupSpec {
+    /// The resources its nodes are given unless a node says otherwise, replacing the deployment's
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<Resources>,
+    /// Where its nodes keep their data, field by field over the deployment's
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<StorageSpec>,
+}
+
+/// Where a resolved node keeps its data
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeStorage {
+    /// The latency sensitive directory, which holds the marker and so is the primary root
+    pub latency: String,
+    /// The throughput sensitive directory
+    pub throughput: String,
+}
+
+impl NodeStorage {
+    /// Every distinct directory this node writes under, the primary first
+    ///
+    /// The same order `Storage::roots` in shoal-core gives the rendered file.
+    #[must_use]
+    pub fn roots(&self) -> Vec<String> {
+        // the primary always, and the other only when it is another directory
+        let mut roots = vec![self.latency.clone()];
+        if self.throughput != self.latency {
+            roots.push(self.throughput.clone());
+        }
+        roots
+    }
+}
+
+/// Where a setting a node resolved came from, so the wizard can say so
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// The node set it itself
+    Node,
+    /// The node's group set it
+    Group(String),
+    /// The deployment set it
+    Deployment,
+    /// Nothing set it, so it is the default
+    Default,
+}
+
+impl std::fmt::Display for Source {
+    /// Name the level a setting came from
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Source::Node => write!(f, "node"),
+            Source::Group(group) => write!(f, "group {group}"),
+            Source::Deployment => write!(f, "deployment"),
+            Source::Default => write!(f, "default"),
+        }
+    }
+}
+
 /// One host of a deployment
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -119,9 +204,15 @@ pub struct NodeSpec {
     /// The address peers and clients reach this node at, resolved from the name if not given
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<IpAddr>,
-    /// This node's resources, if they differ from the deployment's
+    /// The group this node takes its resources and storage from, where it sets none itself
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// This node's resources, if they differ from its group's or the deployment's
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<Resources>,
+    /// Where this node keeps its data, field by field over its group's and the deployment's
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<StorageSpec>,
 }
 
 impl NodeSpec {
@@ -152,9 +243,17 @@ pub struct Inventory {
     /// How many nodes vote in the control group
     #[serde(default = "default_control_voters")]
     pub control_voters: u32,
-    /// The resources every node is given unless it says otherwise
+    /// The resources every node is given unless it or its group says otherwise
     #[serde(default)]
     pub resources: Resources,
+    /// Where every node keeps its data unless it or its group says otherwise; under
+    /// `<remote_dir>/data` if nothing does
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<StorageSpec>,
+    /// Named sets of resources and storage a node takes by naming one
+    /// ([F53](../../../docs/src/features/inventory-wizard.md))
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub groups: BTreeMap<String, GroupSpec>,
     /// The tracing level every node logs at
     #[serde(default = "default_tracing")]
     pub tracing: String,
@@ -195,8 +294,12 @@ pub struct Node {
     pub target: String,
     /// The address peers and clients reach it at
     pub address: IpAddr,
+    /// The group it named, if any
+    pub group: Option<String>,
     /// The resources it is given
     pub resources: Resources,
+    /// Where it keeps its data
+    pub storage: NodeStorage,
 }
 
 impl Node {
@@ -235,6 +338,25 @@ impl Inventory {
     ///
     /// When the file cannot be read or parsed, or describes a cluster that cannot exist.
     pub fn load(path: &Path) -> color_eyre::Result<Self> {
+        // the file as a cluster, then the program it deploys
+        let inventory = Self::read(path)?;
+        inventory.validate()?;
+        Ok(inventory)
+    }
+
+    /// Read an inventory that describes a cluster without looking for its server program
+    ///
+    /// For a program that only talks to a deployed cluster, such as a client or a loader,
+    /// which has no reason to hold the node binary it was deployed with.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The inventory file
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read or parsed, or describes a cluster that cannot exist.
+    pub fn read(path: &Path) -> color_eyre::Result<Self> {
         // read and parse the file
         let raw = std::fs::read_to_string(path)
             .wrap_err_with(|| format!("failed to read the inventory {}", path.display()))?;
@@ -246,23 +368,48 @@ impl Inventory {
                 inventory.server = parent.join(&inventory.server);
             }
         }
-        inventory.validate()?;
+        inventory.validate_shape()?;
         Ok(inventory)
     }
 
-    /// Refuse an inventory that describes a cluster that cannot exist
+    /// Refuse an inventory that describes a cluster that cannot exist, or names a program that
+    /// has not been built
     ///
     /// # Errors
     ///
     /// Names the first thing wrong with it.
     pub fn validate(&self) -> color_eyre::Result<()> {
+        // everything the file itself says
+        self.validate_shape()?;
+        // the server binary is copied from here, so it has to be here
+        if !self.server.is_file() {
+            bail!(
+                "the server program {} does not exist; build it first",
+                self.server.display()
+            );
+        }
+        // and it has to be a program: a source file passes the check above and dies on every host
+        if !is_executable(&self.server) {
+            bail!(
+                "the server program {} is not executable; name the built node program, not its source",
+                self.server.display()
+            );
+        }
+        Ok(())
+    }
+
+    /// Refuse an inventory that describes a cluster that cannot exist, without looking for the
+    /// server program
+    ///
+    /// The wizard judges a draft with this, since an inventory is commonly written before the
+    /// program it names is built.
+    ///
+    /// # Errors
+    ///
+    /// Names the first thing wrong with it.
+    pub fn validate_shape(&self) -> color_eyre::Result<()> {
         // the name is part of a unit name and a path on every host
-        if self.name.is_empty()
-            || !self
-                .name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
+        if !is_plain_name(&self.name) {
             bail!(
                 "the cluster name {:?} has to be non-empty ascii letters, digits, '-' or '_'",
                 self.name
@@ -342,14 +489,126 @@ impl Inventory {
                 bail!("retire_after is {retire_after:?}; write it as 500ms, 15s, 5m or 1h");
             }
         }
-        // the server binary is copied from here, so it has to be here
-        if !self.server.is_file() {
-            bail!(
-                "the server program {} does not exist; build it first",
-                self.server.display()
-            );
+        // a group name is a key an operator types, so it is held to the cluster name's alphabet
+        for name in self.groups.keys() {
+            if !is_plain_name(name) {
+                bail!("the group name {name:?} has to be non-empty ascii letters, digits, '-' or '_'");
+            }
+        }
+        // the remote directory is removed whole by destroy, so it is held to the storage rules
+        let remote_dir = self.remote_dir();
+        check_dir("remote_dir", &remote_dir)?;
+        for spec in &self.nodes {
+            // a group named has to exist
+            if let Some(group) = &spec.group {
+                if !self.groups.contains_key(group) {
+                    bail!("the node {:?} names the group {group:?}, which is not in groups", spec.name);
+                }
+            }
+            // and every directory it resolves is one destroy and --wipe can delete safely
+            let (storage, _) = self.resolve_storage(spec);
+            for (field, path) in [("latency", &storage.latency), ("throughput", &storage.throughput)] {
+                let what = format!("the node {:?}'s {field} storage", spec.name);
+                check_dir(&what, path)?;
+                check_clear_of(&what, path, &remote_dir)?;
+            }
+            // two roots one inside the other would be deleted and locked twice
+            if storage.latency != storage.throughput
+                && (is_within(&storage.latency, &storage.throughput)
+                    || is_within(&storage.throughput, &storage.latency))
+            {
+                bail!(
+                    "the node {:?}'s latency storage {} and throughput storage {} are nested; \
+                     give them the same directory or two apart",
+                    spec.name,
+                    storage.latency,
+                    storage.throughput
+                );
+            }
         }
         Ok(())
+    }
+
+    /// The directory a node's data lives under when nothing names one
+    #[must_use]
+    pub fn default_data_dir(&self) -> String {
+        format!("{}/data", self.remote_dir())
+    }
+
+    /// The group a node names, if it names one that exists
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The node
+    fn group_of(&self, spec: &NodeSpec) -> Option<(&String, &GroupSpec)> {
+        spec.group
+            .as_ref()
+            .and_then(|name| self.groups.get_key_value(name))
+    }
+
+    /// Resolve where a node keeps its data, field by field over its group and the deployment
+    ///
+    /// Needs no address, so validation and destroy use it as well as [`Inventory::node`].
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The node
+    #[must_use]
+    pub fn resolve_storage(&self, spec: &NodeSpec) -> (NodeStorage, [Source; 2]) {
+        // the three levels, most specific first, each with the source it would report
+        let group = self.group_of(spec);
+        let levels: [(Option<&StorageSpec>, Source); 3] = [
+            (spec.storage.as_ref(), Source::Node),
+            (
+                group.and_then(|(_, group)| group.storage.as_ref()),
+                Source::Group(group.map(|(name, _)| name.clone()).unwrap_or_default()),
+            ),
+            (self.storage.as_ref(), Source::Deployment),
+        ];
+        // the first level that sets a field wins it
+        let pick = |field: fn(&StorageSpec) -> Option<&String>| {
+            levels.iter().find_map(|(level, source)| {
+                level
+                    .and_then(|level| field(level))
+                    .map(|path| (trim_dir(path), source.clone()))
+            })
+        };
+        // latency falls back to the remote directory, and throughput to latency
+        let (latency, latency_source) = pick(|level| level.latency.as_ref())
+            .unwrap_or_else(|| (self.default_data_dir(), Source::Default));
+        let (throughput, throughput_source) = pick(|level| level.throughput.as_ref())
+            .unwrap_or_else(|| (latency.clone(), latency_source.clone()));
+        (
+            NodeStorage {
+                latency,
+                throughput,
+            },
+            [latency_source, throughput_source],
+        )
+    }
+
+    /// Resolve the resources a node is given: its own, its group's or the deployment's, whole
+    ///
+    /// Whole rather than field by field because `memory` has a default, so a level that names
+    /// no memory cannot be told from one that names four gibibytes.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The node
+    #[must_use]
+    pub fn resolve_resources(&self, spec: &NodeSpec) -> (Resources, Source) {
+        // the node's own, then its group's, then the deployment's
+        if let Some(resources) = &spec.resources {
+            return (resources.clone(), Source::Node);
+        }
+        if let Some((name, GroupSpec {
+            resources: Some(resources),
+            ..
+        })) = self.group_of(spec)
+        {
+            return (resources.clone(), Source::Group(name.clone()));
+        }
+        (self.resources.clone(), Source::Deployment)
     }
 
     /// The names bootstrap forms the cluster from, in placement order
@@ -409,14 +668,16 @@ impl Inventory {
             Some(address) => address,
             None => resolve(&spec.name)?,
         };
+        // what it runs with and where it keeps its data, over its group and the deployment
+        let (resources, _) = self.resolve_resources(spec);
+        let (storage, _) = self.resolve_storage(spec);
         Ok(Node {
             name: spec.name.clone(),
             target: spec.target().to_string(),
             address,
-            resources: spec
-                .resources
-                .clone()
-                .unwrap_or_else(|| self.resources.clone()),
+            group: spec.group.clone(),
+            resources,
+            storage,
         })
     }
 
@@ -443,6 +704,168 @@ impl Inventory {
     }
 }
 
+/// Whether a name is non-empty ascii letters, digits, '-' or '_'
+///
+/// # Arguments
+///
+/// * `name` - The name
+#[must_use]
+pub fn is_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// A directory as it is written into a node's file, without a trailing slash
+///
+/// # Arguments
+///
+/// * `path` - The directory as the inventory wrote it
+fn trim_dir(path: &str) -> String {
+    // "/mnt/nvme/shoal/" and "/mnt/nvme/shoal" are one root, and "/" stays itself for the check
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        path.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Refuse a directory `destroy` and `--wipe` could not delete safely
+///
+/// Every directory a node is given is removed whole with `rm -rf`, so it has to be absolute,
+/// free of `..`, and at least two components deep: `/` and `/mnt` are refused by name.
+///
+/// # Arguments
+///
+/// * `what` - What the directory is, for the message
+/// * `path` - The directory
+///
+/// # Errors
+///
+/// Names the rule it breaks.
+pub fn check_dir(what: &str, path: &str) -> color_eyre::Result<()> {
+    // relative to what? every host starts ssh somewhere else
+    let parsed = Path::new(path);
+    if !parsed.is_absolute() {
+        bail!("{what} is {path:?}; it has to be an absolute path");
+    }
+    // a `..` would put the directory somewhere its name does not say
+    if parsed
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        bail!("{what} is {path:?}; it may not contain '.' or '..'");
+    }
+    // destroy deletes it whole, so it may not be a whole filesystem's top
+    let depth = parsed
+        .components()
+        .filter(|component| matches!(component, Component::Normal(_)))
+        .count();
+    if depth < 2 {
+        bail!("{what} is {path:?}; it has to be at least two directories deep, like /mnt/shoal, since destroy deletes it");
+    }
+    Ok(())
+}
+
+/// Refuse a storage directory that overlaps the node's program or its keys
+///
+/// # Arguments
+///
+/// * `what` - What the directory is, for the message
+/// * `path` - The directory
+/// * `remote_dir` - The node's remote directory
+///
+/// # Errors
+///
+/// When the directory is the remote directory, holds it, or is inside `bin` or `tls`.
+fn check_clear_of(what: &str, path: &str, remote_dir: &str) -> color_eyre::Result<()> {
+    // the remote directory itself, or anything that holds it: wiping the data would take the
+    // program, the configuration and the keys with it
+    if is_within(remote_dir, path) {
+        bail!("{what} is {path}, which holds {remote_dir}; give the data a directory of its own");
+    }
+    // the program's and the keys' directories are rewritten on every deploy
+    for sub in ["bin", "tls"] {
+        let reserved = format!("{remote_dir}/{sub}");
+        if is_within(path, &reserved) || is_within(&reserved, path) {
+            bail!("{what} is {path}, which overlaps {reserved}");
+        }
+    }
+    Ok(())
+}
+
+/// Whether one directory is another or inside it, by whole components
+///
+/// # Arguments
+///
+/// * `inner` - The directory that may be inside
+/// * `outer` - The directory that may hold it
+#[must_use]
+pub fn is_within(inner: &str, outer: &str) -> bool {
+    Path::new(inner).starts_with(Path::new(outer))
+}
+
+/// Whether a file is one a host could run
+///
+/// Only the owner, group and other execute bits are read, which is what `install -m 0755` keeps
+/// on every host; off unix every file is taken as runnable.
+///
+/// # Arguments
+///
+/// * `path` - The file
+#[must_use]
+pub fn is_executable(path: &Path) -> bool {
+    // a file with any execute bit set, on unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    }
+    // anywhere else, a file
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+/// Every address a host name resolves to here, loopback included
+///
+/// # Arguments
+///
+/// * `host` - The name to resolve
+///
+/// # Errors
+///
+/// When the resolver has no answer for the name.
+pub fn lookup(host: &str) -> color_eyre::Result<Vec<IpAddr>> {
+    // ask the resolver for every address of the name
+    let addresses = (host, 0)
+        .to_socket_addrs()
+        .wrap_err_with(|| format!("failed to resolve {host}"))?
+        .map(|addr| addr.ip())
+        .collect();
+    Ok(addresses)
+}
+
+/// The address peers should dial out of everything a name resolves to, if any is not loopback
+///
+/// # Arguments
+///
+/// * `addresses` - What the name resolved to
+#[must_use]
+pub fn dialable(addresses: &[IpAddr]) -> Option<IpAddr> {
+    // loopback is unreachable from every other host
+    let remote: Vec<IpAddr> = addresses.iter().copied().filter(|ip| !ip.is_loopback()).collect();
+    // prefer an IPv4 address, since that is what a lab network usually routes
+    remote
+        .iter()
+        .find(|ip| ip.is_ipv4())
+        .or_else(|| remote.first())
+        .copied()
+}
+
 /// Resolve a host name to the address its peers should dial
 ///
 /// A loopback answer is refused: `/etc/hosts` commonly maps a machine's own name to
@@ -456,22 +879,11 @@ impl Inventory {
 ///
 /// When the name resolves to nothing but loopback addresses.
 pub fn resolve(host: &str) -> color_eyre::Result<IpAddr> {
-    // ask the resolver for every address of the name
-    let addresses: Vec<IpAddr> = (host, 0)
-        .to_socket_addrs()
-        .wrap_err_with(|| format!("failed to resolve {host}"))?
-        .map(|addr| addr.ip())
-        .filter(|ip| !ip.is_loopback())
-        .collect();
-    // prefer an IPv4 address, since that is what a lab network usually routes
-    addresses
-        .iter()
-        .find(|ip| ip.is_ipv4())
-        .or_else(|| addresses.first())
-        .copied()
-        .ok_or_else(|| {
-            eyre!("{host} resolves only to loopback addresses; give it an address in the inventory")
-        })
+    // everything the name resolves to, then the one a peer can dial
+    let addresses = lookup(host)?;
+    dialable(&addresses).ok_or_else(|| {
+        eyre!("{host} resolves only to loopback addresses; give it an address in the inventory")
+    })
 }
 
 #[cfg(test)]
@@ -563,6 +975,11 @@ mod tests {
         let mut inventory = parse(THREE);
         inventory.server = PathBuf::from("/nonexistent/shoal-node");
         assert!(inventory.validate().unwrap_err().to_string().contains("build it first"));
+        // a source file where the program belongs, as the wizard once wrote (item 127)
+        let source = tempfile::NamedTempFile::new().expect("a temp file");
+        let mut inventory = parse(THREE);
+        inventory.server = source.path().to_path_buf();
+        assert!(inventory.validate().unwrap_err().to_string().contains("not executable"));
         // an unknown key is a typo, not a setting
         let server = std::env::current_exe().expect("the test binary");
         let yaml = format!("server: {}\nname: lab\nreplication_facter: 1\nnodes: []\n", server.display());
@@ -574,6 +991,16 @@ mod tests {
     fn a_node_resolves_off_the_loopback() {
         // localhost has nothing but loopback addresses, which no peer could dial
         assert!(resolve("localhost").unwrap_err().to_string().contains("loopback"));
+        // which the lookup the wizard judges with still sees, so it can say why
+        let addresses = lookup("localhost").expect("localhost resolves");
+        assert!(!addresses.is_empty() && addresses.iter().all(IpAddr::is_loopback));
+        assert_eq!(dialable(&addresses), None);
+        // and a routable address wins over loopback, IPv4 over IPv6
+        let v4: IpAddr = "10.0.0.1".parse().unwrap();
+        let v6: IpAddr = "fd00::1".parse().unwrap();
+        let loopback: IpAddr = "127.0.1.1".parse().unwrap();
+        assert_eq!(dialable(&[loopback, v6, v4]), Some(v4));
+        assert_eq!(dialable(&[loopback, v6]), Some(v6));
         // a node's own resources replace the deployment's whole
         let inventory = parse("name: lab\nreplication_factor: 1\nresources: {cores: 4}\nnodes:\n  - {name: a, address: 10.0.0.1, ssh: ops@a.lab, resources: {cores: 2, memory: 1Gi}}\n");
         let node = inventory.node("a").expect("node a");
@@ -581,5 +1008,111 @@ mod tests {
         assert_eq!(node.resources.cores, Some(2));
         assert_eq!(node.resources.memory, "1Gi");
         assert!(inventory.node("b").is_err());
+    }
+    /// A group gives a node what the node does not set, and the deployment what the group does not
+    #[test]
+    fn a_group_supplies_what_a_node_does_not_set() {
+        // the deployment splits nothing, the group names fast logs, one node names its own archives
+        let inventory = parse(
+            "name: lab\nreplication_factor: 1\nstorage: {latency: /srv/shoal/logs, throughput: /srv/shoal/archive}\n\
+             groups:\n  small: {storage: {latency: /mnt/nvme/shoal}}\n\
+             nodes:\n  - {name: a, address: 10.0.0.1, group: small}\n  - {name: b, address: 10.0.0.2, group: small, storage: {throughput: /mnt/hdd/shoal/}}\n  - {name: c, address: 10.0.0.3}\n",
+        );
+        inventory.validate().expect("a valid inventory");
+        // a takes the group's latency and, field by field, the deployment's throughput
+        let a = inventory.node("a").unwrap();
+        assert_eq!(a.group.as_deref(), Some("small"));
+        assert_eq!(a.storage.latency, "/mnt/nvme/shoal");
+        assert_eq!(a.storage.throughput, "/srv/shoal/archive");
+        let (_, sources) = inventory.resolve_storage(&inventory.nodes[0]);
+        assert_eq!(sources, [Source::Group("small".into()), Source::Deployment]);
+        // b's own throughput wins, written without its trailing slash
+        let b = inventory.node("b").unwrap();
+        assert_eq!(b.storage.latency, "/mnt/nvme/shoal");
+        assert_eq!(b.storage.throughput, "/mnt/hdd/shoal");
+        assert_eq!(b.storage.roots(), vec!["/mnt/nvme/shoal", "/mnt/hdd/shoal"]);
+        // c is in no group and takes the deployment's two
+        let c = inventory.node("c").unwrap();
+        assert_eq!(c.storage.latency, "/srv/shoal/logs");
+        // with nothing set anywhere, both are the remote directory's data, as before F53
+        let plain = parse(THREE);
+        let a = plain.node("a").unwrap();
+        assert_eq!(a.storage.latency, "/opt/shoal-deploy/lab/data");
+        assert_eq!(a.storage.throughput, "/opt/shoal-deploy/lab/data");
+        assert_eq!(a.storage.roots(), vec!["/opt/shoal-deploy/lab/data"]);
+        // and a latency set alone carries the archives with it
+        let one = parse("name: lab\nreplication_factor: 1\nstorage: {latency: /mnt/nvme/shoal}\nnodes:\n  - {name: a, address: 10.0.0.1}\n");
+        let (storage, sources) = one.resolve_storage(&one.nodes[0]);
+        assert_eq!(storage.throughput, "/mnt/nvme/shoal");
+        assert_eq!(sources, [Source::Deployment, Source::Deployment]);
+    }
+
+    /// A group's resources replace the deployment's whole, and a node's replace the group's
+    #[test]
+    fn a_group_replaces_resources_whole() {
+        // the deployment names cores and memory, the group only cores
+        let inventory = parse(
+            "name: lab\nreplication_factor: 1\nresources: {cores: 12, memory: 16Gi}\n\
+             groups:\n  small: {resources: {cores: 4}}\n\
+             nodes:\n  - {name: a, address: 10.0.0.1, group: small}\n  - {name: b, address: 10.0.0.2, group: small, resources: {cores: 2, memory: 1Gi}}\n  - {name: c, address: 10.0.0.3}\n",
+        );
+        inventory.validate().expect("a valid inventory");
+        // a takes the group's whole: its cores and the default memory, not the deployment's
+        let a = inventory.node("a").unwrap();
+        assert_eq!(a.resources.cores, Some(4));
+        assert_eq!(a.resources.memory, "4Gi");
+        assert_eq!(
+            inventory.resolve_resources(&inventory.nodes[0]).1,
+            Source::Group("small".into())
+        );
+        // b's own win over its group's
+        let b = inventory.node("b").unwrap();
+        assert_eq!(b.resources.cores, Some(2));
+        assert_eq!(b.resources.memory, "1Gi");
+        // c has no group and takes the deployment's
+        let c = inventory.node("c").unwrap();
+        assert_eq!(c.resources.cores, Some(12));
+        assert_eq!(c.resources.memory, "16Gi");
+    }
+
+    /// Every storage directory destroy could delete wrongly, and every group that is not there,
+    /// is refused by name
+    #[test]
+    fn a_storage_root_that_destroy_could_misuse_is_refused() {
+        // an inventory with the given deployment-wide storage line
+        let with = |storage: &str| {
+            parse(&format!("name: lab\nreplication_factor: 1\nstorage: {storage}\nnodes:\n  - {{name: a, address: 10.0.0.1}}\n"))
+        };
+        // a relative directory, a whole filesystem, a mount point and a `..`
+        let refused = [
+            ("{latency: shoal/data}", "absolute"),
+            ("{latency: /}", "two directories deep"),
+            ("{latency: /mnt}", "two directories deep"),
+            ("{latency: /mnt/../etc/shoal}", "'..'"),
+            // the remote directory, what holds it, and the program's and the keys' directories
+            ("{latency: /opt/shoal-deploy/lab}", "holds /opt/shoal-deploy/lab"),
+            ("{latency: /opt/shoal-deploy}", "holds /opt/shoal-deploy/lab"),
+            ("{latency: /opt/shoal-deploy/lab/bin}", "overlaps"),
+            ("{throughput: /opt/shoal-deploy/lab/tls/archive}", "overlaps"),
+            // one root inside the other
+            ("{latency: /mnt/nvme/shoal, throughput: /mnt/nvme/shoal/archive}", "nested"),
+        ];
+        for (storage, reason) in refused {
+            let error = with(storage).validate().unwrap_err().to_string();
+            assert!(error.contains(reason), "{storage} was refused with {error:?}, not {reason:?}");
+        }
+        // a directory beside the remote one's data, and two apart, are fine
+        with("{latency: /opt/shoal-deploy/lab/logs}").validate().expect("a sibling of data");
+        with("{latency: /mnt/nvme/shoal, throughput: /mnt/nvmeb/shoal}").validate().expect("two roots apart");
+        // a group a node names that is not there
+        let inventory = parse("name: lab\nreplication_factor: 1\nnodes:\n  - {name: a, address: 10.0.0.1, group: big}\n");
+        assert!(inventory.validate().unwrap_err().to_string().contains("\"big\""));
+        // a group whose name is no key an operator could type
+        let inventory = parse("name: lab\nreplication_factor: 1\ngroups:\n  'big box': {}\nnodes:\n  - {name: a, address: 10.0.0.1}\n");
+        assert!(inventory.validate().unwrap_err().to_string().contains("group name"));
+        // an unknown key under a group is a typo, not a setting
+        let server = std::env::current_exe().expect("the test binary");
+        let yaml = format!("server: {}\nname: lab\ngroups:\n  a: {{storge: {{}}}}\nnodes: []\n", server.display());
+        assert!(serde_yaml::from_str::<Inventory>(&yaml).is_err());
     }
 }

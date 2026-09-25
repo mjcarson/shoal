@@ -134,6 +134,17 @@ fn a_deployed_cluster_serves_every_row_from_every_node() {
             read(&*connect(&deployment, &record.nodes[name].address).await, name).await;
         });
     }
+    // a forced upgrade onto the same program restarts every node through the whole wait, the
+    // leader last, and every row is still served through every node afterwards (F55)
+    ctl(path, &["upgrade", "--force"]);
+    let record = deployment.state.record().expect("a record");
+    runtime.block_on(async {
+        for (name, node) in &record.nodes {
+            read(&*connect(&deployment, &node.address).await, name).await;
+        }
+    });
+    // and a plain one finds every node already on it and restarts none
+    ctl(path, &["upgrade"]);
     ctl(path, &["status"]);
     // leave it up only when asked to
     if std::env::var_os("SHOAL_DEPLOY_KEEP").is_none() {

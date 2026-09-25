@@ -264,6 +264,14 @@ finalizing the hosting and the marker. Not a migration between nodes, which is a
 ([F45](../features/replica-migration.md)); not a change of slots, which is a `Replace`
 ([F47](../features/local-rehome.md)).
 
+**Node group** — A named set of `resources` and `storage` in a deployment's inventory that a
+node takes by naming it (`group: small`), so hosts sharing hardware do not repeat their
+settings. Storage is resolved one directory at a time (the node, then its group, then the
+deployment), and resources are taken whole from the first level that sets any. A deployment's
+term only: the engine never sees a group, only the two directories rendered into each node's
+`shoal.yml` ([F53](../features/inventory-wizard.md)). Not a **tablet group**, which is an
+`openraft` group replicating a tablet.
+
 **Wire version** — The version byte every frame carries. Since
 [F48](../features/rolling-compatibility.md) three constants: `PROTOCOL_VERSION`, the newest this
 build speaks (5); `MIN_PEER_VERSION`, the oldest it reads (4), which the peer hello is written

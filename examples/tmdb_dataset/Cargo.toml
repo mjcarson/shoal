@@ -1,0 +1,43 @@
+[package]
+name = "tmdb-dataset"
+version = "0.1.0"
+edition = "2021"
+description = "The TMDB dataset as a deployable Shoal database: a node program for `cluster bootstrap` and a loader that fills a deployed cluster"
+publish = false
+
+# The schema, which both programs are built from. A client refuses a server whose schema
+# fingerprint differs from its own at the hello, so the node and the loader share one copy of the
+# tables rather than an `include!` of them (F54).
+[lib]
+name = "tmdb_dataset"
+path = "src/lib.rs"
+
+# The server program an inventory's `server:` names, and the whole of what is copied to a host
+[[bin]]
+name = "tmdb-dataset-node"
+path = "src/bin/node.rs"
+
+# The loader, and every `shoalctl` command for this schema: `cluster new`, `bootstrap`, `status`,
+# the terminal UI. One program deploys the cluster and fills it
+[[bin]]
+name = "tmdb-dataset-loader"
+path = "src/bin/loader.rs"
+
+[dependencies]
+# the engine, for the node. the loader links it too, as `shoal-benchctl` does beside `shoal-node`,
+# because one package has one feature set and the node needs it
+shoal = { version = "0.1.0", path = "../../shoal" }
+# `cluster new`, `bootstrap` and the rest, and the deployment state the loader connects with
+shoalctl = { version = "0.1.0", path = "../../shoalctl" }
+tokio = { workspace = true }
+rkyv = { workspace = true }
+deepsize2 = { workspace = true }
+# the allocator every Shoal server program in this workspace runs with
+mimalloc = { workspace = true }
+# the dataset is a csv, deserialized straight into the table struct. the sync reader: the loader
+# runs it on a blocking thread, and it is the faster of the two on a half gigabyte file
+csv = "1"
+serde = { version = "1", features = ["derive"] }
+# the versions every other crate in this workspace asks for, so the lockfile does not grow
+clap = { version = "4.2", features = ["derive"] }
+color-eyre = "0.6.3"

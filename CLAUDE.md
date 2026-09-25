@@ -8,7 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # You can't build just shoal on its own you can either build an example or the tests
 # To build the examples you can use
 cargo build --example tmdb
-cargo build --release --example tmdb_dataset
+# and the TMDB dataset's deployable pair, a node program and a loader (F54)
+cargo build --release -p tmdb-dataset
 
 # the benchmark workloads are the other thing that instantiates a schema
 cargo build --release --bin shoal-workload
@@ -102,8 +103,14 @@ cargo run -p shoal-spike --release -- fanout
 # its own target dir, so the native build is left alone
 CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
     cargo build --release -p shoal-bench --bin shoal-node --bin shoal-benchctl
+# an inventory is written in a form (F53) that judges it as you type; --from edits one. a node's
+# storage directories can be set per deployment, per named group of nodes, or per node
+target/deploy/release/shoal-benchctl cluster new -o target/wizard/my.yml --from shoalctl/inventories/lab.yml
 target/deploy/release/shoal-benchctl cluster bootstrap -i shoalctl/inventories/lab.yml
 target/deploy/release/shoal-benchctl cluster status -i shoalctl/inventories/lab.yml
+# a rebuilt node program onto a running cluster, one node at a time and the leader last (F55);
+# --activate ends the rolling window, --rollback swaps every node back onto its .prev before it
+target/deploy/release/shoal-benchctl cluster upgrade -i shoalctl/inventories/lab.yml
 target/deploy/release/shoal-benchctl cluster destroy -i shoalctl/inventories/lab.yml --yes
 # the rendered shoal.yml parsed and validated as a Conf, claimed, started and initialized
 cargo test -p shoal-bench --test deploy_render
@@ -121,11 +128,14 @@ cargo build --release --bin shoal-workload --features hotpath
 # server against a temp dir under target/ and reads the rows back four ways.
 cargo run --example tmdb
 
-# The same two tables against the real dataset, which is the one example that needs
-# something off disk: TMDB_movie_dataset_v11.csv (538MB, from kaggle, not in this repo)
-# at ~/datasets/ or --dataset, and a shoal.yml in the cwd or the defaults' /opt/shoal.
-# --limit loads a slice. The rows/sec it prints is not a measurement - see shoal-bench.
-cargo run --release --example tmdb_dataset -- --limit 10000
+# The real dataset as a deployed database (F54): examples/tmdb_dataset is a crate with the
+# node an inventory names and a loader that is also this schema's shoalctl. It needs
+# TMDB_movie_dataset_v11.csv (538MB, from kaggle, not in this repo) and a deployed cluster;
+# --addr loads a node started by hand instead. The rows/sec it prints is not a measurement.
+CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
+    cargo build --release -p tmdb-dataset
+target/deploy/release/tmdb-dataset-loader cluster bootstrap -i tmdb.yml
+target/deploy/release/tmdb-dataset-loader load -i tmdb.yml --dataset ~/datasets/TMDB_movie_dataset_v11.csv --limit 10000
 ```
 
 ## Benchmarking
@@ -417,7 +427,7 @@ Shoal is a high-performance, distributed database with persistence, built on thr
 
 ### Crate Structure
 
-Seven implementation crates plus a facade and a spike. The split is
+Seven implementation crates plus a facade, a spike and a deployable example. The split is
 [F15](docs/src/features/client-server-split.md) and the rule it enforces is simple: **nothing
 outside `shoal-proto`, `shoal-client`, `shoal-core` and `shoal-derive` names any of them — callers
 go through `shoal`.**
@@ -456,6 +466,10 @@ go through `shoal`.**
   the contract P1–P6 as executable checks over a Raft-shaped tablet group, with saved schedules
   under `shoal-model/schedules/`. Depends on `serde` and `serde_json` alone and names no shoal
   crate; keep it that way, since a schedule that needs the engine to replay is worth nothing
+- **tmdb-dataset** - The TMDB dataset as a deployable database ([F54](docs/src/features/tmdb-dataset-deployment.md)),
+  under `examples/tmdb_dataset/`: the library is the schema, `tmdb-dataset-node` is its
+  `node::main`, and `tmdb-dataset-loader` is `load -i <inventory>` beside every shoalctl command.
+  Both binaries use the one `Tmdb` type, so they cannot disagree about the fingerprint
 
 ### Key Abstractions
 

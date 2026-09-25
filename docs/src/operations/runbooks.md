@@ -34,7 +34,9 @@ asked for. Then `Initialize { nodes }` in the order you want the tablets dealt, 
 every tablet over those nodes at the factor. Wait for `Readiness.data.default_writes` to say
 `Ok` before opening the cluster to clients - `Members = up` is not data readiness.
 
-**With shoalctl.** `shoalctl cluster bootstrap -i <inventory>` preflights every host, stages and
+**With shoalctl.** `shoalctl cluster new -o <inventory>` writes the inventory in a form that
+judges it the way bootstrap will, and groups hosts sharing disks so their storage directories are
+written once ([F53](../features/inventory-wizard.md)). `shoalctl cluster bootstrap -i <inventory>` preflights every host, stages and
 claims each node, issues each a leaf for the id its claim printed, starts them under systemd in
 this order, sends `Initialize` once in inventory order, and waits for `default_writes`. It
 refuses a cluster its state says it already deployed; `destroy --yes` is its rollback.
@@ -142,6 +144,12 @@ Upgrade one failure domain at a time: stop the node, install the build, start it
 Inside the window the old and new builds negotiate the older version on every link. When every
 member reports the new version, `Activate { wire }`; it is refused naming any member below it.
 After the activation no member starts on a build below it, which is the rollback point.
+
+**With `shoalctl`.** On a cluster deployed from an inventory, `shoalctl cluster upgrade -i <inv>`
+is this runbook: it refuses an unhealthy cluster, upgrades one node at a time with the leader
+last, waits for each to be up and caught up, swaps a node that does not come back onto its
+previous program, and stops. `--activate` ends the window, and `--rollback` is the rollback
+before it ([F55](../features/cluster-upgrade.md)).
 
 **Rollback.** Before the activation, reinstall the previous build on any node; after it, none.
 A schema change is not a rolling operation: a node with another `schema_id` is refused, and
