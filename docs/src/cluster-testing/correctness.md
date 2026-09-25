@@ -223,7 +223,11 @@ throughput fell to zero for a second or two at a time, reads included, with writ
 - journald on titan reported suppressing 43,954 lines from the node, most of them openraft warnings
   for every failed heartbeat to hyperion, per group, twice a second.
 
-Both are followed up as
-[O65](../appendix/optimizations.md#o65-heartbeats-to-followers-that-just-acknowledged-replication).
+The log flood is fixed as
+[O66](../appendix/optimizations.md#o66-a-partitioned-peer-floods-the-log): the rerun had journald
+suppress nothing. [O65](../appendix/optimizations.md#o65-heartbeats-to-followers-that-just-acknowledged-replication)
+did not touch it. The elections are not a load problem. They continue after the heal because
+hyperion's groups kept their election timers running through the partition, and on the heal it
+campaigned at a higher term and made healthy leaders on europa and titan step down.
 
 **Verdict:** correctness **pass**, availability **improved and not yet good enough**.

@@ -4,7 +4,7 @@ What the test suite reaches, what it does not, and the one place where it ~~is~~
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
 `cargo test --workspace` passes: ~~**1,187 tests**~~ ~~**1,198 tests**~~ ~~**1,238 tests**~~
-~~**1,265 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,493 tests**~~ ~~**1,494 tests**~~ ~~**1,495 tests**~~ ~~**1,496 tests**~~ ~~**1,497 tests**~~ ~~**1,499 tests**~~ ~~**1,502 tests**~~ ~~**1,503 tests**~~ ~~**1,504 tests**~~ ~~**1,506 tests**~~ ~~**1,507 tests**~~ ~~**1,509 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ **1,636 tests**, seven ignored, plus ~~**13**~~ **14** behind
+~~**1,265 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,493 tests**~~ ~~**1,494 tests**~~ ~~**1,495 tests**~~ ~~**1,496 tests**~~ ~~**1,497 tests**~~ ~~**1,499 tests**~~ ~~**1,502 tests**~~ ~~**1,503 tests**~~ ~~**1,504 tests**~~ ~~**1,506 tests**~~ ~~**1,507 tests**~~ ~~**1,509 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ **1,637 tests**, seven ignored, plus ~~**13**~~ **14** behind
 `--features stage-profile` that a default run does not reach - ~~and one of those fourteen,
 `stage_join.rs`, had not *compiled* since [F36](../features/cluster-harness.md) added two fields
 to `RunRequest`~~ and one of those fourteen, `stage_join.rs`, ran only on a host with
@@ -17,6 +17,9 @@ nothing else builds them:
 cargo check -p shoal-bench --features stage-profile,hotpath --all-targets
 cargo test -p shoal-bench --features stage-profile --test stage_join
 ```
+
+**O66 added 1**, 1,636 → 1,637: `repeating_openraft_targets_are_quiet_by_default` in the
+`shoal-core` unit tests.
 
 **O65 added 1**, 1,635 → 1,636: `a_group_config_keeps_the_timers_its_base_derives` in the
 `shoal-core` unit tests.

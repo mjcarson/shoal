@@ -202,7 +202,8 @@ so they get worse by existing longer rather than under load.
 | ~~**B20**~~ | ~~[**O62**](#o62-every-compaction-rewrites-the-shards-whole-archive-map) — every compaction rewrites the shard's whole archive map~~ **done**, measured and kept | Measured — 70% of a node's writes under load, in bursts that stalled its fsyncs | S | the lab's mixed `bench` with bytes per file | A longer replay at start | it was |
 | ~~**B21**~~ | ~~[**O63**](#o63-leadership-never-returns-to-a-groups-placement-primary) — leadership never returns to a group's placement primary~~ **done**, measured and kept | Measured — one node leading every group cost about a sixth of the throughput and a quarter of the write p99 | S | the lab's mixed `bench`, skewed against spread | One transfer per group handed back | it was |
 | **B22** | [**O64**](#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab) — a shorter failover base halves write throughput on the lab | Measured — 1 s: 20–24k rows/s and 4 s failover; 5 s: 40–46k rows/s and 16 s failover | ? | the lab's load at each base | Crash failover against write throughput | yes, on the lab |
-| **B23** | [**O65**](#o65-heartbeats-to-followers-that-just-acknowledged-replication) — heartbeats to followers that just acknowledged replication | Indicated — a heartbeat per follower per group every tenth of the base, under load and in a partition | S | the lab's load at 1 s and 5 s | none expected | yes, on the lab |
+| ~~**B23**~~ | ~~[**O65**](#o65-heartbeats-to-followers-that-just-acknowledged-replication) — heartbeats to followers that just acknowledged replication~~ **done**, no measurable effect, kept | Indicated — a heartbeat per follower per group every tenth of the base, under load and in a partition | S | the lab's load at 1 s and 5 s | none expected | yes, on the lab |
+| ~~**B24**~~ | ~~[**O66**](#o66-a-partitioned-peer-floods-the-log) — a partitioned peer floods the log~~ **done**, measured and kept | Measured — 50–60k lines suppressed by journald per node in a 20 s partition | S | the lab's partition test | Per-attempt warnings need `RUST_LOG` | it was |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -3015,3 +3016,33 @@ So heartbeats are not what makes a short base slow
 It does nothing in a partition either, where the heartbeats that fail are to a follower that
 acknowledges nothing. **Kept**, as the configuration openraft documents for sustained writes, at no
 measured cost. The log flood in a partition is not addressed by it.
+
+### O66. A partitioned peer floods the log
+
+| | |
+| --- | --- |
+| **Rank** | ~~**B24**~~ **done** — applied, measured and kept |
+| **Impact** | Measured on the lab — with one node cut off, every group leading a copy on it logged openraft warnings for each failed heartbeat and replication attempt, twice a heartbeat. journald on titan suppressed 43,954 of the node's lines in one partition test and 50,000–60,000 in later ones, and both journald and the node spent a Zen1 host's cpu formatting and writing them |
+| **Difficulty** | S — a default filter directive |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | openraft's per-attempt warnings are gone at the default level; the peer being unreachable is still said once by the link and by the failure detector, and `RUST_LOG` brings them back |
+| **Benchmark** | the lab's [partition test](../cluster-testing/correctness.md#partition-one-node), counting journald's suppressions |
+
+Found by the [distributed cluster testing](../cluster-testing/correctness.md#partition-one-node)
+chapter, and not addressed by [O65](#o65-heartbeats-to-followers-that-just-acknowledged-replication),
+which only drops heartbeats to followers that are answering.
+
+**Applied:** the default filter (`directives_from` in `shoal-core/src/server/trace.rs`) holds
+`openraft::core::heartbeat`, `openraft::engine::handler::replication_handler` and
+`openraft::replication` to errors when the configured level would show warnings. At `Error` or `Off`
+the directives are left out, since there they could only turn those targets on. `RUST_LOG` still
+replaces the whole default. The table stores' `mark_evictable` event, logged at INFO once per
+partition made evictable, moved to DEBUG for the same reason: under a load it was most of what a
+node logged at INFO.
+
+**Outcome:** the same 20 second partition under the mixed bench made journald suppress **none** of
+any node's lines, against 50,000–60,000 before, and each node logged about 7,000–8,000 lines over
+the whole run. Throughput during the partition did not measurably change: the lines were a cost to
+the host, not the cause of the stalls that followed the heal, which the
+[partition test](../cluster-testing/correctness.md#partition-one-node) follows up. **Kept.**
