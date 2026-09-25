@@ -58,6 +58,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 use futures_channel::oneshot;
 use glommio::io::{BufferedFile, Directory, OpenOptions};
@@ -184,6 +185,15 @@ struct GroupLog {
     committed: Option<WalLogId>,
     /// The last purged log id recorded
     purged: Option<WalLogId>,
+    /// The purge point a durable marker holds, which is what a segment may be deleted behind
+    ///
+    /// `purged` moves when a purge is staged; this only once the batch holding its marker is
+    /// synced. A segment deleted behind a staged purge that a crash then lost left a restart
+    /// with its old purge point and the entries after it gone
+    /// ([Resolved #151](../../../../docs/src/appendix/resolved/purge-ahead-of-its-marker.md)).
+    purged_durable: Option<u64>,
+    /// Staged purges not yet durable: where each marker ends, and the index it purges through
+    purge_pending: Vec<(u64, u64, u64)>,
     /// The entries held in memory, by index
     cache: BTreeMap<u64, Entry>,
 }
@@ -269,6 +279,11 @@ impl Batch {
 struct WalInner {
     /// The directory the segments are in
     dir: PathBuf,
+    /// How long the writer waits after a sync before it takes the next batch
+    /// ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page))
+    commit_delay: Duration,
+    /// How many batches have been written and synced
+    synced_batches: u64,
     /// Every group's logical log
     groups: HashMap<GroupId, GroupLog>,
     /// The generation appends go to
@@ -600,6 +615,8 @@ impl WalInner {
             frame::Frame::Purged { group, log_id } => {
                 let index = log_id.index;
                 self.group(group).purged = Some(log_id);
+                // a marker read back from disk is durable by being there
+                self.group(group).purged_durable = Some(index);
                 self.purge_index(group, index);
             }
             frame::Frame::Truncate { group, keep_after } => {
@@ -1191,6 +1208,14 @@ async fn writer(inner: Rc<RefCell<WalInner>>) {
             Ok(()) => complete_batch(&inner, batch),
             Err(error) => fail_batch(&inner, batch, error),
         }
+        // a group commit: after a sync, let the appends that arrive for a moment join the next
+        // batch rather than sync each on its own. Only a writer that just synced waits, so an
+        // append after an idle spell is still written at once
+        // ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page))
+        let delay = inner.borrow().commit_delay;
+        if !delay.is_zero() {
+            glommio::timer::sleep(delay).await;
+        }
     }
     // closing: sync whatever file is open and let it go
     if let Some((_, handle)) = file.take() {
@@ -1211,6 +1236,22 @@ fn complete_batch(inner: &Rc<RefCell<WalInner>>, batch: Batch) {
         let mut guard = inner.borrow_mut();
         guard.durable = (batch.generation, batch.end());
         guard.writing = false;
+        // every staged purge the watermark has now passed is durable (Resolved #151)
+        let durable = guard.durable;
+        for log in guard.groups.values_mut() {
+            let mut reached = None;
+            log.purge_pending.retain(|(generation, end, index)| {
+                let passed = (*generation, *end) <= durable;
+                if passed {
+                    reached = reached.max(Some(*index));
+                }
+                !passed
+            });
+            if let Some(index) = reached {
+                log.purged_durable = log.purged_durable.max(Some(index));
+            }
+        }
+        guard.synced_batches += 1;
         // a stalled group's completions are held; everybody else's fire now
         for (group, callback) in batch.callbacks {
             if guard.stalled.contains(&group) {
@@ -1286,6 +1327,8 @@ impl ShardWal {
         generations.sort_unstable();
         let mut inner = WalInner {
             dir: dir.to_path_buf(),
+            commit_delay: Duration::ZERO,
+            synced_batches: 0,
             groups: HashMap::new(),
             generation: 1,
             next_offset: 0,
@@ -1567,6 +1610,24 @@ impl ShardWal {
         self.inner.borrow().held.len()
     }
 
+    /// Set how long the writer waits after a sync before it takes the next batch
+    ///
+    /// Zero takes the next batch at once, which is the default
+    /// ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page)).
+    ///
+    /// # Arguments
+    ///
+    /// * `delay` - The wait
+    pub fn set_commit_delay(&self, delay: Duration) {
+        self.inner.borrow_mut().commit_delay = delay;
+    }
+
+    /// How many batches have been written and synced since the WAL was opened
+    #[must_use]
+    pub fn synced_batches(&self) -> u64 {
+        self.inner.borrow().synced_batches
+    }
+
     /// Wait until every queued batch is durable
     pub async fn flush(&self) -> io::Result<()> {
         let rx = {
@@ -1798,7 +1859,31 @@ impl GroupStore {
         matches!(self.backend, Backend::Memory(_))
     }
 
-    /// The index this group's log is purged to, if it was ever purged
+    /// The index this group's log is durably purged through: what a segment may be deleted behind
+    ///
+    /// A purge moves [`Self::purged_index`] when its marker is staged, and this only once the
+    /// batch holding the marker is synced. A segment deleted behind a staged purge that a crash
+    /// lost left the restart's log with a hole after its purge point, and the group could not be
+    /// built again ([Resolved #151](../../../../docs/src/appendix/resolved/purge-ahead-of-its-marker.md)).
+    #[must_use]
+    pub fn durable_purged_index(&self) -> Option<u64> {
+        match &self.backend {
+            // the durable marker, never the staged one: what a segment may be deleted behind
+            Backend::Shared(wal) => wal
+                .inner
+                .borrow()
+                .groups
+                .get(&self.group)
+                .and_then(|log| log.purged_durable),
+            // a volatile log keeps nothing on disk, so what it purged is all there is
+            Backend::Memory(memory) => memory
+                .log_state(self.group)
+                .last_purged_log_id
+                .map(|log_id| log_id.index),
+        }
+    }
+
+    /// The index this group's log is purged through, as staged
     #[must_use]
     pub fn purged_index(&self) -> Option<u64> {
         match &self.backend {
@@ -2065,9 +2150,16 @@ impl RaftLogStorage<DataConfig> for GroupStore {
                 };
                 let frame =
                     frame::encode_marker(frame::FrameKind::Purged, self.group, Some(&purged))?;
-                wal.stage(&frame, self.group, None)?;
+                let loc = wal.stage(&frame, self.group, None)?;
                 let mut inner = wal.inner.borrow_mut();
                 let index = purged.index;
+                // durable once the batch holding this marker is: until then nothing may be
+                // deleted behind it (Resolved #151)
+                inner.group(self.group).purge_pending.push((
+                    loc.generation,
+                    loc.offset + u64::from(loc.len),
+                    index,
+                ));
                 inner.group(self.group).purged = Some(purged);
                 inner.purge_index(self.group, index);
                 Ok(())

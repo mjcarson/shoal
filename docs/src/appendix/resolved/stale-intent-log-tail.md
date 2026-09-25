@@ -77,6 +77,22 @@ Two, one at the source and one for logs already on disk.
   lets a log written before the fix load: hyperion's and titan's stop at the first foreign
   record.
 
+**What the zeroing costs.** It clears only the unwritten tail of a partly filled buffer, at a
+partial flush: a `sync()` or a close, which for these writers is about once per compaction. A
+full buffer is flushed without it. At most 128 KiB of memset precedes an `fdatasync`. On the lab,
+the same benches on the same cluster, with the zeroing line removed from the fork and then
+restored (`target/lab/zero-ab.sh`):
+
+| Build | Inserts, run 1 | Inserts, run 2 | Mixed bench, all operations |
+| --- | --- | --- | --- |
+| Without zeroing | 22,982/s, p99 307 ms | 20,175/s, p99 295 ms | 46,818/s, write p99 417–420 ms |
+| With zeroing | 22,928/s, p99 342 ms | 19,171/s, p99 356 ms | 45,159/s, write p99 412–415 ms |
+
+The difference in throughput is within the run-to-run spread: the two runs of the same build
+differ by more than the builds do, and each second run is slower because the table grew. The insert
+p99 was 10–20% higher with the zeroing in both runs, which two runs cannot tell from noise. This
+is recorded rather than dismissed.
+
 ## Alternatives rejected
 
 - **Truncate the intent log on every sync.** An `ftruncate` per compaction, and it still leaves

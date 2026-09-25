@@ -187,7 +187,12 @@ impl<P, B> std::fmt::Debug for ValidatedArchive<P, B> {
 #[derive(Debug)]
 pub enum MaybeLoaded<P: PartitionSupport, B = ReadResult> {
     /// A fully loaded partition
-    Loaded { partition: P, generation: u64 },
+    ///
+    /// Boxed, because a table's map holds this enum inline in every bucket, empty ones included,
+    /// and a row inline is hundreds of bytes: a map sized for its peak held gigabytes the memory
+    /// budget never counted
+    /// ([Resolved #150](../../../../docs/src/appendix/resolved/inline-partition-buckets.md)).
+    Loaded { partition: Box<P>, generation: u64 },
     /// An accessible but not fully loaded partition
     Accessible(ValidatedArchive<P, B>),
 }
@@ -473,7 +478,7 @@ where
     /// Get the data from a loaded partition or deserialize it from an accesible one
     pub fn deserialize(self) -> Result<UnsortedPartition<R>, rkyv::rancor::Error> {
         match self {
-            MaybeLoaded::Loaded { partition, .. } => Ok(partition),
+            MaybeLoaded::Loaded { partition, .. } => Ok(*partition),
             MaybeLoaded::Accessible(read) => {
                 // access our data
                 let access = read.archived();
@@ -1421,6 +1426,38 @@ mod tests {
     use crate::server::tables::persistent::RowSink;
     use crate::shared::queries::parser::{FieldRole, TypeValidator};
     use crate::shared::queries::{SortRange, SortSelect, SortedExists, SortedGet, SortedUpdate};
+
+    /// A table's map holds a loaded partition by pointer, never its row inline (item 150)
+    ///
+    /// A table's partitions live in a `HashMap<u64, MaybeLoaded<…>>`, which holds the value
+    /// inline in every bucket, the empty ones included, and keeps the capacity of its peak. With
+    /// the row inline a Movie bucket was hundreds of bytes, and on the lab the maps held 3 GB of a
+    /// 7 GB node that the budget never counted
+    /// ([Resolved #150](../../../../docs/src/appendix/resolved/inline-partition-buckets.md)).
+    #[test]
+    fn a_maybe_loaded_partition_is_as_small_as_its_pointer() {
+        let unsorted = std::mem::size_of::<MaybeLoaded<UnsortedPartition<TestRow>>>();
+        let sorted = std::mem::size_of::<MaybeLoaded<SortedPartition<TestRow>>>();
+        eprintln!(
+            "a bucket holds {unsorted} bytes for an unsorted partition of {} and {sorted} for a sorted one of {}",
+            std::mem::size_of::<UnsortedPartition<TestRow>>(),
+            std::mem::size_of::<SortedPartition<TestRow>>()
+        );
+        // whatever the row is, the loaded arm is a box and a generation, so a bucket is no bigger
+        // than the other arm's handle on a buffer and the tag: a row inline made it the row's size
+        let handle = std::mem::size_of::<ValidatedArchive<UnsortedPartition<TestRow>>>();
+        assert!(
+            unsorted <= handle + 8,
+            "an unsorted MaybeLoaded is {unsorted} bytes, where the archive handle is {handle}"
+        );
+        let handle = std::mem::size_of::<ValidatedArchive<SortedPartition<TestRow>>>();
+        assert!(
+            sorted <= handle + 8,
+            "a sorted MaybeLoaded is {sorted} bytes, where the archive handle is {handle}"
+        );
+        // and the test row's own partition is bigger than that, so the row is not in the bucket
+        assert!(std::mem::size_of::<UnsortedPartition<TestRow>>() + 8 > unsorted);
+    }
     use crate::shared::queries::{UnsortedGet, UnsortedUpdate};
     use crate::shared::rearchive::Rearchive;
     use crate::shared::row_ref::RowRef;
@@ -3060,7 +3097,7 @@ mod tests {
     /// * `sort_keys` - The sort keys to build rows for
     fn resident(sort_keys: &[&str]) -> MaybeLoaded<SortedPartition<TestRow>, AlignedVec> {
         MaybeLoaded::Loaded {
-            partition: partition_of(sort_keys),
+            partition: Box::new(partition_of(sort_keys)),
             generation: 0,
         }
     }
@@ -3306,7 +3343,7 @@ mod tests {
         assert_eq!(row.data, "updated");
         // and an already loaded partition is updated in place instead
         let mut loaded = MaybeLoaded::<UnsortedPartition<TestRow>, AlignedVec>::Loaded {
-            partition: UnsortedPartition::new(0, TestRow::new("a")),
+            partition: Box::new(UnsortedPartition::new(0, TestRow::new("a"))),
             generation: 0,
         };
         assert!(loaded

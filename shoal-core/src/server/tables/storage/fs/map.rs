@@ -410,24 +410,28 @@ impl SerializedMap {
 }
 
 /// All archives sorted by how much of it is used
+///
+/// Only the bytes each archive holds: the entries of an archive are gathered when it is
+/// compacted, never for every archive at once
+/// ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index)).
 pub struct SortedUsageMap {
     /// This shards archive ids sorted by total used bytes
     pub sorted: BTreeMap<usize, Vec<Uuid>>,
-    /// The entries across all archive maps by archive
-    pub entries: std::collections::HashMap<Uuid, Vec<ArchiveEntry>>,
 }
 
 impl SortedUsageMap {
     /// Create a new sorted usage map
-    ///
-    /// # Arguments
-    ///
-    /// * `capacity` - The capacity to set
-    pub fn with_capacity(capacity: usize) -> Self {
+    pub fn new() -> Self {
         SortedUsageMap {
             sorted: BTreeMap::default(),
-            entries: std::collections::HashMap::with_capacity(capacity),
         }
+    }
+}
+
+impl Default for SortedUsageMap {
+    /// An empty map
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -894,34 +898,44 @@ impl ArchiveMap {
         Ok(())
     }
 
+    /// The entries of the partitions whose latest data lies in one archive
+    ///
+    /// A pass over the index, gathering only that archive's: what a compaction of it needs
+    /// ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index)).
+    ///
+    /// # Arguments
+    ///
+    /// * `archive` - The archive
+    #[must_use]
+    pub fn entries_of(&self, archive: &Uuid) -> Vec<ArchiveEntry> {
+        // every partition whose entry names this archive
+        self.to_archive
+            .borrow()
+            .values()
+            .filter(|entry| entry.archive == *archive)
+            .copied()
+            .collect()
+    }
+
     /// Sort our archives by how much data they have
     ///
     /// They will be sorted from least used to most used.
     #[instrument(name = "ArchiveMap::sort_by_load", skip_all)]
     pub fn sort_by_load(&self) -> SortedUsageMap {
-        // get the length of our archive map
-        let archive_len = self.loaded_archives.borrow().len();
-        // count how many times each archive is used
+        // count how many bytes each archive holds, starting every known archive at none
         let mut used_by: std::collections::HashMap<Uuid, usize> =
-            std::collections::HashMap::with_capacity(archive_len);
-        // prepopulate our used by map with 0 for each archive
+            std::collections::HashMap::with_capacity(self.all_archives.borrow().len());
         for archive in self.all_archives.borrow().iter() {
-            // default our used by count to 0 for all archives
             used_by.insert(*archive, 0);
         }
-        // build a map to sort our archive maps by number of entries in
-        let mut sorted = SortedUsageMap::with_capacity(archive_len);
-        // step over our to archive map
+        // one pass over the index, counting and copying nothing else: copying every entry here
+        // was a copy of the whole index on every compaction
+        // ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index))
         for (_, archive_entry) in self.to_archive.borrow().iter() {
-            // get an entry to this archives count
-            let entry: &mut usize = used_by.entry(archive_entry.archive).or_default();
-            // increment this archived used by count
-            *entry += archive_entry.size;
-            // get an entry to this archives archive entries
-            let entries_entry = sorted.entries.entry(archive_entry.archive).or_default();
-            // add this archive entry to our sorted map
-            entries_entry.push(*archive_entry);
+            *used_by.entry(archive_entry.archive).or_default() += archive_entry.size;
         }
+        // the archives by how much they hold, least first
+        let mut sorted = SortedUsageMap::new();
         // add each used by count and sort them
         for (uuid, size) in used_by {
             // get an enty to this counts archive list
@@ -1124,6 +1138,60 @@ mod tests {
             assert!(saved > 8, "a save did not record its size");
             let reopened = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
             assert_eq!(reopened.saved_bytes.get(), saved);
+            map.close_all().await.expect("a close");
+        });
+    }
+
+    /// Archives are ordered by what they hold, and one archive's entries are gathered alone (O68)
+    ///
+    /// Every archive compaction copied the shard's whole partition index into vectors per
+    /// archive, five million entries a shard on the lab, to compact the few archives below half
+    /// used. It now counts bytes per archive and gathers an archive's entries when it compacts it
+    /// ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index)).
+    #[test]
+    fn archives_are_ordered_by_load_and_gathered_one_at_a_time() {
+        use super::super::conf::FileSystemTableConf;
+        use super::ArchiveMap;
+        LocalExecutor::default().run(async {
+            let temp_dir = test_dir();
+            let conf = FileSystemTableConf::builder()
+                .latency_sensitive(
+                    super::super::conf::FileSystemLatencyWriterConf::builder()
+                        .path(temp_dir.path()),
+                )
+                .throughput_sensitive(
+                    super::super::conf::FileSystemThroughputWriterConf::builder()
+                        .path(temp_dir.path()),
+                );
+            conf.setup_paths("T").await.expect("paths");
+            let map = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
+            // three archives holding one, two and three partitions of 128 bytes
+            let archives = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+            let mut key = 0u64;
+            for (at, archive) in archives.iter().enumerate() {
+                map.all_archives.borrow_mut().insert(*archive);
+                for _ in 0..=at {
+                    map.set_partition(key, ArchiveEntry { key, archive: *archive, offset: key * 128, size: 128 });
+                    key += 1;
+                }
+            }
+            // ordered least used first, by the bytes each holds
+            let sorted = map.sort_by_load();
+            let order: Vec<(usize, Vec<Uuid>)> = sorted.sorted.into_iter().collect();
+            let expected: Vec<(usize, Vec<Uuid>)> = archives
+                .iter()
+                .enumerate()
+                .map(|(at, archive)| ((at + 1) * 128, vec![*archive]))
+                .collect();
+            assert_eq!(order, expected);
+            // and each archive's entries are its own, all of them
+            for (at, archive) in archives.iter().enumerate() {
+                let entries = map.entries_of(archive);
+                assert_eq!(entries.len(), at + 1);
+                assert!(entries.iter().all(|entry| entry.archive == *archive));
+            }
+            // an archive nothing lives in has none, which is what marks it for deletion
+            assert!(map.entries_of(&Uuid::new_v4()).is_empty());
             map.close_all().await.expect("a close");
         });
     }

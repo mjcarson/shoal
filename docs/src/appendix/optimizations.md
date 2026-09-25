@@ -198,13 +198,14 @@ so they get worse by existing longer rather than under load.
 | **B16** | [**O58**](#o58-a-rehomes-moved-records-are-copied-and-a-donors-archives-keep-the-dead-ones) — a rehome's moved records are copied, and a donor's archives keep the dead ones | Argued — a read and a write per moved record at start, and a growth's donor holding dead records until its own compaction | M | `macro/rehome/shrink`, whose `bytes` over `millis` is the copy's pace | Contained | no |
 | **B17** | [**O59**](#o59-the-rehome-runs-on-one-core-and-blocks-the-start) — the rehome runs on one core and blocks the start | Argued — the start held for the whole move while every other core idles | M | `macro/rehome/shrink`, whose `millis` is the hold | Contained | no |
 | **B18** | [**O60**](#o60-a-nodes-figures-ride-its-status-report-as-verbose-json) — a node's figures ride its status report as verbose JSON | Measured in shape — about 7.4 KB a report for four busy tables, one report in four, 1.6× the leader's intake at 64 members | S | none; the spike's `fanout` table prices it, and no arm drives a cluster of that size | Contained | no |
-| **B19** | [**O61**](#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page) — a fast device syncs the WAL in batches too small to fill a page | Measured on the lab — 6.8× the device writes of the slower hosts for the same replicated rows, 5.6k `fdatasync`s a second against 680 | S–M | the lab's insert `bench` with disk counters | Latency for wear | yes, on the lab |
+| ~~**B19**~~ | ~~[**O61**](#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page) — a fast device syncs the WAL in batches too small to fill a page~~ **done**, a per-node setting off by default | Measured on the lab — 6.8× the device writes of the slower hosts for the same replicated rows, 5.6k `fdatasync`s a second against 680 | S–M | the lab's insert `bench` with disk counters | Latency for wear | yes, on the lab |
 | ~~**B20**~~ | ~~[**O62**](#o62-every-compaction-rewrites-the-shards-whole-archive-map) — every compaction rewrites the shard's whole archive map~~ **done**, measured and kept | Measured — 70% of a node's writes under load, in bursts that stalled its fsyncs | S | the lab's mixed `bench` with bytes per file | A longer replay at start | it was |
 | ~~**B21**~~ | ~~[**O63**](#o63-leadership-never-returns-to-a-groups-placement-primary) — leadership never returns to a group's placement primary~~ **done**, measured and kept | Measured — one node leading every group cost about a sixth of the throughput and a quarter of the write p99 | S | the lab's mixed `bench`, skewed against spread | One transfer per group handed back | it was |
 | **B22** | [**O64**](#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab) — a shorter failover base halves write throughput on the lab | Measured — 1 s: 20–24k rows/s and 4 s failover; 5 s: 40–46k rows/s and 16 s failover | ? | the lab's load at each base | Crash failover against write throughput | yes, on the lab |
 | ~~**B23**~~ | ~~[**O65**](#o65-heartbeats-to-followers-that-just-acknowledged-replication) — heartbeats to followers that just acknowledged replication~~ **done**, no measurable effect, kept | Indicated — a heartbeat per follower per group every tenth of the base, under load and in a partition | S | the lab's load at 1 s and 5 s | none expected | yes, on the lab |
 | ~~**B24**~~ | ~~[**O66**](#o66-a-partitioned-peer-floods-the-log) — a partitioned peer floods the log~~ **done**, measured and kept | Measured — 50–60k lines suppressed by journald per node in a 20 s partition | S | the lab's partition test | Per-attempt warnings need `RUST_LOG` | it was |
 | ~~**B25**~~ | ~~[**O67**](#o67-ten-thousand-retained-entries-is-seconds-of-a-busy-group) — ten thousand retained entries is seconds of a busy group~~ **done**, measured and kept | Measured — a 20 s partition cost 13 snapshot installs and 70 s of refused reads on the returning node | S | the lab's partition test | About 0.5 GB more WAL a node under load | it was |
+| ~~**B26**~~ | ~~[**O68**](#o68-every-archive-compaction-copies-the-shards-whole-partition-index) — every archive compaction copies the shard's whole partition index~~ **done**, contained | Measured in shape — the one Shoal frame in a page fault profile, 9.5% | S | a page fault profile under the insert bench | CPU for memory | no |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -2818,7 +2819,7 @@ Filed by [F52](../features/cluster-stats.md).
 
 | | |
 | --- | --- |
-| **Rank** | **B19** — measured on the lab, contained |
+| **Rank** | ~~**B19**~~ **done** — applied as a per-node setting, measured on the lab; off by default |
 | **Impact** | Measured — on the three-node lab, one 30 s insert run wrote 16.6 GB to europa's Optane and 2.45 GB to each Zen1 host's NVMe for the same replicated rows: 6.8×. The node process itself was charged 4,776 MB of writeback on europa and about 875 MB on each other host for 554,450 inserts, and it issued 5.6k `fdatasync`s a second against about 680 on titan |
 | **Difficulty** | S to M — a group-commit delay in the WAL writer: once a batch completes, wait a bounded time for more frames before taking the next, but only while batches are arriving back to back |
 | **Depends on** | nothing |
@@ -2838,6 +2839,32 @@ unchanged at 16.6 GB, so this is not btrfs copying data. The remaining 1.8× bet
 writeback and the device's writes on europa, against 1.26× on ext4, is the filesystem's
 per-sync metadata. The group-commit delay is tried in [cluster testing](../cluster-testing/performance.md#o61-a-group-commit-delay),
 which records the outcome.
+
+**Applied:** `cluster.replication.wal_commit_delay`, at most 10 ms, zero by default. After each
+sync the shard's WAL writer waits that long before it takes the next batch, and appends that
+arrive in the wait join it (`writer` in `server/wal/mod.rs`, set by `ShardWal::set_commit_delay`
+at the shard's open). Only a writer that has just synced waits, so the first append after an idle
+spell is written at once. `a_commit_delay_groups_appends_into_fewer_syncs` checks the mechanism:
+200 appends half a millisecond apart took 200 syncs with no delay and 22 with 5 ms.
+
+**Outcome on the lab**, europa alone set in its `shoal.yml`, the insert bench at each setting,
+europa's syncs counted by a probe on its io_uring submissions and its device writes read from
+`/proc/diskstats`:
+
+| europa's delay | europa's syncs in 10 s | europa's device writes in 30 s | Cluster inserts | p50 | p99 |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 45,123 | 15.6 GB | 18,357/s | 25.3 ms | 506 ms |
+| 3 ms | 14,215 | 7.7 GB | 18,649/s | 25.3 ms | 520 ms |
+| 0 | 44,162 | 14.9 GB | 17,401/s | 25.9 ms | 601 ms |
+
+Three milliseconds cut europa's syncs by two thirds and its device writes by half, with the
+cluster's throughput and latency unchanged. A write's latency is set by the quorum, and a quorum
+always includes a Zen1 host whose own sync takes longer than the delay. An earlier sequence, 0,
+1 ms, 3 ms and 0 in that order, put 1 ms at 13.1 GB, −18%. Its throughput numbers could not be
+used, because the table's growth moved them by more than the settings did. **Kept, off by
+default.** On a device whose syncs are already slow, a batch fills while the last one syncs, and
+the delay would only add latency. It is for the fast device in a mixed cluster, which the lab
+has. A deployment inventory cannot set it per group yet, filed in [todos](todos.md).
 
 ### O62. Every compaction rewrites the shard's whole archive map
 
@@ -3105,3 +3132,30 @@ fewer than the rows. **Kept.**
 A cluster benchmark arm that runs at the default retention (`macro/cluster/catchup/log`) now runs
 a different server. Its captures from before this change do not describe it, and a new capture
 belongs to the benchmark host, not the lab.
+
+### O68. Every archive compaction copies the shard's whole partition index
+
+| | |
+| --- | --- |
+| **Rank** | ~~**B26**~~ **done** — applied, contained |
+| **Impact** | Measured in shape — `ArchiveMap::sort_by_load` was the one Shoal function in a page fault profile of a lab node under load, 9.5% of its faults. It copies every entry of the table's index, five million a shard on the lab, into vectors per archive, on every archive compaction, which runs after every sealed 10 MiB WAL segment |
+| **Difficulty** | S |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | an archive's entries are gathered with a pass over the index when it is compacted, so a compaction of several archives passes over it several times: CPU for memory |
+| **Benchmark** | the lab's insert bench with a page fault profile; `macro/grid/unsorted/*` for the compaction path's CPU |
+
+Found by the [distributed cluster testing](../cluster-testing/performance.md) chapter while chasing
+[#149](resolved/node-memory-budget.md). `sort_by_load` ranks a table's archives by the bytes they
+still hold, so the compactor can rewrite the least used. It also built, for every archive, a vector
+of every entry in it: a transient copy of the whole index, 40 bytes an entry, about 200 MB a shard
+at the lab's size, on every compaction. The compactor uses the entries of the archives it
+compacts, which is those under half used, not all of them.
+
+**Applied:** `sort_by_load` counts bytes per archive and copies nothing, and the compactor asks
+`entries_of(archive)` for each archive as it compacts it. The index is not changed until the pass
+ends, so an archive's entries gathered then are the ones the old copy held.
+`archives_are_ordered_by_load_and_gathered_one_at_a_time` pins both halves. The memory is no
+longer allocated. The node-level effect is folded into [#149](resolved/node-memory-budget.md)'s
+runs, which changed several things at once, so it has no figure of its own. **Kept.**
+

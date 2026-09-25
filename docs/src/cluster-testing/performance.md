@@ -57,9 +57,21 @@ on the fastest node.
 
 ### O61, a group-commit delay
 
-*Not yet run.* The experiment is a bounded wait in the WAL writer before it takes the next batch
-while batches are arriving back to back, run at several delays against the same insert bench.
-Success means fewer syncs and bytes on europa with no change in the cluster's write p50 and p99.
+A bounded wait in the WAL writer after each sync, so appends that arrive in it share the next
+batch, set on europa alone (`cluster.replication.wal_commit_delay`), with the insert bench run at
+each setting and the settings interleaved so that the table's growth does not read as an effect:
+
+| europa's delay | europa's syncs in 10 s | europa's device writes in 30 s | Cluster inserts | p99 |
+| --- | --- | --- | --- | --- |
+| 0 | 45,123 | 15.6 GB | 18,357/s | 506 ms |
+| 3 ms | 14,215 | 7.7 GB | 18,649/s | 520 ms |
+| 0 | 44,162 | 14.9 GB | 17,401/s | 601 ms |
+
+Half the device writes and a third of the syncs, at no measured cost to the cluster, whose write
+latency the slower hosts set. Kept as a setting, off by default
+([O61](../appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page)).
+The first attempt at this sequence lost hyperion halfway through to the kernel's OOM killer, which
+was [#149](../appendix/resolved/node-memory-budget.md).
 
 ## O62, the archive map rewrite
 
@@ -127,3 +139,27 @@ half as much. The cause is not isolated. It is filed as
 [O64](../appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab),
 the default stays at 5 s, and a planned restart no longer pays the window at all
 ([Resolved #139](../appendix/resolved/leadership-handoff-on-stop.md)).
+
+## Memory
+
+Every node holds its table data within `resources.memory` per shard, which the deployment wrote
+as the node's whole budget. The first long insert runs grew the nodes past their hosts' 14 GB, and
+the kernel killed hyperion and then titan. Four findings came out of taking that apart:
+[#149](../appendix/resolved/node-memory-budget.md) (the budget was every shard's, and its counter
+saw a hundredth of what a node held), [#150](../appendix/resolved/inline-partition-buckets.md)
+(the tables' partition maps held every row inline), [O68](../appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index)
+(every compaction copied the whole partition index), and
+[#151](../appendix/resolved/purge-ahead-of-its-marker.md) (a node killed at the wrong moment never
+started again).
+
+Resident memory under five minutes of 70% inserts, `node_memory: 8Gi` on 14 GB hosts, sampled
+every 30 s:
+
+| Build | europa | titan | hyperion |
+| --- | --- | --- | --- |
+| Before (`memory: 8Gi`, every shard's) | 8.9 → 12.8 GB | 7.9 → 12.1 GB, then OOM-killed | 4.2 → 10.8 GB, OOM-killed in an earlier run |
+| All four fixes, a fresh cluster with the whole dataset loaded (t13g) | 3.5 → 7.8 GiB, then 7.0–7.8 GiB | 3.6 → 7.6 GiB, then 7.0–7.6 GiB | 3.6 → 7.9 GiB, then 6.7–7.9 GiB |
+
+The nodes rise until the process passes the budget, then evict and hover under it. The fresh
+cluster's load after the rebuild ran at 33,283 rows/s. That is within the range of first loads after a
+bootstrap (35,800 last time), not a measured cost of the fixes.

@@ -1164,9 +1164,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     #[instrument(name = "FileSystemCompactor::compact_archives", skip_all, err(Debug))]
     async fn compact_archives(&mut self) -> Result<(), ServerError> {
         // find the archives with the least amount of active data
-        let mut sorted = self.map.sort_by_load();
+        let sorted = self.map.sort_by_load();
         // keep a list of old archive paths to delete
-        let mut old_paths = Vec::with_capacity(sorted.entries.len());
+        let mut old_paths = Vec::with_capacity(self.map.all_archives.borrow().len());
         // track the stats for this compaction attempt
         let start_pos = self.writer.current_pos();
         let mut precompaction = 0;
@@ -1174,8 +1174,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         for (used, archive_ids) in &sorted.sorted {
             // compact this group of archives
             for old_id in archive_ids {
-                // get this archives valid data entries
-                if let Some(entries) = sorted.entries.remove(&old_id) {
+                // get this archives valid data entries, gathered now rather than for every
+                // archive up front: the index is not changed until this pass ends
+                // ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index))
+                let entries = self.map.entries_of(old_id);
+                if !entries.is_empty() {
                     // build the path to this archive file
                     let path = self.archive_path.join(old_id.to_string());
                     // get a handle to this archive
