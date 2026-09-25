@@ -128,8 +128,28 @@ fn a_version_range_negotiates_to_the_highest_shared() {
         a_hello(Lane::Data).common_capabilities(&a_hello(Lane::Data)),
         CAPABILITIES
     );
-    // every capability this build defines is required of a peer
+    // every required capability is one this build acts on
     assert_eq!(REQUIRED_CAPABILITIES & CAPABILITIES, REQUIRED_CAPABILITIES);
+}
+
+/// A pre-vote is its own kind, and its capability is advertised but never required (item 144)
+///
+/// A build without pre-vote is still a member: the bit being optional is what lets a rolling
+/// upgrade reach a cluster of builds that all answer it.
+#[test]
+fn pre_vote_is_an_optional_capability() {
+    // the kind is eleven and round trips
+    assert_eq!(ReplicateKind::from_byte(11).unwrap(), ReplicateKind::PreVote);
+    assert_eq!(ReplicateKind::PreVote.as_byte(), 11);
+    assert_eq!(ReplicateKind::PreVote.name(), "pre_vote");
+    // this build acts on it
+    assert_eq!(CAP_PRE_VOTE_V1, 1 << 6);
+    assert_ne!(CAPABILITIES & CAP_PRE_VOTE_V1, 0);
+    // the control lane's kind is eight
+    assert_eq!(ControlKind::from_byte(8).unwrap(), ControlKind::PreVote);
+    assert_eq!(ControlKind::PreVote.as_byte(), 8);
+    // and a peer that does not is not refused for it
+    assert_eq!(REQUIRED_CAPABILITIES & CAP_PRE_VOTE_V1, 0);
 }
 
 /// Every refusal is pinned to its byte, and an unknown byte is still a refusal

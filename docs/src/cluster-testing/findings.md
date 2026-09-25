@@ -23,6 +23,7 @@ than Shoal says so.
 | [141](../appendix/resolved/recycled-stream-channels.md) | Rolling upgrade under load | A failed stream's channel went to the next stream with its late answers: thousands of answers for indexes already answered, and streams that never ended | **Fixed.** Closed streams drop late answers, failed streams do not recycle, duplicates are dropped |
 | [142](../appendix/known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host) | The suite run after 139–141 and O62 | Two fixture tests fail intermittently on an idle host; a restarted member's checkpoint stays at zero | **Open**, with rates |
 | [143](../appendix/resolved/silent-partition-hops.md) | [Partition one node](correctness.md#partition-one-node) | With one node cut off by dropped packets, every write hopped to it waited the whole write timeout, and pipelined clients stopped: zero throughput cluster-wide | **Fixed.** A hop over a link silent for two seconds is refused at once |
+| [144](../appendix/resolved/post-heal-elections.md) | [Partition one node](correctness.md#partition-one-node) | The cut-off node kept standing for election at a term per timeout, and on the heal unseated healthy leaders on both other nodes: stalls for about 20 s after the partition ended | **Fixed.** Pre-Vote on every data group and the control group |
 
 ## Deployment and lab findings
 

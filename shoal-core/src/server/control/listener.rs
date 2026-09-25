@@ -264,6 +264,7 @@ async fn serve_control(
                     // the consensus RPCs and pings, driven straight into the group
                     ControlKind::AppendEntries
                     | ControlKind::Vote
+                    | ControlKind::PreVote
                     | ControlKind::Snapshot
                     | ControlKind::Ping => {
                         let incarnation = local.borrow().incarnation;
@@ -342,6 +343,15 @@ async fn dispatch(
                 Err(error) => err(format!("vote: {error}")),
             },
             Err(error) => err(format!("decoding vote: {error}")),
+        },
+        // a pre-vote is judged by the same rules as a vote and moves nothing
+        // ([Resolved #144](../../../../docs/src/appendix/resolved/post-heal-elections.md))
+        ControlKind::PreVote => match serde_json::from_slice::<VoteRequest<ControlConfig>>(payload) {
+            Ok(rpc) => match raft.pre_vote(rpc).await {
+                Ok(response) => ok(&response),
+                Err(error) => err(format!("pre_vote: {error}")),
+            },
+            Err(error) => err(format!("decoding pre_vote: {error}")),
         },
         ControlKind::Snapshot => match decode_snapshot(payload) {
             Ok((vote, snapshot)) => match raft.install_full_snapshot(vote, snapshot).await {

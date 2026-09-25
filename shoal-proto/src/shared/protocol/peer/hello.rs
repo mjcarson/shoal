@@ -55,23 +55,36 @@ pub const CAP_REPLICATION_V1: u64 = 1 << 4;
 /// read barriers on its replication lane ([F41](../../../../../docs/src/features/read-consistency.md))
 pub const CAP_READ_CONSISTENCY_V1: u64 = 1 << 5;
 
+/// This peer answers the consensus library's pre-vote on its replication lane
+///
+/// Optional: a peer without it is still a member, and a pre-vote to it is granted locally, the
+/// library's own default, rather than sent as a kind it would refuse to decode
+/// ([Resolved #144](../../../../../docs/src/appendix/resolved/post-heal-elections.md)).
+pub const CAP_PRE_VOTE_V1: u64 = 1 << 6;
+
 /// Everything this build can act on
 pub const CAPABILITIES: u64 = CAP_FORWARD_V1
     | CAP_CONTROL_RAFT_V1
     | CAP_BULK_SNAPSHOT_V1
     | CAP_MEMBERSHIP_V1
     | CAP_REPLICATION_V1
-    | CAP_READ_CONSISTENCY_V1;
+    | CAP_READ_CONSISTENCY_V1
+    | CAP_PRE_VOTE_V1;
 
 /// The capabilities a peer has to act on to be a member at all
 ///
-/// Every bit above: each is what some version in [`MIN_PEER_VERSION`]`..=`[`PROTOCOL_VERSION`]
+/// Every bit above but [`CAP_PRE_VOTE_V1`]: each is what some version in [`MIN_PEER_VERSION`]`..=`[`PROTOCOL_VERSION`]
 /// carries, so a peer in the range without one is a build this one does not know how to
 /// half serve, and is refused ([`PeerRefusal::CapabilityMissing`]). A capability a future
 /// build adds as optional is left out of this set and gated by `Negotiated::has` at the one
 /// place it is acted on, the way `CLIENT_CAP_READ_OPTIONS` gates a client
 /// ([F48](../../../../../docs/src/features/rolling-compatibility.md)).
-pub const REQUIRED_CAPABILITIES: u64 = CAPABILITIES;
+pub const REQUIRED_CAPABILITIES: u64 = CAP_FORWARD_V1
+    | CAP_CONTROL_RAFT_V1
+    | CAP_BULK_SNAPSHOT_V1
+    | CAP_MEMBERSHIP_V1
+    | CAP_REPLICATION_V1
+    | CAP_READ_CONSISTENCY_V1;
 
 /// Where each field sits in the body
 const CLUSTER_AT: usize = 0;

@@ -45,7 +45,7 @@ use crate::server::peer::{self, Frame, FrameKey, Lane, LinkEvent, Local};
 use crate::shared::identity::NodeId;
 use crate::shared::protocol::peer::{
     ControlKind, ControlRequestHead, ControlResponseHead, ControlStatus, PeerRefusal,
-    CONTROL_HEAD_LEN,
+    CAP_PRE_VOTE_V1, CONTROL_HEAD_LEN,
 };
 use crate::shared::protocol::MessageType;
 use crate::shared::tls::PeerTlsHolder;
@@ -96,6 +96,15 @@ struct ControlLink {
 }
 
 impl ControlLink {
+    /// Whether the peer answers pre-votes, or nothing while the link is not up
+    ///
+    /// ([Resolved #144](../../../../docs/src/appendix/resolved/post-heal-elections.md))
+    fn answers_pre_votes(&self) -> Option<bool> {
+        self.link
+            .negotiated_if_up()
+            .map(|negotiated| negotiated.has(CAP_PRE_VOTE_V1))
+    }
+
     /// Open a control connection to a peer
     ///
     /// # Arguments
@@ -598,6 +607,44 @@ impl RaftNetworkV2<ControlConfig> for ControlPeer {
             .map_err(Self::unreachable)?;
         serde_json::from_slice(&answer).map_err(|error| {
             Self::unreachable(RpcFailure::Unreachable(format!("decoding vote: {error}")))
+        })
+    }
+
+    /// Ask the member whether it would grant a vote at the next term, without it moving its term
+    ///
+    /// A member whose build does not answer pre-votes is granted locally, openraft's own
+    /// default; one that cannot be reached is an error, never a grant, or a node cut off from
+    /// every peer would grant itself a quorum and stand anyway
+    /// ([Resolved #144](../../../../docs/src/appendix/resolved/post-heal-elections.md)).
+    async fn pre_vote(
+        &mut self,
+        rpc: VoteRequest<ControlConfig>,
+        option: RPCOption,
+    ) -> Result<VoteResponse<ControlConfig>, RPCError<ControlConfig>> {
+        // whether the member's build answers a pre-vote, judged on the link it would go over
+        let link = self.link();
+        match link.answers_pre_votes() {
+            // up with a peer that answers them: ask it
+            Some(true) => (),
+            // up with an older build: grant, as openraft does for a network without pre-vote
+            Some(false) => return Ok(VoteResponse::new(rpc.vote, None, true)),
+            // down: no answer, and so no grant
+            None => {
+                return Err(Self::unreachable(RpcFailure::Unreachable(format!(
+                    "the control link to {} is not up",
+                    self.target
+                ))))
+            }
+        }
+        let payload = serde_json::to_vec(&rpc).map_err(|error| {
+            Self::unreachable(RpcFailure::Unreachable(format!("encoding pre_vote: {error}")))
+        })?;
+        let answer = link
+            .rpc(ControlKind::PreVote, payload, option.hard_ttl())
+            .await
+            .map_err(Self::unreachable)?;
+        serde_json::from_slice(&answer).map_err(|error| {
+            Self::unreachable(RpcFailure::Unreachable(format!("decoding pre_vote: {error}")))
         })
     }
 

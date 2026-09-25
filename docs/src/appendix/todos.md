@@ -369,11 +369,12 @@ list rather than from the diff:
 **What F48 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
 
-- **An optional capability.** `Negotiated::has` is the gate and `REQUIRED_CAPABILITIES` is
+- ~~**An optional capability.** `Negotiated::has` is the gate and `REQUIRED_CAPABILITIES` is
   every bit that exists, so nothing is optional and the gate has nothing to gate. The first
   feature that wants to be spoken to a peer without it is the one that leaves its bit out of
   the required set and gates at the place it is acted on; the shape is there so that it costs
-  no version bump.
+  no version bump.~~ The first is `CAP_PRE_VOTE_V1`
+  ([Resolved #144](resolved/post-heal-elections.md)), with no version bump.
 - **A schema change as a rolling operation.** Explicitly unsupported: a join with another
   `schema_id` is refused and the path is a new cluster and a restore of a backup or an export
   ([F49](../features/backup-and-recovery.md)). A schema id that names a *compatible* change -
@@ -546,8 +547,9 @@ list rather than from the diff:
   away would be a third arm rather than a change to these two.
 - ~~**Item 106.** A member isolated on every lane long enough to inflate its term trips an
   openraft debug assertion in the control plane when healed.~~ A member that can reach nobody
-  stops standing ([Resolved #106](resolved/isolated-member-term-inflation.md)); pre-vote, which
-  would cover a partial partition too, is still unbuilt.
+  stops standing ([Resolved #106](resolved/isolated-member-term-inflation.md)); ~~pre-vote, which
+  would cover a partial partition too, is still unbuilt~~ pre-vote, which covers a partition by
+  dropped packets and a partial one too, is built ([Resolved #144](resolved/post-heal-elections.md)).
 
 **What F42 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
@@ -569,7 +571,9 @@ list rather than from the diff:
 - **A coverage list on the response frame.** Still the slot on the coordinator; still nothing
   reconciles across shares.
 - **A shorter failover window.** The follower lease is `election_timeout_max`, twice the
-  base, so a failover takes two to three times the base. openraft has no pre-vote and no way
+  base, so a failover takes two to three times the base. openraft ~~has no pre-vote and~~ has
+  pre-vote, now on ([Resolved #144](resolved/post-heal-elections.md)), which protects a leader
+  rather than replacing one faster, and has no way
   to expire a follower's lease early; a link that dropped could be a hint to elect, but the
   other followers would still refuse the vote inside their lease. The window is the base's to
   tune.

@@ -1837,7 +1837,9 @@ where
                     },
                     Err(error) => ReplicateReply::error(head.id, format!("decoding append_entries: {error}")),
                 },
-                ReplicateKind::Vote => match postcard::from_bytes::<openraft::raft::VoteRequest<DataConfig>>(&payload) {
+                // a vote, or a pre-vote asking whether one would be granted, judged by the same rules
+                // ([Resolved #144](../../../../docs/src/appendix/resolved/post-heal-elections.md))
+                ReplicateKind::Vote | ReplicateKind::PreVote => match postcard::from_bytes::<openraft::raft::VoteRequest<DataConfig>>(&payload) {
                     Ok(rpc) => {
                         // an empty volatile copy grants nothing to a candidate as empty as
                         // itself, so two members that lost their memory at once cannot elect
@@ -1858,13 +1860,19 @@ where
                             let refused = openraft::raft::VoteResponse::<DataConfig>::new(own_vote, None, false);
                             encode_reply(head.id, &refused)
                         } else {
-                            match raft.vote(rpc).await {
+                            // a pre-vote never persists a vote or moves this copy's term
+                            let answered = if head.kind == ReplicateKind::PreVote {
+                                raft.pre_vote(rpc).await
+                            } else {
+                                raft.vote(rpc).await
+                            };
+                            match answered {
                                 Ok(response) => encode_reply(head.id, &response),
-                                Err(error) => ReplicateReply::error(head.id, format!("vote: {error}")),
+                                Err(error) => ReplicateReply::error(head.id, format!("{}: {error}", head.kind.name())),
                             }
                         }
                     }
-                    Err(error) => ReplicateReply::error(head.id, format!("decoding vote: {error}")),
+                    Err(error) => ReplicateReply::error(head.id, format!("decoding {}: {error}", head.kind.name())),
                 },
                 // the lead handed to this member, or to another it is told about
                 // ([F45](../../../../docs/src/features/replica-migration.md))
@@ -3322,6 +3330,12 @@ fn group_config(
         heartbeat_min_interval: Some((base / 10).max(10)),
         election_timeout_min: base,
         election_timeout_max: base * 2,
+        // a member asks whether it would be granted before it stands, so one that nobody
+        // answers, or whose group still has a leader its peers hear from, never raises its
+        // term: a node cut off by dropped packets keeps its links up and is not isolated as
+        // #106 judges it, and its return at a higher term unseated healthy leaders
+        // ([Resolved #144](../../../../docs/src/appendix/resolved/post-heal-elections.md))
+        enable_pre_vote: Some(true),
         enable_leader_restore: Some(false),
         snapshot_policy: SnapshotPolicy::LogsSinceLast(cluster.replication.checkpoint_entries),
         max_in_snapshot_log_to_keep: cluster.replication.retained_entries,
@@ -3868,6 +3882,8 @@ mod tests {
                 Some(base / 10),
                 "base {base}: heartbeat suppression was not applied"
             );
+            // and pre-vote is on (item 144)
+            assert_eq!(config.enable_pre_vote, Some(true), "base {base}");
         }
     }
 
