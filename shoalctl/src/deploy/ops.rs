@@ -37,6 +37,28 @@ pub(super) const UP_TIMEOUT: Duration = Duration::from_secs(180);
 /// How long the cluster has to admit default writes after `Initialize`
 const READY_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// A shell command that empties and removes every storage root, a mount point included
+///
+/// `rm -rf` of a directory that is a mount point empties it and then fails to remove it, which
+/// stopped `cluster destroy` half way on the lab's loop filesystem. Where the removal fails, what
+/// is under the root is deleted instead, and the root is left for its mount
+/// ([known issue 157](../../../docs/src/appendix/known-issues.md)).
+///
+/// # Arguments
+///
+/// * `roots` - The storage roots
+fn remove_roots(roots: &[String]) -> String {
+    // each root on its own, so one mount point fails nobody else's removal
+    roots
+        .iter()
+        .map(|root| {
+            let root = quote(root);
+            format!("{{ sudo -n rm -rf {root} 2>/dev/null || sudo -n find {root} -mindepth 1 -delete; }}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// The lines of a followed record that name a group's failure
 ///
 /// A repair, backup or restore is done when every group is, failed ones included, so the
@@ -237,9 +259,9 @@ impl Deployment {
             }
             step(Some(&node.name), "wiping the node that was there");
             host.run(&format!(
-                "sudo -n systemctl disable --now {unit} 2>/dev/null || true; sudo -n rm -rf {roots} {tls}",
+                "sudo -n systemctl disable --now {unit} 2>/dev/null || true; {roots}; sudo -n rm -rf {tls}",
                 unit = quote(&self.inventory.unit_name()),
-                roots = quoted(&node.storage.roots()),
+                roots = remove_roots(&node.storage.roots()),
                 tls = quote(&layout.tls()),
             ))?;
             claimed = false;
@@ -554,10 +576,10 @@ impl Deployment {
             host.run(&format!(
                 "sudo -n systemctl disable --now {unit} 2>/dev/null || true; \
                  sudo -n rm -f /etc/systemd/system/{unit}; sudo -n systemctl daemon-reload; \
-                 sudo -n systemctl reset-failed {unit} 2>/dev/null || true; sudo -n rm -rf {dir} {roots}",
+                 sudo -n systemctl reset-failed {unit} 2>/dev/null || true; sudo -n rm -rf {dir}; {roots}",
                 unit = quote(&unit_name),
                 dir = quote(&layout.dir),
-                roots = quoted(&roots),
+                roots = remove_roots(&roots),
             ))?;
         }
         // and the local state, authority and all
@@ -1353,6 +1375,47 @@ pub fn seed_addresses(frame: &Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A storage root that cannot itself be removed is emptied, and the command still succeeds (item 157)
+    ///
+    /// A root that is a mount point empties under `rm -rf` and then fails its own removal, which
+    /// stopped `cluster destroy` half way. A root whose parent is read-only fails the same way, so
+    /// it stands in for the mount point here.
+    #[test]
+    fn a_root_that_cannot_be_removed_is_emptied() {
+        let temp = tempfile::tempdir().expect("a temp dir");
+        let plain = temp.path().join("plain");
+        let pinned = temp.path().join("parent").join("pinned");
+        let missing = temp.path().join("missing");
+        for root in [&plain, &pinned] {
+            std::fs::create_dir_all(root.join("wal")).expect("a root");
+            std::fs::write(root.join("wal").join("1.wal"), b"x").expect("a file");
+        }
+        // the pinned root's parent cannot lose an entry, as a mount point's cannot
+        let parent = temp.path().join("parent");
+        let mut perms = std::fs::metadata(&parent).expect("meta").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o555);
+        std::fs::set_permissions(&parent, perms).expect("read only");
+        let roots: Vec<String> = [&plain, &pinned, &missing]
+            .iter()
+            .map(|root| root.display().to_string())
+            .collect();
+        // the command as it runs on a host, without the sudo a test cannot use
+        let command = super::remove_roots(&roots).replace("sudo -n ", "");
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("{command}"))
+            .status()
+            .expect("a shell");
+        // put the parent back so the temp dir can be cleaned up
+        let mut perms = std::fs::metadata(&parent).expect("meta").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&parent, perms).expect("writable");
+        assert!(status.success(), "{command}");
+        assert!(!plain.exists(), "a plain root was not removed");
+        assert!(pinned.exists(), "the pinned root itself stays for its mount");
+        assert_eq!(std::fs::read_dir(&pinned).expect("the root").count(), 0, "the pinned root was not emptied");
+    }
 
     /// A followed record's failed groups are read out of it, so the command fails with them (item 154)
     ///
