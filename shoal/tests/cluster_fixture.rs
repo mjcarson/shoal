@@ -6113,16 +6113,25 @@ async fn returning_node_catches_up_by_log_or_snapshot() -> Result<(), FixtureErr
         "node two did not install a snapshot for both tables: {by_snapshot}"
     );
     assert_eq!(by_snapshot["dropped_chunks"], 0, "{by_snapshot}");
-    // the senders counted what they sent
-    let sent: u64 = (0..2)
-        .map(|node| snapshots_of(&mut cluster, node).map(|s| s["sent"].as_u64().unwrap_or(0)))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .sum();
-    assert!(
-        sent >= installed,
-        "the senders counted {sent} transfers and node two installed {installed}"
-    );
+    // the senders counted what they sent. A sender counts a transfer once the end's answer
+    // reaches it, which is after the receiver counted the install, so the count is waited for
+    // rather than read once (item 142)
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let sent: u64 = (0..2)
+            .map(|node| snapshots_of(&mut cluster, node).map(|s| s["sent"].as_u64().unwrap_or(0)))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .sum();
+        if sent >= installed {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the senders counted {sent} transfers and node two installed {installed}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     // every row is readable through the returning node, from the installed archives
     let addr2 = cluster.node(2).endpoints.client.to_string();
     for key in [8000u64, 8011, 8150] {
@@ -8517,13 +8526,24 @@ async fn down_within_grace_moves_no_replicas() -> Result<(), FixtureError> {
         stats["installed"].as_u64().unwrap_or(0) >= 1,
         "the returning member caught up without a snapshot: {stats}"
     );
-    // it leads nothing on its return: every group it hosted is led by a survivor
+    // it won nothing on its return: a group it leads is one it is the placement primary of,
+    // handed back by the leader once it caught up
+    // ([O63](../../docs/src/appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary)),
+    // never one an election gave it
     let view = groups_of(&mut cluster, 1)?;
-    let leading = view["leading"].as_u64().unwrap_or(0);
-    assert_eq!(
-        leading, 0,
-        "the returning member leads {leading} groups before any election: {view}"
-    );
+    let me = cluster.node_ids()[1].clone();
+    for group in view["shards"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
+        .filter(|group| group["is_leader"] == true)
+    {
+        assert_eq!(
+            group["members"][0]["node"], me,
+            "the returning member leads a group it is not the primary of: {group}"
+        );
+    }
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
@@ -17935,5 +17955,275 @@ async fn a_silently_cut_node_rejoins_without_elections() -> Result<(), FixtureEr
     // and node one serves writes again
     let one = cluster.node(1).endpoints.client.to_string();
     write_note_eventually(&one, 14_260, "after", Duration::from_secs(20)).await?;
+    Ok(())
+}
+
+/// A write accepted by a node whose copy is installing a snapshot is answered when it commits (item 145)
+///
+/// A coordinator whose own copy of the group follows answers a committed write only once its
+/// copy has applied it, so a read on the same node sees it. A copy installing a snapshot
+/// applies nothing until the install ends, so every write through it waited out the whole write
+/// timeout and was then answered as a success. On the lab, after a partition healed, a steady
+/// few hundred writes a second took exactly five seconds. The wait now ends when the copy is
+/// installing, or stops applying
+/// ([Resolved #145](../../docs/src/appendix/resolved/apply-wait-on-a-stalled-copy.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_through_an_installing_copy_is_answered_at_commit() -> Result<(), FixtureError> {
+    let write_timeout = Duration::from_secs(3);
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(16)
+        .write_timeout(write_timeout)
+        .query_deadline(Duration::from_secs(8))
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    // a base every node holds, then enough to leave node two behind the purge point
+    for key in 22_000..22_010u64 {
+        write_note(&addr0, key, &format!("old-{key}")).await.map_err(ok)?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    leave_behind_purge(&mut cluster, 2, 0, 22_000, 100, "new").await?;
+    // back, with every install held well past the write timeout
+    let mut staged = cluster.staged(2).clone();
+    staged.install_hold_ms = Some(10_000);
+    cluster.restart_with(2, NodeKind::Server, Some(staged))?;
+    cluster.wait_joined(&[2])?;
+    let addr2 = cluster.node(2).endpoints.client.to_string();
+    // a key of a Note group that node two is installing
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let key = loop {
+        let view = groups_of(&mut cluster, 2)?;
+        let tablets = view["shards"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
+            .find(|group| group["table_name"] == "Note" && group["installing"] == true)
+            .map(|group| group["tablet_ids"].as_array().cloned().unwrap_or_default());
+        if let Some(tablets) = tablets {
+            let key = (22_000..22_100u64).find(|key| {
+                tablets
+                    .iter()
+                    .any(|tablet| tablet.as_u64() == Some(tablet_of(*key) as u64))
+            });
+            if let Some(key) = key {
+                break key;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no Note group was ever installing on node two: {view}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    // a write through node two: it hops to the leader, commits there, and is answered
+    let client = Shoal::<TestDbClient>::new(&addr2).await.map_err(ok)?;
+    let sent = Instant::now();
+    let outcome = client
+        .send_one(Note {
+            key,
+            text: "during".to_string(),
+        })
+        .await;
+    let waited = sent.elapsed();
+    eprintln!("a write through an installing copy was answered in {waited:?}: {outcome:?}");
+    outcome.map_err(ok)?;
+    assert!(
+        waited < Duration::from_secs(1),
+        "a write through an installing copy waited {waited:?}, where the write timeout is {write_timeout:?}"
+    );
+    // and the leader has it
+    wait_note(&addr0, key, Some("during"), Duration::from_secs(5)).await?;
+    Ok(())
+}
+
+/// A write through a node whose copy is catching up is answered within two heartbeats of its commit (item 146)
+///
+/// A coordinator whose copy of the group follows waits for its copy to apply a committed write
+/// before it answers, and since [#145](../../docs/src/appendix/resolved/apply-wait-on-a-stalled-copy.md)
+/// stops waiting on a copy that is installing or has stood still. A copy catching up from the
+/// log after a stall is neither: it applies all the time, only thousands of entries behind, and
+/// every write through it waited for all of them. On the lab, writes through a node resumed
+/// after a 20 s `SIGSTOP` took up to 5.3 s for twelve seconds. The wait is now bounded at two
+/// heartbeat intervals ([Resolved #146](../../docs/src/appendix/resolved/apply-wait-on-a-lagging-copy.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_through_a_lagging_copy_is_answered_within_two_heartbeats() -> Result<(), FixtureError> {
+    let base = Duration::from_secs(1);
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .primary_failover_after(base)
+        .write_timeout(Duration::from_secs(5))
+        .query_deadline(Duration::from_secs(10))
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    cluster.wait_voters(0, 3)?;
+    // a key of a group node zero leads, which is where node two's writes will hop to
+    let (key, _group) = key_led_by(&mut cluster, "Note", 0, 23_000)?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let addr2 = cluster.node(2).endpoints.client.to_string();
+    write_note(&addr0, key, "before").await.map_err(ok)?;
+    // node two stops where it stands while node zero takes a long run of wide writes to the key
+    cluster.node(2).pause()?;
+    // a hundred and fifty writers of a hundred single writes each, so every write is an entry
+    // of its own
+    let client0 = std::sync::Arc::new(Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?);
+    let wide = std::sync::Arc::new("x".repeat(4096));
+    let mut writers = Vec::new();
+    for writer in 0..150u64 {
+        let client0 = client0.clone();
+        let wide = wide.clone();
+        writers.push(tokio::spawn(async move {
+            for n in 0..100u64 {
+                client0
+                    .send_one(Note {
+                        key,
+                        text: format!("{wide}-{writer}-{n}"),
+                    })
+                    .await?;
+            }
+            Ok::<(), shoal::client::Errors>(())
+        }));
+    }
+    for writer in writers {
+        writer
+            .await
+            .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?
+            .map_err(ok)?;
+    }
+    // back: its copy has fifteen thousand wide entries to apply, and writes go through it at once
+    cluster.node(2).resume()?;
+    let client2 = Shoal::<TestDbClient>::new(&addr2).await.map_err(ok)?;
+    let mut worst = Duration::ZERO;
+    for n in 0..20u64 {
+        let sent = Instant::now();
+        client2
+            .send_one(Note {
+                key,
+                text: format!("after-{n}"),
+            })
+            .await
+            .map_err(ok)?;
+        worst = worst.max(sent.elapsed());
+    }
+    eprintln!("the slowest of twenty writes through the catching-up node took {worst:?}");
+    // a heartbeat is a tenth of the base: two of them and the round trips, with room for a
+    // loaded host; the unbounded wait took 1.6 to 1.8 s here
+    assert!(
+        worst < Duration::from_millis(800),
+        "a write through a catching-up copy took {worst:?}; its commit is not what it waited on"
+    );
+    Ok(())
+}
+
+/// A control leader paused and resumed calls nobody down, and a leader held down comes back up (item 147)
+///
+/// On the lab the control leader was paused for 20 s, so another led; the next pause was of that
+/// other one. When it resumed, its detector still took itself for the leader and saw 20 s of
+/// silence from everybody, which was its own. It called both others down, and the verdicts were
+/// committed through the leader that had replaced it. The member called down was that leader,
+/// which never hears a report from itself, so it stayed down in the record for good: "up 2" and a
+/// rolling upgrade refused. Now a detector whose own tick stood still re-seeds its evidence rather
+/// than judge by it, and a leader held down commits itself up
+/// ([Resolved #147](../../docs/src/appendix/resolved/paused-detector-verdicts.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paused_control_leader_calls_nobody_down() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let ids = cluster.node_ids();
+    // the health every node's map records for every member
+    let healths = |cluster: &mut Cluster| -> Result<Vec<(usize, usize, String)>, FixtureError> {
+        let mut all = Vec::new();
+        for at in 0..3 {
+            let map = cluster.node_mut(at).command("MAP")?;
+            for (member, id) in ids.iter().enumerate() {
+                let health = map["ok"]["members"][id]["health"].as_str().unwrap_or("?").to_string();
+                all.push((at, member, health));
+            }
+        }
+        Ok(all)
+    };
+    // wait for every member to read up everywhere, or say what never did
+    let wait_all_up = |cluster: &mut Cluster, within: Duration| -> Result<(), FixtureError> {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            let seen = healths(cluster)?;
+            if seen.iter().all(|(_, _, health)| health == "up") {
+                return Ok(());
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(FixtureError::NotReady(format!(
+                    "not every member is up everywhere: {seen:?}"
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    // wait for a node other than one to lead the control group, and say which
+    let wait_led_elsewhere = |cluster: &mut Cluster, not: usize, ask: usize| -> Result<usize, FixtureError> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(leader) = cluster.leader_index(ask)? {
+                if leader != not {
+                    return Ok(leader);
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(FixtureError::NotReady(format!("node {not} still leads")));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    wait_all_up(&mut cluster, Duration::from_secs(20))?;
+    // the first leader is paused long enough to be replaced and called down, then resumed
+    let first = cluster.leader_index(0)?.expect("a leader");
+    let witness = (first + 1) % 3;
+    cluster.node(first).pause()?;
+    let second = wait_led_elsewhere(&mut cluster, first, witness)?;
+    std::thread::sleep(Duration::from_secs(6));
+    cluster.node(first).resume()?;
+    wait_all_up(&mut cluster, Duration::from_secs(20))?;
+    // now the second leader is paused, and resumed once another leads and time has passed
+    let witness = (second + 1) % 3;
+    cluster.node(second).pause()?;
+    let third = wait_led_elsewhere(&mut cluster, second, witness)?;
+    std::thread::sleep(Duration::from_secs(6));
+    cluster.node(second).resume()?;
+    eprintln!("control leaders: {first}, then {second}, then {third}");
+    // for five seconds after it resumes, nobody but the node that was paused is ever down: the
+    // resumed node's silence was its own and calls nobody down
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < until {
+        let seen = healths(&mut cluster)?;
+        let wrongly: Vec<_> = seen
+            .iter()
+            .filter(|(_, member, health)| *member != second && health == "down")
+            .collect();
+        assert!(
+            wrongly.is_empty(),
+            "the resumed node {second} called a live member down: {wrongly:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // and every member is up everywhere within a few reports
+    wait_all_up(&mut cluster, Duration::from_secs(15))?;
+    // and stays so
+    std::thread::sleep(Duration::from_secs(3));
+    let seen = healths(&mut cluster)?;
+    assert!(
+        seen.iter().all(|(_, _, health)| health == "up"),
+        "a member was left down after a paused leader resumed: {seen:?}"
+    );
     Ok(())
 }

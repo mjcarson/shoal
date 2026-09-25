@@ -230,4 +230,91 @@ did not touch it. The elections are not a load problem. They continue after the 
 hyperion's groups kept their election timers running through the partition, and on the heal it
 campaigned at a higher term and made healthy leaders on europa and titan step down.
 
-**Verdict:** correctness **pass**, availability **improved and not yet good enough**.
+**With [#144](../appendix/resolved/post-heal-elections.md) fixed** (Pre-Vote on every group,
+`target/lab/t05d-partition-prevote`, rolled onto the running cluster by `cluster upgrade`), the
+same test:
+
+| Seconds | Before #144 (t05c) | With Pre-Vote (t05d) |
+| --- | --- | --- |
+| Partition, first 2–3 s | 0 | 0 (#143's *Still open*) |
+| Partition, the rest | 5,000–121,000 ops/s, hyperion's groups refused | 27,000–127,000 ops/s, hyperion's groups refused |
+| From the heal for 20 s | 0–85,000, zero for 1–2 s at a time, writes at 5 s | 63,000–84,000, never zero |
+| journald suppressions | 50,000–60,000 per node | 0 |
+
+All 529,759 acknowledged inserts were read back through each of the three members. The fixture
+test that reproduced #144 showed hyperion's terms staying where they were while it was cut off.
+On the lab no leader on europa or titan stepped down at a higher term from hyperion.
+
+**What the rerun still showed.** Every second after the heal, a few hundred writes took exactly
+the 5 s write timeout and then succeeded. Those were writes coordinated on hyperion while its
+copies were waiting for or installing snapshots: the coordinator waited for its own copy to apply
+an entry it could not apply. Fixed as [#145](../appendix/resolved/apply-wait-on-a-stalled-copy.md).
+The first two to three seconds of a silent partition still stop pipelined clients, while the hops
+to the cut-off node wait for the two second silence to be judged; that remains
+[#143](../appendix/resolved/silent-partition-hops.md#still-open)'s open part.
+
+**With #145 fixed** (t05e) the 5 s writes were gone, and the worst write in a second after the heal
+was about a second: the two heartbeats the wait gives a copy that is not applying. That run also
+showed why hyperion was not applying. It came back behind the purge point of its groups and was
+fed thirteen snapshots over 72 s, up to three per group, because the leader purged past each
+install's boundary while it ran. Its reads of those groups were refused the whole time, and a
+read-back through it 35 s after the heal timed out (a second attempt later passed, nothing lost).
+With the default retention raised to 100,000 entries
+([O67](../appendix/optimizations.md#o67-ten-thousand-retained-entries-is-seconds-of-a-busy-group),
+t05f), hyperion caught up from the log: no installs, no refused reads, and the read-back passed
+through every member first time.
+
+**Verdict:** correctness **pass**, availability **good after the first three seconds**.
+
+### Pause one node
+
+For 20 s under the mixed bench, a node's process is stopped with `SIGSTOP` and then resumed with
+`SIGCONT` (`systemctl kill --signal` on its unit, `target/lab/stall.sh`). A paused process is not
+a partition: every one of its sockets stays open, its client port included, and it answers
+nothing. When it resumes, every timer it had has expired at once. This is the "GC pause" case,
+and it is where [Pre-Vote](../appendix/resolved/post-heal-elections.md) is meant to earn its
+keep.
+
+| Run | Paused | Pause | After the resume |
+| --- | --- | --- | --- |
+| t11 | hyperion, leading 12 | 0 for 3 s, then 36,000–73,000 ops/s with its groups refused `NotLeader` until they re-elected about 16–20 s in | 47,000–80,000 ops/s; write p99 2–4.5 s every few seconds |
+| t11b | europa, leading the most (`--slow-ms 1000`) | 0 for 3 s, then about 48,000 | 37,000–70,000 ops/s; slow writes only in the first 2 s, all through europa, at most 1.7 s |
+| t11c | hyperion (`--slow-ms 1000`) | the same shape as t11 | 1,210 writes over a second in the 12 s after the resume, all through hyperion, up to 5.3 s |
+
+Every acknowledged insert was read back through every member in all three runs, and no node
+restarted. No leader was unseated by the resumed node's expired timers.
+
+**What t11 and t11c showed.** The periodic write p99 spikes in t11 first looked like the leadership
+handbacks ([O63](../appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary)),
+which happened at the same moments. openraft's own log showed every transfer landing, none
+ignored for an out-of-date log. The bench's new `--slow-ms`, which logs each slow operation with
+the member it went through, took it apart in t11c. Every slow write went through the resumed node,
+whose copies were catching up from the log. The coordinator was waiting for its own copy to apply
+the whole backlog before answering, a case #145's stall rule had deliberately left waiting. Fixed
+as [#146](../appendix/resolved/apply-wait-on-a-lagging-copy.md): the wait is bounded at two
+heartbeat intervals.
+
+**What the next rolling upgrade found.** `cluster upgrade` refused to start: *"europa is down,
+not up"*. europa was running and was the control leader. When t11c's paused control leader,
+hyperion, resumed, its detector still took itself for the leader and saw 20 s of silence from
+everyone. That silence was its own. It called europa and titan down, and europa, which had
+replaced it, committed the verdicts. titan's next report set it up again. Nothing ever reports a
+leader to itself, so europa stayed down in the record. Fixed as
+[#147](../appendix/resolved/paused-detector-verdicts.md).
+
+**With #146 and #147 deployed** (t11d), the sequence that left europa down was run again: pause
+the control leader for 20 s under the mixed bench, then, 20 s after that run, pause whichever node
+led next. Control leadership went europa, titan, europa. After each run every member read `up`,
+and every acknowledged insert (380,990, then 469,395) was read back through every member.
+
+| Run | Paused | Writes over 1 s after the resume | The slowest |
+| --- | --- | --- | --- |
+| t11c (before #146) | hyperion | 1,210, for 12 s, all through hyperion | 5.3 s |
+| t11d-61 | europa, the control leader | 628 in the 2 s around the resume, all through europa | 1.48 s |
+| t11d-62 | titan, the control leader | 569 in the 2 s around the resume, through all three | 1.73 s |
+
+What remains around the resume is writes sent while the node was still stopped. They sat in its
+socket buffers and were answered once it ran again, which no server change can shorten.
+
+**Verdict:** correctness **pass**; with #146 and #147, a paused node, the control leader included,
+costs its own writes a second or two around the resume and leaves the record right.

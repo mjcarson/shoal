@@ -193,6 +193,10 @@ pub struct BenchArgs {
     /// A label for the synthetic ids, so two runs never write the same ones
     #[clap(long, default_value_t = 0)]
     pub run: u64,
+    /// Log every operation answered this many milliseconds or more after it was sent, with the
+    /// member it went through and when, so a slow second can be taken apart
+    #[clap(long)]
+    pub slow_ms: Option<u64>,
 }
 
 /// What a worker is choosing from
@@ -387,6 +391,10 @@ struct Shared {
     window: Mutex<Window>,
     /// Every synthetic id the cluster acknowledged
     acked: Mutex<Vec<u64>>,
+    /// When the run started, which a slow operation's time is logged against
+    started: Instant,
+    /// The latency at or past which an operation is logged, if any is
+    slow: Option<Duration>,
 }
 
 /// Choose an operation and add it to a bundle
@@ -533,6 +541,7 @@ async fn flush(
 /// * `corpus` - What to choose from
 /// * `shared` - Where to record what happened
 /// * `until` - When to stop
+/// * `members` - How many members the workers are spread over
 async fn bench_worker(
     client: Arc<Shoal<TmdbClient>>,
     index: usize,
@@ -540,6 +549,7 @@ async fn bench_worker(
     corpus: Arc<Corpus>,
     shared: Arc<Shared>,
     until: Instant,
+    members: usize,
 ) {
     // a seed per worker, so two workers do not repeat each other
     let mut rng = SmallRng::seed_from_u64(args.seed.wrapping_add(index as u64 * 7919));
@@ -558,6 +568,7 @@ async fn bench_worker(
             &mut rng,
             &mut next_synthetic,
             until,
+            index % members,
         )
         .await
         {
@@ -581,6 +592,7 @@ async fn bench_worker(
 /// * `rng` - Where choices come from
 /// * `next_synthetic` - The next synthetic id this worker will insert
 /// * `until` - When to stop
+/// * `member` - Which member the stream goes through, by its place in the connect order
 #[allow(clippy::too_many_arguments)]
 async fn drive_stream(
     client: &Arc<Shoal<TmdbClient>>,
@@ -591,6 +603,7 @@ async fn drive_stream(
     rng: &mut SmallRng,
     next_synthetic: &mut u64,
     until: Instant,
+    member: usize,
 ) -> Result<(), Errors> {
     // an unordered stream, since answers are recorded as they land
     let (mut queries_tx, mut results_rx) = client.stream_unordered_with(options.clone())?;
@@ -674,6 +687,23 @@ async fn drive_stream(
                     }
                 }
             };
+            // a slow answer is logged with when it was sent and through which member
+            if let Some(slow) = shared.slow {
+                let took = sent.at.elapsed();
+                if took >= slow {
+                    eprintln!(
+                        "slow {} via member {member} sent at t={:.3}s took {:.3}s id {:?}: {}",
+                        sent.kind.name(),
+                        sent.at.duration_since(shared.started).as_secs_f64(),
+                        took.as_secs_f64(),
+                        sent.inserted,
+                        match &outcome {
+                            Ok(_) => "ok".to_string(),
+                            Err((code, msg)) => format!("{code} {msg}"),
+                        }
+                    );
+                }
+            }
             // an acknowledged insert is one the cluster promised to keep
             if let (Ok(_), Some(id)) = (&outcome, sent.inserted) {
                 shared.acked.lock().expect("the ack list is never poisoned").push(id);
@@ -744,12 +774,14 @@ pub async fn bench(args: BenchArgs) -> color_eyre::Result<()> {
         corpus.keywords.len()
     );
     let clients = connect_targets(args.inventory.as_ref(), args.addr.as_deref()).await?;
+    // start every worker against its member
+    let started = Instant::now();
     let shared = Arc::new(Shared {
         window: Mutex::new(Window::new()),
         acked: Mutex::new(Vec::new()),
+        started,
+        slow: args.slow_ms.map(Duration::from_millis),
     });
-    // start every worker against its member
-    let started = Instant::now();
     let until = started + Duration::from_secs(args.duration);
     let mut handles = Vec::with_capacity(args.workers);
     for index in 0..args.workers {
@@ -760,6 +792,7 @@ pub async fn bench(args: BenchArgs) -> color_eyre::Result<()> {
             corpus.clone(),
             shared.clone(),
             until,
+            clients.len(),
         )));
     }
     // print a line a second until every worker is done, and keep the whole run's total

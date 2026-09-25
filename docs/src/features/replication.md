@@ -72,7 +72,10 @@ leader answers with what was committed before the cut and nothing that was only 
 
 **The client is answered by evidence.** A proposal is answered `Applied` once the group
 committed it *and this shard applied it*, so a read through the same connection sees the
-write; `Duplicate`, answered as the first time, when the request identity was seen with the
+write - ~~always~~ unless this shard's copy is installing a snapshot or has not applied it
+within two heartbeat intervals, when it is answered at the commit and the session token is what
+a read is served past ([Resolved #145](../appendix/resolved/apply-wait-on-a-stalled-copy.md),
+[#146](../appendix/resolved/apply-wait-on-a-lagging-copy.md)); `Duplicate`, answered as the first time, when the request identity was seen with the
 same payload digest; `Refused` when the digest differs. Past `replication.write_timeout` it is
 `OutcomeUnknown`, which is what it is: the command may commit later. A group with no leader
 this shard can reach is `NotLeader`; a shard whose pending bytes for the group would pass
@@ -120,7 +123,7 @@ does not serve ~~- `Snapshot` is M7's -~~ is answered by name; `Snapshot` is ser
 **Configuration.** A `replication:` block under `cluster:`, node-local, with every default
 written on the [configuration page](../getting-started/configuration.md#cluster):
 `write_timeout` 5s, `pending_bytes` 64 MiB, `segment_bytes` 10 MiB, `checkpoint_entries`
-1024, `retained_entries` 10000, `log_cache_bytes` 16 MiB, `volatile_log_bytes` 256 MiB; and
+1024, `retained_entries` ~~10000~~ 100000 ([O67](../appendix/optimizations.md#o67-ten-thousand-retained-entries-is-seconds-of-a-busy-group)), `log_cache_bytes` 16 MiB, `volatile_log_bytes` 256 MiB; and
 `transport.replication_queue_bytes` 64 MiB beside the other lanes' bounds. Validation refuses
 `write_consistency: One`, a `write_timeout` past `forward_timeout`, and a
 `primary_failover_after` under 100 ms. A cluster node's storage directory is claimed at
@@ -278,7 +281,11 @@ node agreed about decides how fast a leader is missed. The fixture sets it to a 
   rewrites every group's line when one moves; the file is small and the write is atomic.
 - **The proposer's answer waits on its own apply**, so a write through a follower costs the
   leader's commit plus the follower's apply. That is what read-your-writes over `One` reads
-  needs, and it is a latency every write through a non-leader pays.
+  needs, and it is a latency every write through a non-leader pays. The wait ends early when
+  the follower's copy is installing, and after two heartbeat intervals in any case, and a
+  `One` read through that node may then miss the write: a `Session` read carrying the answer's
+  token does not ([Resolved #145](../appendix/resolved/apply-wait-on-a-stalled-copy.md),
+  [#146](../appendix/resolved/apply-wait-on-a-lagging-copy.md)).
 - **`All` is judged from metrics.** The proposer polls the group's replication progress until
   every voter's matched index covers the entry; it is correct and it is a poll.
 - **The report a peer's control plane folds is at most a tick behind its shards**, and the

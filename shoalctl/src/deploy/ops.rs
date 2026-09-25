@@ -869,6 +869,98 @@ impl Deployment {
         }
     }
 
+    /// Send one operation the cluster tab's command line takes, and follow its record until done
+    ///
+    /// The same parser and records as the tab's query bar, without its preview: what is typed is
+    /// sent, which is what a script needs. `status <op>` reads the record of an operation sent
+    /// earlier and follows it the same way.
+    ///
+    /// # Arguments
+    ///
+    /// * `shoal` - The admin client
+    /// * `line` - The operation as the tab takes it, like `repair movie verify`
+    /// * `timeout` - How long to follow the record before giving up on it
+    ///
+    /// # Errors
+    ///
+    /// When the line does not parse, the request is refused, or the record is not done in time.
+    pub async fn admin<S>(
+        &self,
+        shoal: &Arc<Shoal<S>>,
+        line: &str,
+        timeout: Duration,
+    ) -> color_eyre::Result<()>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        // the tab's own parser, so the two cannot disagree about what a line means
+        let action = crate::cluster::ClusterAction::parse(line).map_err(|error| eyre!(error))?;
+        // a status names an existing operation: find which kind of record answers by its id
+        let (op, follow) = if let crate::cluster::ClusterAction::Status { op } = action {
+            let mut found = None;
+            for follow in [Follow::Plan, Follow::Repair, Follow::Backup, Follow::Restore, Follow::Move] {
+                if crate::components::follow_once(shoal, op, follow).await.is_ok() {
+                    found = Some(follow);
+                    break;
+                }
+            }
+            let follow = found.ok_or_else(|| eyre!("no record of {op} on this member"))?;
+            (op, follow)
+        } else {
+            // a new operation, written against the topology version as the member serves it
+            let op = Uuid::new_v4();
+            let model = crate::cluster::poll(shoal).await.map_err(|error| eyre!(error))?;
+            let (kind, follow) = action.request();
+            step(None, &format!("sending {line:?} as {op}"));
+            let response = shoal
+                .admin(&AdminRequest {
+                    op,
+                    expected_version: model.version,
+                    kind,
+                })
+                .await
+                .map_err(|error| eyre!("{line}: {error:?}"))?;
+            match response.outcome {
+                Ok(outcome) => step(None, &format!("accepted: {outcome:?}")),
+                Err(error) => {
+                    return Err(eyre!("{line} was refused: {} ({:?})", error.msg, error.code()))
+                }
+            }
+            (op, follow)
+        };
+        // follow the record, printing it whenever it changes, until it is done
+        let deadline = Instant::now() + timeout;
+        let mut last = Vec::new();
+        loop {
+            let (lines, done) = crate::components::follow_once(shoal, op, follow)
+                .await
+                .map_err(|error| eyre!(error))?;
+            if lines != last {
+                for line in &lines {
+                    step(None, line);
+                }
+                last = lines;
+            }
+            if done {
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                bail!("{op} was not done after {timeout:?}; `admin \"status {op}\"` follows it");
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
     /// A plan's progress as one line, from the leader's figures, if the cluster answers them
     ///
     /// # Arguments

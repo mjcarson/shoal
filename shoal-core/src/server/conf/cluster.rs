@@ -459,8 +459,14 @@ fn default_checkpoint_entries() -> u64 {
 }
 
 /// The default number of entries kept behind a snapshot
+///
+/// Enough for a member gone for tens of seconds under a heavy load to catch up from the log.
+/// At ten thousand, a node partitioned for twenty seconds on the lab came back behind the purge
+/// point of every group and was fed each one a snapshot two or three times over, serving none
+/// of their reads for over a minute. `retained_bytes` is what bounds the disk either way
+/// ([O67](../../../../docs/src/appendix/optimizations.md#o67-ten-thousand-retained-entries-is-seconds-of-a-busy-group)).
 fn default_retained_entries() -> u64 {
-    10_000
+    100_000
 }
 
 /// The default bound on the WAL's in-memory tail, per shard
@@ -1932,7 +1938,7 @@ mod tests {
         assert_eq!(defaults.pending_bytes, 64 * 1024 * 1024);
         assert_eq!(defaults.segment_bytes, 10 * 1024 * 1024);
         assert_eq!(defaults.checkpoint_entries, 1024);
-        assert_eq!(defaults.retained_entries, 10_000);
+        assert_eq!(defaults.retained_entries, 100_000);
         assert_eq!(defaults.log_cache_bytes, 16 * 1024 * 1024);
         assert_eq!(defaults.volatile_log_bytes, 256 * 1024 * 1024);
         // the snapshot and retention settings ([F43](../../../../docs/src/features/node-recovery.md))

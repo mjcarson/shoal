@@ -87,6 +87,15 @@ use crate::shared::tls::PeerTlsHolder;
 /// rather than on an election.
 const LEADER_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How many report intervals the control loop may stand still before its own silence is assumed
+///
+/// A loop that ran nothing for this long - a paused process, a starved executor - heard nothing
+/// from anybody in that time either, so its detector's evidence is re-seeded rather than judged
+/// ([Resolved #147](../../../../docs/src/appendix/resolved/paused-detector-verdicts.md)). Two
+/// seconds at the default interval: a member silent for four reaches the default threshold, so
+/// a longer allowance would let a stall that long call everybody down.
+const PAUSED_TICKS: u64 = 4;
+
 /// How long a proposal may take to commit, leader search included
 pub const PROPOSE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -1091,6 +1100,8 @@ struct Core {
     reported_quarantine: Vec<QuarantinedCopy>,
     /// The failure detector, which only a leader feeds
     detector: Detector,
+    /// When this node last judged its members, which says whether its own loop stood still
+    last_judged: Option<Instant>,
     /// The members whose health this leader is proposing, so one verdict is in flight per member
     health_in_flight: BTreeSet<NodeId>,
     /// What every shard last reported about its tablet groups, by shard
@@ -1655,6 +1666,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         quarantined: Vec::new(),
         reported_quarantine: Vec::new(),
         detector: Detector::new(&policy.failure_detector),
+        last_judged: None,
         health_in_flight: BTreeSet::new(),
         replication: BTreeMap::new(),
         migration,
@@ -3215,13 +3227,51 @@ impl Core {
     /// Call down every member the detector suspects, if this node leads
     ///
     /// One verdict per member is in flight at a time, the leader never judges itself, and a
-    /// member the cluster already holds down is not called down again.
+    /// member the cluster already holds down is not called down again. A leader the record holds
+    /// down commits itself up, since it is running, and a detector whose own loop stood still
+    /// judges nobody by the silence that was its own
+    /// ([Resolved #147](../../../../docs/src/appendix/resolved/paused-detector-verdicts.md)).
     fn judge_members(&mut self) {
+        let now = Instant::now();
+        // how long since this node last judged, whether or not it led then
+        let gap = self
+            .last_judged
+            .map(|last| now.saturating_duration_since(last));
+        self.last_judged = Some(now);
         if !self.is_leader {
             return;
         }
-        let now = Instant::now();
         let state = self.machine.state();
+        // a leader the record holds down: it is evidently up, and nobody else reports it
+        if let Some(mine) = state.members.get(&self.node) {
+            if mine.health == MemberHealth::Down && mine.phase != MemberPhase::Removed {
+                event!(Level::WARN, msg = "the control leader is held down; committing it up", node = %self.node);
+                self.propose_health(self.node, MemberHealth::Up, mine.record.incarnation, None);
+            }
+        }
+        // a loop that stood still - a paused process, a starved executor - heard nothing from
+        // anybody for as long, and that silence is this node's, not theirs: start the evidence
+        // over as a new leader does, rather than judge by it
+        let paused = Duration::from_millis(
+            self.policy
+                .failure_detector
+                .interval_ms
+                .max(10)
+                .saturating_mul(PAUSED_TICKS),
+        );
+        if let Some(gap) = gap.filter(|gap| *gap > paused) {
+            event!(Level::WARN, msg = "this node's control loop stood still; its failure evidence starts over", gap_ms = u64::try_from(gap.as_millis()).unwrap_or(u64::MAX));
+            self.detector.reset();
+            for (node, member) in &state.members {
+                if *node != self.node
+                    && member.health == MemberHealth::Up
+                    && member.phase != MemberPhase::Removed
+                {
+                    self.detector.seed(*node, member.record.incarnation, now);
+                }
+            }
+            return;
+        }
         for node in self.detector.suspects(now) {
             if node == self.node {
                 continue;

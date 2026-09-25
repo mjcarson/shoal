@@ -464,7 +464,7 @@ cluster:
     pending_bytes: "64MiB"        # proposed and unanswered bytes one shard holds per group; a write past it is shed
     segment_bytes: "10MiB"        # a WAL segment is sealed once it grows past this
     checkpoint_entries: 1024      # entries a group commits between snapshots at its checkpoint
-    retained_entries: 10000       # entries kept behind the snapshot for a slow member to catch up from
+    retained_entries: 100000      # entries kept behind the snapshot for a slow member to catch up from (O67)
     log_cache_bytes: "16MiB"      # entries the WAL keeps in memory past its durable tail
     volatile_log_bytes: "256MiB"  # every ephemeral table's in-memory log together; a write past it is shed
     snapshot_chunk_bytes: "1MiB"  # one chunk of a snapshot stream on the bulk lane (F43); under max_frame_bytes and bulk_queue_bytes
@@ -542,7 +542,7 @@ wherever a node is placed, until M4 replicates.~~ **Since [F40](../features/repl
 the factor is what a tablet is replicated at**: `min(replication_factor, nodes placed)`
 copies, on distinct nodes, and the topology reports the desired factor beside that active
 one; a `Quorum` write is acknowledged once a majority of the group has fsynced it and this
-node applied it, an `All` write once every voter has it, and `One` is refused at startup
+node applied it (or two heartbeat intervals have passed, [#145](../appendix/resolved/apply-wait-on-a-stalled-copy.md), [#146](../appendix/resolved/apply-wait-on-a-lagging-copy.md)), an `All` write once every voter has it, and `One` is refused at startup
 naming C5 - as is a persistent table configured `Async` on a cluster node, since a receipt
 that precedes an fsync cannot make a durable quorum. **Since [F41](../features/read-consistency.md)
 `read_consistency` is read**: it is the level a read is served at when neither the bundle nor
