@@ -637,14 +637,18 @@ impl RaftNetworkV2<ControlConfig> for ControlPeer {
             }
         }
         let payload = serde_json::to_vec(&rpc).map_err(|error| {
-            Self::unreachable(RpcFailure::Unreachable(format!("encoding pre_vote: {error}")))
+            Self::unreachable(RpcFailure::Unreachable(format!(
+                "encoding pre_vote: {error}"
+            )))
         })?;
         let answer = link
             .rpc(ControlKind::PreVote, payload, option.hard_ttl())
             .await
             .map_err(Self::unreachable)?;
         serde_json::from_slice(&answer).map_err(|error| {
-            Self::unreachable(RpcFailure::Unreachable(format!("decoding pre_vote: {error}")))
+            Self::unreachable(RpcFailure::Unreachable(format!(
+                "decoding pre_vote: {error}"
+            )))
         })
     }
 

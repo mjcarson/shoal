@@ -163,6 +163,67 @@ impl Ring {
                 actual: hosting.slots,
             }));
         }
+        // hand every tablet to its slot, this node's through the executors hosting them
+        Self::assign(ring, hosting, placement, me)
+    }
+
+    /// Build the tablet map for a member of the cluster that the placement does not name
+    ///
+    /// The same rule as [`Ring::with_placement`], over the same list, so a tablet is sent to
+    /// exactly the slot a placed node would send it to; this node's executors are still at the
+    /// front of `shards` but own nothing, and every tablet is a `Remote` contact. It is what
+    /// lets a member admitted after the placement was initialized, and not yet brought in by a
+    /// move, coordinate every query it is sent instead of refusing it
+    /// ([Resolved #169](../../../docs/src/appendix/resolved/unplaced-member-forwards.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `hosting` - This node's slots, executors, and which executor hosts each slot
+    /// * `placement` - Every placed node with its slot count, in placement order
+    /// * `me` - This node's identity
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`Ring::new`] does, when the placement is empty, and when it names this node,
+    /// which is [`Ring::with_placement`]'s to build.
+    pub fn coordinator(
+        hosting: &Hosting,
+        placement: &[(NodeId, u16)],
+        me: NodeId,
+    ) -> Result<Self, ServerError> {
+        // this node's executors are still the local half, and coordinate what it is sent
+        let ring = Ring::new(hosting.physical)?;
+        // a placement naming this node is routed by the placed ring, never this one
+        if placement.iter().any(|(node, _)| *node == me) {
+            return Err(ServerError::Shoal(ShoalError::PlacementNamesSelf {
+                node: me,
+            }));
+        }
+        // and one naming nobody has no tablet to send anywhere
+        if placement.is_empty() {
+            return Err(ServerError::Shoal(ShoalError::NoShards));
+        }
+        // hand every tablet to its remote slot
+        Self::assign(ring, hosting, placement, me)
+    }
+
+    /// Append every remote slot of a placement and hand each tablet to its slot
+    ///
+    /// The one assignment [`Ring::with_placement`] and [`Ring::coordinator`] share, so a
+    /// coordinating member and a placed one cannot disagree about which slot owns a tablet.
+    ///
+    /// # Arguments
+    ///
+    /// * `ring` - The ring holding this node's executors and nothing else yet
+    /// * `hosting` - This node's slots, executors, and which executor hosts each slot
+    /// * `placement` - Every node tablets are placed over, with its slot count
+    /// * `me` - This node's identity, whose slots are hosted by its executors
+    fn assign(
+        mut ring: Ring,
+        hosting: &Hosting,
+        placement: &[(NodeId, u16)],
+        me: NodeId,
+    ) -> Result<Self, ServerError> {
         // append an info for every remote slot, remembering where each node's run starts
         let mut first_index = Vec::with_capacity(placement.len());
         for (node, shards) in placement {
@@ -487,6 +548,49 @@ mod tests {
         assert!(Ring::with_placement(&Hosting::identity(3), &placement, NodeId::mint()).is_err());
         // and neither can one with the wrong shard count
         assert!(Ring::with_placement(&Hosting::identity(2), &placement, ids[1]).is_err());
+    }
+
+    /// A member the placement does not name routes every tablet to the slot the rule gives it
+    ///
+    /// Its own executors come first and own nothing; every tablet goes to the remote slot
+    /// `owner_of` names, which is the slot every placed node sends it to. A placement naming
+    /// this node, or naming nobody, is refused
+    /// ([Resolved #169](../../../docs/src/appendix/resolved/unplaced-member-forwards.md)).
+    #[test]
+    fn a_coordinator_routes_every_tablet_to_its_placed_slot() {
+        let ids = [NodeId::mint(), NodeId::mint(), NodeId::mint()];
+        let shards = [2u16, 3, 1];
+        let placement: Vec<(NodeId, u16)> = ids.iter().copied().zip(shards).collect();
+        let me = NodeId::mint();
+        let ring = Ring::coordinator(&Hosting::identity(4), &placement, me)
+            .expect("a coordinator over three");
+        // four local executors, then every placed slot
+        assert_eq!(ring.shards.len(), 4 + 6);
+        // and the second placed node's view, which the coordinator has to agree with
+        let placed = Ring::with_placement(&Hosting::identity(3), &placement, ids[1])
+            .expect("a placement of three");
+        for tablet in 0..TABLET_COUNT {
+            let (which, shard) = Ring::owner_of(tablet, &shards);
+            let info = &ring.shards[usize::from(ring.tablets[tablet])];
+            assert_eq!(
+                info.contact,
+                ShardContact::Remote {
+                    node: ids[which],
+                    shard,
+                },
+                "tablet {tablet}"
+            );
+            // the placed node agrees wherever the slot is not its own
+            if which != 1 {
+                let seen = &placed.shards[usize::from(placed.tablets[tablet])];
+                assert_eq!(seen.contact, info.contact, "tablet {tablet}");
+            }
+        }
+        // no local executor owns anything
+        assert!(ring.tablets.iter().all(|owner| usize::from(*owner) >= 4));
+        // a placement naming this node is the placed ring's, and one naming nobody is nothing
+        assert!(Ring::coordinator(&Hosting::identity(3), &placement, ids[1]).is_err());
+        assert!(Ring::coordinator(&Hosting::identity(3), &[], me).is_err());
     }
 
     /// A placement hosts this node's slots on its executors and leaves every remote slot alone

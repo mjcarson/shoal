@@ -158,9 +158,11 @@ pub enum ErrorCode {
     StaleVersion = 61,
     /// The node asked cannot commit this request and knows no leader that can
     NotLeader = 62,
-    /// This node holds no tablets yet, so no data query can be answered by it
+    /// This node has no placement to route by, so no data query can be answered by it
     ///
-    /// A joiner before the placement is initialized, or a node the placement does not name.
+    /// A joiner before an operator initialized the placement. A member the placement does not
+    /// name is not refused: it forwards every query to the tablets' holders
+    /// ([Resolved #169](../../../../docs/src/appendix/resolved/unplaced-member-forwards.md)).
     NotInitialized = 63,
     /// The copy this read would be served from is quarantined
     ///

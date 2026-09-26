@@ -219,10 +219,8 @@ mod tests {
             assert!(mutex.lock().now_or_never().is_none());
             // the guard drops, which has to reach the task still waiting
             drop(guard);
-            let finished = glommio::timer::timeout(Duration::from_secs(1), async {
-                Ok(waiter.await)
-            })
-            .await;
+            let finished =
+                glommio::timer::timeout(Duration::from_secs(1), async { Ok(waiter.await) }).await;
             assert!(
                 finished.is_ok(),
                 "the waiting task was never woken with the mutex free"
@@ -253,10 +251,8 @@ mod tests {
             // the drop wakes the first, which is abandoned without being polled
             drop(guard);
             drop(first);
-            let finished = glommio::timer::timeout(Duration::from_secs(1), async {
-                Ok(second.await)
-            })
-            .await;
+            let finished =
+                glommio::timer::timeout(Duration::from_secs(1), async { Ok(second.await) }).await;
             assert!(finished.is_ok(), "the wake died with the abandoned attempt");
         });
     }

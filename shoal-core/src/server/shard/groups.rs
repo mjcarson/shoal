@@ -40,6 +40,7 @@ use tracing::{event, Level, Span};
 use uuid::Uuid;
 
 use super::Shard;
+use crate::server::control::repair::{Quarantine, QuarantineAction, QuarantineReason};
 use crate::server::database::ShoalDatabase;
 use crate::server::map::GroupSpec;
 use crate::server::messages::{QueryMetadata, ServerMsg};
@@ -53,7 +54,6 @@ use crate::server::replication::{
     GroupReport, IntegrityStats, Lease, MachineState, ProposalOutcome, Remembered, ReplicationVerb,
     ResultKind, RpcFailure, ShardNetwork, ShardPeer, ShardReplication, SnapshotStats, Stall,
 };
-use crate::server::control::repair::{Quarantine, QuarantineAction, QuarantineReason};
 use crate::server::ring::Ring;
 use crate::server::stage_profile::{StageDurability, StageOp, Stamp};
 use crate::server::tables::storage::fs::TabletUsage;
@@ -2874,12 +2874,15 @@ where
             // a voter the leader has no progress for is behind, not at index zero: a group
             // with a short log would otherwise read a member mid-install as caught up, and the
             // transfer to it would fail, elect someone else, and restart its install
-            let behind = group.spec.voters.iter().filter(|voter| **voter != metrics.id).any(|voter| {
-                match progress.get(voter).cloned().flatten() {
+            let behind = group
+                .spec
+                .voters
+                .iter()
+                .filter(|voter| **voter != metrics.id)
+                .any(|voter| match progress.get(voter).cloned().flatten() {
                     Some(matched) => matched.index + BALANCE_LAG < last,
                     None => true,
-                }
-            });
+                });
             if behind {
                 continue;
             }
@@ -4251,5 +4254,4 @@ mod tests {
             assert_eq!(config.enable_pre_vote, Some(true), "base {base}");
         }
     }
-
 }

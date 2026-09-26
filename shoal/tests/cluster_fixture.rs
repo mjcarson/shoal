@@ -11078,13 +11078,19 @@ async fn a_crash_mid_compaction_leaves_every_note_readable() -> Result<(), Fixtu
     for chunk in keys.chunks(500) {
         let notes = read_notes(&addr, chunk, None, &SendOptions::new())
             .await
-            .map_err(|error| FixtureError::NotReady(format!("a read after the crash failed: {error:?}")))?;
+            .map_err(|error| {
+                FixtureError::NotReady(format!("a read after the crash failed: {error:?}"))
+            })?;
         for (key, note) in &notes {
             assert_eq!(note, &text, "note {key} came back changed");
         }
         found += notes.len();
     }
-    assert_eq!(found, keys.len(), "notes were lost to a crash mid compaction");
+    assert_eq!(
+        found,
+        keys.len(),
+        "notes were lost to a crash mid compaction"
+    );
     // the pass that died is compacted again, and another after it, each reading the archived
     // copies of what it rewrites: no read may meet a record the map names and the disk lacks
     write_notes_batch(&addr, &keys[..500], "again").await?;
@@ -11663,6 +11669,63 @@ fn hosts_group(cluster: &mut Cluster, node: usize, group: &str) -> Result<bool, 
         .flatten()
         .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
         .any(|found| found["group"].as_u64() == Some(wanted)))
+}
+
+/// A member the placement does not name coordinates every query it is sent (item 169)
+///
+/// Three placed nodes and a spare that joined after the placement was initialized, with no
+/// move bringing it in. Every query sent to the spare is forwarded to the tablets' holders:
+/// a write, a `One` get, a `Quorum` get and a get past the write's session token are all
+/// answered, the write is read back through a placed node, and the spare still holds nothing
+/// ([Resolved #169](../../docs/src/appendix/resolved/unplaced-member-forwards.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn unplaced_member_forwards_every_query() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal::shared::protocol::read::ReadLevel;
+    let mut cluster = three_placed_one_spare(Cluster::builder()).await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let addr3 = cluster.node(3).endpoints.client.to_string();
+    // the spare is joined, holds the map, and is not placed
+    cluster.wait_joined(&[3])?;
+    let readiness = cluster.node_mut(3).command("READINESS")?;
+    assert_eq!(readiness["ok"]["data"]["initialized"], true, "{readiness}");
+    assert_eq!(readiness["ok"]["data"]["placed"], false, "{readiness}");
+    // a write through the spare lands on the placed nodes, and carries a token
+    let mut tokens = Vec::new();
+    for key in 16_900..16_920u64 {
+        let token = write_note_token(&addr3, key, &format!("via-spare-{key}"))
+            .await
+            .unwrap_or_else(|error| panic!("a write through the spare was refused: {error:?}"));
+        tokens.push((key, token.expect("a committed write carries a token")));
+    }
+    // and reads through the spare are answered at every level, and through a placed node too
+    let one = SendOptions::new().read(ReadLevel::One);
+    let quorum = SendOptions::new().read(ReadLevel::Quorum);
+    for (key, token) in &tokens {
+        let expected = format!("via-spare-{key}");
+        let session = SendOptions::new().token(token.clone());
+        for (name, options) in [("one", &one), ("quorum", &quorum), ("session", &session)] {
+            let found = read_note_with(&addr3, *key, options)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("a {name} read through the spare was refused: {error:?}")
+                });
+            // a One read may be served by a copy that has not applied the write yet
+            if name != "one" {
+                assert_eq!(found.as_deref(), Some(expected.as_str()), "{name} {key}");
+            }
+        }
+        wait_note(&addr0, *key, Some(&expected), Duration::from_secs(10)).await?;
+        wait_note(&addr3, *key, Some(&expected), Duration::from_secs(10)).await?;
+    }
+    // forwarding placed nothing on the spare: it hosts no group
+    let readiness = cluster.node_mut(3).command("READINESS")?;
+    assert_eq!(readiness["ok"]["data"]["placed"], false, "{readiness}");
+    assert_eq!(sets_held(&mut cluster, 0)?, vec![3, 3, 3, 0]);
+    for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
 }
 
 /// A write acknowledged after the destination reports zero lag is on the destination (C8 M9a)
@@ -17637,7 +17700,10 @@ async fn stats_follow_a_rebalance() -> Result<(), FixtureError> {
         .as_u64()
         .is_some_and(|bytes| bytes > 0)
     {
-        assert!(Instant::now() < deadline, "node one never reported its bytes");
+        assert!(
+            Instant::now() < deadline,
+            "node one never reported its bytes"
+        );
         std::thread::sleep(Duration::from_millis(200));
     }
     let plan = plan_as_process(&mut cluster, 0, "REBALANCE")?;
@@ -17663,10 +17729,7 @@ async fn stats_follow_a_rebalance() -> Result<(), FixtureError> {
                 assert!(progress["eta_ms"].is_u64() || progress["eta_ms"].is_null());
             }
         }
-        assert!(
-            Instant::now() < deadline,
-            "the plan never finished: {view}"
-        );
+        assert!(Instant::now() < deadline, "the plan never finished: {view}");
         std::thread::sleep(Duration::from_millis(200));
     };
     assert!(saw_running, "the plan was never seen running: {progress}");
@@ -17674,11 +17737,26 @@ async fn stats_follow_a_rebalance() -> Result<(), FixtureError> {
     let total = progress["steps_total"].as_u64().unwrap_or(0);
     assert!(total > 0, "{progress}");
     assert_eq!(progress["moved"], total, "{progress}");
-    assert!(progress["bytes_planned"].as_u64().unwrap_or(0) > 0, "{progress}");
-    assert_eq!(progress["bytes_moved"], progress["bytes_planned"], "{progress}");
-    assert!(progress["started_ms"].as_u64().unwrap_or(0) > 0, "{progress}");
-    assert!(progress["elapsed_ms"].as_u64().unwrap_or(0) > 0, "{progress}");
-    assert!(progress["mean_step_ms"].as_u64().unwrap_or(0) > 0, "{progress}");
+    assert!(
+        progress["bytes_planned"].as_u64().unwrap_or(0) > 0,
+        "{progress}"
+    );
+    assert_eq!(
+        progress["bytes_moved"], progress["bytes_planned"],
+        "{progress}"
+    );
+    assert!(
+        progress["started_ms"].as_u64().unwrap_or(0) > 0,
+        "{progress}"
+    );
+    assert!(
+        progress["elapsed_ms"].as_u64().unwrap_or(0) > 0,
+        "{progress}"
+    );
+    assert!(
+        progress["mean_step_ms"].as_u64().unwrap_or(0) > 0,
+        "{progress}"
+    );
     assert!(progress["eta_ms"].is_null(), "{progress}");
     // the spare applied rows for the sets it was fed, and its figures say so
     let spare = cluster.node_ids()[3].clone();
@@ -17747,7 +17825,9 @@ async fn a_stream_older_than_the_retry_window_still_writes() -> Result<(), Fixtu
         assert!(
             response.suceeded(QuerySuceededOpts::default()).is_ok(),
             "round {round} was refused: {:?}",
-            response.error().map(|error| (error.code(), error.msg().to_string()))
+            response
+                .error()
+                .map(|error| (error.code(), error.msg().to_string()))
         );
     }
     queries_tx.close().await?;
@@ -17839,7 +17919,13 @@ async fn a_stopped_leader_hands_its_groups_off() -> Result<(), FixtureError> {
         "writes to the stopped leader's group were refused for {longest:?}, as long as a lease and an election"
     );
     let last = outcomes.len() - 1;
-    wait_note(&addr, key, Some(&format!("after {last}")), Duration::from_secs(10)).await?;
+    wait_note(
+        &addr,
+        key,
+        Some(&format!("after {last}")),
+        Duration::from_secs(10),
+    )
+    .await?;
     Ok(())
 }
 
@@ -17894,7 +17980,10 @@ async fn a_returning_node_is_handed_back_its_groups() -> Result<(), FixtureError
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     };
-    assert!(before[1] > 0, "node one led nothing to begin with: {before:?}");
+    assert!(
+        before[1] > 0,
+        "node one led nothing to begin with: {before:?}"
+    );
     // node one crashes: its leads move to the survivors
     cluster.kill(1)?;
     tokio::time::sleep(Duration::from_secs(6)).await;
@@ -17909,7 +17998,10 @@ async fn a_returning_node_is_handed_back_its_groups() -> Result<(), FixtureError
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     };
-    eprintln!("node one led {} groups before the crash and {after} after it came back", before[1]);
+    eprintln!(
+        "node one led {} groups before the crash and {after} after it came back",
+        before[1]
+    );
     assert!(
         after >= before[1],
         "node one led {} groups before it crashed and only {after} a minute after it came back",
@@ -18024,12 +18116,16 @@ async fn a_silently_cut_node_rejoins_without_elections() -> Result<(), FixtureEr
     }
     // node one is cut off by dropped packets for ten election timeouts
     let before = group_terms(&mut cluster, 1)?;
-    let control_before = cluster.node_mut(1).command("MEMBERS")?["ok"]["term"].as_u64().unwrap_or_default();
+    let control_before = cluster.node_mut(1).command("MEMBERS")?["ok"]["term"]
+        .as_u64()
+        .unwrap_or_default();
     cluster.blackhole(1);
     tokio::time::sleep(Duration::from_secs(10)).await;
     // what node one's groups stood at while cut off, read over its command lane
     let isolated = group_terms(&mut cluster, 1)?;
-    let control_isolated = cluster.node_mut(1).command("MEMBERS")?["ok"]["term"].as_u64().unwrap_or_default();
+    let control_isolated = cluster.node_mut(1).command("MEMBERS")?["ok"]["term"]
+        .as_u64()
+        .unwrap_or_default();
     eprintln!("node one's control term {control_before} before, {control_isolated} cut off");
     // the control group stood for nothing either
     assert!(
@@ -18093,7 +18189,9 @@ async fn a_write_through_an_installing_copy_is_answered_at_commit() -> Result<()
     let addr0 = cluster.node(0).endpoints.client.to_string();
     // a base every node holds, then enough to leave node two behind the purge point
     for key in 22_000..22_010u64 {
-        write_note(&addr0, key, &format!("old-{key}")).await.map_err(ok)?;
+        write_note(&addr0, key, &format!("old-{key}"))
+            .await
+            .map_err(ok)?;
     }
     wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
     leave_behind_purge(&mut cluster, 2, 0, 22_000, 100, "new").await?;
@@ -18161,7 +18259,8 @@ async fn a_write_through_an_installing_copy_is_answered_at_commit() -> Result<()
 /// after a 20 s `SIGSTOP` took up to 5.3 s for twelve seconds. The wait is now bounded at two
 /// heartbeat intervals ([Resolved #146](../../docs/src/appendix/resolved/apply-wait-on-a-lagging-copy.md)).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_write_through_a_lagging_copy_is_answered_within_two_heartbeats() -> Result<(), FixtureError> {
+async fn a_write_through_a_lagging_copy_is_answered_within_two_heartbeats(
+) -> Result<(), FixtureError> {
     let base = Duration::from_secs(1);
     let mut cluster = Cluster::builder()
         .cluster(3, CoreClaim::Count(1))
@@ -18257,7 +18356,10 @@ async fn a_paused_control_leader_calls_nobody_down() -> Result<(), FixtureError>
         for at in 0..3 {
             let map = cluster.node_mut(at).command("MAP")?;
             for (member, id) in ids.iter().enumerate() {
-                let health = map["ok"]["members"][id]["health"].as_str().unwrap_or("?").to_string();
+                let health = map["ok"]["members"][id]["health"]
+                    .as_str()
+                    .unwrap_or("?")
+                    .to_string();
                 all.push((at, member, health));
             }
         }
@@ -18280,20 +18382,21 @@ async fn a_paused_control_leader_calls_nobody_down() -> Result<(), FixtureError>
         }
     };
     // wait for a node other than one to lead the control group, and say which
-    let wait_led_elsewhere = |cluster: &mut Cluster, not: usize, ask: usize| -> Result<usize, FixtureError> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        loop {
-            if let Some(leader) = cluster.leader_index(ask)? {
-                if leader != not {
-                    return Ok(leader);
+    let wait_led_elsewhere =
+        |cluster: &mut Cluster, not: usize, ask: usize| -> Result<usize, FixtureError> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                if let Some(leader) = cluster.leader_index(ask)? {
+                    if leader != not {
+                        return Ok(leader);
+                    }
                 }
+                if std::time::Instant::now() > deadline {
+                    return Err(FixtureError::NotReady(format!("node {not} still leads")));
+                }
+                std::thread::sleep(Duration::from_millis(50));
             }
-            if std::time::Instant::now() > deadline {
-                return Err(FixtureError::NotReady(format!("node {not} still leads")));
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    };
+        };
     wait_all_up(&mut cluster, Duration::from_secs(20))?;
     // the first leader is paused long enough to be replaced and called down, then resumed
     let first = cluster.leader_index(0)?.expect("a leader");
@@ -18356,7 +18459,8 @@ async fn a_restore_rides_out_an_unreachable_member() -> Result<(), FixtureError>
         .start()
         .await?;
     old.wait_voters(0, 3)?;
-    old.node_mut(0).command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
+    old.node_mut(0)
+        .command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
     for node in 0..3 {
         wait_activated(&mut old, node, PROTOCOL_VERSION, Duration::from_secs(30))?;
     }
@@ -18389,7 +18493,13 @@ async fn a_restore_rides_out_an_unreachable_member() -> Result<(), FixtureError>
     let restore = plan_as_process(&mut new, 0, &format!("RESTORE {}", backup_dir.display()))?;
     tokio::time::sleep(Duration::from_secs(25)).await;
     new.heal(2);
-    let record = wait_operation_done(&mut new, 0, "RESTORE_STATUS", restore, Duration::from_secs(300))?;
+    let record = wait_operation_done(
+        &mut new,
+        0,
+        "RESTORE_STATUS",
+        restore,
+        Duration::from_secs(300),
+    )?;
     // every persistent group restored, none failed, whatever node two missed
     for (group, progress) in record["groups"].as_object().expect("groups") {
         let outcome = &progress["outcome"];
@@ -18401,7 +18511,13 @@ async fn a_restore_rides_out_an_unreachable_member() -> Result<(), FixtureError>
     // and every note reads back
     let new_addr = new.node(0).endpoints.client.to_string();
     for key in &keys {
-        wait_note(&new_addr, *key, Some(&format!("v-{key}")), Duration::from_secs(20)).await?;
+        wait_note(
+            &new_addr,
+            *key,
+            Some(&format!("v-{key}")),
+            Duration::from_secs(20),
+        )
+        .await?;
     }
     Ok(())
 }
@@ -18446,7 +18562,11 @@ async fn a_node_whose_wal_cannot_be_written_stops() -> Result<(), FixtureError> 
         );
     }
     std::fs::set_permissions(&wal, std::fs::Permissions::from_mode(0o755)).expect("writable");
-    eprintln!("node two stopped after {} writes: {:?}", key - 12601, cluster.node(2).failure());
+    eprintln!(
+        "node two stopped after {} writes: {:?}",
+        key - 12601,
+        cluster.node(2).failure()
+    );
     // and the other two still take writes
     write_note_eventually(&addr, key, "after", Duration::from_secs(30)).await?;
     Ok(())
@@ -18612,8 +18732,13 @@ async fn an_unreadable_partition_stalls_one_copy_and_repairs_it() -> Result<(), 
     };
     client.send_one(update).await.map_err(ok)?;
     // the follower quarantines the one copy and keeps running
-    let quarantined = wait_member_quarantined(&mut cluster, follower, true, Duration::from_secs(20));
-    assert_eq!(cluster.node(follower).failure(), None, "the follower stopped");
+    let quarantined =
+        wait_member_quarantined(&mut cluster, follower, true, Duration::from_secs(20));
+    assert_eq!(
+        cluster.node(follower).failure(),
+        None,
+        "the follower stopped"
+    );
     quarantined?;
     // its other groups still serve through it, the stalled one by another member
     let addr_f = cluster.node(follower).endpoints.client.to_string();
@@ -18715,14 +18840,23 @@ async fn a_stalled_copy_survives_a_restart_and_an_operator_repairs_it() -> Resul
         })
         .await
         .map_err(ok)?;
-    let quarantined = wait_member_quarantined(&mut cluster, follower, true, Duration::from_secs(20));
-    assert_eq!(cluster.node(follower).failure(), None, "the follower stopped");
+    let quarantined =
+        wait_member_quarantined(&mut cluster, follower, true, Duration::from_secs(20));
+    assert_eq!(
+        cluster.node(follower).failure(),
+        None,
+        "the follower stopped"
+    );
     quarantined?;
     // killed and started again on the same unreadable record: it starts, and stalls again
     cluster.restart(follower, NodeKind::Server)?;
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let entry = loop {
-        assert_eq!(cluster.node(follower).failure(), None, "the restarted follower stopped");
+        assert_eq!(
+            cluster.node(follower).failure(),
+            None,
+            "the restarted follower stopped"
+        );
         let entry = group_entry(&groups_of(&mut cluster, follower)?, &group);
         if entry["stalled"] == true {
             break entry;
@@ -18804,7 +18938,10 @@ fn backup_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     // the files, never their manifests
     let mut files: Vec<std::path::PathBuf> = walkdir_files(dir)
         .into_iter()
-        .filter(|path| path.extension().is_some_and(|extension| extension == "snap"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "snap")
+        })
         .collect();
     files.sort();
     files
@@ -18821,8 +18958,8 @@ fn backup_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// with nothing failed, is refused ([Resolved #155](../../docs/src/appendix/resolved/restore-retry.md)).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_restore_with_failed_groups_is_finished_by_a_retry() -> Result<(), FixtureError> {
-    use std::os::unix::fs::PermissionsExt;
     use shoal::shared::protocol::PROTOCOL_VERSION;
+    use std::os::unix::fs::PermissionsExt;
     let backups = utils::test_dir();
     // a backup of some notes from a cluster of two shards a node, so it holds several files
     let mut old = Cluster::builder()
@@ -18833,7 +18970,8 @@ async fn a_restore_with_failed_groups_is_finished_by_a_retry() -> Result<(), Fix
         .start()
         .await?;
     old.wait_voters(0, 3)?;
-    old.node_mut(0).command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
+    old.node_mut(0)
+        .command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
     for node in 0..3 {
         wait_activated(&mut old, node, PROTOCOL_VERSION, Duration::from_secs(30))?;
     }
@@ -18849,7 +18987,10 @@ async fn a_restore_with_failed_groups_is_finished_by_a_retry() -> Result<(), Fix
     drop(old);
     // one file unreadable, whose groups cannot build their restore file
     let files = backup_files(&backup_dir);
-    assert!(files.len() >= 2, "the backup holds too few files: {files:?}");
+    assert!(
+        files.len() >= 2,
+        "the backup holds too few files: {files:?}"
+    );
     let hidden = files[0].clone();
     let mode = std::fs::metadata(&hidden).expect("a file").permissions();
     std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o000)).expect("hidden");
@@ -18869,7 +19010,13 @@ async fn a_restore_with_failed_groups_is_finished_by_a_retry() -> Result<(), Fix
         .await?;
     new.wait_voters(0, 3)?;
     let restore = plan_as_process(&mut new, 0, &format!("RESTORE {}", backup_dir.display()))?;
-    let first = wait_operation_done(&mut new, 0, "RESTORE_STATUS", restore, Duration::from_secs(300))?;
+    let first = wait_operation_done(
+        &mut new,
+        0,
+        "RESTORE_STATUS",
+        restore,
+        Duration::from_secs(300),
+    )?;
     let groups = first["groups"].as_object().expect("groups").clone();
     let failed: Vec<&String> = groups
         .iter()
@@ -18881,18 +19028,26 @@ async fn a_restore_with_failed_groups_is_finished_by_a_retry() -> Result<(), Fix
         .filter(|(_, progress)| progress["outcome"]["Restored"].is_object())
         .map(|(group, _)| group)
         .collect();
-    assert!(!failed.is_empty(), "no group failed with its file unreadable: {first}");
+    assert!(
+        !failed.is_empty(),
+        "no group failed with its file unreadable: {first}"
+    );
     assert!(!restored.is_empty(), "no group was restored: {first}");
     for group in &failed {
         assert_eq!(groups[*group]["failed_in"], "Installing", "{first}");
     }
     // below wire version 6 the retry is refused by name
-    let refused = new.node_mut(0).command(&format!("RETRY_RESTORE {restore}"))?;
+    let refused = new
+        .node_mut(0)
+        .command(&format!("RETRY_RESTORE {restore}"))?;
     assert!(
-        refused["error"].as_str().is_some_and(|error| error.contains("wire version 6")),
+        refused["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("wire version 6")),
         "a retry below 6 was not refused: {refused}"
     );
-    new.node_mut(0).command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
+    new.node_mut(0)
+        .command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
     for node in 0..3 {
         wait_activated(&mut new, node, PROTOCOL_VERSION, Duration::from_secs(30))?;
     }
@@ -18902,17 +19057,21 @@ async fn a_restore_with_failed_groups_is_finished_by_a_retry() -> Result<(), Fix
     // wait for the retried groups to be put back and to finish again
     let deadline = Instant::now() + Duration::from_secs(300);
     let second = loop {
-        let record = new.node_mut(0).command(&format!("RESTORE_STATUS {restore}"))?["ok"].clone();
+        let record = new
+            .node_mut(0)
+            .command(&format!("RESTORE_STATUS {restore}"))?["ok"]
+            .clone();
         let finished = record["groups"].as_object().is_some_and(|groups| {
             groups.values().all(|progress| progress["phase"] == "Done")
-                && failed
-                    .iter()
-                    .all(|group| groups[*group]["generation"] == 1)
+                && failed.iter().all(|group| groups[*group]["generation"] == 1)
         });
         if finished {
             break record;
         }
-        assert!(Instant::now() < deadline, "the retry did not finish: {record}");
+        assert!(
+            Instant::now() < deadline,
+            "the retry did not finish: {record}"
+        );
         tokio::time::sleep(Duration::from_millis(250)).await;
     };
     // the failed groups are restored now, and the restored ones are exactly as they were
@@ -18931,12 +19090,22 @@ async fn a_restore_with_failed_groups_is_finished_by_a_retry() -> Result<(), Fix
     // every note reads back
     let new_addr = new.node(0).endpoints.client.to_string();
     for key in &keys {
-        wait_note(&new_addr, *key, Some(&format!("v-{key}")), Duration::from_secs(20)).await?;
+        wait_note(
+            &new_addr,
+            *key,
+            Some(&format!("v-{key}")),
+            Duration::from_secs(20),
+        )
+        .await?;
     }
     // and a retry with nothing failed is refused
-    let nothing = new.node_mut(0).command(&format!("RETRY_RESTORE {restore}"))?;
+    let nothing = new
+        .node_mut(0)
+        .command(&format!("RETRY_RESTORE {restore}"))?;
     assert!(
-        nothing["error"].as_str().is_some_and(|error| error.contains("nothing to retry")),
+        nothing["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("nothing to retry")),
         "a retry with nothing failed was not refused: {nothing}"
     );
     Ok(())
@@ -18987,11 +19156,20 @@ async fn an_archive_compaction_leaves_a_corrupt_record_and_quarantines_it(
         .node_mut(follower)
         .command(&format!("CORRUPT Note {:016x}", hashed(corrupted)))?;
     assert_eq!(answer["ok"]["fault"], "corrupt", "{answer}");
-    assert_eq!(cluster.node(follower).failure(), None, "the follower stopped at the fault");
+    assert_eq!(
+        cluster.node(follower).failure(),
+        None,
+        "the follower stopped at the fault"
+    );
     let addr_l = cluster.node(leader).endpoints.client.to_string();
     for key in (34_000..34_060u64).filter(|key| *key != corrupted) {
-        write_note_eventually(&addr_l, key, &format!("again-{key}"), Duration::from_secs(30))
-            .await?;
+        write_note_eventually(
+            &addr_l,
+            key,
+            &format!("again-{key}"),
+            Duration::from_secs(30),
+        )
+        .await?;
     }
     wait_checkpointed(&mut cluster, follower, "Note", Duration::from_secs(60))?;
     // the archive compaction that rewrites the old archive meets the corrupt record
@@ -19008,7 +19186,11 @@ async fn an_archive_compaction_leaves_a_corrupt_record_and_quarantines_it(
             "the corrupt record never quarantined its copy: {view}"
         );
     }
-    assert_eq!(cluster.node(follower).failure(), None, "the follower stopped");
+    assert_eq!(
+        cluster.node(follower).failure(),
+        None,
+        "the follower stopped"
+    );
     // and no pass keeps rewriting records for nothing: the archives stop growing
     let size = |dir: &std::path::Path| -> u64 {
         walkdir_files(dir)
@@ -19040,8 +19222,7 @@ async fn an_archive_compaction_leaves_a_corrupt_record_and_quarantines_it(
 /// and nothing quarantined the copy. Now the failed load quarantines the copy as unreadable,
 /// its leader repairs it, and the job, which skips the frames the install replaced, finishes.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_segment_merge_onto_a_corrupt_record_has_its_copy_repaired() -> Result<(), FixtureError>
-{
+async fn a_segment_merge_onto_a_corrupt_record_has_its_copy_repaired() -> Result<(), FixtureError> {
     let mut cluster = Cluster::builder()
         .cluster(3, CoreClaim::Count(1))
         .replication_factor(3)
@@ -19086,15 +19267,27 @@ async fn a_segment_merge_onto_a_corrupt_record_has_its_copy_repaired() -> Result
             }
         }
     };
-    assert!(quarantined, "the merge's corrupt record never quarantined its copy");
-    assert_eq!(cluster.node(follower).failure(), None, "the follower stopped");
+    assert!(
+        quarantined,
+        "the merge's corrupt record never quarantined its copy"
+    );
+    assert_eq!(
+        cluster.node(follower).failure(),
+        None,
+        "the follower stopped"
+    );
     // repaired with nobody asking, after which the follower compacts again
     wait_member_quarantined(&mut cluster, follower, false, Duration::from_secs(120))?;
     let addr_f = cluster.node(follower).endpoints.client.to_string();
     wait_note_routed(&addr_f, corrupted, "inserted-over", Duration::from_secs(20)).await?;
     for key in 35_060..35_090u64 {
-        write_note_eventually(&addr_l, key, &format!("after-{key}"), Duration::from_secs(30))
-            .await?;
+        write_note_eventually(
+            &addr_l,
+            key,
+            &format!("after-{key}"),
+            Duration::from_secs(30),
+        )
+        .await?;
     }
     wait_checkpointed(&mut cluster, follower, "Note", Duration::from_secs(60))?;
     wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
@@ -19170,7 +19363,10 @@ async fn a_stalled_leader_hands_its_lead_on_first() -> Result<(), FixtureError> 
                 Ok(_) => break,
                 Err(error) => refusals.push(format!("{error:?}")),
             }
-            assert!(std::time::Instant::now() < deadline, "a write never landed: {refusals:?}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a write never landed: {refusals:?}"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
@@ -19185,7 +19381,11 @@ async fn a_stalled_leader_hands_its_lead_on_first() -> Result<(), FixtureError> 
         started.elapsed(),
         dead_core.first()
     );
-    assert_eq!(cluster.node(leader).failure(), None, "the stalled leader stopped");
+    assert_eq!(
+        cluster.node(leader).failure(),
+        None,
+        "the stalled leader stopped"
+    );
     Ok(())
 }
 
@@ -19211,7 +19411,8 @@ async fn a_copy_moved_in_after_a_restore_holds_the_restored_rows() -> Result<(),
         .start()
         .await?;
     old.wait_voters(0, 3)?;
-    old.node_mut(0).command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
+    old.node_mut(0)
+        .command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
     for node in 0..3 {
         wait_activated(&mut old, node, PROTOCOL_VERSION, Duration::from_secs(30))?;
     }
@@ -19234,7 +19435,13 @@ async fn a_copy_moved_in_after_a_restore_holds_the_restored_rows() -> Result<(),
     )
     .await?;
     let restore = plan_as_process(&mut new, 0, &format!("RESTORE {}", backup_dir.display()))?;
-    wait_operation_done(&mut new, 0, "RESTORE_STATUS", restore, Duration::from_secs(300))?;
+    wait_operation_done(
+        &mut new,
+        0,
+        "RESTORE_STATUS",
+        restore,
+        Duration::from_secs(300),
+    )?;
     // one set moved from node two onto the spare
     let key = keys[0];
     let (group, _) = group_of(&mut new, 0, "Note", key)?;
@@ -19245,7 +19452,10 @@ async fn a_copy_moved_in_after_a_restore_holds_the_restored_rows() -> Result<(),
     assert!(!moved.is_empty(), "no restored key in group {group}");
     let op = move_as_process(&mut new, 0, key, 2, 3)?;
     wait_move_done_via(&mut new, 0, op, Duration::from_secs(120))?;
-    assert!(hosts_group(&mut new, 3, &group)?, "the spare does not host {group}");
+    assert!(
+        hosts_group(&mut new, 3, &group)?,
+        "the spare does not host {group}"
+    );
     // every restored key of the set, read from the spare's own copy
     let addr3 = new.node(3).endpoints.client.to_string();
     let mut missing = Vec::new();

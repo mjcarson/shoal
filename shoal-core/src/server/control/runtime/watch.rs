@@ -282,7 +282,10 @@ mod tests {
         }
         // one receiver, so one waker at most
         let wakers = sender.shared.borrow().wakers.len();
-        assert!(wakers <= 1, "a receiver that polled 1000 times left {wakers} wakers");
+        assert!(
+            wakers <= 1,
+            "a receiver that polled 1000 times left {wakers} wakers"
+        );
         // and a change still reaches it
         sender.send(1).expect("a receiver exists");
         assert!(receiver.changed().now_or_never().is_some());

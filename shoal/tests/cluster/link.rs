@@ -167,7 +167,10 @@ async fn accept_loop(
             // accepted and closed at once: the sender sees a connection that ended, which is
             // what a reconnect into a cut link is meant to see
             LinkState::Cut => drop(inbound),
-            LinkState::Pass | LinkState::Delay(_) | LinkState::Throttle(_) | LinkState::Blackhole => {
+            LinkState::Pass
+            | LinkState::Delay(_)
+            | LinkState::Throttle(_)
+            | LinkState::Blackhole => {
                 let handle = tokio::spawn(forward(inbound, target, current, state.clone()));
                 streams.lock().unwrap().push(handle);
             }

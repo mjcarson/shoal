@@ -87,8 +87,10 @@ pub struct ClaimReport {
 /// Whatever the configuration, the claim, or the server refused with.
 pub fn main<D: ShoalDatabase>() -> Result<(), ServerError>
 where
-    <<D::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
-        rkyv::Deserialize<<D::ClientType as QuerySupport>::QueryKinds, Strategy<Pool, rkyv::rancor::Error>>,
+    <<D::ClientType as QuerySupport>::QueryKinds as Archive>::Archived: rkyv::Deserialize<
+        <D::ClientType as QuerySupport>::QueryKinds,
+        Strategy<Pool, rkyv::rancor::Error>,
+    >,
     for<'a> <Queries<D::ClientType> as Archive>::Archived:
         CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
     for<'a> <<D::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
@@ -156,8 +158,10 @@ pub fn claim(conf: &Conf) -> Result<ClaimReport, ServerError> {
 /// * `conf` - The node's configuration
 fn serve<D: ShoalDatabase>(conf: &Conf) -> Result<(), ServerError>
 where
-    <<D::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
-        rkyv::Deserialize<<D::ClientType as QuerySupport>::QueryKinds, Strategy<Pool, rkyv::rancor::Error>>,
+    <<D::ClientType as QuerySupport>::QueryKinds as Archive>::Archived: rkyv::Deserialize<
+        <D::ClientType as QuerySupport>::QueryKinds,
+        Strategy<Pool, rkyv::rancor::Error>,
+    >,
     for<'a> <Queries<D::ClientType> as Archive>::Archived:
         CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
     for<'a> <<D::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:

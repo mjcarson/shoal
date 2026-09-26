@@ -1071,9 +1071,9 @@ impl ArchiveMap {
 
 #[cfg(test)]
 mod tests {
+    use futures::AsyncWriteExt;
     use glommio::io::{DmaFile, DmaStreamWriterBuilder, OpenOptions};
     use glommio::LocalExecutor;
-    use futures::AsyncWriteExt;
     use std::hash::Hasher;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -1178,9 +1178,15 @@ mod tests {
             // a torn entry with nothing before it names nothing
             assert_eq!(loaded.to_archive.get(&2), None);
             // one inside its archive, up to its last byte, is kept
-            assert_eq!(loaded.to_archive.get(&3).map(|entry| entry.archive), Some(active));
+            assert_eq!(
+                loaded.to_archive.get(&3).map(|entry| entry.archive),
+                Some(active)
+            );
             // and one in a missing archive is kept, for the read to report by name
-            assert_eq!(loaded.to_archive.get(&4).map(|entry| entry.archive), Some(gone));
+            assert_eq!(
+                loaded.to_archive.get(&4).map(|entry| entry.archive),
+                Some(gone)
+            );
         });
     }
 
@@ -1212,10 +1218,14 @@ mod tests {
             intents.extend_from_slice(&framed(&MapIntent::Remove(stale.key)));
             std::fs::write(&intent_path, &intents).unwrap();
             // load this map back with its intent log applied
-            let loaded =
-                SerializedMap::new(&map_path.to_path_buf(), &intent_path.to_path_buf(), None, "test")
-                    .await
-                    .expect("Failed to load map");
+            let loaded = SerializedMap::new(
+                &map_path.to_path_buf(),
+                &intent_path.to_path_buf(),
+                None,
+                "test",
+            )
+            .await
+            .expect("Failed to load map");
             // our pruned partition should be gone
             assert!(!loaded.to_archive.contains_key(&stale.key));
             // and our logged entry should still be there
@@ -1257,7 +1267,9 @@ mod tests {
             // a save records the size of what it wrote, and an open reads it back
             map.saved_bytes.set(0);
             let mut writer = map.compact_map().await.expect("a save");
-            futures::AsyncWriteExt::close(&mut writer).await.expect("a close");
+            futures::AsyncWriteExt::close(&mut writer)
+                .await
+                .expect("a close");
             let saved = map.saved_bytes.get();
             assert!(saved > 8, "a save did not record its size");
             let reopened = ArchiveMap::new("Shard-0", "T", &conf).await.expect("a map");
@@ -1295,7 +1307,15 @@ mod tests {
             for (at, archive) in archives.iter().enumerate() {
                 map.all_archives.borrow_mut().insert(*archive);
                 for _ in 0..=at {
-                    map.set_partition(key, ArchiveEntry { key, archive: *archive, offset: key * 128, size: 128 });
+                    map.set_partition(
+                        key,
+                        ArchiveEntry {
+                            key,
+                            archive: *archive,
+                            offset: key * 128,
+                            size: 128,
+                        },
+                    );
                     key += 1;
                 }
             }
@@ -1346,7 +1366,10 @@ mod tests {
                         .expect("an intent");
                 let intent = rkyv::deserialize::<MapIntent, rkyv::rancor::Error>(archived)
                     .expect("an intent");
-                assert!(matches!(intent, MapIntent::Remove(key) if key == next), "{intent:?}");
+                assert!(
+                    matches!(intent, MapIntent::Remove(key) if key == next),
+                    "{intent:?}"
+                );
                 next += 1;
             }
             assert_eq!(next, 100_000, "the log was not read to its end");
@@ -1410,7 +1433,9 @@ mod tests {
             for key in 0..3u64 {
                 log.extend_from_slice(&framed(&MapIntent::Remove(key)));
             }
-            log.extend_from_slice(&archive_framed(b"My Boss, My Hero2001-12-14/ovLJAwkA28f8lwLL5Pq"));
+            log.extend_from_slice(&archive_framed(
+                b"My Boss, My Hero2001-12-14/ovLJAwkA28f8lwLL5Pq",
+            ));
             log.resize(4096, 0);
             std::fs::write(&path, &log).expect("a log");
             // every intent before it is applied, and the shard opens
@@ -1421,8 +1446,14 @@ mod tests {
             for key in 0..4u64 {
                 map.to_archive.insert(key, entry_for(key));
             }
-            map.load_intent_log(&path, None).await.expect("a log with a stale tail loads");
-            assert_eq!(map.to_archive.len(), 1, "the three removes were not applied");
+            map.load_intent_log(&path, None)
+                .await
+                .expect("a log with a stale tail loads");
+            assert_eq!(
+                map.to_archive.len(),
+                1,
+                "the three removes were not applied"
+            );
             assert!(map.to_archive.contains_key(&3));
         });
     }
@@ -1473,7 +1504,10 @@ mod tests {
             // the file as a crash leaves it
             let on_disk = std::fs::read(&path).expect("the file");
             let stale = on_disk[written..].iter().filter(|byte| **byte != 0).count();
-            assert_eq!(stale, 0, "{stale} bytes past the intent log's end are not zero");
+            assert_eq!(
+                stale, 0,
+                "{stale} bytes past the intent log's end are not zero"
+            );
             writer.close().await.expect("a close");
             file.close().await.expect("a close");
         });
@@ -1518,7 +1552,11 @@ mod tests {
             );
             // and the map it saved loads back
             let reopened = ArchiveMap::new("Shard-0", "T", &conf).await;
-            assert!(reopened.is_ok(), "the saved map did not load: {:?}", reopened.err());
+            assert!(
+                reopened.is_ok(),
+                "the saved map did not load: {:?}",
+                reopened.err()
+            );
             map.close_all().await.expect("a close");
         });
     }

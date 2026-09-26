@@ -3166,7 +3166,11 @@ impl ControlState {
         let Some(record) = self.restores.get_mut(&restore) else {
             return self.applied();
         };
-        for progress in record.groups.values_mut().filter(|progress| progress.failed()) {
+        for progress in record
+            .groups
+            .values_mut()
+            .filter(|progress| progress.failed())
+        {
             progress.retry();
         }
         self.topology_version += 1;
@@ -3665,19 +3669,31 @@ mod tests {
         };
         // below 6, refused by name
         let command = retry(&state, restore);
-        assert_eq!(kind_of(state.apply(&command)), Some(RefusalKind::WireVersion));
+        assert_eq!(
+            kind_of(state.apply(&command)),
+            Some(RefusalKind::WireVersion)
+        );
         state.activated = 6;
         // an unknown operation
         let command = retry(&state, Uuid::new_v4());
-        assert_eq!(kind_of(state.apply(&command)), Some(RefusalKind::UnknownOperation));
+        assert_eq!(
+            kind_of(state.apply(&command)),
+            Some(RefusalKind::UnknownOperation)
+        );
         // the retry: the failed group from its install, the restored one untouched
         let command = retry(&state, restore);
-        assert!(matches!(state.apply(&command), ControlResponse::Applied { .. }));
+        assert!(matches!(
+            state.apply(&command),
+            ControlResponse::Applied { .. }
+        ));
         let record = &state.restores[&restore];
         assert_eq!(record.groups[&restored], restored_progress);
         let again = &record.groups[&failed];
         assert_eq!(again.phase, RestorePhase::Installing);
-        assert_eq!((again.generation, again.outcome.clone(), again.driver), (1, None, None));
+        assert_eq!(
+            (again.generation, again.outcome.clone(), again.driver),
+            (1, None, None)
+        );
         // a second while it runs is refused
         let command = retry(&state, restore);
         assert_eq!(kind_of(state.apply(&command)), Some(RefusalKind::Invalid));

@@ -162,7 +162,8 @@ pub async fn scrub_group<D: ShoalDatabase>(
                 Ok(DigestAnswer::Stalled) => {
                     reports.insert(
                         *member,
-                        Err("the member's copy stalled on a partition it could not read".to_string()),
+                        Err("the member's copy stalled on a partition it could not read"
+                            .to_string()),
                     );
                     stalled.push(*member);
                 }
@@ -564,8 +565,14 @@ mod tests {
             stalled_verdict.quarantine,
             vec![(members[2], QuarantineReason::Unreadable)]
         );
-        assert!(matches!(stalled_verdict.outcome, RepairOutcome::Divergent { .. }));
-        assert_eq!(stalled_verdict.trusted_members, vec![members[0], members[1]]);
+        assert!(matches!(
+            stalled_verdict.outcome,
+            RepairOutcome::Divergent { .. }
+        ));
+        assert_eq!(
+            stalled_verdict.trusted_members,
+            vec![members[0], members[1]]
+        );
         assert_eq!(
             verdict.outcome,
             RepairOutcome::Clean {

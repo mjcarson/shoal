@@ -346,7 +346,8 @@ async fn dispatch(
         },
         // a pre-vote is judged by the same rules as a vote and moves nothing
         // ([Resolved #144](../../../../docs/src/appendix/resolved/post-heal-elections.md))
-        ControlKind::PreVote => match serde_json::from_slice::<VoteRequest<ControlConfig>>(payload) {
+        ControlKind::PreVote => match serde_json::from_slice::<VoteRequest<ControlConfig>>(payload)
+        {
             Ok(rpc) => match raft.pre_vote(rpc).await {
                 Ok(response) => ok(&response),
                 Err(error) => err(format!("pre_vote: {error}")),

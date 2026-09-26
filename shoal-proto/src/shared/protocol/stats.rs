@@ -619,7 +619,11 @@ mod tests {
             version: 1,
             table: None,
             at_ms: 0,
-            members: vec![member(Some(stats.clone())), member(Some(stats)), member(None)],
+            members: vec![
+                member(Some(stats.clone())),
+                member(Some(stats)),
+                member(None),
+            ],
             plans: Vec::new(),
         };
         assert_eq!(view.cluster_total().partitions, 14);

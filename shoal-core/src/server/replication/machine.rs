@@ -645,7 +645,11 @@ mod tests {
     #[test]
     fn a_late_cut_does_not_answer_for_a_newer_scrub() {
         use crate::server::replication::digest::{DigestIntegrity, DigestReport};
-        let mut state = MachineState::at(None, StoredMembershipOf::<DataConfig>::default(), Vec::new());
+        let mut state = MachineState::at(
+            None,
+            StoredMembershipOf::<DataConfig>::default(),
+            Vec::new(),
+        );
         let op = Uuid::new_v4();
         let report = |boundary: u64, digest: u64| DigestReport {
             boundary,

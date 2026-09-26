@@ -1431,7 +1431,6 @@ pub(super) async fn remove_install_files(
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::remove_install_files;
