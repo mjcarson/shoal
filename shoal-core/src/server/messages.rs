@@ -674,6 +674,8 @@ where
     BuildSnapshot {
         /// The group
         group: crate::shared::identity::GroupId,
+        /// The lowest boundary the asker can use, or zero for any
+        at_least: u64,
         /// Where the file goes
         reply: futures_channel::oneshot::Sender<
             Result<std::rc::Rc<crate::server::replication::BuiltSnapshot>, String>,
@@ -778,8 +780,25 @@ where
         group: crate::shared::identity::GroupId,
         /// The operation
         op: Uuid,
+        /// The index the scrub was applied at, which the report is of
+        index: u64,
         /// The report, or why there is none
         outcome: Result<crate::server::replication::DigestReport, String>,
+    },
+    /// An archive compaction met a record that failed its checksum and left it where it was
+    ///
+    /// The copy holding it is quarantined for its checksum, as a read that met it would have
+    /// ([Resolved #165](../../../docs/src/appendix/resolved/corrupt-record-compaction-loop.md)).
+    CorruptRecord {
+        /// The table
+        table: D::TableNames,
+        /// The partition whose record failed
+        partition: u64,
+        /// Whether a merge of the log needed it, and cannot go on until the copy is repaired
+        ///
+        /// Quarantined as unreadable, which its leader repairs without an operator, rather than
+        /// for its checksum ([Resolved #166](../../../docs/src/appendix/resolved/segment-compaction-corrupt-loop.md)).
+        unreadable: bool,
     },
     /// Quarantine a copy this shard holds, or lift it, and answer once the marker is durable
     /// ([F44](../../../docs/src/features/repair.md))
@@ -1051,6 +1070,9 @@ impl<D: ShoalDatabase> ServerMsg<D> {
             }
             ServerMsg::Digested { .. } => return Err("A digest is the scrubbing shard's"),
             ServerMsg::Quarantine { .. } => return Err("A quarantine is the holding shard's"),
+            ServerMsg::CorruptRecord { .. } => {
+                return Err("A corrupt record is the compacting shard's")
+            }
             ServerMsg::RepairDone { .. } => return Err("A repair driver is one shard's"),
             ServerMsg::BackupDone { .. } => return Err("A backup driver is one shard's"),
             ServerMsg::RestoreDone { .. } => return Err("A restore driver is one shard's"),

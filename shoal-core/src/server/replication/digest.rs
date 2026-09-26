@@ -152,6 +152,15 @@ pub struct DigestReport {
     pub bytes: u64,
 }
 
+/// The operation a scrub that only moves the log along is proposed under
+///
+/// A driver that needs an entry past an index - to move a checkpoint, to cut past a target's -
+/// proposes a scrub nobody polls. Under this operation no replica takes a cut of it: on the lab
+/// a copy restarted from a repair snapshot replayed forty of them, each reading a group of
+/// 320,000 archived partitions, and the one digest its repair waited for came after them
+/// ([Resolved #164](../../../../docs/src/appendix/resolved/replayed-scrub-cuts.md)).
+pub const NUDGE: Uuid = Uuid::nil();
+
 /// What a member answers a digest request with
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DigestAnswer {

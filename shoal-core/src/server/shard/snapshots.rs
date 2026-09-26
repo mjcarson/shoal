@@ -389,6 +389,28 @@ where
                 "group {group} is installing a snapshot already"
             ));
         }
+        // the group's own replication streams nothing to a copy with no handle, and never over
+        // a repair's stream: there is one partial a group, and on the lab openraft's transmitter
+        // replaced a stalled copy's repair stream every few seconds, so each repair's end found
+        // the other stream and was refused ([Resolved #163](../../../../docs/src/appendix/resolved/repair-stream-replaced.md))
+        if repair.is_none() {
+            if slot.raft.is_none() {
+                return SnapshotAnswer::Refused(format!("group {group} is still starting"));
+            }
+            let repairing = replication
+                .installs
+                .partials
+                .get(&group)
+                .is_some_and(|partial| {
+                    let partial = partial.borrow();
+                    partial.repair.is_some() && partial.is_assembling()
+                });
+            if repairing {
+                return SnapshotAnswer::Refused(format!(
+                    "a repair's snapshot of group {group} is being received"
+                ));
+            }
+        }
         // a repair stream replaces a quarantined copy that is live and applied past the
         // boundary: judged against the checkpoint the group will be restarted from, which is
         // held where it is until the restart ([F44](../../../../docs/src/features/repair.md))
@@ -1099,6 +1121,19 @@ where
             let boundary = active.manifest.boundary.index;
             if let Err(error) = self.rehand_segments(group, boundary) {
                 event!(Level::ERROR, msg = "the segments above a repair install could not be handed again", group = %group, boundary, ?error);
+            }
+            // and the log below the boundary is purged, since it no longer says what the copy
+            // holds: now if the group is up, or once it is
+            // ([Resolved #168](../../../../docs/src/appendix/resolved/restored-rows-outside-the-log.md))
+            if let Some(slot) = self
+                .replication
+                .as_mut()
+                .and_then(|replication| replication.groups.get_mut(&group))
+            {
+                match slot.raft.clone() {
+                    Some(raft) => super::groups::purge_installed(group, Some(raft), boundary),
+                    None => slot.purge_through = Some(boundary),
+                }
             }
         }
     }

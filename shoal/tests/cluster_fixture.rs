@@ -18624,15 +18624,9 @@ async fn an_unreadable_partition_stalls_one_copy_and_repairs_it() -> Result<(), 
         Duration::from_secs(20),
     )
     .await?;
-    // and writes of the stalled group coordinated through it are answered
-    let through = Shoal::<TestDbClient>::new(&addr_f).await.map_err(ok)?;
-    through
-        .send_one(Note {
-            key: live[1],
-            text: "while-stalled".to_string(),
-        })
-        .await
-        .map_err(ok)?;
+    // and writes of the stalled group coordinated through it are refused retriably, and land
+    // once retried, as a client retries `NotLeader`
+    write_note_eventually(&addr_f, live[1], "while-stalled", Duration::from_secs(60)).await?;
     // the leader repairs it with nobody asking: the quarantine is lifted
     wait_member_quarantined(&mut cluster, follower, false, Duration::from_secs(120))?;
     let view = groups_of(&mut cluster, follower)?;
@@ -18748,6 +18742,23 @@ async fn a_stalled_copy_survives_a_restart_and_an_operator_repairs_it() -> Resul
         Duration::from_secs(30),
     )
     .await?;
+    // writes to the group past what its log retains, so the leader's own replication has to
+    // stream the stalled copy a snapshot: the stream a repair's used to be replaced by (#163)
+    let group_keys: Vec<u64> = keys_in_group(&mut cluster, "Note", &group, 32_000, 8)?
+        .into_iter()
+        .filter(|key| *key < 32_060 && *key != corrupted)
+        .collect();
+    for round in 0..40 {
+        for key in &group_keys {
+            through_leader
+                .send_one(Note {
+                    key: *key,
+                    text: format!("round-{round}"),
+                })
+                .await
+                .map_err(ok)?;
+        }
+    }
     // and nothing repaired it, since the leader was told not to
     std::thread::sleep(Duration::from_secs(3));
     wait_member_quarantined(&mut cluster, follower, true, Duration::from_secs(5))?;
@@ -18774,6 +18785,9 @@ async fn a_stalled_copy_survives_a_restart_and_an_operator_repairs_it() -> Resul
     assert_eq!(entry["stalled"], false, "{entry}");
     assert_eq!(entry["up"], true, "{entry}");
     wait_note_routed(&addr_f, corrupted, "updated", Duration::from_secs(20)).await?;
+    for key in &group_keys {
+        wait_note_routed(&addr_f, *key, "round-39", Duration::from_secs(20)).await?;
+    }
     wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
@@ -18924,6 +18938,330 @@ async fn a_restore_with_failed_groups_is_finished_by_a_retry() -> Result<(), Fix
     assert!(
         nothing["error"].as_str().is_some_and(|error| error.contains("nothing to retry")),
         "a retry with nothing failed was not refused: {nothing}"
+    );
+    Ok(())
+}
+
+/// An archive compaction that meets a corrupt record leaves it and quarantines its copy (item 165)
+///
+/// On the lab an archive compaction that met a record failing its checksum failed the pass, and
+/// the pass was retried every five seconds for as long as the node ran. Each try had already
+/// rewritten the records before the corrupt one into the active archive, and nothing named
+/// them: titan's Movie archives grew to 38 GB. The follower's archive here is left mostly dead
+/// by updates of every other key, so the next archive compaction rewrites it and meets the
+/// corrupt record; the copy is quarantined for its checksum, as a read that met it would have
+/// been, the record and its archive stay, and the node keeps compacting.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_archive_compaction_leaves_a_corrupt_record_and_quarantines_it(
+) -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(64)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .repair_unreadable(false)
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let hashed = |key: u64| {
+        <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
+    };
+    seed_checkpointed_notes(&mut cluster, &client, 34_000..34_060).await?;
+    let (group, leader) = group_of(&mut cluster, 0, "Note", 34_030)?;
+    let leader = leader.expect("the group has a leader");
+    let follower = (0..3).find(|node| *node != leader).expect("a follower");
+    // the follower started again, so the archive holding the notes is no longer its active one
+    cluster.restart(follower, NodeKind::Server)?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))?;
+    // one record corrupted, and every other note written again into the new archive
+    let corrupted = keys_in_group(&mut cluster, "Note", &group, 34_000, 8)?
+        .into_iter()
+        .find(|key| *key < 34_060)
+        .expect("a live key of the group");
+    let answer = cluster
+        .node_mut(follower)
+        .command(&format!("CORRUPT Note {:016x}", hashed(corrupted)))?;
+    assert_eq!(answer["ok"]["fault"], "corrupt", "{answer}");
+    assert_eq!(cluster.node(follower).failure(), None, "the follower stopped at the fault");
+    let addr_l = cluster.node(leader).endpoints.client.to_string();
+    for key in (34_000..34_060u64).filter(|key| *key != corrupted) {
+        write_note_eventually(&addr_l, key, &format!("again-{key}"), Duration::from_secs(30))
+            .await?;
+    }
+    wait_checkpointed(&mut cluster, follower, "Note", Duration::from_secs(60))?;
+    // the archive compaction that rewrites the old archive meets the corrupt record
+    let archives = cluster.dir(follower).join("Note").join("archives");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        compact_now(&mut cluster, follower, "Note")?;
+        let view = groups_of(&mut cluster, follower)?;
+        if view["quarantined"] == 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the corrupt record never quarantined its copy: {view}"
+        );
+    }
+    assert_eq!(cluster.node(follower).failure(), None, "the follower stopped");
+    // and no pass keeps rewriting records for nothing: the archives stop growing
+    let size = |dir: &std::path::Path| -> u64 {
+        walkdir_files(dir)
+            .iter()
+            .filter_map(|path| std::fs::metadata(path).ok())
+            .map(|meta| meta.len())
+            .sum()
+    };
+    compact_now(&mut cluster, follower, "Note")?;
+    let before = size(&archives);
+    for _ in 0..6 {
+        compact_now(&mut cluster, follower, "Note")?;
+    }
+    let after = size(&archives);
+    assert!(
+        after <= before,
+        "the archives grew from {before} to {after} bytes with nothing written"
+    );
+    wait_member_quarantined(&mut cluster, follower, true, Duration::from_secs(20))?;
+    Ok(())
+}
+
+/// A segment compaction that has to merge onto a corrupt record has its copy repaired (item 166)
+///
+/// An insert applies without reading the partition it replaces, but merging it into the
+/// archives loads the archived copy. With that record corrupt on a follower, the follower's
+/// segment compaction failed and was retried every five seconds for as long as the record
+/// stayed corrupt, the checkpoint of every group of the table on the shard held where it was,
+/// and nothing quarantined the copy. Now the failed load quarantines the copy as unreadable,
+/// its leader repairs it, and the job, which skips the frames the install replaced, finishes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_segment_merge_onto_a_corrupt_record_has_its_copy_repaired() -> Result<(), FixtureError>
+{
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(64)
+        .write_timeout(Duration::from_secs(3))
+        .repair_timeout(Duration::from_secs(30))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let hashed = |key: u64| {
+        <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
+    };
+    seed_checkpointed_notes(&mut cluster, &client, 35_000..35_060).await?;
+    let (group, leader) = group_of(&mut cluster, 0, "Note", 35_030)?;
+    let leader = leader.expect("the group has a leader");
+    let follower = (0..3).find(|node| *node != leader).expect("a follower");
+    let corrupted = keys_in_group(&mut cluster, "Note", &group, 35_000, 8)?
+        .into_iter()
+        .find(|key| *key < 35_060)
+        .expect("a live key of the group");
+    let answer = cluster
+        .node_mut(follower)
+        .command(&format!("CORRUPT Note {:016x}", hashed(corrupted)))?;
+    assert_eq!(answer["ok"]["fault"], "corrupt", "{answer}");
+    // an insert over it: applied without a read, merged onto the corrupt record
+    let addr_l = cluster.node(leader).endpoints.client.to_string();
+    write_note_eventually(&addr_l, corrupted, "inserted-over", Duration::from_secs(30)).await?;
+    let quarantined = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            compact_now(&mut cluster, follower, "Note")?;
+            if groups_of(&mut cluster, follower)?["quarantined"] == 1 {
+                break true;
+            }
+            if std::time::Instant::now() > deadline {
+                break false;
+            }
+        }
+    };
+    assert!(quarantined, "the merge's corrupt record never quarantined its copy");
+    assert_eq!(cluster.node(follower).failure(), None, "the follower stopped");
+    // repaired with nobody asking, after which the follower compacts again
+    wait_member_quarantined(&mut cluster, follower, false, Duration::from_secs(120))?;
+    let addr_f = cluster.node(follower).endpoints.client.to_string();
+    wait_note_routed(&addr_f, corrupted, "inserted-over", Duration::from_secs(20)).await?;
+    for key in 35_060..35_090u64 {
+        write_note_eventually(&addr_l, key, &format!("after-{key}"), Duration::from_secs(30))
+            .await?;
+    }
+    wait_checkpointed(&mut cluster, follower, "Note", Duration::from_secs(60))?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A leader whose apply stalls hands its lead on before its core stops (item 167)
+///
+/// On the lab a stalled copy that led its group let its core stop at once, before the lead
+/// it had asked to hand on could move, and every write of the group, through every node,
+/// reached the dead core and was refused `Unavailable` for 16 s, until an election moved the
+/// lead. The leader's own record is corrupted here and an update of it is sent through a
+/// follower; writes of the group after it are answered by the new leader, and none is refused
+/// by a dead core.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_leader_hands_its_lead_on_first() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(64)
+        .write_timeout(Duration::from_secs(3))
+        .repair_timeout(Duration::from_secs(30))
+        .query_deadline(Duration::from_secs(3))
+        .repair_unreadable(false)
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let hashed = |key: u64| {
+        <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
+    };
+    seed_checkpointed_notes(&mut cluster, &client, 36_000..36_060).await?;
+    let (group, leader) = group_of(&mut cluster, 0, "Note", 36_030)?;
+    let leader = leader.expect("the group has a leader");
+    let follower = (0..3).find(|node| *node != leader).expect("a follower");
+    let keys: Vec<u64> = keys_in_group(&mut cluster, "Note", &group, 36_000, 8)?
+        .into_iter()
+        .filter(|key| *key < 36_060)
+        .collect();
+    let (corrupted, others) = (keys[0], &keys[1..]);
+    // the leader's own record, so its apply is the one that stalls
+    let answer = cluster
+        .node_mut(leader)
+        .command(&format!("CORRUPT Note {:016x}", hashed(corrupted)))?;
+    assert_eq!(answer["ok"]["fault"], "corrupt", "{answer}");
+    let addr_f = cluster.node(follower).endpoints.client.to_string();
+    let through = Shoal::<TestDbClient>::new(&addr_f).await.map_err(ok)?;
+    let _ = through
+        .send_one(cluster::schema::NoteUpdate {
+            partition_key: corrupted,
+            text: Some("stalls-the-leader".to_string()),
+        })
+        .await;
+    // every write of the group after it: none refused by a dead core, and all answered
+    let started = std::time::Instant::now();
+    let mut refusals = Vec::new();
+    for key in others.iter().cycle().take(40) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            match through
+                .send_one(Note {
+                    key: *key,
+                    text: "after".to_string(),
+                })
+                .await
+            {
+                Ok(_) => break,
+                Err(error) => refusals.push(format!("{error:?}")),
+            }
+            assert!(std::time::Instant::now() < deadline, "a write never landed: {refusals:?}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    let dead_core: Vec<&String> = refusals
+        .iter()
+        .filter(|refusal| refusal.contains("dropped an apply batch"))
+        .collect();
+    assert!(
+        dead_core.is_empty(),
+        "{} writes reached the stalled leader's dead core in {:?}: {:?}",
+        dead_core.len(),
+        started.elapsed(),
+        dead_core.first()
+    );
+    assert_eq!(cluster.node(leader).failure(), None, "the stalled leader stopped");
+    Ok(())
+}
+
+/// A copy moved onto a member after a restore holds the restored rows (item 168)
+///
+/// A restore installs every group's file outside the log, at a boundary a few entries in. On
+/// the lab, a node rebuilt into a restored cluster was fed by the groups' leaders from their
+/// logs, which still began at entry one and held none of the restored rows: 331,350 of its
+/// movies were missing and a default read missed 82,761. Every copy that installs a restore or
+/// a repair now purges its log through the install's boundary, so a copy moved in later has to
+/// be sent a snapshot, and it holds every restored row.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_moved_in_after_a_restore_holds_the_restored_rows() -> Result<(), FixtureError> {
+    use shoal::client::{ReadLevel, SendOptions};
+    use shoal::shared::protocol::PROTOCOL_VERSION;
+    let backups = utils::test_dir();
+    // a backup of some notes from one cluster
+    let mut old = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    old.wait_voters(0, 3)?;
+    old.node_mut(0).command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
+    for node in 0..3 {
+        wait_activated(&mut old, node, PROTOCOL_VERSION, Duration::from_secs(30))?;
+    }
+    let addr = old.node(0).endpoints.client.to_string();
+    let keys: Vec<u64> = (37_000..37_080).collect();
+    for key in &keys {
+        write_note(&addr, *key, &format!("v-{key}")).await?;
+    }
+    wait_digests_equal(&mut old, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    let op = plan_as_process(&mut old, 0, &format!("BACKUP {}", backups.path().display()))?;
+    wait_operation_done(&mut old, 0, "BACKUP_STATUS", op, Duration::from_secs(120))?;
+    let backup_dir = backups.path().join(op.to_string());
+    drop(old);
+    // restored into three placed nodes, with a fourth spare
+    let mut new = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(2)),
+    )
+    .await?;
+    let restore = plan_as_process(&mut new, 0, &format!("RESTORE {}", backup_dir.display()))?;
+    wait_operation_done(&mut new, 0, "RESTORE_STATUS", restore, Duration::from_secs(300))?;
+    // one set moved from node two onto the spare
+    let key = keys[0];
+    let (group, _) = group_of(&mut new, 0, "Note", key)?;
+    let moved = note_keys_in_group(&mut new, &group, 37_000, 80)?
+        .into_iter()
+        .filter(|key| *key < 37_080)
+        .collect::<Vec<_>>();
+    assert!(!moved.is_empty(), "no restored key in group {group}");
+    let op = move_as_process(&mut new, 0, key, 2, 3)?;
+    wait_move_done_via(&mut new, 0, op, Duration::from_secs(120))?;
+    assert!(hosts_group(&mut new, 3, &group)?, "the spare does not host {group}");
+    // every restored key of the set, read from the spare's own copy
+    let addr3 = new.node(3).endpoints.client.to_string();
+    let mut missing = Vec::new();
+    for key in &moved {
+        let read = read_note_with(&addr3, *key, &SendOptions::new().read(ReadLevel::One)).await;
+        match read {
+            Ok(Some(text)) if text == format!("v-{key}") => {}
+            other => missing.push((*key, format!("{other:?}"))),
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "the moved copy is missing {} of {} restored rows: {:?}",
+        missing.len(),
+        moved.len(),
+        &missing[..missing.len().min(3)]
     );
     Ok(())
 }

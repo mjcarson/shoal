@@ -94,6 +94,43 @@ const BALANCE_RETRY: Duration = Duration::from_secs(60);
 /// How many deadline ticks pass between two sweeps of the WAL segments
 const REPORT_EVERY_TICKS: u32 = 10;
 
+/// Purge a copy's log through the boundary a repair or restore installed it at
+///
+/// The install replaced what the copy holds outside the log, so the entries below the
+/// boundary are no longer its history: a member fed from them would get none of what the
+/// install put there. Purged, the log sends such a member a snapshot instead
+/// ([Resolved #168](../../../../docs/src/appendix/resolved/restored-rows-outside-the-log.md)).
+///
+/// # Arguments
+///
+/// * `group` - The group
+/// * `raft` - Its handle, if it is up
+/// * `boundary` - The install's boundary
+pub(super) fn purge_installed<D: ShoalDatabase>(
+    group: GroupId,
+    raft: Option<Raft<DataConfig, GroupMachine<D>>>,
+    boundary: u64,
+) {
+    let Some(raft) = raft else {
+        return;
+    };
+    glommio::spawn_local(async move {
+        // openraft purges up to the snapshot the install left it, which is at the boundary
+        match raft.trigger().purge_log(boundary).await {
+            Ok(()) => event!(Level::INFO, msg = "purged the log below an install", group = %group, boundary),
+            Err(error) => event!(Level::WARN, msg = "the log below an install could not be purged", group = %group, boundary, %error),
+        }
+    })
+    .detach();
+}
+
+/// How long a stalling copy that leads waits for its lead to move before its core stops
+///
+/// The group's writes commit and wait on a machine that applies nothing meanwhile, so it is
+/// short; an election after the core stops is the fallback
+/// ([Resolved #167](../../../../docs/src/appendix/resolved/stalled-leader-handoff.md)).
+const STALL_HANDOFF_WAIT: Duration = Duration::from_secs(3);
+
 /// How long the sweep waits for a group's core to answer whether it runs
 ///
 /// A running core answers in microseconds and a dead one at once; the bound is for a core
@@ -153,6 +190,18 @@ pub(super) struct Group<D: ShoalDatabase> {
     /// never races a start still in flight over the same store
     /// ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md)).
     pub(super) start_failed: bool,
+    /// The boundary of a repair or restore install whose log below it is still to be purged
+    ///
+    /// Such an install replaces the copy's rows outside the log, so the log below the
+    /// boundary no longer says what the copy holds, and a member fed from it would be missing
+    /// what the install put there ([Resolved #168](../../../../docs/src/appendix/resolved/restored-rows-outside-the-log.md)).
+    pub(super) purge_through: Option<u64>,
+    /// The boundary of the last repair or restore file this copy installed, or zero
+    ///
+    /// A cut below it was taken of the rows the install replaced, and is never a source: one in
+    /// flight when the install landed is dropped rather than handed to its waiters
+    /// ([Resolved #168](../../../../docs/src/appendix/resolved/restored-rows-outside-the-log.md)).
+    pub(super) installed_at: u64,
 }
 
 /// The directory under a shard's WAL where every volatile group it ever held is marked
@@ -348,6 +397,10 @@ pub(super) struct Replication<D: ShoalDatabase> {
     /// When each group this shard leads may next ask for the repair of a stalled member
     /// ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md))
     pub(super) next_stall_repair: HashMap<GroupId, Instant>,
+    /// The digest task of each group's newest scrub still reading its cut, with its operation
+    /// and index, so a newer scrub of the group cancels it
+    /// ([Resolved #164](../../../../docs/src/appendix/resolved/replayed-scrub-cuts.md))
+    pub(super) digest_tasks: HashMap<GroupId, (Uuid, u64, glommio::Task<()>)>,
     /// The group moves this shard is driving right now, by operation and group
     /// ([F45](../../../../docs/src/features/replica-migration.md))
     pub(super) driving_moves: HashSet<(Uuid, GroupId)>,
@@ -480,6 +533,7 @@ where
             driven: HashMap::new(),
             next_scrub: HashMap::new(),
             next_stall_repair: HashMap::new(),
+            digest_tasks: HashMap::new(),
             driving_moves: HashSet::new(),
             driven_moves: HashMap::new(),
             retired,
@@ -701,6 +755,8 @@ where
                 held_before,
                 core_dead: None,
                 start_failed: false,
+                purge_through: None,
+                installed_at: 0,
             };
             replication.groups.insert(spec.id, group);
             // the handle is built on a task of its own, since building it applies
@@ -779,6 +835,8 @@ where
         };
         slot.start_failed = false;
         slot.core_dead = None;
+        // no cut below this file is a source from here on
+        slot.installed_at = slot.installed_at.max(manifest.boundary.index);
         let table = slot.table;
         let tablets = slot.spec.tablets.clone();
         // the state a restart would find: the checkpoint, and the file pending past it
@@ -967,10 +1025,7 @@ where
                 continue;
             }
             frames.sort_by_key(|frame| frame.index);
-            let refs: Vec<(u64, u32)> = frames
-                .iter()
-                .map(|frame| (frame.offset, frame.len))
-                .collect();
+            let refs = frames;
             // the segment is compacting again for this table, so it is not deleted meanwhile
             replication
                 .compacting
@@ -1021,6 +1076,10 @@ where
                 // a new handle is a new core, whatever the last one came to
                 slot.core_dead = None;
                 slot.start_failed = false;
+                // an install that landed while the group was coming up has its log purged now
+                if let Some(boundary) = slot.purge_through.take() {
+                    purge_installed(group, slot.raft.clone(), boundary);
+                }
                 // a volatile group is marked as held whenever it comes up here, so the next
                 // run of this shard knows an empty copy of it lost its log; what this run
                 // knows stays what the scan at its start said
@@ -1325,7 +1384,11 @@ where
             .and_then(|replication| replication.groups.get(&group))
             .map(|slot| slot.spec.tablets.clone())
             .unwrap_or_default();
-        state.borrow_mut().note_scrub(op);
+        // a nudge only moves the log along, and nobody polls its digest
+        if op == crate::server::replication::digest::NUDGE {
+            return;
+        }
+        state.borrow_mut().note_scrub(op, index);
         if let Some(replication) = self.replication.as_mut() {
             replication.integrity.scrubs += 1;
         }
@@ -1334,22 +1397,45 @@ where
             Ok(cut) => cut,
             Err(error) => {
                 event!(Level::ERROR, msg = "a scrub could not take its cut", group = %group, op = %op, error = ?error);
-                state
-                    .borrow_mut()
-                    .record_digest(op, crate::server::replication::DigestAnswer::Unknown);
+                state.borrow_mut().record_digest(
+                    op,
+                    index,
+                    crate::server::replication::DigestAnswer::Unknown,
+                );
                 return;
             }
         };
         event!(Level::INFO, msg = "applied a scrub", group = %group, op = %op, index, resident = cut.resident.len(), archived = cut.archived.len());
         let tx = self.shard_local_tx.clone();
-        glommio::spawn_local(async move {
+        let task = glommio::spawn_local(async move {
             let outcome = cut
                 .finish(schema_id, &tablets, index)
                 .await
                 .map_err(|error| format!("{error:?}"));
-            let _ = tx.send(ServerMsg::Digested { group, op, outcome }).await;
-        })
-        .detach();
+            let _ = tx
+                .send(ServerMsg::Digested {
+                    group,
+                    op,
+                    index,
+                    outcome,
+                })
+                .await;
+        });
+        // an older scrub of the group still reading its cut is superseded: a group's scrubs
+        // are driven one at a time, so nobody waits for it now, and a copy replaying a run of
+        // them would otherwise read its archives once for each
+        let superseded = self
+            .replication
+            .as_mut()
+            .and_then(|replication| replication.digest_tasks.insert(group, (op, index, task)));
+        if let Some((old_op, old_index, old_task)) = superseded {
+            drop(old_task);
+            state.borrow_mut().record_digest(
+                old_op,
+                old_index,
+                crate::server::replication::DigestAnswer::Unknown,
+            );
+        }
     }
 
     /// Record what a scrub's task came to
@@ -1358,16 +1444,28 @@ where
     ///
     /// * `group` - The group
     /// * `op` - The operation
+    /// * `index` - The index the scrub was applied at
     /// * `outcome` - The report, or why there is none
     pub(super) fn handle_digested(
         &mut self,
         group: GroupId,
         op: Uuid,
+        index: u64,
         outcome: Result<crate::server::replication::DigestReport, String>,
     ) {
         let Some(replication) = self.replication.as_mut() else {
             return;
         };
+        // the task that posted this is done
+        if replication
+            .digest_tasks
+            .get(&group)
+            .is_some_and(|(known, at, _)| *known == op && *at == index)
+        {
+            if let Some((_, _, task)) = replication.digest_tasks.remove(&group) {
+                task.detach();
+            }
+        }
         let Some(slot) = replication.groups.get(&group) else {
             return;
         };
@@ -1376,15 +1474,19 @@ where
                 event!(Level::INFO, msg = "a scrub's digest is in", group = %group, op = %op, boundary = report.boundary, digest = format!("{:016x}", report.digest), partitions = report.partitions, rows = report.rows, integrity = ?report.integrity, unverified = report.unverified);
                 replication.integrity.scrub_bytes += report.bytes;
                 replication.integrity.scrub_partitions += report.partitions;
-                slot.state
-                    .borrow_mut()
-                    .record_digest(op, crate::server::replication::DigestAnswer::Report(report));
+                slot.state.borrow_mut().record_digest(
+                    op,
+                    index,
+                    crate::server::replication::DigestAnswer::Report(report),
+                );
             }
             Err(error) => {
                 event!(Level::ERROR, msg = "a scrub's cut could not be read", group = %group, op = %op, error);
-                slot.state
-                    .borrow_mut()
-                    .record_digest(op, crate::server::replication::DigestAnswer::Unknown);
+                slot.state.borrow_mut().record_digest(
+                    op,
+                    index,
+                    crate::server::replication::DigestAnswer::Unknown,
+                );
             }
         }
     }
@@ -1457,19 +1559,8 @@ where
             return;
         };
         slot.state.borrow_mut().stalled = Some(Stall { index, partition });
-        // a leader hands its lead on before its core stops; best effort, since an election
-        // follows the stop anyway
         let raft = slot.raft.clone();
         let me = slot.spec.me(node);
-        if let Some(raft) = raft {
-            let leads = raft.metrics().borrow_watched().current_leader == Some(me);
-            let successor = raft.voter_ids().find(|voter| *voter != me);
-            if let (true, Some(successor)) = (leads, successor) {
-                if let Err(error) = raft.trigger().transfer_leader(successor).await {
-                    event!(Level::WARN, msg = "a stalling copy could not hand its lead on", group = %group, to = %successor, %error);
-                }
-            }
-        }
         event!(Level::ERROR, msg = "a replicated apply could not read its partition; this copy stops applying until it is repaired", group = %group, table = %table, partition = format!("{partition:016x}"), index);
         // quarantined as unreadable, persisted and reported, which the leader repairs
         let quarantine = Quarantine {
@@ -1479,8 +1570,50 @@ where
         };
         self.handle_quarantine(group, QuarantineAction::Set(quarantine), None)
             .await;
-        // the batch let go ends the apply, and with it this copy's core or its start
-        drop(batch);
+        // the batch let go ends the apply, and with it this copy's core or its start. A copy
+        // that leads hands its lead on first and lets go once another member has it, or after
+        // a bound: letting go at once ended the core before the transfer took, and on the lab
+        // every write of the group, through any node, reached the dead core for 16 s until an
+        // election moved the lead ([Resolved #167](../../../../docs/src/appendix/resolved/stalled-leader-handoff.md))
+        let Some(raft) = raft else {
+            drop(batch);
+            return;
+        };
+        let (leads, successor) = {
+            let metrics = raft.metrics().borrow_watched().clone();
+            let leads = metrics.current_leader == Some(me);
+            // the voter furthest along, so the election it is asked to win it can win at once
+            let successor = metrics
+                .replication
+                .as_ref()
+                .and_then(|matched| {
+                    matched
+                        .iter()
+                        .filter(|(voter, _)| **voter != me)
+                        .max_by_key(|(_, log_id)| log_id.as_ref().map_or(0, |log_id| log_id.index))
+                        .map(|(voter, _)| *voter)
+                })
+                .or_else(|| raft.voter_ids().find(|voter| *voter != me));
+            (leads, successor)
+        };
+        let (true, Some(successor)) = (leads, successor) else {
+            drop(batch);
+            return;
+        };
+        glommio::spawn_local(async move {
+            if let Err(error) = raft.trigger().transfer_leader(successor).await {
+                event!(Level::WARN, msg = "a stalling copy could not hand its lead on", group = %group, to = %successor, %error);
+            }
+            let moved = raft
+                .wait(Some(STALL_HANDOFF_WAIT))
+                .metrics(|metrics| metrics.current_leader != Some(me), "the lead moved on")
+                .await;
+            if moved.is_err() {
+                event!(Level::WARN, msg = "a stalling copy's lead did not move within the bound; its core stops anyway", group = %group, bound_ms = STALL_HANDOFF_WAIT.as_millis() as u64);
+            }
+            drop(batch);
+        })
+        .detach();
     }
 
     /// Propose a write through the group serving its tablet
@@ -2206,10 +2339,7 @@ where
             for (table, groups) in by_table {
                 let mut frames = replication.wal.frames_in(segment.generation, &groups);
                 frames.sort_by_key(|frame| (frame.group, frame.index));
-                let refs: Vec<(u64, u32)> = frames
-                    .iter()
-                    .map(|frame| (frame.offset, frame.len))
-                    .collect();
+                let refs = frames;
                 // where each group stands once these frames are merged, for a snapshot cut
                 // after them ([F43](../../../../docs/src/features/node-recovery.md))
                 let positions: Vec<(GroupId, crate::server::wal::WalLogId)> = groups
@@ -2989,11 +3119,13 @@ where
             ReplicationVerb::Snapshot { group } => {
                 // cut now, on the loop's own request; the manifest is answered from a task once
                 // the cut lands, since the loop hears about it as a message
-                if !replication.groups.contains_key(&group) {
+                let Some(slot) = replication.groups.get(&group) else {
                     return Some(Err(format!("group {group} is not hosted on this shard")));
-                }
+                };
+                // at the checkpoint at least, so a test's cut is never an older held file
+                let at_least = slot.state.borrow().checkpoint_index();
                 let (built_tx, built) = oneshot::channel();
-                if let Err(error) = self.handle_build_snapshot(group, built_tx).await {
+                if let Err(error) = self.handle_build_snapshot(group, at_least, built_tx).await {
                     return Some(Err(format!("{error:?}")));
                 }
                 glommio::spawn_local(async move {
@@ -3028,10 +3160,12 @@ where
     /// # Arguments
     ///
     /// * `group` - The group
+    /// * `at_least` - The lowest boundary the asker can use, or zero for any
     /// * `reply` - Where the file goes
     pub(super) async fn handle_build_snapshot(
         &mut self,
         group: GroupId,
+        at_least: u64,
         reply: oneshot::Sender<Result<Rc<BuiltSnapshot>, String>>,
     ) -> Result<(), ServerError> {
         let schema_id = <D::ClientType as QuerySupport>::SCHEMA_ID;
@@ -3044,10 +3178,17 @@ where
             let _ = reply.send(Err(format!("group {group} is not hosted on this shard")));
             return Ok(());
         };
-        // a held file at the checkpoint or past it is the answer
+        // a held file is the answer while the log still holds every entry above its boundary,
+        // which is all a receiver needs to go on from it; one at the checkpoint or past it
+        // always is. Cutting again whenever the checkpoint had moved cut a 125 MB group every
+        // few seconds on the lab, for a member that could not take any of them
+        // ([O71](../../../../docs/src/appendix/optimizations.md#o71-a-held-snapshot-is-cut-again-whenever-the-checkpoint-moves))
         let checkpoint = slot.state.borrow().checkpoint_index();
+        let purged = slot.store.purged_index();
         if let Some(built) = &slot.snapshot {
-            if built.manifest.boundary.index >= checkpoint {
+            let boundary = built.manifest.boundary.index;
+            let follows = boundary >= checkpoint || purged.is_none_or(|purged| purged <= boundary);
+            if boundary >= at_least && boundary >= slot.installed_at && follows {
                 let _ = reply.send(Ok(built.clone()));
                 return Ok(());
             }
@@ -3177,6 +3318,18 @@ where
         };
         slot.snapshot_building = false;
         let waiting = std::mem::take(&mut slot.snapshot_waiting);
+        // a cut taken before an install that landed while it was being cut holds the rows the
+        // install replaced, and is nobody's source
+        let outcome = match outcome {
+            Ok((path, manifest)) if manifest.boundary.index < slot.installed_at => {
+                let _ = glommio::io::remove(&path).await;
+                Err(format!(
+                    "the cut at {} was taken before an install at {}; ask again",
+                    manifest.boundary.index, slot.installed_at
+                ))
+            }
+            other => other,
+        };
         match outcome {
             Ok((path, manifest)) => {
                 replication.snapshots.built += 1;

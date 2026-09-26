@@ -88,6 +88,12 @@ dead member held onto it. Follow the plan. At a factor of three on three machine
 blocked naming the missing member until the replacement has joined; supply the capacity first
 and do not wait for the removal.
 
+**On the same host, with shoalctl.** When the host is fine and only its data is lost or bad,
+`cluster rebuild -i <inventory> <node> --yes` ([F56](../features/cluster-rebuild.md)) does all of
+the above in order: it stops the node, waits for it to be committed down, wipes it, joins it as a
+new identity, and removes the old one onto it. It refuses while another member is down or a plan
+is open.
+
 **Rollback.** A member `Removing` is never brought back; the grace can be
 [held](#5-automatic-removal-and-maintenance) before it expires, not after.
 

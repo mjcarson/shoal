@@ -96,7 +96,7 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ **1,663 tests**, seven ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ **1,674 tests**, seven ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
@@ -112,7 +112,7 @@ fixture tests: two passed alone, and six could not bind ~~port 12000~~ ports 120
 because a deployed lab node held them on the same host ([Test Coverage](test-coverage.md)), since
 [resolved](resolved/fixture-default-peer-ports.md) as item 134. The
 [distributed cluster testing](../cluster-testing/overview.md) chapter's fixes (items 60, 130, 131,
-133 to 157, O61, O62, O63, O65 to O68) and its driver added 37 and took it to 1,656 ([Test Coverage](test-coverage.md)). [Resolved #158](resolved/runtime-waker-lists.md) added 5 `shoal-core` unit tests and took it to 1,661, every one passing at six threads. [Resolved #159](resolved/map-ahead-of-archive.md) added 2 and took it to 1,663. Its run at six threads failed two fixture tests from item 142's list, each of which passed alone three times.
+133 to 157, O61, O62, O63, O65 to O68) and its driver added 37 and took it to 1,656 ([Test Coverage](test-coverage.md)). [Resolved #158](resolved/runtime-waker-lists.md) added 5 `shoal-core` unit tests and took it to 1,661, every one passing at six threads. [Resolved #159](resolved/map-ahead-of-archive.md) added 2 and took it to 1,663. Its run at six threads failed two fixture tests from item 142's list, each of which passed alone three times. Items 160 to 168 and [F56](../features/cluster-rebuild.md) added 11 and took it to 1,674 ([Test Coverage](test-coverage.md)).
 [Resolved #27](resolved/shql-quote-escape.md), [#32](resolved/client-gone-broadcast.md),
 [#36](resolved/staged-tail-deadline.md) and [#125](resolved/retry-unknown-outcome.md) added 11
 and took it to 1,587. There are two new binaries, `retry_outcome.rs` (3) and `staged_flush.rs`
@@ -448,6 +448,21 @@ the margins are what a loaded host erodes.
 The `shoal-core` change for [#148](resolved/stale-intent-log-tail.md) was followed by one failure
 in the first four runs of `shoal/tests/persistent_unsorted_table.rs` at six threads, whose name the
 run did not keep, and none in the next nine.
+The seven full runs of the suite for items 160 to 168 at six threads gave these, each run with
+nothing else on the host:
+- `local_rehome_recovers_after_each_crash_point` and `migration_resumes_after_each_phase_failure`
+  failed once each (the rehome test on *"No such file or directory"* from a child). Both passed
+  alone. The rehome test then failed one of five runs alone, on *"node two never died at
+  before_finalize"*, the first failure of it alone on record.
+- `a_restore_rides_out_an_unreachable_member` failed once, with one group handed back at
+  `Pending` for want of the isolated member and not driven again within 300 s. It passed alone,
+  and in the next two full runs.
+- `lost_response_retry_returns_original_result` failed once, on its usual checkpoint.
+
+Two failures in those runs were not this item and were fixed: `mixed_versions_exchange_real_cluster_operations`
+raced its activation against a member report (on [Resolved #155](resolved/restore-retry.md)), and
+`an_unreadable_partition_stalls_one_copy_and_repairs_it` did not retry a write the stalled copy
+refused retriably.
 
 ### 152. `a_compaction_that_meets_an_unreadable_archive_is_tried_again` fails intermittently
 
@@ -479,6 +494,25 @@ now stops instead of holding dead cores, so writes through it are never answered
 a restart once space returns brings it back (on the lab with no restart by hand). The one fix still
 wanted is to shed appends below a reserve with a retriable refusal, so that a nearly full node
 keeps serving reads rather than stopping.
+
+### 169. A member the placement does not name refuses every client query
+
+A node answers every query with `NotInitialized` (*"this node holds no tablets: the placement has
+not been initialized, or does not name it"*) while the placement does not name it (`Shard::placed`,
+`shard.rs`). That is right before the cluster is initialized. But a member admitted afterwards is
+not named until a plan puts it in a set, although it has the map and could forward every query to
+the tablets' holders, as any node does for a tablet it holds no copy of. A client connected to a
+member added with `cluster add` and no rebalance is refused everything. And a client connected to a
+rebuilt node is refused from its start until its replacement plan names it.
+
+On the lab the second case cost 63,012 refusals in two seconds of a `cluster rebuild` under the
+bench (`rebuild-cap6`): pipelined clients reconnect to the new process as soon as it listens. The
+bench counts them as failures, since `NotInitialized` says the cluster is not set up, which is not
+something a client retries. What it needs: an unplaced member of an initialized cluster coordinates
+with the placement's ring, every share of which is remote, and refuses only when the map has no
+placement at all. Or, smaller: a refusal a client retries elsewhere. Found by the
+[distributed cluster testing](../cluster-testing/correctness.md#rebuilding-a-node-under-load)
+chapter. Established from the bench's samples and the source; not reproduced in the fixture.
 
 ---
 

@@ -137,8 +137,20 @@ pub async fn scrub_group<D: ShoalDatabase>(
                 }
             };
             match answer {
-                Ok(DigestAnswer::Report(report)) => {
+                // a report of this scrub's boundary; one of another is a cut of an earlier
+                // application of the same operation, and this one is still to come
+                // ([Resolved #162](../../../../docs/src/appendix/resolved/stale-scrub-digest.md))
+                Ok(DigestAnswer::Report(report)) if report.boundary == boundary => {
                     reports.insert(*member, Ok(report));
+                }
+                Ok(DigestAnswer::Report(report)) => {
+                    last.insert(
+                        *member,
+                        format!(
+                            "the member answered a cut at {} for the scrub at {boundary}",
+                            report.boundary
+                        ),
+                    );
                 }
                 Ok(DigestAnswer::Pending) => {
                     last.insert(*member, "the member's cut is still being read".to_string());
@@ -629,10 +641,12 @@ impl<D: ShoalDatabase> DriverContext<D> {
             target,
             self.network.clone(),
         );
+        // the first cut may be any the leader holds; one the target was past has to be passed
+        let mut at_least = 0;
         for attempt in 0..CUTS_AT_MOST {
             let built = self
                 .network
-                .build(self.group)
+                .build(self.group, at_least)
                 .await
                 .map_err(|error| format!("cutting a snapshot: {error}"))?;
             let vote = self.raft.metrics().borrow_watched().vote.clone();
@@ -653,6 +667,7 @@ impl<D: ShoalDatabase> DriverContext<D> {
                 crate::server::replication::network::RepairSend::Behind { checkpoint } => {
                     event!(Level::INFO, msg = "the target's checkpoint is past the cut; moving this shard's past it", op = %self.op, group = %self.group, %target, checkpoint, ours = self.state.borrow().checkpoint_index());
                     self.advance_past(checkpoint).await?;
+                    at_least = checkpoint + 1;
                 }
             }
         }
@@ -677,11 +692,14 @@ impl<D: ShoalDatabase> DriverContext<D> {
                     self.timeout
                 ));
             }
-            // an entry past the index: a scrub under a throwaway operation costs one cut
+            // an entry past the index: a scrub nobody polls, so no replica cuts it
             let written = glommio::timer::timeout(self.timeout, async {
                 Ok(self
                     .raft
-                    .client_write(Command::scrub(self.table, Uuid::new_v4()))
+                    .client_write(Command::scrub(
+                        self.table,
+                        crate::server::replication::digest::NUDGE,
+                    ))
                     .await)
             })
             .await;
@@ -1127,6 +1145,23 @@ where
     /// * `table` - The table
     /// * `partition_id` - The partition whose record failed
     pub(super) async fn quarantine_for_checksum(&mut self, table: D::TableNames, partition_id: u64) {
+        self.quarantine_partition(table, partition_id, QuarantineReason::Checksum)
+            .await;
+    }
+
+    /// Quarantine the copy a partition belongs to, for a reason
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    /// * `partition_id` - The partition
+    /// * `reason` - Why
+    pub(super) async fn quarantine_partition(
+        &mut self,
+        table: D::TableNames,
+        partition_id: u64,
+        reason: QuarantineReason,
+    ) {
         use crate::shared::traits::TableNameSupport as _;
         // truncation cannot happen: a tablet id is twelve bits
         #[allow(clippy::cast_possible_truncation)]
@@ -1144,7 +1179,7 @@ where
             .and_then(|replication| replication.groups.get(&group))
             .map_or(0, |slot| slot.state.borrow().applied_index());
         let quarantine = Quarantine {
-            reason: QuarantineReason::Checksum,
+            reason,
             at,
             op: Uuid::nil(),
         };

@@ -49,6 +49,8 @@ L=target/deploy/release/tmdb-dataset-loader
 $L cluster bootstrap -i tmdb_cluster.yaml
 $L cluster upgrade -i tmdb_cluster.yaml        # after every fix, one node at a time
 $L cluster destroy -i tmdb_cluster.yaml --yes  # between tests that need an empty cluster
+$L cluster rebuild -i tmdb_cluster.yaml hyperion --yes   # a node from its peers, as a new identity (F56)
+$L cluster admin -i tmdb_cluster.yaml "restore-retry <op>"  # a restore's failed groups, again (#155)
 ```
 
 ## The driver
