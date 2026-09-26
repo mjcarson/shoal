@@ -716,11 +716,13 @@ and kill-all's elections.
 The item section 7 left open: [#169](../appendix/resolved/unplaced-member-forwards.md), a member
 the placement does not name refusing every query `NotInitialized`. It cost 63,012 refusals in two
 seconds as a rebuilt hyperion started. It was fixed in the tree with a fixture test first, then
-proved here with the same scenario. That scenario found three more defects,
+proved here with the same scenario. Repeating it eight times found eight more defects,
 [#170](../appendix/resolved/uncached-log-reads.md) to
-[#172](../appendix/resolved/identity-refusal-redials.md). Every run below was on a cluster destroyed,
-bootstrapped on the build under test and loaded from the csv minutes before, so every group still
-held the load in its log. The records are under `target/lab/r169/`.
+[#177](../appendix/resolved/blocked-plan-retry.md) (#176 is filed, not fixed), and one optimization,
+[O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench).
+Runs 1, 2, 5 and 8 were on a cluster destroyed, bootstrapped on the build under test and loaded from
+the csv minutes before, so every group still held the load in its log; runs 3, 4, 6 and 7 followed
+on the cluster the run before left. The records are under `target/lab/r169/`.
 
 ### Rebuilding a node under load, again
 
@@ -748,12 +750,11 @@ through it, forwarded to the placed members until the first move names it.
 **What run 1 found.**
 
 - **A step that never caught up.** The sixth set, a `Movie` group titan led, sat in the move for the
-  whole 600 s window and failed. The group's log still held nearly a gigabyte of the load, and the
-  new copy was fed from it for eight minutes before a snapshot was cut. Reading that log turned
-  out to cost one I/O per entry, each waiting a reactor turn on a busy shard: 10 entries a second
-  in an experiment. That is [#170](../appendix/resolved/uncached-log-reads.md), fixed by reading a
-  run of entries in one span (1,221 a second in the same experiment). Run 2 shows it was not the
-  whole story (below).
+  whole 600 s window and failed, with no snapshot cut for eight minutes. It was first put down to
+  the leader reading the copy's log one entry per I/O, which it did, 10 entries a second in an
+  experiment: [#170](../appendix/resolved/uncached-log-reads.md), fixed (1,221 a second). But that
+  was not this failure. Run 7 measured it: the snapshot cut waited behind the compactor's backlog
+  ([#174](../appendix/resolved/snapshot-cut-queue.md), below).
 - **The failed step was published anyway.** The set's other group had activated, and a failed
   group counted as activated, so the set was routed to hyperion while the `Movie` group's voters
   still named the removed identity. The plan therefore never retried it, and `cluster rebuild` said
@@ -778,8 +779,9 @@ read. A stall with nothing logged at `info` needs openraft's own tracing, which 
 | `Movie` groups led by titan, fed a snapshot | 6 | 7 s, 10 s, 22 s, **109 s**, **184 s**, and one that failed at 600 s before its retry took 37 s |
 
 Every slow step was titan's, and each spent its time *before* the cut began. Once a cut started, it
-took about 10 s to cut, send and install. So what delays the snapshot is openraft's decision to ask
-for one.
+took about 10 s to cut, send and install. That looked like openraft deciding late to ask for a
+snapshot. It was not: runs 6 and 7 showed that openraft asked at once, and the cut waited
+(below).
 
 **Runs 3 and 4: tracing the stall, and what the tracing did.** Openraft logs nothing at `info` about
 a replication stream that makes no progress. So run 3 set `RUST_LOG` to debug for
@@ -810,3 +812,54 @@ titan had it too, because in those groups titan's copy was the one that had to s
 That window also showed that **a rebuild costs the control group one failure of margin**. The old
 identity stays a control voter until the removal commits, so while titan was down only europa of the
 three voters was up, and the control group had no leader (`leader none`) until titan returned.
+
+**Runs 5 to 7: counting what a stalled move sends.** The move driver now logs, every 30 s while a
+destination stands still, what its appends came to. Run 6 made the stall plain:
+
+```text
+a move's destination has made no progress  stalled_secs=270  sent=14788 data=1 accepted=14787
+  conflicts=1 failed=0 last_prev=Some(1092395) last_acked=None
+```
+
+One append carrying entries was ever sent: openraft's first probe, at the leader's purge point, which
+conflicted as a probe to an empty copy does. Every other append was an empty heartbeat. The next step
+had to be a snapshot. Run 7 taught the compactor to log how long a cut waited:
+
+```text
+taking a snapshot cut  table="Movie" group=84dfae50a3fe833b queued_ms=566758 backlog=180
+```
+
+The cut waited 9.4 minutes behind 180 queued merges on titan's `Movie` compactor, for a cut that then
+took about 10 s: [#174](../appendix/resolved/snapshot-cut-queue.md). A cut is now taken ahead of
+queued merges. That is safe, because the compactor is the archives' only writer and a cut between
+any two jobs is consistent. The backlog is its own finding: under the bench a Zen1 node's compactor
+falls hundreds of jobs behind, filed as
+[O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench).
+
+Run 7, on the build before that fix, then found two more:
+
+- **A crash loop the #171 fix opened.** Tablet 1's move failed, and with #171 the record now ends,
+  so hyperion stopped its learner copies. The retry named them again, and the keyword copy's WAL
+  index pointed into a segment hyperion had reclaimed meanwhile, because a group the shard no longer
+  hosts counts as purged. The shard died, the process aborted, and hyperion crash-looped 147 times:
+  [#175](../appendix/resolved/stopped-group-log.md). A group stopped because the map no longer names
+  it now has its log forgotten once its handle is down, and a learner copy that cannot be built is
+  built again empty. A voter in the same state would still stop its node:
+  [#176](../appendix/known-issues.md#176-a-voter-whose-log-cannot-be-read-stops-its-node-at-every-start),
+  filed.
+- **A blocked plan nobody could retry.** The set failed twice and the plan was blocked by name.
+  Asking for the removal again was accepted and changed nothing, so one set stayed short of its
+  down voter: [#177](../appendix/resolved/blocked-plan-retry.md). Asking again now forgives the plan's
+  failures so far. On the lab, with the fixes installed by hand (`cluster upgrade` rightly refuses
+  while a set is under the factor), `remove` asked again ran the plan to `Completed`, 18 moved, and
+  every acknowledged insert (3,612,822) and csv row read back through each member alone.
+
+| Run | Build | Stalled moves | Failed steps | Outcome | Acknowledged inserts, each member alone |
+| --- | --- | --- | --- | --- | --- |
+| 1 | #169 | 1 | 1, published anyway (#171) | "rebuilt" with a set wrongly published | 4,265,222, 0 lost |
+| 2 | + #170 to #172 | 1 | 1, retried and moved | 18 moved | 4,413,157, 0 lost |
+| 3 | + debug tracing | 1 | 1, retried and moved | 18 moved | 3,400,781, 0 lost |
+| 4 | + debug tracing, rate limit lifted | – | – | abandoned; see above | – |
+| 5 | + #173, the stall report | 1 (5.5 min) | 0 | 18 moved | 4,234,475, 0 lost |
+| 6 | + append counts | 3 | 0 | 18 moved | 4,216,793, 0 lost |
+| 7 | + the cut's wait logged | 1 (9.4 min) | 2, plan blocked (#177), then the #175 crash loop | retried by hand after #174, #175 and #177: 18 moved | 3,612,822, 0 lost |

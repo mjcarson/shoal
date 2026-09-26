@@ -66,6 +66,7 @@ than Shoal says so.
 | gxhash reads a whole 16-byte block past the end of a short key | Every AddressSanitizer run | Recorded: it stays within a page by design, so it is not a fault. It means an ASan build needs `-Zsanitizer-recover=address`, and every run reports it once per location |
 | `cluster rebuild` stopped when the member it followed the plan through restarted, while the plan ran on | [Section 8](correctness.md#8-an-unplaced-member-coordinates), run 4 | The follower waits up to five minutes of unreadable records before giving up |
 | `RUST_LOG` at debug for openraft's replication writes about 150,000 lines a second a node under the bench, and rsyslog filled titan's root device | [Section 8](correctness.md#8-an-unplaced-member-coordinates), runs 3 and 4 | Recorded: not a way to observe a loaded lab. The move driver reports a stalled destination's appends itself |
+| The loader's read-back after a load read at `One` and counted a row a copy had not applied yet as lost | Rebuild 8's load, [section 8](correctness.md#8-an-unplaced-member-coordinates): 1 of 10,073, with every row on every member alone moments later | The read-back is at `Quorum` |
 
 ## Optimizations
 
