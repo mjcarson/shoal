@@ -55,6 +55,7 @@ than Shoal says so.
 | [174](../appendix/resolved/snapshot-cut-queue.md) | [Section 8](correctness.md#8-an-unplaced-member-coordinates), rebuilds 1 to 7 | A move's snapshot cut waited behind every compaction queued before it: 9.4 minutes behind 180 jobs on titan, the stall every rebuild had and the failure of runs 1 to 3 | **Fixed.** A cut is taken ahead of queued merges |
 | [175](../appendix/resolved/stopped-group-log.md) | [Section 8](correctness.md#8-an-unplaced-member-coordinates), rebuild 7 | A failed move's learner, stopped by #171's fix, kept a log index into segments its node then reclaimed; built again for the retry, it killed hyperion, which crash-looped 147 times | **Fixed.** A stopped group's log is forgotten; a learner that cannot be built is built again empty |
 | [176](../appendix/known-issues.md#176-a-voter-whose-log-cannot-be-read-stops-its-node-at-every-start) | #175's fix | A voter whose log cannot be read would still stop its node at every start | **Filed.** Needs a guard on an emptied voter's vote |
+| [177](../appendix/resolved/blocked-plan-retry.md) | [Section 8](correctness.md#8-an-unplaced-member-coordinates), rebuild 7 | A plan blocked by two failed moves of one set could not be retried: asking again was accepted and did nothing | **Fixed.** Asking the same operation again forgives the failures so far |
 
 ## Deployment and lab findings
 

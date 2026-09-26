@@ -1816,6 +1816,27 @@ impl ControlState {
         }
     }
 
+    /// Try a member's open plan again, forgiving the failures that blocked it
+    ///
+    /// A decommission or a removal asked again for a member already leaving or removing is the
+    /// operator's way to retry one: the plan's failures so far stop counting, and the leader's
+    /// next pass plans the sets they blocked. A plan that is not blocked is left as it is.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member the plan drains
+    fn retry_plan_for(&mut self, node: NodeId) -> ControlResponse {
+        let retried = self
+            .plans
+            .values_mut()
+            .filter(|record| !record.is_done() && record.kind.drains() == Some(node))
+            .fold(false, |retried, record| record.retry() || retried);
+        if retried {
+            self.topology_version += 1;
+        }
+        self.applied()
+    }
+
     /// Mark a member leaving and record the plan that drains it
     ///
     /// # Arguments
@@ -1846,7 +1867,9 @@ impl ControlState {
         match state.phase {
             MemberPhase::Member => {}
             // already leaving is applied and changes nothing: the first plan drains it
-            MemberPhase::Leaving => return self.applied(),
+            // asked again: a plan its failures blocked is tried again
+            // ([Resolved #177](../../../../docs/src/appendix/resolved/blocked-plan-retry.md))
+            MemberPhase::Leaving => return self.retry_plan_for(node),
             other => {
                 return ControlResponse::refused(
                     RefusalKind::WrongPhase,
@@ -1916,7 +1939,9 @@ impl ControlState {
                     format!("{node} is already removed"),
                 );
             }
-            MemberPhase::Removing => return self.applied(),
+            // asked again: a plan its failures blocked is tried again
+            // ([Resolved #177](../../../../docs/src/appendix/resolved/blocked-plan-retry.md))
+            MemberPhase::Removing => return self.retry_plan_for(node),
             _ if !removable => {
                 return ControlResponse::refused(RefusalKind::WrongPhase, format!(
                         "{node} is {} and a member; only a down or leaving member can be removed - decommission a live one",
@@ -4638,6 +4663,74 @@ mod tests {
             .expected
             .iter()
             .any(|member| member.node == d));
+    }
+
+    /// Asking a decommission again retries a plan its failed moves blocked (item 177)
+    ///
+    /// A member is decommissioned and its plan records a set that failed twice, which leaves it
+    /// blocked. Before the fix the same decommission asked again was applied and changed
+    /// nothing, so the set stayed blocked for good; now the failures stop counting and the
+    /// leader's next pass plans the set again
+    /// ([Resolved #177](../../../../docs/src/appendix/resolved/blocked-plan-retry.md)).
+    #[test]
+    fn asking_again_retries_a_plan_its_failures_blocked() {
+        use crate::server::control::plan::{Blocked, PlanStep, StepState};
+        let (mut state, _, node) = bootstrapped();
+        let (b, c, d) = (NodeId::mint(), NodeId::mint(), NodeId::mint());
+        for (other, name) in [(b, "b"), (c, "c"), (d, "d")] {
+            state.apply(&ControlCommand::Admit(member(other, name)));
+            state.apply(&ControlCommand::ObserveMember(member(other, name)));
+        }
+        let version = state.topology_version;
+        state.apply(&ControlCommand::Initialize {
+            op: Uuid::new_v4(),
+            principal: "alice".to_string(),
+            expected_version: version,
+            nodes: vec![node, b, c],
+            tables: vec![("Row".to_string(), TableId::of("Row"))],
+        });
+        let decommission = |op, expected_version| ControlCommand::Decommission {
+            op,
+            principal: "alice".to_string(),
+            expected_version,
+            node: b,
+        };
+        let plan = Uuid::new_v4();
+        let version = state.topology_version;
+        state.apply(&decommission(plan, version));
+        // the set at tablet zero failed twice, and the plan is blocked on it
+        let failed = || PlanStep {
+            tablet: 0,
+            from: b,
+            to: d,
+            bytes: 0,
+            op: None,
+            state: StepState::Failed {
+                reason: "did not catch up within 600s".to_string(),
+            },
+        };
+        {
+            let record = state.plans.get_mut(&plan).expect("recorded");
+            record.steps = vec![failed(), failed()];
+            record.blocked = Some(Blocked {
+                reason: "tablet 0: its move failed 2 times".to_string(),
+                since: version,
+            });
+        }
+        assert_eq!(state.plans[&plan].failures_of(0), 2);
+        // asked again: applied, and the failures so far no longer count
+        let version = state.topology_version;
+        assert_eq!(
+            state.apply(&decommission(Uuid::new_v4(), version)),
+            ControlResponse::Applied {
+                topology_version: version + 1
+            }
+        );
+        assert_eq!(state.plans[&plan].failures_of(0), 0);
+        assert_eq!(state.plans[&plan].retried_from, 2);
+        // and a failure after the retry counts again
+        state.plans.get_mut(&plan).expect("recorded").steps.push(failed());
+        assert_eq!(state.plans[&plan].failures_of(0), 1);
     }
 
     /// A member is decommissioned to leaving and removed to removing, a plain up member cannot

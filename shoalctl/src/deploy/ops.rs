@@ -69,12 +69,39 @@ fn remove_roots(roots: &[String]) -> String {
 ///
 /// * `lines` - The record as the cluster tab draws it
 fn failed_lines(lines: &[String]) -> Vec<&str> {
-    // a group's line carries its outcome, which says Failed when it did
+    // a group's line carries its outcome, which says Failed when it did; a plan's set that
+    // failed and then moved under a later step is not a failure of the plan
+    // ([Resolved #177](../../../docs/src/appendix/resolved/blocked-plan-retry.md))
     lines
         .iter()
-        .filter(|line| line.contains("\"Failed\""))
-        .map(|line| line.trim())
+        .enumerate()
+        .filter(|(_, line)| line.contains("\"Failed\""))
+        .filter(|(at, line)| !moved_later(line, &lines[at + 1..]))
+        .map(|(_, line)| line.trim())
         .collect()
+}
+
+/// Whether a plan's step line names a set that a later step moved
+///
+/// # Arguments
+///
+/// * `line` - The failed step's line
+/// * `later` - The lines after it
+fn moved_later(line: &str, later: &[String]) -> bool {
+    // a plan's step line starts with the set's first tablet
+    let key = |line: &str| {
+        let mut words = line.split_whitespace();
+        match (words.next(), words.next()) {
+            (Some("tablet"), Some(tablet)) => Some(tablet.to_string()),
+            _ => None,
+        }
+    };
+    let Some(tablet) = key(line) else {
+        return false;
+    };
+    later
+        .iter()
+        .any(|next| key(next).as_deref() == Some(&tablet) && next.trim_end().ends_with("Moved"))
 }
 
 /// How long a plan's record may be unreadable before its follower gives up on it
@@ -1044,7 +1071,34 @@ impl Deployment {
                     return Err(eyre!("{line} was refused: {} ({:?})", error.msg, error.code()))
                 }
             }
-            (action.followed(op), follow)
+            let followed = action.followed(op);
+            // a removal or a decommission asked again for a member already on its way out
+            // retries that member's open plan rather than recording one, so that plan is the
+            // one followed ([Resolved #177](../../../docs/src/appendix/resolved/blocked-plan-retry.md))
+            let retried = if follow == Follow::Plan
+                && crate::components::follow_once(shoal, followed, follow)
+                    .await
+                    .is_err()
+            {
+                let kind = line.split_whitespace().next().unwrap_or_default();
+                let model = crate::cluster::poll(shoal).await.map_err(|error| eyre!(error))?;
+                let open: Vec<Uuid> = model
+                    .plans
+                    .iter()
+                    .filter(|plan| plan.kind == kind && !plan.phase.eq_ignore_ascii_case("done"))
+                    .filter_map(|plan| plan.op.parse().ok())
+                    .collect();
+                match open.as_slice() {
+                    [plan] => {
+                        step(None, &format!("{kind} was asked again: retrying its plan {plan}"));
+                        Some(*plan)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            (retried.unwrap_or(followed), follow)
         };
         // follow the record, printing it whenever it changes, until it is done
         let deadline = Instant::now() + timeout;
@@ -1503,6 +1557,17 @@ mod tests {
         );
         // a record with no failure has none, whatever else it says
         assert!(super::failed_lines(&lines[..2]).is_empty());
+        // a plan's set that failed and then moved is not a failure; one that never moved is
+        // ([Resolved #177](../../../docs/src/appendix/resolved/blocked-plan-retry.md))
+        let plan = vec![
+            "  tablet 1 a -> b {\"Failed\":{\"reason\":\"did not catch up\"}}".to_string(),
+            "  tablet 2 a -> b {\"Failed\":{\"reason\":\"did not catch up\"}}".to_string(),
+            "  tablet 1 a -> b Moved".to_string(),
+        ];
+        assert_eq!(
+            super::failed_lines(&plan),
+            vec!["tablet 2 a -> b {\"Failed\":{\"reason\":\"did not catch up\"}}"]
+        );
     }
     use super::*;
     use crate::cluster::model::MemberRow;
