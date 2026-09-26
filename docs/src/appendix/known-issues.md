@@ -445,6 +445,16 @@ The first suite run after [#155](resolved/restore-retries-unreachable.md) failed
 six more after the disk-full rerun on the lab) and passed in the next full suite run. That run's log kept only the summary line, so the failure's message was not
 captured. The test waits out a 25 s isolation with a 20 s phase deadline and a 5 s retry pause, and
 the margins are what a loaded host erodes.
+While proving [#170](resolved/uncached-log-reads.md), `migration_resumes_after_each_phase_failure`
+was run eight times on its own on the fixed tree: 2 of 8 failed. One failure was the test's
+`"no member of the target is up to take the lead"`, and one was openraft's own debug assertion in
+the test process's node, `Some(log_id) <= committed` at `log_state_reader.rs:25`: a member was
+handed a log id at an index it had already committed, under a different leader. Because #170
+changed how a leader reads its log, the same loop was run on `48dfad8`, the tree before it. The
+assertion fired there on the first run, and 2 of the 3 runs taken failed. So it predates #170,
+and it is the first time this item has a message from inside openraft rather than a deadline.
+The assertion is the one [Resolved #109](resolved/volatile-majority-loss.md) met for a volatile
+log. Whether this test's durable groups can reach it the same way is not established.
 The `shoal-core` change for [#148](resolved/stale-intent-log-tail.md) was followed by one failure
 in the first four runs of `shoal/tests/persistent_unsorted_table.rs` at six threads, whose name the
 run did not keep, and none in the next nine.
@@ -495,25 +505,20 @@ a restart once space returns brings it back (on the lab with no restart by hand)
 wanted is to shed appends below a reserve with a retriable refusal, so that a nearly full node
 keeps serving reads rather than stopping.
 
-### 169. A member the placement does not name refuses every client query
 
-A node answers every query with `NotInitialized` (*"this node holds no tablets: the placement has
-not been initialized, or does not name it"*) while the placement does not name it (`Shard::placed`,
-`shard.rs`). That is right before the cluster is initialized. But a member admitted afterwards is
-not named until a plan puts it in a set, although it has the map and could forward every query to
-the tablets' holders, as any node does for a tablet it holds no copy of. A client connected to a
-member added with `cluster add` and no rebalance is refused everything. And a client connected to a
-rebuilt node is refused from its start until its replacement plan names it.
+### 176. A voter whose log cannot be read stops its node at every start
 
-On the lab the second case cost 63,012 refusals in two seconds of a `cluster rebuild` under the
-bench (`rebuild-cap6`): pipelined clients reconnect to the new process as soon as it listens. The
-bench counts them as failures, since `NotInitialized` says the cluster is not set up, which is not
-something a client retries. What it needs: an unplaced member of an initialized cluster coordinates
-with the placement's ring, every share of which is remote, and refuses only when the map has no
-placement at all. Or, smaller: a refusal a client retries elsewhere. Found by the
-[distributed cluster testing](../cluster-testing/correctness.md#rebuilding-a-node-under-load)
-chapter. Established from the bench's samples and the source; not reproduced in the fixture.
-
+`handle_group_up` (`shard/groups.rs`) turns a group that fails to build into a shard error, and a
+shard error ends the process, so a node with one durable voter copy whose log cannot be read never
+starts. [Resolved #175](resolved/stopped-group-log.md) builds a *learner* copy again with no log
+in that case, since a learner has no vote. A voter cannot be treated the same way yet: an emptied
+voter grants its vote to a candidate with any log, which is how [#109](resolved/volatile-majority-loss.md)
+lost committed entries, and #109's guard covers only volatile copies. What it needs: a voter
+whose log cannot be read stalls as that one copy, like an unreadable partition does since
+[#160](resolved/unreadable-partition-stalls-one-copy.md), and is repaired by its group, or is
+rebuilt empty under a guard that withholds its vote until it has caught up. Until then the node
+needs `cluster rebuild`. Found with #175 on the lab, where the copy was a learner. Established from
+the source; no voter has been seen in this state.
 ---
 
 ## Low — hygiene and documentation drift

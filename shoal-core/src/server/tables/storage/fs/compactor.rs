@@ -11,7 +11,7 @@ use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::Archive;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hasher;
 use std::marker::PhantomData;
 use std::path::PathBuf;
@@ -326,6 +326,11 @@ pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport, 
     staged: Vec<u8>,
     /// The channel to listen for paths to intent logs to compact
     jobs_rx: AsyncReceiver<CompactionJob>,
+    /// The jobs taken off the channel and not yet run, in the order they were sent
+    ///
+    /// Drained from the channel before each job so a snapshot cut can be taken ahead of the
+    /// merges queued before it ([Resolved #174](../../../../../../docs/src/appendix/resolved/snapshot-cut-queue.md)).
+    backlog: VecDeque<CompactionJob>,
     /// The channel to send shard local messages on
     shard_local_tx: AsyncSender<ServerMsg<S>>,
     /// The path to this tables archive folder
@@ -373,6 +378,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             removals: Vec::with_capacity(capacity),
             staged: Vec::new(),
             jobs_rx,
+            backlog: VecDeque::new(),
             shard_local_tx: shard_local_tx.clone(),
             archive_path: conf.get_archive_path(R::name()),
             merged: HashMap::new(),
@@ -1735,7 +1741,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 expired_before,
                 provenance,
                 dir,
+                requested,
             } => {
+                // how long the cut waited behind other jobs, and how many are still queued
+                // ([Resolved #174](../../../../../../docs/src/appendix/resolved/snapshot-cut-queue.md))
+                event!(Level::INFO, msg = "taking a snapshot cut", table = R::name(), group = %group, queued_ms = requested.elapsed().as_millis() as u64, backlog = self.backlog.len() + self.jobs_rx.len());
                 self.cut_snapshot(
                     group,
                     schema_id,
@@ -1819,22 +1829,32 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             let (job, attempts) = match due {
                 Some(retry) => (retry.job, retry.attempts),
                 None => {
-                    // wait for a job, but no longer than the earliest retry
-                    let earliest = retries
-                        .iter()
-                        .map(|retry| retry.at)
-                        .min()
-                        .map(|at| at.saturating_duration_since(Instant::now()));
-                    match earliest {
-                        Some(wait) => {
-                            let mut recv = Box::pin(self.jobs_rx.recv()).fuse();
-                            let mut timer = Box::pin(glommio::timer::sleep(wait)).fuse();
-                            select! {
-                                job = recv => (job?, 0),
-                                () = timer => continue,
+                    // everything already sent comes off the channel first, so a cut asked for
+                    // behind a run of merges is taken before them
+                    // ([Resolved #174](../../../../../../docs/src/appendix/resolved/snapshot-cut-queue.md))
+                    while let Ok(Some(job)) = self.jobs_rx.try_recv() {
+                        self.backlog.push_back(job);
+                    }
+                    if let Some(job) = take_next(&mut self.backlog) {
+                        (job, 0)
+                    } else {
+                        // wait for a job, but no longer than the earliest retry
+                        let earliest = retries
+                            .iter()
+                            .map(|retry| retry.at)
+                            .min()
+                            .map(|at| at.saturating_duration_since(Instant::now()));
+                        match earliest {
+                            Some(wait) => {
+                                let mut recv = Box::pin(self.jobs_rx.recv()).fuse();
+                                let mut timer = Box::pin(glommio::timer::sleep(wait)).fuse();
+                                select! {
+                                    job = recv => (job?, 0),
+                                    () = timer => continue,
+                                }
                             }
+                            None => (self.jobs_rx.recv().await?, 0),
                         }
-                        None => (self.jobs_rx.recv().await?, 0),
                     }
                 }
             };
@@ -1865,5 +1885,106 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             }
         }
         Ok(())
+    }
+}
+
+/// The next job to run: the first snapshot cut queued, or else the oldest job
+///
+/// A cut reads the archives as they stand between two jobs, and the compactor is their only
+/// writer, so one taken ahead of queued merges is as consistent as one taken after them, at a
+/// lower boundary the new copy catches up from by log. Every other job keeps its order: an
+/// install's place among the merges is what lets a merge skip the frames it replaced
+/// ([Resolved #166](../../../../../../docs/src/appendix/resolved/segment-compaction-corrupt-loop.md)).
+/// A cut waited behind every merge queued before it, and on a loaded node a move's destination
+/// waited minutes for its snapshot ([Resolved #174](../../../../../../docs/src/appendix/resolved/snapshot-cut-queue.md)).
+///
+/// # Arguments
+///
+/// * `backlog` - The jobs taken off the channel, in the order they were sent
+fn take_next(backlog: &mut VecDeque<CompactionJob>) -> Option<CompactionJob> {
+    // a cut anywhere in the backlog goes first, the earliest of them if there are several
+    match backlog
+        .iter()
+        .position(|job| matches!(job, CompactionJob::Snapshot { .. }))
+    {
+        Some(cut) => backlog.remove(cut),
+        None => backlog.pop_front(),
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+
+    /// A snapshot job for a group, with nothing in it the order depends on
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    fn cut(group: u64) -> CompactionJob {
+        CompactionJob::Snapshot {
+            group: GroupId(group),
+            schema_id: 0,
+            tablets: Vec::new(),
+            at_least: None,
+            memberships: Vec::new(),
+            retries: Vec::new(),
+            expired_before: 0,
+            provenance: crate::server::replication::snapshot::SnapshotProvenance::at(
+                crate::shared::identity::ClusterId::default(),
+                crate::shared::identity::NodeId::mint(),
+                crate::shared::protocol::MIN_PEER_VERSION,
+            ),
+            dir: PathBuf::new(),
+            requested: std::time::Instant::now(),
+        }
+    }
+
+    /// A merge job, told apart by its generation
+    ///
+    /// # Arguments
+    ///
+    /// * `generation` - The generation
+    fn merge(generation: u64) -> CompactionJob {
+        CompactionJob::IntentLog {
+            path: PathBuf::new(),
+            generation,
+        }
+    }
+
+    /// The generation of a merge, or the group of a cut, to compare an order by
+    ///
+    /// # Arguments
+    ///
+    /// * `job` - The job
+    fn label(job: &CompactionJob) -> String {
+        match job {
+            CompactionJob::IntentLog { generation, .. } => format!("merge {generation}"),
+            CompactionJob::Snapshot { group, .. } => format!("cut {}", group.0),
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// A cut queued behind merges is taken first, cuts keep their own order, and every other
+    /// job runs in the order it was sent (item 174)
+    #[test]
+    fn a_snapshot_cut_is_taken_ahead_of_queued_merges() {
+        let mut backlog: VecDeque<CompactionJob> =
+            [merge(1), merge(2), cut(7), merge(3), cut(8), merge(4)]
+                .into_iter()
+                .collect();
+        let mut order = Vec::new();
+        while let Some(job) = take_next(&mut backlog) {
+            order.push(label(&job));
+        }
+        assert_eq!(
+            order,
+            ["cut 7", "cut 8", "merge 1", "merge 2", "merge 3", "merge 4"]
+        );
+        // with no cut queued the order is the order sent
+        let mut backlog: VecDeque<CompactionJob> = [merge(1), merge(2)].into_iter().collect();
+        assert_eq!(take_next(&mut backlog).as_ref().map(label).as_deref(), Some("merge 1"));
+        assert_eq!(take_next(&mut backlog).as_ref().map(label).as_deref(), Some("merge 2"));
+        assert!(take_next(&mut backlog).is_none());
     }
 }

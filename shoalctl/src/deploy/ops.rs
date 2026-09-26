@@ -77,6 +77,12 @@ fn failed_lines(lines: &[String]) -> Vec<&str> {
         .collect()
 }
 
+/// How long a plan's record may be unreadable before its follower gives up on it
+///
+/// Long enough for a member the follower reads through to restart: the plan runs on in the
+/// cluster whatever its follower does.
+const FOLLOW_GRACE: Duration = Duration::from_secs(300);
+
 /// How long a rebalance plan is followed before the deployment stops waiting on it
 const PLAN_TIMEOUT: Duration = Duration::from_secs(1800);
 
@@ -917,10 +923,39 @@ impl Deployment {
         let deadline = Instant::now() + PLAN_TIMEOUT;
         let mut last = Vec::new();
         let mut leader = None;
+        // when the record stopped being readable, if it has
+        let mut failing_since: Option<Instant> = None;
         loop {
-            let (lines, done) = crate::components::follow_once(shoal, op, Follow::Plan)
-                .await
-                .map_err(|error| eyre!(error))?;
+            // a plan runs on in the cluster without its follower, so a member restarting under
+            // the follow is waited for while the client reconnects, never taken as the plan's end
+            let (lines, done) = match crate::components::follow_once(shoal, op, Follow::Plan).await
+            {
+                Ok(found) => {
+                    failing_since = None;
+                    found
+                }
+                Err(error) => {
+                    // the first failure of a run of them is said once
+                    let since = match failing_since {
+                        Some(since) => since,
+                        None => {
+                            step(
+                                None,
+                                &format!("the {what}'s record could not be read ({error}); trying again"),
+                            );
+                            *failing_since.insert(Instant::now())
+                        }
+                    };
+                    if since.elapsed() > FOLLOW_GRACE {
+                        bail!(
+                            "the {what} {op}'s record could not be read for {FOLLOW_GRACE:?}: {error}; \
+                             the plan runs on, and `admin \"status {op}\"` follows it"
+                        );
+                    }
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            };
             if lines != last {
                 for line in &lines {
                     step(None, line);

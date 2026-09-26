@@ -577,6 +577,30 @@ impl Future for Wanted {
     }
 }
 
+/// Whether a dial failed on a verdict about who the peer is, which no queued frame changes
+///
+/// The certificate named another node, the hello named another identity, or the peer refused
+/// ours as mismatched, removed or of another cluster. A refused connection or a timeout is not
+/// one: the node may be starting again at the same address. Nor is a peer that does not know us
+/// yet, which a joiner meets until the map reaches it; a frame that wants to go should find
+/// either at once.
+///
+/// # Arguments
+///
+/// * `error` - Why the dial failed
+pub(super) fn is_identity_verdict(error: &ServerError) -> bool {
+    use crate::server::errors::ShoalError;
+    use crate::shared::protocol::peer::PeerRefusal;
+    match error {
+        ServerError::Shoal(ShoalError::CertificateIdentity { .. } | ShoalError::PeerIdentity { .. }) => true,
+        ServerError::Shoal(ShoalError::PeerRefused { reason, .. }) => matches!(
+            reason,
+            PeerRefusal::IdentityMismatch | PeerRefusal::Removed | PeerRefusal::WrongCluster
+        ),
+        _ => false,
+    }
+}
+
 /// The link's life: wait to be wanted, dial, carry, drop, back off, again
 ///
 /// # Arguments
@@ -644,11 +668,19 @@ async fn run<F: Fn(LinkEvent) + 'static>(
                 });
                 // wait out the backoff, growing it with jitter, and try again if still wanted:
                 // never sooner than the floor, and no later than the first frame that wants
-                // to go, since a frame waiting out a backoff is a caller waiting out a backoff
+                // to go, since a frame waiting out a backoff is a caller waiting out a backoff.
+                // a verdict on who the peer is is not changed by a frame, so it waits the whole
+                // backoff: a rebuilt node's old address answered its every heartbeat with a
+                // handshake that could only fail, ten times a second a link
+                // ([Resolved #172](../../../../docs/src/appendix/resolved/identity-refusal-redials.md))
                 let wait = jittered(backoff, attempt, settings.local.borrow().incarnation);
                 attempt = attempt.wrapping_add(1);
                 backoff = (backoff * 2).min(settings.reconnect_max);
-                let floor = wait.min(settings.reconnect_min);
+                let floor = if is_identity_verdict(&error) {
+                    wait
+                } else {
+                    wait.min(settings.reconnect_min)
+                };
                 glommio::timer::sleep(floor).await;
                 let rest = wait.saturating_sub(floor);
                 if !rest.is_zero() {

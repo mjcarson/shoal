@@ -2349,3 +2349,15 @@ the leader purges below the snapshot being installed. What it needs: retention t
 step, or a catch-up that tolerates a purge by re-cutting only what moved; a cut streamed from the
 archives instead of written to a file first; and several steps in flight onto a node. Proving it
 needs hosts with the disk for it, or retention shrunk on the lab until a step outlasts it.
+
+## Feed a new copy a snapshot when its log is larger
+
+Filed by [Resolved #170](resolved/uncached-log-reads.md). openraft feeds a new copy from the log
+whenever the leader still holds the entries it needs, which after a load is up to
+`retained_bytes` (1 GiB) of a group's log from index one. On the lab that was ten times the size
+of the set's snapshot (a 50 MB cut against a gigabyte of entries), and replaying it re-applies
+every write the set ever took, including every overwrite. #170's fix made the replay fast enough
+to finish, but not cheap. What it needs: when a move adds its destination, the leader compares the
+log the destination would be fed with the bytes its set holds, and if the log is the larger it
+purges through its last checkpoint, which every voter has already matched, so that openraft sends
+a snapshot. The purge has to wait for the other voters, never pass them.

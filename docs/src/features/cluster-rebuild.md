@@ -68,6 +68,14 @@ shoalctl cluster rebuild -i <inventory> <node> --yes
 - **It takes as long as moving every set the node held**, one plan step at a time: 6 to 12
   minutes on the lab for 1.4 GiB under load (below).
 - **The old identity's tombstone is permanent**, like every removal's.
+- **The control group has one failure less to spare while it runs.** The old identity stays a
+  control voter until its removal commits, which is at the end of the plan. On three voters, one
+  more member down leaves the control group without a leader until it returns. The data groups
+  keep their own quorums, so writes to the sets already moved go on. The lab met this with titan's
+  disk full ([section 8](../cluster-testing/correctness.md#8-an-unplaced-member-coordinates)).
+- **The command follows the plan through one member.** If that member restarts, the command waits
+  up to five minutes for its record to be readable again. Past that it stops, and the plan runs on
+  without it: `cluster admin "status <plan>"` follows it from any member.
 - **It is not proven past the lab's size, and the defaults are not sized for terabytes.** Steps are
   replica sets, so their number is fixed by the placement (18 on the lab) and their size grows with
   the data: about 55 GB each at a terabyte a node. Extrapolated, **not measured**: under load the lab moved

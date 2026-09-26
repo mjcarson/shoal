@@ -525,3 +525,44 @@ fn the_listener_dispatches_a_slot_to_its_host() {
     assert!(format!("{error:?}").contains("does not run"), "{error:?}");
     assert!(dispatch_target(&plain, 4, "refused").is_err());
 }
+
+/// A dial refused on who the peer is waits out its backoff; one refused for now does not
+///
+/// A certificate or hello naming another node, and a refusal as mismatched, removed or of another
+/// cluster, are verdicts no queued frame changes, so the link waits its whole grown backoff. A
+/// refused connection, a peer that does not know us yet and a fenced run are retried as soon as a
+/// frame wants to go ([Resolved #172](../../../../docs/src/appendix/resolved/identity-refusal-redials.md)).
+#[test]
+fn identity_verdicts_wait_out_the_backoff() {
+    use super::link::is_identity_verdict;
+    use crate::server::errors::{ServerError, ShoalError};
+    use crate::shared::protocol::peer::PeerRefusal;
+    let (a, b) = (NodeId::mint(), NodeId::mint());
+    let refused = |reason| {
+        ServerError::Shoal(ShoalError::PeerRefused { node: a, reason })
+    };
+    // verdicts on identity
+    for error in [
+        ServerError::Shoal(ShoalError::CertificateIdentity {
+            claimed: a,
+            certified: Some(b),
+        }),
+        ServerError::Shoal(ShoalError::PeerIdentity {
+            expected: a,
+            found: b,
+        }),
+        refused(PeerRefusal::IdentityMismatch),
+        refused(PeerRefusal::Removed),
+        refused(PeerRefusal::WrongCluster),
+    ] {
+        assert!(is_identity_verdict(&error), "{error:?} is retried at once");
+    }
+    // and what may change with the next start or the next map
+    for error in [
+        ServerError::from(std::io::Error::from(std::io::ErrorKind::ConnectionRefused)),
+        refused(PeerRefusal::UnknownNode),
+        refused(PeerRefusal::Fenced),
+    ] {
+        assert!(!is_identity_verdict(&error), "{error:?} waits out its backoff");
+    }
+}

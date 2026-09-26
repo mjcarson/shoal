@@ -3336,3 +3336,21 @@ nothing from the member for the hop-silence bound ([#143](resolved/silent-partit
 two seconds). A member that returns is heard from again and is cut its snapshot on the next try.
 **Kept**; the rebuild's time was not measured again with it, so its effect on that number is not
 claimed.
+
+### O74. A Zen1 node's compactor falls hundreds of jobs behind under the bench
+
+| | |
+| --- | --- |
+| **Rank** | **B32** — open |
+| **Impact** | Measured on the lab — titan's `Movie` compactor had 180 jobs queued when a snapshot cut reached the front after 9.4 minutes, under the mixed bench through all three members ([#174](resolved/snapshot-cut-queue.md)). Sealed segments wait for their merge, the groups' logs pass `retained_bytes`, and the retention budget forces purges ("forcing a group past a sealed segment") |
+| **Difficulty** | M |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | unknown until the cost of a segment merge is broken down |
+| **Benchmark** | the lab's rebuild under the bench: `taking a snapshot cut` `backlog=` on titan, and the rate of forced purges |
+
+Since #174 a cut no longer waits for the backlog, but every other job still does, and a backlog is
+held WAL. What is not known is where a segment merge's time goes on a four-core node that is also
+applying and serving the bench: the merge itself, the archive map's intents
+([O62](#o62-every-compaction-rewrites-the-shards-whole-archive-map)), or the scheduling of a compactor task on a busy shard. That is
+the measurement to take before any change.

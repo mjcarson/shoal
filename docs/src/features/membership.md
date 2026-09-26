@@ -73,7 +73,11 @@ pool attaches once the shards are up; a shard installs a newer version between t
 rebuilds its ring from the order with the M2 rule - tablet `t` on `nodes[t % N]`, then shard
 `(t / N) % shards` - and never routes against half a map. Before `Initialize`, the bootstrapper
 places every tablet on itself, which is the standalone ring with a name on it, and a joiner
-holds no tablets and answers every data query `NotInitialized`. `Initialize { nodes }` is the
+holds no tablets and answers every data query `NotInitialized`. ~~So does a member admitted
+after `Initialize` that no placement slot names~~: since
+[Resolved #169](../appendix/resolved/unplaced-member-forwards.md) such a member coordinates
+every query with every tablet remote (`Ring::coordinator`), because the map says an operator
+initialized the placement (`TabletMap::initialized`). `Initialize { nodes }` is the
 one explicit placement, applied once in the order given; a second is refused naming
 ~~[M9a](../distributed/milestones.md#m9a-safe-replica-migration)~~ the `Move` operation
 ([F45](replica-migration.md)). `cluster.dial` says where a
