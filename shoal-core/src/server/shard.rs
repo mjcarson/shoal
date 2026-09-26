@@ -4332,9 +4332,12 @@ where
                 ServerMsg::SnapshotCleaned { group, outcome } => {
                     self.handle_snapshot_cleaned(group, outcome)
                 }
-                ServerMsg::Digested { group, op, outcome } => {
-                    self.handle_digested(group, op, outcome)
-                }
+                ServerMsg::Digested {
+                    group,
+                    op,
+                    index,
+                    outcome,
+                } => self.handle_digested(group, op, index, outcome),
                 ServerMsg::Quarantine {
                     group,
                     action,

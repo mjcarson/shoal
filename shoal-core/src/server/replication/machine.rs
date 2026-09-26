@@ -100,11 +100,16 @@ pub struct MachineState {
     /// A received snapshot verified at open and not yet installed, which openraft installs
     /// when it builds the group and finds it past the checkpoint
     pub pending_install: Option<(PathBuf, SnapshotManifest)>,
-    /// The last few scrubs this replica applied, by operation, and what each came to
+    /// The last few scrubs this replica applied, by operation, with the index each was
+    /// applied at, and what each came to
     ///
     /// `Pending` from the apply until the cut's task posts, then the report; the leader polls
-    /// these over the lane ([F44](../../../../docs/src/features/repair.md)).
-    pub digests: VecDeque<(Uuid, DigestAnswer)>,
+    /// these over the lane ([F44](../../../../docs/src/features/repair.md)). One operation
+    /// can be applied at two indexes - a repair scrubs before and after its install, and a
+    /// copy restarted from a snapshot below the first replays it - so a report is kept only
+    /// for the index its operation was last applied at
+    /// ([Resolved #162](../../../../docs/src/appendix/resolved/stale-scrub-digest.md)).
+    pub digests: VecDeque<(Uuid, u64, DigestAnswer)>,
     /// Why this replica's copy is quarantined, if it is
     ///
     /// While set the group's tablets serve no read through this shard; writes still propose,
@@ -307,10 +312,11 @@ impl MachineState {
     /// # Arguments
     ///
     /// * `op` - The operation
-    pub fn note_scrub(&mut self, op: Uuid) {
+    /// * `index` - The index it was applied at
+    pub fn note_scrub(&mut self, op: Uuid, index: u64) {
         // the newest goes last, and only so many are kept
-        self.digests.retain(|(known, _)| *known != op);
-        self.digests.push_back((op, DigestAnswer::Pending));
+        self.digests.retain(|(known, _, _)| *known != op);
+        self.digests.push_back((op, index, DigestAnswer::Pending));
         while self.digests.len() > KEPT_REPORTS {
             self.digests.pop_front();
         }
@@ -321,13 +327,16 @@ impl MachineState {
     /// # Arguments
     ///
     /// * `op` - The operation
+    /// * `index` - The index the cut was taken at
     /// * `answer` - The report, or that the cut failed
-    pub fn record_digest(&mut self, op: Uuid, answer: DigestAnswer) {
-        // replace the pending entry, or add one for a report that outlived it
-        match self.digests.iter_mut().find(|(known, _)| *known == op) {
-            Some((_, slot)) => *slot = answer,
+    pub fn record_digest(&mut self, op: Uuid, index: u64, answer: DigestAnswer) {
+        // replace the pending entry of this index, or add one for a report that outlived it; a
+        // cut of an earlier application of the same operation is late, and says nothing
+        match self.digests.iter_mut().find(|(known, _, _)| *known == op) {
+            Some((_, at, slot)) if *at == index => *slot = answer,
+            Some(_) => {}
             None => {
-                self.digests.push_back((op, answer));
+                self.digests.push_back((op, index, answer));
                 while self.digests.len() > KEPT_REPORTS {
                     self.digests.pop_front();
                 }
@@ -350,8 +359,8 @@ impl MachineState {
         // a scrub this replica never applied, or forgot, is unknown
         self.digests
             .iter()
-            .find(|(known, _)| *known == op)
-            .map_or(DigestAnswer::Unknown, |(_, answer)| *answer)
+            .find(|(known, _, _)| *known == op)
+            .map_or(DigestAnswer::Unknown, |(_, _, answer)| *answer)
     }
 
     /// The remembered requests applied at or below an index, oldest first
@@ -625,6 +634,37 @@ mod tests {
             },
             applied,
         }
+    }
+
+    /// A late cut of an earlier application of an operation never answers for the newer one
+    ///
+    /// A copy restarted from a repair snapshot below the repair's first scrub replays that
+    /// scrub, then applies the verifying one under the same operation. On the lab the first
+    /// cut's task posted after the second was noted, overwrote its pending slot, and the
+    /// leader read the copy as still divergent (item 162).
+    #[test]
+    fn a_late_cut_does_not_answer_for_a_newer_scrub() {
+        use crate::server::replication::digest::{DigestIntegrity, DigestReport};
+        let mut state = MachineState::at(None, StoredMembershipOf::<DataConfig>::default(), Vec::new());
+        let op = Uuid::new_v4();
+        let report = |boundary: u64, digest: u64| DigestReport {
+            boundary,
+            partitions: 1,
+            rows: 1,
+            digest,
+            integrity: DigestIntegrity::Verified,
+            unverified: 0,
+            bytes: 0,
+        };
+        // applied at 10, then again at 20 before the first cut was read
+        state.note_scrub(op, 10);
+        state.note_scrub(op, 20);
+        // the first cut's report is late, and changes nothing
+        state.record_digest(op, 10, DigestAnswer::Report(report(10, 1)));
+        assert_eq!(state.digest_of(op), DigestAnswer::Pending);
+        // the second's is the answer
+        state.record_digest(op, 20, DigestAnswer::Report(report(20, 2)));
+        assert_eq!(state.digest_of(op), DigestAnswer::Report(report(20, 2)));
     }
 
     /// An identity older than the window, or than the newest identity forgotten, is expired;

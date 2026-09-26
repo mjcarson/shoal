@@ -137,8 +137,20 @@ pub async fn scrub_group<D: ShoalDatabase>(
                 }
             };
             match answer {
-                Ok(DigestAnswer::Report(report)) => {
+                // a report of this scrub's boundary; one of another is a cut of an earlier
+                // application of the same operation, and this one is still to come
+                // ([Resolved #162](../../../../docs/src/appendix/resolved/stale-scrub-digest.md))
+                Ok(DigestAnswer::Report(report)) if report.boundary == boundary => {
                     reports.insert(*member, Ok(report));
+                }
+                Ok(DigestAnswer::Report(report)) => {
+                    last.insert(
+                        *member,
+                        format!(
+                            "the member answered a cut at {} for the scrub at {boundary}",
+                            report.boundary
+                        ),
+                    );
                 }
                 Ok(DigestAnswer::Pending) => {
                     last.insert(*member, "the member's cut is still being read".to_string());

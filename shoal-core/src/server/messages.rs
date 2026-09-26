@@ -778,6 +778,8 @@ where
         group: crate::shared::identity::GroupId,
         /// The operation
         op: Uuid,
+        /// The index the scrub was applied at, which the report is of
+        index: u64,
         /// The report, or why there is none
         outcome: Result<crate::server::replication::DigestReport, String>,
     },

@@ -11,7 +11,7 @@ use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::Archive;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::Hasher;
 use std::marker::PhantomData;
 use std::path::PathBuf;
@@ -216,6 +216,43 @@ async fn active_writer<'a>(
 fn written_to(writer: Option<&DmaStreamWriter>) -> u64 {
     // an archive not yet created has had nothing written to it
     writer.map_or(0, DmaStreamWriter::current_pos)
+}
+
+/// Take the next job to run from the ones already sent
+///
+/// In the order they were sent, except that a snapshot cut is taken ahead of the merges queued
+/// before it. A cut records the archives as they stand between two jobs and the position
+/// merged so far, so it is exact wherever it runs; behind a compaction backlog under load it
+/// waited minutes, and a repair or a new replica waited with it
+/// ([O70](../../../../../../docs/src/appendix/optimizations.md#o70-a-snapshot-cut-waits-behind-the-compaction-backlog)).
+/// It never passes an install, a removal, a fault or a stop, whose effect on the archives it
+/// has to see or not see in the order they were asked for.
+///
+/// # Arguments
+///
+/// * `backlog` - The jobs already sent, oldest first
+fn next_job(backlog: &mut VecDeque<CompactionJob>) -> Option<CompactionJob> {
+    // the first cut with nothing but merges ahead of it
+    let cut = backlog
+        .iter()
+        .position(|job| !is_merge(job))
+        .filter(|index| matches!(backlog[*index], CompactionJob::Snapshot { .. }));
+    match cut {
+        Some(index) => backlog.remove(index),
+        None => backlog.pop_front(),
+    }
+}
+
+/// Whether a job only merges logs or rewrites archives, which a cut may be taken ahead of
+///
+/// # Arguments
+///
+/// * `job` - The job
+fn is_merge(job: &CompactionJob) -> bool {
+    matches!(
+        job,
+        CompactionJob::IntentLog { .. } | CompactionJob::Segment { .. } | CompactionJob::Archives
+    )
 }
 
 /// The first wait before a compaction job that failed before writing is tried again
@@ -1691,15 +1728,27 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     {
         // the jobs that failed before writing, waiting for their next try
         let mut retries: Vec<RetryJob> = Vec::new();
+        // the jobs already sent and not yet run, which a snapshot cut may be taken out of
+        let mut backlog: VecDeque<CompactionJob> = VecDeque::new();
         loop {
             // a retry that is due comes before the channel
             let due = retries
                 .iter()
                 .position(|retry| retry.at <= Instant::now())
                 .map(|index| retries.remove(index));
-            let (job, attempts) = match due {
-                Some(retry) => (retry.job, retry.attempts),
-                None => {
+            // everything already sent joins the backlog, so a cut waiting behind merges is seen
+            while let Ok(Some(job)) = self.jobs_rx.try_recv() {
+                backlog.push_back(job);
+            }
+            let next = if due.is_none() {
+                next_job(&mut backlog)
+            } else {
+                None
+            };
+            let (job, attempts) = match (due, next) {
+                (Some(retry), _) => (retry.job, retry.attempts),
+                (None, Some(job)) => (job, 0),
+                (None, None) => {
                     // wait for a job, but no longer than the earliest retry
                     let earliest = retries
                         .iter()
@@ -1746,5 +1795,66 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_job;
+    use crate::server::replication::snapshot::SnapshotProvenance;
+    use crate::server::tables::storage::CompactionJob;
+    use crate::shared::identity::{ClusterId, GroupId, NodeId};
+    use std::collections::VecDeque;
+    use std::path::PathBuf;
+
+    /// A cut of a group
+    fn cut(group: u64) -> CompactionJob {
+        CompactionJob::Snapshot {
+            group: GroupId(group),
+            schema_id: 0,
+            tablets: vec![0],
+            at_least: None,
+            memberships: Vec::new(),
+            retries: Vec::new(),
+            expired_before: 0,
+            provenance: SnapshotProvenance::at(ClusterId::mint(), NodeId::mint(), 6),
+            dir: PathBuf::from("/tmp"),
+        }
+    }
+
+    /// A merge of an intent log
+    fn merge(generation: u64) -> CompactionJob {
+        CompactionJob::IntentLog {
+            path: PathBuf::from("/tmp/log"),
+            generation,
+        }
+    }
+
+    /// A cut is taken ahead of the merges queued before it, and never ahead of anything else
+    ///
+    /// Under the lab's update bench a repair's cut waited two minutes behind the Movie
+    /// compactor's backlog (O70); a cut records the archives as they stand, so it is exact
+    /// wherever it runs among merges. An install ahead of it has to be seen, so the cut waits
+    /// for it.
+    #[test]
+    fn a_cut_is_taken_ahead_of_queued_merges_only() {
+        // two merges, then a cut: the cut first, then the merges in order
+        let mut backlog: VecDeque<CompactionJob> =
+            [merge(1), merge(2), cut(7), merge(3)].into_iter().collect();
+        assert!(matches!(next_job(&mut backlog), Some(CompactionJob::Snapshot { .. })));
+        assert!(matches!(next_job(&mut backlog), Some(CompactionJob::IntentLog { generation: 1, .. })));
+        assert!(matches!(next_job(&mut backlog), Some(CompactionJob::IntentLog { generation: 2, .. })));
+        // an install ahead of a cut is run first
+        let install = CompactionJob::Install {
+            group: GroupId(7),
+            tablets: vec![0],
+            path: PathBuf::from("/tmp/snap"),
+        };
+        let mut backlog: VecDeque<CompactionJob> =
+            [merge(1), install, cut(7)].into_iter().collect();
+        assert!(matches!(next_job(&mut backlog), Some(CompactionJob::IntentLog { generation: 1, .. })));
+        assert!(matches!(next_job(&mut backlog), Some(CompactionJob::Install { .. })));
+        assert!(matches!(next_job(&mut backlog), Some(CompactionJob::Snapshot { .. })));
+        assert!(next_job(&mut backlog).is_none());
     }
 }

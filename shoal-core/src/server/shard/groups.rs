@@ -1325,7 +1325,7 @@ where
             .and_then(|replication| replication.groups.get(&group))
             .map(|slot| slot.spec.tablets.clone())
             .unwrap_or_default();
-        state.borrow_mut().note_scrub(op);
+        state.borrow_mut().note_scrub(op, index);
         if let Some(replication) = self.replication.as_mut() {
             replication.integrity.scrubs += 1;
         }
@@ -1334,9 +1334,11 @@ where
             Ok(cut) => cut,
             Err(error) => {
                 event!(Level::ERROR, msg = "a scrub could not take its cut", group = %group, op = %op, error = ?error);
-                state
-                    .borrow_mut()
-                    .record_digest(op, crate::server::replication::DigestAnswer::Unknown);
+                state.borrow_mut().record_digest(
+                    op,
+                    index,
+                    crate::server::replication::DigestAnswer::Unknown,
+                );
                 return;
             }
         };
@@ -1347,7 +1349,14 @@ where
                 .finish(schema_id, &tablets, index)
                 .await
                 .map_err(|error| format!("{error:?}"));
-            let _ = tx.send(ServerMsg::Digested { group, op, outcome }).await;
+            let _ = tx
+                .send(ServerMsg::Digested {
+                    group,
+                    op,
+                    index,
+                    outcome,
+                })
+                .await;
         })
         .detach();
     }
@@ -1358,11 +1367,13 @@ where
     ///
     /// * `group` - The group
     /// * `op` - The operation
+    /// * `index` - The index the scrub was applied at
     /// * `outcome` - The report, or why there is none
     pub(super) fn handle_digested(
         &mut self,
         group: GroupId,
         op: Uuid,
+        index: u64,
         outcome: Result<crate::server::replication::DigestReport, String>,
     ) {
         let Some(replication) = self.replication.as_mut() else {
@@ -1376,15 +1387,19 @@ where
                 event!(Level::INFO, msg = "a scrub's digest is in", group = %group, op = %op, boundary = report.boundary, digest = format!("{:016x}", report.digest), partitions = report.partitions, rows = report.rows, integrity = ?report.integrity, unverified = report.unverified);
                 replication.integrity.scrub_bytes += report.bytes;
                 replication.integrity.scrub_partitions += report.partitions;
-                slot.state
-                    .borrow_mut()
-                    .record_digest(op, crate::server::replication::DigestAnswer::Report(report));
+                slot.state.borrow_mut().record_digest(
+                    op,
+                    index,
+                    crate::server::replication::DigestAnswer::Report(report),
+                );
             }
             Err(error) => {
                 event!(Level::ERROR, msg = "a scrub's cut could not be read", group = %group, op = %op, error);
-                slot.state
-                    .borrow_mut()
-                    .record_digest(op, crate::server::replication::DigestAnswer::Unknown);
+                slot.state.borrow_mut().record_digest(
+                    op,
+                    index,
+                    crate::server::replication::DigestAnswer::Unknown,
+                );
             }
         }
     }
