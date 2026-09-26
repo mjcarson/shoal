@@ -23,7 +23,7 @@ pub mod model;
 pub mod stats;
 
 pub use actions::{ClusterAction, Follow};
-pub use model::ClusterModel;
+pub use model::{ClusterModel, MemberRow};
 pub use stats::StatsModel;
 
 use shoal::Shoal;

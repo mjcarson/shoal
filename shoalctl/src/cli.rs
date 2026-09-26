@@ -113,6 +113,19 @@ pub enum ClusterCommand {
         #[clap(long)]
         rebalance: bool,
     },
+    /// Rebuild one node from its peers under a new identity: stop it, wipe it, join it as a new
+    /// member and move every set the old identity held onto it
+    /// ([F56](../../docs/src/features/cluster-rebuild.md))
+    Rebuild {
+        /// The inventory
+        #[clap(flatten)]
+        inventory: InventoryArg,
+        /// The node to rebuild, by its inventory name
+        node: String,
+        /// Confirm that everything under the node's storage roots is deleted
+        #[clap(long)]
+        yes: bool,
+    },
     /// Move data onto members holding less than their share, and follow the plan
     Rebalance {
         /// The inventory
@@ -337,6 +350,15 @@ where
         } => {
             Deployment::open(&inventory.inventory)?
                 .add::<S>(&node, wipe, rebalance)
+                .await
+        }
+        ClusterCommand::Rebuild {
+            inventory,
+            node,
+            yes,
+        } => {
+            Deployment::open(&inventory.inventory)?
+                .rebuild::<S>(&node, yes)
                 .await
         }
         ClusterCommand::Rebalance { inventory } => {

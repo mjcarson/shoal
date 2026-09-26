@@ -25,6 +25,7 @@ pub mod remote;
 pub mod render;
 pub mod state;
 pub mod unit;
+pub mod rebuild;
 pub mod upgrade;
 
 pub use inventory::Inventory;
