@@ -544,3 +544,21 @@ wiped voter under its old identity votes for any candidate, which can lose a com
 another voter fails before the refill. The todo now says what a safe `cluster rebuild` has to
 check.
 
+### The suite on the fixed build
+
+The fault suite a third time, on the committed build with #158 and #159, after hyperion's
+rebuild (`target/lab/suite-r159.log`):
+
+| Fault | Acknowledged inserts | Lost | Seconds at zero |
+| --- | --- | --- | --- |
+| Kill the node leading the most groups (hyperion) | 487,988 | 0 | 0 |
+| Partition hyperion by dropped packets, 20 s | 487,999 | 0 | 3 |
+| Pause the control leader (europa), 20 s | 517,025 | 0 | 3 |
+| Kill every node at once | 387,733 | 0 | 12 |
+
+Every acknowledged insert was read back through every member, kill-all included. Each node
+restarted only when its fault restarted it (europa 1, titan 1, hyperion 2), and all three were
+active afterwards. The seconds at zero are section 5's: a silent partition's or a pause's first
+seconds ([#143](../appendix/resolved/silent-partition-hops.md#still-open)), and kill-all's
+elections.
+
