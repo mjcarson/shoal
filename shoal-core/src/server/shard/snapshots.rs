@@ -1122,6 +1122,19 @@ where
             if let Err(error) = self.rehand_segments(group, boundary) {
                 event!(Level::ERROR, msg = "the segments above a repair install could not be handed again", group = %group, boundary, ?error);
             }
+            // and the log below the boundary is purged, since it no longer says what the copy
+            // holds: now if the group is up, or once it is
+            // ([Resolved #168](../../../../docs/src/appendix/resolved/restored-rows-outside-the-log.md))
+            if let Some(slot) = self
+                .replication
+                .as_mut()
+                .and_then(|replication| replication.groups.get_mut(&group))
+            {
+                match slot.raft.clone() {
+                    Some(raft) => super::groups::purge_installed(group, Some(raft), boundary),
+                    None => slot.purge_through = Some(boundary),
+                }
+            }
         }
     }
 

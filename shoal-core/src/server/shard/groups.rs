@@ -94,6 +94,36 @@ const BALANCE_RETRY: Duration = Duration::from_secs(60);
 /// How many deadline ticks pass between two sweeps of the WAL segments
 const REPORT_EVERY_TICKS: u32 = 10;
 
+/// Purge a copy's log through the boundary a repair or restore installed it at
+///
+/// The install replaced what the copy holds outside the log, so the entries below the
+/// boundary are no longer its history: a member fed from them would get none of what the
+/// install put there. Purged, the log sends such a member a snapshot instead
+/// ([Resolved #168](../../../../docs/src/appendix/resolved/restored-rows-outside-the-log.md)).
+///
+/// # Arguments
+///
+/// * `group` - The group
+/// * `raft` - Its handle, if it is up
+/// * `boundary` - The install's boundary
+pub(super) fn purge_installed<D: ShoalDatabase>(
+    group: GroupId,
+    raft: Option<Raft<DataConfig, GroupMachine<D>>>,
+    boundary: u64,
+) {
+    let Some(raft) = raft else {
+        return;
+    };
+    glommio::spawn_local(async move {
+        // openraft purges up to the snapshot the install left it, which is at the boundary
+        match raft.trigger().purge_log(boundary).await {
+            Ok(()) => event!(Level::INFO, msg = "purged the log below an install", group = %group, boundary),
+            Err(error) => event!(Level::WARN, msg = "the log below an install could not be purged", group = %group, boundary, %error),
+        }
+    })
+    .detach();
+}
+
 /// How long a stalling copy that leads waits for its lead to move before its core stops
 ///
 /// The group's writes commit and wait on a machine that applies nothing meanwhile, so it is
@@ -160,6 +190,12 @@ pub(super) struct Group<D: ShoalDatabase> {
     /// never races a start still in flight over the same store
     /// ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md)).
     pub(super) start_failed: bool,
+    /// The boundary of a repair or restore install whose log below it is still to be purged
+    ///
+    /// Such an install replaces the copy's rows outside the log, so the log below the
+    /// boundary no longer says what the copy holds, and a member fed from it would be missing
+    /// what the install put there ([Resolved #168](../../../../docs/src/appendix/resolved/restored-rows-outside-the-log.md)).
+    pub(super) purge_through: Option<u64>,
 }
 
 /// The directory under a shard's WAL where every volatile group it ever held is marked
@@ -713,6 +749,7 @@ where
                 held_before,
                 core_dead: None,
                 start_failed: false,
+                purge_through: None,
             };
             replication.groups.insert(spec.id, group);
             // the handle is built on a task of its own, since building it applies
@@ -1030,6 +1067,10 @@ where
                 // a new handle is a new core, whatever the last one came to
                 slot.core_dead = None;
                 slot.start_failed = false;
+                // an install that landed while the group was coming up has its log purged now
+                if let Some(boundary) = slot.purge_through.take() {
+                    purge_installed(group, slot.raft.clone(), boundary);
+                }
                 // a volatile group is marked as held whenever it comes up here, so the next
                 // run of this shard knows an empty copy of it lost its log; what this run
                 // knows stays what the scan at its start said

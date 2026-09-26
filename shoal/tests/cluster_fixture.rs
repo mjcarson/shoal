@@ -18624,15 +18624,9 @@ async fn an_unreadable_partition_stalls_one_copy_and_repairs_it() -> Result<(), 
         Duration::from_secs(20),
     )
     .await?;
-    // and writes of the stalled group coordinated through it are answered
-    let through = Shoal::<TestDbClient>::new(&addr_f).await.map_err(ok)?;
-    through
-        .send_one(Note {
-            key: live[1],
-            text: "while-stalled".to_string(),
-        })
-        .await
-        .map_err(ok)?;
+    // and writes of the stalled group coordinated through it are refused retriably, and land
+    // once retried, as a client retries `NotLeader`
+    write_note_eventually(&addr_f, live[1], "while-stalled", Duration::from_secs(60)).await?;
     // the leader repairs it with nobody asking: the quarantine is lifted
     wait_member_quarantined(&mut cluster, follower, false, Duration::from_secs(120))?;
     let view = groups_of(&mut cluster, follower)?;
@@ -19192,5 +19186,82 @@ async fn a_stalled_leader_hands_its_lead_on_first() -> Result<(), FixtureError> 
         dead_core.first()
     );
     assert_eq!(cluster.node(leader).failure(), None, "the stalled leader stopped");
+    Ok(())
+}
+
+/// A copy moved onto a member after a restore holds the restored rows (item 168)
+///
+/// A restore installs every group's file outside the log, at a boundary a few entries in. On
+/// the lab, a node rebuilt into a restored cluster was fed by the groups' leaders from their
+/// logs, which still began at entry one and held none of the restored rows: 331,350 of its
+/// movies were missing and a default read missed 82,761. Every copy that installs a restore or
+/// a repair now purges its log through the install's boundary, so a copy moved in later has to
+/// be sent a snapshot, and it holds every restored row.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_moved_in_after_a_restore_holds_the_restored_rows() -> Result<(), FixtureError> {
+    use shoal::client::{ReadLevel, SendOptions};
+    use shoal::shared::protocol::PROTOCOL_VERSION;
+    let backups = utils::test_dir();
+    // a backup of some notes from one cluster
+    let mut old = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    old.wait_voters(0, 3)?;
+    old.node_mut(0).command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
+    for node in 0..3 {
+        wait_activated(&mut old, node, PROTOCOL_VERSION, Duration::from_secs(30))?;
+    }
+    let addr = old.node(0).endpoints.client.to_string();
+    let keys: Vec<u64> = (37_000..37_080).collect();
+    for key in &keys {
+        write_note(&addr, *key, &format!("v-{key}")).await?;
+    }
+    wait_digests_equal(&mut old, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    let op = plan_as_process(&mut old, 0, &format!("BACKUP {}", backups.path().display()))?;
+    wait_operation_done(&mut old, 0, "BACKUP_STATUS", op, Duration::from_secs(120))?;
+    let backup_dir = backups.path().join(op.to_string());
+    drop(old);
+    // restored into three placed nodes, with a fourth spare
+    let mut new = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(2)),
+    )
+    .await?;
+    let restore = plan_as_process(&mut new, 0, &format!("RESTORE {}", backup_dir.display()))?;
+    wait_operation_done(&mut new, 0, "RESTORE_STATUS", restore, Duration::from_secs(300))?;
+    // one set moved from node two onto the spare
+    let key = keys[0];
+    let (group, _) = group_of(&mut new, 0, "Note", key)?;
+    let moved = note_keys_in_group(&mut new, &group, 37_000, 80)?
+        .into_iter()
+        .filter(|key| *key < 37_080)
+        .collect::<Vec<_>>();
+    assert!(!moved.is_empty(), "no restored key in group {group}");
+    let op = move_as_process(&mut new, 0, key, 2, 3)?;
+    wait_move_done_via(&mut new, 0, op, Duration::from_secs(120))?;
+    assert!(hosts_group(&mut new, 3, &group)?, "the spare does not host {group}");
+    // every restored key of the set, read from the spare's own copy
+    let addr3 = new.node(3).endpoints.client.to_string();
+    let mut missing = Vec::new();
+    for key in &moved {
+        let read = read_note_with(&addr3, *key, &SendOptions::new().read(ReadLevel::One)).await;
+        match read {
+            Ok(Some(text)) if text == format!("v-{key}") => {}
+            other => missing.push((*key, format!("{other:?}"))),
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "the moved copy is missing {} of {} restored rows: {:?}",
+        missing.len(),
+        moved.len(),
+        &missing[..missing.len().min(3)]
+    );
     Ok(())
 }

@@ -1019,8 +1019,22 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             })
             .buffered(CUT_READS_IN_FLIGHT);
         while let Some(read) = reads.next().await {
-            // every record verified against its checksum as it is read, in the order asked
-            let (key, read) = read?;
+            // every record verified against its checksum as it is read, in the order asked; a
+            // corrupt one fails the cut, since a copy's corruption is never a source, and
+            // quarantines the copy as a read that met it would. A backup's cut on the lab found
+            // four such records nothing had read, and nothing said so
+            // ([Resolved #165](../../../../../../docs/src/appendix/resolved/corrupt-record-compaction-loop.md))
+            let (key, read) = match read {
+                Ok(read) => read,
+                Err(error) => {
+                    if let ServerError::Shoal(ShoalError::CorruptArchive { partition_id, .. }) =
+                        &error
+                    {
+                        self.report_corrupt(*partition_id, false).await;
+                    }
+                    return Err(error);
+                }
+            };
             writer.record(key, &read).await?;
         }
         // the trailer: what was remembered at or below the boundary, oldest first
