@@ -1044,7 +1044,34 @@ impl Deployment {
                     return Err(eyre!("{line} was refused: {} ({:?})", error.msg, error.code()))
                 }
             }
-            (action.followed(op), follow)
+            let followed = action.followed(op);
+            // a removal or a decommission asked again for a member already on its way out
+            // retries that member's open plan rather than recording one, so that plan is the
+            // one followed ([Resolved #177](../../../docs/src/appendix/resolved/blocked-plan-retry.md))
+            let retried = if follow == Follow::Plan
+                && crate::components::follow_once(shoal, followed, follow)
+                    .await
+                    .is_err()
+            {
+                let kind = line.split_whitespace().next().unwrap_or_default();
+                let model = crate::cluster::poll(shoal).await.map_err(|error| eyre!(error))?;
+                let open: Vec<Uuid> = model
+                    .plans
+                    .iter()
+                    .filter(|plan| plan.kind == kind && !plan.phase.eq_ignore_ascii_case("done"))
+                    .filter_map(|plan| plan.op.parse().ok())
+                    .collect();
+                match open.as_slice() {
+                    [plan] => {
+                        step(None, &format!("{kind} was asked again: retrying its plan {plan}"));
+                        Some(*plan)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            (retried.unwrap_or(followed), follow)
         };
         // follow the record, printing it whenever it changes, until it is done
         let deadline = Instant::now() + timeout;

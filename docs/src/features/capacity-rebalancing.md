@@ -136,7 +136,10 @@ moving, the planner is asked what is left, and its steps are appended, or its bl
 recorded, or - with nothing left - a drain is `Finishing` and a rebalance is `Done`. One
 proposal per plan is in flight at a time, and a leader change resumes from the record: a
 moving step's move is its own record, driven by the group's leader as [F45](replica-migration.md)
-built it.
+built it. A set whose move failed twice is left blocked by name. ~~Nothing could plan it again~~:
+since [Resolved #177](../appendix/resolved/blocked-plan-retry.md), asking the same decommission or
+removal again forgives the plan's failures so far (`PlanRecord::retried_from`), and the next pass
+plans the set again.
 
 A `Finishing` drain is `finish_removal`: the tombstone first - `ControlCommand::Tombstone`,
 which moves the member to `Removed`, clears its grace and records `tombstones[node]` - while

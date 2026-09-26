@@ -232,6 +232,12 @@ pub struct PlanRecord {
     pub requested_at: u64,
     /// How many times the leader has derived steps for it
     pub replanned: u32,
+    /// The first step whose failure still counts toward leaving a set blocked
+    ///
+    /// Asking the same operation again moves it past every step so far, so a set blocked by
+    /// failed moves is planned afresh ([Resolved #177](../../../../docs/src/appendix/resolved/blocked-plan-retry.md)).
+    #[serde(default)]
+    pub retried_from: usize,
 }
 
 impl PlanRecord {
@@ -255,7 +261,17 @@ impl PlanRecord {
             principal: principal.to_string(),
             requested_at,
             replanned: 0,
+            retried_from: 0,
         }
+    }
+
+    /// Forgive every failure so far, so a set the failures blocked is planned again
+    ///
+    /// Answers whether the plan was blocked, which is when this changes what happens next.
+    pub fn retry(&mut self) -> bool {
+        // the failures that count start after every step taken so far
+        self.retried_from = self.steps.len();
+        self.blocked.is_some()
     }
 
     /// Whether nothing more will happen under this plan
@@ -276,9 +292,11 @@ impl PlanRecord {
     /// * `tablet` - The set's first tablet
     #[must_use]
     pub fn failures_of(&self, tablet: u16) -> u32 {
+        // only the failures since the operation was last asked again count
         let failed = self
             .steps
             .iter()
+            .skip(self.retried_from)
             .filter(|step| step.tablet == tablet && matches!(step.state, StepState::Failed { .. }))
             .count();
         u32::try_from(failed).unwrap_or(u32::MAX)
