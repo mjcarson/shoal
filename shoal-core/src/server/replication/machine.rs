@@ -135,6 +135,22 @@ pub struct MachineState {
     /// and by a snapshot's manifest, so a copy built from either refuses what its source
     /// would ([F45](../../../../docs/src/features/replica-migration.md)).
     pub expired_before: u64,
+    /// Where this copy stopped applying, if a replicated apply could not read a partition
+    ///
+    /// A stalled copy applies nothing more: its log and its vote are intact, but what it would
+    /// compute without the read would diverge from its leader's. It is quarantined as
+    /// unreadable, and a restart from a repair snapshot is what clears this
+    /// ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md)).
+    pub stalled: Option<Stall>,
+}
+
+/// Where a copy stopped applying, and on what
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stall {
+    /// The log index of the entry that could not be applied
+    pub index: u64,
+    /// The partition its apply could not read
+    pub partition: u64,
 }
 
 /// The millisecond a time-ordered identity was minted at, or none for one that is not
@@ -193,6 +209,7 @@ impl MachineState {
             repair_pending: false,
             memberships: VecDeque::new(),
             expired_before: 0,
+            stalled: None,
         }
     }
 
@@ -325,6 +342,11 @@ impl MachineState {
     /// * `op` - The operation
     #[must_use]
     pub fn digest_of(&self, op: Uuid) -> DigestAnswer {
+        // a stalled copy will never apply the scrub, and says so rather than making the
+        // leader poll it until the scrub's deadline
+        if self.stalled.is_some() {
+            return DigestAnswer::Stalled;
+        }
         // a scrub this replica never applied, or forgot, is unknown
         self.digests
             .iter()

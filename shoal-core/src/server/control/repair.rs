@@ -63,6 +63,11 @@ pub enum QuarantineReason {
     Divergent,
     /// An operator named it
     Operator,
+    /// A replicated apply could not read one of its partitions, so the copy stopped applying
+    ///
+    /// Decided by the copy itself, which needs no judgement: it is repaired from the group's
+    /// leader without an operator ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md)).
+    Unreadable,
 }
 
 impl QuarantineReason {
@@ -73,6 +78,7 @@ impl QuarantineReason {
             QuarantineReason::Checksum => "checksum",
             QuarantineReason::Divergent => "divergent",
             QuarantineReason::Operator => "operator",
+            QuarantineReason::Unreadable => "unreadable",
         }
     }
 }
@@ -144,6 +150,7 @@ impl QuarantinedCopy {
             reason: match member.reason.as_str() {
                 "checksum" => QuarantineReason::Checksum,
                 "divergent" => QuarantineReason::Divergent,
+                "unreadable" => QuarantineReason::Unreadable,
                 _ => QuarantineReason::Operator,
             },
         }

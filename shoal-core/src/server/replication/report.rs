@@ -82,6 +82,12 @@ pub struct GroupReport {
     /// ([Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub core_dead: Option<String>,
+    /// Whether this copy stopped applying on a partition it could not read
+    ///
+    /// Such a copy is down and quarantined as unreadable until its leader repairs it, and is
+    /// not counted as starting ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md)).
+    #[serde(default)]
+    pub stalled: bool,
     /// The term this shard's copy of the group is at
     ///
     /// Climbs by one per election; a copy standing for an election nobody grants climbs it
@@ -437,6 +443,10 @@ pub struct NodeReplication {
     /// ([Resolved #137](../../../../docs/src/appendix/resolved/upgrade-waits-for-groups.md)).
     #[serde(default)]
     pub starting: usize,
+    /// How many of the node's copies stopped applying on a partition they could not read
+    /// ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md))
+    #[serde(default)]
+    pub stalled: usize,
     /// How many of the node's copies are quarantined ([F44](../../../../docs/src/features/repair.md))
     #[serde(default)]
     pub quarantined: usize,
@@ -490,7 +500,17 @@ impl NodeReplication {
                 .sum(),
             starting: shards
                 .iter()
-                .map(|shard| shard.groups.iter().filter(|group| !group.up).count())
+                .map(|shard| {
+                    shard
+                        .groups
+                        .iter()
+                        .filter(|group| !group.up && !group.stalled)
+                        .count()
+                })
+                .sum(),
+            stalled: shards
+                .iter()
+                .map(|shard| shard.groups.iter().filter(|group| group.stalled).count())
                 .sum(),
             quarantined: shards
                 .iter()

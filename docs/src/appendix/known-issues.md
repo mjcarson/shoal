@@ -498,35 +498,6 @@ a restart once space returns brings it back (on the lab with no restart by hand)
 wanted is to shed appends below a reserve with a retriable refusal, so that a nearly full node
 keeps serving reads rather than stopping.
 
-### 160. A copy that cannot read one partition stops its node
-
-A replicated apply that needs a partition's archived copy parks on the read, and a read that
-fails outright fails the shard: *"partition … could not be read for a replicated apply"*
-(`resume_parked`, `shard/groups.rs`). That is the right choice for the group, since a replica
-that applied without the read would diverge from its leader. But the shard hosts every group on
-its core, and a failed shard stops the node. So one bad record stops every copy the node holds.
-If the record is in the log above the checkpoint, the node stops again at every start: on the
-lab, hyperion did so 31 times after [#159](resolved/map-ahead-of-archive.md) left a torn entry in
-its map. Its other 35 groups had healthy copies the cluster could not use.
-
-What it needs: the read's failure quarantines that group's copy, as a scrub's checksum failure
-does ([F44](../features/repair.md)), and the group stops applying on this node until a repair
-restarts it from a snapshot. The shard, and every other group on it, keeps running. The hard
-part is the apply stream: openraft hands the state machine entries in order and has no way to
-skip one. So the group has to be stopped here, not its entry, and its copy restarted by the
-repair path, which already knows how to do that for a quarantined durable copy. Found by the
-[distributed cluster testing](../cluster-testing/correctness.md#5-regression-pass) chapter.
-
-### 161. A start that fails leaves an empty archive behind
-
-`ArchiveMap::new` gives every open a new active archive id, and the compactor creates the file
-when it starts. A start that fails after that and before anything is compacted leaves an empty
-archive file, which the next start does not know to remove, since the map never recorded it. A
-clean shutdown deletes its own empty active archive (`FileSystemCompactor::shutdown`), but a
-failed start does not shut down. On the lab, hyperion's 31 failed starts left 30 empty files
-under `Movie/archives/`. Harmless beyond the clutter and an inode each. Found with
-[#159](resolved/map-ahead-of-archive.md).
-
 ---
 
 ## Low — hygiene and documentation drift

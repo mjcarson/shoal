@@ -51,8 +51,9 @@ use crate::server::replication::snapshot::{
 use crate::server::replication::{
     ApplyOutcome, BarrierAnswer, CommandResult, DataConfig, GroupMachine, GroupNetwork,
     GroupReport, IntegrityStats, Lease, MachineState, ProposalOutcome, Remembered, ReplicationVerb,
-    ResultKind, RpcFailure, ShardNetwork, ShardPeer, ShardReplication, SnapshotStats,
+    ResultKind, RpcFailure, ShardNetwork, ShardPeer, ShardReplication, SnapshotStats, Stall,
 };
+use crate::server::control::repair::{Quarantine, QuarantineAction, QuarantineReason};
 use crate::server::ring::Ring;
 use crate::server::stage_profile::{StageDurability, StageOp, Stamp};
 use crate::server::tables::storage::fs::TabletUsage;
@@ -146,6 +147,12 @@ pub(super) struct Group<D: ShoalDatabase> {
     /// answer here, so the report says the copy is down rather than what it last was
     /// ([Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md)).
     pub(super) core_dead: Option<String>,
+    /// Whether this copy's start ended without a handle because its replay stalled
+    ///
+    /// Set once the task building the handle has given up, so a repair that restarts the group
+    /// never races a start still in flight over the same store
+    /// ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md)).
+    pub(super) start_failed: bool,
 }
 
 /// The directory under a shard's WAL where every volatile group it ever held is marked
@@ -338,6 +345,9 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) driven: HashMap<(Uuid, GroupId), crate::server::control::repair::RepairPhase>,
     /// When each group this shard leads is next due a scheduled scrub
     pub(super) next_scrub: HashMap<GroupId, Instant>,
+    /// When each group this shard leads may next ask for the repair of a stalled member
+    /// ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md))
+    pub(super) next_stall_repair: HashMap<GroupId, Instant>,
     /// The group moves this shard is driving right now, by operation and group
     /// ([F45](../../../../docs/src/features/replica-migration.md))
     pub(super) driving_moves: HashSet<(Uuid, GroupId)>,
@@ -468,6 +478,7 @@ where
             driving: HashSet::new(),
             driven: HashMap::new(),
             next_scrub: HashMap::new(),
+            next_stall_repair: HashMap::new(),
             driving_moves: HashSet::new(),
             driven_moves: HashMap::new(),
             retired,
@@ -688,6 +699,7 @@ where
                 up_since: None,
                 held_before,
                 core_dead: None,
+                start_failed: false,
             };
             replication.groups.insert(spec.id, group);
             // the handle is built on a task of its own, since building it applies
@@ -758,9 +770,14 @@ where
         if replication.active_installs.contains_key(&group) {
             return Err(format!("group {group} is installing a snapshot already"));
         }
-        let Some(previous) = slot.raft.take() else {
-            return Err(format!("group {group} is still starting"));
+        // a copy whose start stalled has no handle to stop, and nothing still starting
+        let previous = match slot.raft.take() {
+            Some(previous) => Some(previous),
+            None if slot.start_failed => None,
+            None => return Err(format!("group {group} is still starting")),
         };
+        slot.start_failed = false;
+        slot.core_dead = None;
         let table = slot.table;
         let tablets = slot.spec.tablets.clone();
         // the state a restart would find: the checkpoint, and the file pending past it
@@ -822,7 +839,7 @@ where
             network,
             slot.store.clone(),
             machine,
-            Some(previous),
+            previous,
             slot.held_before,
         );
         Ok(())
@@ -1000,6 +1017,9 @@ where
                 event!(Level::INFO, msg = "a tablet group is up", group = %group, members = slot.spec.members.len());
                 slot.raft = Some(raft);
                 slot.up_since = Some(Instant::now());
+                // a new handle is a new core, whatever the last one came to
+                slot.core_dead = None;
+                slot.start_failed = false;
                 // a volatile group is marked as held whenever it comes up here, so the next
                 // run of this shard knows an empty copy of it lost its log; what this run
                 // knows stays what the scan at its start said
@@ -1029,6 +1049,25 @@ where
                     let _ = raft.shutdown().await;
                 })
                 .detach();
+            }
+            // a copy whose replay stalled on an unreadable partition waits for its repair,
+            // and the shard and every other group on it carry on
+            // ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md))
+            (Some(slot), Err(error)) if slot.state.borrow().stalled.is_some() => {
+                event!(Level::ERROR, msg = "a tablet group's start stalled on a partition it could not read; the copy waits for a repair", group = %group, error);
+                slot.start_failed = true;
+                // the writes that waited for the handle are refused, retriably
+                let waiting = std::mem::take(&mut slot.waiting);
+                for (meta, table, key, _) in waiting {
+                    // truncation cannot happen: a tablet id is twelve bits
+                    #[allow(clippy::cast_possible_truncation)]
+                    let tablet = Ring::tablet_of(key) as u16;
+                    let outcome = ProposalOutcome::NotLeader(format!(
+                        "group {group}'s copy on this node stalled on a partition it could not read, and is being repaired"
+                    ));
+                    self.answer_proposal(meta, table, tablet, None, outcome, 0)
+                        .await?;
+                }
             }
             // a group that could not be built is a shard that cannot serve its tablets
             (_, Err(error)) => {
@@ -1350,7 +1389,9 @@ where
     }
 
     /// Resume every apply batch parked on a partition, now that its read has landed or failed
-    /// Resume every apply batch parked on a partition, now that its read has landed or failed
+    ///
+    /// A read that failed outright stalls the copy the batch belongs to, and nothing else on
+    /// this shard ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md)).
     ///
     /// # Arguments
     ///
@@ -1370,17 +1411,75 @@ where
         let Some(parked) = parked else {
             return Ok(());
         };
-        // a replica that cannot read its archive is not a replica: a result computed without
-        // the read would diverge from the leader's
+        // a replica that cannot read its archive cannot apply past it: a result computed
+        // without the read would diverge from the leader's. So that copy stops, and the shard
+        // and every other group on it carry on
         if failed {
-            return Err(ServerError::GlommioGeneric(format!(
-                "partition {partition} of {table} could not be read for a replicated apply"
-            )));
+            for batch in parked {
+                self.stall_copy(batch, table, partition).await;
+            }
+            return Ok(());
         }
         for batch in parked {
             self.run_apply(batch, true).await?;
         }
         Ok(())
+    }
+
+    /// Stop one copy applying, on an entry whose partition it could not read
+    ///
+    /// The copy is quarantined as unreadable, which the leader repairs from a snapshot without
+    /// an operator, and the batch is let go: its responders fail and the machine's apply with
+    /// them, which ends this copy's core - or its start, if the entry was being replayed - and
+    /// nothing else. The log and the vote are untouched, since neither depends on the archives.
+    /// A copy that leads hands the lead to another voter first, so the group's writes are not
+    /// held for an election.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch` - The parked batch, its entry that could not be applied at the front
+    /// * `table` - The table
+    /// * `partition` - The partition that could not be read
+    async fn stall_copy(&mut self, batch: ParkedApply, table: D::TableNames, partition: u64) {
+        let group = batch.group;
+        let node = self.node_id();
+        // where the copy stops: the entry at the front of the batch
+        let index = batch
+            .entries
+            .front()
+            .map_or(0, |(entry, _)| entry.log_id.index);
+        let Some(slot) = self
+            .replication
+            .as_mut()
+            .and_then(|replication| replication.groups.get_mut(&group))
+        else {
+            return;
+        };
+        slot.state.borrow_mut().stalled = Some(Stall { index, partition });
+        // a leader hands its lead on before its core stops; best effort, since an election
+        // follows the stop anyway
+        let raft = slot.raft.clone();
+        let me = slot.spec.me(node);
+        if let Some(raft) = raft {
+            let leads = raft.metrics().borrow_watched().current_leader == Some(me);
+            let successor = raft.voter_ids().find(|voter| *voter != me);
+            if let (true, Some(successor)) = (leads, successor) {
+                if let Err(error) = raft.trigger().transfer_leader(successor).await {
+                    event!(Level::WARN, msg = "a stalling copy could not hand its lead on", group = %group, to = %successor, %error);
+                }
+            }
+        }
+        event!(Level::ERROR, msg = "a replicated apply could not read its partition; this copy stops applying until it is repaired", group = %group, table = %table, partition = format!("{partition:016x}"), index);
+        // quarantined as unreadable, persisted and reported, which the leader repairs
+        let quarantine = Quarantine {
+            reason: QuarantineReason::Unreadable,
+            at: index,
+            op: Uuid::nil(),
+        };
+        self.handle_quarantine(group, QuarantineAction::Set(quarantine), None)
+            .await;
+        // the batch let go ends the apply, and with it this copy's core or its start
+        drop(batch);
     }
 
     /// Propose a write through the group serving its tablet
@@ -1447,6 +1546,18 @@ where
         if replication.stopping {
             let outcome = ProposalOutcome::NotLeader(format!(
                 "group {id} is stopping on this node; its lead is being handed to another member"
+            ));
+            return self
+                .answer_proposal(meta, table, tablet, None, outcome, 0)
+                .await;
+        }
+        // a copy that stalled on an unreadable partition applies nothing, so a write through
+        // it is refused retriably and the client takes it to another member
+        // ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md))
+        let stalled = group.state.borrow().stalled.is_some();
+        if stalled {
+            let outcome = ProposalOutcome::NotLeader(format!(
+                "group {id}'s copy on this node stalled on a partition it could not read, and is being repaired"
             ));
             return self
                 .answer_proposal(meta, table, tablet, None, outcome, 0)
@@ -1741,13 +1852,26 @@ where
             ));
             return;
         };
-        let Some(raft) = slot.raft.clone() else {
+        // a copy whose start stalled has no handle and never will until it is repaired, and
+        // answers what its repair asks of it - the snapshot, its quarantine, how far it
+        // applied and its digest - from what the loop holds
+        // ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md))
+        let answers_stalled = slot.start_failed
+            && matches!(
+                head.kind,
+                ReplicateKind::Snapshot
+                    | ReplicateKind::Quarantine
+                    | ReplicateKind::Applied
+                    | ReplicateKind::Digest
+            );
+        let raft = slot.raft.clone();
+        if raft.is_none() && !answers_stalled {
             let _ = reply.try_send(ReplicateReply::error(
                 head.id,
                 format!("group {group} is still starting"),
             ));
             return;
-        };
+        }
         // a snapshot rpc is the receiver's: judged on the loop against what it holds
         // ([F43](../../../../docs/src/features/node-recovery.md))
         if head.kind == ReplicateKind::Snapshot {
@@ -1819,6 +1943,14 @@ where
             let _ = reply.try_send(answer);
             return;
         }
+        // everything else is the handle's
+        let Some(raft) = raft else {
+            let _ = reply.try_send(ReplicateReply::error(
+                head.id,
+                format!("group {group} is still starting"),
+            ));
+            return;
+        };
         let network = replication.network.clone();
         let me = slot.spec.me(node);
         let deadline = Duration::from_millis(u64::from(head.deadline_ms.max(1)));
@@ -2472,7 +2604,7 @@ where
                     purged: slot.store.purged_index().unwrap_or(0),
                     pending_bytes: slot.pending_bytes,
                     volatile: slot.store.is_volatile(),
-                    up: slot.raft.is_some() && slot.core_dead.is_none(),
+                    up: slot.raft.is_some() && slot.core_dead.is_none() && state.stalled.is_none(),
                     installing: state.installing,
                     voters: metrics
                         .as_ref()
@@ -2482,6 +2614,7 @@ where
                     quarantined: state.quarantined.map(|quarantine| quarantine.reason),
                     bytes,
                     core_dead: slot.core_dead.clone(),
+                    stalled: state.stalled.is_some(),
                     term: metrics
                         .as_ref()
                         .map(|metrics| metrics.current_term)

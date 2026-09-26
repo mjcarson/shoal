@@ -107,7 +107,7 @@ scrub_bytes, scrub_partitions }` rides `ShardReplication` and `NodeReplication` 
 A copy is quarantined **locally first**: by a record that failed its checksum on a read - the
 shard maps the table and partition to the group holding it - or by a driver's verdict after a
 scrub, sent over the lane as `ReplicateKind::Quarantine = 7` and applied on the loop.
-`MachineState::quarantined: Option<Quarantine { reason: Checksum | Divergent | Operator, at, op }>`
+`MachineState::quarantined: Option<Quarantine { reason: Checksum | Divergent | Operator | Unreadable, at, op }>`
 is persisted as `wal/Shard-N/quarantine/<group>` with `write_atomic` and scanned at open beside
 the install markers, so a restart finds the copy still quarantined. While it is set a read of
 the group's tablets through the shard is refused with `ErrorCode::Quarantined` naming the
@@ -124,6 +124,28 @@ a tablet is quarantined, so a `One` read through the holding node is routed to a
 and served from there, and the local refusal is the backstop for the window before the map
 carries it. A quarantine is lifted only by a repair that verified the copy or by an operator's
 `Repair { release: true }` after an explicit outcome.
+
+### A copy that cannot read: stalled, and repaired unasked
+
+*Added by [Resolved #160](../appendix/resolved/unreadable-partition-stalls-one-copy.md).* A
+replicated apply that needs a partition's archived copy and cannot read it (a checksum, a missing
+archive, a short read) cannot apply past it, since a result computed without the read would
+diverge. Before #160 that failed the shard and stopped the node, at every start. Now only that
+copy **stalls**:
+
+- `MachineState::stalled` records the entry and the partition. The copy is quarantined
+  `Unreadable`, which replaces any reason it already had. The parked batch is dropped, which ends
+  the group's core, or its `Raft::new` at start, and nothing else on the shard. A leader hands its
+  lead on first.
+- A stalled copy refuses writes through it `NotLeader`, answers a digest `Stalled`, and is `up:
+  false, stalled: true` in the report. A stalled start keeps its slot with no handle
+  (`start_failed`) and still answers its repair's snapshot, quarantine, applied and digest RPCs.
+- The group's leader proposes a `Repair` of the group as the process (principal
+  `stalled-copy`, at most every 30 s per group) when a member is committed `Unreadable`. The
+  judge makes every stalled member a target without comparing it, and it is installed from the
+  leader like any target, restarted with no handle to stop if its start stalled.
+- `cluster.repair.unreadable: false` leaves the copy stalled and quarantined for an operator's
+  `Repair`.
 
 ### The `Repair` operation and its record
 
@@ -216,7 +238,7 @@ the judgement - or still corrupt and installs it again
 
 ### The scheduled scrub
 
-`cluster.repair: { scrub_interval: none, timeout: 5m, concurrent: 1 }`
+`cluster.repair: { scrub_interval: none, timeout: 5m, concurrent: 1, unreadable: true }`
 ([configuration](../getting-started/configuration.md)). With `scrub_interval` set, every
 group a shard leads is verified on the interval, the first pass staggered across it by the
 group's identity, under a `Repair` the process proposes in verify mode naming the group's
@@ -304,7 +326,11 @@ scrub twice.
 **A scheduled pass verifies and stops.** The cost of a scrub is the group's disk once per
 pass, which the background arm prices; the cost of an automatic install is a copy replaced by
 a rule nobody asked to apply. The destructive half is an operator's, with the majority rule
-and a named source, and never an automatic choice on an unresolved split.
+and a named source, and never an automatic choice on an unresolved split. The one exception,
+since [#160](../appendix/resolved/unreadable-partition-stalls-one-copy.md), is a copy that
+stalled on an unreadable partition. It said so of itself and has stopped applying, so what is
+installed replaces nothing anyone still serves from, and the source is a trusted majority as
+for any repair.
 
 ## Alternatives rejected
 
@@ -404,7 +430,11 @@ it installs, which one field on the begin carries.
 - **The segments above a repair's boundary are handed to the compactor again for that group
   alone.** Without it the writes the old generation had merged live only in resident copies the
   next eviction drops.
-- **A scheduled pass runs in verify mode.** The destructive half is an operator's.
+- **A scheduled pass runs in verify mode.** The destructive half is an operator's, except for
+  a copy that stalled and quarantined itself `Unreadable`, whose leader asks for a repair in
+  `repair` mode ([#160](../appendix/resolved/unreadable-partition-stalls-one-copy.md)).
+- **A stalled copy applies nothing until it is restarted from a snapshot**, and a slot with no
+  handle is restarted only once its failed start has posted (`start_failed`).
 - **The fixture's `DIGEST` is not the scrub's function.** C11 requires an independent fold.
 
 ## Performance
@@ -439,7 +469,9 @@ records the cost a scrub pays that an incremental digest kept in the map would n
 | `a_torn_record_is_refused` | `shoal-core/src/server/tables/storage/fs/tests.rs` | A short read is served as a record |
 | `checkpoint_and_retries_are_checksummed` | `shoal-core/src/server/wal/tests.rs` | Either file loses its checksum, a torn one is read, or one from before stops reading |
 | `canonical_fold_is_layout_and_order_independent` | `shoal-core/src/server/replication/digest.rs` | The fold depends on insertion order, two rows run together, a tombstone counts, or the schema or the tablets stop being folded in |
-| `the_judge_needs_a_majority_or_an_operator` | `shoal-core/src/server/shard/repair.rs` | The judge trusts less than a majority, ignores a source, resolves a split, or does not quarantine an invalid copy |
+| `the_judge_needs_a_majority_or_an_operator` | `shoal-core/src/server/shard/repair.rs` | The judge trusts less than a majority, ignores a source, resolves a split, does not quarantine an invalid copy, or does not make a stalled one a target |
+| `an_unreadable_partition_stalls_one_copy_and_repairs_it` | `shoal/tests/cluster_fixture.rs` | An unreadable partition stops the node, a write through the stalled copy waits on it, or its leader does not repair it ([#160](../appendix/resolved/unreadable-partition-stalls-one-copy.md)) |
+| `a_stalled_copy_survives_a_restart_and_an_operator_repairs_it` | `shoal/tests/cluster_fixture.rs` | A start whose replay meets the record stops the node, or a copy with no handle cannot be repaired |
 | `the_repair_block_parses_with_its_defaults`, `validation_refuses_what_is_not_built` | `shoal-core/src/server/conf/cluster.rs` | The block's defaults or bounds change |
 | `background_capture_records_scrub_interference` | `shoal-bench/src/workloads/harness/background.rs` | The record loses its marks, windows or series, or an F43 record stops loading |
 | `the_background_arm_shares_the_replication_placement` | `shoal-bench/src/workloads/cluster_background.rs` | The arm drifts off the durable placement, asks for a fault, or leaves registry order |

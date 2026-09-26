@@ -483,6 +483,7 @@ cluster:
     scrub_interval: null          # how often every group this node leads is verified on its own; absent or null is never, and a pass never installs
     timeout: "5m"                 # one scrub: the entry committed and every member's digest polled; no shorter than replication.write_timeout, and no longer than scrub_interval
     concurrent: 1                 # group repairs one shard drives at a time; at least one
+    unreadable: true              # a group's leader repairs a copy that stalled on a partition it could not read, without an operator (item 160)
   migration:                      # moves of a replica set (F45), node-local
     catchup_lag: 64               # entries behind the leader a move's learner may be when it is made a voter
     timeout: "10m"                # one phase of a move; no shorter than replication.snapshot_timeout, since the learner phase is a transfer
