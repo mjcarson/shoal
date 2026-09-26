@@ -972,10 +972,7 @@ where
                 continue;
             }
             frames.sort_by_key(|frame| frame.index);
-            let refs: Vec<(u64, u32)> = frames
-                .iter()
-                .map(|frame| (frame.offset, frame.len))
-                .collect();
+            let refs = frames;
             // the segment is compacting again for this table, so it is not deleted meanwhile
             replication
                 .compacting
@@ -2254,10 +2251,7 @@ where
             for (table, groups) in by_table {
                 let mut frames = replication.wal.frames_in(segment.generation, &groups);
                 frames.sort_by_key(|frame| (frame.group, frame.index));
-                let refs: Vec<(u64, u32)> = frames
-                    .iter()
-                    .map(|frame| (frame.offset, frame.len))
-                    .collect();
+                let refs = frames;
                 // where each group stands once these frames are merged, for a snapshot cut
                 // after them ([F43](../../../../docs/src/features/node-recovery.md))
                 let positions: Vec<(GroupId, crate::server::wal::WalLogId)> = groups

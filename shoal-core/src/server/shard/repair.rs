@@ -1145,6 +1145,23 @@ where
     /// * `table` - The table
     /// * `partition_id` - The partition whose record failed
     pub(super) async fn quarantine_for_checksum(&mut self, table: D::TableNames, partition_id: u64) {
+        self.quarantine_partition(table, partition_id, QuarantineReason::Checksum)
+            .await;
+    }
+
+    /// Quarantine the copy a partition belongs to, for a reason
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    /// * `partition_id` - The partition
+    /// * `reason` - Why
+    pub(super) async fn quarantine_partition(
+        &mut self,
+        table: D::TableNames,
+        partition_id: u64,
+        reason: QuarantineReason,
+    ) {
         use crate::shared::traits::TableNameSupport as _;
         // truncation cannot happen: a tablet id is twelve bits
         #[allow(clippy::cast_possible_truncation)]
@@ -1162,7 +1179,7 @@ where
             .and_then(|replication| replication.groups.get(&group))
             .map_or(0, |slot| slot.state.borrow().applied_index());
         let quarantine = Quarantine {
-            reason: QuarantineReason::Checksum,
+            reason,
             at,
             op: Uuid::nil(),
         };

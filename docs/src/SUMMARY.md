@@ -280,6 +280,7 @@
   - [163. A repair's snapshot stream could be replaced by the group's own replication](appendix/resolved/repair-stream-replaced.md)
   - [164. A copy replaying a run of scrubs read its archives once for each](appendix/resolved/replayed-scrub-cuts.md)
   - [165. An archive compaction that met a corrupt record retried forever, leaking what it wrote](appendix/resolved/corrupt-record-compaction-loop.md)
+  - [166. A segment compaction that had to merge onto a corrupt record was retried forever](appendix/resolved/segment-compaction-corrupt-loop.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

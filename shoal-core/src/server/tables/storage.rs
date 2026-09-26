@@ -275,8 +275,11 @@ pub enum CompactionJob {
         path: PathBuf,
         /// Its generation
         generation: u64,
-        /// This table's frames in it, as (offset, length), in log order per group
-        frames: Vec<(u64, u32)>,
+        /// This table's frames in it, with the group and index each is of, in log order per group
+        ///
+        /// The group and index let a job built before a repair install skip what the install
+        /// replaced ([Resolved #166](../../../docs/src/appendix/resolved/segment-compaction-corrupt-loop.md)).
+        frames: Vec<crate::server::wal::FrameRef>,
         /// The last entry of each group with frames in the job, which the compactor tracks
         /// so a snapshot it cuts afterwards knows its boundary
         /// ([F43](../../../docs/src/features/node-recovery.md))

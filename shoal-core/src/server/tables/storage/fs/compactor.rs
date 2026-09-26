@@ -301,8 +301,13 @@ pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport, 
     writer: Option<DmaStreamWriter>,
     /// The writer for updates to our archive maps partition data
     map_writer: DmaStreamWriter,
-    /// The partitions whose records failed their checksum at an archive compaction, reported
-    reported_corrupt: HashSet<u64>,
+    /// The partitions whose records failed their checksum at a compaction, reported, with
+    /// whether a merge was waiting on them
+    reported_corrupt: HashSet<(u64, bool)>,
+    /// The boundary of the last snapshot installed for each group since this compactor started
+    installed: HashMap<GroupId, u64>,
+    /// The boundary of the snapshot the install in progress is reading
+    installing_boundary: Option<u64>,
     /// The changes to apply to the already compacted partitions on disk
     changes: HashMap<u64, Vec<T::Intent>>,
     /// The partitions in the intent log currently being compacted
@@ -360,6 +365,8 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             writer,
             map_writer,
             reported_corrupt: HashSet::new(),
+            installed: HashMap::new(),
+            installing_boundary: None,
             changes: HashMap::with_capacity(capacity),
             loaded: HashMap::with_capacity(capacity),
             entries: Vec::with_capacity(capacity),
@@ -756,7 +763,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         &mut self,
         path: PathBuf,
         generation: u64,
-        frames: Vec<(u64, u32)>,
+        frames: Vec<crate::server::wal::FrameRef>,
         positions: Vec<(GroupId, WalLogId)>,
     ) -> Result<(), JobFailure>
     where
@@ -780,7 +787,17 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             let file = BufferedFile::open(&path)
                 .await
                 .map_err(|error| JobFailure::Retry(error.into()))?;
-            for (offset, len) in &frames {
+            for frame in &frames {
+                // a frame a repair install has replaced since this job was built is not merged
+                // over it: the install's rows are newer ([Resolved #166](../../../../../../docs/src/appendix/resolved/segment-compaction-corrupt-loop.md))
+                if self
+                    .installed
+                    .get(&frame.group)
+                    .is_some_and(|boundary| frame.index <= *boundary)
+                {
+                    continue;
+                }
+                let (offset, len) = (&frame.offset, &frame.len);
                 let read = file
                     .read_at(*offset, *len as usize)
                     .await
@@ -811,10 +828,16 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         let partitions = if self.changes.is_empty() {
             Vec::default()
         } else {
-            // still writing nothing, so this too can be tried again
-            self.load_partitions_for_intents()
-                .await
-                .map_err(JobFailure::Retry)?;
+            // still writing nothing, so this too can be tried again; a partition whose record
+            // failed its checksum cannot be merged onto until its copy is repaired, which it is
+            // asked for once, and the job waits for the repair's install
+            // ([Resolved #166](../../../../../../docs/src/appendix/resolved/segment-compaction-corrupt-loop.md))
+            if let Err(error) = self.load_partitions_for_intents().await {
+                if let ServerError::Shoal(ShoalError::CorruptArchive { partition_id, .. }) = &error {
+                    self.report_corrupt(*partition_id, true).await;
+                }
+                return Err(JobFailure::Retry(error));
+            }
             // the active archive is created here if nothing has been written to it yet, so an
             // archive that cannot be created fails the job before it wrote anything
             active_writer(&mut self.writer, &self.map)
@@ -1070,9 +1093,15 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             .await
             .map_err(|error| format!("{error:?}"));
         // an install that failed part way leaves nothing for the next job to publish: its
-        // entries, removals and staged intents name a file the loop is about to refuse
-        if outcome.is_err() {
-            self.reset_job();
+        // entries, removals and staged intents name a file the loop is about to refuse; one that
+        // landed is a boundary every job built before it skips the group's frames up to
+        let boundary = self.installing_boundary.take();
+        match (&outcome, boundary) {
+            (Ok(_), Some(boundary)) => {
+                self.installed.insert(group, boundary);
+            }
+            (Ok(_), None) => {}
+            (Err(_), _) => self.reset_job(),
         }
         // the loop hears the trailer, or why the archives were not touched
         self.shard_local_tx
@@ -1115,6 +1144,8 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     {
         use crate::server::replication::install::{crash_point, CrashPoint};
         let mut reader = SnapshotReader::open(path).await?;
+        // the boundary it is at, which a job built before it has to skip up to
+        self.installing_boundary = Some(reader.header().boundary);
         // the file has to be this table's
         if reader.header().table != self.table_name.table_id() {
             return Err(ServerError::GlommioGeneric(format!(
@@ -1445,7 +1476,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                             Ok(read) => read,
                             Err(ServerError::Shoal(ShoalError::CorruptArchive { .. })) => {
                                 kept_corrupt = true;
-                                self.report_corrupt(entry.key).await;
+                                self.report_corrupt(entry.key, false).await;
                                 continue;
                             }
                             Err(error) => return Err(error),
@@ -1604,26 +1635,30 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         self.staged.clear();
     }
 
-    /// Tell the shard a record failed its checksum, once for each partition
+    /// Tell the shard a record failed its checksum, once for each partition and reason
     ///
-    /// The shard quarantines the copy holding it, as a read that met it would. An archive
-    /// holding one stays a candidate for every later pass, so a partition already reported is
-    /// not reported again.
+    /// The shard quarantines the copy holding it: for its checksum, as a read that met it
+    /// would, or as unreadable when a merge of the log needs it, which its leader repairs
+    /// without an operator. An archive holding one stays a candidate for every later pass, and a
+    /// segment job waiting on one is tried again, so a partition already reported is not
+    /// reported again.
     ///
     /// # Arguments
     ///
     /// * `partition` - The partition whose record failed
-    async fn report_corrupt(&mut self, partition: u64) {
-        // once a partition
-        if !self.reported_corrupt.insert(partition) {
+    /// * `unreadable` - Whether a merge needs it, so the copy is repaired without an operator
+    async fn report_corrupt(&mut self, partition: u64, unreadable: bool) {
+        // once a partition and reason
+        if !self.reported_corrupt.insert((partition, unreadable)) {
             return;
         }
-        event!(Level::ERROR, msg = "an archive compaction left a record that failed its checksum where it was", table = R::name(), partition = format!("{partition:016x}"));
+        event!(Level::ERROR, msg = "a compaction met a record that failed its checksum", table = R::name(), partition = format!("{partition:016x}"), merge_waits = unreadable);
         let _ = self
             .shard_local_tx
             .send(ServerMsg::CorruptRecord {
                 table: self.table_name,
                 partition,
+                unreadable,
             })
             .await;
     }

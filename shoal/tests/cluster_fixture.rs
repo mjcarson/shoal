@@ -19036,3 +19036,76 @@ async fn an_archive_compaction_leaves_a_corrupt_record_and_quarantines_it(
     wait_member_quarantined(&mut cluster, follower, true, Duration::from_secs(20))?;
     Ok(())
 }
+
+/// A segment compaction that has to merge onto a corrupt record has its copy repaired (item 166)
+///
+/// An insert applies without reading the partition it replaces, but merging it into the
+/// archives loads the archived copy. With that record corrupt on a follower, the follower's
+/// segment compaction failed and was retried every five seconds for as long as the record
+/// stayed corrupt, the checkpoint of every group of the table on the shard held where it was,
+/// and nothing quarantined the copy. Now the failed load quarantines the copy as unreadable,
+/// its leader repairs it, and the job, which skips the frames the install replaced, finishes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_segment_merge_onto_a_corrupt_record_has_its_copy_repaired() -> Result<(), FixtureError>
+{
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(64)
+        .write_timeout(Duration::from_secs(3))
+        .repair_timeout(Duration::from_secs(30))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let hashed = |key: u64| {
+        <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
+    };
+    seed_checkpointed_notes(&mut cluster, &client, 35_000..35_060).await?;
+    let (group, leader) = group_of(&mut cluster, 0, "Note", 35_030)?;
+    let leader = leader.expect("the group has a leader");
+    let follower = (0..3).find(|node| *node != leader).expect("a follower");
+    let corrupted = keys_in_group(&mut cluster, "Note", &group, 35_000, 8)?
+        .into_iter()
+        .find(|key| *key < 35_060)
+        .expect("a live key of the group");
+    let answer = cluster
+        .node_mut(follower)
+        .command(&format!("CORRUPT Note {:016x}", hashed(corrupted)))?;
+    assert_eq!(answer["ok"]["fault"], "corrupt", "{answer}");
+    // an insert over it: applied without a read, merged onto the corrupt record
+    let addr_l = cluster.node(leader).endpoints.client.to_string();
+    write_note_eventually(&addr_l, corrupted, "inserted-over", Duration::from_secs(30)).await?;
+    let quarantined = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            compact_now(&mut cluster, follower, "Note")?;
+            if groups_of(&mut cluster, follower)?["quarantined"] == 1 {
+                break true;
+            }
+            if std::time::Instant::now() > deadline {
+                break false;
+            }
+        }
+    };
+    assert!(quarantined, "the merge's corrupt record never quarantined its copy");
+    assert_eq!(cluster.node(follower).failure(), None, "the follower stopped");
+    // repaired with nobody asking, after which the follower compacts again
+    wait_member_quarantined(&mut cluster, follower, false, Duration::from_secs(120))?;
+    let addr_f = cluster.node(follower).endpoints.client.to_string();
+    wait_note_routed(&addr_f, corrupted, "inserted-over", Duration::from_secs(20)).await?;
+    for key in 35_060..35_090u64 {
+        write_note_eventually(&addr_l, key, &format!("after-{key}"), Duration::from_secs(30))
+            .await?;
+    }
+    wait_checkpointed(&mut cluster, follower, "Note", Duration::from_secs(60))?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}

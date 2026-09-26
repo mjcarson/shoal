@@ -4346,8 +4346,17 @@ where
                 } => self.handle_digested(group, op, index, outcome),
                 // an archive compaction left a corrupt record where it was: the copy holding
                 // it is quarantined, as a read that met it would have
-                ServerMsg::CorruptRecord { table, partition } => {
-                    self.quarantine_for_checksum(table, partition).await;
+                ServerMsg::CorruptRecord {
+                    table,
+                    partition,
+                    unreadable,
+                } => {
+                    let reason = if unreadable {
+                        crate::server::control::repair::QuarantineReason::Unreadable
+                    } else {
+                        crate::server::control::repair::QuarantineReason::Checksum
+                    };
+                    self.quarantine_partition(table, partition, reason).await;
                 }
                 ServerMsg::Quarantine {
                     group,

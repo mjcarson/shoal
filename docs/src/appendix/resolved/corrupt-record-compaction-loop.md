@@ -73,11 +73,9 @@ partition is not reported twice.
 
 ## Still open
 
-- **A segment compaction that has to load a corrupt partition still fails and is retried
-  forever** (filed as [item 166](../known-issues.md#166-a-segment-compaction-that-needs-a-corrupt-partition-is-retried-forever)).
-  Its merge needs the partition, so it cannot simply leave it. Unlike the archive pass, it writes
-  nothing before the load fails, so it leaks nothing. But the table's checkpoint on the shard
-  stops moving until the copy is repaired.
+- ~~**A segment compaction that has to load a corrupt partition still fails and is retried
+  forever**, filed as item 166.~~ Resolved: its copy is quarantined as unreadable and repaired,
+  and the job skips what the install replaced ([Resolved #166](segment-compaction-corrupt-loop.md)).
 - The 38 GB titan held was reclaimed by the lab's re-bootstrap, not by the fix: bytes already
   written are dead space that later archive compactions reclaim.
 

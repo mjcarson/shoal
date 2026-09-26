@@ -794,6 +794,11 @@ where
         table: D::TableNames,
         /// The partition whose record failed
         partition: u64,
+        /// Whether a merge of the log needed it, and cannot go on until the copy is repaired
+        ///
+        /// Quarantined as unreadable, which its leader repairs without an operator, rather than
+        /// for its checksum ([Resolved #166](../../../docs/src/appendix/resolved/segment-compaction-corrupt-loop.md)).
+        unreadable: bool,
     },
     /// Quarantine a copy this shard holds, or lift it, and answer once the marker is durable
     /// ([F44](../../../docs/src/features/repair.md))

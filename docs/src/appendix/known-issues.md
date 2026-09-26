@@ -480,27 +480,6 @@ a restart once space returns brings it back (on the lab with no restart by hand)
 wanted is to shed appends below a reserve with a retriable refusal, so that a nearly full node
 keeps serving reads rather than stopping.
 
-### 166. A segment compaction that needs a corrupt partition is retried forever
-
-A segment compaction merges a sealed WAL segment's frames into the archives, so it loads the
-archived copy of every partition the frames name (`load_partitions_for_intents`). A record that
-fails its checksum fails the load, and the job is retried every five seconds as one that failed
-before writing (`JobFailure::Retry`), for as long as the partition stays corrupt. It writes nothing
-before the load, so unlike [#165](resolved/corrupt-record-compaction-loop.md) it leaks nothing. But
-the segment is never merged for that table, so the checkpoint of every group of the table on the
-shard stops moving, and the WAL behind it grows until the copy is repaired. A copy whose apply
-needs the same partition stalls and is repaired unasked ([#160](resolved/unreadable-partition-stalls-one-copy.md)),
-which ends it. One that only compaction reads is not quarantined by the failure, and nothing
-repairs it.
-
-What it needs: the failed load reports the partition, as an archive compaction now does, so the
-copy is quarantined. And the job has to be safe to redo after the repair's install, whose
-boundary may be past some of the job's frames. Merging those again over the installed state
-would put older values over newer ones, so the redo has to skip a group's frames at or below its
-install boundary. Found while fixing #165 on the
-[distributed cluster testing](../cluster-testing/correctness.md#7-a-copy-that-cannot-read-a-partition)
-chapter's lab. Established by reading the source, not reproduced.
-
 ---
 
 ## Low — hygiene and documentation drift
