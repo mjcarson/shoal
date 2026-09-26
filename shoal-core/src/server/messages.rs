@@ -785,6 +785,16 @@ where
         /// The report, or why there is none
         outcome: Result<crate::server::replication::DigestReport, String>,
     },
+    /// An archive compaction met a record that failed its checksum and left it where it was
+    ///
+    /// The copy holding it is quarantined for its checksum, as a read that met it would have
+    /// ([Resolved #165](../../../docs/src/appendix/resolved/corrupt-record-compaction-loop.md)).
+    CorruptRecord {
+        /// The table
+        table: D::TableNames,
+        /// The partition whose record failed
+        partition: u64,
+    },
     /// Quarantine a copy this shard holds, or lift it, and answer once the marker is durable
     /// ([F44](../../../docs/src/features/repair.md))
     Quarantine {
@@ -1055,6 +1065,9 @@ impl<D: ShoalDatabase> ServerMsg<D> {
             }
             ServerMsg::Digested { .. } => return Err("A digest is the scrubbing shard's"),
             ServerMsg::Quarantine { .. } => return Err("A quarantine is the holding shard's"),
+            ServerMsg::CorruptRecord { .. } => {
+                return Err("A corrupt record is the compacting shard's")
+            }
             ServerMsg::RepairDone { .. } => return Err("A repair driver is one shard's"),
             ServerMsg::BackupDone { .. } => return Err("A backup driver is one shard's"),
             ServerMsg::RestoreDone { .. } => return Err("A restore driver is one shard's"),

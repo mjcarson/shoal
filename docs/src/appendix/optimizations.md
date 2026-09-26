@@ -3232,3 +3232,87 @@ area and a way to burn a core, so the change was reverted. Worth trying again on
 workload that is latency-bound at low load, where a sleep is on the critical path, and against
 the microbenchmarks, not the lab's load.
 
+
+### O70. A snapshot cut reads its records one at a time
+
+| | |
+| --- | --- |
+| **Rank** | ~~**B28**~~ **done** — applied, contained |
+| **Impact** | Measured on the lab — a repair's cut of a Movie group finished two to three minutes after it was asked for under the update bench, once it held 66,000 to 146,000 partitions, and each time the repair, and the stalled copy with it, waited on it. The cut reads every archived record of the group with a direct read at its offset, one awaited after another, in key order, which is random order on disk |
+| **Difficulty** | S |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | 32 records' buffers held at once, about 13 MB for the lab's rows; the file is still written in key order |
+| **Benchmark** | the lab: `repair` of a group under `bench --mix get:40,update:45,insert:15`, timed from the compactor's `cutting a snapshot` to its `cut a snapshot` |
+
+Found by the [distributed cluster testing](../cluster-testing/correctness.md#7-a-copy-that-cannot-read-a-partition)
+chapter while proving [#160](resolved/unreadable-partition-stalls-one-copy.md) on the lab.
+`cut_snapshot_file` read each record with `read_record(entry).await` inside its loop, so the
+device saw one request at a time, and under the bench's load each one waited its turn behind the
+node's own reads and writes.
+
+**Applied:** the records are read through a stream `buffered(32)`, which keeps 32 reads in flight
+and yields them in the order asked, so the file's bytes and its checksum are what they were. On
+the lab, the cut of a group of 268,753 partitions took **18 s** under the same bench, and one of
+320,561 took **4 s** idle. The old cut's own duration was never logged (only its end), so the
+before figure is the time from the request to the end, which includes the wait for the compactor's
+job in progress. The new `cutting a snapshot` line at the start is what makes the two parts
+separable now. **Kept.**
+
+**Tried with it and not kept:** taking a cut out of turn, ahead of the merges queued before it in
+the compactor. A cut is exact wherever it runs among merges, so it was safe. But with it in place,
+a repair's cut on the third run still started 78 s after the request. The wait was the job in
+progress, not the queue, and nothing measured a difference from the reordering, so it was
+reverted.
+
+### O71. A held snapshot is cut again whenever the checkpoint moves
+
+| | |
+| --- | --- |
+| **Rank** | ~~**B29**~~ **done** — applied, contained |
+| **Impact** | Measured on the lab — europa cut group `2c0307…`'s 125 MB snapshot 17 times in 97 s, once for every try its openraft made to send a snapshot to titan's stalled copy, because the held file was below a checkpoint that moved every few seconds under load |
+| **Difficulty** | S |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | a receiver may install an older snapshot and take more of the log after it, which the log still holds by construction |
+| **Benchmark** | the lab's stall runs: `cutting a snapshot` lines per group while a member needs one |
+
+`handle_build_snapshot` answered with the held file only if its boundary was at or past the
+group's checkpoint. A receiver needs no more than a file whose boundary the leader's log still
+follows: everything above the boundary is replicated to it after the install.
+
+**Applied:** a held file is the answer while the log's purge point is at or below its boundary
+(or it is at the checkpoint, as before). Because a caller can need a newer one, a build now names
+`at_least`, the lowest boundary its caller can use, and `build` asks again if a cut already in
+flight lands below it:
+
+- openraft's transmitter asks for any (0);
+- a backup asks for its applied index, since everything applied before it was asked for has to be
+  in the file;
+- a repair asks for any, and then for past the target's checkpoint once the target has answered
+  `Behind`;
+- the fixture's `SNAPSHOT` asks for the checkpoint.
+
+On the lab's next stall runs, each group was cut once per repair. **Kept.**
+
+### O72. A refused snapshot build logs four lines per apply
+
+| | |
+| --- | --- |
+| **Rank** | ~~**B30**~~ **done** — applied, contained |
+| **Impact** | Measured on the lab — 3,604 lines in five minutes on europa, `push snapshot building command`, `build snapshot`, `snapshot building is refused by state machine` and `snapshot building deferred`, while compaction was behind the bench |
+| **Difficulty** | S |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | openraft's snapshot handler and state machine worker say nothing below `WARN` by default, including an install's `install complete snapshot`, which Shoal logs itself |
+| **Benchmark** | `journalctl -u shoal-tmdb \| grep -c "snapshot building is refused"` over a stall run |
+
+openraft asks the state machine for a snapshot once `LogsSinceLast(checkpoint_entries)` entries
+have been applied since the last. The machine refuses until its checkpoint has moved and is durable
+(`try_create_snapshot_builder`), which, while compaction lags, is every apply. Each refusal is four
+`INFO` lines from two openraft targets.
+
+**Applied:** `openraft::core::sm::worker` and `openraft::engine::handler::snapshot_handler` join
+O66's quiet targets, at `warn`. The fifth line is `openraft::engine::engine_impl`'s, which also
+logs elections, so it is left. The refusal itself costs a message to the worker and back and is
+left as it is. **Kept.**

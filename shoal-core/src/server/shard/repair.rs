@@ -692,11 +692,14 @@ impl<D: ShoalDatabase> DriverContext<D> {
                     self.timeout
                 ));
             }
-            // an entry past the index: a scrub under a throwaway operation costs one cut
+            // an entry past the index: a scrub nobody polls, so no replica cuts it
             let written = glommio::timer::timeout(self.timeout, async {
                 Ok(self
                     .raft
-                    .client_write(Command::scrub(self.table, Uuid::new_v4()))
+                    .client_write(Command::scrub(
+                        self.table,
+                        crate::server::replication::digest::NUDGE,
+                    ))
                     .await)
             })
             .await;

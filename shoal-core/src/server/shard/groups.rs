@@ -348,6 +348,10 @@ pub(super) struct Replication<D: ShoalDatabase> {
     /// When each group this shard leads may next ask for the repair of a stalled member
     /// ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md))
     pub(super) next_stall_repair: HashMap<GroupId, Instant>,
+    /// The digest task of each group's newest scrub still reading its cut, with its operation
+    /// and index, so a newer scrub of the group cancels it
+    /// ([Resolved #164](../../../../docs/src/appendix/resolved/replayed-scrub-cuts.md))
+    pub(super) digest_tasks: HashMap<GroupId, (Uuid, u64, glommio::Task<()>)>,
     /// The group moves this shard is driving right now, by operation and group
     /// ([F45](../../../../docs/src/features/replica-migration.md))
     pub(super) driving_moves: HashSet<(Uuid, GroupId)>,
@@ -480,6 +484,7 @@ where
             driven: HashMap::new(),
             next_scrub: HashMap::new(),
             next_stall_repair: HashMap::new(),
+            digest_tasks: HashMap::new(),
             driving_moves: HashSet::new(),
             driven_moves: HashMap::new(),
             retired,
@@ -1325,6 +1330,10 @@ where
             .and_then(|replication| replication.groups.get(&group))
             .map(|slot| slot.spec.tablets.clone())
             .unwrap_or_default();
+        // a nudge only moves the log along, and nobody polls its digest
+        if op == crate::server::replication::digest::NUDGE {
+            return;
+        }
         state.borrow_mut().note_scrub(op, index);
         if let Some(replication) = self.replication.as_mut() {
             replication.integrity.scrubs += 1;
@@ -1344,7 +1353,7 @@ where
         };
         event!(Level::INFO, msg = "applied a scrub", group = %group, op = %op, index, resident = cut.resident.len(), archived = cut.archived.len());
         let tx = self.shard_local_tx.clone();
-        glommio::spawn_local(async move {
+        let task = glommio::spawn_local(async move {
             let outcome = cut
                 .finish(schema_id, &tablets, index)
                 .await
@@ -1357,8 +1366,22 @@ where
                     outcome,
                 })
                 .await;
-        })
-        .detach();
+        });
+        // an older scrub of the group still reading its cut is superseded: a group's scrubs
+        // are driven one at a time, so nobody waits for it now, and a copy replaying a run of
+        // them would otherwise read its archives once for each
+        let superseded = self
+            .replication
+            .as_mut()
+            .and_then(|replication| replication.digest_tasks.insert(group, (op, index, task)));
+        if let Some((old_op, old_index, old_task)) = superseded {
+            drop(old_task);
+            state.borrow_mut().record_digest(
+                old_op,
+                old_index,
+                crate::server::replication::DigestAnswer::Unknown,
+            );
+        }
     }
 
     /// Record what a scrub's task came to
@@ -1379,6 +1402,16 @@ where
         let Some(replication) = self.replication.as_mut() else {
             return;
         };
+        // the task that posted this is done
+        if replication
+            .digest_tasks
+            .get(&group)
+            .is_some_and(|(known, at, _)| *known == op && *at == index)
+        {
+            if let Some((_, _, task)) = replication.digest_tasks.remove(&group) {
+                task.detach();
+            }
+        }
         let Some(slot) = replication.groups.get(&group) else {
             return;
         };

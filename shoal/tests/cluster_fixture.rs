@@ -18947,3 +18947,92 @@ async fn a_restore_with_failed_groups_is_finished_by_a_retry() -> Result<(), Fix
     );
     Ok(())
 }
+
+/// An archive compaction that meets a corrupt record leaves it and quarantines its copy (item 165)
+///
+/// On the lab an archive compaction that met a record failing its checksum failed the pass, and
+/// the pass was retried every five seconds for as long as the node ran. Each try had already
+/// rewritten the records before the corrupt one into the active archive, and nothing named
+/// them: titan's Movie archives grew to 38 GB. The follower's archive here is left mostly dead
+/// by updates of every other key, so the next archive compaction rewrites it and meets the
+/// corrupt record; the copy is quarantined for its checksum, as a read that met it would have
+/// been, the record and its archive stay, and the node keeps compacting.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_archive_compaction_leaves_a_corrupt_record_and_quarantines_it(
+) -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(64)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .repair_unreadable(false)
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let hashed = |key: u64| {
+        <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
+    };
+    seed_checkpointed_notes(&mut cluster, &client, 34_000..34_060).await?;
+    let (group, leader) = group_of(&mut cluster, 0, "Note", 34_030)?;
+    let leader = leader.expect("the group has a leader");
+    let follower = (0..3).find(|node| *node != leader).expect("a follower");
+    // the follower started again, so the archive holding the notes is no longer its active one
+    cluster.restart(follower, NodeKind::Server)?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))?;
+    // one record corrupted, and every other note written again into the new archive
+    let corrupted = keys_in_group(&mut cluster, "Note", &group, 34_000, 8)?
+        .into_iter()
+        .find(|key| *key < 34_060)
+        .expect("a live key of the group");
+    let answer = cluster
+        .node_mut(follower)
+        .command(&format!("CORRUPT Note {:016x}", hashed(corrupted)))?;
+    assert_eq!(answer["ok"]["fault"], "corrupt", "{answer}");
+    assert_eq!(cluster.node(follower).failure(), None, "the follower stopped at the fault");
+    let addr_l = cluster.node(leader).endpoints.client.to_string();
+    for key in (34_000..34_060u64).filter(|key| *key != corrupted) {
+        write_note_eventually(&addr_l, key, &format!("again-{key}"), Duration::from_secs(30))
+            .await?;
+    }
+    wait_checkpointed(&mut cluster, follower, "Note", Duration::from_secs(60))?;
+    // the archive compaction that rewrites the old archive meets the corrupt record
+    let archives = cluster.dir(follower).join("Note").join("archives");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        compact_now(&mut cluster, follower, "Note")?;
+        let view = groups_of(&mut cluster, follower)?;
+        if view["quarantined"] == 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the corrupt record never quarantined its copy: {view}"
+        );
+    }
+    assert_eq!(cluster.node(follower).failure(), None, "the follower stopped");
+    // and no pass keeps rewriting records for nothing: the archives stop growing
+    let size = |dir: &std::path::Path| -> u64 {
+        walkdir_files(dir)
+            .iter()
+            .filter_map(|path| std::fs::metadata(path).ok())
+            .map(|meta| meta.len())
+            .sum()
+    };
+    compact_now(&mut cluster, follower, "Note")?;
+    let before = size(&archives);
+    for _ in 0..6 {
+        compact_now(&mut cluster, follower, "Note")?;
+    }
+    let after = size(&archives);
+    assert!(
+        after <= before,
+        "the archives grew from {before} to {after} bytes with nothing written"
+    );
+    wait_member_quarantined(&mut cluster, follower, true, Duration::from_secs(20))?;
+    Ok(())
+}

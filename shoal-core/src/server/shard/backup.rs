@@ -158,7 +158,10 @@ impl<D: ShoalDatabase> BackupContext<D> {
             let written = glommio::timer::timeout(self.timeout, async {
                 Ok(self
                     .raft
-                    .client_write(Command::scrub(self.table, Uuid::new_v4()))
+                    .client_write(Command::scrub(
+                        self.table,
+                        crate::server::replication::digest::NUDGE,
+                    ))
                     .await)
             })
             .await;

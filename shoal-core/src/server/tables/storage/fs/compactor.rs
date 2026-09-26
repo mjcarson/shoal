@@ -11,7 +11,7 @@ use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::Archive;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
 use std::marker::PhantomData;
 use std::path::PathBuf;
@@ -33,6 +33,7 @@ use crate::server::replication::snapshot::{
 };
 use crate::server::ring::Ring;
 use crate::server::wal::WalLogId;
+use crate::server::errors::ShoalError;
 use crate::server::ServerError;
 use crate::shared::identity::{ClusterId, GroupId, NodeId};
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, TableNameSupport as _};
@@ -218,43 +219,6 @@ fn written_to(writer: Option<&DmaStreamWriter>) -> u64 {
     writer.map_or(0, DmaStreamWriter::current_pos)
 }
 
-/// Take the next job to run from the ones already sent
-///
-/// In the order they were sent, except that a snapshot cut is taken ahead of the merges queued
-/// before it. A cut records the archives as they stand between two jobs and the position
-/// merged so far, so it is exact wherever it runs; behind a compaction backlog under load it
-/// waited minutes, and a repair or a new replica waited with it
-/// ([O70](../../../../../../docs/src/appendix/optimizations.md#o70-a-snapshot-cut-reads-its-records-one-at-a-time)).
-/// It never passes an install, a removal, a fault or a stop, whose effect on the archives it
-/// has to see or not see in the order they were asked for.
-///
-/// # Arguments
-///
-/// * `backlog` - The jobs already sent, oldest first
-fn next_job(backlog: &mut VecDeque<CompactionJob>) -> Option<CompactionJob> {
-    // the first cut with nothing but merges ahead of it
-    let cut = backlog
-        .iter()
-        .position(|job| !is_merge(job))
-        .filter(|index| matches!(backlog[*index], CompactionJob::Snapshot { .. }));
-    match cut {
-        Some(index) => backlog.remove(index),
-        None => backlog.pop_front(),
-    }
-}
-
-/// Whether a job only merges logs or rewrites archives, which a cut may be taken ahead of
-///
-/// # Arguments
-///
-/// * `job` - The job
-fn is_merge(job: &CompactionJob) -> bool {
-    matches!(
-        job,
-        CompactionJob::IntentLog { .. } | CompactionJob::Segment { .. } | CompactionJob::Archives
-    )
-}
-
 /// How many archived records a snapshot cut reads at once
 ///
 /// Enough to keep a device queue busy under a node's own load; the records are still written
@@ -337,6 +301,8 @@ pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport, 
     writer: Option<DmaStreamWriter>,
     /// The writer for updates to our archive maps partition data
     map_writer: DmaStreamWriter,
+    /// The partitions whose records failed their checksum at an archive compaction, reported
+    reported_corrupt: HashSet<u64>,
     /// The changes to apply to the already compacted partitions on disk
     changes: HashMap<u64, Vec<T::Intent>>,
     /// The partitions in the intent log currently being compacted
@@ -393,6 +359,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             map: map.clone(),
             writer,
             map_writer,
+            reported_corrupt: HashSet::new(),
             changes: HashMap::with_capacity(capacity),
             loaded: HashMap::with_capacity(capacity),
             entries: Vec::with_capacity(capacity),
@@ -1464,11 +1431,25 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     }
                     // get a copy of our active archive id
                     let active_id = *self.map.active.borrow();
+                    // whether a record here failed its checksum, which keeps the archive
+                    let mut kept_corrupt = false;
                     // read all of the still valid data from this archive
                     for mut entry in entries {
                         // read this entry from our archive file, verified against its
-                        // checksum: a corrupt record is never rewritten under a fresh one
-                        let read = self.map.read_record(&entry).await?;
+                        // checksum: a corrupt record is never rewritten under a fresh one. It
+                        // is left where it is, with its archive, and the copy holding it is
+                        // quarantined; failing the pass instead retried it every five seconds,
+                        // each try rewriting the records before it into the active archive
+                        // for nothing, 38 GB on the lab ([Resolved #165](../../../../../../docs/src/appendix/resolved/corrupt-record-compaction-loop.md))
+                        let read = match self.map.read_record(&entry).await {
+                            Ok(read) => read,
+                            Err(ServerError::Shoal(ShoalError::CorruptArchive { .. })) => {
+                                kept_corrupt = true;
+                                self.report_corrupt(entry.key).await;
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        };
                         // write this entry to our new archive as a checksummed record
                         let start = write_record(
                             active_writer(&mut self.writer, &self.map).await?,
@@ -1490,6 +1471,10 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     }
                     // close our archive
                     archive.close().await?;
+                    // an archive still holding a corrupt record stays, since the map names it
+                    if kept_corrupt {
+                        continue;
+                    }
                     // stage an intent that we are deleting this archive, written after the
                     // records copied out of it are durable
                     stage_intent(&mut self.staged, &MapIntent::DeleteArchive(*old_id))?;
@@ -1619,6 +1604,30 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         self.staged.clear();
     }
 
+    /// Tell the shard a record failed its checksum, once for each partition
+    ///
+    /// The shard quarantines the copy holding it, as a read that met it would. An archive
+    /// holding one stays a candidate for every later pass, so a partition already reported is
+    /// not reported again.
+    ///
+    /// # Arguments
+    ///
+    /// * `partition` - The partition whose record failed
+    async fn report_corrupt(&mut self, partition: u64) {
+        // once a partition
+        if !self.reported_corrupt.insert(partition) {
+            return;
+        }
+        event!(Level::ERROR, msg = "an archive compaction left a record that failed its checksum where it was", table = R::name(), partition = format!("{partition:016x}"));
+        let _ = self
+            .shard_local_tx
+            .send(ServerMsg::CorruptRecord {
+                table: self.table_name,
+                partition,
+            })
+            .await;
+    }
+
     /// Run one compaction job
     ///
     /// # Arguments
@@ -1745,27 +1754,15 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     {
         // the jobs that failed before writing, waiting for their next try
         let mut retries: Vec<RetryJob> = Vec::new();
-        // the jobs already sent and not yet run, which a snapshot cut may be taken out of
-        let mut backlog: VecDeque<CompactionJob> = VecDeque::new();
         loop {
             // a retry that is due comes before the channel
             let due = retries
                 .iter()
                 .position(|retry| retry.at <= Instant::now())
                 .map(|index| retries.remove(index));
-            // everything already sent joins the backlog, so a cut waiting behind merges is seen
-            while let Ok(Some(job)) = self.jobs_rx.try_recv() {
-                backlog.push_back(job);
-            }
-            let next = if due.is_none() {
-                next_job(&mut backlog)
-            } else {
-                None
-            };
-            let (job, attempts) = match (due, next) {
-                (Some(retry), _) => (retry.job, retry.attempts),
-                (None, Some(job)) => (job, 0),
-                (None, None) => {
+            let (job, attempts) = match due {
+                Some(retry) => (retry.job, retry.attempts),
+                None => {
                     // wait for a job, but no longer than the earliest retry
                     let earliest = retries
                         .iter()
@@ -1815,63 +1812,3 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::next_job;
-    use crate::server::replication::snapshot::SnapshotProvenance;
-    use crate::server::tables::storage::CompactionJob;
-    use crate::shared::identity::{ClusterId, GroupId, NodeId};
-    use std::collections::VecDeque;
-    use std::path::PathBuf;
-
-    /// A cut of a group
-    fn cut(group: u64) -> CompactionJob {
-        CompactionJob::Snapshot {
-            group: GroupId(group),
-            schema_id: 0,
-            tablets: vec![0],
-            at_least: None,
-            memberships: Vec::new(),
-            retries: Vec::new(),
-            expired_before: 0,
-            provenance: SnapshotProvenance::at(ClusterId::mint(), NodeId::mint(), 6),
-            dir: PathBuf::from("/tmp"),
-        }
-    }
-
-    /// A merge of an intent log
-    fn merge(generation: u64) -> CompactionJob {
-        CompactionJob::IntentLog {
-            path: PathBuf::from("/tmp/log"),
-            generation,
-        }
-    }
-
-    /// A cut is taken ahead of the merges queued before it, and never ahead of anything else
-    ///
-    /// Under the lab's update bench a repair's cut waited two minutes behind the Movie
-    /// compactor's backlog (O70); a cut records the archives as they stand, so it is exact
-    /// wherever it runs among merges. An install ahead of it has to be seen, so the cut waits
-    /// for it.
-    #[test]
-    fn a_cut_is_taken_ahead_of_queued_merges_only() {
-        // two merges, then a cut: the cut first, then the merges in order
-        let mut backlog: VecDeque<CompactionJob> =
-            [merge(1), merge(2), cut(7), merge(3)].into_iter().collect();
-        assert!(matches!(next_job(&mut backlog), Some(CompactionJob::Snapshot { .. })));
-        assert!(matches!(next_job(&mut backlog), Some(CompactionJob::IntentLog { generation: 1, .. })));
-        assert!(matches!(next_job(&mut backlog), Some(CompactionJob::IntentLog { generation: 2, .. })));
-        // an install ahead of a cut is run first
-        let install = CompactionJob::Install {
-            group: GroupId(7),
-            tablets: vec![0],
-            path: PathBuf::from("/tmp/snap"),
-        };
-        let mut backlog: VecDeque<CompactionJob> =
-            [merge(1), install, cut(7)].into_iter().collect();
-        assert!(matches!(next_job(&mut backlog), Some(CompactionJob::IntentLog { generation: 1, .. })));
-        assert!(matches!(next_job(&mut backlog), Some(CompactionJob::Install { .. })));
-        assert!(matches!(next_job(&mut backlog), Some(CompactionJob::Snapshot { .. })));
-        assert!(next_job(&mut backlog).is_none());
-    }
-}
