@@ -1858,8 +1858,21 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     }
                 }
             };
-            // run it, keeping a copy in case it has to be tried again
-            match self.run_job(job.clone()).await {
+            // an archive pass with another queued behind it is that one's to do: a pass compacts
+            // whatever qualifies when it runs, so the later one covers this one, and a backlog
+            // of passes held every cut behind it ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
+            if is_redundant(&job, &self.backlog) {
+                continue;
+            }
+            // how long a job holds the compactor, which a queued cut waits out
+            let kind = job_kind(&job);
+            let started = Instant::now();
+            let outcome = self.run_job(job.clone()).await;
+            if started.elapsed() >= LONG_JOB {
+                event!(Level::INFO, msg = "a compaction job ran long", table = R::name(), kind, secs = started.elapsed().as_secs_f64(), backlog = self.backlog.len() + self.jobs_rx.len());
+            }
+            // and what came of it, keeping a copy in case it has to be tried again
+            match outcome {
                 Ok(AfterJob::Continue) => (),
                 Ok(AfterJob::Stop) => break,
                 Err(JobFailure::Retry(error)) => {
@@ -1885,6 +1898,43 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             }
         }
         Ok(())
+    }
+}
+
+/// Whether a job is covered by one queued behind it
+///
+/// An archive pass compacts whatever qualifies when it runs, so a pass with another queued
+/// behind it does nothing the later one will not. Nothing else is ever skipped.
+///
+/// # Arguments
+///
+/// * `job` - The job about to run
+/// * `backlog` - The jobs queued behind it
+fn is_redundant(job: &CompactionJob, backlog: &VecDeque<CompactionJob>) -> bool {
+    matches!(job, CompactionJob::Archives)
+        && backlog
+            .iter()
+            .any(|queued| matches!(queued, CompactionJob::Archives))
+}
+
+/// How long a job may hold the compactor before it is reported
+const LONG_JOB: Duration = Duration::from_secs(5);
+
+/// A job's kind, for the report of one that ran long
+///
+/// # Arguments
+///
+/// * `job` - The job
+fn job_kind(job: &CompactionJob) -> &'static str {
+    match job {
+        CompactionJob::IntentLog { .. } => "intent log",
+        CompactionJob::Segment { .. } => "segment",
+        CompactionJob::Snapshot { .. } => "snapshot",
+        CompactionJob::Install { .. } => "install",
+        CompactionJob::Drop { .. } => "drop",
+        CompactionJob::Fault { .. } => "fault",
+        CompactionJob::Archives => "archives",
+        CompactionJob::Shutdown => "shutdown",
     }
 }
 
@@ -1981,6 +2031,12 @@ mod order_tests {
             order,
             ["cut 7", "cut 8", "merge 1", "merge 2", "merge 3", "merge 4"]
         );
+        // an archive pass with another queued behind it is skipped, and nothing else ever is
+        let backlog: VecDeque<CompactionJob> = [merge(5), CompactionJob::Archives].into_iter().collect();
+        assert!(is_redundant(&CompactionJob::Archives, &backlog));
+        assert!(!is_redundant(&merge(4), &backlog));
+        assert!(!is_redundant(&cut(9), &backlog));
+        assert!(!is_redundant(&CompactionJob::Archives, &VecDeque::new()));
         // with no cut queued the order is the order sent
         let mut backlog: VecDeque<CompactionJob> = [merge(1), merge(2)].into_iter().collect();
         assert_eq!(take_next(&mut backlog).as_ref().map(label).as_deref(), Some("merge 1"));
