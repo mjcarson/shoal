@@ -60,9 +60,12 @@ shard and node do not.
   machine's `apply`, which ends that group's `RaftCore` if the group is running, or its
   `Raft::new` if the entry was being replayed at start. Nothing else on the shard notices. The
   log and the vote are untouched, since neither depends on the archives.
-- **A copy that leads hands its lead on first**, with `transfer_leader` to another voter,
+- **A copy that leads hands its lead on first**, ~~with `transfer_leader` to another voter,
   so the group's writes are not held for an election timeout. This is best effort: an election
-  follows the core's end anyway.
+  follows the core's end anyway.~~ Dropping the batch straight after asking ended the core before
+  the transfer took, and on the lab a group's writes reached the dead core for 16 s. Since
+  [#167](stalled-leader-handoff.md) a task holds the batch until another member leads, or for 3 s,
+  and the lead goes to the voter furthest along.
 - **A start that stalls is not a failed shard.** `handle_group_up` takes a failed build of a
   stalled group as a stall: the slot keeps no handle and is marked `start_failed`, and the writes
   that waited for the handle are refused retriably. A slot with no handle and `start_failed` set

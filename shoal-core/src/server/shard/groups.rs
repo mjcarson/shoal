@@ -196,6 +196,12 @@ pub(super) struct Group<D: ShoalDatabase> {
     /// boundary no longer says what the copy holds, and a member fed from it would be missing
     /// what the install put there ([Resolved #168](../../../../docs/src/appendix/resolved/restored-rows-outside-the-log.md)).
     pub(super) purge_through: Option<u64>,
+    /// The boundary of the last repair or restore file this copy installed, or zero
+    ///
+    /// A cut below it was taken of the rows the install replaced, and is never a source: one in
+    /// flight when the install landed is dropped rather than handed to its waiters
+    /// ([Resolved #168](../../../../docs/src/appendix/resolved/restored-rows-outside-the-log.md)).
+    pub(super) installed_at: u64,
 }
 
 /// The directory under a shard's WAL where every volatile group it ever held is marked
@@ -750,6 +756,7 @@ where
                 core_dead: None,
                 start_failed: false,
                 purge_through: None,
+                installed_at: 0,
             };
             replication.groups.insert(spec.id, group);
             // the handle is built on a task of its own, since building it applies
@@ -828,6 +835,8 @@ where
         };
         slot.start_failed = false;
         slot.core_dead = None;
+        // no cut below this file is a source from here on
+        slot.installed_at = slot.installed_at.max(manifest.boundary.index);
         let table = slot.table;
         let tablets = slot.spec.tablets.clone();
         // the state a restart would find: the checkpoint, and the file pending past it
@@ -3179,7 +3188,7 @@ where
         if let Some(built) = &slot.snapshot {
             let boundary = built.manifest.boundary.index;
             let follows = boundary >= checkpoint || purged.is_none_or(|purged| purged <= boundary);
-            if boundary >= at_least && follows {
+            if boundary >= at_least && boundary >= slot.installed_at && follows {
                 let _ = reply.send(Ok(built.clone()));
                 return Ok(());
             }
@@ -3309,6 +3318,18 @@ where
         };
         slot.snapshot_building = false;
         let waiting = std::mem::take(&mut slot.snapshot_waiting);
+        // a cut taken before an install that landed while it was being cut holds the rows the
+        // install replaced, and is nobody's source
+        let outcome = match outcome {
+            Ok((path, manifest)) if manifest.boundary.index < slot.installed_at => {
+                let _ = glommio::io::remove(&path).await;
+                Err(format!(
+                    "the cut at {} was taken before an install at {}; ask again",
+                    manifest.boundary.index, slot.installed_at
+                ))
+            }
+            other => other,
+        };
         match outcome {
             Ok((path, manifest)) => {
                 replication.snapshots.built += 1;

@@ -52,6 +52,13 @@ A corrupt record found by an archive compaction is **left where it is**:
 A kept archive stays a candidate for later passes. It has little left to rewrite, and the
 partition is not reported twice.
 
+**A snapshot cut reports one too.** A backup on the lab failed four groups on corrupt records
+nothing had read (`cutting the snapshot: CorruptArchive …`), and nothing said which copy held them.
+The cut still fails, since a corrupt copy is never a source, but it now reports the record the same
+way. **On the lab** the fix, deployed onto titan with its 64 GB of archives, reported 13 corrupt
+records in its first minute, and the archives fell to 37.6 GB within two minutes as passes stopped
+failing and deleted what they had rewritten.
+
 ## Alternatives rejected
 
 - **Classify the pass as fatal.** It stops the loop, but it also stops the table's compactor on the
@@ -76,8 +83,8 @@ partition is not reported twice.
 - ~~**A segment compaction that has to load a corrupt partition still fails and is retried
   forever**, filed as item 166.~~ Resolved: its copy is quarantined as unreadable and repaired,
   and the job skips what the install replaced ([Resolved #166](segment-compaction-corrupt-loop.md)).
-- The 38 GB titan held was reclaimed by the lab's re-bootstrap, not by the fix: bytes already
-  written are dead space that later archive compactions reclaim.
+- Dead bytes a failed pass already wrote are reclaimed only by later passes over that archive, so
+  a node that ran the loop for long keeps some until its archives are compacted again.
 
 ## Tests
 
