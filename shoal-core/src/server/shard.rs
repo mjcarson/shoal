@@ -1529,9 +1529,16 @@ pub(super) struct Shard<D: ShoalDatabase> {
     map: MapCell,
     /// Whether this node holds tablets under the placement
     ///
-    /// A joiner before the placement is initialized holds none and answers every data query
-    /// with `NotInitialized`; a standalone node always holds its own.
+    /// The placement, a configuration or a move names it, so it hosts groups; a standalone
+    /// node always holds its own.
     placed: bool,
+    /// Whether this node has a ring to coordinate queries with
+    ///
+    /// True on every node once the placement is initialized, placed or not: a member the
+    /// placement does not name forwards every query to the tablets' holders. Only a node
+    /// whose map has no placement yet answers every data query with `NotInitialized`
+    /// ([Resolved #169](../../../docs/src/appendix/resolved/unplaced-member-forwards.md)).
+    routes: bool,
     /// What this node says about itself in a hello, shared with the links and the listener
     ///
     /// A cell rather than a value because a joiner's cluster is learned after its shards start,
@@ -1645,13 +1652,16 @@ where
         .await?;
         // build our tablet map: a standalone node's is its own shards, a cluster node's places
         // those shards among the members the map names, so a remote key routes to a remote
-        // contact ([F38](../../../docs/src/features/inter-node-transport.md)); a node the map
-        // does not place holds a ring of its own shards it routes nothing against
-        let (ring, replica_ring, placed, map, local) = match &peer_setup {
+        // contact ([F38](../../../docs/src/features/inter-node-transport.md)); a member the
+        // placement does not name coordinates with every tablet remote, and a node whose map has
+        // no placement yet holds a ring of its own shards it routes nothing against
+        let (ring, replica_ring, placed, routes, map, local) = match &peer_setup {
             Some(setup) => {
                 let map = MapCell::new(setup.initial_map.clone());
                 let mut local = setup.local.clone();
                 local.cluster = local.cluster.or(setup.initial_map.cluster);
+                // whether the placement names this node, which decides the groups it hosts
+                let placed = setup.initial_map.places(setup.local.node);
                 match setup.initial_map.ring_for(setup.local.node, &hosting)? {
                     Some(ring) => {
                         let replica_ring = setup
@@ -1661,6 +1671,7 @@ where
                         (
                             ring,
                             replica_ring,
+                            placed,
                             true,
                             map,
                             Some(Rc::new(RefCell::new(local))),
@@ -1672,6 +1683,7 @@ where
                             ring.clone(),
                             ring,
                             false,
+                            false,
                             map,
                             Some(Rc::new(RefCell::new(local))),
                         )
@@ -1682,7 +1694,7 @@ where
                 // a standalone node owns its tablets as the hosting deals them, which is the
                 // ring of old until a rehome moved some ([F47](../../../docs/src/features/local-rehome.md))
                 let ring = Ring::from_hosting(&hosting)?;
-                (ring.clone(), ring, true, MapCell::default(), None)
+                (ring.clone(), ring, true, true, MapCell::default(), None)
             }
         };
         // build our shard
@@ -1720,6 +1732,7 @@ where
             peers: None,
             map,
             placed,
+            routes,
             local,
             bulk_received: Rc::new(Cell::new(0)),
             shed: 0,
@@ -1753,22 +1766,27 @@ where
                 local.cluster = map.cluster;
             }
         }
-        // the ring this node routes with under the placement, or none if it is not placed
+        // the ring this node routes with under the placement: its own tablets on its executors
+        // if the placement names it, every tablet remote if not, and none before there is one
+        // ([Resolved #169](../../../docs/src/appendix/resolved/unplaced-member-forwards.md))
         match map.ring_for(setup.local.node, &self.hosting)? {
             Some(ring) => {
                 self.replica_ring = map
                     .read_ring_for(setup.local.node, &self.hosting)?
                     .unwrap_or_else(|| ring.clone());
                 self.ring = ring;
-                self.placed = true;
+                self.routes = true;
             }
-            None => self.placed = false,
+            None => self.routes = false,
         }
+        // whether it hosts groups follows whether the placement names it
+        self.placed = map.places(setup.local.node);
         event!(
             Level::INFO,
             msg = "installed a tablet map",
             version = map.version,
             placed = self.placed,
+            routes = self.routes,
             members = map.members.len(),
         );
         // the groups this shard hosts follow the placement
@@ -2162,16 +2180,18 @@ where
         // every index below is absolute, so this has to carry the base index too or a
         // streamed bundle would compare an absolute index against a relative one
         let end_index = base_index + last_offset;
-        // a node the placement does not name holds no tablets, so nothing here can be answered;
-        // every query is refused by name rather than routed to a shard that would find nothing
-        // ([F39](../../../docs/src/features/membership.md))
-        if !self.placed {
+        // a node whose map has no placement has nowhere to send a query, so nothing here can be
+        // answered; every query is refused by name rather than routed to a shard that would find
+        // nothing ([F39](../../../docs/src/features/membership.md)). A member the placement does
+        // not name routes every query remotely instead
+        // ([Resolved #169](../../../docs/src/appendix/resolved/unplaced-member-forwards.md))
+        if !self.routes {
             for (offset, kind) in queries.queries.iter().enumerate() {
                 let index = offset + base_index;
                 let table = <D::ClientType as QuerySupport>::archived_query_table(kind);
                 let error = crate::shared::responses::ResponseError::new(
                     ErrorCode::NotInitialized,
-                    "this node holds no tablets: the placement has not been initialized, or does not name it",
+                    "this node has no placement to route by: the cluster has not been initialized",
                 );
                 let response = <D::ClientType as QuerySupport>::failed(
                     table,
@@ -3029,7 +3049,11 @@ where
             let command = match self.tables.write_command(&query) {
                 Ok(command) => command,
                 Err(error) => {
-                    event!(Level::ERROR, msg = "failed to archive a write's intent", ?error);
+                    event!(
+                        Level::ERROR,
+                        msg = "failed to archive a write's intent",
+                        ?error
+                    );
                     let error = crate::shared::responses::ResponseError::new(
                         ErrorCode::StorageWrite,
                         "the write could not be archived and was not applied".to_owned(),

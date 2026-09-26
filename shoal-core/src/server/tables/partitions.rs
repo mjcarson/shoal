@@ -2044,9 +2044,13 @@ mod tests {
         // two copies of one partition, updated the two ways
         let mut whole = partition_of(&["a"]);
         let mut split = partition_of(&["a"]);
-        let diff = whole.update(&update_for("a")).expect("a live row was not updated");
+        let diff = whole
+            .update(&update_for("a"))
+            .expect("a live row was not updated");
         // find the row, then apply to it, as a write does around its commit
-        let row = split.live_row_mut(&"a".to_owned()).expect("a live row was not found");
+        let row = split
+            .live_row_mut(&"a".to_owned())
+            .expect("a live row was not found");
         let split_diff = SortedPartition::update_row(row, &update_for("a"));
         split.resize(split_diff);
         // both came to the same thing
@@ -3010,7 +3014,8 @@ mod tests {
     /// * `sort_keys` - The sort keys to build rows for
     fn accessible(sort_keys: &[&str]) -> MaybeLoaded<SortedPartition<TestRow>, AlignedVec> {
         // archive the partition the way a compaction would have written it
-        let raw = <SortedPartition<TestRow> as RkyvSupport>::serialize(&partition_of(sort_keys)).unwrap();
+        let raw =
+            <SortedPartition<TestRow> as RkyvSupport>::serialize(&partition_of(sort_keys)).unwrap();
         // hold it as an archive rather than as rows, validated the way a load validates it
         MaybeLoaded::Accessible(ValidatedArchive::new(raw).unwrap())
     }
@@ -3021,8 +3026,7 @@ mod tests {
     ///
     /// * `sort_keys` - The sort keys to build rows for
     fn archived_of(sort_keys: &[&str]) -> AlignedVec {
-        <SortedPartition<TestRow> as RkyvSupport>::serialize(&partition_of(sort_keys))
-            .unwrap()
+        <SortedPartition<TestRow> as RkyvSupport>::serialize(&partition_of(sort_keys)).unwrap()
     }
 
     /// Copy an archive, keeping its alignment, so a test can damage it
@@ -3261,7 +3265,8 @@ mod tests {
     /// so it has to be the length of the buffer rather than the size of the rows in it.
     fn an_accessible_partition_reports_its_byte_size() {
         // archive a partition and hold it both ways
-        let raw = <SortedPartition<TestRow> as RkyvSupport>::serialize(&partition_of(&["a", "b"])).unwrap();
+        let raw = <SortedPartition<TestRow> as RkyvSupport>::serialize(&partition_of(&["a", "b"]))
+            .unwrap();
         let len = raw.len();
         let partition: MaybeLoaded<SortedPartition<TestRow>, AlignedVec> =
             MaybeLoaded::Accessible(ValidatedArchive::new(raw).unwrap());

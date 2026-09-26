@@ -57,7 +57,9 @@ const NEGLIGIBLE_RATE: f64 = 1e-6;
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 /// One exponentially weighted moving average of a rate
@@ -157,9 +159,12 @@ impl WriteWindows {
         self.inserts.observe(delta.inserts as f64 / dt, dt);
         self.updates.observe(delta.updates as f64 / dt, dt);
         self.deletes.observe(delta.deletes as f64 / dt, dt);
-        self.insert_bytes.observe(delta.insert_bytes as f64 / dt, dt);
-        self.update_bytes.observe(delta.update_bytes as f64 / dt, dt);
-        self.delete_bytes.observe(delta.delete_bytes as f64 / dt, dt);
+        self.insert_bytes
+            .observe(delta.insert_bytes as f64 / dt, dt);
+        self.update_bytes
+            .observe(delta.update_bytes as f64 / dt, dt);
+        self.delete_bytes
+            .observe(delta.delete_bytes as f64 / dt, dt);
         self.misses.observe(delta.misses as f64 / dt, dt);
     }
 
@@ -281,12 +286,14 @@ impl NodeStatsTracker {
         // the groups gone since the tick before are forgotten with it
         self.prev = seen;
         // the node's snapshot streams, gained since the tick before
-        let (sent, received) = shards.values().fold((0u64, 0u64), |(sent, received), report| {
-            (
-                sent.saturating_add(report.snapshots.bytes_sent),
-                received.saturating_add(report.snapshots.bytes_received),
-            )
-        });
+        let (sent, received) = shards
+            .values()
+            .fold((0u64, 0u64), |(sent, received), report| {
+                (
+                    sent.saturating_add(report.snapshots.bytes_sent),
+                    received.saturating_add(report.snapshots.bytes_received),
+                )
+            });
         let stream_gained = match self.prev_stream {
             Some((prev_sent, prev_received)) => (
                 sent.checked_sub(prev_sent).unwrap_or(sent),
@@ -375,7 +382,8 @@ impl NodeStatsTracker {
         self.total.applied.observe(&applied, dt);
         self.total.led.observe(&led, dt);
         self.stream_sent.observe(stream_gained.0 as f64 / dt, dt);
-        self.stream_received.observe(stream_gained.1 as f64 / dt, dt);
+        self.stream_received
+            .observe(stream_gained.1 as f64 / dt, dt);
     }
 }
 
@@ -396,7 +404,9 @@ fn is_negligible(rates: &WriteRates) -> bool {
         rates.misses,
     ]
     .iter()
-    .all(|rate| rate.r10s <= NEGLIGIBLE_RATE && rate.r1m <= NEGLIGIBLE_RATE && rate.r5m <= NEGLIGIBLE_RATE)
+    .all(|rate| {
+        rate.r10s <= NEGLIGIBLE_RATE && rate.r1m <= NEGLIGIBLE_RATE && rate.r5m <= NEGLIGIBLE_RATE
+    })
 }
 
 /// When one step's move started and, once done, finished, in milliseconds since the epoch
@@ -462,8 +472,14 @@ where
         op: record.op,
         kind: record.kind.name().to_string(),
         phase: record.phase.name().to_string(),
-        blocked: record.blocked.as_ref().map(|blocked| blocked.reason.clone()),
-        outcome: record.outcome.as_ref().map(|outcome| outcome.name().to_string()),
+        blocked: record
+            .blocked
+            .as_ref()
+            .map(|blocked| blocked.reason.clone()),
+        outcome: record
+            .outcome
+            .as_ref()
+            .map(|outcome| outcome.name().to_string()),
         steps_total: 0,
         pending: 0,
         moving: 0,
@@ -541,7 +557,10 @@ where
     }
     // an open plan's current throughput is what its running steps' sources stream out
     if !record.is_done() && !sources.is_empty() {
-        let rates: Vec<f64> = sources.iter().filter_map(|node| stream_rate(*node)).collect();
+        let rates: Vec<f64> = sources
+            .iter()
+            .filter_map(|node| stream_rate(*node))
+            .collect();
         if !rates.is_empty() {
             progress.throughput_now_bps = Some(rates.iter().sum());
         }
@@ -694,7 +713,10 @@ mod tests {
             node,
             start,
             1,
-            &shards(vec![group(1, "notes", 100, true), group(2, "notes", 50, false)]),
+            &shards(vec![
+                group(1, "notes", 100, true),
+                group(2, "notes", 50, false),
+            ]),
             7,
         );
         assert_eq!(first.total.applied.inserts.r10s, 0.0);
@@ -710,7 +732,10 @@ mod tests {
             node,
             start + Duration::from_secs(1),
             2,
-            &shards(vec![group(1, "notes", 110, true), group(2, "notes", 70, false)]),
+            &shards(vec![
+                group(1, "notes", 110, true),
+                group(2, "notes", 70, false),
+            ]),
             7,
         );
         assert!((second.total.applied.inserts.r10s - 30.0).abs() < 1e-9);
@@ -724,7 +749,10 @@ mod tests {
             node,
             start + Duration::from_secs(2),
             3,
-            &shards(vec![group(1, "notes", 5, true), group(2, "notes", 70, false)]),
+            &shards(vec![
+                group(1, "notes", 5, true),
+                group(2, "notes", 70, false),
+            ]),
             7,
         );
         let r10s = third.total.applied.inserts.r10s;
@@ -783,7 +811,10 @@ mod tests {
         let (done_op, running_op) = (Uuid::new_v4(), Uuid::new_v4());
         let moves = BTreeMap::from([
             (done_op, move_of(done_op, 20_000, 10_000, MovePhase::Done)),
-            (running_op, move_of(running_op, 25_000, 3_000, MovePhase::CatchingUp)),
+            (
+                running_op,
+                move_of(running_op, 25_000, 3_000, MovePhase::CatchingUp),
+            ),
         ]);
         let step = |op: Option<Uuid>, from: NodeId, state: StepState| PlanStep {
             tablet: 0,
@@ -811,7 +842,15 @@ mod tests {
         let rate = |node: NodeId| (node == b).then_some(100_000.0);
         let progress = plan_progress(&plan, &moves, 30_000, rate);
         assert_eq!(progress.steps_total, 4);
-        assert_eq!((progress.pending, progress.moving, progress.moved, progress.failed), (1, 1, 1, 1));
+        assert_eq!(
+            (
+                progress.pending,
+                progress.moving,
+                progress.moved,
+                progress.failed
+            ),
+            (1, 1, 1, 1)
+        );
         assert_eq!(progress.bytes_planned, 3_000_000);
         assert_eq!(progress.bytes_moved, 1_000_000);
         assert_eq!(progress.bytes_streamed, 800);

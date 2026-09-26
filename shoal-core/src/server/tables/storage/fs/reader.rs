@@ -200,9 +200,10 @@ impl IntentLogReader {
         // what of the ask the block holds: all of it, unless the file ends first
         let offset = (position - aligned) as usize;
         let held = window.len().saturating_sub(offset).min(len);
-        let slice = ReadResult::slice(&window, offset.min(window.len()), held).ok_or_else(|| {
-            ServerError::Shoal(crate::server::errors::ShoalError::TruncatedIntentLog)
-        })?;
+        let slice =
+            ReadResult::slice(&window, offset.min(window.len()), held).ok_or_else(|| {
+                ServerError::Shoal(crate::server::errors::ShoalError::TruncatedIntentLog)
+            })?;
         self.window = Some(window);
         Ok(slice)
     }

@@ -1695,9 +1695,8 @@ where
             }
             let bytes = match entry {
                 MaybeLoaded::Loaded { partition, .. } => match &partition.row {
-                    MaybeRow::Row(_) => {
-                        rkyv::to_bytes::<rkyv::rancor::Error>(&**partition).map(|bytes| bytes.to_vec())
-                    }
+                    MaybeRow::Row(_) => rkyv::to_bytes::<rkyv::rancor::Error>(&**partition)
+                        .map(|bytes| bytes.to_vec()),
                     MaybeRow::Tombstone => continue,
                 },
                 MaybeLoaded::Accessible(read) => match &read.archived().row {

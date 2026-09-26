@@ -222,7 +222,11 @@ async fn a_stream_dropped_early_is_not_tracked() -> Result<(), TestError> {
     }
     // let the late answers land, which must not bring a slot back either
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(client.tracked(), before, "a dropped stream is still tracked");
+    assert_eq!(
+        client.tracked(),
+        before,
+        "a dropped stream is still tracked"
+    );
     // and the client still answers
     client.send_one(TestRecord::new("after", "drop")).await?;
     // Shutdown server

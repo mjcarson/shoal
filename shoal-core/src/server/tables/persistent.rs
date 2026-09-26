@@ -1132,7 +1132,10 @@ mod tests {
         // the first could not be read, which stops it waiting on that one alone
         pending.fail(
             0,
-            crate::shared::responses::ResponseError::new(ErrorCode::StorageRead, "first".to_owned()),
+            crate::shared::responses::ResponseError::new(
+                ErrorCode::StorageRead,
+                "first".to_owned(),
+            ),
         );
         assert!(pending.is_pending());
         assert_eq!(pending.rank(1), None);

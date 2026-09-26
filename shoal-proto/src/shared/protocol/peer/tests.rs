@@ -139,7 +139,10 @@ fn a_version_range_negotiates_to_the_highest_shared() {
 #[test]
 fn pre_vote_is_an_optional_capability() {
     // the kind is eleven and round trips
-    assert_eq!(ReplicateKind::from_byte(11).unwrap(), ReplicateKind::PreVote);
+    assert_eq!(
+        ReplicateKind::from_byte(11).unwrap(),
+        ReplicateKind::PreVote
+    );
     assert_eq!(ReplicateKind::PreVote.as_byte(), 11);
     assert_eq!(ReplicateKind::PreVote.name(), "pre_vote");
     // this build acts on it

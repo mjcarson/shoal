@@ -46,8 +46,9 @@ use crate::server::peer::handshake::PeerAddr;
 use crate::server::peer::{self, Frame, FrameKey, Lane, LinkEvent, LinkView, Local};
 use crate::shared::identity::{GroupId, NodeId, ShardAddr};
 use crate::shared::protocol::peer::{
-    checksum, ReplicateKind, ReplicateRequestHead, CAP_PRE_VOTE_V1, ReplicateResponseHead, ReplicateStatus,
-    SnapshotBegin, SnapshotChunk, SnapshotEnd, SnapshotStatus, REPLICATE_RESPONSE_HEAD_LEN,
+    checksum, ReplicateKind, ReplicateRequestHead, ReplicateResponseHead, ReplicateStatus,
+    SnapshotBegin, SnapshotChunk, SnapshotEnd, SnapshotStatus, CAP_PRE_VOTE_V1,
+    REPLICATE_RESPONSE_HEAD_LEN,
 };
 use crate::shared::protocol::MessageType;
 use crate::shared::tls::PeerTlsHolder;
@@ -289,8 +290,16 @@ impl ReplicationLink {
         deadline: Duration,
     ) -> Result<Vec<u8>, RpcFailure> {
         // the peer is given exactly as long as this side waits
-        self.rpc_budgeted(kind, group, target_shard, version, payload, deadline, deadline)
-            .await
+        self.rpc_budgeted(
+            kind,
+            group,
+            target_shard,
+            version,
+            payload,
+            deadline,
+            deadline,
+        )
+        .await
     }
 
     /// Send one RPC telling the peer one budget, and wait for its answer for another
@@ -1286,11 +1295,18 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
         })?;
         let answer = self
             .peer
-            .rpc(ReplicateKind::PreVote, self.group, payload, option.hard_ttl())
+            .rpc(
+                ReplicateKind::PreVote,
+                self.group,
+                payload,
+                option.hard_ttl(),
+            )
             .await
             .map_err(ShardPeer::unreachable)?;
         postcard::from_bytes(&answer).map_err(|error| {
-            ShardPeer::unreachable(RpcFailure::Unreachable(format!("decoding pre_vote: {error}")))
+            ShardPeer::unreachable(RpcFailure::Unreachable(format!(
+                "decoding pre_vote: {error}"
+            )))
         })
     }
 
@@ -1800,7 +1816,10 @@ mod tests {
     #[test]
     fn a_hop_leaves_the_leader_less_than_it_waits() {
         // a short budget loses a tenth, not the whole fixed margin
-        assert_eq!(hop_budget(Duration::from_millis(500)), Duration::from_millis(450));
+        assert_eq!(
+            hop_budget(Duration::from_millis(500)),
+            Duration::from_millis(450)
+        );
         // a long one loses the cap and no more
         assert_eq!(
             hop_budget(Duration::from_secs(5)),

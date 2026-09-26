@@ -467,6 +467,11 @@ pub enum ShoalError {
     /// A node routes against a placement it is part of; one that leaves it out would send every
     /// query to a peer, including the ones for its own tablets.
     PlacementMissingSelf { node: NodeId },
+    /// A coordinating ring was asked for over a placement that names this node
+    ///
+    /// A placed node routes its own tablets to its own executors, which a coordinating ring
+    /// never does ([Resolved #169](../../../docs/src/appendix/resolved/unplaced-member-forwards.md)).
+    PlacementNamesSelf { node: NodeId },
     /// The placement names this node with a shard count other than the one it runs
     ///
     /// A peer routes to a shard on this node from the count the cluster recorded, so a count
@@ -709,6 +714,11 @@ impl std::fmt::Display for ShoalError {
                 f,
                 "the placement does not name this node, {node}; a node routes against a \
                  placement it is part of"
+            ),
+            ShoalError::PlacementNamesSelf { node } => write!(
+                f,
+                "the placement names this node, {node}; only a member it does not name \
+                 coordinates with every tablet remote"
             ),
             ShoalError::PlacementShardCount { node, entry, actual } => write!(
                 f,

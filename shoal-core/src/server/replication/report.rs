@@ -528,13 +528,13 @@ impl NodeReplication {
                     folded.absorb(&shard.integrity);
                     folded
                 }),
-            writes: shards
-                .iter()
-                .flat_map(|shard| shard.groups.iter())
-                .fold(WriteCounters::default(), |mut folded, group| {
+            writes: shards.iter().flat_map(|shard| shard.groups.iter()).fold(
+                WriteCounters::default(),
+                |mut folded, group| {
                     folded.absorb(&group.writes);
                     folded
-                }),
+                },
+            ),
             shards,
         }
     }

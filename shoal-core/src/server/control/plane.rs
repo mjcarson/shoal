@@ -474,6 +474,13 @@ pub struct DataReadiness {
     pub initialized: bool,
     /// Whether this node holds tablets under the placement
     pub placed: bool,
+    /// Whether this node coordinates data queries, placed or not
+    ///
+    /// Every member does once the placement is initialized; one the placement does not name
+    /// forwards every query to the tablets' holders
+    /// ([Resolved #169](../../../../docs/src/appendix/resolved/unplaced-member-forwards.md)).
+    #[serde(default)]
+    pub routes: bool,
     /// How many members are up
     pub members_up: u32,
     /// The replication factor the policy asks for
@@ -1251,10 +1258,13 @@ impl Core {
             data: DataReadiness {
                 initialized: self.machine.state().initialized.is_some(),
                 placed: map.places(self.node),
+                routes: map.coordinates(self.node),
                 members_up: map.up(),
                 desired_rf: map.desired_rf,
                 active_rf: map.active_rf(),
-                default_writes: if map.places(self.node) {
+                // a write through any member of an initialized cluster is coordinated, so its
+                // admission is the map's whether or not this node is placed
+                default_writes: if map.coordinates(self.node) {
                     map.write_admission()
                 } else {
                     Err(QuorumShortfall {
@@ -2707,9 +2717,9 @@ impl Core {
             // every member's standing and figures and every plan's progress
             // ([F52](../../../../docs/src/features/cluster-stats.md))
             AdminKind::Stats { table } => {
-                let outcome = self.cluster_stats(table.as_deref()).map(|view| {
-                    AdminOutcome::Read(serde_json::to_value(view).unwrap_or_default())
-                });
+                let outcome = self
+                    .cluster_stats(table.as_deref())
+                    .map(|view| AdminOutcome::Read(serde_json::to_value(view).unwrap_or_default()));
                 let _ = call.reply.send(answer(outcome));
                 return;
             }
@@ -3270,7 +3280,11 @@ impl Core {
                 .saturating_mul(PAUSED_TICKS),
         );
         if let Some(gap) = gap.filter(|gap| *gap > paused) {
-            event!(Level::WARN, msg = "this node's control loop stood still; its failure evidence starts over", gap_ms = u64::try_from(gap.as_millis()).unwrap_or(u64::MAX));
+            event!(
+                Level::WARN,
+                msg = "this node's control loop stood still; its failure evidence starts over",
+                gap_ms = u64::try_from(gap.as_millis()).unwrap_or(u64::MAX)
+            );
             self.detector.reset();
             for (node, member) in &state.members {
                 if *node != self.node
@@ -3651,9 +3665,7 @@ impl Core {
     fn stats_stale_after(&self) -> Duration {
         // a few of the intervals the figures are sent at
         let interval = self.policy.failure_detector.interval_ms.max(50);
-        Duration::from_millis(
-            interval * u64::from(STATS_EVERY_REPORTS) * STALE_AFTER_INTERVALS,
-        )
+        Duration::from_millis(interval * u64::from(STATS_EVERY_REPORTS) * STALE_AFTER_INTERVALS)
     }
 
     /// Every member's standing and figures, and how far every plan has got
@@ -3708,9 +3720,7 @@ impl Core {
             .map(|member| {
                 let node = member.record.node;
                 let figures = held(node);
-                let stale = figures
-                    .as_ref()
-                    .is_some_and(|(_, age)| *age > stale_after);
+                let stale = figures.as_ref().is_some_and(|(_, age)| *age > stale_after);
                 MemberStats {
                     node,
                     client: member.record.client.clone(),
@@ -3726,9 +3736,9 @@ impl Core {
                         _ => None,
                     },
                     shards_failed: member.shards_failed.clone(),
-                    report_age_ms: figures.as_ref().map(|(_, age)| {
-                        u64::try_from(age.as_millis()).unwrap_or(u64::MAX)
-                    }),
+                    report_age_ms: figures
+                        .as_ref()
+                        .map(|(_, age)| u64::try_from(age.as_millis()).unwrap_or(u64::MAX)),
                     stale,
                     stats: figures.map(|(stats, _)| match table {
                         Some(table) => stats.narrowed(table),

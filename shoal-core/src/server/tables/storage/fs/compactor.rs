@@ -27,13 +27,13 @@ use super::map::{
 };
 use super::IntentLogReader;
 use crate::server::database::ShoalDatabase;
+use crate::server::errors::ShoalError;
 use crate::server::messages::ServerMsg;
 use crate::server::replication::snapshot::{
     self, SnapshotManifest, SnapshotProvenance, SnapshotReader, SnapshotWriter,
 };
 use crate::server::ring::Ring;
 use crate::server::wal::WalLogId;
-use crate::server::errors::ShoalError;
 use crate::server::ServerError;
 use crate::shared::identity::{ClusterId, GroupId, NodeId};
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, TableNameSupport as _};
@@ -833,7 +833,8 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             // asked for once, and the job waits for the repair's install
             // ([Resolved #166](../../../../../../docs/src/appendix/resolved/segment-compaction-corrupt-loop.md))
             if let Err(error) = self.load_partitions_for_intents().await {
-                if let ServerError::Shoal(ShoalError::CorruptArchive { partition_id, .. }) = &error {
+                if let ServerError::Shoal(ShoalError::CorruptArchive { partition_id, .. }) = &error
+                {
                     self.report_corrupt(*partition_id, true).await;
                 }
                 return Err(JobFailure::Retry(error));
@@ -1666,7 +1667,13 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         if !self.reported_corrupt.insert((partition, unreadable)) {
             return;
         }
-        event!(Level::ERROR, msg = "a compaction met a record that failed its checksum", table = R::name(), partition = format!("{partition:016x}"), merge_waits = unreadable);
+        event!(
+            Level::ERROR,
+            msg = "a compaction met a record that failed its checksum",
+            table = R::name(),
+            partition = format!("{partition:016x}"),
+            merge_waits = unreadable
+        );
         let _ = self
             .shard_local_tx
             .send(ServerMsg::CorruptRecord {
@@ -1860,4 +1867,3 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         Ok(())
     }
 }
-

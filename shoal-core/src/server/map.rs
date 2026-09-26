@@ -164,6 +164,12 @@ pub struct TabletMap {
     pub members: BTreeMap<NodeId, MapMember>,
     /// The nodes tablets are placed over, in placement order; empty before initialization
     pub placement: Vec<NodeId>,
+    /// Whether an operator initialized the placement, rather than the bootstrapper serving alone
+    ///
+    /// Once it has, every member coordinates the queries it is sent, placed or not
+    /// ([Resolved #169](../../../docs/src/appendix/resolved/unplaced-member-forwards.md)).
+    #[serde(default)]
+    pub initialized: bool,
     /// The tables the schema serves, with their stable identities
     pub tables: Vec<(String, TableId)>,
     /// How many replicas each tablet is meant to have
@@ -230,6 +236,7 @@ impl Default for TabletMap {
             leader: None,
             members: BTreeMap::new(),
             placement: Vec::new(),
+            initialized: false,
             tables: Vec::new(),
             desired_rf: 0,
             write_consistency: Consistency::Quorum,
@@ -305,6 +312,7 @@ impl TabletMap {
             leader,
             members,
             placement,
+            initialized: state.initialized.is_some(),
             tables: if state.tables.is_empty() {
                 tables.to_vec()
             } else {
@@ -833,6 +841,21 @@ impl TabletMap {
         self.routing_counts().iter().any(|(node, _)| *node == me)
     }
 
+    /// Whether a node coordinates the data queries it is sent
+    ///
+    /// A node a ring names does, and so does every other member once an operator initialized
+    /// the placement: it routes with every tablet remote. Before that only the bootstrapper
+    /// serves, and a joiner refuses by name
+    /// ([Resolved #169](../../../docs/src/appendix/resolved/unplaced-member-forwards.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `me` - The node
+    #[must_use]
+    pub fn coordinates(&self, me: NodeId) -> bool {
+        self.places(me) || (self.initialized && !self.placement.is_empty())
+    }
+
     /// Every node a ring names: the placement, then every node a configuration or a move
     /// not yet published brings in that the placement does not, each with its shard count
     ///
@@ -874,7 +897,13 @@ impl TabletMap {
             .collect()
     }
 
-    /// The ring this node routes with under the placement, or none if it is not placed
+    /// The ring this node routes with under the placement, or none if it coordinates nothing
+    ///
+    /// A node the placement names routes its own tablets to its own executors. A member it
+    /// does not name - one admitted after initialization and not yet brought in by a move -
+    /// coordinates with every tablet remote, sending each to exactly the slot a placed node
+    /// would ([Resolved #169](../../../docs/src/appendix/resolved/unplaced-member-forwards.md)).
+    /// A joiner before initialization has none.
     ///
     /// # Arguments
     ///
@@ -885,10 +914,16 @@ impl TabletMap {
     ///
     /// Fails if the placement names this node with another slot count.
     pub fn ring_for(&self, me: NodeId, hosting: &Hosting) -> Result<Option<Ring>, ServerError> {
-        if !self.places(me) {
-            return Ok(None);
+        // every node a ring names, this one included if it is placed
+        let counts = self.routing_counts();
+        if self.places(me) {
+            return Ring::with_placement(hosting, &counts, me).map(Some);
         }
-        Ring::with_placement(hosting, &self.routing_counts(), me).map(Some)
+        // a member the placement does not name coordinates over it once it is initialized
+        if self.coordinates(me) {
+            return Ring::coordinator(hosting, &counts, me).map(Some);
+        }
+        Ok(None)
     }
 
     /// The ring this node serves queries with: a tablet it holds a replica of is served locally
@@ -902,7 +937,9 @@ impl TabletMap {
     /// every query is served by a local replica.
     ///
     /// A local copy is served by the executor hosting its slot
-    /// ([F47](../../../docs/src/features/local-rehome.md)).
+    /// ([F47](../../../docs/src/features/local-rehome.md)). A member the placement does not
+    /// name holds no copy, so every tablet goes to a holder that is up
+    /// ([Resolved #169](../../../docs/src/appendix/resolved/unplaced-member-forwards.md)).
     ///
     /// # Arguments
     ///
@@ -917,10 +954,10 @@ impl TabletMap {
         me: NodeId,
         hosting: &Hosting,
     ) -> Result<Option<Ring>, ServerError> {
-        if !self.places(me) {
+        // start from the placement ring, or have none before the placement is initialized
+        let Some(mut ring) = self.ring_for(me, hosting)? else {
             return Ok(None);
-        }
-        let mut ring = Ring::with_placement(hosting, &self.routing_counts(), me)?;
+        };
         // the executor hosting one of this node's slots, as the ring indexes it
         //
         // truncation cannot happen: an executor count is bounded by a u16 at the ring
@@ -1251,6 +1288,10 @@ mod tests {
             .ring_for(joiner, &Hosting::identity(3))
             .expect("a ring")
             .is_none());
+        // before an operator initializes, the bootstrapper serves alone and a joiner refuses
+        assert!(!map.initialized);
+        assert!(!map.coordinates(joiner));
+        assert!(map.coordinates(node));
         let ring = map
             .ring_for(node, &Hosting::identity(2))
             .expect("a ring")
@@ -1601,6 +1642,110 @@ mod tests {
         assert!((0..TABLET_COUNT).all(|tablet| map.replicas_of(tablet).len() == 2));
     }
 
+    /// A member admitted after initialization coordinates every tablet remotely, to the slot a
+    /// placed node sends it to, and reads through it follow the holders' health (item 169)
+    ///
+    /// Three placed nodes at a factor of three and a fourth member the placement never named.
+    /// Its ring owns nothing locally and routes each tablet to the placed ring's primary; its
+    /// read ring sends each tablet to a holder, and to another holder once the primary is down
+    /// ([Resolved #169](../../../docs/src/appendix/resolved/unplaced-member-forwards.md)).
+    #[test]
+    fn an_unplaced_member_coordinates_every_tablet_remotely() {
+        let (mut map, nodes) = placed(&[2, 1, 1], 3);
+        assert!(map.initialized);
+        // a fourth member, admitted after the placement, with two shards
+        let fourth = NodeId::mint();
+        map.members.insert(
+            fourth,
+            MapMember {
+                node: fourth,
+                client: "c".to_string(),
+                data: "d".to_string(),
+                control: "e".to_string(),
+                shards: 2,
+                role: MemberRole::Learner,
+                health: MemberHealth::Up,
+                incarnation: 1,
+                shards_failed: Vec::new(),
+                quarantined: Vec::new(),
+                phase: super::MemberPhase::Member,
+            },
+        );
+        assert!(!map.places(fourth));
+        assert!(map.coordinates(fourth));
+        let hosting = Hosting::identity(2);
+        let ring = map
+            .ring_for(fourth, &hosting)
+            .expect("a ring")
+            .expect("an unplaced member coordinates");
+        // its own executors first, owning nothing, then every placed slot
+        assert_eq!(ring.shards.len(), 2 + 2 + 1 + 1);
+        // and a placed node's ring, to compare the remote slots against
+        let placed_ring = map
+            .ring_for(nodes[1], &Hosting::identity(1))
+            .expect("a ring")
+            .expect("placed");
+        for tablet in 0..TABLET_COUNT {
+            let key = (tablet as u64) << (u64::BITS - super::super::ring::TABLET_BITS);
+            let primary = map.replicas_of(tablet)[0];
+            let contact = ring.find_shard(key).contact.clone();
+            assert_eq!(
+                contact,
+                ShardContact::Remote {
+                    node: primary.node,
+                    shard: primary.shard,
+                },
+                "tablet {tablet}"
+            );
+            // the placed node sends it to the same slot, unless it is that slot's node
+            if primary.node != nodes[1] {
+                assert_eq!(
+                    placed_ring.find_shard(key).contact,
+                    contact,
+                    "tablet {tablet}"
+                );
+            }
+        }
+        // reads go to the primary while it is up
+        let read = map
+            .read_ring_for(fourth, &hosting)
+            .expect("a ring")
+            .expect("an unplaced member coordinates");
+        for tablet in 0..TABLET_COUNT {
+            let key = (tablet as u64) << (u64::BITS - super::super::ring::TABLET_BITS);
+            let primary = map.replicas_of(tablet)[0];
+            assert_eq!(
+                read.find_shard(key).contact,
+                ShardContact::Remote {
+                    node: primary.node,
+                    shard: primary.shard,
+                },
+                "tablet {tablet}"
+            );
+        }
+        // and to another holder once node zero is down
+        if let Some(member) = map.members.get_mut(&nodes[0]) {
+            member.health = MemberHealth::Down;
+        }
+        let read = map
+            .read_ring_for(fourth, &hosting)
+            .expect("a ring")
+            .expect("an unplaced member coordinates");
+        for tablet in 0..TABLET_COUNT {
+            let key = (tablet as u64) << (u64::BITS - super::super::ring::TABLET_BITS);
+            let ShardContact::Remote { node, shard } = read.find_shard(key).contact.clone() else {
+                panic!("tablet {tablet} was routed locally");
+            };
+            assert_ne!(node, nodes[0], "tablet {tablet} went to a down holder");
+            assert!(
+                map.replicas_of(tablet)
+                    .iter()
+                    .any(|replica| replica.node == node && replica.shard == shard),
+                "tablet {tablet} went to a node holding no copy"
+            );
+        }
+    }
+
     /// A configuration overrides the rule for exactly its tablets and keeps the group's
     /// identity, a member outside the placement is placed by one, and a move's destination
     /// hosts the set as a learner until the move is published
@@ -1636,10 +1781,16 @@ mod tests {
             },
         );
         assert!(!map.places(fourth));
-        assert!(map
+        // unplaced, it still coordinates, with every tablet remote
+        // ([Resolved #169](../../../docs/src/appendix/resolved/unplaced-member-forwards.md))
+        let coordinating = map
             .ring_for(fourth, &Hosting::identity(2))
             .expect("a ring")
-            .is_none());
+            .expect("an unplaced member coordinates");
+        assert!((0..TABLET_COUNT).all(|tablet| {
+            let key = (tablet as u64) << (u64::BITS - super::super::ring::TABLET_BITS);
+            coordinating.find_shard(key).contact.local_index().is_none()
+        }));
         // the set node two leads, and its tablets, from the groups the rule derives
         let before = map.groups_of(TableId::of("Row"));
         let (id, expected, tablets) = before

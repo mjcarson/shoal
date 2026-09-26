@@ -1137,7 +1137,10 @@ fn a_commit_delay_groups_appends_into_fewer_syncs() {
             wal.flush().await.expect("failed to flush");
             batches.push(wal.synced_batches() - before);
         }
-        eprintln!("two hundred appends took {} syncs with no delay and {} with 5 ms", batches[0], batches[1]);
+        eprintln!(
+            "two hundred appends took {} syncs with no delay and {} with 5 ms",
+            batches[0], batches[1]
+        );
         // every append with no delay is nearly a sync of its own; with it, a batch holds several
         assert!(
             batches[1] * 3 < batches[0],
@@ -1147,7 +1150,6 @@ fn a_commit_delay_groups_appends_into_fewer_syncs() {
         );
     });
 }
-
 
 /// A segment may be deleted only behind a purge whose marker is durable (item 151)
 ///
@@ -1171,7 +1173,10 @@ fn a_purge_is_durable_only_once_its_marker_is() {
         let (tx, _rx) = DataConfig::oneshot::<Result<(), io::Error>>();
         let entries: Vec<Entry> = (1..=20).map(|index| normal(index, 100)).collect();
         store
-            .append(entries, openraft::storage::IOFlushed::<DataConfig>::signal(tx))
+            .append(
+                entries,
+                openraft::storage::IOFlushed::<DataConfig>::signal(tx),
+            )
             .await
             .expect("failed to append");
         wal.flush().await.expect("failed to flush");
@@ -1195,4 +1200,3 @@ fn a_purge_is_durable_only_once_its_marker_is() {
         reopened.close().await.expect("failed to close");
     });
 }
-

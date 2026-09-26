@@ -1840,7 +1840,10 @@ mod tests {
         );
         assert_eq!(defaults.timeout.duration(), Duration::from_secs(300));
         assert_eq!(defaults.concurrent, 1);
-        assert!(defaults.unreadable, "a stalled copy is repaired unasked by default");
+        assert!(
+            defaults.unreadable,
+            "a stalled copy is repaired unasked by default"
+        );
         // a block naming every field
         let parsed: super::Repair = serde_yaml::from_str(
             "scrub_interval: \"6h\"\ntimeout: \"2m\"\nconcurrent: 2\nunreadable: false\n",

@@ -764,10 +764,19 @@ mod tests {
         // and the snapshot builds openraft asks for on every apply while compaction is behind (O72)
         assert!(info.contains("openraft::core::sm::worker=warn"), "{info}");
         // and every directive parses, or the filter would drop the whole string
-        assert!(tracing_subscriber::EnvFilter::try_new(&info).is_ok(), "{info}");
+        assert!(
+            tracing_subscriber::EnvFilter::try_new(&info).is_ok(),
+            "{info}"
+        );
         // at error and off it is left out, since it could only enable those targets
-        assert_eq!(super::directives_from(None, &Tracing::default().level(TraceLevel::Error)), "error");
-        assert_eq!(super::directives_from(None, &Tracing::default().level(TraceLevel::Off)), "off");
+        assert_eq!(
+            super::directives_from(None, &Tracing::default().level(TraceLevel::Error)),
+            "error"
+        );
+        assert_eq!(
+            super::directives_from(None, &Tracing::default().level(TraceLevel::Off)),
+            "off"
+        );
     }
 
     #[test]
