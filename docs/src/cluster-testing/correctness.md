@@ -780,3 +780,33 @@ read. A stall with nothing logged at `info` needs openraft's own tracing, which 
 Every slow step was titan's, and each spent its time *before* the cut began. Once a cut started, it
 took about 10 s to cut, send and install. So what delays the snapshot is openraft's decision to ask
 for one.
+
+**Runs 3 and 4: tracing the stall, and what the tracing did.** Openraft logs nothing at `info` about
+a replication stream that makes no progress. So run 3 set `RUST_LOG` to debug for
+`openraft::replication` and `openraft::progress` on the two leaders. Run 3 lost the failing step's
+trace: journald suppressed about 1,800 lines a second. Run 4 lifted the unit's rate limit, and the
+nodes then wrote about **150,000 lines a second** each. That slowed the moves being traced to a crawl,
+and rsyslog copied it all to `/var/log/syslog`: 67 GB on titan and 190 GB on europa in about 25
+minutes. Titan's storage is a directory on its root device, so the node failed its next start on
+`ENOSPC` and crash-looped until the log was cut. Nothing was lost, and titan came back on its own once
+space returned ([#156](../appendix/resolved/wal-failure-stops-the-node.md)'s fix at work). But this is
+not a way to observe a lab under load. The move driver now reports a stalled destination itself: the
+appends sent to it, accepted, conflicting and failed, and the last failure, every 30 s at `warn`.
+
+Run 3 otherwise matched run 2: one step failed in 600 s and its retry moved it. 3,400,781 acknowledged
+inserts were found through each member alone, and every csv row matched.
+
+**What the restarts found: an idle cluster that never elected.** Run 4's follower exited when europa
+was restarted under it. The plan ran on regardless, and `cluster admin "status <plan>"` shows it.
+The follower now waits out five minutes of unreadable records instead. With titan crash-looping and
+the bench stopped, the plan then stalled at 6 of 7. `cluster stats` showed each member leading 4 of
+its groups: **24 of 36 groups had no leader** for over twenty minutes, with two of their three
+voters up. A pre-vote over a link that was down was refused without sending anything, and a link
+dials only for a frame, so on an idle cluster nothing ever brought europa's links to titan back up:
+[#173](../appendix/resolved/idle-pre-vote-links.md). Installing the fixed build on europa alone took
+the cluster from 12 groups led to 33 within 25 s, and the stuck move started. The last 3 elected when
+titan had it too, because in those groups titan's copy was the one that had to stand.
+
+That window also showed that **a rebuild costs the control group one failure of margin**. The old
+identity stays a control voter until the removal commits, so while titan was down only europa of the
+three voters was up, and the control group had no leader (`leader none`) until titan returned.

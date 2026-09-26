@@ -60,6 +60,8 @@ than Shoal says so.
 | Europa's node was on a root device 98% full | `df` before the first test | Its group moved to the Optane |
 | Europa's Optane took 6.8× the device writes of the Zen1 hosts' NVMe for the same replicated rows | [Performance](performance.md#write-amplification-by-device-and-filesystem) | Not copy-on-write: `nodatacow` changed nothing. Most of it is the WAL syncing smaller batches on the faster device, filed as [O61](../appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page) |
 | gxhash reads a whole 16-byte block past the end of a short key | Every AddressSanitizer run | Recorded: it stays within a page by design, so it is not a fault. It means an ASan build needs `-Zsanitizer-recover=address`, and every run reports it once per location |
+| `cluster rebuild` stopped when the member it followed the plan through restarted, while the plan ran on | [Section 8](correctness.md#8-an-unplaced-member-coordinates), run 4 | The follower waits up to five minutes of unreadable records before giving up |
+| `RUST_LOG` at debug for openraft's replication writes about 150,000 lines a second a node under the bench, and rsyslog filled titan's root device | [Section 8](correctness.md#8-an-unplaced-member-coordinates), runs 3 and 4 | Recorded: not a way to observe a loaded lab. The move driver reports a stalled destination's appends itself |
 
 ## Optimizations
 
