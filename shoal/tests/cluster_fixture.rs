@@ -1814,6 +1814,14 @@ fn handle_command(
             ),
             None => Err("RESTORE needs a directory".to_string()),
         },
+        // drive a finished restore's failed groups again, as the process (item 155)
+        "RETRY_RESTORE" => match parts
+            .next()
+            .and_then(|text| text.parse::<uuid::Uuid>().ok())
+        {
+            Some(restore) => plan_op(pool, AdminKind::RetryRestore { restore }),
+            None => Err("RETRY_RESTORE needs the restore's operation id".to_string()),
+        },
         "RESTORE_STATUS" => match parts
             .next()
             .and_then(|text| text.parse::<uuid::Uuid>().ok())
@@ -15690,10 +15698,22 @@ async fn mixed_versions_exchange_real_cluster_operations() -> Result<(), Fixture
         MIN_PEER_VERSION,
         Duration::from_secs(10),
     )?;
-    // the newest version cannot be activated while two members speak the floor
-    let refused = cluster
-        .node_mut(0)
-        .command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
+    // the newest version cannot be activated while two members speak the floor; a request
+    // whose version a member report moved past on a loaded host is asked again, since that
+    // refusal is the version check's and says nothing about the members
+    let mut refused = serde_json::Value::Null;
+    for _ in 0..20 {
+        refused = cluster
+            .node_mut(0)
+            .command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
+        let stale = refused["error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("StaleVersion"));
+        if !stale {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     let reason = refused["error"].as_str().unwrap_or_default().to_string();
     let ids = cluster.node_ids();
     assert!(
@@ -15707,9 +15727,19 @@ async fn mixed_versions_exchange_real_cluster_operations() -> Result<(), Fixture
     let (_, wire) = wire_of(&mut cluster, 0)?;
     assert_eq!(wire["activated"], u64::from(MIN_PEER_VERSION), "{wire}");
     // the floor itself is already activated, and asking for it changes nothing
-    let same = cluster
-        .node_mut(0)
-        .command(&format!("ACTIVATE {MIN_PEER_VERSION}"))?;
+    let mut same = serde_json::Value::Null;
+    for _ in 0..20 {
+        same = cluster
+            .node_mut(0)
+            .command(&format!("ACTIVATE {MIN_PEER_VERSION}"))?;
+        let stale = same["error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("StaleVersion"));
+        if !stale {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     assert!(same["ok"].is_object(), "{same}");
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
@@ -18748,5 +18778,152 @@ async fn a_stalled_copy_survives_a_restart_and_an_operator_repairs_it() -> Resul
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
+    Ok(())
+}
+
+/// Every `.snap` file under a backup directory
+///
+/// # Arguments
+///
+/// * `dir` - The backup's directory
+fn backup_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    // the files, never their manifests
+    let mut files: Vec<std::path::PathBuf> = walkdir_files(dir)
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "snap"))
+        .collect();
+    files.sort();
+    files
+}
+
+/// A restore whose groups failed is finished by a retry of those groups alone (item 155)
+///
+/// A restore runs once per cluster, so on the lab a restore with one failed group left a
+/// cluster whose only way on was to be deleted and restored again whole. One backup file is
+/// made unreadable, so every group it covers fails at its install, and the rest are restored.
+/// A retry is refused below wire version 6. Once 6 is activated and the file is readable again,
+/// the retry drives the failed groups from the phase they failed in, under the same operation,
+/// and leaves the restored ones exactly as they were. Every note reads back, and a second retry,
+/// with nothing failed, is refused ([Resolved #155](../../docs/src/appendix/resolved/restore-retry.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_with_failed_groups_is_finished_by_a_retry() -> Result<(), FixtureError> {
+    use std::os::unix::fs::PermissionsExt;
+    use shoal::shared::protocol::PROTOCOL_VERSION;
+    let backups = utils::test_dir();
+    // a backup of some notes from a cluster of two shards a node, so it holds several files
+    let mut old = Cluster::builder()
+        .cluster(3, CoreClaim::Count(2))
+        .replication_factor(3)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    old.wait_voters(0, 3)?;
+    old.node_mut(0).command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
+    for node in 0..3 {
+        wait_activated(&mut old, node, PROTOCOL_VERSION, Duration::from_secs(30))?;
+    }
+    let addr = old.node(0).endpoints.client.to_string();
+    let keys: Vec<u64> = (33_000..33_080).collect();
+    for key in &keys {
+        write_note(&addr, *key, &format!("v-{key}")).await?;
+    }
+    wait_digests_equal(&mut old, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    let op = plan_as_process(&mut old, 0, &format!("BACKUP {}", backups.path().display()))?;
+    wait_operation_done(&mut old, 0, "BACKUP_STATUS", op, Duration::from_secs(120))?;
+    let backup_dir = backups.path().join(op.to_string());
+    drop(old);
+    // one file unreadable, whose groups cannot build their restore file
+    let files = backup_files(&backup_dir);
+    assert!(files.len() >= 2, "the backup holds too few files: {files:?}");
+    let hidden = files[0].clone();
+    let mode = std::fs::metadata(&hidden).expect("a file").permissions();
+    std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o000)).expect("hidden");
+    if std::fs::read(&hidden).is_ok() {
+        // running as root: there is no failure to observe
+        std::fs::set_permissions(&hidden, mode).expect("shown");
+        return Ok(());
+    }
+    // restored into a new cluster, which has not activated 6
+    let mut new = Cluster::builder()
+        .cluster(3, CoreClaim::Count(2))
+        .replication_factor(3)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .repair_timeout(Duration::from_secs(20))
+        .start()
+        .await?;
+    new.wait_voters(0, 3)?;
+    let restore = plan_as_process(&mut new, 0, &format!("RESTORE {}", backup_dir.display()))?;
+    let first = wait_operation_done(&mut new, 0, "RESTORE_STATUS", restore, Duration::from_secs(300))?;
+    let groups = first["groups"].as_object().expect("groups").clone();
+    let failed: Vec<&String> = groups
+        .iter()
+        .filter(|(_, progress)| progress["outcome"]["Failed"].is_object())
+        .map(|(group, _)| group)
+        .collect();
+    let restored: Vec<&String> = groups
+        .iter()
+        .filter(|(_, progress)| progress["outcome"]["Restored"].is_object())
+        .map(|(group, _)| group)
+        .collect();
+    assert!(!failed.is_empty(), "no group failed with its file unreadable: {first}");
+    assert!(!restored.is_empty(), "no group was restored: {first}");
+    for group in &failed {
+        assert_eq!(groups[*group]["failed_in"], "Installing", "{first}");
+    }
+    // below wire version 6 the retry is refused by name
+    let refused = new.node_mut(0).command(&format!("RETRY_RESTORE {restore}"))?;
+    assert!(
+        refused["error"].as_str().is_some_and(|error| error.contains("wire version 6")),
+        "a retry below 6 was not refused: {refused}"
+    );
+    new.node_mut(0).command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
+    for node in 0..3 {
+        wait_activated(&mut new, node, PROTOCOL_VERSION, Duration::from_secs(30))?;
+    }
+    // the file back, and the retry
+    std::fs::set_permissions(&hidden, mode).expect("shown");
+    plan_as_process(&mut new, 0, &format!("RETRY_RESTORE {restore}"))?;
+    // wait for the retried groups to be put back and to finish again
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let second = loop {
+        let record = new.node_mut(0).command(&format!("RESTORE_STATUS {restore}"))?["ok"].clone();
+        let finished = record["groups"].as_object().is_some_and(|groups| {
+            groups.values().all(|progress| progress["phase"] == "Done")
+                && failed
+                    .iter()
+                    .all(|group| groups[*group]["generation"] == 1)
+        });
+        if finished {
+            break record;
+        }
+        assert!(Instant::now() < deadline, "the retry did not finish: {record}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    // the failed groups are restored now, and the restored ones are exactly as they were
+    for group in &failed {
+        assert!(
+            second["groups"][*group]["outcome"]["Restored"].is_object(),
+            "group {group} did not restore on the retry: {second}"
+        );
+    }
+    for group in &restored {
+        assert_eq!(
+            second["groups"][*group], groups[*group],
+            "a restored group was touched by the retry"
+        );
+    }
+    // every note reads back
+    let new_addr = new.node(0).endpoints.client.to_string();
+    for key in &keys {
+        wait_note(&new_addr, *key, Some(&format!("v-{key}")), Duration::from_secs(20)).await?;
+    }
+    // and a retry with nothing failed is refused
+    let nothing = new.node_mut(0).command(&format!("RETRY_RESTORE {restore}"))?;
+    assert!(
+        nothing["error"].as_str().is_some_and(|error| error.contains("nothing to retry")),
+        "a retry with nothing failed was not refused: {nothing}"
+    );
     Ok(())
 }

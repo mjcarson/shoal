@@ -107,6 +107,9 @@ pub struct RestoreContext<D: ShoalDatabase> {
     pub reached: RefCell<RestorePhase>,
     /// How many drives of this group were handed back for want of a member, before this one
     pub attempts: u32,
+    /// Which retry of the operation's failed groups this drive belongs to
+    /// ([Resolved #155](../../../../docs/src/appendix/resolved/restore-retry.md))
+    pub generation: u32,
     /// The structural fingerprint of the schema this node serves
     pub schema_id: u64,
     /// Where the built file goes
@@ -182,6 +185,8 @@ impl<D: ShoalDatabase> RestoreContext<D> {
             files: self.files.clone(),
             outcome: None,
             attempts: self.attempts,
+            failed_in: None,
+            generation: self.generation,
         }
     }
 
@@ -308,10 +313,13 @@ pub async fn drive_group_restore<D: ShoalDatabase>(context: RestoreContext<D>) {
         }
         Err(error) => {
             event!(Level::ERROR, msg = "a group's restore failed", op = %context.op, group = %context.group, error);
+            // the phase it failed in is kept, which is where a retry drives it from
+            let failed_in = context.reached.borrow().clone();
             let _ = context
                 .commit(GroupRestore {
                     phase: RestorePhase::Done,
                     outcome: Some(RestoreOutcome::Failed { reason: error }),
+                    failed_in: Some(failed_in),
                     ..context.at(RestorePhase::Done)
                 })
                 .await;
@@ -323,6 +331,7 @@ pub async fn drive_group_restore<D: ShoalDatabase>(context: RestoreContext<D>) {
         .send(ServerMsg::RestoreDone {
             op: context.op,
             group: context.group,
+            generation: context.generation,
             phase,
         })
         .await;
@@ -677,11 +686,20 @@ where
     ///
     /// * `op` - The operation
     /// * `group` - The group
+    /// * `generation` - The try of the operation's failed groups it drove
     /// * `phase` - The phase it committed last
-    pub(super) fn handle_restore_done(&mut self, op: Uuid, group: GroupId, phase: RestorePhase) {
+    pub(super) fn handle_restore_done(
+        &mut self,
+        op: Uuid,
+        group: GroupId,
+        generation: u32,
+        phase: RestorePhase,
+    ) {
         if let Some(replication) = self.replication.as_mut() {
             replication.driving_restores.remove(&(op, group));
-            replication.driven_restores.insert((op, group), phase);
+            replication
+                .driven_restores
+                .insert((op, group), (generation, phase));
         }
         self.drive_restores();
     }
@@ -720,9 +738,15 @@ where
                 if !replication.driving_restores.is_empty() {
                     return;
                 }
-                // the phase as this shard last committed it, when the map is behind it
+                // the phase as this shard last committed it, when the map is behind it - for the
+                // same try: a group retried since starts again from the record
                 let phase = match replication.driven_restores.get(&(record.op, *group)) {
-                    Some(driven) if driven.rank() > progress.phase.rank() => driven.clone(),
+                    Some((generation, driven))
+                        if *generation == progress.generation
+                            && driven.rank() > progress.phase.rank() =>
+                    {
+                        driven.clone()
+                    }
                     _ => progress.phase.clone(),
                 };
                 if phase == RestorePhase::Done {
@@ -756,6 +780,7 @@ where
                     files: progress.files.clone(),
                     reached: RefCell::new(phase.clone()),
                     attempts: progress.attempts,
+                    generation: progress.generation,
                     phase,
                     schema_id,
                     snapshots_dir: snapshots_dir.clone(),

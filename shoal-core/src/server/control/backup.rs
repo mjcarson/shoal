@@ -331,6 +331,14 @@ pub struct GroupRestore {
     /// ([Resolved #155](../../../../docs/src/appendix/resolved/restore-retries-unreachable.md))
     #[serde(default)]
     pub attempts: u32,
+    /// The phase the group had reached when it failed, which a retry drives it from
+    /// ([Resolved #155](../../../../docs/src/appendix/resolved/restore-retry.md))
+    #[serde(default)]
+    pub failed_in: Option<RestorePhase>,
+    /// How many times the operation's failed groups were retried when this group was last
+    /// put back to be driven, so a driver of an earlier try is told apart from this one's
+    #[serde(default)]
+    pub generation: u32,
 }
 
 impl Default for GroupRestore {
@@ -342,6 +350,8 @@ impl Default for GroupRestore {
             files: Vec::new(),
             outcome: None,
             attempts: 0,
+            failed_in: None,
+            generation: 0,
         }
     }
 }
@@ -352,7 +362,41 @@ impl GroupRestore {
     pub fn is_done(&self) -> bool {
         self.phase == RestorePhase::Done
     }
+
+    /// Whether this group's restore ended in a failure
+    #[must_use]
+    pub fn failed(&self) -> bool {
+        self.is_done() && matches!(self.outcome, Some(RestoreOutcome::Failed { .. }))
+    }
+
+    /// Put a failed group back to be driven again, from the phase it failed in
+    ///
+    /// A group that failed loading loads again, which checks its copies are still empty. One
+    /// that failed installing or verifying installs again: a new file at a new boundary on
+    /// every member, which replaces whatever a partial install left, and then verifies. The
+    /// driver, the outcome and the attempts are cleared, and the generation moves on.
+    pub fn retry(&mut self) {
+        // where the next driver starts
+        self.phase = match self.failed_in {
+            Some(RestorePhase::Installing | RestorePhase::Verifying) => RestorePhase::Installing,
+            Some(RestorePhase::Loading) => RestorePhase::Loading,
+            _ => RestorePhase::Pending,
+        };
+        self.driver = None;
+        self.outcome = None;
+        self.attempts = 0;
+        self.failed_in = None;
+        self.generation += 1;
+    }
 }
+
+/// The wire version a restore's failed groups can be retried from
+///
+/// The retry is a control command, and a group's record gained the phase it failed in and a
+/// generation; a replica built before them would refuse the command or drop the fields, so it
+/// is refused until every member speaks 6 and it is activated
+/// ([F48](../../../../docs/src/features/rolling-compatibility.md)).
+pub const RESTORE_RETRY_FROM_WIRE: u8 = 6;
 
 /// One backup file as a restore judges it, read from its manifest
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -833,6 +833,8 @@ where
         op: Uuid,
         /// The group
         group: crate::shared::identity::GroupId,
+        /// The try of the operation's failed groups it drove
+        generation: u32,
         /// The phase it committed last, which the map may not carry yet
         phase: crate::server::control::backup::RestorePhase,
     },

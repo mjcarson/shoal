@@ -363,9 +363,10 @@ pub(super) struct Replication<D: ShoalDatabase> {
         HashMap<(Uuid, GroupId), crate::server::control::backup::BackupPhase>,
     /// The group restores this shard is driving right now, by operation and group
     pub(super) driving_restores: HashSet<(Uuid, GroupId)>,
-    /// The phase each restore driver here committed last, which the map may be behind on
+    /// The phase each restore driver here committed last, which the map may be behind on,
+    /// with the try of the operation's failed groups it drove
     pub(super) driven_restores:
-        HashMap<(Uuid, GroupId), crate::server::control::backup::RestorePhase>,
+        HashMap<(Uuid, GroupId), (u32, crate::server::control::backup::RestorePhase)>,
 }
 
 impl<D: ShoalDatabase> Shard<D>

@@ -70,6 +70,12 @@ pub enum ClusterAction {
         /// The directory
         path: String,
     },
+    /// Drive a finished restore's failed groups again
+    /// ([Resolved #155](../../../docs/src/appendix/resolved/restore-retry.md))
+    RetryRestore {
+        /// The restore operation
+        restore: Uuid,
+    },
     /// Activate a wire version
     Activate {
         /// The version
@@ -180,6 +186,16 @@ impl ClusterAction {
                     .ok_or_else(|| "restore needs a directory".to_string())?
                     .to_string(),
             },
+            "restore-retry" | "retry-restore" => {
+                let word = words
+                    .next()
+                    .ok_or_else(|| "restore-retry needs the restore's operation id".to_string())?;
+                ClusterAction::RetryRestore {
+                    restore: word
+                        .parse()
+                        .map_err(|_| format!("{word} is not an operation id"))?,
+                }
+            }
             "activate" => {
                 let word = words
                     .next()
@@ -222,6 +238,7 @@ impl ClusterAction {
             "repair <table> [verify|repair] scrub a table, or repair it".to_string(),
             "backup [table] <dir>           back a table or every table up".to_string(),
             "restore <dir>                  restore a backup into this empty cluster".to_string(),
+            "restore-retry <op>             drive a finished restore's failed groups again".to_string(),
             "activate <wire>                activate a wire version".to_string(),
             "status <op>                    read an operation's record".to_string(),
             "reload-tls                     read this node's certificate again".to_string(),
@@ -320,6 +337,11 @@ impl ClusterAction {
                 "moves: every group's members install the files' records under a quarantine".to_string(),
                 "boundary: once, into an empty cluster; the source cluster's identities are refused from here on".to_string(),
             ],
+            ClusterAction::RetryRestore { restore } => vec![
+                format!("retry the failed groups of restore {restore}"),
+                "moves: each failed group is loaded or installed again from where it failed; a restored group is not touched".to_string(),
+                format!("boundary: the same files and operation; needs wire version 6 activated (activated {})", model.activated_wire),
+            ],
             ClusterAction::Activate { wire } => vec![
                 format!("activate wire version {wire} (activated {}, members speak {}..={})", model.activated_wire, model.wire_range.0, model.wire_range.1),
                 "moves: nothing".to_string(),
@@ -382,9 +404,30 @@ impl ClusterAction {
             ClusterAction::Restore { path } => {
                 (AdminKind::Restore { path: path.clone() }, Follow::Restore)
             }
+            ClusterAction::RetryRestore { restore } => (
+                AdminKind::RetryRestore { restore: *restore },
+                Follow::Restore,
+            ),
             ClusterAction::Activate { wire } => (AdminKind::Activate { wire: *wire }, Follow::None),
             ClusterAction::Status { op } => (AdminKind::PlanStatus { op: *op }, Follow::None),
             ClusterAction::ReloadTls => (AdminKind::ReloadTls, Follow::None),
+        }
+    }
+}
+
+impl ClusterAction {
+    /// The operation whose record follows this action, once it was sent as `sent`
+    ///
+    /// Its own, except for a retry, whose record is the restore's.
+    ///
+    /// # Arguments
+    ///
+    /// * `sent` - The operation the request was sent as
+    #[must_use]
+    pub fn followed(&self, sent: Uuid) -> Uuid {
+        match self {
+            ClusterAction::RetryRestore { restore } => *restore,
+            _ => sent,
         }
     }
 }
@@ -572,6 +615,16 @@ mod tests {
             ClusterAction::parse("activate 5").expect("parses"),
             ClusterAction::Activate { wire: 5 }
         );
+        // a retry is followed by the restore's record, not by its own
+        let restore = Uuid::new_v4();
+        let retry = ClusterAction::parse(&format!("restore-retry {restore}")).expect("parses");
+        assert_eq!(retry, ClusterAction::RetryRestore { restore });
+        assert_eq!(
+            retry.request(),
+            (AdminKind::RetryRestore { restore }, Follow::Restore)
+        );
+        assert_eq!(retry.followed(Uuid::new_v4()), restore);
+        assert!(retry.is_mutation());
         let op = Uuid::new_v4();
         assert_eq!(
             ClusterAction::parse(&format!("status {op}")).expect("parses"),

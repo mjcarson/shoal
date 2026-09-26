@@ -90,7 +90,7 @@ passwordless sudo on every host ([F51](../features/cluster-deployment.md)):
 | `cluster bootstrap -i <inv> [--wipe]` | Stage, claim, issue a leaf, and start every bootstrap node under systemd, then `Initialize` once and wait for writes |
 | `cluster add -i <inv> <node> [--wipe] [--rebalance]` | Join a listed node through every member, and optionally follow a `Rebalance` onto it |
 | `cluster rebalance -i <inv>` | Send `Rebalance` and follow its plan |
-| `cluster admin -i <inv> <operation...>` | Send any operation the cluster tab's command line takes (`repair <table> [verify\|repair]`, `backup [table] <dir>`, `restore <dir>`, `decommission <node>`, `status <op>`, ...) without the tab's preview, and follow its record until it is done (`--timeout-secs`, an hour by default). The scriptable form of the tab's query bar, added for the [cluster testing](../cluster-testing/correctness.md) chapter |
+| `cluster admin -i <inv> <operation...>` | Send any operation the cluster tab's command line takes (`repair <table> [verify\|repair]`, `backup [table] <dir>`, `restore <dir>`, `restore-retry <op>`, `decommission <node>`, `status <op>`, ...) without the tab's preview, and follow its record until it is done (`--timeout-secs`, an hour by default). The scriptable form of the tab's query bar, added for the [cluster testing](../cluster-testing/correctness.md) chapter |
 | `cluster status -i <inv>` | Every node's id, address and unit, then the cluster tab's lines |
 | `cluster stats -i <inv> [--table <t>] [--watch [s]] [--json]` | Every member's standing, groups, tablets, archived partitions and bytes, and write and stream rates over 10s/1m/5m, the cluster's led totals, and every plan's progress, pace and estimate, from the control leader ([F52](../features/cluster-stats.md)) |
 | `cluster start/stop/restart -i <inv> [node]` | systemctl on one node or every deployed node |
@@ -235,7 +235,7 @@ under-replicated, and whether a default write is admitted right now.
 The query bar is a command line on this tab. It takes `initialize <node> [<node>...]` (the
 placement, once, in the order typed - [runbook 1](runbooks.md#1-bootstrap)), `decommission
 <node>`, `remove <node> [replacement]`, `maintenance <node> on|off`, `rebalance`, `repair <table> [verify|repair]`,
-`backup [table] <dir>`, `restore <dir>`, `activate <wire>`, `status <op>`, `reload-tls` and
+`backup [table] <dir>`, `restore <dir>`, `restore-retry <op>`, `activate <wire>`, `status <op>`, `reload-tls` and
 `help`. The first `Enter` on a mutation draws a **preview** under the model - the identity it
 touches as the model knows it, what will move, and the boundary that cannot be undone - and the
 second `Enter` on the same line sends it against the version the model was built at; `Esc`

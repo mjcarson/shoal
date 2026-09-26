@@ -1,8 +1,9 @@
 # 155. A restore failed a group for good when a member was out of reach for a while
 
-*Partly resolved.* A group that fails because a member could not be reached is now driven again.
-A group that fails for any other reason still cannot be finished. That remainder stays open on
-[known issues](../known-issues.md#155-a-restore-whose-group-failed-cannot-be-finished).
+*The first half of item 155.* A group that fails because a member could not be reached is now
+driven again. ~~A group that fails for any other reason still cannot be finished.~~ The remainder,
+a group that failed for any other reason, is [resolved on its own page](restore-retry.md): a
+finished restore's failed groups are driven again by `RetryRestore`.
 
 ## Symptom
 
@@ -70,7 +71,9 @@ for.
 
 ## Still open
 
-- A group that failed for any other reason cannot be retried: the remainder of item 155.
+- ~~A group that failed for any other reason cannot be retried: the remainder of item 155.~~
+  Resolved: a finished restore's failed groups are driven again by `RetryRestore`
+  ([the remainder](restore-retry.md)).
 
 ## Tests
 

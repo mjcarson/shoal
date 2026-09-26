@@ -466,10 +466,12 @@ where
         let app_tx = app_tx.clone();
         let id = self.id;
         let is_status = matches!(action, ClusterAction::Status { .. });
+        // a retry is followed by the record of the restore it retries
+        let followed = action.followed(op);
         tokio::task::spawn(async move {
             let outcome = send_admin::<S>(&shoal, op, version, kind, follow, is_status).await;
             let follow_up = match &outcome {
-                Ok(_) if follow != Follow::None && !is_status => Some((op, follow)),
+                Ok(_) if follow != Follow::None && !is_status => Some((followed, follow)),
                 _ => None,
             };
             let _ = app_tx

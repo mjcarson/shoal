@@ -4348,9 +4348,12 @@ where
                 ServerMsg::BackupDone { op, group, phase } => {
                     self.handle_backup_done(op, group, phase)
                 }
-                ServerMsg::RestoreDone { op, group, phase } => {
-                    self.handle_restore_done(op, group, phase)
-                }
+                ServerMsg::RestoreDone {
+                    op,
+                    group,
+                    generation,
+                    phase,
+                } => self.handle_restore_done(op, group, generation, phase),
                 // a driver asking for a group's current handle, after a restart it caused
                 ServerMsg::GroupHandle { group, reply } => {
                     let handle = self

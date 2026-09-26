@@ -689,6 +689,18 @@ pub enum ControlCommand {
         /// Every file, as the leader read the manifests
         files: Vec<BackupFile>,
     },
+    /// Drive every group a finished restore failed again, from the phase each failed in
+    /// ([Resolved #155](../../../../docs/src/appendix/resolved/restore-retry.md))
+    RetryRestore {
+        /// The identity of this request
+        op: Uuid,
+        /// Who asked
+        principal: String,
+        /// The topology version the request was written against
+        expected_version: u64,
+        /// The restore operation to retry
+        restore: Uuid,
+    },
     /// A group's driver says where its restore stands
     RestoreProgress {
         /// The operation
@@ -823,6 +835,12 @@ impl ControlCommand {
                 expected_version,
                 ..
             } => Some((*op, principal, "restore", *expected_version)),
+            ControlCommand::RetryRestore {
+                op,
+                principal,
+                expected_version,
+                ..
+            } => Some((*op, principal, "retry_restore", *expected_version)),
             _ => None,
         }
     }
@@ -931,6 +949,9 @@ impl fmt::Display for ControlCommand {
             ControlCommand::Restore {
                 op, source, path, ..
             } => write!(f, "Restore({op} from {source} at {path})"),
+            ControlCommand::RetryRestore { op, restore, .. } => {
+                write!(f, "RetryRestore({op} of {restore})")
+            }
             ControlCommand::RestoreProgress {
                 op,
                 group,
@@ -1755,6 +1776,12 @@ impl ControlState {
                 *source_schema,
                 files,
             ),
+            // a finished restore's failed groups, put back to be driven
+            ControlCommand::RetryRestore {
+                expected_version,
+                restore,
+                ..
+            } => self.apply_retry_restore(*expected_version, *restore),
             // a driver's word on where a group's restore stands
             ControlCommand::RestoreProgress {
                 op,
@@ -3077,10 +3104,71 @@ impl ControlState {
         if current.is_done() {
             return self.applied();
         }
+        // a driver of an earlier try, whose group was retried since, is too late to say
+        // anything ([Resolved #155](../../../../docs/src/appendix/resolved/restore-retry.md))
+        if progress.generation != current.generation {
+            return self.applied();
+        }
         if current == progress {
             return self.applied();
         }
         *current = progress.clone();
+        self.topology_version += 1;
+        self.applied()
+    }
+
+    /// Put every group a finished restore failed back to be driven, from where each failed
+    ///
+    /// Under the same operation and against the same files, so nothing about what is restored
+    /// is judged again; a group that was restored or skipped is not touched. Refused below
+    /// wire version 6, while any group is still running, and when nothing failed
+    /// ([Resolved #155](../../../../docs/src/appendix/resolved/restore-retry.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `expected_version` - The topology version the request was written against
+    /// * `restore` - The restore operation
+    fn apply_retry_restore(&mut self, expected_version: u64, restore: Uuid) -> ControlResponse {
+        // the command and the record's new fields are version 6's
+        let needed = crate::server::control::backup::RESTORE_RETRY_FROM_WIRE;
+        if self.activated_wire() < needed {
+            return ControlResponse::refused(
+                RefusalKind::WireVersion,
+                format!(
+                    "a restore retry needs wire version {needed} activated, and the cluster has activated {}",
+                    self.activated_wire()
+                ),
+            );
+        }
+        let Some(record) = self.restores.get(&restore) else {
+            return ControlResponse::refused(
+                RefusalKind::UnknownOperation,
+                format!("no restore operation {restore} is recorded"),
+            );
+        };
+        // a running restore is still trying; its failures are not final yet
+        if !record.is_done() {
+            return ControlResponse::refused(
+                RefusalKind::Invalid,
+                format!("restore {restore} is still running; a retry is of a finished one"),
+            );
+        }
+        if !record.groups.values().any(GroupRestore::failed) {
+            return ControlResponse::refused(
+                RefusalKind::Invalid,
+                format!("no group of restore {restore} failed, so there is nothing to retry"),
+            );
+        }
+        if let Some(refusal) = self.check_version(expected_version) {
+            return refusal;
+        }
+        // every failed group back from where it failed, the rest as they are
+        let Some(record) = self.restores.get_mut(&restore) else {
+            return self.applied();
+        };
+        for progress in record.groups.values_mut().filter(|progress| progress.failed()) {
+            progress.retry();
+        }
         self.topology_version += 1;
         self.applied()
     }
@@ -3504,6 +3592,118 @@ mod tests {
             }
         );
         (state, cluster, node)
+    }
+
+    /// A retry puts a finished restore's failed groups back, once, and fences their old drivers
+    ///
+    /// Refused below wire version 6, for an unknown operation, while any group runs and when
+    /// nothing failed; a failed group goes back to the phase it failed in under the next
+    /// generation, a restored one is left as it is, and a progress from the earlier try is
+    /// applied as nothing ([Resolved #155](../../../../docs/src/appendix/resolved/restore-retry.md)).
+    #[test]
+    fn a_restore_retry_drives_only_its_failed_groups() {
+        use crate::server::control::backup::{
+            GroupRestore, RestoreOutcome, RestorePhase, RestoreRecord,
+        };
+        let (mut state, cluster, node) = bootstrapped();
+        // a finished restore with one group restored and one failed at its install
+        let restore = Uuid::new_v4();
+        let (restored, failed) = (GroupId(1), GroupId(2));
+        let done = |outcome: RestoreOutcome, failed_in: Option<RestorePhase>| GroupRestore {
+            phase: RestorePhase::Done,
+            driver: Some(node),
+            outcome: Some(outcome),
+            failed_in,
+            ..GroupRestore::default()
+        };
+        let restored_progress = done(
+            RestoreOutcome::Restored {
+                boundary: 5,
+                records: 3,
+                bytes: 100,
+                retries: 0,
+                verified: 7,
+            },
+            None,
+        );
+        state.restores.insert(
+            restore,
+            RestoreRecord {
+                op: restore,
+                path: "/backups/x".to_string(),
+                source: ClusterId::mint(),
+                source_schema: 0,
+                principal: "admin".to_string(),
+                requested_at: state.topology_version,
+                files: Vec::new(),
+                groups: [
+                    (restored, restored_progress.clone()),
+                    (
+                        failed,
+                        done(
+                            RestoreOutcome::Failed {
+                                reason: "the file could not be read".to_string(),
+                            },
+                            Some(RestorePhase::Installing),
+                        ),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        );
+        let _ = cluster;
+        let retry = |state: &ControlState, restore: Uuid| ControlCommand::RetryRestore {
+            op: Uuid::new_v4(),
+            principal: "admin".to_string(),
+            expected_version: state.topology_version,
+            restore,
+        };
+        let kind_of = |response: ControlResponse| match response {
+            ControlResponse::Refused { kind, .. } => Some(kind),
+            _ => None,
+        };
+        // below 6, refused by name
+        let command = retry(&state, restore);
+        assert_eq!(kind_of(state.apply(&command)), Some(RefusalKind::WireVersion));
+        state.activated = 6;
+        // an unknown operation
+        let command = retry(&state, Uuid::new_v4());
+        assert_eq!(kind_of(state.apply(&command)), Some(RefusalKind::UnknownOperation));
+        // the retry: the failed group from its install, the restored one untouched
+        let command = retry(&state, restore);
+        assert!(matches!(state.apply(&command), ControlResponse::Applied { .. }));
+        let record = &state.restores[&restore];
+        assert_eq!(record.groups[&restored], restored_progress);
+        let again = &record.groups[&failed];
+        assert_eq!(again.phase, RestorePhase::Installing);
+        assert_eq!((again.generation, again.outcome.clone(), again.driver), (1, None, None));
+        // a second while it runs is refused
+        let command = retry(&state, restore);
+        assert_eq!(kind_of(state.apply(&command)), Some(RefusalKind::Invalid));
+        // a late word from the first try's driver changes nothing
+        let progress = |generation: u32| ControlCommand::RestoreProgress {
+            op: restore,
+            group: failed,
+            node,
+            incarnation: 1,
+            progress: GroupRestore {
+                generation,
+                ..restored_progress.clone()
+            },
+        };
+        let before = state.restores[&restore].groups[&failed].clone();
+        let _ = state.apply(&progress(0));
+        assert_eq!(state.restores[&restore].groups[&failed], before);
+        // this try's driver finishes it, after which there is nothing to retry
+        let _ = state.apply(&progress(1));
+        assert!(state.restores[&restore].groups[&failed].is_done());
+        let command = retry(&state, restore);
+        let refused = state.apply(&command);
+        assert!(
+            matches!(&refused, ControlResponse::Refused { reason, .. } if reason.contains("nothing to retry")),
+            "{refused:?}"
+        );
     }
 
     /// A bootstrap creates the cluster once, and the topology version moves with each change

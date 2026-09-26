@@ -27,7 +27,15 @@ that was made before the page was written.
 
 ### The wire is negotiated, not matched
 
-`PROTOCOL_VERSION` is 5 and `MIN_PEER_VERSION` is 4 (`shoal-proto/src/shared/protocol.rs`).
+~~`PROTOCOL_VERSION` is 5~~ `PROTOCOL_VERSION` is 6 since [#155](../appendix/resolved/restore-retry.md),
+and `MIN_PEER_VERSION` is 4 (`shoal-proto/src/shared/protocol.rs`). Version 6 moved no frame's
+encoding: a body at 6 is encoded as at 5. It exists because the control log gained
+`RetryRestore` and a group's restore record gained `failed_in` and `generation`, which a replica
+at 5 would refuse to decode or drop, so the command is refused until 6 is activated
+(`RESTORE_RETRY_FROM_WIRE`). A stalled copy's `DigestAnswer::Stalled`
+([#160](../appendix/resolved/unreadable-partition-stalls-one-copy.md)) is new at the same build
+and is not gated: a leader at 5 that cannot decode it counts the member as not reporting, which is
+what it did before.
 Every peer hello advertises `wire_min..=wire_max` - the floor, and the build's newest unless a
 pin holds it lower - and the two ends speak the highest version both ranges hold
 (`PeerHello::negotiate`); ranges that share nothing are refused `NoCommonVersion`, from both
@@ -131,6 +139,7 @@ with it:
 | Snapshot manifest on the wire | v4 shape on a 4 link, v5 on a 5 link | v5 only, since no 4 is spoken to |
 | Snapshot file header | Version 1, which a 4 reads | Version 2, which a 4 refuses by name |
 | Control log | `ObserveMember` records with the wire fields, which a 4 reads and drops on its own persisted state | Carries `Activate`, a command a 4 cannot decode; the log is the boundary too |
+| Control log, 5 to 6 | Nothing a 5 cannot read: `RetryRestore` is refused before it is committed | May carry `RetryRestore`, which a 5 cannot decode |
 | Checkpoint and control files | Unchanged at 5 | Unchanged at 5 |
 | Storage marker | Format 3, unchanged | Format 3, unchanged |
 | Client lane | 4, unchanged | 4, unchanged |
