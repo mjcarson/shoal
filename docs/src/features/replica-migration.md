@@ -256,7 +256,9 @@ request is recorded and runs when it can, and the record says what it waits behi
   reconciles from the committed membership. Nothing rolls a group back. ~~A failed group counted
   as activated, so the set was published anyway~~: fixed by
   [Resolved #171](../appendix/resolved/failed-group-publishes-its-set.md), which also ends the
-  record once a failed group leaves nothing in flight, so a plan replans the set.
+  record once a failed group leaves nothing in flight, so a plan replans the set. The destination
+  then stops its learner copies, and since [Resolved #175](../appendix/resolved/stopped-group-log.md)
+  forgets their logs with them, so the move asked again builds them from nothing.
 - **A move of a set is every table's group over it**, and `concurrent` serializes the groups on
   a shard: a set of four tables moves its groups one at a time, and the first waits at
   `Activated` for the last. The record's `activated` time is that wait.
