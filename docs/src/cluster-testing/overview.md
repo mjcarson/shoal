@@ -51,6 +51,9 @@ $L cluster upgrade -i tmdb_cluster.yaml        # after every fix, one node at a 
 $L cluster destroy -i tmdb_cluster.yaml --yes  # between tests that need an empty cluster
 $L cluster rebuild -i tmdb_cluster.yaml hyperion --yes   # a node from its peers, as a new identity (F56)
 $L cluster admin -i tmdb_cluster.yaml "restore-retry <op>"  # a restore's failed groups, again (#155)
+$L cluster admin -i tmdb_cluster.yaml "remove <node> <replacement>"  # again: retries a blocked plan (#177)
+$L cluster add -i target/lab/tmdb-add.yaml hyperion   # a member with no placement slot (section 8)
+$L bench -i target/lab/tmdb-add.yaml --addr 172.16.2.5:12000 …   # through that one member, as the admin
 ```
 
 ## The driver
@@ -75,6 +78,26 @@ removed at the end of the test that added it.
 Each run is recorded by `target/lab/record.sh`, which runs `vmstat 1` on every host beside it. Disk
 writes are counted per device from `/proc/diskstats` before and after (`target/lab/diskstats.sh`).
 These scripts are scratch and are not committed. What they measured is on these pages.
+
+## When a move is slow
+
+A move that makes no progress says so itself, every 30 s, on the node leading the group:
+
+```text
+a move's destination has made no progress  group=… stalled_secs=270 sent=14788 data=1
+  accepted=14787 conflicts=1 failed=0 last_prev=Some(1092395) last_acked=None
+```
+
+`data` counts the appends that carried entries, as opposed to heartbeats. `last_acked` is the highest
+index the copy accepted. `failed` and `last_error` say whether the link is at fault. The compactor
+logs how long each snapshot cut waited (`taking a snapshot cut … queued_ms= backlog=`) and every job
+that held it over 5 s (`a compaction job ran long … kind= secs=`). These are the tools that found
+[#174](../appendix/resolved/snapshot-cut-queue.md).
+
+**Do not turn on openraft's debug tracing on a loaded lab node.** `RUST_LOG` at debug for
+`openraft::replication` wrote about 150,000 lines a second a node under the bench. rsyslog copied it
+to `/var/log/syslog` until titan's root device, which holds its storage, was full
+([section 8](correctness.md#8-an-unplaced-member-coordinates), runs 3 and 4).
 
 ## How to read the numbers
 

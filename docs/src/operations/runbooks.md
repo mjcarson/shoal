@@ -108,7 +108,10 @@ every set it holds to the members the planner picks, one at a time under `moves_
 follow `PlanStatus`. When every set has moved the member is tombstoned, taken out of the
 control group, and its process stops with `ShoalError::Removed`. An impossible target - nowhere
 for a set to go - is recorded `blocked` naming why, not refused; add capacity and the plan
-resumes on its own. `shoalctl cluster stats` follows the plan's pace and estimate the way it
+resumes on its own. A set whose move failed twice is blocked too (`its move failed 2 times`); once
+the cause is dealt with, send the same `Decommission` (or `Remove`) again, which forgives the plan's
+failures so far and plans the set afresh ([Resolved #177](../appendix/resolved/blocked-plan-retry.md)).
+`cluster admin` follows the retried plan. `shoalctl cluster stats` follows the plan's pace and estimate the way it
 does a rebalance's, and the leaving member's row shows its tablets and partitions falling
 ([F52](../features/cluster-stats.md)).
 

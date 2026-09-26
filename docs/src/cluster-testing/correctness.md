@@ -863,3 +863,53 @@ Run 7, on the build before that fix, then found two more:
 | 5 | + #173, the stall report | 1 (5.5 min) | 0 | 18 moved | 4,234,475, 0 lost |
 | 6 | + append counts | 3 | 0 | 18 moved | 4,216,793, 0 lost |
 | 7 | + the cut's wait logged | 1 (9.4 min) | 2, plan blocked (#177), then the #175 crash loop | retried by hand after #174, #175 and #177: 18 moved | 3,612,822, 0 lost |
+| 8 | + #174, #175, #177, fresh cluster | 3, the longest a 147 s wait for a cut | 0 | 18 moved, 979 s | 4,258,483, 0 lost |
+| 9 | + archive passes coalesced (O74), grown cluster | 6 reports, the longest a 39.5 s wait for a cut | 0 | 18 moved, **748 s** | 3,994,578, 0 lost |
+
+**Runs 8 and 9: the fixed build.** Run 8, on a freshly loaded cluster, moved every set with no failed
+step and no refusal. Its longest stall was a cut waiting 147 s behind the job running when it was
+asked for. That backlog was mostly archive passes, each redundant with the next, so run 9 skips a
+pass that another queued pass covers. It also logs any job that holds the compactor over 5 s. Run 9,
+on the cluster run 8 left, rebuilt hyperion in 748 s, the fastest of the nine, with the longest cut
+wait at 39.5 s. What still holds a cut is where the compactor's time goes on a Zen1 node:
+682 segment merges ran over five seconds in that run, and one archive pass ran three minutes.
+That is [O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench),
+left open with those figures.
+
+Across every run the bench saw no `NotInitialized`. Its other failures were the same in each: about
+1,200 to 1,600 `NotLeader` and `Unavailable` in the four or five seconds hyperion's stop handed its
+leads off, and 768 streams dropped as it went down. The loader's own read-back after run 8's load
+once found a movie missing that every member alone held a moment later. It was reading at `One`, and
+the copy that answered had not applied the load's last writes, so it now reads back at `Quorum`.
+
+**Verdict: pass.** A rebuilt node serves from the moment it listens (#169), and the moves that refill
+it no longer stall silently, fail, get published half done, block for good or crash their
+destination (#170, #171, #173 to #175, #177).
+
+### A member added with no rebalance
+
+**How.** `target/lab/tmdb-add.yaml` is `tmdb_cluster.yaml` at a factor of two, bootstrapped on
+europa and titan. The csv was loaded, then `cluster add -i target/lab/tmdb-add.yaml hyperion`, with no
+`--rebalance`, left hyperion a voter of the control group and in no placement slot: no groups, no
+bytes. The bench then ran through hyperion **alone** for 180 s (`bench --inventory … --addr
+172.16.2.5:12000`, which connects to one member as the admin), with all four operations. Every
+acknowledged insert was read back through each member alone at `One`, then the cluster was
+rebalanced onto hyperion and the read-back repeated.
+
+| | |
+| --- | --- |
+| Hyperion before the bench | joined, a voter, 0 groups, 0 B |
+| Bench through hyperion alone, 181 s | get 9,148/s, keyword 3,049/s, update 13,725/s, insert 4,574/s |
+| Failures | **none**, of any kind |
+| Acknowledged inserts, each member alone at `One` | 827,821, 0 lost |
+| After `cluster rebalance` | hyperion holds 12 groups and 535 MiB; 827,821, 0 lost |
+
+Before #169, every one of those queries was refused. Get latency through the unplaced member is 2 ms
+at the median, since every share is a forward: about four times a placed member's. The rebalance
+moved six sets at a little over five minutes each. That is `retire_after`, five minutes by default,
+which a move off a live source waits out before its old copy goes; the rebuilds never waited because
+their source was down. The TMDB inventories do not set it, and `lab.yml` sets 15 s.
+`cluster rebalance` stopped following at its 30 minute limit with the plan at five of six, and the
+plan finished on its own.
+
+**Verdict: pass.**

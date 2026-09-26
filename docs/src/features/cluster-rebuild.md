@@ -90,6 +90,14 @@ shoalctl cluster rebuild -i <inventory> <node> --yes
   can feed the new node logs that hold none of the restored rows. On such a cluster, repair every
   table in `repair` mode first.
 
+- **Section 8's rebuilds found and fixed six defects in the moves a rebuild is made of**
+  ([cluster testing](../cluster-testing/correctness.md#8-an-unplaced-member-coordinates)). Before
+  [#171](../appendix/resolved/failed-group-publishes-its-set.md), `cluster rebuild` could report success
+  with a set published onto the new node whose group never took it. Before
+  [#174](../appendix/resolved/snapshot-cut-queue.md), a set's snapshot could wait minutes behind the
+  source's compactions and fail its move. On the fixed build, run 9 rebuilt hyperion under the bench in
+  748 s with no failed step.
+
 ## Invariants to uphold
 
 - **A rebuild never reuses an identity.** `rebuild` refuses to continue if the claim returns the old
