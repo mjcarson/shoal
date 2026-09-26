@@ -107,12 +107,18 @@ fn directives_from(env: Option<String>, conf: &Tracing) -> String {
     }
 }
 
-/// The targets that log once per heartbeat or replication attempt, held to errors by default
+/// The targets that log once per heartbeat, replication attempt or snapshot build, held down by default
+///
+/// The state machine worker and the snapshot handler log four lines at `INFO` each time openraft
+/// asks for a snapshot, and while compaction is behind the policy asks on every apply and the
+/// machine refuses every time: 3,604 lines in five minutes on one lab node
+/// ([O72](../../../docs/src/appendix/optimizations.md#o72-a-refused-snapshot-build-logs-four-lines-per-apply)).
 ///
 /// `RUST_LOG` replaces the whole default, these included, so anyone who wants them back names
 /// them there.
 const QUIET_REPEATING: &str = "openraft::core::heartbeat=error,\
-openraft::engine::handler::replication_handler=error,openraft::replication=error";
+openraft::engine::handler::replication_handler=error,openraft::replication=error,\
+openraft::core::sm::worker=warn,openraft::engine::handler::snapshot_handler=warn";
 
 /// Setup local tracing to the console
 ///
@@ -755,6 +761,8 @@ mod tests {
         let info = super::directives_from(None, &Tracing::default().level(TraceLevel::Info));
         assert!(info.starts_with("info,"), "{info}");
         assert!(info.contains("openraft::core::heartbeat=error"), "{info}");
+        // and the snapshot builds openraft asks for on every apply while compaction is behind (O72)
+        assert!(info.contains("openraft::core::sm::worker=warn"), "{info}");
         // and every directive parses, or the filter would drop the whole string
         assert!(tracing_subscriber::EnvFilter::try_new(&info).is_ok(), "{info}");
         // at error and off it is left out, since it could only enable those targets

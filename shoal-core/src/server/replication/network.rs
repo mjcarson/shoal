@@ -59,7 +59,8 @@ const SNAPSHOT_SHED_BACKOFF: Duration = Duration::from_millis(10);
 const SNAPSHOT_RPC_RETRY: Duration = Duration::from_millis(100);
 
 /// What a group's network asks the shard loop for a snapshot file with
-pub type SnapshotBuilder = Rc<dyn Fn(GroupId, oneshot::Sender<Result<Rc<BuiltSnapshot>, String>>)>;
+pub type SnapshotBuilder =
+    Rc<dyn Fn(GroupId, u64, oneshot::Sender<Result<Rc<BuiltSnapshot>, String>>)>;
 
 /// What a replication RPC's answer resolves to
 enum Outcome {
@@ -652,16 +653,34 @@ impl ShardNetwork {
         *self.shared.snapshots.borrow()
     }
 
-    /// Ask the shard loop for a snapshot file of a group
+    /// Ask the shard loop for a snapshot file of a group, at a boundary at least this high
+    ///
+    /// A file the loop holds is answered while it is at or past `at_least` and the log still
+    /// holds what follows it; a cut already in flight can land below `at_least`, and is asked
+    /// past again ([O71](../../../../docs/src/appendix/optimizations.md#o71-a-held-snapshot-is-cut-again-whenever-the-checkpoint-moves)).
     ///
     /// # Arguments
     ///
     /// * `group` - The group
-    pub async fn build(&self, group: GroupId) -> Result<Rc<BuiltSnapshot>, String> {
-        let (tx, rx) = oneshot::channel();
-        (self.shared.builder)(group, tx);
-        rx.await
-            .unwrap_or_else(|_| Err("the shard loop dropped the snapshot request".to_string()))
+    /// * `at_least` - The lowest boundary the caller can use, or zero for any
+    pub async fn build(&self, group: GroupId, at_least: u64) -> Result<Rc<BuiltSnapshot>, String> {
+        // a few tries, since a cut asked for before ours may be the one that answers first
+        let mut built = None;
+        for _ in 0..3 {
+            let (tx, rx) = oneshot::channel();
+            (self.shared.builder)(group, at_least, tx);
+            let answer = rx.await.unwrap_or_else(|_| {
+                Err("the shard loop dropped the snapshot request".to_string())
+            })?;
+            if answer.manifest.boundary.index >= at_least {
+                return Ok(answer);
+            }
+            built = Some(answer);
+        }
+        let boundary = built.map_or(0, |built| built.manifest.boundary.index);
+        Err(format!(
+            "every cut of group {group} landed at {boundary}, below the {at_least} asked for"
+        ))
     }
 
     /// Where to dial a member, from the map and this node's overrides
@@ -1329,7 +1348,7 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
         let (path, manifest): (PathBuf, SnapshotManifest) = match snapshot.snapshot {
             SnapshotData::Own { .. } => {
                 held = network
-                    .build(group)
+                    .build(group, 0)
                     .await
                     .map_err(|msg| unreachable(format!("cutting a snapshot: {msg}")))?;
                 (held.path.clone(), held.manifest.clone())

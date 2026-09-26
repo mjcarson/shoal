@@ -641,10 +641,12 @@ impl<D: ShoalDatabase> DriverContext<D> {
             target,
             self.network.clone(),
         );
+        // the first cut may be any the leader holds; one the target was past has to be passed
+        let mut at_least = 0;
         for attempt in 0..CUTS_AT_MOST {
             let built = self
                 .network
-                .build(self.group)
+                .build(self.group, at_least)
                 .await
                 .map_err(|error| format!("cutting a snapshot: {error}"))?;
             let vote = self.raft.metrics().borrow_watched().vote.clone();
@@ -665,6 +667,7 @@ impl<D: ShoalDatabase> DriverContext<D> {
                 crate::server::replication::network::RepairSend::Behind { checkpoint } => {
                     event!(Level::INFO, msg = "the target's checkpoint is past the cut; moving this shard's past it", op = %self.op, group = %self.group, %target, checkpoint, ours = self.state.borrow().checkpoint_index());
                     self.advance_past(checkpoint).await?;
+                    at_least = checkpoint + 1;
                 }
             }
         }

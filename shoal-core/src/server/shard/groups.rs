@@ -3004,11 +3004,13 @@ where
             ReplicationVerb::Snapshot { group } => {
                 // cut now, on the loop's own request; the manifest is answered from a task once
                 // the cut lands, since the loop hears about it as a message
-                if !replication.groups.contains_key(&group) {
+                let Some(slot) = replication.groups.get(&group) else {
                     return Some(Err(format!("group {group} is not hosted on this shard")));
-                }
+                };
+                // at the checkpoint at least, so a test's cut is never an older held file
+                let at_least = slot.state.borrow().checkpoint_index();
                 let (built_tx, built) = oneshot::channel();
-                if let Err(error) = self.handle_build_snapshot(group, built_tx).await {
+                if let Err(error) = self.handle_build_snapshot(group, at_least, built_tx).await {
                     return Some(Err(format!("{error:?}")));
                 }
                 glommio::spawn_local(async move {
@@ -3043,10 +3045,12 @@ where
     /// # Arguments
     ///
     /// * `group` - The group
+    /// * `at_least` - The lowest boundary the asker can use, or zero for any
     /// * `reply` - Where the file goes
     pub(super) async fn handle_build_snapshot(
         &mut self,
         group: GroupId,
+        at_least: u64,
         reply: oneshot::Sender<Result<Rc<BuiltSnapshot>, String>>,
     ) -> Result<(), ServerError> {
         let schema_id = <D::ClientType as QuerySupport>::SCHEMA_ID;
@@ -3059,10 +3063,17 @@ where
             let _ = reply.send(Err(format!("group {group} is not hosted on this shard")));
             return Ok(());
         };
-        // a held file at the checkpoint or past it is the answer
+        // a held file is the answer while the log still holds every entry above its boundary,
+        // which is all a receiver needs to go on from it; one at the checkpoint or past it
+        // always is. Cutting again whenever the checkpoint had moved cut a 125 MB group every
+        // few seconds on the lab, for a member that could not take any of them
+        // ([O71](../../../../docs/src/appendix/optimizations.md#o71-a-held-snapshot-is-cut-again-whenever-the-checkpoint-moves))
         let checkpoint = slot.state.borrow().checkpoint_index();
+        let purged = slot.store.purged_index();
         if let Some(built) = &slot.snapshot {
-            if built.manifest.boundary.index >= checkpoint {
+            let boundary = built.manifest.boundary.index;
+            let follows = boundary >= checkpoint || purged.is_none_or(|purged| purged <= boundary);
+            if boundary >= at_least && follows {
                 let _ = reply.send(Ok(built.clone()));
                 return Ok(());
             }

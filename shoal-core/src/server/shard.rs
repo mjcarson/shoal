@@ -3915,8 +3915,12 @@ where
             Rc::new(move |event| {
                 let _ = events.try_send(ServerMsg::Peer(PeerEvent::Link(event)));
             }),
-            Rc::new(move |group, reply| {
-                if let Err(error) = builder_tx.try_send(ServerMsg::BuildSnapshot { group, reply }) {
+            Rc::new(move |group, at_least, reply| {
+                if let Err(error) = builder_tx.try_send(ServerMsg::BuildSnapshot {
+                    group,
+                    at_least,
+                    reply,
+                }) {
                     // the loop is gone; the reply it carried is dropped, which the asker hears
                     let _ = error;
                 }
@@ -4302,9 +4306,11 @@ where
                     self.handle_segment_compacted(table, generation);
                 }
                 // the checkpoint file landed
-                ServerMsg::BuildSnapshot { group, reply } => {
-                    self.handle_build_snapshot(group, reply).await?
-                }
+                ServerMsg::BuildSnapshot {
+                    group,
+                    at_least,
+                    reply,
+                } => self.handle_build_snapshot(group, at_least, reply).await?,
                 ServerMsg::SnapshotBuilt { group, outcome } => {
                     self.handle_snapshot_built(group, outcome).await?
                 }

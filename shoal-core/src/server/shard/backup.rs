@@ -274,7 +274,7 @@ async fn drive_inner<D: ShoalDatabase>(context: &BackupContext<D>) -> Result<(),
     context.advance_past(applied).await?;
     // the group's snapshot at or past its checkpoint, held so the sweep cannot delete it
     let built: Rc<BuiltSnapshot> = glommio::timer::timeout(context.timeout, async {
-        Ok(context.network.build(context.group).await)
+        Ok(context.network.build(context.group, applied).await)
     })
     .await
     .map_err(|_| format!("the cut did not land within {:?}", context.timeout))?

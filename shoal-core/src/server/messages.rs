@@ -674,6 +674,8 @@ where
     BuildSnapshot {
         /// The group
         group: crate::shared::identity::GroupId,
+        /// The lowest boundary the asker can use, or zero for any
+        at_least: u64,
         /// Where the file goes
         reply: futures_channel::oneshot::Sender<
             Result<std::rc::Rc<crate::server::replication::BuiltSnapshot>, String>,

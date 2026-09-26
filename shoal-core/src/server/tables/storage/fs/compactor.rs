@@ -1,6 +1,6 @@
 //! The file system compaction utilties for intent logs/archives
 
-use futures::{select, AsyncWriteExt, FutureExt};
+use futures::{select, AsyncWriteExt, FutureExt, StreamExt};
 use glommio::io::{BufferedFile, DmaFile, DmaStreamWriter, OpenOptions};
 use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
@@ -224,7 +224,7 @@ fn written_to(writer: Option<&DmaStreamWriter>) -> u64 {
 /// before it. A cut records the archives as they stand between two jobs and the position
 /// merged so far, so it is exact wherever it runs; behind a compaction backlog under load it
 /// waited minutes, and a repair or a new replica waited with it
-/// ([O70](../../../../../../docs/src/appendix/optimizations.md#o70-a-snapshot-cut-waits-behind-the-compaction-backlog)).
+/// ([O70](../../../../../../docs/src/appendix/optimizations.md#o70-a-snapshot-cut-reads-its-records-one-at-a-time)).
 /// It never passes an install, a removal, a fault or a stop, whose effect on the archives it
 /// has to see or not see in the order they were asked for.
 ///
@@ -254,6 +254,12 @@ fn is_merge(job: &CompactionJob) -> bool {
         CompactionJob::IntentLog { .. } | CompactionJob::Segment { .. } | CompactionJob::Archives
     )
 }
+
+/// How many archived records a snapshot cut reads at once
+///
+/// Enough to keep a device queue busy under a node's own load; the records are still written
+/// in key order ([O70](../../../../../../docs/src/appendix/optimizations.md#o70-a-snapshot-cut-reads-its-records-one-at-a-time)).
+const CUT_READS_IN_FLIGHT: usize = 32;
 
 /// The first wait before a compaction job that failed before writing is tried again
 const COMPACTION_RETRY_MIN: Duration = Duration::from_millis(100);
@@ -1010,11 +1016,22 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             schema_id,
         );
         let mut writer = SnapshotWriter::create(&path, header).await?;
-        for entry in &entries {
-            // read this partition's archived bytes as they are, verified against their
-            // checksum so a corrupt copy is never a source, and write them as they are
-            let read = self.map.read_record(entry).await?;
-            writer.record(entry.key, &read).await?;
+        event!(Level::INFO, msg = "cutting a snapshot", group = %group, boundary = boundary.index, records = entries.len());
+        // the records read a few at a time and written in key order: one read at a time, each a
+        // direct read at a random offset, took minutes for a group of 146,000 partitions on a
+        // loaded lab node, and a repair or a new replica waited on it
+        // ([O70](../../../../../../docs/src/appendix/optimizations.md#o70-a-snapshot-cut-reads-its-records-one-at-a-time))
+        let map = self.map.clone();
+        let mut reads = futures::stream::iter(entries.iter().copied())
+            .map(|entry| {
+                let map = map.clone();
+                async move { map.read_record(&entry).await.map(|read| (entry.key, read)) }
+            })
+            .buffered(CUT_READS_IN_FLIGHT);
+        while let Some(read) = reads.next().await {
+            // every record verified against its checksum as it is read, in the order asked
+            let (key, read) = read?;
+            writer.record(key, &read).await?;
         }
         // the trailer: what was remembered at or below the boundary, oldest first
         let remembered: Vec<_> = retries

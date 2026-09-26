@@ -18748,6 +18748,23 @@ async fn a_stalled_copy_survives_a_restart_and_an_operator_repairs_it() -> Resul
         Duration::from_secs(30),
     )
     .await?;
+    // writes to the group past what its log retains, so the leader's own replication has to
+    // stream the stalled copy a snapshot: the stream a repair's used to be replaced by (#163)
+    let group_keys: Vec<u64> = keys_in_group(&mut cluster, "Note", &group, 32_000, 8)?
+        .into_iter()
+        .filter(|key| *key < 32_060 && *key != corrupted)
+        .collect();
+    for round in 0..40 {
+        for key in &group_keys {
+            through_leader
+                .send_one(Note {
+                    key: *key,
+                    text: format!("round-{round}"),
+                })
+                .await
+                .map_err(ok)?;
+        }
+    }
     // and nothing repaired it, since the leader was told not to
     std::thread::sleep(Duration::from_secs(3));
     wait_member_quarantined(&mut cluster, follower, true, Duration::from_secs(5))?;
@@ -18774,6 +18791,9 @@ async fn a_stalled_copy_survives_a_restart_and_an_operator_repairs_it() -> Resul
     assert_eq!(entry["stalled"], false, "{entry}");
     assert_eq!(entry["up"], true, "{entry}");
     wait_note_routed(&addr_f, corrupted, "updated", Duration::from_secs(20)).await?;
+    for key in &group_keys {
+        wait_note_routed(&addr_f, *key, "round-39", Duration::from_secs(20)).await?;
+    }
     wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
