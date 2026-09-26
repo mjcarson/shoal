@@ -13,7 +13,7 @@
 
 use clap::{ArgGroup, Args};
 use color_eyre::eyre::{bail, eyre, WrapErr};
-use shoal::client::{Shoal, ShoalQueryStream};
+use shoal::client::{SendOptions, Shoal, ShoalQueryStream};
 use shoal::shared::queries::Queries;
 use shoal::shared::responses::ResponseActionNames;
 use shoal::{Errors, QuerySuceededOpts};
@@ -461,6 +461,7 @@ impl Pipeline {
 /// * `counts` - The shared counters to record what came back in
 async fn worker(
     client: Arc<Shoal<TmdbClient>>,
+    options: SendOptions,
     mut jobs: Receiver<Job>,
     args: Arc<LoadArgs>,
     counts: Arc<Counts>,
@@ -469,7 +470,7 @@ async fn worker(
     //
     // unordered rather than ordered: an ordered stream holds a response back until every earlier
     // one has arrived, so a single slow query would stall everything queued behind it
-    let (queries_tx, mut results_rx) = client.stream_unordered()?;
+    let (queries_tx, mut results_rx) = client.stream_unordered_with(options)?;
     // leave room for a full batch plus the fan out a batch of inserts adds
     let mut pipe = Pipeline::new(queries_tx, args.batch * 2);
     // whether there is any more work coming
@@ -580,10 +581,12 @@ async fn worker(
 /// # Arguments
 ///
 /// * `clients` - One client per connected member
+/// * `options` - How the workers' reads are served
 /// * `args` - The settings for this load
 /// * `counts` - The shared counters the workers record into
 fn spawn_workers(
     clients: &[Arc<Shoal<TmdbClient>>],
+    options: &SendOptions,
     args: &Arc<LoadArgs>,
     counts: &Arc<Counts>,
 ) -> (Vec<Sender<Job>>, Vec<WorkerHandle>) {
@@ -596,7 +599,13 @@ fn spawn_workers(
         senders.push(tx);
         // each worker on the next member in turn, so every member coordinates a share
         let client = clients[index % clients.len()].clone();
-        handles.push(tokio::spawn(worker(client, rx, args.clone(), counts.clone())));
+        handles.push(tokio::spawn(worker(
+            client,
+            options.clone(),
+            rx,
+            args.clone(),
+            counts.clone(),
+        )));
     }
     (senders, handles)
 }
@@ -705,7 +714,8 @@ async fn write_all(
 ) -> color_eyre::Result<Vec<u64>> {
     println!("-- loading {} --", args.dataset.display());
     let started = Instant::now();
-    let (senders, handles) = spawn_workers(clients, args, counts);
+    // the load's own reads, of which there are none, are served as the client's defaults say
+    let (senders, handles) = spawn_workers(clients, &SendOptions::new(), args, counts);
     // parse the csv off the runtime: it is a half gigabyte of blocking work, and leaving it on a
     // worker thread would starve the tasks draining the responses
     let reader = tokio::task::spawn_blocking({
@@ -772,7 +782,10 @@ async fn verify(
     sample.dedup();
     println!("-- reading back {} of {} movies --", sample.len(), ids.len());
     let started = Instant::now();
-    let (senders, handles) = spawn_workers(clients, args, counts);
+    // at quorum: a copy still applying the load's last writes answers a `One` read without
+    // them, and a row that is late is not a row that was lost
+    let options = SendOptions::new().read(shoal::shared::protocol::read::ReadLevel::Quorum);
+    let (senders, handles) = spawn_workers(clients, &options, args, counts);
     // feed the sampled ids in, round robin across the same worker set
     for (sent, id) in sample.iter().enumerate() {
         counts.requested.fetch_add(1, Ordering::Relaxed);
