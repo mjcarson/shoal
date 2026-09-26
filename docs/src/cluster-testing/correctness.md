@@ -526,3 +526,21 @@ the five minutes the window promises, and that is now written down in
 run shows the fixed build surviving the failure's trigger nine times, not that the window was
 hit. The fixture's `mid_compaction` crash point is what aims at it.
 
+### Rebuilding a node from its peers
+
+hyperion's copy had to be abandoned for #159 by bootstrapping the whole lab again, because
+nothing rebuilds one node ([todos](../appendix/todos.md#rebuild-a-node-from-its-peers)). Tried on
+the rebuilt lab with nothing running: hyperion stopped, its `Movie/`, `MovieByKeyword/` and
+`wal/` removed, and its identity (`shoal-meta.json`) and control log kept.
+
+| | |
+| --- | --- |
+| Back up | 12 s after the start, no restarts |
+| Refilled | 2.8 GB, 4.83 million partitions, in about four minutes, fed by the groups' leaders |
+| Its copy alone at `One` | 1,187,691 movies and 58,418 keyword partitions equal to the csv; all 3,644,280 inserts acknowledged in the SIGKILL run present |
+
+**Verdict:** it works, on a caught-up cluster. It is not a procedure to hand an operator as is: a
+wiped voter under its old identity votes for any candidate, which can lose a committed write if
+another voter fails before the refill. The todo now says what a safe `cluster rebuild` has to
+check.
+
