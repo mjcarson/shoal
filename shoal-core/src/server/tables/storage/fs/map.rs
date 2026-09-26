@@ -10,7 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
 use std::hash::Hasher;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
@@ -240,9 +240,56 @@ pub struct SerializedMap {
     to_archive: std::collections::HashMap<u64, ArchiveEntry>,
 }
 
+/// Whether an entry's record lies inside its archive, as the archive is on disk
+///
+/// An archive that is not there is kept: that is another failure, reported loudly where the
+/// record is read.
+///
+/// # Arguments
+///
+/// * `entry` - The entry
+/// * `archive_dir` - The directory the table's archives are in
+/// * `lengths` - The archives' lengths read so far, filled as they are needed
+fn within_archive(
+    entry: &ArchiveEntry,
+    archive_dir: &Path,
+    lengths: &mut HashMap<Uuid, Option<u64>>,
+) -> bool {
+    // each archive's length is read once
+    let length = *lengths.entry(entry.archive).or_insert_with(|| {
+        std::fs::metadata(archive_dir.join(entry.archive.to_string()))
+            .ok()
+            .map(|meta| meta.len())
+    });
+    match length {
+        Some(length) => entry.offset + entry.size as u64 <= length,
+        None => true,
+    }
+}
+
 impl SerializedMap {
+    /// Apply an intent log over this map
+    ///
+    /// An entry whose record lies past the end of its archive is skipped, so the entry before
+    /// it stands. A build before [Resolved #159](../../../../../../docs/src/appendix/resolved/map-ahead-of-archive.md)
+    /// could write an intent to the log before the record it names reached its archive, and a
+    /// crash between the two left the map naming bytes the disk never got. The job that wrote
+    /// such an entry never finished, so the log it was compacting is still there and is
+    /// compacted again over the entry before.
+    ///
+    /// # Arguments
+    ///
+    /// * `intent_path` - The intent log
+    /// * `archive_dir` - The directory the table's archives are in, to check entries against
     #[instrument(name = "SerializableMap::load_intent_log", skip(self), err(Debug))]
-    async fn load_intent_log(&mut self, intent_path: &PathBuf) -> Result<(), ServerError> {
+    async fn load_intent_log(
+        &mut self,
+        intent_path: &PathBuf,
+        archive_dir: Option<&Path>,
+    ) -> Result<(), ServerError> {
+        // the archives' lengths, read as entries name them, and the entries skipped
+        let mut lengths: HashMap<Uuid, Option<u64>> = HashMap::new();
+        let mut skipped = 0u64;
         // get a reader for this intent file
         let mut reader = IntentLogReader::new(intent_path).await?;
         // read all of the intent from this intent log
@@ -270,8 +317,14 @@ impl SerializedMap {
                 MapIntent::DeleteArchive(id) => {
                     self.all_archives.remove(&id);
                 }
-                // add this entry to our map
+                // add this entry to our map, if its record is on disk
                 MapIntent::Entry(entry) => {
+                    if let Some(dir) = archive_dir {
+                        if !within_archive(&entry, dir, &mut lengths) {
+                            skipped += 1;
+                            continue;
+                        }
+                    }
                     self.to_archive.insert(entry.key, entry);
                 }
                 // this partition was pruned so it no longer has an archive entry
@@ -282,6 +335,15 @@ impl SerializedMap {
         }
         // close our reader
         reader.close().await?;
+        // say so if a crash had left the log naming records that never reached disk
+        if skipped > 0 {
+            event!(
+                Level::WARN,
+                msg = "skipped map entries whose records lie past the end of their archive",
+                log = %intent_path.display(),
+                skipped,
+            );
+        }
         Ok(())
     }
 
@@ -292,10 +354,14 @@ impl SerializedMap {
     /// # Arguments
     ///
     /// * `map_path` - The path to an existing serialized archive map path
+    /// * `intent_path` - The path to the map's intent log
+    /// * `archive_dir` - The directory the table's archives are in, to check logged entries against
+    /// * `from` - Who is loading it, for the trace
     #[instrument(name = "SerializableMap::new", err(Debug))]
     pub async fn new(
         map_path: &PathBuf,
         intent_path: &PathBuf,
+        archive_dir: Option<&Path>,
         from: &str,
     ) -> Result<Self, ServerError> {
         // open this shards map file
@@ -336,7 +402,7 @@ impl SerializedMap {
             // deserialize this map
             let mut map = rkyv::deserialize::<SerializedMap, rkyv::rancor::Error>(archived)?;
             // load our intent log
-            map.load_intent_log(intent_path).await?;
+            map.load_intent_log(intent_path, archive_dir).await?;
             Ok(map)
         } else {
             // close our file
@@ -556,7 +622,9 @@ impl ArchiveMap {
         intent_path.push(shard_name);
         // load our serializable map from disk so we can load it into our papaya map
         // TODO make issue about SerializedMap not needing to track active
-        let serializable = SerializedMap::new(&map_path, &intent_path, "new").await?;
+        let archive_dir = conf.get_archive_path(table_name);
+        let serializable =
+            SerializedMap::new(&map_path, &intent_path, Some(&archive_dir), "new").await?;
         // how large the map on disk is, which the intent log is folded against
         let saved_bytes = std::fs::metadata(&map_path).map_or(0, |meta| meta.len());
         // start out with an empty hash map with room for 1k partitions
@@ -1060,6 +1128,61 @@ mod tests {
         out
     }
 
+    /// A logged entry past the end of its archive is skipped, and the entry before it stands
+    ///
+    /// The shape a crash left under a build before [Resolved #159](../../../../../../docs/src/appendix/resolved/map-ahead-of-archive.md):
+    /// the map's intent log naming a record its archive never got.
+    #[test]
+    fn a_logged_entry_past_its_archive_keeps_the_one_before() {
+        LocalExecutor::default().run(async {
+            let temp_dir = test_dir();
+            let map_path = temp_dir.path().join("test-map");
+            let intent_path = temp_dir.path().join("test-map-intent");
+            let archive_dir = temp_dir.path().join("archives");
+            std::fs::create_dir_all(&archive_dir).unwrap();
+            // two archives on disk: an old one that is whole, and the active one, cut short
+            let (old, active, gone) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+            std::fs::write(archive_dir.join(old.to_string()), vec![1u8; 4096]).unwrap();
+            std::fs::write(archive_dir.join(active.to_string()), vec![1u8; 1024]).unwrap();
+            // the snapshot knows partition 1 in the old archive
+            let before = ArchiveEntry {
+                key: 1,
+                archive: old,
+                offset: 512,
+                size: 256,
+            };
+            let mut snapshot_map = SerializedMap {
+                all_archives: HashSet::default(),
+                to_archive: std::collections::HashMap::default(),
+            };
+            snapshot_map.to_archive.insert(before.key, before);
+            std::fs::write(&map_path, snapshot(&snapshot_map)).unwrap();
+            // the log repoints 1 past the active archive's end, logs 2 there too, logs 3
+            // inside it, and logs 4 in an archive that is not there at all
+            let mut intents = framed(&MapIntent::entry(1, active, 2048, 256));
+            intents.extend_from_slice(&framed(&MapIntent::entry(2, active, 900, 256)));
+            intents.extend_from_slice(&framed(&MapIntent::entry(3, active, 512, 512)));
+            intents.extend_from_slice(&framed(&MapIntent::entry(4, gone, 0, 64)));
+            std::fs::write(&intent_path, &intents).unwrap();
+            let loaded = SerializedMap::new(
+                &map_path.to_path_buf(),
+                &intent_path.to_path_buf(),
+                Some(&archive_dir),
+                "test",
+            )
+            .await
+            .expect("the map loads");
+            // the entry before the torn one stands
+            assert_eq!(loaded.to_archive.get(&1), Some(&before));
+            // a torn entry with nothing before it names nothing
+            assert_eq!(loaded.to_archive.get(&2), None);
+            // one inside its archive, up to its last byte, is kept
+            assert_eq!(loaded.to_archive.get(&3).map(|entry| entry.archive), Some(active));
+            // and one in a missing archive is kept, for the read to report by name
+            assert_eq!(loaded.to_archive.get(&4).map(|entry| entry.archive), Some(gone));
+        });
+    }
+
     #[test]
     /// A remove intent drops a pruned partitions entry when the map is loaded back
     fn remove_intent_drops_an_entry() {
@@ -1089,7 +1212,7 @@ mod tests {
             std::fs::write(&intent_path, &intents).unwrap();
             // load this map back with its intent log applied
             let loaded =
-                SerializedMap::new(&map_path.to_path_buf(), &intent_path.to_path_buf(), "test")
+                SerializedMap::new(&map_path.to_path_buf(), &intent_path.to_path_buf(), None, "test")
                     .await
                     .expect("Failed to load map");
             // our pruned partition should be gone
@@ -1297,7 +1420,7 @@ mod tests {
             for key in 0..4u64 {
                 map.to_archive.insert(key, entry_for(key));
             }
-            map.load_intent_log(&path).await.expect("a log with a stale tail loads");
+            map.load_intent_log(&path, None).await.expect("a log with a stale tail loads");
             assert_eq!(map.to_archive.len(), 1, "the three removes were not applied");
             assert!(map.to_archive.contains_key(&3));
         });

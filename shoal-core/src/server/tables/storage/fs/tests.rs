@@ -485,7 +485,7 @@ fn map_corrupt_hash() {
         std::fs::write(&map_path, &map).unwrap();
         // loading it should fail on the hash rather than on rkyv validation
         let result =
-            SerializedMap::new(&map_path.to_path_buf(), &intent_path.to_path_buf(), "test").await;
+            SerializedMap::new(&map_path.to_path_buf(), &intent_path.to_path_buf(), None, "test").await;
         match result {
             Err(crate::server::ServerError::Shoal(ShoalError::MapCorruption { .. })) => (),
             Err(other) => panic!("Expected MapCorruption error, got: {other:?}"),

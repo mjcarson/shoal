@@ -2313,3 +2313,20 @@ is `cluster destroy` of the whole deployment or a hand-made removal and re-add. 
 <node>`, meaning stop, wipe and rejoin under a new identity with a `Replace`, would make it an
 operation.
 
+**Tried on the lab, 2026-09-26, under the same identity.** hyperion was stopped, its table
+directories and `wal/` were removed, and `shoal-meta.json`, `control/` and the lock were kept. It
+started, was up within 12 s, and its 36 groups were fed by their leaders (#99's path for a
+durable member that lost its log): 2.8 GB in about four minutes, idle apart from that. Read
+through hyperion alone at `One`, every movie and keyword partition equalled the csv, and all
+3,644,280 inserts acknowledged in the SIGKILL run before it were there
+([cluster testing](../cluster-testing/correctness.md#rebuilding-a-node-from-its-peers)).
+
+**It is not safe as a general operation, and that is why the sketch above wants a new identity.**
+A wiped voter that keeps its identity has an empty log, so it grants its vote to any candidate.
+Take an entry committed with its acknowledgement and held by one other member only. If that
+member fails, a candidate without the entry can win with the wiped node's vote, and a committed
+write is gone. The same-identity rebuild is safe when, for every group the node votes in, the
+other voters have already matched the leader's committed index before the wipe, as on an idle
+cluster. So a `cluster rebuild` built on it has to check that first, per group, and refuse
+otherwise. The `Replace` path has no such condition.
+

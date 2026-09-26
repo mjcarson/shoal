@@ -327,8 +327,18 @@ compaction** — unbounded write amplification, and a `to_mark` list that grew w
 rather than the job.
 
 Ordering matters: the in-memory map is not repointed until the data and the map intent are
-both on disk. A crash before the sync leaves the map pointing at the old copy, which is still
-intact — the compaction is simply lost and will be redone from the sealed log.
+both on disk. ~~A crash before the sync leaves the map pointing at the old copy, which is still
+intact — the compaction is simply lost and will be redone from the sealed log.~~ That was true
+of the in-memory map and false of the one on disk. The map intents went into the intent log's
+writer as each partition was written, and that writer flushes every buffer as it fills. So a
+crash before the sync could leave intents on disk naming records the archive never got, and on
+restart the map pointed past the end of its archive
+([Resolved #159](../appendix/resolved/map-ahead-of-archive.md)). **A job's intents are now staged
+in memory and written only after the archive is synced** (`sync_job`, or `bound_staged` every
+4 MiB for a long job). The order on disk is records, then intents, then the map repointed. A
+crash before the sync leaves the old entries on disk, and the job is redone from the sealed log.
+A map written by an older build can still hold such intents, and loading the intent log skips an
+entry whose record lies past its archive's end, keeping the entry before it.
 
 Note `sync()` here is `DmaStreamWriter::sync`, glommio's, which does flush and fsync — unlike
 `StreamWriter::sync`, which only issues a background write
@@ -426,8 +436,12 @@ Live entries are copied into the active archive with the same size-prefix framin
 (`.../fs/compactor.rs:497-535`). Only after both writers sync (`:576-577`) are entries published
 and old archives removed from the map, and only then are the files unlinked.
 
-That ordering is the crash-safe one: new copy on disk → map repointed → old file deleted. A
-crash anywhere leaves the map pointing at data that still exists.
+That ordering is the crash-safe one: new copy on disk → map repointed → old file deleted. ~~A
+crash anywhere leaves the map pointing at data that still exists.~~ It was not quite that
+order: the new entries and the `DeleteArchive` intents reached the intent log as they were
+made, ahead of the copy they named. Staged since [#159](../appendix/resolved/map-ahead-of-archive.md),
+they are written after the new archive is synced, so a crash anywhere leaves the map on disk
+pointing at data that exists.
 
 ### None of the above has ever run in a test
 
