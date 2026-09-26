@@ -625,13 +625,16 @@ where
                 Installs::marker_name(group),
             )
         };
-        let Some(raft) = raft else {
+        // a repair stream is installed by restarting the group, which a copy whose start
+        // stalled can be without a handle; any other install is handed to the handle
+        // ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md))
+        if raft.is_none() && partial.borrow().repair.is_none() {
             let _ = reply.try_send(encode_answer(
                 head.id,
                 &SnapshotAnswer::Refused(format!("group {group} is still starting")),
             ));
             return;
-        };
+        }
         {
             let partial = partial.borrow();
             if partial.stream != stream || partial.from != origin {
@@ -683,7 +686,7 @@ where
                 if complete && !writing {
                     break install_received(
                         &partial,
-                        &raft,
+                        raft.as_ref(),
                         &path,
                         &marker_dir,
                         &marker_name,
@@ -1154,7 +1157,7 @@ async fn read_records(
 /// # Arguments
 ///
 /// * `partial` - The partial, whole
-/// * `raft` - The group's handle
+/// * `raft` - The group's handle, which a repair stream to a copy whose start stalled has none of
 /// * `path` - The partial's file
 /// * `marker_dir` - Where the marker goes
 /// * `marker_name` - The marker's name
@@ -1162,11 +1165,13 @@ async fn read_records(
 /// * `loop_tx` - The loop, which restarts the group for a repair stream
 async fn install_received<D: ShoalDatabase>(
     partial: &Rc<RefCell<Partial>>,
-    raft: &openraft::Raft<
-        crate::server::replication::DataConfig,
-        impl openraft::storage::RaftStateMachine<
+    raft: Option<
+        &openraft::Raft<
             crate::server::replication::DataConfig,
-            SnapshotData = SnapshotData,
+            impl openraft::storage::RaftStateMachine<
+                crate::server::replication::DataConfig,
+                SnapshotData = SnapshotData,
+            >,
         >,
     >,
     path: &std::path::Path,
@@ -1256,6 +1261,9 @@ async fn install_received<D: ShoalDatabase>(
             path: path.to_path_buf(),
             manifest,
         },
+    };
+    let Some(raft) = raft else {
+        return SnapshotAnswer::Refused(format!("group {group} is still starting"));
     };
     match raft.install_full_snapshot(vote, snapshot).await {
         Ok(response) => SnapshotAnswer::Installed {

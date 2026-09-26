@@ -629,6 +629,7 @@ mod tests {
             quarantined: None,
             bytes: 1000,
             core_dead: None,
+            stalled: false,
             term: 1,
             partitions: 10,
             writes: WriteCounters {

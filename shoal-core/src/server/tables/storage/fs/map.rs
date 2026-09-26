@@ -677,8 +677,6 @@ impl ArchiveMap {
         if let Some(file) = self.loaded_archives.borrow_mut().get(&self.active.borrow()) {
             return Ok(DmaStreamWriterBuilder::new(file.dup()?).build());
         }
-        // add this archive to our active archive set
-        self.all_archives.borrow_mut().insert(*self.active.borrow());
         // build the path to this archive
         let mut path = self.conf.get_archive_path(&self.table_name);
         // add our active id
@@ -690,6 +688,9 @@ impl ArchiveMap {
             .write(true)
             .dma_open(&path)
             .await?;
+        // add this archive to our active archive set, only once it exists: one named here
+        // that the open failed to create would be opened by every later archive compaction
+        self.all_archives.borrow_mut().insert(*self.active.borrow());
         // clone this file handle and place it in our archive map
         self.add_archive(*self.active.borrow(), file.dup()?);
         // a new archive is this build's format, and begins with the header that says so

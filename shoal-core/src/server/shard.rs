@@ -3482,6 +3482,8 @@ where
                 self.drive_backups();
                 self.drive_restores();
                 self.schedule_scrubs();
+                // a member that stalled on an unreadable partition is repaired unasked
+                self.repair_stalled_copies();
                 // a retired copy whose grace is over is reclaimed
                 // ([F45](../../../docs/src/features/replica-migration.md))
                 self.sweep_retired().await?;

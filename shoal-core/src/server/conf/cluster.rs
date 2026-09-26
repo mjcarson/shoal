@@ -630,6 +630,11 @@ fn default_repair_concurrent() -> u32 {
     1
 }
 
+/// A copy that stalled on an unreadable partition is repaired without an operator by default
+fn default_repair_unreadable() -> bool {
+    true
+}
+
 /// The repair settings, which are this node's alone
 ///
 /// A scrub is a cut of a group's rows at a committed boundary and a read of everything the
@@ -657,6 +662,14 @@ pub struct Repair {
     /// same device; the rest of a record's groups wait their turn.
     #[serde(default = "default_repair_concurrent")]
     pub concurrent: u32,
+    /// Whether a group's leader repairs a copy that stalled on an unreadable partition itself
+    ///
+    /// Such a copy has stopped applying and said so, so there is nothing to judge: the leader
+    /// asks for a `Repair` of the group as the process. Off, the copy stays stalled and
+    /// quarantined until an operator asks
+    /// ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md)).
+    #[serde(default = "default_repair_unreadable")]
+    pub unreadable: bool,
 }
 
 impl Default for Repair {
@@ -666,6 +679,7 @@ impl Default for Repair {
             scrub_interval: None,
             timeout: default_repair_timeout(),
             concurrent: default_repair_concurrent(),
+            unreadable: default_repair_unreadable(),
         }
     }
 }
@@ -1826,16 +1840,19 @@ mod tests {
         );
         assert_eq!(defaults.timeout.duration(), Duration::from_secs(300));
         assert_eq!(defaults.concurrent, 1);
+        assert!(defaults.unreadable, "a stalled copy is repaired unasked by default");
         // a block naming every field
-        let parsed: super::Repair =
-            serde_yaml::from_str("scrub_interval: \"6h\"\ntimeout: \"2m\"\nconcurrent: 2\n")
-                .expect("a full repair block parses");
+        let parsed: super::Repair = serde_yaml::from_str(
+            "scrub_interval: \"6h\"\ntimeout: \"2m\"\nconcurrent: 2\nunreadable: false\n",
+        )
+        .expect("a full repair block parses");
         assert_eq!(
             parsed.scrub_interval.map(|spec| spec.duration()),
             Some(Duration::from_secs(6 * 3600))
         );
         assert_eq!(parsed.timeout.duration(), Duration::from_secs(120));
         assert_eq!(parsed.concurrent, 2);
+        assert!(!parsed.unreadable);
         // an explicit null is never, an empty block is the defaults, an unknown field is refused
         let never: super::Repair =
             serde_yaml::from_str("scrub_interval: null\n").expect("null parses");

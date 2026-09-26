@@ -56,6 +56,11 @@ pub struct ScrubOutcome {
     pub log_id: crate::server::wal::WalLogId,
     /// Every member's report, or why there is none from it
     pub reports: BTreeMap<ShardAddr, Result<DigestReport, String>>,
+    /// The members whose copies said they stalled on a partition they could not read
+    ///
+    /// Each is a repair target without a judgement, since the copy said so of itself
+    /// ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md)).
+    pub stalled: Vec<ShardAddr>,
 }
 
 /// Propose a scrub through a group's leader handle and poll every member for its digest
@@ -113,6 +118,7 @@ pub async fn scrub_group<D: ShoalDatabase>(
     // every member's report, polled until it is in or the time is up
     let mut reports: BTreeMap<ShardAddr, Result<DigestReport, String>> = BTreeMap::new();
     let mut last: BTreeMap<ShardAddr, String> = BTreeMap::new();
+    let mut stalled: Vec<ShardAddr> = Vec::new();
     loop {
         for member in members {
             if reports.contains_key(member) {
@@ -139,6 +145,14 @@ pub async fn scrub_group<D: ShoalDatabase>(
                 }
                 Ok(DigestAnswer::Unknown) => {
                     last.insert(*member, "the member has not applied the scrub".to_string());
+                }
+                // a stalled copy never will, so it is not polled until the deadline
+                Ok(DigestAnswer::Stalled) => {
+                    reports.insert(
+                        *member,
+                        Err("the member's copy stalled on a partition it could not read".to_string()),
+                    );
+                    stalled.push(*member);
                 }
                 Err(error) => {
                     last.insert(*member, error);
@@ -168,8 +182,14 @@ pub async fn scrub_group<D: ShoalDatabase>(
         boundary,
         log_id,
         reports,
+        stalled,
     })
 }
+
+/// The least time between two repairs a leader asks for the same stalled member's group
+///
+/// A repair that failed - the member out of reach, say - is asked for again after this.
+pub const STALL_REPAIR_RETRY: Duration = Duration::from_secs(30);
 
 /// The directory under `wal/Shard-N/` a quarantined copy's marker lives in
 pub const QUARANTINE_DIR: &str = "quarantine";
@@ -321,6 +341,11 @@ pub fn judge(members: &[ShardAddr], scrub: &ScrubOutcome, source: Option<NodeId>
             Err(_) => {}
         }
     }
+    // a copy that stalled on an unreadable partition said so itself, and is repaired as soon
+    // as a trusted digest is there to repair it from
+    for member in &scrub.stalled {
+        quarantine.push((*member, QuarantineReason::Unreadable));
+    }
     let summaries: Vec<(ShardAddr, DigestSummary)> = verified
         .iter()
         .map(|(member, report)| {
@@ -449,6 +474,7 @@ mod tests {
                 .zip(digests)
                 .map(|(member, (digest, failures))| (*member, Ok(report(digest, failures))))
                 .collect::<BTreeMap<_, _>>(),
+            stalled: Vec::new(),
         };
         // clean
         let verdict = judge(&members, &scrub([(7, 0), (7, 0), (7, 0)]), None);
@@ -516,6 +542,18 @@ mod tests {
         let verdict = judge(&members, &partial, None);
         assert_eq!(verdict.trusted, Some(7));
         assert!(verdict.quarantine.is_empty());
+        // a member whose copy stalled on an unreadable partition is a target without a
+        // judgement, repaired from the two that agree (item 160)
+        let mut stalled = partial.clone();
+        stalled.stalled.push(members[2]);
+        let stalled_verdict = judge(&members, &stalled, None);
+        assert_eq!(stalled_verdict.trusted, Some(7));
+        assert_eq!(
+            stalled_verdict.quarantine,
+            vec![(members[2], QuarantineReason::Unreadable)]
+        );
+        assert!(matches!(stalled_verdict.outcome, RepairOutcome::Divergent { .. }));
+        assert_eq!(stalled_verdict.trusted_members, vec![members[0], members[1]]);
         assert_eq!(
             verdict.outcome,
             RepairOutcome::Clean {
@@ -1152,15 +1190,25 @@ where
         let wal_dir = replication.wal_dir.clone();
         match action {
             QuarantineAction::Set(quarantine) => {
-                // already quarantined is already quarantined; the first reason stands
-                if state.borrow().quarantined.is_some() {
-                    return Ok(());
+                // already quarantined is already quarantined, and the first reason stands -
+                // except that a copy which stalled on an unreadable partition says so over any
+                // other reason, since that is the one that has it repaired without an operator
+                // ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md))
+                let current = state.borrow().quarantined.map(|current| current.reason);
+                match current {
+                    None => {}
+                    Some(QuarantineReason::Unreadable) => return Ok(()),
+                    Some(_) if quarantine.reason != QuarantineReason::Unreadable => return Ok(()),
+                    Some(_) => {}
                 }
                 super::repair::write_quarantine(&wal_dir, group, &quarantine)
                     .await
                     .map_err(|error| format!("writing the quarantine marker: {error}"))?;
                 state.borrow_mut().quarantined = Some(quarantine);
-                replication.integrity.quarantined += 1;
+                // a reason replaced is the same copy quarantined, and is not counted twice
+                if current.is_none() {
+                    replication.integrity.quarantined += 1;
+                }
                 event!(Level::ERROR, msg = "quarantined this shard's copy of a group", group = %group, reason = quarantine.reason.as_str(), at = quarantine.at, op = %quarantine.op);
             }
             QuarantineAction::Rebuild => {
@@ -1289,6 +1337,82 @@ where
                 };
                 glommio::spawn_local(drive_group(context)).detach();
             }
+        }
+    }
+
+    /// Ask for the repair of every group this shard leads whose member stalled on a read
+    ///
+    /// A copy that could not read a partition for a replicated apply stops applying and is
+    /// committed quarantined as unreadable. It needs no judgement, since it said so itself, so
+    /// its leader asks for a `Repair` of the group as the process, once a group has no repair
+    /// or move open and at most every [`STALL_REPAIR_RETRY`]
+    /// ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md)).
+    pub(super) fn repair_stalled_copies(&mut self) {
+        let enabled = self
+            .conf
+            .cluster
+            .as_ref()
+            .is_some_and(|cluster| cluster.repair.unreadable);
+        if !enabled {
+            return;
+        }
+        let map = self.map.get();
+        let node = self.node_id();
+        let Some(control) = self.control.clone() else {
+            return;
+        };
+        let now = Instant::now();
+        let Some(replication) = self.replication.as_mut() else {
+            return;
+        };
+        let mut due = Vec::new();
+        for (group, slot) in &replication.groups {
+            // only a group's leader asks
+            let Some(raft) = slot.raft.as_ref() else {
+                continue;
+            };
+            if raft.metrics().borrow_watched().current_leader != Some(slot.spec.me(node)) {
+                continue;
+            }
+            // a member whose copy of this group is committed unreadable
+            let stalled = map.members.values().any(|member| {
+                member.quarantined.iter().any(|copy| {
+                    copy.group == *group && copy.reason == QuarantineReason::Unreadable
+                })
+            });
+            if !stalled {
+                continue;
+            }
+            // not while a repair or a move of the group is open, and not too often
+            let pending = map
+                .repairs
+                .iter()
+                .any(|record| record.groups.get(group).is_some_and(|progress| !progress.is_done()));
+            let moving = map.moves.iter().any(|record| !record.is_done() && record.groups.contains_key(group));
+            let waiting = replication
+                .next_stall_repair
+                .get(group)
+                .is_some_and(|next| now < *next);
+            if pending || moving || waiting {
+                continue;
+            }
+            due.push((*group, slot.spec.table, slot.spec.tablets.first().copied().unwrap_or(0)));
+        }
+        for (group, table, tablet) in due {
+            replication.next_stall_repair.insert(group, now + STALL_REPAIR_RETRY);
+            let (reply, _rx) = kanal::bounded(1);
+            let command = ControlCommand::Repair {
+                op: Uuid::new_v4(),
+                principal: "stalled-copy".to_string(),
+                expected_version: map.version,
+                table,
+                tablet: Some(tablet),
+                mode: RepairMode::Repair,
+                source: None,
+                release: false,
+            };
+            event!(Level::WARN, msg = "asking for the repair of a member that stalled on an unreadable partition", group = %group, table = %table);
+            let _ = control.try_send(ControlRequest::Propose { command, reply });
         }
     }
 

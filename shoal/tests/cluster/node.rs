@@ -231,6 +231,10 @@ pub struct StagedCluster {
     /// ([F44](../../../docs/src/features/repair.md))
     #[serde(default)]
     pub scrub_interval_ms: Option<u64>,
+    /// Whether a leader repairs a copy that stalled on an unreadable partition, if changed
+    /// ([Resolved #160](../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md))
+    #[serde(default)]
+    pub repair_unreadable: Option<bool>,
     /// How long one scrub may take, in milliseconds, if the test shortened it
     #[serde(default)]
     pub repair_timeout_ms: Option<u64>,

@@ -150,6 +150,8 @@ pub struct ClusterBuilder {
     retained_bytes: Option<u64>,
     /// How often every group a node leads is scrubbed on its own, if set
     scrub_interval_ms: Option<u64>,
+    /// Whether a leader repairs a copy that stalled on an unreadable partition, if changed
+    repair_unreadable: Option<bool>,
     /// How long one scrub may take, if shortened
     repair_timeout_ms: Option<u64>,
     /// How long one snapshot transfer may take, if shortened
@@ -456,6 +458,16 @@ impl ClusterBuilder {
     /// * `interval` - The interval
     pub fn scrub_interval(mut self, interval: Duration) -> Self {
         self.scrub_interval_ms = Some(interval.as_millis() as u64);
+        self
+    }
+
+    /// Say whether a group's leader repairs a copy that stalled on an unreadable partition
+    ///
+    /// # Arguments
+    ///
+    /// * `unreadable` - Whether it does, which is the default
+    pub fn repair_unreadable(mut self, unreadable: bool) -> Self {
+        self.repair_unreadable = Some(unreadable);
         self
     }
 
@@ -1010,6 +1022,7 @@ impl Cluster {
             segment_bytes: None,
             retained_bytes: None,
             scrub_interval_ms: None,
+            repair_unreadable: None,
             repair_timeout_ms: None,
             retire_after_ms: None,
             catchup_lag: None,
@@ -2017,6 +2030,7 @@ fn build_membership_cluster(
             read_consistency: builder.read_consistency.clone(),
             query_deadline_ms: builder.query_deadline_ms,
             scrub_interval_ms: builder.scrub_interval_ms,
+            repair_unreadable: builder.repair_unreadable,
             repair_timeout_ms: builder.repair_timeout_ms,
             snapshot_timeout_ms: builder.snapshot_timeout_ms,
             retire_after_ms: builder.retire_after_ms,

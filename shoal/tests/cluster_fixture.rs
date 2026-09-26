@@ -1407,6 +1407,9 @@ async fn cluster_server_child() {
             if let Some(ms) = staged.scrub_interval_ms {
                 block.repair.scrub_interval = Some(Duration::from_millis(ms).into());
             }
+            if let Some(unreadable) = staged.repair_unreadable {
+                block.repair.unreadable = unreadable;
+            }
             // the move's lag, deadline and grace ([F45](../../docs/src/features/replica-migration.md))
             if let Some(ms) = staged.retire_after_ms {
                 block.migration.retire_after = Duration::from_millis(ms).into();
@@ -18416,5 +18419,334 @@ async fn a_node_whose_wal_cannot_be_written_stops() -> Result<(), FixtureError> 
     eprintln!("node two stopped after {} writes: {:?}", key - 12601, cluster.node(2).failure());
     // and the other two still take writes
     write_note_eventually(&addr, key, "after", Duration::from_secs(30)).await?;
+    Ok(())
+}
+
+/// The zero length archive files under a node's storage, by path
+///
+/// # Arguments
+///
+/// * `root` - The node's storage directory
+fn empty_archives(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    // every file under a table's `archives/` directory that holds no byte
+    walkdir_files(root)
+        .into_iter()
+        .filter(|path| {
+            path.parent()
+                .and_then(|parent| parent.file_name())
+                .is_some_and(|name| name == "archives")
+        })
+        .filter(|path| std::fs::metadata(path).is_ok_and(|meta| meta.len() == 0))
+        .collect()
+}
+
+/// Every file under a directory, recursively
+///
+/// # Arguments
+///
+/// * `root` - The directory to walk
+fn walkdir_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    // a stack of directories still to read
+    let mut dirs = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(dir) = dirs.pop() {
+        // a directory removed while it is walked is skipped
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            // descend into directories and keep everything else
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+/// A start that ends without a shutdown leaves no empty archive behind (item 161)
+///
+/// Every open of a table's storage minted an active archive and the compactor created its file
+/// at once; only a clean shutdown removed it while empty. A node killed before it compacted
+/// anything, or whose start failed, left a zero length file its map never named, one per
+/// start: hyperion's 31 failed starts left 30. The active archive is now created by the first
+/// record written to it, so a node that wrote nothing leaves nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_that_ends_without_a_shutdown_leaves_no_empty_archive() -> Result<(), FixtureError>
+{
+    let mut cluster = Cluster::builder()
+        .standalone(CoreClaim::Count(1))
+        .start()
+        .await?;
+    // killed and started again three times without a write between
+    for _ in 0..3 {
+        cluster.restart(0, NodeKind::Standalone)?;
+    }
+    // and killed once more before it is looked at
+    cluster.kill(0)?;
+    let empty = empty_archives(&cluster.dir(0));
+    assert!(
+        empty.is_empty(),
+        "four starts ended without a shutdown and left {} empty archives: {empty:?}",
+        empty.len()
+    );
+    Ok(())
+}
+
+/// Write every key in a range to the fixture's notes, and wait for every copy to checkpoint it
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `client` - A client of node zero
+/// * `keys` - The keys
+async fn seed_checkpointed_notes(
+    cluster: &mut Cluster,
+    client: &Shoal<TestDbClient>,
+    keys: std::ops::Range<u64>,
+) -> Result<(), FixtureError> {
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    // every key once
+    for key in keys {
+        client
+            .send_one(Note {
+                key,
+                text: format!("note-{key}"),
+            })
+            .await
+            .map_err(ok)?;
+    }
+    // every copy holds them, in its archives
+    wait_digests_equal(cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for node in 0..3 {
+        wait_checkpointed(cluster, node, "Note", Duration::from_secs(60))?;
+    }
+    Ok(())
+}
+
+/// A follower whose replicated apply cannot read a partition stalls that one copy (item 160)
+///
+/// A follower's archived record of a partition is corrupted and its resident copy evicted, so
+/// the update written next has to read it to apply. Before item 160 the failed read failed the
+/// shard, and a failed shard stops the node: every other copy the node held went with it, and
+/// the next start stopped again on the same entry. Now the copy is quarantined as unreadable
+/// and stops applying where it stands, the node and every other group on it keep serving, and
+/// the group's leader repairs it from a snapshot without an operator; afterwards the follower
+/// serves the update and the digests agree.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreadable_partition_stalls_one_copy_and_repairs_it() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(64)
+        .write_timeout(Duration::from_secs(3))
+        .repair_timeout(Duration::from_secs(30))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let hashed = |key: u64| {
+        <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
+    };
+    seed_checkpointed_notes(&mut cluster, &client, 31_000..31_060).await?;
+    // a group, its leader, a follower, and a key of the group in another group's company
+    let (group, leader) = group_of(&mut cluster, 0, "Note", 31_030)?;
+    let leader = leader.expect("the group has a leader");
+    let follower = (0..3).find(|node| *node != leader).expect("a follower");
+    let live: Vec<u64> = keys_in_group(&mut cluster, "Note", &group, 31_000, 8)?
+        .into_iter()
+        .filter(|key| *key < 31_060)
+        .collect();
+    let corrupted = live[0];
+    let elsewhere = (31_000..31_060u64)
+        .find(|key| group_of(&mut cluster, 0, "Note", *key).is_ok_and(|(other, _)| other != group))
+        .expect("a key in another group");
+    // the follower's record corrupted, and its resident copy evicted with it
+    let answer = cluster
+        .node_mut(follower)
+        .command(&format!("CORRUPT Note {:016x}", hashed(corrupted)))?;
+    assert_eq!(answer["ok"]["fault"], "corrupt", "{answer}");
+    // an update of it through the leader: the follower's apply has to read the corrupt record
+    let addr_l = cluster.node(leader).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr_l).await.map_err(ok)?;
+    let update = cluster::schema::NoteUpdate {
+        partition_key: corrupted,
+        text: Some("updated".to_string()),
+    };
+    client.send_one(update).await.map_err(ok)?;
+    // the follower quarantines the one copy and keeps running
+    let quarantined = wait_member_quarantined(&mut cluster, follower, true, Duration::from_secs(20));
+    assert_eq!(cluster.node(follower).failure(), None, "the follower stopped");
+    quarantined?;
+    // its other groups still serve through it, the stalled one by another member
+    let addr_f = cluster.node(follower).endpoints.client.to_string();
+    wait_note_routed(
+        &addr_f,
+        elsewhere,
+        &format!("note-{elsewhere}"),
+        Duration::from_secs(20),
+    )
+    .await?;
+    // and writes of the stalled group coordinated through it are answered
+    let through = Shoal::<TestDbClient>::new(&addr_f).await.map_err(ok)?;
+    through
+        .send_one(Note {
+            key: live[1],
+            text: "while-stalled".to_string(),
+        })
+        .await
+        .map_err(ok)?;
+    // the leader repairs it with nobody asking: the quarantine is lifted
+    wait_member_quarantined(&mut cluster, follower, false, Duration::from_secs(120))?;
+    let view = groups_of(&mut cluster, follower)?;
+    assert_eq!(view["quarantined"], 0, "{view}");
+    assert_eq!(view["snapshots"]["installed"], 1, "{}", view["snapshots"]);
+    // the repaired copy serves what was written while it was stalled
+    wait_note_routed(&addr_f, corrupted, "updated", Duration::from_secs(20)).await?;
+    wait_note_routed(&addr_f, live[1], "while-stalled", Duration::from_secs(20)).await?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// The copy of a group read at every node restart
+///
+/// # Arguments
+///
+/// * `view` - A node's groups view
+/// * `group` - The group, in hex
+fn group_entry(view: &serde_json::Value, group: &str) -> serde_json::Value {
+    // the group's id as the view spells it
+    let id = u64::from_str_radix(group, 16).expect("a group id");
+    view["shards"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
+        .find(|entry| entry["group"].as_u64() == Some(id))
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// A copy stalled on an unreadable partition stays stalled across a restart, and an operator
+/// repairs it (item 160)
+///
+/// The same stall as the test before it, with the leader's repair of it turned off. The node
+/// is killed and started again on the same unreadable record: before item 160 every start
+/// stopped the node again, which is how hyperion failed 31 starts on the lab. Now it starts,
+/// the copy stalls again where it stood and stays quarantined, and every other copy on the node
+/// serves. An operator's `Repair` of the tablet then installs a snapshot from the leader on a
+/// copy with no handle, and the copy serves the update.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_copy_survives_a_restart_and_an_operator_repairs_it() -> Result<(), FixtureError>
+{
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(64)
+        .write_timeout(Duration::from_secs(3))
+        .repair_timeout(Duration::from_secs(30))
+        .query_deadline(Duration::from_secs(3))
+        .repair_unreadable(false)
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let hashed = |key: u64| {
+        <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
+    };
+    seed_checkpointed_notes(&mut cluster, &client, 32_000..32_060).await?;
+    let (group, leader) = group_of(&mut cluster, 0, "Note", 32_030)?;
+    let leader = leader.expect("the group has a leader");
+    let follower = (0..3).find(|node| *node != leader).expect("a follower");
+    let corrupted = keys_in_group(&mut cluster, "Note", &group, 32_000, 8)?
+        .into_iter()
+        .find(|key| *key < 32_060)
+        .expect("a live key of the group");
+    let elsewhere = (32_000..32_060u64)
+        .find(|key| group_of(&mut cluster, 0, "Note", *key).is_ok_and(|(other, _)| other != group))
+        .expect("a key in another group");
+    let answer = cluster
+        .node_mut(follower)
+        .command(&format!("CORRUPT Note {:016x}", hashed(corrupted)))?;
+    assert_eq!(answer["ok"]["fault"], "corrupt", "{answer}");
+    let addr_l = cluster.node(leader).endpoints.client.to_string();
+    let through_leader = Shoal::<TestDbClient>::new(&addr_l).await.map_err(ok)?;
+    through_leader
+        .send_one(cluster::schema::NoteUpdate {
+            partition_key: corrupted,
+            text: Some("updated".to_string()),
+        })
+        .await
+        .map_err(ok)?;
+    let quarantined = wait_member_quarantined(&mut cluster, follower, true, Duration::from_secs(20));
+    assert_eq!(cluster.node(follower).failure(), None, "the follower stopped");
+    quarantined?;
+    // killed and started again on the same unreadable record: it starts, and stalls again
+    cluster.restart(follower, NodeKind::Server)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let entry = loop {
+        assert_eq!(cluster.node(follower).failure(), None, "the restarted follower stopped");
+        let entry = group_entry(&groups_of(&mut cluster, follower)?, &group);
+        if entry["stalled"] == true {
+            break entry;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("the restarted copy never stalled again: {entry}");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert_eq!(entry["quarantined"], "Unreadable", "{entry}");
+    // the node's other groups serve through it
+    let addr_f = cluster.node(follower).endpoints.client.to_string();
+    wait_note_routed(
+        &addr_f,
+        elsewhere,
+        &format!("note-{elsewhere}"),
+        Duration::from_secs(30),
+    )
+    .await?;
+    // and nothing repaired it, since the leader was told not to
+    std::thread::sleep(Duration::from_secs(3));
+    wait_member_quarantined(&mut cluster, follower, true, Duration::from_secs(5))?;
+    // an operator's repair of the tablet does
+    let repair = shoal::server::AdminKind::Repair {
+        table: "Note".to_string(),
+        tablet: Some(tablet_of(corrupted) as u16),
+        mode: "repair".to_string(),
+        source: None,
+        release: false,
+    };
+    let op = repair_as_process(&mut cluster, leader, &repair)?;
+    let record = wait_repair_done_via(&mut cluster, leader, op, Duration::from_secs(120))?;
+    let group_id = u64::from_str_radix(&group, 16).expect("a group id");
+    let repaired = &record["groups"][group_id.to_string()]["outcome"]["Repaired"];
+    assert!(repaired.is_object(), "the copy was not repaired: {record}");
+    assert_eq!(
+        repaired["targets"][0]["node"],
+        cluster.node_ids()[follower],
+        "{record}"
+    );
+    wait_member_quarantined(&mut cluster, follower, false, Duration::from_secs(20))?;
+    let entry = group_entry(&groups_of(&mut cluster, follower)?, &group);
+    assert_eq!(entry["stalled"], false, "{entry}");
+    assert_eq!(entry["up"], true, "{entry}");
+    wait_note_routed(&addr_f, corrupted, "updated", Duration::from_secs(20)).await?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
     Ok(())
 }

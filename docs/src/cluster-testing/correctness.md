@@ -496,7 +496,8 @@ stops. Filed, reproduced with a crash point that dies inside the window, and fix
 [#159](../appendix/resolved/map-ahead-of-archive.md): a job's map intents are staged and written
 only after its archive is synced, and a torn entry in the intent log is skipped at load. That
 hyperion stopped altogether over one partition is filed as
-[160](../appendix/known-issues.md#160-a-copy-that-cannot-read-one-partition-stops-its-node).
+160, since [resolved](../appendix/resolved/unreadable-partition-stalls-one-copy.md) and proved
+on the lab in [section 7](#7-a-copy-that-cannot-read-a-partition).
 
 hyperion's torn entry had been folded into its map's snapshot by the crash-loop starts, which
 the fix does not repair, so the lab was bootstrapped again on the fixed build and reloaded.

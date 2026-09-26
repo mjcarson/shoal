@@ -161,6 +161,9 @@ pub enum DigestAnswer {
     Report(DigestReport),
     /// The member never applied a scrub under this operation, or forgot it
     Unknown,
+    /// The member's copy stopped applying on a partition it could not read, and never will
+    /// apply the scrub ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md))
+    Stalled,
 }
 
 /// The archived records a canonical cut still has to read, with the handles to read them by

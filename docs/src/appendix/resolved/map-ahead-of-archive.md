@@ -47,8 +47,8 @@ A torn entry then does more damage than the one partition:
   the log.
 - **An apply that needs the partition stops the node.** A write replayed over it at the next
   start parks on the read, the read fails, and a replica that cannot read its archive fails its
-  shard rather than diverge (`resume_parked`). Filed on its own as
-  [known issue 160](../known-issues.md#160-a-copy-that-cannot-read-one-partition-stops-its-node).
+  shard rather than diverge (`resume_parked`). Filed on its own as item 160, since
+  [resolved](unreadable-partition-stalls-one-copy.md): the one copy now stalls and is repaired.
 
 ## Evidence
 
@@ -130,10 +130,12 @@ into a later compaction, so this half of the change has none of its own.
   had been folded into the snapshot by the crash-loop starts before the fix, and the node was
   rebuilt by re-bootstrapping the lab. Rebuilding one node's copy from its peers is filed in
   [todos](../todos.md#rebuild-a-node-from-its-peers).
-- **One unreadable partition still stops the node**, [known issue 160](../known-issues.md#160-a-copy-that-cannot-read-one-partition-stops-its-node).
-- **Every start creates an active archive.** `ArchiveMap::new` gives each open a new id, and a
-  start that fails before it writes leaves an empty file. hyperion's crash loop left 30 of them.
-  Filed in [known issues](../known-issues.md#161-a-start-that-fails-leaves-an-empty-archive-behind).
+- ~~**One unreadable partition still stops the node**, known issue 160.~~ Resolved: only that
+  copy stops, and its group's leader repairs it ([Resolved #160](unreadable-partition-stalls-one-copy.md)).
+- ~~**Every start creates an active archive.** `ArchiveMap::new` gives each open a new id, and a
+  start that fails before it writes leaves an empty file. hyperion's crash loop left 30 of them.~~
+  Resolved: the file is created by the first record written to it
+  ([Resolved #161](failed-start-empty-archive.md)).
 
 ## Tests
 
