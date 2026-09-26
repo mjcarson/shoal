@@ -19109,3 +19109,88 @@ async fn a_segment_merge_onto_a_corrupt_record_has_its_copy_repaired() -> Result
     }
     Ok(())
 }
+
+/// A leader whose apply stalls hands its lead on before its core stops (item 167)
+///
+/// On the lab a stalled copy that led its group let its core stop at once, before the lead
+/// it had asked to hand on could move, and every write of the group, through every node,
+/// reached the dead core and was refused `Unavailable` for 16 s, until an election moved the
+/// lead. The leader's own record is corrupted here and an update of it is sent through a
+/// follower; writes of the group after it are answered by the new leader, and none is refused
+/// by a dead core.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_leader_hands_its_lead_on_first() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(64)
+        .write_timeout(Duration::from_secs(3))
+        .repair_timeout(Duration::from_secs(30))
+        .query_deadline(Duration::from_secs(3))
+        .repair_unreadable(false)
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let hashed = |key: u64| {
+        <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key)
+    };
+    seed_checkpointed_notes(&mut cluster, &client, 36_000..36_060).await?;
+    let (group, leader) = group_of(&mut cluster, 0, "Note", 36_030)?;
+    let leader = leader.expect("the group has a leader");
+    let follower = (0..3).find(|node| *node != leader).expect("a follower");
+    let keys: Vec<u64> = keys_in_group(&mut cluster, "Note", &group, 36_000, 8)?
+        .into_iter()
+        .filter(|key| *key < 36_060)
+        .collect();
+    let (corrupted, others) = (keys[0], &keys[1..]);
+    // the leader's own record, so its apply is the one that stalls
+    let answer = cluster
+        .node_mut(leader)
+        .command(&format!("CORRUPT Note {:016x}", hashed(corrupted)))?;
+    assert_eq!(answer["ok"]["fault"], "corrupt", "{answer}");
+    let addr_f = cluster.node(follower).endpoints.client.to_string();
+    let through = Shoal::<TestDbClient>::new(&addr_f).await.map_err(ok)?;
+    let _ = through
+        .send_one(cluster::schema::NoteUpdate {
+            partition_key: corrupted,
+            text: Some("stalls-the-leader".to_string()),
+        })
+        .await;
+    // every write of the group after it: none refused by a dead core, and all answered
+    let started = std::time::Instant::now();
+    let mut refusals = Vec::new();
+    for key in others.iter().cycle().take(40) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            match through
+                .send_one(Note {
+                    key: *key,
+                    text: "after".to_string(),
+                })
+                .await
+            {
+                Ok(_) => break,
+                Err(error) => refusals.push(format!("{error:?}")),
+            }
+            assert!(std::time::Instant::now() < deadline, "a write never landed: {refusals:?}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    let dead_core: Vec<&String> = refusals
+        .iter()
+        .filter(|refusal| refusal.contains("dropped an apply batch"))
+        .collect();
+    assert!(
+        dead_core.is_empty(),
+        "{} writes reached the stalled leader's dead core in {:?}: {:?}",
+        dead_core.len(),
+        started.elapsed(),
+        dead_core.first()
+    );
+    assert_eq!(cluster.node(leader).failure(), None, "the stalled leader stopped");
+    Ok(())
+}

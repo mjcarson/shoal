@@ -94,6 +94,13 @@ const BALANCE_RETRY: Duration = Duration::from_secs(60);
 /// How many deadline ticks pass between two sweeps of the WAL segments
 const REPORT_EVERY_TICKS: u32 = 10;
 
+/// How long a stalling copy that leads waits for its lead to move before its core stops
+///
+/// The group's writes commit and wait on a machine that applies nothing meanwhile, so it is
+/// short; an election after the core stops is the fallback
+/// ([Resolved #167](../../../../docs/src/appendix/resolved/stalled-leader-handoff.md)).
+const STALL_HANDOFF_WAIT: Duration = Duration::from_secs(3);
+
 /// How long the sweep waits for a group's core to answer whether it runs
 ///
 /// A running core answers in microseconds and a dead one at once; the bound is for a core
@@ -1502,19 +1509,8 @@ where
             return;
         };
         slot.state.borrow_mut().stalled = Some(Stall { index, partition });
-        // a leader hands its lead on before its core stops; best effort, since an election
-        // follows the stop anyway
         let raft = slot.raft.clone();
         let me = slot.spec.me(node);
-        if let Some(raft) = raft {
-            let leads = raft.metrics().borrow_watched().current_leader == Some(me);
-            let successor = raft.voter_ids().find(|voter| *voter != me);
-            if let (true, Some(successor)) = (leads, successor) {
-                if let Err(error) = raft.trigger().transfer_leader(successor).await {
-                    event!(Level::WARN, msg = "a stalling copy could not hand its lead on", group = %group, to = %successor, %error);
-                }
-            }
-        }
         event!(Level::ERROR, msg = "a replicated apply could not read its partition; this copy stops applying until it is repaired", group = %group, table = %table, partition = format!("{partition:016x}"), index);
         // quarantined as unreadable, persisted and reported, which the leader repairs
         let quarantine = Quarantine {
@@ -1524,8 +1520,50 @@ where
         };
         self.handle_quarantine(group, QuarantineAction::Set(quarantine), None)
             .await;
-        // the batch let go ends the apply, and with it this copy's core or its start
-        drop(batch);
+        // the batch let go ends the apply, and with it this copy's core or its start. A copy
+        // that leads hands its lead on first and lets go once another member has it, or after
+        // a bound: letting go at once ended the core before the transfer took, and on the lab
+        // every write of the group, through any node, reached the dead core for 16 s until an
+        // election moved the lead ([Resolved #167](../../../../docs/src/appendix/resolved/stalled-leader-handoff.md))
+        let Some(raft) = raft else {
+            drop(batch);
+            return;
+        };
+        let (leads, successor) = {
+            let metrics = raft.metrics().borrow_watched().clone();
+            let leads = metrics.current_leader == Some(me);
+            // the voter furthest along, so the election it is asked to win it can win at once
+            let successor = metrics
+                .replication
+                .as_ref()
+                .and_then(|matched| {
+                    matched
+                        .iter()
+                        .filter(|(voter, _)| **voter != me)
+                        .max_by_key(|(_, log_id)| log_id.as_ref().map_or(0, |log_id| log_id.index))
+                        .map(|(voter, _)| *voter)
+                })
+                .or_else(|| raft.voter_ids().find(|voter| *voter != me));
+            (leads, successor)
+        };
+        let (true, Some(successor)) = (leads, successor) else {
+            drop(batch);
+            return;
+        };
+        glommio::spawn_local(async move {
+            if let Err(error) = raft.trigger().transfer_leader(successor).await {
+                event!(Level::WARN, msg = "a stalling copy could not hand its lead on", group = %group, to = %successor, %error);
+            }
+            let moved = raft
+                .wait(Some(STALL_HANDOFF_WAIT))
+                .metrics(|metrics| metrics.current_leader != Some(me), "the lead moved on")
+                .await;
+            if moved.is_err() {
+                event!(Level::WARN, msg = "a stalling copy's lead did not move within the bound; its core stops anyway", group = %group, bound_ms = STALL_HANDOFF_WAIT.as_millis() as u64);
+            }
+            drop(batch);
+        })
+        .detach();
     }
 
     /// Propose a write through the group serving its tablet
