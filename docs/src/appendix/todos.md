@@ -2340,9 +2340,10 @@ otherwise. The `Replace` path has no such condition.
 Filed by [F56](../features/cluster-rebuild.md). A move's step is a whole replica set, cut to a
 snapshot file on the source, streamed, written as a partial on the destination and installed into
 its archives, one stage after another, one set onto a node at a time. At the lab's size the fixed
-costs of a step dominate (about 35 s a step). At a terabyte a node a step is about 55 GB. Extrapolated
-from the lab's stage rates, that is about ten hours a terabyte, and two defaults would likely keep a
-step from finishing under writes: `snapshot_timeout` (5 minutes a transfer) and the log retention
+costs of a step dominate (about 35 s a step) and at a few hundred MB a set the per-record work does:
+3.4 MiB/s under the bench whether one step ran at a time or six. At a terabyte a node a step is about
+55 GB. Extrapolated from the lab's rates, that is ten hours a terabyte idle and days under that load,
+and two defaults would likely keep a step from finishing under writes: `snapshot_timeout` (5 minutes a transfer) and the log retention
 (`retained_entries` 100,000 and `retained_bytes` 1 GiB a group, seconds of a busy group), past which
 the leader purges below the snapshot being installed. What it needs: retention that outlasts a
 step, or a catch-up that tolerates a purge by re-cutting only what moved; a cut streamed from the

@@ -1343,6 +1343,24 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
     ) -> Result<SnapshotResponse<DataConfig>, StreamingError<DataConfig>> {
         let group = self.group;
         let network = self.peer.network.clone();
+        // a member the link has heard nothing from is not cut a snapshot it cannot take: on the
+        // lab a rebuilt node's old identity, down until its removal reached each group, was cut
+        // two or three files of 270 MB a group, which the moves refilling its replacement then
+        // queued behind ([O73](../../../../docs/src/appendix/optimizations.md#o73-a-snapshot-is-cut-for-a-member-that-cannot-be-reached))
+        let target = self.peer.target.node;
+        let silence = network.hop_silence();
+        let silent = network.link(target).map_or_else(
+            || network.silent_for(target, silence),
+            |link| {
+                link.silent_for(silence)
+                    .or_else(|| network.silent_for(target, silence))
+            },
+        );
+        if let Some(silent) = silent {
+            return Err(unreachable(format!(
+                "{target} has answered nothing on the replication lane for {silent:?}; no snapshot is cut for it"
+            )));
+        }
         // the file: the loop's cut for this group's own snapshot, or a received one as it is
         let held;
         let (path, manifest): (PathBuf, SnapshotManifest) = match snapshot.snapshot {

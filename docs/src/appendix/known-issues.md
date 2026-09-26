@@ -448,6 +448,21 @@ the margins are what a loaded host erodes.
 The `shoal-core` change for [#148](resolved/stale-intent-log-tail.md) was followed by one failure
 in the first four runs of `shoal/tests/persistent_unsorted_table.rs` at six threads, whose name the
 run did not keep, and none in the next nine.
+The seven full runs of the suite for items 160 to 168 at six threads gave these, each run with
+nothing else on the host:
+- `local_rehome_recovers_after_each_crash_point` and `migration_resumes_after_each_phase_failure`
+  failed once each (the rehome test on *"No such file or directory"* from a child). Both passed
+  alone. The rehome test then failed one of five runs alone, on *"node two never died at
+  before_finalize"*, the first failure of it alone on record.
+- `a_restore_rides_out_an_unreachable_member` failed once, with one group handed back at
+  `Pending` for want of the isolated member and not driven again within 300 s. It passed alone,
+  and in the next two full runs.
+- `lost_response_retry_returns_original_result` failed once, on its usual checkpoint.
+
+Two failures in those runs were not this item and were fixed: `mixed_versions_exchange_real_cluster_operations`
+raced its activation against a member report (on [Resolved #155](resolved/restore-retry.md)), and
+`an_unreadable_partition_stalls_one_copy_and_repairs_it` did not retry a write the stalled copy
+refused retriably.
 
 ### 152. `a_compaction_that_meets_an_unreadable_archive_is_tried_again` fails intermittently
 
@@ -479,6 +494,25 @@ now stops instead of holding dead cores, so writes through it are never answered
 a restart once space returns brings it back (on the lab with no restart by hand). The one fix still
 wanted is to shed appends below a reserve with a retriable refusal, so that a nearly full node
 keeps serving reads rather than stopping.
+
+### 169. A member the placement does not name refuses every client query
+
+A node answers every query with `NotInitialized` (*"this node holds no tablets: the placement has
+not been initialized, or does not name it"*) while the placement does not name it (`Shard::placed`,
+`shard.rs`). That is right before the cluster is initialized. But a member admitted afterwards is
+not named until a plan puts it in a set, although it has the map and could forward every query to
+the tablets' holders, as any node does for a tablet it holds no copy of. A client connected to a
+member added with `cluster add` and no rebalance is refused everything. And a client connected to a
+rebuilt node is refused from its start until its replacement plan names it.
+
+On the lab the second case cost 63,012 refusals in two seconds of a `cluster rebuild` under the
+bench (`rebuild-cap6`): pipelined clients reconnect to the new process as soon as it listens. The
+bench counts them as failures, since `NotInitialized` says the cluster is not set up, which is not
+something a client retries. What it needs: an unplaced member of an initialized cluster coordinates
+with the placement's ring, every share of which is remote, and refuses only when the map has no
+placement at all. Or, smaller: a refusal a client retries elsewhere. Found by the
+[distributed cluster testing](../cluster-testing/correctness.md#rebuilding-a-node-under-load)
+chapter. Established from the bench's samples and the source; not reproduced in the fixture.
 
 ---
 

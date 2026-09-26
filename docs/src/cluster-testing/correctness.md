@@ -400,7 +400,8 @@ could finish the restore short of doing it again on a new cluster (item 155, sin
 keyword partitions, exactly the backup's records, and a `verify` found 0 missing and 0 different.
 
 **Verdict:** backup **pass**; restore **pass** with #153, and a restore that fails part way is
-still unrecoverable (155).
+~~still unrecoverable (155)~~ finished by `restore-retry` since #155's second half
+([section 7](#a-restore-finished-by-a-retry)).
 
 ### Fill a node's disk
 
@@ -530,7 +531,9 @@ hit. The fixture's `mid_compaction` crash point is what aims at it.
 ### Rebuilding a node from its peers
 
 hyperion's copy had to be abandoned for #159 by bootstrapping the whole lab again, because
-nothing rebuilds one node ([todos](../appendix/todos.md#rebuild-a-node-from-its-peers)). Tried on
+nothing rebuilt one node then ([todos](../appendix/todos.md#rebuild-a-node-from-its-peers); since
+[F56](../features/cluster-rebuild.md), `cluster rebuild`, proved in
+[section 7](#rebuilding-a-node-under-load)). Tried on
 the rebuilt lab with nothing running: hyperion stopped, its `Movie/`, `MovieByKeyword/` and
 `wal/` removed, and its identity (`shoal-meta.json`) and control log kept.
 
@@ -679,7 +682,12 @@ under the bench.**
 Why so slow, at 2.6 MB/s: no step's transfer ran slowly (82 MB streamed and installed in about
 1.5 s). The plan moves one set onto the node at a time, and each step carries about 35 s of fixed
 cost: the planner's 5 s tick, catch-up, two membership changes, and cuts that queue behind the
-source's compaction under the bench. At terabyte scale the step's own size would dominate instead,
+source's compaction under the bench. Two more rebuilds, once the benches had grown the data to
+about 240 MB a set, moved 3.4 MiB/s both with `moves_per_node` at 1 and at 6. At that size the
+per-record work is the limit: a 279 MB set's cut took 41 s under the bench, and its catch-up
+36 s, on hosts already busy. Six steps at once only stretched each one. The one waste in those
+runs, snapshots cut for the old identity while it was still a member, is now skipped:
+[O73](../appendix/optimizations.md#o73-a-snapshot-is-cut-for-a-member-that-cannot-be-reached). At terabyte scale the step's own size would dominate instead,
 and two defaults would probably stop it converging under writes; see
 [F56's Limitations](../features/cluster-rebuild.md#limitations).
 

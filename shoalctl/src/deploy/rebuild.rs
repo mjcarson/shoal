@@ -47,11 +47,13 @@ pub fn rebuild_refusal(model: &ClusterModel, old: &str) -> Option<String> {
         ));
     }
     // every other member up and a plain member, since the rebuilt node's copies are gone until
-    // the plan refills them
+    // the plan refills them; one already removed, a previous rebuild's old identity among them,
+    // holds nothing and is listed only as history
     let others: Vec<String> = model
         .members
         .iter()
         .filter(|other| other.node != old)
+        .filter(|other| !other.phase.eq_ignore_ascii_case("removed"))
         .filter(|other| {
             !other.health.eq_ignore_ascii_case("up") || !other.phase.eq_ignore_ascii_case("member")
         })
@@ -281,6 +283,9 @@ mod tests {
         model.members[1].health = "down".to_string();
         assert!(rebuild_refusal(&model, "a").is_some_and(|why| why.contains("every other member")));
         model.members[1].health = "up".to_string();
+        // a member already removed, a previous rebuild's old identity, is history and no bar
+        model.members.push(row("z", "down", "Removed"));
+        assert_eq!(rebuild_refusal(&model, "a"), None);
         // the node leaving already
         model.members[0].phase = "Leaving".to_string();
         assert!(rebuild_refusal(&model, "a").is_some_and(|why| why.contains("plain member")));

@@ -70,10 +70,10 @@ shoalctl cluster rebuild -i <inventory> <node> --yes
 - **The old identity's tombstone is permanent**, like every removal's.
 - **It is not proven past the lab's size, and the defaults are not sized for terabytes.** Steps are
   replica sets, so their number is fixed by the placement (18 on the lab) and their size grows with
-  the data: about 55 GB each at a terabyte a node. Extrapolated, **not measured**, from the lab's per
-  stage rates (cut, stream, install, each 50 to 80 MB/s one after the other), a step moves at about
-  25 to 30 MB/s end to end: roughly ten hours a terabyte as steps run today, and three to five at best
-  under the node's 64 MiB/s stream budget and a 1 GbE link. Under writes, two defaults would likely
+  the data: about 55 GB each at a terabyte a node. Extrapolated, **not measured**: under load the lab moved
+  about 3.4 MiB/s, which would be more than three days a terabyte. Idle, the stages ran at 50 to 80
+  MB/s each, one after another, about 25 to 30 MB/s end to end, or about ten hours a terabyte. The
+  node's 64 MiB/s stream budget and a 1 GbE link bound it at three to five hours. Under writes, two defaults would likely
   stop it converging. `snapshot_timeout` is 5 minutes a transfer, where a transfer would take 15 to
   35. And `retained_entries` (100,000) and `retained_bytes` (1 GiB) a group are seconds of a busy
   group, so the leader would purge past the snapshot a new copy is installing, and send it another.
@@ -112,6 +112,22 @@ planner about 5 s to notice the move was done and issue the next step (`plan_int
 whose cut queued behind the source compactor's merges under the bench waited up to 15 s more. The
 plan moves one set onto a node at a time (`rebalance.moves_per_node`, 1), so these fixed costs add
 up, about 35 s a step, and bandwidth is never the limit at this size.
+
+**At a larger size the per-record work is the limit, and more steps at once do not help.** With
+the benches' inserts the cluster grew to about 240 MB a set, and hyperion was rebuilt twice more
+under the same bench, once with `moves_per_node` at 6 (one per shard) and once at 1:
+
+| `moves_per_node` | Moved | Plan | Rate | Per step |
+| --- | --- | --- | --- | --- |
+| 6 | 3.5 GiB | 17 min 26 s | 3.4 MiB/s | 1 min 48 s, six at a time |
+| 1 | 4.3 GiB | 21 min 56 s | 3.4 MiB/s | 1 min 9 s |
+
+One step at 1, a Movie set of 710,444 rows and 279 MB: the cut took 41 s (17 MB/s, where an idle
+cut of 320,561 rows took 4 s), the stream 9 s, and catch-up 36 s, while hyperion also applied the
+bench's writes for every set it already held. The source compactors and the four core destination
+were already busy, so six steps at once only stretched each step. About 10,000 records a second
+end to end is what these hosts moved under this load. The one waste found in these runs, cuts for
+the old identity while it was still a member, is [O73](../appendix/optimizations.md#o73-a-snapshot-is-cut-for-a-member-that-cannot-be-reached).
 
 ## Tests
 

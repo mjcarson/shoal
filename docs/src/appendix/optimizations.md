@@ -3316,3 +3316,23 @@ have been applied since the last. The machine refuses until its checkpoint has m
 O66's quiet targets, at `warn`. The fifth line is `openraft::engine::engine_impl`'s, which also
 logs elections, so it is left. The refusal itself costs a message to the worker and back and is
 left as it is. **Kept.**
+
+### O73. A snapshot is cut for a member that cannot be reached
+
+| | |
+| --- | --- |
+| **Rank** | ~~**B31**~~ **done** — applied, contained |
+| **Impact** | Measured on the lab — during a rebuild, the leaders cut two or three snapshots of 270 MB a group for the rebuilt node's old identity, down until its removal reached each group, and failed each send as unreachable (15 failures over 22 minutes). The moves refilling the replacement cut from the same compactors |
+| **Difficulty** | S |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | a member heard from again gets its snapshot on openraft's next retry, not at once |
+| **Benchmark** | the lab's rebuild under the bench: `cut a snapshot` lines for groups no move names |
+
+openraft sends a snapshot to a follower behind the leader's purge point, and our transmitter
+(`GroupPeer::full_snapshot`) cut the file before its first RPC, so a member that could not be
+reached cost a whole cut per try. It now refuses at once, before cutting, when the link has heard
+nothing from the member for the hop-silence bound ([#143](resolved/silent-partition-hops.md)'s
+two seconds). A member that returns is heard from again and is cut its snapshot on the next try.
+**Kept**; the rebuild's time was not measured again with it, so its effect on that number is not
+claimed.
