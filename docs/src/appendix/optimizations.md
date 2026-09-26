@@ -3341,7 +3341,7 @@ claimed.
 
 | | |
 | --- | --- |
-| **Rank** | **B32** — open |
+| **Rank** | **B32** — partly applied (archive passes coalesced), open |
 | **Impact** | Measured on the lab — titan's `Movie` compactor had 180 jobs queued when a snapshot cut reached the front after 9.4 minutes, under the mixed bench through all three members ([#174](resolved/snapshot-cut-queue.md)). Sealed segments wait for their merge, the groups' logs pass `retained_bytes`, and the retention budget forces purges ("forcing a group past a sealed segment") |
 | **Difficulty** | M |
 | **Depends on** | nothing |
@@ -3350,7 +3350,28 @@ claimed.
 | **Benchmark** | the lab's rebuild under the bench: `taking a snapshot cut` `backlog=` on titan, and the rate of forced purges |
 
 Since #174 a cut no longer waits for the backlog, but every other job still does, and a backlog is
-held WAL. What is not known is where a segment merge's time goes on a four-core node that is also
-applying and serving the bench: the merge itself, the archive map's intents
-([O62](#o62-every-compaction-rewrites-the-shards-whole-archive-map)), or the scheduling of a compactor task on a busy shard. That is
-the measurement to take before any change.
+held WAL. A cut still waits for the job running when it arrives. Rebuild 8 saw that cost 147 s,
+behind a backlog that was mostly archive passes, each redundant with the next.
+
+**Partly applied: coalesced archive passes.** An archive pass with another queued behind it is now
+skipped (`is_redundant`), since a pass compacts whatever qualifies when it runs. A job that holds
+the compactor for over 5 s is logged with its kind. Rebuild 9, on the cluster rebuild 8 left:
+
+| | Rebuild 8, passes not coalesced | Rebuild 9, coalesced |
+| --- | --- | --- |
+| Longest wait for a snapshot cut | 147.5 s | 39.5 s |
+| Cuts' median and p90 wait | 0 and – | 0 and 6.2 s |
+| Whole rebuild | 979 s | 748 s |
+
+| Job kind, rebuild 9, both leaders | Ran over 5 s | Mean of those | Longest |
+| --- | --- | --- | --- |
+| segment merge | 682 | 6.8 s | 20.9 s |
+| archive pass | 39 | 16.4 s | 182.4 s |
+| snapshot cut | 6 | 25.2 s | 37.4 s |
+
+So the compactor's time on these hosts goes into segment merges: hundreds a run take five to twenty
+seconds each. That is the open part. What is not known is where a segment merge's time goes on a
+four-core node that is also applying and serving the bench: the merge itself, the archive map's
+intents ([O62](#o62-every-compaction-rewrites-the-shards-whole-archive-map)), or the scheduling of a
+compactor task on a busy shard. And one archive pass can still hold a cut for three minutes, because
+a pass cannot stop part way: the index is repointed only when it ends.
