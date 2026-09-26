@@ -459,21 +459,36 @@ pub(super) fn now_ms() -> u64 {
 ///
 /// * `context` - The driver
 async fn add_learner<D: ShoalDatabase>(context: &MoveContext<D>) -> Result<(), String> {
-    match context
-        .raft
-        .add_learner(context.to, context.to, false)
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward))) => Err(format!(
-            "{NOT_LEADER}group {}: the leader is {:?}",
-            context.group,
-            forward.leader_node.or(forward.leader_id)
-        )),
-        Err(error) => Err(format!(
-            "adding {} as a learner of group {}: {error}",
-            context.to, context.group
-        )),
+    let started = Instant::now();
+    loop {
+        match context
+            .raft
+            .add_learner(context.to, context.to, false)
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward))) => {
+                return Err(format!(
+                    "{NOT_LEADER}group {}: the leader is {:?}",
+                    context.group,
+                    forward.leader_node.or(forward.leader_id)
+                ))
+            }
+            // a change still uncommitted is waited for, not failed: a leader just elected may
+            // still be committing the membership its predecessor proposed
+            // ([Resolved #178](../../../../docs/src/appendix/resolved/learner-in-progress.md))
+            Err(RaftError::APIError(ClientWriteError::ChangeMembershipError(
+                ChangeMembershipError::InProgress(_),
+            ))) if started.elapsed() < context.timeout => {
+                glommio::timer::sleep(POLL).await;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "adding {} as a learner of group {}: {error}",
+                    context.to, context.group
+                ))
+            }
+        }
     }
 }
 
