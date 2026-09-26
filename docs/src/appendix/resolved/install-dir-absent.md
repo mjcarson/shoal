@@ -57,7 +57,8 @@ that wrote nothing there has nothing to make durable.
 
 ## Still open
 
-- A restore whose group fails cannot be retried ([known issue 155](../known-issues.md#155-a-restore-whose-group-failed-cannot-be-finished)).
+- ~~A restore whose group fails cannot be retried (known issue 155).~~ Resolved: `RetryRestore`
+  drives a finished restore's failed groups again ([Resolved #155](restore-retry.md)).
 
 ## Tests
 

@@ -215,8 +215,15 @@ and `verified`. Verify by `DIGEST` against the source if you have it, then point
 new cluster: its session tokens are its own, and the old cluster's are refused `WrongCluster`.
 A node of the old cluster started against the new is refused as removed.
 
-**Rollback.** The backup is files; a restore that failed is a cluster to delete and bootstrap
-again. The cluster the backup was cut in is untouched throughout.
+**A group failed.** ~~A restore that failed is a cluster to delete and bootstrap again.~~ Read
+each failed group's `reason` and `failed_in`, deal with the cause (an unreadable file, a full
+disk, copies that are not empty), activate wire version 6 if it is not, and
+`RetryRestore { restore: <op> }` (`cluster admin "restore-retry <op>"`). Only the failed groups
+are driven again, from the phase each failed in, and the command follows the restore's record
+until every group is done ([#155](../appendix/resolved/restore-retry.md)).
+
+**Rollback.** The backup is files. A restore you want to abandon is a cluster to delete and
+bootstrap again. The cluster the backup was cut in is untouched throughout.
 
 ## 11. Existing single-node data
 

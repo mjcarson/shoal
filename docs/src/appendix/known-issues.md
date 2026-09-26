@@ -461,24 +461,6 @@ ten other runs or in three runs of the test alone. The test takes the permission
 archives, so it is the family item 113's `statfs` panic came from. That panic is fixed, so this
 is another timing. Filed with its rate so the next change to the retry path can say more.
 
-### 155. A restore whose group failed cannot be finished
-
-*Partly resolved:* a group whose driver could not reach a member is now driven again
-([Resolved #155](resolved/restore-retries-unreachable.md)). What remains is every other failure.
-`Restore` is refused on *"a cluster that already restored"*, and on a populated table. So a restore
-in which one group failed for another reason leaves a cluster with that group's tablets empty, and
-the only way to finish is to delete the cluster, bootstrap another, and restore everything again. On the lab that was 3 minutes of restore, and
-it would be hours for a large backup. A retry of the failed groups alone, under the same operation
-and against the same files, would finish it: every other group is verified and is not touched
-again. What such a retry needs, worked out on the way to building it: a failed
-group's record keeps only `Done` and the reason, so the phase it failed in has to be kept too
-(`Installing` and `Verifying` can be run again, and `Loading` checks the copies are empty
-anyway). And either a new control command or a change to what `Restore` or a group's progress
-does on a restored cluster. Both change what every control replica applies, so a node on an
-older build would apply the same entry differently. So it waits for a wire version 6 under
-[F48](../features/rolling-compatibility.md)'s rules, not a change that could be made alone. Found by the [distributed cluster testing](../cluster-testing/correctness.md#back-up-destroy-and-restore)
-chapter.
-
 ### 156. A full disk stops every group on a node until it is restarted
 
 *Partly resolved:* a node whose WAL cannot be written now stops, and a restart recovers it

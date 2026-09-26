@@ -880,6 +880,39 @@ impl Deployment {
         if let Err(error) = response.outcome {
             bail!("rebalance was refused: {} ({:?})", error.msg, error.code());
         }
+        self.follow_plan(shoal, op, "rebalance").await
+    }
+
+    /// Follow a plan's record the way the cluster tab does, printing it as it changes
+    ///
+    /// # Arguments
+    ///
+    /// * `shoal` - The admin client
+    /// * `op` - The plan
+    /// * `what` - What the plan is, for the message when it runs out of time
+    ///
+    /// # Errors
+    ///
+    /// When the record cannot be read or the plan does not finish in time.
+    pub async fn follow_plan<S>(
+        &self,
+        shoal: &Arc<Shoal<S>>,
+        op: Uuid,
+        what: &str,
+    ) -> color_eyre::Result<()>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         // follow the plan's record the way the cluster tab does
         let deadline = Instant::now() + PLAN_TIMEOUT;
         let mut last = Vec::new();
@@ -903,7 +936,7 @@ impl Deployment {
                 return Ok(());
             }
             if Instant::now() > deadline {
-                bail!("the rebalance {op} was not done after {PLAN_TIMEOUT:?}; `status` follows it");
+                bail!("the {what} {op} was not done after {PLAN_TIMEOUT:?}; `status` follows it");
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
@@ -976,7 +1009,7 @@ impl Deployment {
                     return Err(eyre!("{line} was refused: {} ({:?})", error.msg, error.code()))
                 }
             }
-            (op, follow)
+            (action.followed(op), follow)
         };
         // follow the record, printing it whenever it changes, until it is done
         let deadline = Instant::now() + timeout;
@@ -1335,7 +1368,7 @@ where
 /// # Arguments
 ///
 /// * `shoal` - The admin client
-async fn control_addresses<S>(shoal: &Arc<Shoal<S>>) -> color_eyre::Result<Vec<String>>
+pub(super) async fn control_addresses<S>(shoal: &Arc<Shoal<S>>) -> color_eyre::Result<Vec<String>>
 where
     S: QuerySupport + Send + Sync + 'static,
 {

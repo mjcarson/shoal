@@ -391,8 +391,9 @@ had died during the restore, over a clean-up that synced an install directory a 
 creates ([#153](../appendix/resolved/install-dir-absent.md)). Its restart reset a peer connection
 at the moment another group's restore was quarantining that member, and that group failed. The
 command did not say so ([#154](../appendix/resolved/admin-hides-failed-groups.md)), and nothing
-could finish the restore short of doing it again on a new cluster
-([known issue 155](../appendix/known-issues.md#155-a-restore-whose-group-failed-cannot-be-finished)).
+could finish the restore short of doing it again on a new cluster (item 155, since
+[resolved](../appendix/resolved/restore-retry.md) and proved on the lab in
+[section 7](#a-restore-finished-by-a-retry)).
 
 **With #153 and #154 fixed (t14b):** the same backup restored in 1 min 50 s, with every group
 `Restored` and verified and no node restarted. The table held 7,893,508 Movie partitions and 58,418
@@ -462,8 +463,7 @@ more than the one restart its fault gave it, and after the pause every member re
 remains is filed: the first two to three seconds of a silent partition or a pause
 ([#143](../appendix/resolved/silent-partition-hops.md#still-open)), a full disk
 ([156](../appendix/known-issues.md#156-a-full-disk-stops-every-group-on-a-node-until-it-is-restarted)),
-and a restore that fails part way
-([155](../appendix/known-issues.md#155-a-restore-whose-group-failed-cannot-be-finished)).
+and a restore that fails part way (155, since [resolved](../appendix/resolved/restore-retry.md)).
 
 ## 6. A second regression pass, and a crash mid compaction
 

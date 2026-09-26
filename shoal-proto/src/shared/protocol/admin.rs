@@ -202,6 +202,15 @@ pub enum AdminKind {
         /// The operation
         op: Uuid,
     },
+    /// Drive every group a finished restore failed again, from the phase each failed in
+    ///
+    /// Under the same operation and against the same files; a group that was restored is not
+    /// touched. Refused while the restore is still running, when nothing in it failed, and
+    /// below wire version 6 ([Resolved #155](../../../../docs/src/appendix/resolved/restore-retry.md)).
+    RetryRestore {
+        /// The restore operation to retry
+        restore: Uuid,
+    },
     /// Every recovery an operator ran on a survivor, oldest first
     Recoveries,
     /// Read this node's peer certificate, key and authority again and use them from now on
@@ -255,6 +264,7 @@ impl AdminKind {
                 | AdminKind::Activate { .. }
                 | AdminKind::Backup { .. }
                 | AdminKind::Restore { .. }
+                | AdminKind::RetryRestore { .. }
                 | AdminKind::ReloadTls
         )
     }
@@ -286,6 +296,7 @@ impl AdminKind {
             AdminKind::Backups => "backups",
             AdminKind::Restore { .. } => "restore",
             AdminKind::RestoreStatus { .. } => "restore_status",
+            AdminKind::RetryRestore { .. } => "retry_restore",
             AdminKind::Recoveries => "recoveries",
             AdminKind::ReloadTls => "reload_tls",
             AdminKind::Stats { .. } => "stats",
@@ -556,6 +567,9 @@ mod tests {
             },
             AdminKind::Restore {
                 path: "/backups/x".to_string(),
+            },
+            AdminKind::RetryRestore {
+                restore: Uuid::new_v4(),
             },
             AdminKind::Decommission { node },
             AdminKind::Remove {

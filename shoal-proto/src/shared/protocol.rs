@@ -94,7 +94,13 @@ use trace::{TraceContext, TRACE_CONTEXT_LEN};
 /// differs between 4 and 5. The client lane took no part in the change, which is why
 /// [`CLIENT_WIRE_VERSION`] stayed at 4: a client built at 4 is served by a build at 5, and one
 /// built at 5 is served by a build at 4, because neither writes a frame the other cannot read.
-pub const PROTOCOL_VERSION: u8 = 5;
+///
+/// Went to 6 when a finished restore's failed groups could be driven again
+/// ([Resolved #155](../../../docs/src/appendix/resolved/restore-retry.md)). No frame's framing
+/// or body encoding moved - a body at 6 is encoded as at 5 - but the control log gained a
+/// command and a group's restore record two fields, which a replica built before them would
+/// apply differently or refuse to decode, so the command is refused until 6 is activated.
+pub const PROTOCOL_VERSION: u8 = 6;
 
 /// The oldest wire version a peer of this build is spoken to
 ///

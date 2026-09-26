@@ -2600,6 +2600,16 @@ impl Core {
                     files,
                 }
             }
+            // a retry of a finished restore's failed groups: judged whole by the state machine
+            AdminKind::RetryRestore { restore } => ControlCommand::RetryRestore {
+                op: call.request.op,
+                principal: call
+                    .principal
+                    .clone()
+                    .unwrap_or_else(|| "process".to_string()),
+                expected_version: call.request.expected_version,
+                restore: *restore,
+            },
             AdminKind::RestoreStatus { op } => {
                 let outcome = match state.restores.get(op) {
                     Some(record) => Ok(AdminOutcome::Read(

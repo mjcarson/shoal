@@ -270,7 +270,11 @@ process.
   is no shipping, no encryption and no retention. Storing them outside the failure domain is
   the operator's step, as C9 says, and a backup's age is not tracked.
 - **A restore is once, into an empty new cluster.** No point-in-time restore, no merge, no
-  restore of one table into a populated cluster. The refusals name each case.
+  restore of one table into a populated cluster. The refusals name each case. ~~A group that
+  failed cannot be finished short of restoring again into another cluster.~~ Since
+  [#155](../appendix/resolved/restore-retry.md), `RetryRestore { restore }` drives a finished
+  restore's failed groups again from the phase each failed in, under the same operation and
+  files, at wire version 6. It is the operator's to ask for, never automatic.
 - **A recovery keeps one survivor's data and nothing else.** A set whose every member was
   lost is gone; a set the survivor held is exactly as the survivor last applied it, which is
   the data-loss boundary the record names (`last_committed`). With more nodes than the factor,
@@ -295,7 +299,12 @@ process.
   under any cluster's manifest.
 - **A restore is into an empty table, once, into a cluster that is not the source.** The
   `Loading` scrub is the emptiness proof; `restored_from` and the source check are the once.
-  Any change that lets a group hold rows before a restore has to say what wins.
+  Any change that lets a group hold rows before a restore has to say what wins. A retry does
+  not reopen the once: it repeats the recorded restore's own files for its failed groups, and
+  a group that failed loading is loaded again, emptiness check included.
+- **A retry touches only failed groups, and a progress counts only for its generation.** A
+  restored group's record is left as it was, and a first try's driver is fenced by
+  `GroupRestore::generation` ([#155](../appendix/resolved/restore-retry.md)).
 - **`restored_from` is refused at every door as removed.** Both admission judges
   (`control/listener.rs`, `map.rs`) return `Verdict::Removed` for it; a new door has to ask
   the same question.
