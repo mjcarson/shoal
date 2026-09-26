@@ -651,6 +651,12 @@ where
     },
     /// Every tablet group this shard hosts has shut down, from the task that stopped them
     GroupsDown,
+    /// A group the map stopped naming here has shut down, so its log can be forgotten
+    /// ([Resolved #175](../../../docs/src/appendix/resolved/stopped-group-log.md))
+    GroupStopped {
+        /// The group
+        group: crate::shared::identity::GroupId,
+    },
     /// The groups this shard led have been handed to other members, or the wait ran out, and
     /// they can be stopped ([Resolved #139](../../../docs/src/appendix/resolved/leadership-handoff-on-stop.md))
     HandedOff,
@@ -1041,6 +1047,7 @@ impl<D: ShoalDatabase> ServerMsg<D> {
                 return Err("A ready read is for the shard that waited on it")
             }
             ServerMsg::GroupsDown => return Err("A groups-down notice is for one shard"),
+            ServerMsg::GroupStopped { .. } => return Err("A stopped group is one shard's"),
             ServerMsg::HandedOff => return Err("A handed-off notice is for one shard"),
             ServerMsg::WalSealed { .. } => return Err("A sealed segment is the writing shard's"),
             ServerMsg::SegmentCompacted { .. } => {

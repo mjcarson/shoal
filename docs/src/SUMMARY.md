@@ -290,6 +290,7 @@
   - [172. A link refused on who its peer is redialled ten times a second](appendix/resolved/identity-refusal-redials.md)
   - [173. A pre-vote over a link that was down sent nothing, so an idle cluster never elected](appendix/resolved/idle-pre-vote-links.md)
   - [174. A move's snapshot cut waited behind every compaction queued before it](appendix/resolved/snapshot-cut-queue.md)
+  - [175. A group stopped on a node kept a log index into segments the node then reclaimed](appendix/resolved/stopped-group-log.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

@@ -11671,6 +11671,95 @@ fn hosts_group(cluster: &mut Cluster, node: usize, group: &str) -> Result<bool, 
         .any(|found| found["group"].as_u64() == Some(wanted)))
 }
 
+/// A move asked again after one failed rebuilds its learner from nothing, whatever the WAL
+/// reclaimed in between (item 175)
+///
+/// Three placed nodes and a spare. A set is moved onto the spare; once the spare's copy has
+/// taken entries, more are written, which reach its log ahead of its checkpoint, then its data
+/// links are cut and the move fails at its short timeout, so the record ends and the spare stops
+/// its learner copies. The spare then seals and reclaims its segments.
+/// Asked again, the move rebuilds the learner on the spare: before the fix the copy's WAL index
+/// still named the reclaimed segment, the build failed and the spare's shard died; now the
+/// copy starts with no log, is fed again and the move ends `Moved`
+/// ([Resolved #175](../../docs/src/appendix/resolved/stopped-group-log.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_asked_again_rebuilds_its_learner_from_nothing() -> Result<(), FixtureError> {
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .snapshot_timeout(Duration::from_secs(4))
+            .migration_timeout(Duration::from_secs(4))
+            .retire_after(Duration::from_secs(2))
+            .catchup_lag(0),
+    )
+    .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    // a set node two leads, with rows in it so its log has something to feed the spare
+    let (key, group) = key_led_by(&mut cluster, "Note", 2, 17_500)?;
+    let keys = note_keys_in_group(&mut cluster, &group, 17_500, 30)?;
+    assert!(keys.contains(&key));
+    write_notes_batch(&addr0, &keys, "first").await?;
+    // the move onto the spare, cut off once the spare's copy has started taking entries
+    let op = move_as_process(&mut cluster, 0, key, 2, 3)?;
+    wait_move_phase(&mut cluster, 0, op, 3, Duration::from_secs(30))?;
+    // the spare's copy of the persistent table holds entries of its own, since the move drives
+    // one group at a time
+    let note_log = |cluster: &mut Cluster| -> Result<(u64, u64), FixtureError> {
+        let view = groups_of(cluster, 3)?;
+        Ok(view["shards"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
+            .find(|found| found["table_name"] == "Note")
+            .map_or((0, 0), |found| {
+                (
+                    found["last_log"].as_u64().unwrap_or(0),
+                    found["checkpoint"].as_u64().unwrap_or(0),
+                )
+            }))
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while note_log(&mut cluster)?.0 == 0 {
+        assert!(Instant::now() < deadline, "the spare's Note copy never took an entry");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // more rows while it catches up, which reach the spare's log ahead of its checkpoint
+    write_notes_batch(&addr0, &keys, "second").await?;
+    std::thread::sleep(Duration::from_millis(500));
+    let (last, checkpoint) = note_log(&mut cluster)?;
+    assert!(checkpoint < last, "the spare's copy checkpointed everything: {checkpoint} of {last}");
+    for link in cluster.data_links_into(3) {
+        link.cut();
+    }
+    // it fails at its timeout, and the record ends without publishing
+    let record = wait_move_done_via(&mut cluster, 0, op, Duration::from_secs(60))?;
+    assert!(record["outcome"]["Failed"].is_object(), "{record}");
+    for link in cluster.data_links_into(3) {
+        link.heal();
+    }
+    // the spare stops its learners and reclaims every segment their entries were in
+    for _ in 0..10 {
+        let _ = cluster.node_mut(3).command("ROTATE")?;
+        let _ = cluster.node_mut(3).command("COMPACT")?;
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    // asked again, the learner is built afresh and the move ends
+    let again = move_as_process(&mut cluster, 0, key, 2, 3)?;
+    let record = wait_move_done_via(&mut cluster, 0, again, Duration::from_secs(120))?;
+    assert_eq!(record["outcome"], "Moved", "{record}");
+    assert_eq!(cluster.node(3).failure(), None, "the spare died");
+    let addr3 = cluster.node(3).endpoints.client.to_string();
+    for key in &keys {
+        wait_note(&addr3, *key, Some("second"), Duration::from_secs(30)).await?;
+    }
+    for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
 /// An idle cluster elects every group again after its members restart with one voter gone
 /// (item 173)
 ///

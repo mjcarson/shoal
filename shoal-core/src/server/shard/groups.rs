@@ -408,6 +408,14 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) driven_moves: HashMap<(Uuid, GroupId), crate::server::control::migrate::GroupMove>,
     /// The copies this shard retired under a move, kept for the grace, by group
     pub(super) retired: HashMap<GroupId, super::migrate::RetiredCopy>,
+    /// The groups the map stopped naming here whose handles are still shutting down
+    ///
+    /// Their logs are forgotten once they have, and a copy the map names again meanwhile waits
+    /// for that ([Resolved #175](../../../../docs/src/appendix/resolved/stopped-group-log.md)).
+    pub(super) stopping_groups: HashSet<GroupId>,
+    /// The learner copies whose log could not be read, forgotten and built empty once this run
+    /// ([Resolved #175](../../../../docs/src/appendix/resolved/stopped-group-log.md))
+    pub(super) reset_learners: HashSet<GroupId>,
     /// The group backups this shard is driving right now, by operation and group
     /// ([F49](../../../../docs/src/features/backup-and-recovery.md))
     pub(super) driving_backups: HashSet<(Uuid, GroupId)>,
@@ -537,6 +545,8 @@ where
             driving_moves: HashSet::new(),
             driven_moves: HashMap::new(),
             retired,
+            stopping_groups: HashSet::new(),
+            reset_learners: HashSet::new(),
             driving_backups: HashSet::new(),
             driven_backups: HashMap::new(),
             driving_restores: HashSet::new(),
@@ -638,17 +648,31 @@ where
                     continue;
                 }
                 event!(Level::INFO, msg = "stopping a tablet group the map no longer names", group = %id);
-                if let Some(raft) = group.raft {
-                    glommio::spawn_local(async move {
+                // its log goes with it: the segments it is in are reclaimed as soon as no group
+                // this shard hosts needs them, so a copy of the group built here again would read
+                // an index into files that are gone, and a failed move's learner is built again
+                // by the move asked next ([Resolved #175](../../../../docs/src/appendix/resolved/stopped-group-log.md))
+                replication.stopping_groups.insert(id);
+                let raft = group.raft;
+                let tx = tx.clone();
+                glommio::spawn_local(async move {
+                    // the handle first, so nothing appends to the log once the loop forgets it
+                    if let Some(raft) = raft {
                         let _ = raft.shutdown().await;
-                    })
-                    .detach();
-                }
+                    }
+                    let _ = tx.send(ServerMsg::GroupStopped { group: id }).await;
+                })
+                .detach();
             }
         }
         replication.tablets.clear();
         // build what it newly names
         for spec in specs {
+            // a group still shutting down here is built once its log is forgotten
+            if replication.stopping_groups.contains(&spec.id) {
+                event!(Level::INFO, msg = "the map names a group still stopping here; building it once it has", group = %spec.id);
+                continue;
+            }
             // a group whose retired copy is still here is built once the copy is reclaimed
             if replication.retired.contains_key(&spec.id) {
                 event!(Level::WARN, msg = "the map names a group whose retired copy is not reclaimed yet; building it once it is", group = %spec.id);
@@ -1128,6 +1152,37 @@ where
                     self.answer_proposal(meta, table, tablet, None, outcome, 0)
                         .await?;
                 }
+            }
+            // a learner holds no vote and nothing it acknowledged counts toward a quorum, so one
+            // whose log cannot be read is built again with none, once, and fed by its leader;
+            // a copy whose log pointed into reclaimed segments killed its node at every start
+            // ([Resolved #175](../../../../docs/src/appendix/resolved/stopped-group-log.md))
+            (Some(slot), Err(error))
+                if slot.spec.learner && !replication.reset_learners.contains(&group) =>
+            {
+                event!(Level::ERROR, msg = "a learner copy could not be built; forgetting its log and building it empty", group = %group, error);
+                replication.reset_learners.insert(group);
+                // the writes that waited for the handle are refused, retriably, before it goes
+                let waiting = std::mem::take(&mut slot.waiting);
+                replication.groups.remove(&group);
+                replication.volatile.forget(group);
+                if let Err(error) = replication.wal.forget(group) {
+                    return Err(ServerError::GlommioGeneric(format!(
+                        "tablet group {group} could not be built, and its log could not be forgotten: {error}"
+                    )));
+                }
+                for (meta, table, key, _) in waiting {
+                    // truncation cannot happen: a tablet id is twelve bits
+                    #[allow(clippy::cast_possible_truncation)]
+                    let tablet = Ring::tablet_of(key) as u16;
+                    let outcome = ProposalOutcome::NotLeader(format!(
+                        "group {group}'s copy on this node is being built again"
+                    ));
+                    self.answer_proposal(meta, table, tablet, None, outcome, 0)
+                        .await?;
+                }
+                // the map still names it, so it is built again, empty
+                return self.rebuild_groups().await;
             }
             // a group that could not be built is a shard that cannot serve its tablets
             (_, Err(error)) => {
@@ -3297,6 +3352,35 @@ where
         })
         .await?;
         Ok(())
+    }
+
+    /// Forget the log of a group the map stopped naming here, now its handle has shut down
+    ///
+    /// The segments its entries are in are reclaimed as soon as no group this shard hosts
+    /// needs them, so the log is forgotten with the copy; a copy the map names here again
+    /// starts with none and is fed by its leader
+    /// ([Resolved #175](../../../../docs/src/appendix/resolved/stopped-group-log.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    pub(super) async fn handle_group_stopped(&mut self, group: GroupId) -> Result<(), ServerError> {
+        let Some(replication) = self.replication.as_mut() else {
+            return Ok(());
+        };
+        // only a group this shard stopped, and has not built again, is forgotten
+        if !replication.stopping_groups.remove(&group) || replication.groups.contains_key(&group) {
+            return Ok(());
+        }
+        // both logs are asked: a group's log is in one of them, and the other knows nothing
+        replication.volatile.forget(group);
+        if let Err(error) = replication.wal.forget(group) {
+            event!(Level::WARN, msg = "could not forget a stopped group's log", group = %group, %error);
+        }
+        replication.sweep_due = true;
+        event!(Level::INFO, msg = "a stopped group's log is forgotten", group = %group);
+        // the map may have named the group here again meanwhile
+        self.rebuild_groups().await
     }
 
     /// Take a cut that landed, answer everybody waiting for it, and retire the file it replaces

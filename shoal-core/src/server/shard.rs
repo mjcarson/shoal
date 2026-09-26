@@ -4314,6 +4314,7 @@ where
                 } => self.handle_replication(origin, head, payload, version, reply),
                 // a group's handle, from the task that built it
                 ServerMsg::GroupUp { group, raft } => self.handle_group_up(group, raft).await?,
+                ServerMsg::GroupStopped { group } => self.handle_group_stopped(group).await?,
                 // every group is down: the shutdown that asked for it can finish
                 ServerMsg::GroupsDown => break,
                 // the led groups have been handed off, so the groups can stop now
