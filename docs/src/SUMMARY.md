@@ -288,6 +288,7 @@
   - [170. A member fed from the log read one entry per I/O, and a move's catch-up never finished](appendix/resolved/uncached-log-reads.md)
   - [171. A set whose one group failed its move was published anyway](appendix/resolved/failed-group-publishes-its-set.md)
   - [172. A link refused on who its peer is redialled ten times a second](appendix/resolved/identity-refusal-redials.md)
+  - [173. A pre-vote over a link that was down sent nothing, so an idle cluster never elected](appendix/resolved/idle-pre-vote-links.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

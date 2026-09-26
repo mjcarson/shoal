@@ -11671,6 +11671,71 @@ fn hosts_group(cluster: &mut Cluster, node: usize, group: &str) -> Result<bool, 
         .any(|found| found["group"].as_u64() == Some(wanted)))
 }
 
+/// An idle cluster elects every group again after its members restart with one voter gone
+/// (item 173)
+///
+/// Three nodes at a factor of three. Node two is killed for good, node one is killed, node zero
+/// restarts alone for ten seconds and node one then comes back, and nothing is sent to the
+/// cluster. Every group needs the
+/// two survivors to agree, and each asks the other in a pre-vote. Before the fix a pre-vote over
+/// a link that was not up was refused without sending anything, and nothing else wanted those
+/// links, so no group ever elected; now every group on both survivors reports a leader
+/// ([Resolved #173](../../docs/src/appendix/resolved/idle-pre-vote-links.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_cluster_elects_again_after_restarts_with_a_voter_gone() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .start()
+        .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    // every group has taken a write, so each has a term and a log to elect from
+    for key in 17_300..17_340u64 {
+        write_note_eventually(&addr0, key, "before", Duration::from_secs(30)).await?;
+    }
+    // node two goes for good; node one goes too, and node zero restarts alone, so every link
+    // it dials to node one fails and drops what it held, as titan's did while it could not start
+    cluster.kill(2)?;
+    cluster.kill(1)?;
+    cluster.restart(0, NodeKind::Server)?;
+    std::thread::sleep(Duration::from_secs(10));
+    // then node one comes back, and nothing is sent to the cluster
+    cluster.restart(1, NodeKind::Server)?;
+    cluster.wait_joined(&[0, 1])?;
+    // with nothing sent to it, every group on both survivors elects a leader
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let mut leaderless = Vec::new();
+        for node in [0, 1] {
+            let view = groups_of(&mut cluster, node)?;
+            for shard in view["shards"].as_array().into_iter().flatten() {
+                for group in shard["groups"].as_array().into_iter().flatten() {
+                    if group["leader"].is_null() {
+                        leaderless.push((node, group["group"].as_u64().unwrap_or_default()));
+                    }
+                }
+            }
+        }
+        if leaderless.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "groups never elected on an idle cluster: {leaderless:?}"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    // and the data is served again, through the restarted node's own endpoint
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    for key in 17_300..17_340u64 {
+        wait_note(&addr0, key, Some("before"), Duration::from_secs(10)).await?;
+    }
+    for id in [0, 1] {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
 /// A member the placement does not name coordinates every query it is sent (item 169)
 ///
 /// Three placed nodes and a spare that joined after the placement was initialized, with no

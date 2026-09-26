@@ -624,17 +624,13 @@ impl RaftNetworkV2<ControlConfig> for ControlPeer {
         // whether the member's build answers a pre-vote, judged on the link it would go over
         let link = self.link();
         match link.answers_pre_votes() {
-            // up with a peer that answers them: ask it
-            Some(true) => (),
             // up with an older build: grant, as openraft does for a network without pre-vote
             Some(false) => return Ok(VoteResponse::new(rpc.vote, None, true)),
-            // down: no answer, and so no grant
-            None => {
-                return Err(Self::unreachable(RpcFailure::Unreachable(format!(
-                    "the control link to {} is not up",
-                    self.target
-                ))))
-            }
+            // up with a peer that answers them, or not up: ask it, since a link dials only for a
+            // frame and a refusal over a down link sent none; a peer that cannot be reached
+            // still answers an error, never a grant
+            // ([Resolved #173](../../../../docs/src/appendix/resolved/idle-pre-vote-links.md))
+            Some(true) | None => (),
         }
         let payload = serde_json::to_vec(&rpc).map_err(|error| {
             Self::unreachable(RpcFailure::Unreachable(format!(

@@ -504,6 +504,9 @@ struct Shared {
     /// Snapshot bytes sent per group and member, which a move's record is charged with
     /// ([F45](../../../../docs/src/features/replica-migration.md))
     stream_bytes: RefCell<HashMap<(GroupId, ShardAddr), u64>>,
+    /// What the appends to each member of each group came to, which a move that sees no
+    /// progress reports ([Resolved #173](../../../../docs/src/appendix/resolved/stalled-move-catch-up.md))
+    appends: RefCell<HashMap<(GroupId, ShardAddr), AppendStats>>,
     /// The byte budget every stream this shard sends draws on
     /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
     limiter: RefCell<RateLimiter>,
@@ -566,6 +569,7 @@ impl ShardNetwork {
                 replication,
                 snapshots: RefCell::new(SnapshotStats::default()),
                 stream_bytes: RefCell::new(HashMap::new()),
+                appends: RefCell::new(HashMap::new()),
                 limiter: RefCell::new(RateLimiter::new(stream_bytes_per_sec)),
                 map,
                 dial,
@@ -591,6 +595,56 @@ impl ShardNetwork {
             .get(&(group, target))
             .copied()
             .unwrap_or(0)
+    }
+
+    /// What the appends to a member of a group have come to so far
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `target` - The member
+    #[must_use]
+    pub fn appends_to(&self, group: GroupId, target: ShardAddr) -> AppendStats {
+        self.shared
+            .appends
+            .borrow()
+            .get(&(group, target))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Record one append to a member of a group, and what came of it
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `target` - The member
+    /// * `entries` - How many entries it carried
+    /// * `prev` - The index it was sent after, if any
+    /// * `outcome` - What the member answered, or why nothing usable came back
+    fn note_append(
+        &self,
+        group: GroupId,
+        target: ShardAddr,
+        entries: u64,
+        prev: Option<u64>,
+        outcome: AppendOutcome,
+    ) {
+        let mut appends = self.shared.appends.borrow_mut();
+        let stats = appends.entry((group, target)).or_default();
+        // what was sent
+        stats.sent += 1;
+        stats.max_entries = stats.max_entries.max(entries);
+        stats.last_prev = prev;
+        // and what came of it
+        match outcome {
+            AppendOutcome::Matched => stats.matched += 1,
+            AppendOutcome::Conflict => stats.conflicts += 1,
+            AppendOutcome::Failed(error) => {
+                stats.failed += 1;
+                stats.last_error = Some((error, Instant::now()));
+            }
+        }
     }
 
     /// The move a stream to a member of a group serves, if the map carries one
@@ -1201,6 +1255,39 @@ impl RaftNetworkFactory<DataConfig> for GroupNetwork {
     }
 }
 
+/// What the appends to one member of one group have come to
+///
+/// Kept per group and member by the shard network, and logged by a move whose destination
+/// makes no progress, so a stalled catch-up says whether its appends are sent, answered,
+/// conflicting or failing, and why ([Resolved #173](../../../../docs/src/appendix/resolved/stalled-move-catch-up.md)).
+#[derive(Debug, Clone, Default)]
+pub struct AppendStats {
+    /// Appends sent
+    pub sent: u64,
+    /// Appends the member accepted
+    pub matched: u64,
+    /// Appends the member answered with a conflict, as a probe for a new member is
+    pub conflicts: u64,
+    /// Appends that brought back nothing openraft could use: not sent, timed out or refused
+    pub failed: u64,
+    /// The most entries one append carried
+    pub max_entries: u64,
+    /// The index the last append was sent after
+    pub last_prev: Option<u64>,
+    /// The last failure, and when it happened
+    pub last_error: Option<(String, Instant)>,
+}
+
+/// What one append came to, for the counts
+enum AppendOutcome {
+    /// The member accepted it
+    Matched,
+    /// The member's log did not match at the index it was sent after
+    Conflict,
+    /// Nothing usable came back, and why
+    Failed(String),
+}
+
 /// The network to one member of one particular group
 pub struct GroupPeer {
     /// The group
@@ -1218,26 +1305,20 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
         rpc: AppendEntriesRequest<DataConfig>,
         option: RPCOption,
     ) -> Result<AppendEntriesResponse<DataConfig>, RPCError<DataConfig>> {
-        let payload = postcard::to_allocvec(&rpc).map_err(|error| {
-            ShardPeer::unreachable(RpcFailure::Unreachable(format!(
-                "encoding append_entries: {error}"
-            )))
-        })?;
-        let answer = self
-            .peer
-            .rpc(
-                ReplicateKind::AppendEntries,
-                self.group,
-                payload,
-                option.hard_ttl(),
-            )
-            .await
-            .map_err(ShardPeer::unreachable)?;
-        postcard::from_bytes(&answer).map_err(|error| {
-            ShardPeer::unreachable(RpcFailure::Unreachable(format!(
-                "decoding append_entries: {error}"
-            )))
-        })
+        // what this append is, for the counts a stalled move reports
+        let entries = rpc.entries.len() as u64;
+        let prev = rpc.prev_log_id.as_ref().map(|log_id| log_id.index);
+        let network = self.peer.network.clone();
+        let (group, target) = (self.group, self.peer.target);
+        let result = self.send_append(rpc, option).await;
+        // count it, as matched, conflicting or failed
+        let outcome = match &result {
+            Ok(AppendEntriesResponse::Conflict) => AppendOutcome::Conflict,
+            Ok(_) => AppendOutcome::Matched,
+            Err(error) => AppendOutcome::Failed(error.to_string()),
+        };
+        network.note_append(group, target, entries, prev, outcome);
+        result
     }
 
     /// Vote: serialize, send, deserialize the response
@@ -1278,17 +1359,15 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
             .link(self.peer.target.node)
             .and_then(|link| link.answers_pre_votes());
         match answers {
-            // up with a peer that answers them: ask it
-            Some(true) => (),
             // up with an older build: grant, as openraft does for a network without pre-vote
             Some(false) => return Ok(VoteResponse::new(rpc.vote, None, true)),
-            // down: no answer, and so no grant
-            None => {
-                return Err(ShardPeer::unreachable(RpcFailure::NotSent(format!(
-                    "the link to {} is not up",
-                    self.peer.target.node
-                ))))
-            }
+            // up with a peer that answers them, or not up: ask it. a link dials only for a frame,
+            // so refusing over a link that is down sent nothing, and on a cluster with nothing
+            // else to say to that peer the link never came up and the group never elected
+            // ([Resolved #173](../../../../docs/src/appendix/resolved/idle-pre-vote-links.md)).
+            // a peer that cannot be reached still answers an error, never a grant, and an older
+            // build refuses the kind once, after which the link is up and says what it speaks
+            Some(true) | None => (),
         }
         let payload = postcard::to_allocvec(&rpc).map_err(|error| {
             ShardPeer::unreachable(RpcFailure::NotSent(format!("encoding pre_vote: {error}")))
@@ -1419,6 +1498,39 @@ impl From<StreamingError<DataConfig>> for SendError {
 }
 
 impl GroupPeer {
+    /// Append entries: serialize, send, deserialize the response
+    ///
+    /// # Arguments
+    ///
+    /// * `rpc` - The request
+    /// * `option` - Its budget
+    async fn send_append(
+        &mut self,
+        rpc: AppendEntriesRequest<DataConfig>,
+        option: RPCOption,
+    ) -> Result<AppendEntriesResponse<DataConfig>, RPCError<DataConfig>> {
+        let payload = postcard::to_allocvec(&rpc).map_err(|error| {
+            ShardPeer::unreachable(RpcFailure::Unreachable(format!(
+                "encoding append_entries: {error}"
+            )))
+        })?;
+        let answer = self
+            .peer
+            .rpc(
+                ReplicateKind::AppendEntries,
+                self.group,
+                payload,
+                option.hard_ttl(),
+            )
+            .await
+            .map_err(ShardPeer::unreachable)?;
+        postcard::from_bytes(&answer).map_err(|error| {
+            ShardPeer::unreachable(RpcFailure::Unreachable(format!(
+                "decoding append_entries: {error}"
+            )))
+        })
+    }
+
     /// A peer to one member of a group, for a repair transfer outside openraft's replication
     ///
     /// # Arguments

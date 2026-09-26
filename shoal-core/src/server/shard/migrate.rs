@@ -276,6 +276,10 @@ impl<D: ShoalDatabase> MoveContext<D> {
     }
 }
 
+/// How long a move's destination may make no progress before the driver reports it, and how
+/// often it reports again while it still makes none
+const STALL_REPORT: Duration = Duration::from_secs(30);
+
 /// Drive one group's move from where the record stands to where this driver can take it
 ///
 /// # Arguments
@@ -487,6 +491,10 @@ async fn catch_up<D: ShoalDatabase>(
     progress: &mut GroupMove,
 ) -> Result<(), String> {
     let started = Instant::now();
+    // the destination's last position and when it moved, and when the stall was last reported
+    let mut last_matched = None;
+    let mut progressed = Instant::now();
+    let mut reported = Instant::now();
     loop {
         if !context.leads() {
             return Err(format!(
@@ -502,6 +510,21 @@ async fn catch_up<D: ShoalDatabase>(
         }
         let (matched, last) = context.destination_lag();
         progress.stats.bytes = context.network.bytes_sent_to(context.group, context.to);
+        // a destination that has not moved for a while is reported with what its appends came
+        // to, which is the only account of a stall openraft gives nothing about at info
+        // ([Resolved #173](../../../../docs/src/appendix/resolved/stalled-move-catch-up.md))
+        if matched != last_matched {
+            last_matched = matched;
+            progressed = Instant::now();
+        } else if progressed.elapsed() >= STALL_REPORT && reported.elapsed() >= STALL_REPORT {
+            reported = Instant::now();
+            let appends = context.network.appends_to(context.group, context.to);
+            let last_error = appends
+                .last_error
+                .as_ref()
+                .map(|(error, at)| format!("{error} ({:?} ago)", at.elapsed()));
+            event!(Level::WARN, msg = "a move's destination has made no progress", op = %context.op, group = %context.group, to = %context.to, matched, last, stalled_secs = progressed.elapsed().as_secs(), sent = appends.sent, accepted = appends.matched, conflicts = appends.conflicts, failed = appends.failed, max_entries = appends.max_entries, last_prev = ?appends.last_prev, snapshot_bytes = progress.stats.bytes, last_error = ?last_error);
+        }
         if let Some(matched) = matched {
             // the destination's log position once it is caught up: everything it was fed, by
             // snapshot and by log together, since a learner starts from nothing
