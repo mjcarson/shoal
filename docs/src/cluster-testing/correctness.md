@@ -563,3 +563,142 @@ active afterwards. The seconds at zero are section 5's: a silent partition's or 
 seconds ([#143](../appendix/resolved/silent-partition-hops.md#still-open)), and kill-all's
 elections.
 
+
+## 7. A copy that cannot read a partition
+
+The four items the last section left: [160](../appendix/resolved/unreadable-partition-stalls-one-copy.md)
+(one unreadable partition stopped its node), [161](../appendix/resolved/failed-start-empty-archive.md)
+(a failed start left an empty archive), the rest of [155](../appendix/resolved/restore-retry.md)
+(a restore's failed group could not be finished) and a safe rebuild of a node
+([F56](../features/cluster-rebuild.md)). Each was fixed in the tree with a fixture test first and
+then proved here. The proving found eight more defects, #162 to #168 and one fixed in passing, and
+three optimizations. Every lab run below was on a cluster bootstrapped on the build under test, with
+wire version 6 activated.
+
+### Stalling one copy, and repairing it unasked
+
+**How.** titan stopped, 64 random bytes written at eight to twelve places in each of its Movie
+archives over 20 MB, and titan started again, then the mixed bench (`get:40,update:45,insert:15`)
+for 180 s. Titan had to read the damaged records to apply the updates.
+
+**What the first runs found.** Every run, titan stayed up, which is #160 fixed, and every
+stalled copy was repaired unasked. How long that took is what the runs found wrong:
+
+| Run | Stalled | Repaired | What went wrong, and its fix |
+| --- | --- | --- | --- |
+| First | 1 group, while running | after 2 min 40 s, at the second try | The repair's verify read a late cut of its own first scrub as the answer: [#162](../appendix/resolved/stale-scrub-digest.md). The cut itself took two minutes under the bench: [O70](../appendix/optimizations.md#o70-a-snapshot-cut-reads-its-records-one-at-a-time) |
+| Third | 8 groups, at the start's replay | 5 in 5 minutes, 3 never | openraft's own snapshot stream replaced each repair's stream: [#163](../appendix/resolved/repair-stream-replaced.md). A held 125 MB snapshot was cut again 17 times in 97 s: [O71](../appendix/optimizations.md#o71-a-held-snapshot-is-cut-again-whenever-the-checkpoint-moves). openraft logged 3,604 refused snapshot builds in 5 minutes: [O72](../appendix/optimizations.md#o72-a-refused-snapshot-build-logs-four-lines-per-apply) |
+| Fourth | 2 groups, at a restart | 1 in 5 min, 1 at the second try | A copy restarted from a repair snapshot replayed forty scrubs, each reading 320,000 records, and missed its verify's deadline: [#164](../appendix/resolved/replayed-scrub-cuts.md) |
+
+The same damage also started two loops on titan that no read ended:
+
+- **An archive compaction that met a corrupt record** retried every 5 s, each try leaking the
+  records it had rewritten. Titan's Movie archives reached 38 GB, then 64 GB, where the others held
+  3 GB: [#165](../appendix/resolved/corrupt-record-compaction-loop.md). Deployed onto that node, the
+  fix reported 13 corrupt records in its first minute, and the archives fell to 37.6 GB within two.
+- **A segment compaction that had to merge onto one** retried every 5 s without end, holding the
+  table's checkpoint on its shard: [#166](../appendix/resolved/segment-compaction-corrupt-loop.md).
+
+**Corruption nothing had read** was then found by a backup, whose cuts failed four groups, and
+repaired by an operator: `repair Movie repair` found titan's copy corrupt in 14 of 18 Movie groups,
+repaired all 14 from a verified majority and judged the other 4 clean, in 79 s. A cut that meets a
+corrupt record now reports it too, which quarantines the copy (on #165's page).
+
+**The runs on the fixed build.** The same damage, twice:
+
+| | Stalled | Each repaired after | Writes refused `Unavailable` | Titan restarts |
+| --- | --- | --- | --- | --- |
+| Final run | 4 groups, while running | 20 to 38 s, under the bench | 18,853 | 0 |
+| With #167 | 4 groups | 1.5 to 2.5 min, under the bench | 12 | 0 |
+
+The final run's 18,853 refusals were one group, for 16 s. Titan led it, and its core stopped before
+the lead it had asked to hand on could move. Every write of the group through any node reached the
+dead core until an election: [#167](../appendix/resolved/stalled-leader-handoff.md). With the fix
+the stalled leader keeps its core until another member leads, and the refusals went from 18,853 to
+12. Each repair used one or two cuts, against 17 before O71.
+
+After the final run every insert acknowledged under it was read back through each member alone
+(950,263 found, 0 lost), and after the operator's repair above, every movie and keyword partition
+read through titan alone at `One` equalled the csv (0 missing, 0 different).
+
+**Verdict: pass**, on the fixed build: one unreadable partition costs one copy of one group, for a
+minute or two, and no node stops.
+
+### A failed start leaves no empty archive
+
+The lab's nodes were started eight times on the fixed build (titan four, europa two, hyperion two),
+through upgrades, the corruption runs' restarts and `SIGKILL`s. Afterwards no node held a
+zero-length archive file (`find */archives -maxdepth 1 -size 0`). The six empty files per node
+under `archives/intents/` are the map intent logs, which each compactor start truncates, not
+archives. **Verdict: pass.**
+
+### A restore finished by a retry
+
+**How.** A backup of every table (36 files, 1.5 GB, in 9 s), its files copied to every host, the
+cluster destroyed and bootstrapped, wire version 6 activated, and one Movie group's file made
+unreadable on every host (`chmod 000`) before `restore <dir>`.
+
+| | |
+| --- | --- |
+| Restore | 58 s; 1 group `Failed` at `Installing` (*"does not verify against its manifest: Permission denied"*), the command exits 1 naming it |
+| The table afterwards | 66,312 movies missing, one group's rows |
+| `restore-retry <op>`, the file readable again | 28 s; the failed group driven from `Installing` and `Restored`, the other 35 untouched |
+| The table after the retry | 0 missing, 0 different, every keyword partition equal |
+
+**Verdict: pass.** Before this, a restore with a failed group was a cluster to delete and
+restore again whole.
+
+### Rebuilding a node under load
+
+**How.** `cluster rebuild hyperion --yes` while the bench ran against all three nodes for 480 s,
+then every acknowledged insert read back through each member, and every row read through each
+member alone at `One`.
+
+**First run: a cluster restored minutes before.** The rebuild itself worked: down in 14 s, joined
+as a new identity 22 s later, 18 sets moved in 6 minutes, 392 s in all. But a tenth of the bench's
+gets answered `NotFound` for movies that exist (472,946), and afterwards hyperion's own copy was
+missing 331,350 movies. About half its groups had been fed from their leaders' logs, which began at
+entry one and held none of the restored rows, because a restore installs them outside the log:
+[#168](../appendix/resolved/restored-rows-outside-the-log.md). The same scenario in the fixture,
+a set moved onto a spare after a restore, lost 32 of 32 restored rows. The fix purges a copy's log
+through every repair or restore it installs. The lab was repaired with `repair Movie repair` and
+`repair MovieByKeyword repair`, after which every member alone equalled the csv.
+
+**Second run: the same backup restored into a fresh cluster on the fixed build, then the rebuild
+under the bench.**
+
+| | |
+| --- | --- |
+| Committed down, joined as a new identity | 13 s, 21 s later |
+| Plan | 18 of 18 sets moved, 1.4 GiB (1.8 GiB streamed, every set as a snapshot), 11 min 22 s |
+| Whole rebuild | 710 s |
+| Bench, 480 s | get 12,738/s, update 14,318/s, insert 4,774/s; 0 `NotFound`; no second at zero |
+| Acknowledged inserts | 2,296,295, all found through each member alone |
+| Each member alone at `One`, and the default read | 0 missing, 0 different; every keyword partition equal |
+
+Why so slow, at 2.6 MB/s: no step's transfer ran slowly (82 MB streamed and installed in about
+1.5 s). The plan moves one set onto the node at a time, and each step carries about 35 s of fixed
+cost: the planner's 5 s tick, catch-up, two membership changes, and cuts that queue behind the
+source's compaction under the bench. At terabyte scale the step's own size would dominate instead,
+and two defaults would probably stop it converging under writes; see
+[F56's Limitations](../features/cluster-rebuild.md#limitations).
+
+**Verdict: pass** on the fixed build. The first run's failure was the restore's, and it would have
+hit any member added after a restore, not only a rebuilt one.
+
+### The suite on the final build
+
+The fault suite a fourth time, on the build with every fix above, on the cluster the rebuild had
+just been proved on (`target/lab/suite-r168.log`):
+
+| Fault | Acknowledged inserts | Lost | Seconds at zero |
+| --- | --- | --- | --- |
+| Kill the node leading the most groups (hyperion) | 558,988 | 0 | 0 |
+| Partition hyperion by dropped packets, 20 s | 486,983 | 0 | 3 |
+| Pause the control leader (hyperion), 20 s | 506,380 | 0 | 2 |
+| Kill every node at once | 398,645 | 0 | 13 |
+
+Every acknowledged insert was read back through every member, kill-all included. Each node was
+active afterwards, restarted only by its faults, and none held an empty archive after the kill-all's
+`SIGKILL`s. The seconds at zero are section 6's: a silent partition's and a pause's first seconds,
+and kill-all's elections.

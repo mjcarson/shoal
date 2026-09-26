@@ -118,6 +118,7 @@
   - [F53. An inventory wizard, and storage per node group](features/inventory-wizard.md)
   - [F54. The TMDB dataset as a deployable database, and a loader for it](features/tmdb-dataset-deployment.md)
   - [F55. A rolling upgrade with `shoalctl cluster upgrade`](features/cluster-upgrade.md)
+  - [F56. Rebuilding a node from its peers with `shoalctl cluster rebuild`](features/cluster-rebuild.md)
 
 # Direction
 

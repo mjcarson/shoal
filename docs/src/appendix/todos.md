@@ -2305,7 +2305,11 @@ and never rewrites its `shoal.yml`, so a change to what the renderer writes reac
 node. The lab's nodes had `node_memory` added by hand. Re-rendering needs the admin's credential,
 which the tool deliberately does not keep, so a `cluster reconfigure` would ask for it.
 
-## Rebuild a node from its peers
+## ~~Rebuild a node from its peers~~
+
+**Done as [F56](../features/cluster-rebuild.md)**, `cluster rebuild <node>`, under a new identity
+with a `Remove` and a replacement, as the sketch below wanted. The same-identity rebuild stays
+unoffered for the reason given. What follows is the todo as it was filed.
 
 Filed by [Resolved #151](resolved/purge-ahead-of-its-marker.md). A node whose disk cannot start
 it, like titan with a hole in its WAL, has to be wiped and fed by its peers. The only path today
@@ -2330,3 +2334,17 @@ other voters have already matched the leader's committed index before the wipe, 
 cluster. So a `cluster rebuild` built on it has to check that first, per group, and refuse
 otherwise. The `Replace` path has no such condition.
 
+
+## Rebuild and move at terabyte scale
+
+Filed by [F56](../features/cluster-rebuild.md). A move's step is a whole replica set, cut to a
+snapshot file on the source, streamed, written as a partial on the destination and installed into
+its archives, one stage after another, one set onto a node at a time. At the lab's size the fixed
+costs of a step dominate (about 35 s a step). At a terabyte a node a step is about 55 GB. Extrapolated
+from the lab's stage rates, that is about ten hours a terabyte, and two defaults would likely keep a
+step from finishing under writes: `snapshot_timeout` (5 minutes a transfer) and the log retention
+(`retained_entries` 100,000 and `retained_bytes` 1 GiB a group, seconds of a busy group), past which
+the leader purges below the snapshot being installed. What it needs: retention that outlasts a
+step, or a catch-up that tolerates a purge by re-cutting only what moved; a cut streamed from the
+archives instead of written to a file first; and several steps in flight onto a node. Proving it
+needs hosts with the disk for it, or retention shrunk on the lab until a step outlasts it.

@@ -68,6 +68,16 @@ shoalctl cluster rebuild -i <inventory> <node> --yes
 - **It takes as long as moving every set the node held**, one plan step at a time: 6 to 12
   minutes on the lab for 1.4 GiB under load (below).
 - **The old identity's tombstone is permanent**, like every removal's.
+- **It is not proven past the lab's size, and the defaults are not sized for terabytes.** Steps are
+  replica sets, so their number is fixed by the placement (18 on the lab) and their size grows with
+  the data: about 55 GB each at a terabyte a node. Extrapolated, **not measured**, from the lab's per
+  stage rates (cut, stream, install, each 50 to 80 MB/s one after the other), a step moves at about
+  25 to 30 MB/s end to end: roughly ten hours a terabyte as steps run today, and three to five at best
+  under the node's 64 MiB/s stream budget and a 1 GbE link. Under writes, two defaults would likely
+  stop it converging. `snapshot_timeout` is 5 minutes a transfer, where a transfer would take 15 to
+  35. And `retained_entries` (100,000) and `retained_bytes` (1 GiB) a group are seconds of a busy
+  group, so the leader would purge past the snapshot a new copy is installing, and send it another.
+  Filed in [todos](../appendix/todos.md#rebuild-and-move-at-terabyte-scale).
 - **A cluster restored before [#168](../appendix/resolved/restored-rows-outside-the-log.md)'s fix**
   can feed the new node logs that hold none of the restored rows. On such a cluster, repair every
   table in `repair` mode first.
@@ -94,6 +104,14 @@ On the lab, rebuilding hyperion while the mixed bench ran against all three node
 The restored cluster's rebuild streamed more because every set was sent as a snapshot, which is
 #168's fix working. The earlier run fed about half of the groups from their logs, and those groups
 were missing the restored rows.
+
+**Where the time goes.** 1.8 GiB in 710 s is 2.6 MB/s, but no transfer ran that slowly. One step
+of the second run, a Movie group of 181,679 rows and 82 MB: the cut took 1.5 s, the stream and
+install about 1.5 s (about 80 MB/s), catch-up and the two membership changes about 1 s, and the
+planner about 5 s to notice the move was done and issue the next step (`plan_interval`). Steps
+whose cut queued behind the source compactor's merges under the bench waited up to 15 s more. The
+plan moves one set onto a node at a time (`rebalance.moves_per_node`, 1), so these fixed costs add
+up, about 35 s a step, and bandwidth is never the limit at this size.
 
 ## Tests
 
