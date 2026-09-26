@@ -39,8 +39,10 @@ new set. `replica_groups` and `groups_of` compute the rule's sets and overlay ea
 configuration; `holds`, `preferred_holder`, `alternate_holder` and the read ring all go through
 `replicas_of`, so a node in no placement slot but in a configuration is a holder like any other.
 `places` and the routing list are the placement plus every node a configuration or a move
-brings in, so a member admitted after `Initialize` routes and is routed to from the moment a
-move names it. `active_rf` and write admission read the placement's size as before.
+brings in, so a member admitted after `Initialize` is routed to from the moment a
+move names it. ~~It routes from that moment too~~ It coordinates queries from its admission,
+with every tablet remote, and needs no move to do so
+([Resolved #169](../appendix/resolved/unplaced-member-forwards.md)). `active_rf` and write admission read the placement's size as before.
 
 A configuration covers a whole set: a `Move` names a tablet, and the set is every table's group
 over the tablets the rule placed together with it. Routing is per tablet and not per table
@@ -251,7 +253,10 @@ request is recorded and runs when it can, and the record says what it waits behi
 - **A failed move leaves the group where its committed membership says.** A group activated
   before another of the set failed keeps its target membership while the configuration is not
   published; the record's `Failed` outcome names the reason, and asking the move again
-  reconciles from the committed membership. Nothing rolls a group back.
+  reconciles from the committed membership. Nothing rolls a group back. ~~A failed group counted
+  as activated, so the set was published anyway~~: fixed by
+  [Resolved #171](../appendix/resolved/failed-group-publishes-its-set.md), which also ends the
+  record once a failed group leaves nothing in flight, so a plan replans the set.
 - **A move of a set is every table's group over it**, and `concurrent` serializes the groups on
   a shard: a set of four tables moves its groups one at a time, and the first waits at
   `Activated` for the last. The record's `activated` time is that wait.

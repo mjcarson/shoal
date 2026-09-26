@@ -2600,9 +2600,14 @@ impl ControlState {
                 self.configurations.insert(first, configuration);
             }
         }
-        // the last group done finishes the record and releases what waited behind it
+        // the last group done finishes the record and releases what waited behind it; so does
+        // the last group settled once one has failed, since a set with a failed group is never
+        // published and an activated group would wait for that publish for ever
+        // ([Resolved #171](../../../../docs/src/appendix/resolved/failed-group-publishes-its-set.md))
         let record = self.moves.get_mut(&op).expect("checked above");
-        if record.groups.values().all(GroupMove::is_done) {
+        let failed_and_settled = record.groups.values().any(GroupMove::is_failed)
+            && record.groups.values().all(GroupMove::is_settled);
+        if record.groups.values().all(GroupMove::is_done) || failed_and_settled {
             record.phase = MovePhase::Done;
             let failed = record
                 .groups
@@ -4146,6 +4151,104 @@ mod tests {
             state.table_read_policy.get(&TableId::of("Row")),
             Some(&Consistency::One)
         );
+    }
+
+    /// A set whose one group failed its move is never published, however its others went
+    /// (item 171)
+    ///
+    /// Three placed at a factor of three and a fourth member: a set of two groups is moved from
+    /// c to d. One group activates; the other fails catching up and is committed done with the
+    /// failure. The configuration naming d is not published - the failed group's committed
+    /// voters never took d, so routing the set to d would name a copy the group does not count -
+    /// and the record ends `Failed` ([Resolved #171](../../../../docs/src/appendix/resolved/failed-group-publishes-its-set.md)).
+    #[test]
+    fn a_set_with_a_failed_group_is_not_published() {
+        use crate::server::control::migrate::{GroupMove, MoveOutcome, MovePhase, MoveStats};
+        let (mut state, _, node) = bootstrapped();
+        let (b, c, d) = (NodeId::mint(), NodeId::mint(), NodeId::mint());
+        for (other, name) in [(b, "b"), (c, "c"), (d, "d")] {
+            state.apply(&ControlCommand::Admit(member(other, name)));
+            state.apply(&ControlCommand::ObserveMember(member(other, name)));
+        }
+        let tables = vec![
+            ("Row".to_string(), TableId::of("Row")),
+            ("Note".to_string(), TableId::of("Note")),
+        ];
+        // three placed, and d a member the placement never named
+        let version = state.topology_version;
+        state.apply(&ControlCommand::Initialize {
+            op: Uuid::new_v4(),
+            principal: "alice".to_string(),
+            expected_version: version,
+            nodes: vec![node, b, c],
+            tables: tables.clone(),
+        });
+        // move tablet zero's set off c onto d
+        let op = Uuid::new_v4();
+        let version = state.topology_version;
+        assert!(matches!(
+            state.apply(&ControlCommand::Move {
+                op,
+                principal: "alice".to_string(),
+                expected_version: version,
+                tablet: 0,
+                from: c,
+                to: d,
+            }),
+            ControlResponse::Applied { .. }
+        ));
+        let groups: Vec<_> = state.moves[&op].groups.keys().copied().collect();
+        assert_eq!(groups.len(), 2, "one group per table");
+        let report = |group, progress: GroupMove| ControlCommand::MoveProgress {
+            op,
+            group,
+            node,
+            incarnation: 1,
+            progress,
+        };
+        // the first group activates, and publishes nothing on its own
+        state.apply(&report(
+            groups[0],
+            GroupMove {
+                phase: MovePhase::Activated,
+                driver: Some(node),
+                config: Some(40),
+                stats: MoveStats::default(),
+                outcome: None,
+            },
+        ));
+        assert!(state.configurations.is_empty());
+        // the second fails catching up, and is committed done with the failure
+        state.apply(&report(
+            groups[1],
+            GroupMove {
+                phase: MovePhase::Done,
+                driver: Some(node),
+                config: None,
+                stats: MoveStats::default(),
+                outcome: Some(MoveOutcome::Failed {
+                    reason: "did not catch up within 600s".to_string(),
+                }),
+            },
+        ));
+        // the set is still served where it was: nothing published, d holds nothing
+        assert!(
+            state.configurations.is_empty(),
+            "a set with a failed group was published: {:?}",
+            state.configurations
+        );
+        let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
+        assert!(map.holds(c, 0), "the source was routed away from");
+        assert!(!map.holds(d, 0), "the destination was routed to");
+        // and the record ends failed at once: the activated group would otherwise wait for a
+        // publish that cannot come, and a plan would wait on the record for ever
+        assert_eq!(state.moves[&op].phase, MovePhase::Done);
+        assert!(matches!(
+            state.moves[&op].outcome,
+            Some(MoveOutcome::Failed { .. })
+        ));
+        // so the map no longer carries it, and the set is free for the move to be asked again
+        assert!(map.moves.is_empty(), "{:?}", map.moves);
     }
 
     /// A move is recorded against the set as the map serves it, queued behind a transition on

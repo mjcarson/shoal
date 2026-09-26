@@ -495,25 +495,6 @@ a restart once space returns brings it back (on the lab with no restart by hand)
 wanted is to shed appends below a reserve with a retriable refusal, so that a nearly full node
 keeps serving reads rather than stopping.
 
-### 169. A member the placement does not name refuses every client query
-
-A node answers every query with `NotInitialized` (*"this node holds no tablets: the placement has
-not been initialized, or does not name it"*) while the placement does not name it (`Shard::placed`,
-`shard.rs`). That is right before the cluster is initialized. But a member admitted afterwards is
-not named until a plan puts it in a set, although it has the map and could forward every query to
-the tablets' holders, as any node does for a tablet it holds no copy of. A client connected to a
-member added with `cluster add` and no rebalance is refused everything. And a client connected to a
-rebuilt node is refused from its start until its replacement plan names it.
-
-On the lab the second case cost 63,012 refusals in two seconds of a `cluster rebuild` under the
-bench (`rebuild-cap6`): pipelined clients reconnect to the new process as soon as it listens. The
-bench counts them as failures, since `NotInitialized` says the cluster is not set up, which is not
-something a client retries. What it needs: an unplaced member of an initialized cluster coordinates
-with the placement's ring, every share of which is remote, and refuses only when the map has no
-placement at all. Or, smaller: a refusal a client retries elsewhere. Found by the
-[distributed cluster testing](../cluster-testing/correctness.md#rebuilding-a-node-under-load)
-chapter. Established from the bench's samples and the source; not reproduced in the fixture.
-
 ---
 
 ## Low — hygiene and documentation drift

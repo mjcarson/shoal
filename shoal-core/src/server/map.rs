@@ -859,9 +859,10 @@ impl TabletMap {
     /// Every node a ring names: the placement, then every node a configuration or a move
     /// not yet published brings in that the placement does not, each with its shard count
     ///
-    /// A member admitted after the placement was initialized is brought in by a move, and
-    /// routes and is routed to from then on
-    /// ([F45](../../../docs/src/features/replica-migration.md)).
+    /// A member admitted after the placement was initialized is brought in by a move, and is
+    /// routed to from then on ([F45](../../../docs/src/features/replica-migration.md)); it
+    /// coordinates queries from its admission, with a ring over this list that names it nowhere
+    /// ([Resolved #169](../../../docs/src/appendix/resolved/unplaced-member-forwards.md)).
     #[must_use]
     pub fn routing_counts(&self) -> Vec<(NodeId, u16)> {
         let mut counts = self.placement_counts();

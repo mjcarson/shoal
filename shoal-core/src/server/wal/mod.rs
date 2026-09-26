@@ -78,6 +78,13 @@ pub use memory::MemoryWal;
 /// The directory under the latency sensitive path the WAL lives in
 pub const WAL_DIR: &str = "wal";
 
+/// The most bytes one read of a group's frames spans, other groups' frames between included
+///
+/// A lagging member is fed a run of a group's entries a call, and the run is read in spans of
+/// at most this many bytes ([Resolved #170](../../../docs/src/appendix/resolved/uncached-log-reads.md)).
+/// Twelve groups interleaved, three hundred entries of a few kilobytes each is a few megabytes.
+const MAX_READ_SPAN: u64 = 4 << 20;
+
 /// The checkpoint file's name
 pub const CHECKPOINT_FILE: &str = "checkpoint.json";
 
@@ -1804,28 +1811,90 @@ impl ShardWal {
         }
     }
 
+    /// Read the entries of several frames in one segment with as few reads as the span allows
+    ///
+    /// A run of one group's frames lies in its segment in append order, interleaved with the
+    /// other groups', so one read from the first frame's start to the last frame's end holds all
+    /// of them. A lagging member is fed hundreds of entries a call, and one read each waited a
+    /// reactor turn apiece on a busy shard: ten entries a second in the experiment, and a move's
+    /// catch-up that never finished on the lab
+    /// ([Resolved #170](../../../docs/src/appendix/resolved/uncached-log-reads.md)). A span is
+    /// capped at [`MAX_READ_SPAN`], so the frames of another group between two of ours cost a
+    /// bounded read, never a segment's worth.
+    ///
+    /// # Arguments
+    ///
+    /// * `locs` - Where the frames lie, all in one generation, in ascending offset order
+    async fn read_entries(&self, locs: &[Loc]) -> io::Result<Vec<Entry>> {
+        let mut entries = Vec::with_capacity(locs.len());
+        let mut at = 0;
+        while at < locs.len() {
+            // extend the span over every following frame it can take under the cap
+            let start = locs[at].offset;
+            let mut end = at + 1;
+            while end < locs.len()
+                && locs[end].offset + u64::from(locs[end].len) - start <= MAX_READ_SPAN
+            {
+                end += 1;
+            }
+            let last = locs[end - 1];
+            let span = last.offset + u64::from(last.len) - start;
+            // one read for the whole span, on the segment's reader
+            let bytes = self.read_bytes(locs[at].generation, start, span as usize).await?;
+            // and every frame of the run decoded out of it
+            for loc in &locs[at..end] {
+                let offset = (loc.offset - start) as usize;
+                match frame::decode_at(&bytes, offset) {
+                    Some((frame::Frame::Entry { entry, .. }, _)) => entries.push(entry),
+                    _ => {
+                        return Err(io::Error::other(format!(
+                            "the frame at {}:{} is not a whole entry",
+                            loc.generation, loc.offset
+                        )))
+                    }
+                }
+            }
+            at = end;
+        }
+        Ok(entries)
+    }
+
+    /// Read a range of bytes from a segment, on the segment's cached reader
+    ///
+    /// # Arguments
+    ///
+    /// * `generation` - The segment
+    /// * `offset` - Where the range begins
+    /// * `len` - How many bytes it holds
+    async fn read_bytes(
+        &self,
+        generation: u64,
+        offset: u64,
+        len: usize,
+    ) -> io::Result<glommio::io::ReadResult> {
+        // take a reader on the segment, or open one
+        let taken = self.inner.borrow_mut().readers.remove(&generation);
+        let path = self.segment_path(generation);
+        let reader = match taken {
+            Some(reader) => reader,
+            None => BufferedFile::open(&path).await.map_err(io)?,
+        };
+        let read = reader.read_at(offset, len).await.map_err(io);
+        // hand the reader back for the next read of this segment
+        self.inner.borrow_mut().readers.insert(generation, reader);
+        read
+    }
+
     /// Read a frame's entry from its segment
     ///
     /// # Arguments
     ///
     /// * `loc` - Where the frame lies
     async fn read_entry(&self, loc: Loc) -> io::Result<Entry> {
-        // take a reader on the segment, or open one
-        let taken = self.inner.borrow_mut().readers.remove(&loc.generation);
-        let path = self.segment_path(loc.generation);
-        let reader = match taken {
-            Some(reader) => reader,
-            None => BufferedFile::open(&path).await.map_err(io)?,
-        };
-        let read = reader
-            .read_at(loc.offset, loc.len as usize)
-            .await
-            .map_err(io);
-        self.inner
-            .borrow_mut()
-            .readers
-            .insert(loc.generation, reader);
-        let bytes = read?;
+        // the frame's bytes alone
+        let bytes = self
+            .read_bytes(loc.generation, loc.offset, loc.len as usize)
+            .await?;
         match frame::decode_at(&bytes, 0) {
             Some((frame::Frame::Entry { entry, .. }, _)) => Ok(entry),
             _ => Err(io::Error::other(format!(
@@ -1972,11 +2041,26 @@ impl RaftLogReader<DataConfig> for GroupStore {
                     (indexes, cached)
                 };
                 let mut entries = Vec::with_capacity(indexes.len());
+                // the uncached frames of one segment in a row, read together
+                let mut run: Vec<Loc> = Vec::new();
                 for (index, loc) in indexes {
-                    match cached.get(&index) {
-                        Some(entry) => entries.push(entry.clone()),
-                        None => entries.push(wal.read_entry(loc).await?),
+                    // a frame in another segment, or a cached entry, ends the run
+                    let cached_entry = cached.get(&index);
+                    if run
+                        .last()
+                        .is_some_and(|last| cached_entry.is_some() || last.generation != loc.generation)
+                    {
+                        entries.extend(wal.read_entries(&run).await?);
+                        run.clear();
                     }
+                    match cached_entry {
+                        Some(entry) => entries.push(entry.clone()),
+                        None => run.push(loc),
+                    }
+                }
+                // and the last run
+                if !run.is_empty() {
+                    entries.extend(wal.read_entries(&run).await?);
                 }
                 Ok(entries)
             }

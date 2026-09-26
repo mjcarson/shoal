@@ -187,9 +187,27 @@ impl GroupMove {
     }
 
     /// Whether the group's uniform membership naming the target is committed
+    ///
+    /// A group whose move failed is done without it, whatever phase it reached, and never
+    /// counts toward publishing its set
+    /// ([Resolved #171](../../../../docs/src/appendix/resolved/failed-group-publishes-its-set.md)).
     #[must_use]
     pub fn is_activated(&self) -> bool {
-        self.phase.rank() >= MovePhase::Activated.rank()
+        self.phase.rank() >= MovePhase::Activated.rank() && !self.is_failed()
+    }
+
+    /// Whether the group's move ended in a failure
+    #[must_use]
+    pub fn is_failed(&self) -> bool {
+        matches!(self.outcome, Some(MoveOutcome::Failed { .. }))
+    }
+
+    /// Whether nothing more will happen to the group under a record that cannot be published
+    ///
+    /// Done, or activated and waiting for a publish a failed group of its set has ruled out.
+    #[must_use]
+    pub fn is_settled(&self) -> bool {
+        self.is_done() || self.is_activated()
     }
 }
 

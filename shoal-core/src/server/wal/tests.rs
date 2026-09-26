@@ -1200,3 +1200,127 @@ fn a_purge_is_durable_only_once_its_marker_is() {
         reopened.close().await.expect("failed to close");
     });
 }
+
+/// A lagging member's read of a whole log returns every entry whole, whatever its frames span
+///
+/// Two groups append turn about across rotations, with entries big enough that one group's run
+/// in a segment is longer than a single read may span, and a cache that holds only the newest
+/// few. Reading one group's whole log back in one call crosses segments, splits runs at the
+/// span cap and interleaves cached entries with read ones; every entry comes back in order with
+/// its own payload ([Resolved #170](../../../../docs/src/appendix/resolved/uncached-log-reads.md)).
+#[test]
+fn a_lagging_read_returns_every_entry_across_spans_segments_and_the_cache() {
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        use openraft::storage::RaftLogReader as _;
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        // segments of 8 MiB and a cache of 64 KiB, so most of the log is read from the files
+        let wal = ShardWal::open(&dir.path().join("wal"), 8 << 20, 64 << 10)
+            .await
+            .expect("failed to open");
+        let mut ours = wal.store(GroupId(1));
+        let mut theirs = wal.store(GroupId(2));
+        // 3,000 entries of 3 KiB each, turn about with the other group's: 18 MiB in all
+        for chunk in 0..30u64 {
+            let mine = (0..100)
+                .map(|at| normal(chunk * 100 + at + 1, 3_000 + (at as usize % 7)))
+                .collect();
+            append_durably(&mut ours, mine).await;
+            let other = (0..100)
+                .map(|at| normal(chunk * 100 + at + 1, 3_000))
+                .collect();
+            append_durably(&mut theirs, other).await;
+        }
+        // the log spans more than one segment
+        assert!(wal.segments().len() > 1, "{:?}", wal.segments());
+        // the whole log in one call, and a range from the middle
+        for (from, to) in [(1u64, 3_000u64), (1_234, 2_345)] {
+            let entries = ours
+                .try_get_log_entries(from..=to)
+                .await
+                .expect("failed to read");
+            assert_eq!(entries.len() as u64, to - from + 1);
+            for (at, entry) in entries.iter().enumerate() {
+                let index = from + at as u64;
+                assert_eq!(entry.log_id(), log_id(1, index));
+                let offset = (index - 1) % 100;
+                match &entry.payload {
+                    EntryPayload::Normal(command) => assert_eq!(
+                        command.payload,
+                        vec![index as u8; 3_000 + (offset as usize % 7)],
+                        "entry {index}"
+                    ),
+                    other => panic!("not a normal entry: {other:?}"),
+                }
+            }
+        }
+        wal.close().await.expect("failed to close");
+    });
+}
+
+/// How long a lagging member's log takes to read back from interleaved segments, under load
+///
+/// An experiment rather than a check, run by hand with `--ignored --nocapture`: twelve groups
+/// append turn about, the cache is too small to hold any of it, and one group's whole log is
+/// read back the way openraft feeds a lagging member, three hundred entries a call, while
+/// another task keeps the executor busy the way a shard serving clients does.
+#[test]
+#[ignore]
+fn experiment_uncached_log_read_rate() {
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        use openraft::storage::RaftLogReader as _;
+        let dir = tempfile::tempdir_in(concat!(env!("CARGO_MANIFEST_DIR"), "/../target")).expect("a temp dir");
+        let wal = ShardWal::open(&dir.path().join("wal"), 64 << 20, 2048)
+            .await
+            .expect("failed to open");
+        let groups: Vec<GroupId> = (1..=12).map(GroupId).collect();
+        let mut stores: Vec<GroupStore> = groups.iter().map(|group| wal.store(*group)).collect();
+        let per_group = 6_000u64;
+        for chunk in 0..(per_group / 100) {
+            for store in &mut stores {
+                let entries = (0..100)
+                    .map(|at| normal(chunk * 100 + at + 1, 2_000))
+                    .collect();
+                append_durably(store, entries).await;
+            }
+        }
+        // a competing task that yields often, as a busy shard's does
+        let busy = Rc::new(std::cell::Cell::new(true));
+        let spinning = busy.clone();
+        let spinner = glommio::spawn_local(async move {
+            while spinning.get() {
+                let until = std::time::Instant::now() + Duration::from_micros(200);
+                while std::time::Instant::now() < until {}
+                // give every other task on the executor its turn
+                let mut yielded = false;
+                futures::future::poll_fn(|cx| {
+                    if yielded {
+                        return std::task::Poll::Ready(());
+                    }
+                    yielded = true;
+                    cx.waker().wake_by_ref();
+                    std::task::Poll::Pending
+                })
+                .await;
+            }
+        });
+        let started = std::time::Instant::now();
+        let mut next = 1u64;
+        while next <= per_group {
+            let entries = stores[0]
+                .try_get_log_entries(next..(next + 300).min(per_group + 1))
+                .await
+                .expect("failed to read");
+            next += entries.len() as u64;
+        }
+        let elapsed = started.elapsed();
+        busy.set(false);
+        spinner.await;
+        println!(
+            "read {per_group} uncached entries in {elapsed:?}: {:.0} entries/s",
+            per_group as f64 / elapsed.as_secs_f64()
+        );
+        wal.close().await.expect("failed to close");
+    });
+}
