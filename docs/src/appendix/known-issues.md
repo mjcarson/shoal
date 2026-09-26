@@ -445,6 +445,16 @@ The first suite run after [#155](resolved/restore-retries-unreachable.md) failed
 six more after the disk-full rerun on the lab) and passed in the next full suite run. That run's log kept only the summary line, so the failure's message was not
 captured. The test waits out a 25 s isolation with a 20 s phase deadline and a 5 s retry pause, and
 the margins are what a loaded host erodes.
+While proving [#170](resolved/uncached-log-reads.md), `migration_resumes_after_each_phase_failure`
+was run eight times on its own on the fixed tree: 2 of 8 failed. One failure was the test's
+`"no member of the target is up to take the lead"`, and one was openraft's own debug assertion in
+the test process's node, `Some(log_id) <= committed` at `log_state_reader.rs:25`: a member was
+handed a log id at an index it had already committed, under a different leader. Because #170
+changed how a leader reads its log, the same loop was run on `48dfad8`, the tree before it. The
+assertion fired there on the first run, and 2 of the 3 runs taken failed. So it predates #170,
+and it is the first time this item has a message from inside openraft rather than a deadline.
+The assertion is the one [Resolved #109](resolved/volatile-majority-loss.md) met for a volatile
+log. Whether this test's durable groups can reach it the same way is not established.
 The `shoal-core` change for [#148](resolved/stale-intent-log-tail.md) was followed by one failure
 in the first four runs of `shoal/tests/persistent_unsorted_table.rs` at six threads, whose name the
 run did not keep, and none in the next nine.

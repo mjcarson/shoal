@@ -710,3 +710,73 @@ Every acknowledged insert was read back through every member, kill-all included.
 active afterwards, restarted only by its faults, and none held an empty archive after the kill-all's
 `SIGKILL`s. The seconds at zero are section 6's: a silent partition's and a pause's first seconds,
 and kill-all's elections.
+
+## 8. An unplaced member coordinates
+
+The item section 7 left open: [#169](../appendix/resolved/unplaced-member-forwards.md), a member
+the placement does not name refusing every query `NotInitialized`. It cost 63,012 refusals in two
+seconds as a rebuilt hyperion started. It was fixed in the tree with a fixture test first, then
+proved here with the same scenario. That scenario found three more defects,
+[#170](../appendix/resolved/uncached-log-reads.md) to
+[#172](../appendix/resolved/identity-refusal-redials.md). Every run below was on a cluster destroyed,
+bootstrapped on the build under test and loaded from the csv minutes before, so every group still
+held the load in its log. The records are under `target/lab/r169/`.
+
+### Rebuilding a node under load, again
+
+**How.** `target/lab/rebuild-exp.sh`, as in section 7: the mixed bench (`get:40,update:45,insert:15`)
+through all three members for 900 s, with `cluster rebuild hyperion --yes` 25 s in. Afterwards every
+acknowledged insert is read back through each member alone at `One`, and the csv is verified through
+each member alone (`target/lab/r169/verify-all.sh`).
+
+| | Run 1, #169 fixed | Run 2, #170 to #172 fixed too |
+| --- | --- | --- |
+| Wire version | 4, the bootstrap's (section 7 activated 6) | 6 |
+| Hyperion rejoined as a new identity after | 27 s | 22 s |
+| `NotInitialized` over 900 s | **0** | **0** |
+| Other failures | 1,302 `NotLeader`/`Unavailable` in the stop's first 5 s, 768 dropped streams as hyperion went down | 1,236 in the stop's 4 s, one set's activation (102 `NotLeader`), 768 dropped streams |
+| Plan | `Completed`, 17 moved and **1 failed**, never retried | `Completed`, 18 moved; one failed and its retry moved it |
+| Whole rebuild | 1,319 s | 1,275 s |
+| Acknowledged inserts, each member alone at `One` | 4,265,222, 0 lost | 4,413,157, 0 lost |
+| csv, each member alone at `One` | 0 missing, 0 different, every keyword partition equal | the same |
+| Hyperion's journal | 60,478 refused TLS handshakes in 12 minutes | see run 3 |
+
+**#169 is fixed:** not one refusal, where section 7 counted 63,012 in two seconds. The pipelined
+clients reconnect to hyperion's new process as soon as it listens, as before. They are now served
+through it, forwarded to the placed members until the first move names it.
+
+**What run 1 found.**
+
+- **A step that never caught up.** The sixth set, a `Movie` group titan led, sat in the move for the
+  whole 600 s window and failed. The group's log still held nearly a gigabyte of the load, and the
+  new copy was fed from it for eight minutes before a snapshot was cut. Reading that log turned
+  out to cost one I/O per entry, each waiting a reactor turn on a busy shard: 10 entries a second
+  in an experiment. That is [#170](../appendix/resolved/uncached-log-reads.md), fixed by reading a
+  run of entries in one span (1,221 a second in the same experiment). Run 2 shows it was not the
+  whole story (below).
+- **The failed step was published anyway.** The set's other group had activated, and a failed
+  group counted as activated, so the set was routed to hyperion while the `Movie` group's voters
+  still named the removed identity. The plan therefore never retried it, and `cluster rebuild` said
+  it had rebuilt the node. No data was lost, because the new copy was a learner that held every
+  row. But `cluster status` said "3 of 3 copies" for a group one failure from stopping. That is
+  [#171](../appendix/resolved/failed-group-publishes-its-set.md): a set with a failed group is no
+  longer published, its record ends, and the plan replans it.
+- **A redial storm.** Every member dialled the old identity at hyperion's address every 100 ms, and
+  each attempt was a TLS handshake that could only fail: 60,478 of them on a four-core host. That is
+  [#172](../appendix/resolved/identity-refusal-redials.md): a dial refused on the peer's identity now
+  waits out its backoff.
+
+**What run 2 showed.** #171 works as designed. The step that failed was replanned, the retry was fed
+a snapshot at once, and it caught up in 37 s. But the step still failed, and it failed in the
+**`learner`** phase: in 600 s the new copy never acknowledged a single append. That is not a slow
+read. A stall with nothing logged at `info` needs openraft's own tracing, which run 3 has.
+
+| Catch-up of each group, run 2 | Groups | Time |
+| --- | --- | --- |
+| Keyword groups, fed the log | 17 | 1 to 8 s |
+| `Movie` groups led by europa, fed a snapshot | 11 | 2 to 63 s |
+| `Movie` groups led by titan, fed a snapshot | 6 | 7 s, 10 s, 22 s, **109 s**, **184 s**, and one that failed at 600 s before its retry took 37 s |
+
+Every slow step was titan's, and each spent its time *before* the cut began. Once a cut started, it
+took about 10 s to cut, send and install. So what delays the snapshot is openraft's decision to ask
+for one.
