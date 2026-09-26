@@ -232,8 +232,20 @@ pub async fn connect_targets(
     addr: Option<&str>,
 ) -> color_eyre::Result<Vec<Arc<Shoal<TmdbClient>>>> {
     match (inventory, addr) {
+        // one member of a deployed cluster, as its admin: driving a single member is how a
+        // member the placement does not name is shown to coordinate (section 8 of the cluster
+        // testing chapter)
+        (Some(inventory), Some(addr)) => {
+            let deployment = Deployment::attach(inventory)?;
+            let client = deployment
+                .connect::<TmdbClient>(addr, Instant::now() + CONNECT_DEADLINE)
+                .await
+                .map_err(|error| eyre!("could not connect to {addr}: {error}"))?;
+            println!("connected to {addr}");
+            Ok(vec![client])
+        }
         // a deployed cluster, as its admin
-        (Some(inventory), _) => connect_deployment(inventory).await,
+        (Some(inventory), None) => connect_deployment(inventory).await,
         // one node, as nobody
         (None, Some(addr)) => {
             let client = Shoal::<TmdbClient>::new(addr)

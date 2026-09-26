@@ -149,12 +149,13 @@ fn parse_mix(raw: &str) -> Result<Mix, String> {
 
 /// Drive a timed mixed workload against a deployed cluster
 #[derive(Args, Debug, Clone)]
-#[command(group(ArgGroup::new("target").required(true).args(["inventory", "addr"])))]
+#[command(group(ArgGroup::new("target").required(true).args(["inventory", "addr"]).multiple(true)))]
 pub struct BenchArgs {
     /// The inventory of the deployed cluster to drive
     #[clap(long, short)]
     pub inventory: Option<PathBuf>,
-    /// A single node's client address, for a node started by hand
+    /// A single node's client address, for a node started by hand; with `--inventory`, the one
+    /// member of the deployment to drive, as its admin
     #[clap(long)]
     pub addr: Option<String>,
     /// The csv the cluster was loaded from, which the ids and keywords are chosen out of
