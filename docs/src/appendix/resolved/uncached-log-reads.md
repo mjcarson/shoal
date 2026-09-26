@@ -1,8 +1,13 @@
-# 170. A member fed from the log read one entry per I/O, and a move's catch-up never finished
+# 170. A member fed from the log read one entry per I/O
+
+> **Correction.** This page first said that these reads were why a move's catch-up failed on the
+> lab. They were not. That move waited minutes for its snapshot cut behind 180 queued compaction
+> jobs, which is [#174](snapshot-cut-queue.md), found once the move driver counted what it sent. The
+> slow reads below are real, and the experiment shows them, but they are not what failed the move.
 
 ## Symptom
 
-The rebuild of hyperion that proved [#169](unplaced-member-forwards.md)'s fix on the lab
+*As first reported, and attributed wrongly; see the correction above.* The rebuild of hyperion that proved [#169](unplaced-member-forwards.md)'s fix on the lab
 ([section 8](../../cluster-testing/correctness.md#8-an-unplaced-member-coordinates)) was taken on
 a cluster loaded from the csv minutes before. Five sets moved in about 10 s each. The sixth, a
 `Movie` group led by titan, sat in `CatchingUp` for the whole of the move's 600 s window and failed:
@@ -36,7 +41,7 @@ cost of a call is then 300 turns, not 300 reads.
 
 ## Evidence
 
-**Measured, then reproduced on the lab.** `experiment_uncached_log_read_rate`
+**Measured.** `experiment_uncached_log_read_rate`
 (`shoal-core/src/server/wal/tests.rs`, ignored, run by hand) appends 6,000 entries of 2 KB to
 each of twelve interleaved groups behind a cache too small to hold any of them. It then reads one
 group back 300 entries a call while a second task keeps the executor busy in 200 µs slices:
@@ -47,9 +52,9 @@ group back 300 entries a call while a second task keeps the executor busy in 200
 | After, one read per run of a segment | 6,000 | 4.9 s | 1,221 entries/s |
 
 The competing task is always runnable, which is harsher than a real shard. So the absolute figures
-are this test's own, but the ratio is the mechanism. On the lab the same reader fed a copy fewer
-than 110,000 entries in 480 s, while the keyword groups, whose logs were mostly cached, caught up
-52,000 to 58,000 entries in 3 to 4 s.
+are this test's own, but the ratio is the mechanism. The lab figure first given here, fewer than
+110,000 entries fed in 480 s, was not a read rate: [#174](snapshot-cut-queue.md) showed that the
+copy was fed one probe and then waited for a snapshot.
 
 ## The fix
 

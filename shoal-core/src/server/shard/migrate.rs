@@ -512,7 +512,7 @@ async fn catch_up<D: ShoalDatabase>(
         progress.stats.bytes = context.network.bytes_sent_to(context.group, context.to);
         // a destination that has not moved for a while is reported with what its appends came
         // to, which is the only account of a stall openraft gives nothing about at info
-        // ([Resolved #173](../../../../docs/src/appendix/resolved/stalled-move-catch-up.md))
+        // ([Resolved #174](../../../../docs/src/appendix/resolved/snapshot-cut-queue.md))
         if matched != last_matched {
             last_matched = matched;
             progressed = Instant::now();
@@ -523,7 +523,7 @@ async fn catch_up<D: ShoalDatabase>(
                 .last_error
                 .as_ref()
                 .map(|(error, at)| format!("{error} ({:?} ago)", at.elapsed()));
-            event!(Level::WARN, msg = "a move's destination has made no progress", op = %context.op, group = %context.group, to = %context.to, matched, last, stalled_secs = progressed.elapsed().as_secs(), sent = appends.sent, accepted = appends.matched, conflicts = appends.conflicts, failed = appends.failed, max_entries = appends.max_entries, last_prev = ?appends.last_prev, snapshot_bytes = progress.stats.bytes, last_error = ?last_error);
+            event!(Level::WARN, msg = "a move's destination has made no progress", op = %context.op, group = %context.group, to = %context.to, matched, last, stalled_secs = progressed.elapsed().as_secs(), sent = appends.sent, data = appends.data, accepted = appends.matched, conflicts = appends.conflicts, failed = appends.failed, max_entries = appends.max_entries, last_prev = ?appends.last_prev, last_acked = ?appends.last_acked, highest_acked = ?appends.highest_acked, snapshot_bytes = progress.stats.bytes, last_error = ?last_error);
         }
         if let Some(matched) = matched {
             // the destination's log position once it is caught up: everything it was fed, by

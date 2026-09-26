@@ -505,7 +505,7 @@ struct Shared {
     /// ([F45](../../../../docs/src/features/replica-migration.md))
     stream_bytes: RefCell<HashMap<(GroupId, ShardAddr), u64>>,
     /// What the appends to each member of each group came to, which a move that sees no
-    /// progress reports ([Resolved #173](../../../../docs/src/appendix/resolved/stalled-move-catch-up.md))
+    /// progress reports ([Resolved #174](../../../../docs/src/appendix/resolved/snapshot-cut-queue.md))
     appends: RefCell<HashMap<(GroupId, ShardAddr), AppendStats>>,
     /// The byte budget every stream this shard sends draws on
     /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))
@@ -621,6 +621,7 @@ impl ShardNetwork {
     /// * `target` - The member
     /// * `entries` - How many entries it carried
     /// * `prev` - The index it was sent after, if any
+    /// * `last` - The index of its last entry, if it carried any
     /// * `outcome` - What the member answered, or why nothing usable came back
     fn note_append(
         &self,
@@ -628,17 +629,27 @@ impl ShardNetwork {
         target: ShardAddr,
         entries: u64,
         prev: Option<u64>,
+        last: Option<u64>,
         outcome: AppendOutcome,
     ) {
         let mut appends = self.shared.appends.borrow_mut();
         let stats = appends.entry((group, target)).or_default();
-        // what was sent
+        // what was sent, telling a batch of entries from a heartbeat
         stats.sent += 1;
         stats.max_entries = stats.max_entries.max(entries);
-        stats.last_prev = prev;
+        if entries > 0 {
+            stats.data += 1;
+            stats.last_prev = prev;
+        }
         // and what came of it
         match outcome {
-            AppendOutcome::Matched => stats.matched += 1,
+            AppendOutcome::Matched => {
+                stats.matched += 1;
+                if entries > 0 {
+                    stats.last_acked = last;
+                    stats.highest_acked = stats.highest_acked.max(last);
+                }
+            }
             AppendOutcome::Conflict => stats.conflicts += 1,
             AppendOutcome::Failed(error) => {
                 stats.failed += 1;
@@ -1259,7 +1270,7 @@ impl RaftNetworkFactory<DataConfig> for GroupNetwork {
 ///
 /// Kept per group and member by the shard network, and logged by a move whose destination
 /// makes no progress, so a stalled catch-up says whether its appends are sent, answered,
-/// conflicting or failing, and why ([Resolved #173](../../../../docs/src/appendix/resolved/stalled-move-catch-up.md)).
+/// conflicting or failing, and why ([Resolved #174](../../../../docs/src/appendix/resolved/snapshot-cut-queue.md)).
 #[derive(Debug, Clone, Default)]
 pub struct AppendStats {
     /// Appends sent
@@ -1272,8 +1283,14 @@ pub struct AppendStats {
     pub failed: u64,
     /// The most entries one append carried
     pub max_entries: u64,
-    /// The index the last append was sent after
+    /// Appends that carried entries, rather than a heartbeat's none
+    pub data: u64,
+    /// The index the last append carrying entries was sent after
     pub last_prev: Option<u64>,
+    /// The last index of the last append carrying entries the member accepted
+    pub last_acked: Option<u64>,
+    /// The highest index any accepted append carried
+    pub highest_acked: Option<u64>,
     /// The last failure, and when it happened
     pub last_error: Option<(String, Instant)>,
 }
@@ -1308,6 +1325,7 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
         // what this append is, for the counts a stalled move reports
         let entries = rpc.entries.len() as u64;
         let prev = rpc.prev_log_id.as_ref().map(|log_id| log_id.index);
+        let last = rpc.entries.last().map(|entry| entry.log_id.index);
         let network = self.peer.network.clone();
         let (group, target) = (self.group, self.peer.target);
         let result = self.send_append(rpc, option).await;
@@ -1317,7 +1335,7 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
             Ok(_) => AppendOutcome::Matched,
             Err(error) => AppendOutcome::Failed(error.to_string()),
         };
-        network.note_append(group, target, entries, prev, outcome);
+        network.note_append(group, target, entries, prev, last, outcome);
         result
     }
 

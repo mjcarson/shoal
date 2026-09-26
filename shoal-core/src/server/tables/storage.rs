@@ -326,6 +326,9 @@ pub enum CompactionJob {
         provenance: crate::server::replication::snapshot::SnapshotProvenance,
         /// The directory the file goes in
         dir: PathBuf,
+        /// When the shard asked for the cut, so the wait behind other jobs can be told
+        /// ([Resolved #174](../../../docs/src/appendix/resolved/snapshot-cut-queue.md))
+        requested: std::time::Instant,
     },
     /// Install a received snapshot of one group's tablets into the archives
     ///

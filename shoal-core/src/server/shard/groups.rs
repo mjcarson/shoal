@@ -3293,6 +3293,7 @@ where
             expired_before,
             provenance,
             dir,
+            requested: std::time::Instant::now(),
         })
         .await?;
         Ok(())
