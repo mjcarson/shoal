@@ -25,9 +25,11 @@ groups:
     storage:
       latency: /optane/shoal-tmdb
     wal_commit_delay: 3ms
+    lead_weight: 2
   v1000:
     storage:
       latency: /optane/shoal
+    wal_commit_delay: 2ms
 tracing: Info
 user: shoal
 admin: admin

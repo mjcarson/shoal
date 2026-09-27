@@ -304,6 +304,12 @@ struct Queue {
     dials: u64,
     /// Whether the owner has gone away
     closed: bool,
+    /// The connection's socket while the link is up, for asking the kernel about it
+    ///
+    /// Set once the connection is made and cleared as the carrying ends, with no await between
+    /// the socket's close and the clear, so nothing on this executor can read a descriptor
+    /// that has since been reused.
+    fd: Option<std::os::fd::RawFd>,
 }
 
 impl Queue {
@@ -374,6 +380,7 @@ impl Link {
             dropped_frames: 0,
             dials: 0,
             closed: false,
+            fd: None,
         }));
         let node = entry.node_or_nil();
         let target = entry.clone();
@@ -472,6 +479,17 @@ impl Link {
     #[must_use]
     pub fn node(&self) -> NodeId {
         self.node
+    }
+
+    /// Whether the kernel says the connection's peer is cut off, as opposed to slow
+    ///
+    /// Always false while the link is not up, or when the kernel cannot be asked
+    /// ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)).
+    #[must_use]
+    pub fn cut_off(&self) -> bool {
+        let fd = self.queue.borrow().fd;
+        fd.and_then(|fd| super::TcpSample::read(fd).ok())
+            .is_some_and(|sample| sample.cut_off())
     }
 
     /// What this link looks like from outside
@@ -703,6 +721,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
         {
             let mut q = queue.borrow_mut();
             q.state = LinkState::Up;
+            q.fd = Some(std::os::fd::AsRawFd::as_raw_fd(&stream));
             q.peer_incarnation = Some(peer_incarnation);
             q.negotiated = Some(negotiated);
             q.last_failure = None;
@@ -730,6 +749,8 @@ async fn run<F: Fn(LinkEvent) + 'static>(
         // whatever was still queued was never written
         let unsent = {
             let mut q = queue.borrow_mut();
+            // the socket closed as the carrying ended, and nothing has run since
+            q.fd = None;
             q.state = LinkState::Backoff;
             q.peer_incarnation = None;
             q.negotiated = None;

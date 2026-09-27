@@ -143,6 +143,52 @@ impl StatsModel {
                 bytes(stats.resident_bytes),
             ));
         }
+        // every member's storage pipeline: the WAL's syncs, the compactors' backlog, the copies
+        // behind their logs and the proposals unanswered, which is what tells a slow node's
+        // cause apart (O64)
+        lines.push(String::new());
+        lines.push(format!(
+            "{:<12} {:>10} {:>12} {:>9} {:>11} {:>10} {:>12} {:>18} {:>14}",
+            "storage", "syncs/s", "wal/s", "segments", "compacting", "apply lag", "pending",
+            "shard writes/s", "led by shard"
+        ));
+        for member in &self.view.members {
+            let Some(stats) = live(member) else {
+                lines.push(format!("{:<12} {}", short(&member.node.0.to_string()), "-"));
+                continue;
+            };
+            // the busiest shard against the quietest, which a node's one busy core shows as
+            let busiest = stats.shard_writes_per_sec.iter().copied().fold(0.0, f64::max);
+            let quietest = stats
+                .shard_writes_per_sec
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, f64::min);
+            let spread = if stats.shard_writes_per_sec.is_empty() {
+                "-".to_string()
+            } else {
+                format!("{}..{}", rate(quietest), rate(busiest))
+            };
+            // the groups each shard leads, in shard order
+            let led = stats
+                .shard_groups_led
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            lines.push(format!(
+                "{:<12} {:>10} {:>12} {:>9} {:>11} {:>10} {:>12} {:>18} {:>14}",
+                short(&member.node.0.to_string()),
+                rate(stats.wal_syncs_per_sec),
+                byte_rate(stats.wal_bytes_per_sec),
+                stats.wal_segments,
+                stats.compacting_segments,
+                stats.apply_lag,
+                bytes(stats.pending_bytes),
+                spread,
+                led,
+            ));
+        }
         // the busiest groups each member leads, which is where the cluster's writes go
         let hot: Vec<(String, &shoal::shared::protocol::stats::GroupRate)> = self
             .view

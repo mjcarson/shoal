@@ -283,6 +283,12 @@ pub struct ShardReplication {
     /// The shard's eviction budget
     #[serde(default)]
     pub memory_budget: u64,
+    /// WAL batches written and synced since the shard started, one `fdatasync` each
+    #[serde(default)]
+    pub wal_syncs: u64,
+    /// Bytes those batches held
+    #[serde(default)]
+    pub wal_bytes: u64,
 }
 
 /// What a shard's reads have cost and dropped since it started

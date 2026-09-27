@@ -73,6 +73,10 @@ pub struct MapMember {
     /// ([F46](../../../docs/src/features/capacity-rebalancing.md))
     #[serde(default)]
     pub phase: MemberPhase,
+    /// Its share of the groups' leads against the other voters'; zero means one
+    /// ([F58](../../../docs/src/features/weighted-leadership.md))
+    #[serde(default)]
+    pub lead_weight: u32,
 }
 
 impl MapMember {
@@ -149,6 +153,33 @@ impl GroupSpec {
             .first()
             .is_some_and(|primary| primary.node == node && primary.shard == self.mine)
     }
+}
+
+/// A voter's weighted rendezvous score for a group, the highest of which leads it
+///
+/// `-weight / ln(u)` for a `u` in (0, 1) drawn from the group and the node alone: the voter
+/// with the highest score wins, and each wins with probability proportional to its weight.
+/// The hash is SplitMix64's finaliser over the two identities, so every node computes the same
+/// score whatever build or process it runs.
+///
+/// # Arguments
+///
+/// * `group` - The group
+/// * `node` - The voter's node
+/// * `weight` - The voter's lead weight, at least one
+fn rendezvous_score(group: GroupId, node: NodeId, weight: u32) -> f64 {
+    // fold the node's sixteen bytes and the group into one word, then mix it
+    let bytes = node.0.as_bytes();
+    let high = u64::from_le_bytes(bytes[..8].try_into().expect("eight bytes"));
+    let low = u64::from_le_bytes(bytes[8..].try_into().expect("eight bytes"));
+    let mut mixed = group.0 ^ high.rotate_left(17) ^ low.rotate_left(41);
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^= mixed >> 31;
+    // the top 53 bits as a uniform in (0, 1), never zero or one
+    #[allow(clippy::cast_precision_loss)]
+    let uniform = ((mixed >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
+    -f64::from(weight) / uniform.ln()
 }
 
 /// The cluster as every shard holds it
@@ -295,6 +326,7 @@ impl TabletMap {
                         shards_failed: member.shards_failed.clone(),
                         quarantined: member.quarantined.clone(),
                         phase: member.phase,
+                        lead_weight: member.record.lead_weight,
                     },
                 )
             })
@@ -492,6 +524,40 @@ impl TabletMap {
     #[must_use]
     pub fn member(&self, node: NodeId) -> Option<&MapMember> {
         self.members.get(&node)
+    }
+
+    /// The voter a group's lead belongs with, by its members' lead weights
+    ///
+    /// With every voter at the same weight - a cluster that sets none - it is the placement
+    /// primary, which spreads leads evenly and is where [O63](../../../docs/src/appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary)
+    /// hands them back. Otherwise it is the up voter with the highest weighted rendezvous score
+    /// for the group, so each voter leads about its weight's share of the groups it is in, every
+    /// node reaches the same answer with nothing shared, and one voter going down moves only
+    /// the leads it held ([F58](../../../docs/src/features/weighted-leadership.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The group
+    #[must_use]
+    pub fn preferred_leader(&self, spec: &GroupSpec) -> Option<ShardAddr> {
+        // a voter's weight, one when it sets none or is not in the map
+        let weight = |voter: &ShardAddr| {
+            self.members
+                .get(&voter.node)
+                .map_or(1, |member| member.lead_weight.max(1))
+        };
+        let primary = spec.voters.first().copied()?;
+        // equal weights are the placement's own spread, and O63's behaviour unchanged
+        if spec.voters.iter().all(|voter| weight(voter) == weight(&primary)) {
+            return Some(primary);
+        }
+        // the up voter scoring highest; a down one cannot take a lead it is handed
+        spec.voters
+            .iter()
+            .filter(|voter| self.is_up(voter.node))
+            .map(|voter| (rendezvous_score(spec.id, voter.node, weight(voter)), *voter))
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, voter)| voter)
     }
 
     /// Where to dial a member and who to expect there
@@ -1205,6 +1271,7 @@ mod tests {
             physical: 0,
             incarnation,
             weight: 0,
+            lead_weight: 0,
             wire_min: 0,
             wire_max: 0,
             capabilities: 0,
@@ -1643,6 +1710,56 @@ mod tests {
         assert!((0..TABLET_COUNT).all(|tablet| map.replicas_of(tablet).len() == 2));
     }
 
+    /// Leads follow the voters' lead weights, and equal weights keep the placement primary
+    ///
+    /// Three nodes at a factor of three, so every node votes in every group. With no weights
+    /// every group's lead belongs with its primary, as O63 had it. At 2:1:1 the first node's
+    /// share of six thousand groups is about half and the others' about a quarter each, every
+    /// answer is the same when asked again, and a node that is down is never chosen
+    /// ([F58](../../../docs/src/features/weighted-leadership.md)).
+    #[test]
+    fn leads_follow_the_voters_lead_weights() {
+        let (mut map, nodes) = placed(&[2, 2, 2], 3);
+        for member in map.members.values_mut() {
+            member.health = MemberHealth::Up;
+        }
+        let spec = map
+            .replica_groups(nodes[0])
+            .into_iter()
+            .next()
+            .expect("a group");
+        assert_eq!(spec.voters.len(), 3);
+        // no weights: the primary, whatever the group
+        assert_eq!(map.preferred_leader(&spec), spec.voters.first().copied());
+        // 2:1:1
+        map.members.get_mut(&nodes[0]).expect("a member").lead_weight = 2;
+        for other in &nodes[1..] {
+            map.members.get_mut(other).expect("a member").lead_weight = 1;
+        }
+        let mut won = std::collections::HashMap::new();
+        for id in 0..6_000u64 {
+            let mut group = spec.clone();
+            group.id = GroupId(id.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+            let leader = map.preferred_leader(&group).expect("a leader");
+            // the same answer every time it is asked
+            assert_eq!(map.preferred_leader(&group), Some(leader));
+            *won.entry(leader.node).or_insert(0u64) += 1;
+        }
+        let share = |node: &NodeId| won.get(node).copied().unwrap_or(0);
+        assert!((2_700..=3_300).contains(&share(&nodes[0])), "{won:?}");
+        for other in &nodes[1..] {
+            assert!((1_200..=1_800).contains(&share(other)), "{won:?}");
+        }
+        // a voter that is down is never handed a lead
+        map.members.get_mut(&nodes[0]).expect("a member").health = MemberHealth::Down;
+        for id in 0..600u64 {
+            let mut group = spec.clone();
+            group.id = GroupId(id);
+            let leader = map.preferred_leader(&group).expect("a leader");
+            assert_ne!(leader.node, nodes[0]);
+        }
+    }
+
     /// A member admitted after initialization coordinates every tablet remotely, to the slot a
     /// placed node sends it to, and reads through it follow the holders' health (item 169)
     ///
@@ -1670,6 +1787,7 @@ mod tests {
                 shards_failed: Vec::new(),
                 quarantined: Vec::new(),
                 phase: super::MemberPhase::Member,
+                lead_weight: 0,
             },
         );
         assert!(!map.places(fourth));
@@ -1779,6 +1897,7 @@ mod tests {
                 shards_failed: Vec::new(),
                 quarantined: Vec::new(),
                 phase: super::MemberPhase::Member,
+                lead_weight: 0,
             },
         );
         assert!(!map.places(fourth));

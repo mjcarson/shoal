@@ -209,6 +209,8 @@ fn a_group_split_renders_the_roots_the_engine_claims() {
             }),
             // the WAL commit delay belongs to the device, so a group sets it (O61)
             wal_commit_delay: Some("3ms".to_string()),
+            // and so does a share of the leads, which is what the machine can commit (F58)
+            lead_weight: Some(2),
         },
     );
     inventory.nodes[0].group = Some("split".to_string());
@@ -238,9 +240,12 @@ fn a_group_split_renders_the_roots_the_engine_claims() {
         cluster.replication.wal_commit_delay.duration(),
         std::time::Duration::from_millis(3)
     );
+    // the group's lead weight reached the engine too
+    assert_eq!(cluster.lead_weight, Some(2));
     // a node of no group renders none, which the engine reads as its default of zero
     let b = inventory.node("b").expect("node b");
     assert_eq!(b.wal_commit_delay, None);
+    assert_eq!(b.lead_weight, None);
     // and a delay past the engine's 10ms is refused before anything is rendered
     let mut slow = inventory.clone();
     slow.groups.get_mut("split").expect("the group").wal_commit_delay = Some("20ms".to_string());

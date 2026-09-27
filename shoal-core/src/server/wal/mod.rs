@@ -291,6 +291,8 @@ struct WalInner {
     commit_delay: Duration,
     /// How many batches have been written and synced
     synced_batches: u64,
+    /// How many bytes those batches held
+    synced_bytes: u64,
     /// Every group's logical log
     groups: HashMap<GroupId, GroupLog>,
     /// The generation appends go to
@@ -1270,6 +1272,7 @@ fn complete_batch(inner: &Rc<RefCell<WalInner>>, batch: Batch) {
             }
         }
         guard.synced_batches += 1;
+        guard.synced_bytes += batch.bytes.len() as u64;
         // a stalled group's completions are held, a slowed group's wait their turn, and
         // everybody else's fire now
         for (group, callback) in batch.callbacks {
@@ -1386,6 +1389,7 @@ impl ShardWal {
             dir: dir.to_path_buf(),
             commit_delay: Duration::ZERO,
             synced_batches: 0,
+            synced_bytes: 0,
             groups: HashMap::new(),
             generation: 1,
             next_offset: 0,
@@ -1715,6 +1719,12 @@ impl ShardWal {
     #[must_use]
     pub fn synced_batches(&self) -> u64 {
         self.inner.borrow().synced_batches
+    }
+
+    /// How many bytes the synced batches held
+    #[must_use]
+    pub fn synced_bytes(&self) -> u64 {
+        self.inner.borrow().synced_bytes
     }
 
     /// Wait until every queued batch is durable

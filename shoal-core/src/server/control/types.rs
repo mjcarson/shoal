@@ -120,6 +120,12 @@ pub struct MemberRecord {
     /// change is a restart ([F46](../../../../docs/src/features/capacity-rebalancing.md)).
     #[serde(default)]
     pub weight: u32,
+    /// This node's share of the groups' leads, against the other voters'; zero means one
+    ///
+    /// Set by the node's own `cluster.lead_weight` and recorded when it observes itself
+    /// ([F58](../../../../docs/src/features/weighted-leadership.md)).
+    #[serde(default)]
+    pub lead_weight: u32,
     /// The oldest wire version this member reads; zero, from a record before F48, is the floor
     /// ([F48](../../../../docs/src/features/rolling-compatibility.md))
     #[serde(default)]
@@ -3601,6 +3607,7 @@ mod tests {
             physical: 0,
             incarnation: 1,
             weight: 0,
+            lead_weight: 0,
             wire_min: 0,
             wire_max: 0,
             capabilities: 0,

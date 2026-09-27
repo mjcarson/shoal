@@ -120,6 +120,7 @@
   - [F55. A rolling upgrade with `shoalctl cluster upgrade`](features/cluster-upgrade.md)
   - [F56. Rebuilding a node from its peers with `shoalctl cluster rebuild`](features/cluster-rebuild.md)
   - [F57. Rendering a deployed cluster's files again with `shoalctl cluster reconfigure`](features/cluster-reconfigure.md)
+  - [F58. Leads weighted by what each member can commit](features/weighted-leadership.md)
 
 # Direction
 

@@ -1431,6 +1431,10 @@ async fn cluster_server_child() {
             if let Some(weight) = staged.weight {
                 block = block.weight(Some(weight));
             }
+            // and the share of the leads (F58)
+            if let Some(lead_weight) = staged.lead_weight {
+                block = block.lead_weight(Some(lead_weight));
+            }
             if let Some(bytes) = staged.stream_bytes_per_sec {
                 block.migration.stream_bytes_per_sec = bytes;
             }
@@ -18664,6 +18668,54 @@ async fn a_returning_node_is_handed_back_its_groups() -> Result<(), FixtureError
         after >= before[1],
         "node one led {} groups before it crashed and only {after} a minute after it came back",
         before[1]
+    );
+    Ok(())
+}
+
+/// Leads follow the members' lead weights (F58)
+///
+/// Three nodes at a factor of three with lead weights 4:1:1: once the balancer has settled, the
+/// heavy node leads well over a third of the groups, where an even spread gives it a third, and
+/// every node still leads something. The shares are the weighted rendezvous over each group's
+/// voters, so they are about two thirds and a sixth each, give or take the groups' count
+/// ([F58](../../docs/src/features/weighted-leadership.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn leads_follow_the_members_lead_weights() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .primary_failover_after(Duration::from_secs(1))
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .lead_weight(0, 4)
+        .lead_weight(1, 1)
+        .lead_weight(2, 1)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    // write through every group so each has a log its voters are caught up on
+    let addr = cluster.node(0).endpoints.client.to_string();
+    for key in 14_100..14_160u64 {
+        write_note_eventually(&addr, key, "weighted", Duration::from_secs(20)).await?;
+    }
+    // the balancer hands a group a round per shard, after a settle, so give it a while
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let led = loop {
+        let led: Vec<usize> = (0..3)
+            .map(|node| groups_led(&mut cluster, node))
+            .collect::<Result<_, _>>()?;
+        let total: usize = led.iter().sum();
+        if (total > 0 && led[0] * 2 > total) || Instant::now() > deadline {
+            break led;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    eprintln!("groups led at 4:1:1: {led:?}");
+    let total: usize = led.iter().sum();
+    assert!(
+        led[0] * 2 > total,
+        "the node weighted four led {} of {total} groups: {led:?}",
+        led[0]
     );
     Ok(())
 }

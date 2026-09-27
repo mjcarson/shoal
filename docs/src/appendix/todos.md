@@ -759,7 +759,10 @@ one thread queue behind each other** (395 µs alone, 10.8 ms with sixty four lea
 once), which is the number Q2's shared physical WAL has to beat. Both are in the
 [decision record](../distributed/protocol.md#q1-and-q13-at-m1).
 
-#### Leadership is spread evenly, whatever each member can do
+#### ~~Leadership is spread evenly, whatever each member can do~~
+
+**Done as static weights in [F58](../features/weighted-leadership.md)**: a member's `lead_weight` decides its share of the leads by weighted rendezvous, and the placement's primaries are untouched. Weighing by measured commit latency is filed below as its own todo. What follows is the todo as it was filed.
+
 
 `shoal-core/src/server/shard/groups.rs`, `balance_leadership`. Since
 [O63](optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary) a group's lead
@@ -769,6 +772,16 @@ split. The planner already weighs members by `weight` for data ([F46](../feature
 choosing primaries by the same weight, or by measured commit latency, would put more leads where
 writes commit fastest. Not done because it changes the placement's primaries, which every group
 identity and every initialization reads, and deserves its own design.
+
+#### Lead weights from measured commit latency
+
+`shoal-core/src/server/replication/admission.rs` (`ProposalPermit::drop` knows each commit's time),
+`control/stats.rs`, `server/map.rs`. [F58](../features/weighted-leadership.md) weighs leads by a weight
+the operator sets. Deriving it instead from each member's measured commit latency would follow a
+host whose disk degrades. It needs the latency reported per member, a controller on the control
+leader that commits weights, and hysteresis, since a member's latency rises with the leads it is
+given. Not done until the lab shows static weights gain anything
+([round 12](../cluster-testing/performance.md#weighted-leadership)).
 
 #### ~~The inventory wizard has no field for `failover`~~
 

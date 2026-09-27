@@ -154,6 +154,10 @@ pub struct ClusterConf {
     /// The replication settings the inventory names for this node, if any
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replication: Option<ReplicationConf>,
+    /// This node's share of the groups' leads, if the inventory names one
+    /// ([F58](../../../docs/src/features/weighted-leadership.md))
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lead_weight: Option<u32>,
 }
 
 /// `cluster.replication`, only the keys an inventory can set
@@ -326,6 +330,8 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
                 .wal_commit_delay
                 .clone()
                 .map(|wal_commit_delay| ReplicationConf { wal_commit_delay }),
+            // the node's own or its group's share of the leads (F58)
+            lead_weight: node.lead_weight,
         },
     }
 }

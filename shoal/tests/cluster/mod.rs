@@ -179,6 +179,8 @@ pub struct ClusterBuilder {
     auto_remove_after_ms: Option<u64>,
     /// Each node's placement weight, by node index, where a test set one
     weights: Vec<(usize, u32)>,
+    /// Each node's lead weight, by node index, where a test set one
+    lead_weights: Vec<(usize, u32)>,
     /// Each node's stream budget, by node index: bytes per second and streams at a time
     stream_budgets: Vec<(usize, usize, u32)>,
     /// The disk reserve every node keeps, in bytes, if set
@@ -564,6 +566,17 @@ impl ClusterBuilder {
     /// * `weight` - Its weight
     pub fn weight(mut self, id: usize, weight: u32) -> Self {
         self.weights.push((id, weight));
+        self
+    }
+
+    /// Set one node's share of the groups' leads ([F58](../../../docs/src/features/weighted-leadership.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `lead_weight` - Its lead weight
+    pub fn lead_weight(mut self, id: usize, lead_weight: u32) -> Self {
+        self.lead_weights.push((id, lead_weight));
         self
     }
 
@@ -1043,6 +1056,7 @@ impl Cluster {
             retry_window_ms: None,
             auto_remove_after_ms: None,
             weights: Vec::new(),
+            lead_weights: Vec::new(),
             stream_budgets: Vec::new(),
             disk_reserve: None,
             moves_per_node: None,
@@ -2069,6 +2083,11 @@ fn build_membership_cluster(
             auto_remove_after_ms: builder.auto_remove_after_ms,
             weight: builder
                 .weights
+                .iter()
+                .find(|(node, _)| *node == id)
+                .map(|(_, weight)| *weight),
+            lead_weight: builder
+                .lead_weights
                 .iter()
                 .find(|(node, _)| *node == id)
                 .map(|(_, weight)| *weight),

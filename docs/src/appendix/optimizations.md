@@ -3081,6 +3081,20 @@ single hot group decides anything. The mode is still unexplained.
 The investigation also found [#158](resolved/runtime-waker-lists.md), and tried
 [O69](#o69-every-idle-moment-parks-an-executor).
 
+**Round 12: five more candidates ruled out, and the resource named.** About forty fresh loads with
+a rate every five seconds and each member's storage pipeline in `Stats`
+([cluster testing, round 12](../cluster-testing/performance.md#o64-in-round-12-what-the-mode-is-not)):
+the page cache, TRIM after `destroy`, the disks' flush latency before a load, one shard carrying
+more than its share, who leads, and how a node's leads fall on its shards made no difference. The spread, 36,000 to 48,000 rows a second,
+is set in a load's first ten seconds. A write-only load is paced by the Zen1 hosts' 970 EVOs, which
+flush their cache on every `fdatasync` (3 ms for one writer, about 900 synced writes a second for
+six). A 2 ms `wal_commit_delay` on those hosts made the slow mode rarer (1 of 8 loads under 42,000
+against 9 of 15), which is what a group commit with two equilibria would show. The mixed bench under it showed no
+latency cost and about 8% more throughput, so it is **applied to the lab's inventory** (a
+deployment setting, not a default). **Status:** the cause of the mode is still not established;
+the next step is a batch-size distribution per sync on the Zen1 WALs, to see the two equilibria
+directly.
+
 ### O65. Heartbeats to followers that just acknowledged replication
 
 | | |
@@ -3547,3 +3561,29 @@ the rest a poll each). On the lab, hyperion's storage delayed 50 ms again
 while each group's first wait ran out, and held at 107–253 ms for the rest of it, where it had
 been 1,022 ms throughout. Throughput was 50–79k operations a second, as before, and all 540,837
 acknowledged inserts were read back through each member.
+
+### O77. An abandoned proposal logs a warning when it applies
+
+| | |
+| --- | --- |
+| **Rank** | **done** — applied |
+| **Impact** | Observed — about 1,000 lines a second on titan during a load past what the cluster commits (192,332 in three minutes), each `ProgressResponder.complete_tx.send: is_ok: false` |
+| **Difficulty** | S |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | openraft's line is gone at the default levels. The proposer already answered the write `OutcomeUnknown` and counted it in `unknown_outcomes`, so nothing is lost. `RUST_LOG` brings it back |
+| **Benchmark** | none: a log volume, read from the journal (`journalctl -u shoal-tmdb \| grep -c WARN`) |
+
+Found by the [distributed cluster testing](../cluster-testing/correctness.md#13-round-12) chapter's
+#180 sweep, with the admission gate switched off on a lab build. openraft warns once for every
+entry whose proposer dropped the channel it would have been answered on. Shoal drops it for
+every write it stops waiting for: at `write_timeout`, when a silent partition's hop watch gives
+up ([#143](resolved/silent-partition-hops.md)), or when a leader falls quiet with the write
+already appended. A write piled up in openraft past its deadline is one line when it finally
+applies. Titan's storage shares its root device with the journal and `/var/log/syslog`, which
+is how openraft's debug tracing once filled it
+([round 8](../cluster-testing/correctness.md#8-an-unplaced-member-coordinates)).
+
+**Applied:** `openraft::raft::responder=error` joins the targets `server/trace.rs` holds down at
+any level that would show warnings, beside [O66](#o66-a-partitioned-peer-floods-the-log)'s and
+[O72](#o72-a-refused-snapshot-build-logs-four-lines-per-apply)'s.

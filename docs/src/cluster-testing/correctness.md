@@ -1213,3 +1213,57 @@ its receiver, and a test fails on any bare receive raced in the workspace
 ([Resolved #152](../appendix/resolved/kanal-receive-races.md)). The test that found it passed 36
 runs of 36 on the unfixed tree, which is the rate the item had, not evidence either way. The
 evidence is the reproduction of kanal's loss itself.
+
+### A first write queued past the memory
+
+[#180](../appendix/resolved/first-write-past-identity-memory.md) had stopped round 11's loader in
+three of six runs: a first write that waited in the server while its group forgot 4,096 later
+identities was refused `IdentityExpired`, which nothing retries. It is fixed. Such a write that
+reached the server within five seconds of its mint is refused `Shedding`, and the loader and
+`exec_with` send it again under a new identity. The fixture reproduces the refusal exactly and
+passes on the fix.
+
+The lab could not make it happen on this tree. Two builds of the node from one tree, the fix
+switched off in one, both with the admission gate switched off by a lab-only variable
+(`target/lab/r12/180/sweep.sh`), loaded whole at 8 × 4,096 in flight on fresh clusters:
+
+| Run | Build | Rows a second | Retried, all unknown outcomes | `IdentityExpired` |
+| --- | --- | --- | --- | --- |
+| 1 | without the fix | 6,170 | 2,225,257 | 0 |
+| 2 | with it | 9,895 | 1,293,249 | 0 |
+| 3 | with it | 6,325 | — | 0 |
+| 4 | without the fix | 4,245 | — | 0 |
+
+Without the gate, every write piles into openraft and waits out `write_timeout` as an unknown
+outcome, not an expiry: the queue that ages a write past the memory is the one in front of
+admission, and here the whole load drained through the one behind it. Round 11's gate-off runs
+were a different switch on an older tree. The sweep was stopped after four runs, since it could
+not tell the builds apart. It found one thing: [O77](../appendix/optimizations.md#o77-an-abandoned-proposal-logs-a-warning-when-it-applies),
+openraft's warning for every abandoned proposal, about a thousand lines a second on titan.
+
+### A silent partition's first second
+
+Round 11 left the first second and a half of a silent partition, while hops already sent waited
+for the silence to be judged ([#143](../appendix/resolved/silent-partition-hops.md#the-first-second-and-a-half-closed-on-the-kernels-word)).
+The replication lane now also asks the kernel. A peer that is only slow still acknowledges every
+segment, and one that is cut off leaves the sender's retransmission timer backing off. The
+partition test again, hyperion's peer ports dropped both ways for 20 s under the mixed bench, as
+a share of the second before the cut:
+
+| Second | Round 11 | Kernel verdict on one backoff | On two |
+| --- | --- | --- | --- |
+| cut | 36% | 68% | 76% |
+| +1 | 31% | 130%, hyperion's groups refused | 44% |
+| +2 | 169% | 145% | 191% |
+
+The one-backoff build failed the scenarios that must not trip it. Under 5% loss on hyperion's peer
+traffic it refused 125 to 323 writes in about half the seconds, where round 11 refused none; 100 ms
+of delay and 1% loss were clean. The two-backoff build refused 80 writes in 20 seconds of 5% loss.
+Every acknowledged insert was read back through every member after each run (629,239, 489,628
+and 690,658), and no node restarted.
+
+The one-way cuts were rerun on the one-backoff build: the second of the cut ran at 38% and 51% of
+the second before, where round 11's ran at 19% and 22%.
+
+**Verdict: pass.** No second of the partition runs below 44%, and nothing slow or lossy is taken
+for a cut.

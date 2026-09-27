@@ -30,7 +30,8 @@ runs the clients and the builds, and its numbers carry that noise.
 
 The cluster is `tmdb_cluster.yaml` at the repository root, deployed with
 [F51](../features/cluster-deployment.md)'s `cluster bootstrap`: replication factor 3, three control
-voters, six cores and 8 GiB per node with a dedicated control core, mutual TLS on the peer lanes,
+voters, six cores and 8 GiB per node with a dedicated control core, since round 12 europa at
+`lead_weight: 2` and the Zen1 hosts at a 2 ms `wal_commit_delay`, mutual TLS on the peer lanes,
 SCRAM for clients, and nodes running as the system user `shoal` under systemd with
 `Restart=on-failure`. The schema is [F54](../features/tmdb-dataset-deployment.md)'s: `Movie`
 (unsorted, by id) and `MovieByKeyword` (sorted, by keyword then title and id). The dataset is
@@ -85,6 +86,12 @@ added the rest:
 | `fault2.sh <dir> <run> <secs> <inject> <heal>` | `fault.sh` with the fault held for any length |
 | clock skew | `timedatectl set-ntp false; date -s "+30 sec"` on titan, and back |
 
+Round 12's scripts are under `target/lab/r12/`: `180/sweep.sh` (fresh clusters on two builds of
+the node, with the admission gate switched off by a lab-only environment variable that was never
+committed), `o64.sh` (fresh clusters loaded whole, the page cache dropped on every host first or
+not), `leadab.sh` (lead weights rolled onto one cluster with `cluster reconfigure`, then the mixed
+bench), and `132/loop.sh` (an ASan build of one test binary run until it aborts).
+
 The runs that compare builds use `abload.sh` (a fresh cluster, the csv, `verify`, the bench, every
 acknowledged insert back through each member), `fresh-sweep.sh` (the loader past what the cluster
 commits, on fresh clusters), `benchab.sh` and `benchab2.sh` (arms rolled onto one cluster in turn)
@@ -99,7 +106,12 @@ These scripts are scratch and are not committed. What they measured is on these 
 ## Reading a node's figures
 
 `cluster stats` prints, since round 11, each member's row memory against its eviction budget and
-its resident memory, and the cluster's ten busiest groups with the member leading each. A node
+its resident memory, and the cluster's ten busiest groups with the member leading each. Since
+round 12 it also prints each member's storage pipeline: WAL syncs and bytes a second, the WAL's
+segments, the sealed segments waiting on a compactor, entries committed and not yet applied, and
+bytes proposed and not yet answered, with each shard's applied writes a second (quietest to busiest)
+and the groups each shard leads. `load --series <secs>` prints the load's rate over each
+interval, so a load that changes pace partway through shows where. A node
 that judges its own links slow says so in its journal (`this node's links are slow, and it hands
 its leads on`), as does one under its append reserve (`under the append reserve`).
 

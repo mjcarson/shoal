@@ -96,7 +96,7 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ ~~**1,674 tests**~~ ~~**1,685 tests**~~ **1,691 tests**, eight ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ ~~**1,674 tests**~~ ~~**1,685 tests**~~ ~~**1,691 tests**~~ **1,715 tests**, eight ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
@@ -371,6 +371,14 @@ tests and reported no use-after-free, only gxhash reading past the end of a 13-b
 does on purpose within a page. So this stays open until it recurs on a tree with #133 fixed, or
 never does.
 
+**Looped under ASan in round 12, 169 runs, no abort.** The binary built with
+`-Zsanitizer=address -Zsanitizer-recover=address` on `f9254f5` (the tree with
+[Resolved #152](resolved/kanal-receive-races.md)) ran all fifteen tests 169 times at six threads
+on europa, beside lab loads (`target/lab/r12/132/loop.sh`). Every run reported exactly one error,
+at one address: gxhash's `get_partial_unsafe` reading past a short key. Nothing else, and no
+`tcache` abort. It has not recurred in any suite run since it was filed either, so it stays filed
+with that as its record.
+
 ### 142. Two fixture tests fail intermittently on an idle host
 
 `lost_response_retry_returns_original_result` stops at `group …'s checkpoint never reached 5:
@@ -465,6 +473,17 @@ handed when its wait for the next job lost a race against a retry's timer. A los
 WAL segment, and a held segment holds every group's checkpoint on its shard, which is the shape of
 the lost-response test's *"checkpoint never reached 5"*. Whether it was the cause is not
 established; round 12's suite runs record the rate on the fixed tree.
+The first full run of round 12 (`28f0385`, 1,715 tests at six threads) failed only
+`a_restore_rides_out_an_unreachable_member`, its second failure on record, and in the same shape
+as the first: one group left at `Pending` with no driver and no attempts, never driven again
+within 300 s, while the other two were `Done`. It passed alone straight after, and ten runs of it
+alone with twenty busy loops on the host all passed (`target/lab/r12/restore-loop.sh`). The record
+says something the deadline alone does not: the only path that leaves a group at its starting
+phase with no driver is a driver that lost its lead handing the group back for the new leader
+(`drive_group_restore`), and every shard polls for a group it leads at every tick. So either no
+member led the group for five minutes, or its leader's shard believed it was already driving a
+restore (`driving_restores` is one at a time per shard, and cleared only by `RestoreDone`). The
+next failure should be caught with `SHOAL_CHILD_LOG` to tell which.
 
 ---
 
