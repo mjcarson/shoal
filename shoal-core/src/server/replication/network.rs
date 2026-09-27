@@ -911,6 +911,28 @@ impl ShardNetwork {
             .filter(|silent| *silent >= after)
     }
 
+    /// How long a peer node has been silent on the replication lane, if it has been for `after`
+    ///
+    /// Silent either way: this node's own requests over its link unanswered for that long, or
+    /// nothing at all heard from the peer for that long. A peer never heard from and with nothing
+    /// outstanding is not silent ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The peer
+    /// * `after` - How long silence has to last to count
+    #[must_use]
+    pub fn node_silent_for(&self, node: NodeId, after: Duration) -> Option<Duration> {
+        // the link this node already holds, if any: asking must never dial one
+        let outbound = self
+            .shared
+            .links
+            .borrow()
+            .get(&node)
+            .and_then(|link| link.silent_for(after));
+        outbound.or_else(|| self.silent_for(node, after))
+    }
+
     /// Complete the RPC a response frame from a node answers
     ///
     /// # Arguments

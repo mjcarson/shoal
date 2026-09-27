@@ -825,10 +825,10 @@ async fn read_barrier<D: ShoalDatabase>(
             None => {
                 // a leader no quorum has answered for the hop silence cannot complete a
                 // heartbeat round either ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md))
-                if let Some(quiet) = Lease::quorum_quiet(raft, network.hop_silence()) {
+                if let Some(quiet) = Lease::quorum_quiet(raft, network) {
                     return Err(ResponseError::new(
                         ErrorCode::QuorumUnavailable,
-                        format!("{me} leads group {group} but no quorum has acknowledged it for {quiet:?}"),
+                        format!("{me} leads group {group} but no quorum of its members' nodes has been heard from for {quiet:?}"),
                     ));
                 }
                 // a lease that lapsed cannot complete a heartbeat round: answered by name rather

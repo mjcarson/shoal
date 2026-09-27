@@ -571,6 +571,42 @@ pub struct TabletUsage {
     pub partitions: Vec<u64>,
 }
 
+impl TabletUsage {
+    /// Nothing held on any tablet
+    #[must_use]
+    pub fn empty() -> Self {
+        TabletUsage {
+            bytes: vec![0u64; crate::server::ring::TABLET_COUNT],
+            partitions: vec![0u64; crate::server::ring::TABLET_COUNT],
+        }
+    }
+
+    /// Count a partition's entry onto its tablet
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition's key
+    /// * `entry` - Its entry
+    fn add(&mut self, key: u64, entry: &ArchiveEntry) {
+        let tablet = crate::server::ring::Ring::tablet_of(key);
+        self.bytes[tablet] += u64::try_from(entry.size).unwrap_or(u64::MAX);
+        self.partitions[tablet] += 1;
+    }
+
+    /// Take a partition's entry off its tablet
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition's key
+    /// * `entry` - The entry it was counted with
+    fn remove(&mut self, key: u64, entry: &ArchiveEntry) {
+        let tablet = crate::server::ring::Ring::tablet_of(key);
+        self.bytes[tablet] =
+            self.bytes[tablet].saturating_sub(u64::try_from(entry.size).unwrap_or(u64::MAX));
+        self.partitions[tablet] = self.partitions[tablet].saturating_sub(1);
+    }
+}
+
 /// A map of archives for the file system storage engine
 #[derive(Debug)]
 pub struct ArchiveMap {
@@ -579,7 +615,15 @@ pub struct ArchiveMap {
     /// The currently active archive id
     pub active: RefCell<Uuid>,
     /// A shard local map of what archives contain what data
+    ///
+    /// Changed only through `set_partition` and `remove_partition`, which keep `usage` in step.
     pub to_archive: RefCell<HashMap<u64, ArchiveEntry>>,
+    /// The bytes and partitions `to_archive` holds per tablet, kept as it changes
+    ///
+    /// A shard's replication report asks for it on every tick, and a pass over a map of millions
+    /// of partitions a few times a second was a shard core's work for nothing
+    /// ([O57](../../../../../../docs/src/appendix/optimizations.md#o57-tablet-bytes-are-rescanned-from-the-whole-archive-map-on-every-report)).
+    usage: RefCell<TabletUsage>,
     /// A map of loaded archives
     pub loaded_archives: RefCell<HashMap<Uuid, DmaFile>>,
     /// The format of every loaded archive, decided once when its handle was opened
@@ -629,9 +673,12 @@ impl ArchiveMap {
         let saved_bytes = std::fs::metadata(&map_path).map_or(0, |meta| meta.len());
         // start out with an empty hash map with room for 1k partitions
         let to_archive = RefCell::new(HashMap::with_capacity(1000));
+        // and what they hold per tablet, counted as they are loaded
+        let mut usage = TabletUsage::empty();
         // load all of this shards keys into this map
         for (key, entry) in serializable.to_archive {
             // add this entry from our map
+            usage.add(key, &entry);
             to_archive.borrow_mut().insert(key, entry);
         }
         // just use empty maps for now
@@ -639,6 +686,7 @@ impl ArchiveMap {
             table_name: table_name.to_owned(),
             active: RefCell::new(Uuid::new_v4()),
             to_archive,
+            usage: RefCell::new(usage),
             loaded_archives: RefCell::new(HashMap::with_capacity(1000)),
             formats: RefCell::new(HashMap::with_capacity(1000)),
             integrity: IntegrityCounters::default(),
@@ -711,14 +759,18 @@ impl ArchiveMap {
     /// * `id` - The key of the partition to set the location for
     /// * `entry` - The archive entry for this partitions data
     pub fn set_partition(&self, id: u64, entry: ArchiveEntry) {
-        // insert or update this partitions entry
-        self.to_archive.borrow_mut().insert(id, entry);
+        // insert or update this partitions entry, and move its tablet's figures by the change
+        let mut usage = self.usage.borrow_mut();
+        if let Some(old) = self.to_archive.borrow_mut().insert(id, entry) {
+            usage.remove(id, &old);
+        }
+        usage.add(id, &entry);
     }
 
     /// The bytes the archives hold per tablet, indexed by tablet
     ///
-    /// One pass over the map, so the figure can never drift from what the map names: a
-    /// partition replaced, removed or reloaded is counted as the map has it now
+    /// Kept by every change to the map, so the figure is what the map names now: a partition
+    /// replaced, removed or reloaded is counted as the map has it
     /// ([F46](../../../docs/src/features/capacity-rebalancing.md)).
     #[must_use]
     pub fn tablet_bytes(&self) -> Vec<u64> {
@@ -727,21 +779,22 @@ impl ArchiveMap {
 
     /// The bytes and partitions the archives hold per tablet, indexed by tablet
     ///
-    /// The same one pass as [`ArchiveMap::tablet_bytes`], counting each partition once onto
-    /// its tablet as well as its size, so a shard's report learns both for the price of the
-    /// walk it already paid for the bytes ([F52](../../../docs/src/features/cluster-stats.md)).
+    /// The counters `set_partition` and `remove_partition` keep, copied: no pass over the map
+    /// ([O57](../../../../../../docs/src/appendix/optimizations.md#o57-tablet-bytes-are-rescanned-from-the-whole-archive-map-on-every-report)).
     #[must_use]
     pub fn tablet_usage(&self) -> TabletUsage {
-        // one slot per tablet for each figure
-        let mut usage = TabletUsage {
-            bytes: vec![0u64; crate::server::ring::TABLET_COUNT],
-            partitions: vec![0u64; crate::server::ring::TABLET_COUNT],
-        };
+        self.usage.borrow().clone()
+    }
+
+    /// The bytes and partitions the archives hold per tablet, counted by one pass over the map
+    ///
+    /// What `tablet_usage` has to equal, for a test that the counters never drift.
+    #[must_use]
+    pub fn tablet_usage_by_pass(&self) -> TabletUsage {
+        let mut usage = TabletUsage::empty();
         // every partition the map names lands on the tablet its key hashes into
         for (key, entry) in self.to_archive.borrow().iter() {
-            let tablet = crate::server::ring::Ring::tablet_of(*key);
-            usage.bytes[tablet] += u64::try_from(entry.size).unwrap_or(u64::MAX);
-            usage.partitions[tablet] += 1;
+            usage.add(*key, entry);
         }
         usage
     }
@@ -755,8 +808,10 @@ impl ArchiveMap {
     ///
     /// * `id` - The key of the partition to forget
     pub fn remove_partition(&self, id: u64) {
-        // drop this partitions entry
-        self.to_archive.borrow_mut().remove(&id);
+        // drop this partitions entry, and its figures from its tablet's
+        if let Some(old) = self.to_archive.borrow_mut().remove(&id) {
+            self.usage.borrow_mut().remove(id, &old);
+        }
     }
 
     /// Get a handle to an archive that already exists

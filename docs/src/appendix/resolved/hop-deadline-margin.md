@@ -37,7 +37,7 @@ The load's failure itself was overload, which this item does not fix. The loader
 workers × 4096 = 32k writes outstanding, with each movie's keyword rows added to the queue, and a
 write that waited in that queue past `replication.write_timeout` (5s) could not commit in time.
 The server does not shed that load before a write times out, which is filed as
-[item 129](../known-issues.md#129-an-overloaded-group-answers-outcomeunknown-rather-than-shedding).
+[item 129](overload-sheds.md), since fixed.
 The loader now retries the codes that say to try again
 ([F54](../../features/tmdb-dataset-deployment.md)).
 
@@ -99,8 +99,8 @@ cannot be reached still reads as "the replication rpc timed out".
 
 ## Still open
 
-- [Item 129](../known-issues.md#129-an-overloaded-group-answers-outcomeunknown-rather-than-shedding):
-  an overloaded group lets a write wait out its deadline instead of refusing it as `Shedding`.
+- ~~[Item 129](overload-sheds.md): an overloaded group lets a write wait out its deadline instead
+  of refusing it as `Shedding`.~~ Fixed: a gate in front of openraft sheds it.
 
 ## Tests
 

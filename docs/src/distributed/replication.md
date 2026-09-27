@@ -63,7 +63,9 @@ The executing shard, the one hosting the tablet's slot on this node, turns the q
 `Command { table, tablet, request: RequestId { bundle, index }, payload }` - the same intent
 bytes a standalone node would log, built once by `build_intent` above both storage engines -
 and `propose_write` admits it: `pending_bytes` (proposed and unanswered bytes per group) and
-`volatile_log_bytes` shed before anything is recorded; an identity older than
+`volatile_log_bytes` shed before anything is recorded, and on the leader the group's gate lets a
+bounded number of writes into openraft and sheds one that waits past a quarter of its budget
+([Resolved #129](../appendix/resolved/overload-sheds.md)); an identity older than
 `replication.retry_window` or than the group's `expired_before` watermark is `IdentityExpired`
 before it is proposed, so the log never carries it. The command is proposed through this
 replica's handle when it leads and hops once to the leader over the replication lane when it

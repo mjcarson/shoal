@@ -2441,7 +2441,16 @@ where
         let state = slot.state.clone();
         glommio::spawn_local(async move {
             let answer = match head.kind {
-                ReplicateKind::AppendEntries => match postcard::from_bytes(&payload) {
+                ReplicateKind::AppendEntries => match postcard::from_bytes::<openraft::raft::AppendEntriesRequest<DataConfig>>(&payload) {
+                    // a node under the append reserve takes no more entries into a durable log:
+                    // the leader sees an append that failed and tries again later, the group
+                    // commits on its other voters, and this copy follows its leader's heartbeats
+                    // and serves what it holds until there is space again, rather than filling
+                    // the disk and stopping ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md))
+                    Ok(rpc) if disk_low.is_some() && !volatile && !rpc.entries.is_empty() => ReplicateReply::error(
+                        head.id,
+                        "append_entries: this node's storage is under the append reserve; it takes no entries until there is space".to_string(),
+                    ),
                     Ok(rpc) => match raft.append_entries(rpc).await {
                         Ok(response) => encode_reply(head.id, &response),
                         Err(error) => ReplicateReply::error(head.id, format!("append_entries: {error}")),
@@ -2527,10 +2536,10 @@ where
                 // read log id, or say who leads instead. A lapsed lease is answered by name
                 // rather than waited out, since its heartbeat round cannot complete
                 ReplicateKind::ReadBarrier => {
-                    let quiet = Lease::quorum_quiet(&raft, network.hop_silence());
+                    let quiet = Lease::quorum_quiet(&raft, &network);
                     if let Some(quiet) = quiet {
                         let answer = BarrierAnswer::NoQuorum(format!(
-                            "{me} leads the group but no quorum has acknowledged it for {quiet:?}"
+                            "{me} leads the group but no quorum of its members' nodes has been heard from for {quiet:?}"
                         ));
                         encode_reply(head.id, &answer)
                     } else if Lease::of(&raft, me) == Lease::Lapsed {
@@ -4407,7 +4416,7 @@ async fn propose_through<D: ShoalDatabase>(
             let metrics = metrics.borrow_watched();
             (
                 Lease::judge(&metrics, me, Lease::length(raft)),
-                Lease::quiet_of(&metrics, network.hop_silence()),
+                Lease::quiet_of(&metrics, network),
             )
         };
         let leads = matches!(lease, Lease::Leads | Lease::NotStarted);
@@ -4435,7 +4444,7 @@ async fn propose_through<D: ShoalDatabase>(
         // ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md))
         if let Some(quiet) = quiet {
             return ProposalOutcome::NotLeader(format!(
-                "{me} leads group {group} but no quorum has acknowledged it for {quiet:?}; the write was not appended"
+                "{me} leads group {group} but no quorum of its members' nodes has been heard from for {quiet:?}; the write was not appended"
             ));
         }
         // a leader lets the write into openraft only through the gate: past the bound it waits
@@ -4473,9 +4482,9 @@ async fn propose_through<D: ShoalDatabase>(
             {
                 Ok(written) => break Ok(written),
                 Err(_) => {
-                    if let Some(quiet) = Lease::quorum_quiet(raft, network.hop_silence()) {
+                    if let Some(quiet) = Lease::quorum_quiet(raft, network) {
                         return ProposalOutcome::Unknown(format!(
-                            "{me} took the write for group {group} and then no quorum acknowledged it for {quiet:?}; it may yet commit"
+                            "{me} took the write for group {group} and then no quorum of its members' nodes was heard from for {quiet:?}; it may yet commit"
                         ));
                     }
                 }

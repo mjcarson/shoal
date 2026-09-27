@@ -19,8 +19,8 @@ $L load -i tmdb_cluster.yaml --dataset ~/datasets/TMDB_movie_dataset_v11.csv
 
 Two csv rows do not parse and are skipped. Neither load needed a retry: the smaller in-flight gate
 F54 shipped with holds the queue under `write_timeout` on this lab
-([item 129](../appendix/known-issues.md#129-an-overloaded-group-answers-outcomeunknown-rather-than-shedding)
-still stands for a client that does not hold it).
+([item 129](../appendix/resolved/overload-sheds.md) stood for a client that does not hold it,
+until [section 11](#11-overload-silence-and-a-nearly-full-disk) fixed it).
 
 **Verdict: pass.**
 

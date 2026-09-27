@@ -73,6 +73,8 @@ struct GateInner {
     bound: usize,
     /// The most it ever lets in at once
     max: usize,
+    /// The fewest it ever lets in at once
+    least: usize,
     /// When the bound was last halved, so one slow round halves it once
     halved: Option<Instant>,
     /// How many are in openraft now
@@ -114,6 +116,7 @@ impl ProposalGate {
             inner: Rc::new(RefCell::new(GateInner {
                 bound: INITIAL_IN_FLIGHT.min(max),
                 max,
+                least: MIN_IN_FLIGHT,
                 halved: None,
                 in_flight: 0,
                 waiting: VecDeque::new(),
@@ -218,7 +221,7 @@ impl Drop for ProposalPermit {
                 .halved
                 .is_some_and(|halved| halved.elapsed() < self.slow_after);
             if !recently {
-                inner.bound = (inner.bound / 2).max(MIN_IN_FLIGHT.min(inner.max));
+                inner.bound = (inner.bound / 2).max(inner.least.min(inner.max));
                 inner.halved = Some(Instant::now());
                 event!(Level::DEBUG, msg = "a slow commit halved a group's gate", ?took, bound = inner.bound, in_flight = inner.in_flight, waiting = inner.waiting.len());
             }

@@ -18599,12 +18599,14 @@ fn groups_led_by(cluster: &mut Cluster, node: usize) -> Result<usize, FixtureErr
         .count())
 }
 
-/// A node under the append reserve leads nothing and goes on serving (item 156)
+/// A node under the append reserve leads nothing, takes no entries and goes on serving (item 156)
 ///
 /// A node whose disk filled stopped, which is right for a full disk and wrong for a nearly full
 /// one, since a stopped node serves no reads. Under `replication.append_reserve` a node now
-/// hands on every group it leads and refuses to take one back, while writes through it hop to
-/// the new leaders and reads through it are served. Over the reserve again, it leads again
+/// hands on every group it leads, refuses to take one back and refuses appends that carry
+/// entries, so its disk stops filling: the groups commit on their other voters, writes through
+/// it hop to them, and reads through it are served from what it holds. Over the reserve again,
+/// it is fed what it missed and holds what the others do
 /// ([Resolved #156](../../docs/src/appendix/resolved/wal-failure-stops-the-node.md)).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_node_under_the_append_reserve_leads_nothing_and_serves() -> Result<(), FixtureError> {
@@ -18616,7 +18618,9 @@ async fn a_node_under_the_append_reserve_leads_nothing_and_serves() -> Result<()
     cluster.wait_voters(0, 3)?;
     let (led_key, _group) = key_led_by(&mut cluster, "Note", 1, 14_500)?;
     let through_one = cluster.node(1).endpoints.client.to_string();
+    let through_zero = cluster.node(0).endpoints.client.to_string();
     write_note(&through_one, led_key, "before").await?;
+    wait_note(&through_one, led_key, Some("before"), Duration::from_secs(10)).await?;
     assert!(groups_led_by(&mut cluster, 1)? > 0, "node one leads nothing to hand on");
     // node one's storage reads 100 MiB free, under the 512 MiB default reserve
     let low = cluster.node_mut(1).command("FREE_BYTES 104857600")?;
@@ -18634,19 +18638,21 @@ async fn a_node_under_the_append_reserve_leads_nothing_and_serves() -> Result<()
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    // writes through it land, hopped to the new leaders, and reads through it are served
+    // writes through it land, hopped to leaders that commit on the other two voters
     let keys: Vec<u64> = (14_600..14_640).collect();
     for key in &keys {
         write_note(&through_one, *key, "under the reserve").await?;
     }
     for key in &keys {
-        assert_eq!(
-            read_note(&through_one, *key).await?.as_deref(),
-            Some("under the reserve"),
-            "a read through node one of {key}"
-        );
+        wait_note(&through_zero, *key, Some("under the reserve"), Duration::from_secs(10)).await?;
     }
-    // and no lead comes back to it while it stays under: past the handback's settle and
+    // and a read through it is served from what it held
+    assert_eq!(
+        read_note(&through_one, led_key).await?.as_deref(),
+        Some("before"),
+        "a read through node one under the reserve"
+    );
+    // no lead comes back to it while it stays under: past the handback's settle and
     // interval, which would hand a primary's groups back to it
     tokio::time::sleep(Duration::from_secs(20)).await;
     assert_eq!(
@@ -18654,12 +18660,14 @@ async fn a_node_under_the_append_reserve_leads_nothing_and_serves() -> Result<()
         0,
         "a lead was handed back to a node under the append reserve"
     );
-    write_note(&through_one, led_key, "still under").await?;
-    // over the reserve again it takes writes as ever
+    // over the reserve again it is fed what it missed, and takes writes as ever
     let back = cluster.node_mut(1).command("FREE_BYTES none")?;
     assert!(back.get("ok").is_some(), "{back}");
+    for key in &keys {
+        wait_note(&through_one, *key, Some("under the reserve"), Duration::from_secs(30)).await?;
+    }
     write_note(&through_one, led_key, "after").await?;
-    assert_eq!(read_note(&through_one, led_key).await?.as_deref(), Some("after"));
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
     Ok(())
 }
 
