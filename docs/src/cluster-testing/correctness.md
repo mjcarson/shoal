@@ -874,7 +874,7 @@ on the cluster run 8 left, rebuilt hyperion in 748 s, the fastest of the nine, w
 wait at 39.5 s. What still holds a cut is where the compactor's time goes on a Zen1 node:
 682 segment merges ran over five seconds in that run, and one archive pass ran three minutes.
 That is [O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench),
-left open with those figures.
+left open with those figures and applied in [section 10](#10-the-compactors-backlog-and-four-rebuilds).
 
 Across every run the bench saw no `NotInitialized`. Its other failures were the same in each: about
 1,200 to 1,600 `NotLeader` and `Unavailable` in the four or five seconds hyperion's stop handed its
@@ -994,8 +994,8 @@ hyperion 25 s in. The runs are under `target/lab/o74/`.
 | c3 | + a pass stops inside an archive at 16 MiB, 16 reads in flight | 18 moved | **272 s** | 3,950,753, 0 lost | 0 missing, 0 different |
 
 c3 is the fastest rebuild on record: section 8's rebuilds 8 and 9 took 979 s and 748 s. Its longest
-wait for a snapshot cut was 0.7 s, against 147.5 s in rebuild 8. The part of O74 still open is the
-cost of reclaiming space. With the backlog gone, the archive passes run at the rate the bench makes
+wait for a snapshot cut was 0.7 s, against 147.5 s in rebuild 8. What the change costs is the work of
+reclaiming space. With the backlog gone, the archive passes run at the rate the bench makes
 garbage, where before they were skipped behind it. That costs about 6% of throughput in steady state.
 
 **Verdict: pass.** No run lost an acknowledged write or a row.
