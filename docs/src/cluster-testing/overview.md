@@ -127,6 +127,8 @@ Shoal costs.
   spends its time, and the optimizations tried here with their outcomes.
 - [Findings](findings.md): every defect and optimization this testing found or measured, with
   what was done about each.
+- [What is left](todo.md): the open defects, optimizations still to apply or measure,
+  limitations the lab confirmed, and scenarios not yet run.
 
 ## Related
 

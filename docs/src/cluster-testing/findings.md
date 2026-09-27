@@ -5,6 +5,7 @@ it. A defect has an item number on [Known Issues](../appendix/known-issues.md) o
 [Resolved Issues](../appendix/resolved-issues.md). An optimization has an `O` number on
 [Optimizations](../appendix/optimizations.md). A finding about the lab or the deployment rather
 than Shoal says so.
+What is still open, across all three kinds, is collected on [What is left](todo.md).
 
 ## Defects
 

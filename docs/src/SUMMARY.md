@@ -159,6 +159,7 @@
   - [Correctness](cluster-testing/correctness.md)
   - [Performance](cluster-testing/performance.md)
   - [Findings](cluster-testing/findings.md)
+  - [What is left](cluster-testing/todo.md)
 
 # Appendix
 
