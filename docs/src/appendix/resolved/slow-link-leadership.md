@@ -34,13 +34,20 @@ node one still leads 4 of its 4 groups with its links slow
 ## The fix
 
 The control thread already pings every member once a second over the control lane, and records
-each round trip. Each peer's round trips are now also smoothed, and each peer keeps the lowest
-smoothed figure it has seen as its baseline, which creeps up with a time constant of nearly three
-hours (`LinkRtt` in `server/control/links.rs`). The node judges **its own** links slow when the
-round trip to every peer heard from in the last 10 s, at least two of them, is past 10 ms and past
-twenty times that peer's baseline. It judges them well again once they fall under 5 ms or ten times
-the baseline. Judged over every peer at once, one slow node sees all its peers slow while each of
-them sees only it, so only the slow node judges itself.
+each round trip. Each peer's figure is now the least of its last three round trips, and each peer
+keeps the lowest figure it has seen as its baseline, which creeps up with a time constant of
+nearly three hours (`LinkRtt` in `server/control/links.rs`). The node judges **its own** links
+slow once every peer heard from in the last 10 s, at least two of them, has read past 10 ms and
+past twenty times its baseline for 3 s running (`LinkJudge`). It judges them well again as soon as
+they read under 5 ms or ten times the baseline. Judged over every peer at once, one slow node sees
+all its peers slow while each of them sees only it, so only the slow node judges itself.
+
+**A partition's answers are not a slow link.** The first cut smoothed the round trips, and the
+workspace suite's `a_silently_cut_node_rejoins_without_elections` failed on it: a blackholed
+node's pings were answered all at once when it healed, with round trips of up to 1.26 s, and the
+node judged its links slow and moved its leads, which the test caught as two more elections. So
+the figure is the least of three samples, which the first fresh answer brings down; no answer
+counts for five after a ping went unanswered; and the judgement needs three seconds of it.
 
 The judgement is process-wide (`links::impaired()`). Every shard reads it on its tick
 (`check_disk` in `server/shard/groups.rs`) and, while it holds:
@@ -95,7 +102,8 @@ placement's twelve leads. All 501,081 acknowledged inserts were read back throug
 | Test | What breaks if this is reverted |
 | --- | --- |
 | `a_node_with_slow_links_hands_its_leads_on` (`shoal/tests/cluster_fixture.rs`) | A node whose links are slow keeps its leads, takes one back, or never leads again once they are well |
-| `impaired_only_when_every_peer_is_slow`, `the_floor_and_the_recovery_line_hold` (`server/control/links.rs`) | One slow peer, a single peer or a few milliseconds is judged impaired, or recovery comes before the round trips are well down |
+| `impaired_only_when_every_peer_is_slow`, `the_floor_and_the_recovery_line_hold`, `answers_after_a_miss_are_passed_over`, `a_burst_of_late_answers_is_undone_by_a_fresh_one` (`server/control/links.rs`) | One slow peer, a single peer, a few milliseconds, or a partition's held answers are judged impaired, or recovery comes before the round trips are well down |
+| `a_silently_cut_node_rejoins_without_elections` (`shoal/tests/cluster_fixture.rs`) | A healed node judges its links slow from its partition's held answers and moves its leads |
 | The 100 ms delay ([cluster testing, section 12](../../cluster-testing/correctness.md#12-scenarios-nobody-had-run)) | One node's slow links take the whole cluster to a third of its rate |
 
 ## Related

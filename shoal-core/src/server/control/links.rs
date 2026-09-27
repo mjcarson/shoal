@@ -6,9 +6,11 @@
 //! ([cluster testing, section 12](../../../../docs/src/cluster-testing/correctness.md#12-scenarios-nobody-had-run)).
 //! Leads are balanced by count, and nothing moved them off a member whose links were slow.
 //!
-//! The control thread pings every member once a second. Each peer's round trips are smoothed,
-//! and each peer keeps the lowest smoothed figure seen as its baseline, which creeps up slowly so
-//! a network that is simply slower is learnt rather than judged. The node is impaired when the
+//! The control thread pings every member once a second. Each peer's figure is the least of its
+//! last three round trips, so a run of late answers - a partition's or a pause's, all arriving
+//! at once - is undone by the first fresh one. Each peer keeps the lowest figure seen as its
+//! baseline, which creeps up slowly so a network that is simply slower is learnt rather than
+//! judged. The node is impaired when the
 //! round trip to every peer is past both a floor and a multiple of that peer's baseline. Judged
 //! from every peer at once, one slow node sees all its peers slow while each of them sees only
 //! it, so only the slow node judges itself impaired. With fewer than two peers the two ends of
@@ -24,8 +26,8 @@ use std::time::{Duration, Instant};
 /// Whether this process's links are judged impaired, which every shard reads
 static IMPAIRED: AtomicBool = AtomicBool::new(false);
 
-/// How much of each new round trip the smoothed figure takes
-const SMOOTHING: f64 = 0.3;
+/// How many of a peer's latest round trips its figure is the least of
+const WINDOW: usize = 3;
 
 /// How much of the gap to a higher smoothed figure a baseline closes each sample
 ///
@@ -48,15 +50,28 @@ const RECOVERED_FACTOR: f64 = 10.0;
 /// How long a peer's figure counts after its last answered ping
 const FRESH_FOR: Duration = Duration::from_secs(10);
 
+/// How many answered pings after a missed one are not counted
+///
+/// A partition's pings are answered all at once when it heals, each with the whole wait as its
+/// round trip. Counted, they judged the healed node's links slow and moved its leads for nothing.
+/// A link that is slow and not cut misses no ping, so nothing is lost by the wait.
+const SETTLE_AFTER_MISS: u32 = 5;
+
 /// One peer's round trips, as this node's pings have measured them
 #[derive(Debug, Clone)]
 pub struct LinkRtt {
-    /// The smoothed round trip, in microseconds
+    /// The latest round trips, in microseconds, oldest overwritten first
+    recent: [f64; WINDOW],
+    /// Where the next round trip goes in `recent`
+    next: usize,
+    /// The least of the latest round trips, in microseconds
     ewma_us: f64,
     /// The lowest smoothed round trip seen, creeping up towards the current one
     baseline_us: f64,
     /// When the last answer arrived
     last: Instant,
+    /// How many more answers are passed over since a ping went unanswered
+    settle: u32,
 }
 
 impl LinkRtt {
@@ -71,9 +86,12 @@ impl LinkRtt {
         #[allow(clippy::cast_precision_loss)]
         let us = rtt.as_micros() as f64;
         LinkRtt {
+            recent: [us; WINDOW],
+            next: 0,
             ewma_us: us,
             baseline_us: us,
             last: Instant::now(),
+            settle: 0,
         }
     }
 
@@ -83,16 +101,28 @@ impl LinkRtt {
     ///
     /// * `rtt` - Its round trip
     pub fn observe(&mut self, rtt: Duration) {
+        self.last = Instant::now();
+        // an answer soon after a miss may be one a partition held: passed over
+        if self.settle > 0 {
+            self.settle -= 1;
+            return;
+        }
         #[allow(clippy::cast_precision_loss)]
         let us = rtt.as_micros() as f64;
-        // the smoothed figure, then the baseline under it
-        self.ewma_us += (us - self.ewma_us) * SMOOTHING;
+        // the least of the latest round trips, then the baseline under it
+        self.recent[self.next] = us;
+        self.next = (self.next + 1) % WINDOW;
+        self.ewma_us = self.recent.iter().copied().fold(f64::MAX, f64::min);
         if self.ewma_us < self.baseline_us {
             self.baseline_us = self.ewma_us;
         } else {
             self.baseline_us += (self.ewma_us - self.baseline_us) * BASELINE_CREEP;
         }
-        self.last = Instant::now();
+    }
+
+    /// Note a ping that got no answer: the next few answers are passed over
+    pub fn missed(&mut self) {
+        self.settle = SETTLE_AFTER_MISS;
     }
 
     /// Whether this peer's round trip is past the line for impaired, or for recovered
@@ -109,7 +139,7 @@ impl LinkRtt {
         self.ewma_us > floor.max(self.baseline_us * factor)
     }
 
-    /// The smoothed round trip, in microseconds
+    /// The least of the latest round trips, in microseconds
     #[must_use]
     pub fn ewma_us(&self) -> f64 {
         self.ewma_us
@@ -130,6 +160,53 @@ pub fn judge<'a>(peers: impl Iterator<Item = &'a LinkRtt>, impaired: bool) -> bo
         .filter(|peer| now.duration_since(peer.last) < FRESH_FOR)
         .collect();
     fresh.len() >= 2 && fresh.iter().all(|peer| peer.slow(impaired))
+}
+
+/// How long every peer has to read slow before the node judges its links impaired
+///
+/// A burst of answers a short cut or a pause held reads slow until the next fresh answer, a
+/// second at most; a slow link stays slow.
+const IMPAIRED_AFTER: Duration = Duration::from_secs(3);
+
+/// The judgement over time: impaired once every peer has read slow for [`IMPAIRED_AFTER`], and
+/// well again as soon as they read under the recovery line
+#[derive(Debug, Default)]
+pub struct LinkJudge {
+    /// Whether this node's links are judged impaired
+    impaired: bool,
+    /// Since when every peer has read slow, while they have
+    slow_since: Option<Instant>,
+}
+
+impl LinkJudge {
+    /// Judge again from every peer's figures, and say what changed
+    ///
+    /// Returns the new judgement when it changed.
+    ///
+    /// # Arguments
+    ///
+    /// * `peers` - Every peer's round trips
+    pub fn update<'a>(&mut self, peers: impl Iterator<Item = &'a LinkRtt>) -> Option<bool> {
+        let slow = judge(peers, self.impaired);
+        let now = Instant::now();
+        // how long they have read slow, or not at all
+        self.slow_since = if slow {
+            Some(self.slow_since.unwrap_or(now))
+        } else {
+            None
+        };
+        let judged = if self.impaired {
+            slow
+        } else {
+            self.slow_since
+                .is_some_and(|since| now.duration_since(since) >= IMPAIRED_AFTER)
+        };
+        if judged == self.impaired {
+            return None;
+        }
+        self.impaired = judged;
+        Some(judged)
+    }
 }
 
 /// Say whether this node's links are impaired, for every shard to read
@@ -182,6 +259,44 @@ mod tests {
         // a single peer cannot say which end is slow
         let single = [peer(lan, slow)];
         assert!(!judge(single.iter(), false));
+    }
+
+    /// The answers a partition held, arriving together at its heal, are passed over
+    #[test]
+    fn answers_after_a_miss_are_passed_over() {
+        let lan = Duration::from_micros(120);
+        let mut peers = [peer(lan, lan), peer(lan, lan)];
+        // both peers missed pings, then answered the held ones with seconds of round trip
+        for link in &mut peers {
+            link.missed();
+            for held in 1..=SETTLE_AFTER_MISS {
+                link.observe(Duration::from_secs(u64::from(held)));
+            }
+        }
+        assert!(!judge(peers.iter(), false));
+        // and a slow link that goes on after the settle is judged as ever
+        for link in &mut peers {
+            for _ in 0..10 {
+                link.observe(Duration::from_millis(100));
+            }
+        }
+        assert!(judge(peers.iter(), false));
+    }
+
+    /// A burst of late answers with no miss before it, a short cut's or a pause's, is undone
+    /// by the first fresh answer
+    #[test]
+    fn a_burst_of_late_answers_is_undone_by_a_fresh_one() {
+        let lan = Duration::from_micros(120);
+        let mut peers = [peer(lan, lan), peer(lan, lan)];
+        for link in &mut peers {
+            // three answers held three, two and one seconds, then a fresh one
+            for held in [3, 2, 1] {
+                link.observe(Duration::from_secs(held));
+            }
+            link.observe(lan);
+        }
+        assert!(!judge(peers.iter(), false));
     }
 
     /// A few milliseconds is never impaired however fast the baseline, and recovery needs the

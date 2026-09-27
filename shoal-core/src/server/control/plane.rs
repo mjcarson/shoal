@@ -1101,6 +1101,8 @@ struct Core {
     reachability: BTreeMap<NodeId, Reachability>,
     /// Every peer's smoothed round trips, which judge whether this node's own links are slow
     link_rtts: BTreeMap<NodeId, super::links::LinkRtt>,
+    /// The judgement of this node's own links over time
+    link_judge: super::links::LinkJudge,
     /// The shard health last proposed, so a change is proposed once
     reported_shards: Vec<u16>,
     /// The quarantined copies across this node's shards, as they last reported
@@ -1676,6 +1678,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         report_seq: 0,
         reachability: BTreeMap::new(),
         link_rtts: BTreeMap::new(),
+        link_judge: super::links::LinkJudge::default(),
         reported_shards: Vec::new(),
         quarantined: Vec::new(),
         reported_quarantine: Vec::new(),
@@ -3553,12 +3556,17 @@ impl Core {
                     }
                 }
             }
-            Err(()) => entry.misses = entry.misses.saturating_add(1),
+            Err(()) => {
+                entry.misses = entry.misses.saturating_add(1);
+                // the answers a partition held are not counted when it heals
+                if let Some(link) = self.link_rtts.get_mut(&node) {
+                    link.missed();
+                }
+            }
         }
-        // every peer slow at once is this node's links: its leads are handed on while it lasts
-        let was = super::links::impaired();
-        let now = super::links::judge(self.link_rtts.values(), was);
-        if now != was {
+        // every peer slow at once, for a while, is this node's links: its leads are handed on
+        // while it lasts
+        if let Some(now) = self.link_judge.update(self.link_rtts.values()) {
             super::links::set_impaired(now);
             let rtts: Vec<u64> = self
                 .link_rtts
