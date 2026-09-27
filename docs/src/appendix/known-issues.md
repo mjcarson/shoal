@@ -473,6 +473,12 @@ Two failures in those runs were not this item and were fixed: `mixed_versions_ex
 raced its activation against a member report (on [Resolved #155](resolved/restore-retry.md)), and
 `an_unreadable_partition_stalls_one_copy_and_repairs_it` did not retry a write the stalled copy
 refused retriably.
+The full run for [Resolved #176](resolved/unreadable-voter-log.md) at six threads passed 127 of 130:
+`local_rehome_recovers_after_each_crash_point` (*"No such file or directory"* from a child again),
+`scheduled_scrub_quarantines_without_an_operator` (its quarantine never committed in time), and
+`a_move_asked_again_rebuilds_its_learner_from_nothing`, which is the test's own race and not this
+item: its first move ended `Moved` before the test cut the spare's links, so the failure it waits
+for never came. All three passed alone straight after.
 
 ### 152. `a_compaction_that_meets_an_unreadable_archive_is_tried_again` fails intermittently
 
