@@ -649,6 +649,7 @@ mod tests {
             bytes: 1000,
             core_dead: None,
             stalled: false,
+            floor: None,
             term: 1,
             partitions: 10,
             writes: WriteCounters {

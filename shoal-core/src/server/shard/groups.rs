@@ -59,7 +59,8 @@ use crate::server::stage_profile::{StageDurability, StageOp, Stamp};
 use crate::server::tables::storage::fs::TabletUsage;
 use crate::server::tables::ApplyStep;
 use crate::server::wal::{
-    Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, ShardWal,
+    Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, ShardWal, Vote,
+    WalLogId,
 };
 use crate::server::ServerError;
 use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
@@ -242,6 +243,172 @@ async fn mark_held_volatile(wal_dir: &Path, group: GroupId) -> std::io::Result<(
     crate::server::wal::write_atomic(&dir, &group.0.to_string(), Vec::new()).await
 }
 
+/// The directory under a shard's WAL where a durable copy whose log was lost keeps its floor
+const FLOOR_DIR: &str = "floor";
+
+/// What a durable copy whose log was lost remembers of it, until it is fed past it again
+///
+/// A voter's log is part of every quorum it acknowledged in, so an emptied voter that grants
+/// its vote to a candidate lacking what it held can elect a leader missing committed entries,
+/// which is how [#109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md) lost
+/// them on a volatile group. The floor is the last log id the copy knew of; until its own log
+/// reaches it again the copy grants only to a candidate at or past it. The vote is the last one
+/// it granted, so it never votes twice in a term
+/// ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md)).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct VoteFloor {
+    /// The last log id the copy knew of when its log was lost
+    pub(super) floor: WalLogId,
+    /// The last vote the copy granted, if it knew one
+    pub(super) vote: Option<Vote>,
+}
+
+/// Every floor a durable copy on this shard is held to, by the markers under its WAL directory
+///
+/// # Arguments
+///
+/// * `wal_dir` - The shard's WAL directory
+fn scan_floors(wal_dir: &Path) -> HashMap<GroupId, VoteFloor> {
+    let mut floors = HashMap::new();
+    // every marker is named by its group and holds its floor; anything else is not one
+    if let Ok(entries) = std::fs::read_dir(wal_dir.join(FLOOR_DIR)) {
+        for entry in entries.flatten() {
+            let Some(group) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            // a marker that cannot be read is said by name; the copy then votes unguarded
+            match std::fs::read(entry.path())
+                .map_err(|error| error.to_string())
+                .and_then(|bytes| {
+                    serde_json::from_slice::<VoteFloor>(&bytes).map_err(|error| error.to_string())
+                }) {
+                Ok(floor) => {
+                    floors.insert(GroupId(group), floor);
+                }
+                Err(error) => {
+                    event!(Level::ERROR, msg = "a copy's vote floor could not be read", group = %GroupId(group), error);
+                }
+            }
+        }
+    }
+    floors
+}
+
+/// Write a durable copy's floor, synced, before its log is forgotten
+///
+/// # Arguments
+///
+/// * `wal_dir` - The shard's WAL directory
+/// * `group` - The group
+/// * `floor` - The floor
+async fn write_floor(wal_dir: &Path, group: GroupId, floor: &VoteFloor) -> std::io::Result<()> {
+    let dir = wal_dir.join(FLOOR_DIR);
+    std::fs::create_dir_all(&dir)?;
+    // the floor as json, written the way every marker under the WAL is
+    let bytes = serde_json::to_vec(floor).map_err(std::io::Error::other)?;
+    crate::server::wal::write_atomic(&dir, &group.0.to_string(), bytes).await
+}
+
+/// Remove a copy's floor once it has been fed past it
+///
+/// # Arguments
+///
+/// * `wal_dir` - The shard's WAL directory
+/// * `group` - The group
+fn remove_floor(wal_dir: &Path, group: GroupId) -> std::io::Result<()> {
+    match std::fs::remove_file(wal_dir.join(FLOOR_DIR).join(group.0.to_string())) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// Whether a durable copy held to a floor grants a vote to the candidate asking
+///
+/// A copy under no floor, or one whose own log reached its floor again, judges the candidate
+/// the way openraft does. One still below it grants only to a candidate whose last log id is at
+/// or past the floor, compared as openraft compares log ids: such a candidate holds at least
+/// what this copy held, so electing it loses nothing this copy acknowledged. There is no grace:
+/// what a durable copy acknowledged may be held nowhere else, so its group waits rather than
+/// lose it ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md)).
+///
+/// # Arguments
+///
+/// * `floor` - The floor this copy is held to, if any
+/// * `own_last_index` - The last log index this copy holds, if any
+/// * `candidate_last` - The candidate's last log id, if any
+#[must_use]
+pub(super) fn grants_above_floor(
+    floor: Option<&WalLogId>,
+    own_last_index: Option<u64>,
+    candidate_last: Option<&WalLogId>,
+) -> bool {
+    // no floor, or a log fed past it again
+    let Some(floor) = floor else {
+        return true;
+    };
+    if own_last_index.is_some_and(|index| index >= floor.index) {
+        return true;
+    }
+    // below it: only a candidate holding at least what this copy held
+    candidate_last.is_some_and(|candidate| candidate >= floor)
+}
+
+/// Forget a durable copy's log, holding it to a floor on its vote until it is fed past it
+///
+/// The floor is written, synced, before the log is forgotten, and the copy's last vote is
+/// staged again after it, so no crash between the steps leaves a copy that lost its log and
+/// votes unguarded, or one that can vote twice in a term
+/// ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md)).
+///
+/// # Arguments
+///
+/// * `replication` - The shard's replication state
+/// * `group` - The group
+/// * `checkpoint` - The copy's checkpoint, if it has one
+async fn forget_durable_log<D: ShoalDatabase>(
+    replication: &mut Replication<D>,
+    group: GroupId,
+    checkpoint: Option<&WalLogId>,
+) -> Result<(), ServerError> {
+    // the last log id the copy knew of: its log's, its checkpoint's, or a floor it had already
+    let mut floor = std::cmp::max(replication.wal.last_log_id_of(group), checkpoint.cloned());
+    let held = replication.floors.get(&group).cloned();
+    if let Some(held) = &held {
+        floor = std::cmp::max(floor, Some(held.floor.clone()));
+    }
+    // the vote the log holds is the newest; a floor's is from a loss before it
+    let vote = replication
+        .wal
+        .vote_of(group)
+        .or_else(|| held.and_then(|held| held.vote));
+    if let Some(floor) = floor {
+        let marker = VoteFloor { floor, vote: vote.clone() };
+        write_floor(&replication.wal_dir, group, &marker)
+            .await
+            .map_err(ServerError::IO)?;
+        event!(Level::WARN, msg = "a copy's log is forgotten; it grants no vote below its floor until it is fed past it", group = %group, floor = %marker.floor, vote = ?marker.vote);
+        replication.floors.insert(group, marker);
+    }
+    replication.integrity.log_lost += 1;
+    replication.volatile.forget(group);
+    replication
+        .wal
+        .forget(group)
+        .map_err(|error| ServerError::GlommioGeneric(format!("the log of group {group} could not be forgotten: {error}")))?;
+    // the vote survives the log, so the copy keeps the term it voted in
+    if let Some(vote) = &vote {
+        replication
+            .wal
+            .restore_vote(group, vote)
+            .map_err(|error| ServerError::GlommioGeneric(format!("the vote of group {group} could not be kept: {error}")))?;
+    }
+    Ok(())
+}
+
 /// Whether an empty volatile copy grants a vote to the candidate asking
 ///
 /// A volatile group's log lives in memory, so a member that restarts comes back with none. Two
@@ -356,6 +523,8 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) pending_installs: HashMap<GroupId, (PathBuf, SnapshotManifest)>,
     /// How many committed write replies to drop before answering clients again, for the fixture
     pub(super) drop_replies: u64,
+    /// Whether sealed segments are held back from the compactors, for the fixture
+    pub(super) hold_handoffs: bool,
     /// How many rebuilds of the groups there have been
     pub(super) epoch: u64,
     /// Deadline ticks since the last segment sweep
@@ -413,9 +582,18 @@ pub(super) struct Replication<D: ShoalDatabase> {
     /// Their logs are forgotten once they have, and a copy the map names again meanwhile waits
     /// for that ([Resolved #175](../../../../docs/src/appendix/resolved/stopped-group-log.md)).
     pub(super) stopping_groups: HashSet<GroupId>,
-    /// The learner copies whose log could not be read, forgotten and built empty once this run
-    /// ([Resolved #175](../../../../docs/src/appendix/resolved/stopped-group-log.md))
-    pub(super) reset_learners: HashSet<GroupId>,
+    /// The copies whose log could not be read, forgotten and built empty once this run
+    ///
+    /// A learner since [Resolved #175](../../../../docs/src/appendix/resolved/stopped-group-log.md),
+    /// and a durable voter under a floor on its vote since
+    /// [Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md).
+    pub(super) reset_copies: HashSet<GroupId>,
+    /// The floors the durable copies whose log was lost are held to, by group
+    ///
+    /// Read from the markers under the WAL when the shard starts, added to when a log is
+    /// forgotten, and cleared once a copy has applied past its floor
+    /// ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md)).
+    pub(super) floors: HashMap<GroupId, VoteFloor>,
     /// The group backups this shard is driving right now, by operation and group
     /// ([F49](../../../../docs/src/features/backup-and-recovery.md))
     pub(super) driving_backups: HashSet<(Uuid, GroupId)>,
@@ -524,6 +702,7 @@ where
             active_installs: HashMap::new(),
             pending_installs,
             drop_replies: 0,
+            hold_handoffs: false,
             epoch: 0,
             ticks: 0,
             isolated: false,
@@ -546,7 +725,8 @@ where
             driven_moves: HashMap::new(),
             retired,
             stopping_groups: HashSet::new(),
-            reset_learners: HashSet::new(),
+            reset_copies: HashSet::new(),
+            floors: scan_floors(&dir),
             driving_backups: HashSet::new(),
             driven_backups: HashMap::new(),
             driving_restores: HashSet::new(),
@@ -716,12 +896,37 @@ where
                 ),
                 None => (None, StoredMembership::default(), Vec::new()),
             };
+            // a durable log with a hole in it lost a segment: a replay over the hole applies
+            // the entries around it and not the ones in it. One wholly at or below the
+            // checkpoint holds nothing the archives lack, and is purged; one above it is a
+            // log this copy cannot trust, forgotten under a floor on its vote
+            // ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md))
+            if !store.is_volatile() {
+                if let Some((from, to)) = replication.wal.hole_of(spec.id) {
+                    match &checkpoint {
+                        Some(point) if point.index >= to => {
+                            event!(Level::WARN, msg = "a durable log has a hole below its checkpoint; purging through the checkpoint", group = %spec.id, from, to, checkpoint = point.index);
+                            replication.wal.stage_purge(spec.id, point.clone()).map_err(ServerError::IO)?;
+                        }
+                        _ => {
+                            event!(Level::ERROR, msg = "a durable log has a hole past its checkpoint; forgetting it, and its leader will feed it again", group = %spec.id, table = %table, from, to, checkpoint = checkpoint.as_ref().map(|point| point.index));
+                            forget_durable_log(replication, spec.id, checkpoint.as_ref()).await?;
+                        }
+                    }
+                }
+            }
             // a durable group whose checkpoint or archives say this shard held it, with no
             // log behind them, lost its WAL: what it acknowledged is gone, and the leader
             // feeds it again rather than stopping - said here, once, by name, since the
             // leader's side of a reversion is a library log line
-            // ([Resolved #99](../../../../docs/src/appendix/resolved/durable-log-reversion.md))
-            if !store.is_volatile() && replication.wal.last_log_id_of(spec.id).is_none() {
+            // ([Resolved #99](../../../../docs/src/appendix/resolved/durable-log-reversion.md)).
+            // A copy whose log this shard forgot is already held to a floor; one that lost its
+            // log before this run is held to its checkpoint, which is the most it can know
+            // ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md))
+            if !store.is_volatile()
+                && replication.wal.last_log_id_of(spec.id).is_none()
+                && !replication.floors.contains_key(&spec.id)
+            {
                 let held = match &checkpoint {
                     Some(point) => Some(format!("checkpoint {}", point.index)),
                     None if table_map.holds_any(table, &spec.tablets) => {
@@ -738,6 +943,16 @@ where
                         table = %table,
                         held,
                     );
+                    if let Some(point) = &checkpoint {
+                        let marker = VoteFloor {
+                            floor: point.clone(),
+                            vote: None,
+                        };
+                        write_floor(&replication.wal_dir, spec.id, &marker)
+                            .await
+                            .map_err(ServerError::IO)?;
+                        replication.floors.insert(spec.id, marker);
+                    }
                 }
             }
             if !seed.is_empty() {
@@ -1156,20 +1371,43 @@ where
             // a learner holds no vote and nothing it acknowledged counts toward a quorum, so one
             // whose log cannot be read is built again with none, once, and fed by its leader;
             // a copy whose log pointed into reclaimed segments killed its node at every start
-            // ([Resolved #175](../../../../docs/src/appendix/resolved/stopped-group-log.md))
+            // ([Resolved #175](../../../../docs/src/appendix/resolved/stopped-group-log.md)).
+            // A durable voter is built again the same way under a floor on its vote, so it
+            // cannot elect a leader missing what it acknowledged
+            // ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md))
             (Some(slot), Err(error))
-                if slot.spec.learner && !replication.reset_learners.contains(&group) =>
+                if (slot.spec.learner || !slot.store.is_volatile())
+                    && !replication.reset_copies.contains(&group) =>
             {
-                event!(Level::ERROR, msg = "a learner copy could not be built; forgetting its log and building it empty", group = %group, error);
-                replication.reset_learners.insert(group);
+                let learner = slot.spec.learner;
+                event!(Level::ERROR, msg = "a copy could not be built; forgetting its log and building it empty", group = %group, learner, error);
+                replication.reset_copies.insert(group);
                 // the writes that waited for the handle are refused, retriably, before it goes
                 let waiting = std::mem::take(&mut slot.waiting);
-                replication.groups.remove(&group);
-                replication.volatile.forget(group);
-                if let Err(error) = replication.wal.forget(group) {
-                    return Err(ServerError::GlommioGeneric(format!(
-                        "tablet group {group} could not be built, and its log could not be forgotten: {error}"
-                    )));
+                // what the first build took from the shard's memory goes back for the next: a
+                // quarantine still on disk, and a received snapshot not yet installed
+                if let Some(removed) = replication.groups.remove(&group) {
+                    let mut state = removed.state.borrow_mut();
+                    if let Some(quarantine) = state.quarantined.take() {
+                        replication.quarantines.insert(group, quarantine);
+                    }
+                    if let Some(install) = state.pending_install.take() {
+                        replication.pending_installs.insert(group, install);
+                    }
+                }
+                if learner {
+                    replication.volatile.forget(group);
+                    if let Err(error) = replication.wal.forget(group) {
+                        return Err(ServerError::GlommioGeneric(format!(
+                            "tablet group {group} could not be built, and its log could not be forgotten: {error}"
+                        )));
+                    }
+                } else {
+                    let checkpoint = replication
+                        .checkpoint
+                        .get(group)
+                        .and_then(|point| point.applied.clone());
+                    forget_durable_log(replication, group, checkpoint.as_ref()).await?;
                 }
                 for (meta, table, key, _) in waiting {
                     // truncation cannot happen: a tablet id is twelve bits
@@ -2150,6 +2388,12 @@ where
         // been up empty
         let volatile = slot.store.is_volatile();
         let restarted = slot.held_before;
+        // and the floor a durable copy whose log was lost is held to
+        // ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md))
+        let floor = replication
+            .floors
+            .get(&group)
+            .map(|floor| floor.floor.clone());
         let up_for = slot
             .up_since
             .map_or(Duration::ZERO, |since| since.elapsed());
@@ -2185,6 +2429,13 @@ where
                         let candidate_last = rpc.last_log_id.as_ref().map(|log_id| log_id.index);
                         if !grants_to_empty_candidate(volatile, restarted, own_last, candidate_last, up_for, grace) {
                             event!(Level::WARN, msg = "an empty volatile copy refused an empty candidate's vote", group = %group, candidate = %rpc.vote);
+                            let refused = openraft::raft::VoteResponse::<DataConfig>::new(own_vote, None, false);
+                            encode_reply(head.id, &refused)
+                        } else if !grants_above_floor(floor.as_ref(), own_last, rpc.last_log_id.as_ref()) {
+                            // a durable copy whose log was lost grants nothing below what it
+                            // held, so it cannot elect a leader missing what it acknowledged
+                            // ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md))
+                            event!(Level::WARN, msg = "a copy below its floor refused a candidate behind it", group = %group, candidate = %rpc.vote, floor = ?floor, candidate_last = ?rpc.last_log_id);
                             let refused = openraft::raft::VoteResponse::<DataConfig>::new(own_vote, None, false);
                             encode_reply(head.id, &refused)
                         } else {
@@ -2295,6 +2546,30 @@ where
         let Some(replication) = self.replication.as_mut() else {
             return;
         };
+        // a copy that applied past its floor holds what it lost again, and votes as any copy
+        // ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md))
+        let fed: Vec<GroupId> = replication
+            .floors
+            .iter()
+            .filter(|(group, floor)| {
+                replication
+                    .groups
+                    .get(group)
+                    .is_some_and(|slot| slot.state.borrow().applied_index() >= floor.floor.index)
+            })
+            .map(|(group, _)| *group)
+            .collect();
+        for group in fed {
+            match remove_floor(&replication.wal_dir, group) {
+                Ok(()) => {
+                    event!(Level::INFO, msg = "a copy was fed past its floor, and votes as any copy again", group = %group);
+                    replication.floors.remove(&group);
+                }
+                Err(error) => {
+                    event!(Level::WARN, msg = "a copy's floor could not be removed", group = %group, %error);
+                }
+            }
+        }
         // the handles to ask, taken out of the borrow first
         let handles: Vec<(GroupId, Raft<DataConfig, GroupMachine<D>>)> = replication
             .groups
@@ -2368,7 +2643,8 @@ where
                     .get(group)
                     .is_none_or(|slot| slot.state.borrow().applied_index() >= last.index)
             });
-            if !resolved {
+            // a hold keeps every sealed segment from the compactors, as a backlog would
+            if !resolved || replication.hold_handoffs {
                 break;
             }
             handoffs.push(segment);
@@ -2801,6 +3077,10 @@ where
                     bytes,
                     core_dead: slot.core_dead.clone(),
                     stalled: state.stalled.is_some(),
+                    floor: replication
+                        .floors
+                        .get(&slot.spec.id)
+                        .map(|floor| floor.floor.index),
                     term: metrics
                         .as_ref()
                         .map(|metrics| metrics.current_term)
@@ -3114,6 +3394,10 @@ where
             ReplicationVerb::DropReplies { n } => {
                 replication.drop_replies = n;
                 Ok(serde_json::json!({ "dropping": n }))
+            }
+            ReplicationVerb::HoldCompaction { hold } => {
+                replication.hold_handoffs = hold;
+                Ok(serde_json::json!({ "holding": hold }))
             }
             ReplicationVerb::Scrub { group } => {
                 // the scrub runs on a task: the loop has to apply the entry it proposes
@@ -4215,7 +4499,8 @@ fn peer_client(id: u64) -> Uuid {
 
 #[cfg(test)]
 mod tests {
-    use super::grants_to_empty_candidate;
+    use super::{grants_above_floor, grants_to_empty_candidate, WalLogId};
+    use crate::shared::identity::ShardAddr;
     use std::time::Duration;
 
     /// An empty volatile copy that lost its memory grants no vote to a candidate as empty
@@ -4315,6 +4600,35 @@ mod tests {
             grace * 2,
             grace
         ));
+    }
+
+    /// The rule of [Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md),
+    /// judged case by case: a copy under no floor grants as openraft would, one fed past its floor
+    /// grants, and one below it grants only to a candidate at or past the floor, compared by term
+    /// before index, with no grace.
+    #[test]
+    fn a_copy_below_its_floor_grants_only_to_a_candidate_past_it() {
+        use openraft::vote::RaftLeaderId as _;
+        let at = |term: u64, index: u64| -> WalLogId {
+            openraft::LogId::new(
+                crate::server::wal::LeaderId::new(term, ShardAddr::from(1)),
+                index,
+            )
+        };
+        let floor = at(3, 40);
+        // no floor: openraft judges
+        assert!(grants_above_floor(None, None, None));
+        // fed past the floor: openraft judges
+        assert!(grants_above_floor(Some(&floor), Some(40), None));
+        assert!(grants_above_floor(Some(&floor), Some(41), Some(&at(1, 2))));
+        // below it: an empty candidate, or one behind the floor, is refused
+        assert!(!grants_above_floor(Some(&floor), None, None));
+        assert!(!grants_above_floor(Some(&floor), Some(12), Some(&at(3, 39))));
+        // a candidate at a later index of an older term is behind it
+        assert!(!grants_above_floor(Some(&floor), None, Some(&at(2, 90))));
+        // a candidate at or past it holds what this copy held
+        assert!(grants_above_floor(Some(&floor), None, Some(&at(3, 40))));
+        assert!(grants_above_floor(Some(&floor), None, Some(&at(4, 10))));
     }
     /// The timers a group runs with are the ones derived from the base, not openraft's defaults (O65)
     ///

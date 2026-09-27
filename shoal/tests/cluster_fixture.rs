@@ -1978,6 +1978,20 @@ fn handle_command(
                     .collect::<Result<Vec<_>, _>>()
                     .map(serde_json::Value::Array)
             }),
+        // hand no sealed segment to the compactors, or hand them again
+        "HOLD_COMPACTION" | "RELEASE_COMPACTION" => pool
+            .replication_verb(
+                shoal::server::replication::ReplicationVerb::HoldCompaction {
+                    hold: verb == "HOLD_COMPACTION",
+                },
+            )
+            .map_err(|error| format!("{error:?}"))
+            .and_then(|answers| {
+                answers
+                    .into_iter()
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(serde_json::Value::Array)
+            }),
         // hold back a group's flush completions, or release them
         "STALL_WAL" | "RELEASE_WAL" => match parts
             .next()
@@ -11756,6 +11770,115 @@ async fn a_move_asked_again_rebuilds_its_learner_from_nothing() -> Result<(), Fi
     }
     for id in 0..4 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A voter whose log has a hole is built again empty, and is fed, rather than stopping its node (item 176)
+///
+/// Three voters with small segments and a checkpoint that stays behind. Node two is killed and
+/// one of its sealed segments from the middle of its log is deleted, so its index has a hole
+/// between entries it holds. Before the fix the group could not be built, the shard died, and
+/// the node failed the same way at every start. Now the copy is built again with no log, under a
+/// floor on its vote until it is fed past what it held, and every note reads back through it
+/// ([Resolved #176](../../docs/src/appendix/resolved/unreadable-voter-log.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_voter_whose_log_has_a_hole_is_fed_not_fatal() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .segment_bytes(64 * 1024)
+        .checkpoint_entries(1_000_000)
+        .retained_entries(1_000_000)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    // node two's compactor held back, so its checkpoint stays behind the sealed segments the way
+    // a compactor hundreds of jobs behind leaves it on the lab
+    cluster.node_mut(2).command("HOLD_COMPACTION")?;
+    // wide notes, enough to seal node two's segments several times over
+    let wide = "y".repeat(4096);
+    for key in 17_600..17_700u64 {
+        write_note_eventually(&addr0, key, &format!("{key}-{wide}"), Duration::from_secs(15))
+            .await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    let survivors = [cluster.node(0).pid, cluster.node(1).pid];
+    let wal_dir = cluster.dir(2).join("wal").join("Shard-0");
+    cluster.kill(2)?;
+    // the segments by generation, and one from the middle removed
+    let mut segments: Vec<std::path::PathBuf> = std::fs::read_dir(&wal_dir)
+        .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "wal"))
+        .collect();
+    segments.sort();
+    assert!(
+        segments.len() >= 4,
+        "node two sealed too few segments to leave a hole: {segments:?}"
+    );
+    let hole = segments[segments.len() / 2].clone();
+    std::fs::remove_file(&hole).map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    eprintln!("removed {} of {} segments: {segments:?}", hole.display(), segments.len());
+    cluster.restart(2, NodeKind::Server)?;
+    cluster.wait_joined(&[2])?;
+    // writes keep committing, and nothing dies
+    for key in 17_700..17_710u64 {
+        write_note_eventually(&addr0, key, &format!("after-{key}"), Duration::from_secs(15))
+            .await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(90))?;
+    for id in 0..3 {
+        assert_eq!(
+            cluster.node(id).failure(),
+            None,
+            "node {id} died after node two's log lost a segment"
+        );
+    }
+    for (id, pid) in survivors.iter().enumerate() {
+        assert_eq!(cluster.node(id).pid, *pid, "node {id} is not the process it was");
+    }
+    // node two said what it lost, and once fed past its floor votes as any copy again
+    let view = groups_of(&mut cluster, 2)?;
+    let lost = view["integrity"]["log_lost"].as_u64().unwrap_or(0);
+    assert!(lost > 0, "node two did not report a lost log: {}", view["integrity"]);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let view = groups_of(&mut cluster, 2)?;
+        let floored: Vec<serde_json::Value> = view["shards"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
+            .filter(|group| !group["floor"].is_null())
+            .cloned()
+            .collect();
+        if floored.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node two's copies were never fed past their floors: {floored:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // every note is the leader's value through the member whose log had the hole
+    let addr2 = cluster.node(2).endpoints.client.to_string();
+    for key in 17_600..17_710u64 {
+        let expected = if key < 17_700 {
+            format!("{key}-{wide}")
+        } else {
+            format!("after-{key}")
+        };
+        let read = read_note(&addr2, key)
+            .await
+            .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+        assert_eq!(read.as_deref(), Some(expected.as_str()), "note {key} through node two");
     }
     Ok(())
 }

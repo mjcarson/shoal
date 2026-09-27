@@ -1752,6 +1752,94 @@ impl ShardWal {
             .unwrap_or_default()
     }
 
+    /// The first run of indexes missing from a group's log, if its log has a hole
+    ///
+    /// A log runs without a gap from past its purge point, or from its first entry when nothing
+    /// was purged, to its last entry. A hole is what a lost or deleted segment leaves behind,
+    /// and a replay over one skips its entries in silence: openraft checks only the ends of each
+    /// chunk it reads ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    #[must_use]
+    pub fn hole_of(&self, group: GroupId) -> Option<(u64, u64)> {
+        let inner = self.inner.borrow();
+        let log = inner.groups.get(&group)?;
+        // the index the log should start at: just past its purge point, or its first entry
+        let mut expected = match &log.purged {
+            Some(purged) => purged.index + 1,
+            None => *log.index.keys().next()?,
+        };
+        // the first index past the last one expected that the index does not hold
+        for index in log.index.keys() {
+            if *index > expected {
+                return Some((expected, index - 1));
+            }
+            expected = expected.max(index + 1);
+        }
+        None
+    }
+
+    /// Purge a group's log through a log id, staged into the open batch
+    ///
+    /// The purge is durable once the batch holding its marker is, and nothing is deleted behind
+    /// it before then ([Resolved #151](../../../../docs/src/appendix/resolved/purge-ahead-of-its-marker.md)).
+    /// A purge never moves the boundary backwards.
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `log_id` - The last log id purged
+    ///
+    /// # Errors
+    ///
+    /// Fails if the marker could not be staged.
+    pub fn stage_purge(&self, group: GroupId, log_id: WalLogId) -> io::Result<()> {
+        // a purge never moves the boundary backwards
+        let purged = {
+            let inner = self.inner.borrow();
+            match inner.groups.get(&group).and_then(|log| log.purged.clone()) {
+                Some(existing) if existing.index >= log_id.index => existing,
+                _ => log_id,
+            }
+        };
+        let frame = frame::encode_marker(frame::FrameKind::Purged, group, Some(&purged))?;
+        let loc = self.stage(&frame, group, None)?;
+        let mut inner = self.inner.borrow_mut();
+        let index = purged.index;
+        // durable once the batch holding this marker is: until then nothing may be deleted
+        // behind it (Resolved #151)
+        inner
+            .group(group)
+            .purge_pending
+            .push((loc.generation, loc.offset + u64::from(loc.len), index));
+        inner.group(group).purged = Some(purged);
+        inner.purge_index(group, index);
+        Ok(())
+    }
+
+    /// Record a vote a group granted before its log was forgotten, staged into the open batch
+    ///
+    /// A copy whose log is forgotten keeps the term it voted in, so it cannot vote twice in one
+    /// term ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md)).
+    /// Durable with the batch, which the next vote this copy grants waits for.
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `vote` - The vote
+    ///
+    /// # Errors
+    ///
+    /// Fails if the frame could not be staged.
+    pub fn restore_vote(&self, group: GroupId, vote: &Vote) -> io::Result<()> {
+        let frame = frame::encode_vote(group, vote)?;
+        self.stage(&frame, group, None)?;
+        self.inner.borrow_mut().group(group).vote = Some(vote.clone());
+        Ok(())
+    }
+
     /// Put a frame into the open batch and wake the writer
     ///
     /// # Arguments
@@ -2032,6 +2120,21 @@ impl RaftLogReader<DataConfig> for GroupStore {
                         .range((Bound::Included(start), upper))
                         .map(|(index, slot)| (*index, slot.loc))
                         .collect::<Vec<_>>();
+                    // a gap inside the range is a lost entry, never one to skip: openraft
+                    // checks only a read's ends, and a replay over a hole applied the entries
+                    // around it and not the ones in it
+                    // ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md))
+                    if let Some(pair) = indexes.windows(2).find(|pair| pair[1].0 != pair[0].0 + 1) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "the log of group {} has no entries from {} to {}",
+                                self.group,
+                                pair[0].0 + 1,
+                                pair[1].0 - 1
+                            ),
+                        ));
+                    }
                     let cached = indexes
                         .iter()
                         .filter_map(|(index, _)| {
@@ -2230,35 +2333,7 @@ impl RaftLogStorage<DataConfig> for GroupStore {
                 memory.purge(self.group, log_id);
                 Ok(())
             }
-            Backend::Shared(wal) => {
-                // a purge never moves the boundary backwards
-                let purged = {
-                    let inner = wal.inner.borrow();
-                    match inner
-                        .groups
-                        .get(&self.group)
-                        .and_then(|log| log.purged.clone())
-                    {
-                        Some(existing) if existing.index >= log_id.index => existing,
-                        _ => log_id,
-                    }
-                };
-                let frame =
-                    frame::encode_marker(frame::FrameKind::Purged, self.group, Some(&purged))?;
-                let loc = wal.stage(&frame, self.group, None)?;
-                let mut inner = wal.inner.borrow_mut();
-                let index = purged.index;
-                // durable once the batch holding this marker is: until then nothing may be
-                // deleted behind it (Resolved #151)
-                inner.group(self.group).purge_pending.push((
-                    loc.generation,
-                    loc.offset + u64::from(loc.len),
-                    index,
-                ));
-                inner.group(self.group).purged = Some(purged);
-                inner.purge_index(self.group, index);
-                Ok(())
-            }
+            Backend::Shared(wal) => wal.stage_purge(self.group, log_id),
         }
     }
 }

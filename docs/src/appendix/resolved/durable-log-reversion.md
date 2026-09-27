@@ -106,6 +106,10 @@ for. Fencing it would turn one lost disk into a replacement procedure.
   first.
 - A log truncated to a shorter one that still holds frames is not detected at open; the leader
   meets it as a reversion and feeds the member, and nothing on the member counts it.
+- ~~The member that lost its log votes as an empty copy would, with no guard.~~ Since
+  [#176](unreadable-voter-log.md) it is held to a floor at its checkpoint's log id, and grants no
+  vote to a candidate behind it until it has applied past it. A log that lost only a segment from
+  its middle is a hole, found at open and handled by the same fix.
 
 ## Tests
 
