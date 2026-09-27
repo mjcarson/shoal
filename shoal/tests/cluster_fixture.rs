@@ -8955,17 +8955,18 @@ async fn flood_notes(
 /// and two bundles of writes far past what it commits in `write_timeout` are sent at once: one
 /// through its leader and one through a follower, which hops each write to the leader. Every
 /// write that could not be committed in time used to wait out the timeout in openraft's queue
-/// and be answered `OutcomeUnknown`. Admission now sheds a write once the group's oldest
-/// unanswered proposal is past half the timeout, on the proposing shard and on the leader a
-/// hop lands on, so the answers are writes that committed and writes refused `Shedding`,
-/// which is definite, and no unknown outcome at all
+/// and be answered `OutcomeUnknown`. A leader now lets a bounded number of a group's writes into
+/// openraft and sheds one that waits for a place past a quarter of its budget, so the answers are
+/// writes that committed and writes refused `Shedding`, which is definite. The timeout is long
+/// enough for this group to commit the gate's first bound in time; a group slower than that can
+/// still end the first burst's tail unknown, and then the bound halves
 /// ([Resolved #129](../../docs/src/appendix/resolved/overload-sheds.md)).
 #[tokio::test(flavor = "multi_thread")]
 async fn an_overloaded_group_sheds_rather_than_timing_out() -> Result<(), FixtureError> {
     let mut cluster = Cluster::builder()
         .cluster(3, CoreClaim::Count(1))
         .replication_factor(3)
-        .write_timeout(Duration::from_secs(1))
+        .write_timeout(Duration::from_secs(3))
         .query_deadline(Duration::from_secs(20))
         .start()
         .await?;
@@ -8984,8 +8985,8 @@ async fn an_overloaded_group_sheds_rather_than_timing_out() -> Result<(), Fixtur
     let leader = cluster.node(0).endpoints.client.to_string();
     let follower = cluster.node(1).endpoints.client.to_string();
     let (local, hopped) = tokio::join!(
-        flood_notes(&leader, &keys, 4_000),
-        flood_notes(&follower, &keys, 4_000)
+        flood_notes(&leader, &keys, 8_000),
+        flood_notes(&follower, &keys, 8_000)
     );
     let (local, hopped) = (local?, hopped?);
     eprintln!("through the leader: {local:?}; through a follower: {hopped:?}");

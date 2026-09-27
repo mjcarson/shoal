@@ -16,11 +16,10 @@
 //! to openraft has the rest of its budget and at most the bound's writes ahead of it.
 //!
 //! The bound follows what the group commits. Each write handed through reports how long it
-//! spent in openraft: one that took more than half its budget halves the bound, and one
+//! spent in openraft: one that took more than three quarters of its budget halves the bound, and one
 //! that took less raises it by one, so the queue in openraft holds about what the group commits
-//! in half of it whatever the host, the device or the load. It starts at
-//! [`INITIAL_IN_FLIGHT`], which a group on the lab's hosts commits in milliseconds, and grows
-//! from there as a burst is fed through.
+//! in that time whatever the host, the device or the load. It starts at
+//! [`INITIAL_IN_FLIGHT`], which a group on the lab's hosts commits in a fraction of a second.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -33,25 +32,30 @@ use tracing::{event, Level};
 /// The most of a group's writes a shard hands to openraft at once
 ///
 /// openraft batches whatever is queued into each append, so the bound only has to cover a
-/// group's commit rate times its commit latency: 1,024 writes is a fifth of a second of a group
-/// committing 5,000 a second, more than the lab's hosts ever showed one group do
-/// ([Resolved #129](../../../../docs/src/appendix/resolved/overload-sheds.md)).
-pub const PROPOSALS_IN_FLIGHT: usize = 1024;
+/// group's commit rate times its commit latency. The lab's hot keyword groups needed more than a
+/// thousand at the loader's default gate ([Resolved #129](../../../../docs/src/appendix/resolved/overload-sheds.md)).
+pub const PROPOSALS_IN_FLIGHT: usize = 4096;
 
 /// How many of a group's writes a shard hands to openraft at once before it has seen any commit
-pub const INITIAL_IN_FLIGHT: usize = 64;
+///
+/// No slow start: a burst to a fresh group is what a load begins with, and a group whose bound
+/// started at 64 shed the lab's load at its default gate, which the tree before the gate took
+/// with no retry at all.
+pub const INITIAL_IN_FLIGHT: usize = 1024;
 
 /// The fewest of a group's writes a shard hands to openraft at once, however slowly it commits
 ///
 /// A group that commits nothing holds this many writes to an unknown outcome and no more.
-pub const MIN_IN_FLIGHT: usize = 8;
+pub const MIN_IN_FLIGHT: usize = 64;
 
 /// The share of a write's budget it may spend in openraft before the bound is halved, as a
-/// divisor
+/// numerator over four
 ///
-/// Half: a commit that slow still ended inside the budget, but a write that also waited at
-/// the gate would not have, so the queue in openraft is cut before one does.
-pub const SLOW_COMMIT_DIVISOR: u32 = 2;
+/// Three quarters: a commit that slow still ended inside the budget, and a write that also
+/// waited its quarter at the gate would not have, so the queue in openraft is cut before one
+/// ends unknown. Halving at half the budget cut the bound on every stall of a Zen1 host's
+/// compactor, and with it the batches and the commit rate.
+pub const SLOW_COMMIT_QUARTERS: u32 = 3;
 
 /// The share of a write's budget it may spend waiting at the gate, as a divisor
 ///
@@ -135,9 +139,9 @@ impl ProposalGate {
     ///
     /// How long it waited, when its turn did not come in time; nothing was appended.
     pub async fn enter(&self, budget: Duration) -> Result<ProposalPermit, Duration> {
-        // a quarter of the budget at the gate, and half of it the mark of a slow commit
+        // a quarter of the budget at the gate, and three quarters of it the mark of a slow commit
         let wait = budget / GATE_WAIT_DIVISOR;
-        let slow_after = budget / SLOW_COMMIT_DIVISOR;
+        let slow_after = budget * SLOW_COMMIT_QUARTERS / 4;
         // a free place and nobody ahead: straight through
         let turn = {
             let mut inner = self.inner.borrow_mut();

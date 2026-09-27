@@ -421,7 +421,7 @@ was loaded.
   `One` equalled the csv.
 
 **Verdict:** durability **pass**. Availability through a node with a full disk **fail**, filed as
-[known issue 156](../appendix/known-issues.md#156-a-full-disk-stops-every-group-on-a-node-until-it-is-restarted).
+[known issue 156](../appendix/resolved/wal-failure-stops-the-node.md).
 Cleaning up also found `cluster destroy` unable to remove a storage path that is itself a mount
 point ([#157](../appendix/resolved/destroy-mount-point.md), fixed).
 
@@ -463,7 +463,7 @@ Every acknowledged insert was read back through every member after every fault. 
 more than the one restart its fault gave it, and after the pause every member read `up`. What
 remains is filed: the first two to three seconds of a silent partition or a pause
 ([#143](../appendix/resolved/silent-partition-hops.md#still-open)), a full disk
-([156](../appendix/known-issues.md#156-a-full-disk-stops-every-group-on-a-node-until-it-is-restarted)),
+([156](../appendix/resolved/wal-failure-stops-the-node.md)),
 and a restore that fails part way (155, since [resolved](../appendix/resolved/restore-retry.md)).
 
 ## 6. A second regression pass, and a crash mid compaction

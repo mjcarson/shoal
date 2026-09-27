@@ -470,26 +470,6 @@ times of three and eighteen of eighteen with six copies at once. A paced pass ne
 job, since the loop takes whichever retry is due and waits no longer than the earliest; nothing
 found links the change to this.
 
-### 156. A full disk stops every group on a node until it is restarted
-
-*Partly resolved:* a node whose WAL cannot be written now stops, and a restart recovers it
-([Resolved #156](resolved/wal-failure-stops-the-node.md)). What remains is refusing appends before
-the disk is full.
-
-When a node's WAL write fails for want of space, openraft stops the core of every group the write
-was for with a fatal storage error, and the shard's probe marks each copy dead "until the process
-restarts" (`probe_cores`). Nothing refuses writes while the disk nears full: `disk_reserve` guards
-snapshot installs, not appends. And a write coordinated through the node goes to its own dead core,
-failing `Unavailable` for as long as the node runs, rather than hopping to the group's new leader.
-Found on the lab ([cluster testing](../cluster-testing/correctness.md#fill-a-nodes-disk)), where
-a loader connected to every member stopped at those writes. Nothing was corrupted: freed and
-restarted, the node caught up exactly. That paragraph describes the tree before the fix. The node
-now stops instead of holding dead cores, so writes through it are never answered by a dead core and
-a restart once space returns brings it back (on the lab with no restart by hand). The one fix still
-wanted is to shed appends below a reserve with a retriable refusal, so that a nearly full node
-keeps serving reads rather than stopping.
-
-
 ### 180. A first write queued past a group's identity memory is refused `IdentityExpired`
 
 A group remembers the result of its last `REMEMBERED_REQUESTS` (4,096) write identities
