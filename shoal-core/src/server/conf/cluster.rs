@@ -320,6 +320,16 @@ pub struct Transport {
     /// How long a peer has to finish its handshake
     #[serde(default = "default_handshake_timeout")]
     pub handshake_timeout: DurationSpec,
+    /// How long data sent on a peer connection may go unacknowledged before the connection is
+    /// aborted and dialled again (`TCP_USER_TIMEOUT`)
+    ///
+    /// A partition that drops packets leaves a connection open with its retransmission timer
+    /// doubling, and after the heal nothing moves until that timer next fires: 48 s after a
+    /// 60 s cut on the lab. Aborted and dialled again, the link is back within a dial
+    /// ([Resolved #181](../../../../docs/src/appendix/resolved/partition-retransmit-backoff.md)).
+    /// Zero leaves the kernel's default, which gives up after about fifteen minutes.
+    #[serde(default = "default_unacked_timeout")]
+    pub unacked_timeout: DurationSpec,
     /// How often the control thread pings every placed peer
     #[serde(default = "default_ping_interval")]
     pub ping_interval: DurationSpec,
@@ -414,6 +424,11 @@ fn default_handshake_timeout() -> DurationSpec {
     DurationSpec(Duration::from_secs(10))
 }
 
+/// The default time sent data may go unacknowledged before a peer connection is aborted
+fn default_unacked_timeout() -> DurationSpec {
+    DurationSpec(Duration::from_secs(5))
+}
+
 /// The default ping interval
 fn default_ping_interval() -> DurationSpec {
     DurationSpec(Duration::from_secs(1))
@@ -432,6 +447,7 @@ impl Default for Transport {
             reconnect_min: default_reconnect_min(),
             reconnect_max: default_reconnect_max(),
             handshake_timeout: default_handshake_timeout(),
+            unacked_timeout: default_unacked_timeout(),
             ping_interval: default_ping_interval(),
             wire_version: None,
         }

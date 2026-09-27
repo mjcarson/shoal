@@ -93,6 +93,7 @@ storage:
         write_behind: 4
         archive_pass_bytes: "16MiB"  # what one archive pass copies before it yields (O74)
         archive_pass_interval: 1m    # least time between the starts of two archive passes
+        archive_pass_live_percent: 50 # an archive at least this live is left alone by a pass; 1-99 (O74)
   flush_interval: 1ms                # longest a busy shard leaves a staged write unwritten
   tables:                            # per-table overrides, keyed by table name
     movies:
@@ -464,6 +465,7 @@ cluster:
     reconnect_min: "100ms"        # the first backoff after a lost link, with a quarter of jitter; a link a frame wants never waits longer than this to redial (F42)
     reconnect_max: "5s"           # the longest
     handshake_timeout: "10s"      # to dial and finish the hello
+    unacked_timeout: "5s"         # sent data unacknowledged this long aborts a peer connection, which is dialled again (TCP_USER_TIMEOUT, #181); 0 is the kernel's default
     ping_interval: "1s"           # how often a node pings each member over its control lane
     replication_queue_bytes: "64MiB" # queued to one peer on the replication lane; an append past it is refused and retried
     wire_version: null            # the newest wire version this node advertises (F48); null is the build's newest, a number holds it there through a rolling upgrade; never below the build's floor or the cluster's activated version

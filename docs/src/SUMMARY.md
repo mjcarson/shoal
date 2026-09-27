@@ -297,6 +297,7 @@
   - [177. A plan blocked by failed moves could not be tried again](appendix/resolved/blocked-plan-retry.md)
   - [178. A move failed if its learner was added while a membership change was still committing](appendix/resolved/learner-in-progress.md)
   - [179. A fully live archive of short records was judged under half live](appendix/resolved/archive-usage-prefix.md)
+  - [181. A silent partition's links stayed down for most of a minute after it healed](appendix/resolved/partition-retransmit-backoff.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

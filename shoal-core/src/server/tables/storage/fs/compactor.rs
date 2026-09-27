@@ -357,6 +357,8 @@ pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport, 
     pass_bytes: u64,
     /// The least time between the starts of two archive passes
     pass_interval: Duration,
+    /// The percent of an archive that has to be live for a pass to leave it alone
+    pass_live_percent: u64,
     /// The last entry of each tablet group merged into the archives since this compactor started
     ///
     /// What a snapshot cut between two jobs takes as its boundary
@@ -408,6 +410,8 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             pass_continues: false,
             pass_bytes: conf.throughput_sensitive.archive_pass_bytes as u64,
             pass_interval: conf.throughput_sensitive.archive_pass_interval.duration(),
+            // held to 1..=99, so a pass neither copies every archive nor none
+            pass_live_percent: u64::from(conf.throughput_sensitive.archive_pass_live_percent.clamp(1, 99)),
             merged: HashMap::new(),
             row_kind: PhantomData,
         };
@@ -492,13 +496,17 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         let started = Instant::now();
         // the archive entry of every partition with intents that the map names, copied out so
         // no borrow of the map is held across a read
-        let entries: Vec<ArchiveEntry> = {
+        let mut entries: Vec<ArchiveEntry> = {
             let to_archive = self.map.to_archive.borrow();
             self.changes
                 .keys()
                 .filter_map(|partition| to_archive.get(partition).copied())
                 .collect()
         };
+        // read in the order the records lie on disk, archive by archive, so neighbouring reads
+        // land together rather than in the map's hash order
+        // ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
+        entries.sort_unstable_by_key(|entry| (entry.archive, entry.offset));
         self.phases.loaded += entries.len() as u64;
         // read a few at a time: one direct read at a random offset after another, each waiting
         // its turn on a busy shard, held a Zen1 node's merges five to twenty seconds each, and
@@ -1536,7 +1544,10 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 // get this archives valid data entries, gathered now rather than for every
                 // archive up front: the index is not changed until this pass ends
                 // ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index))
-                let entries = self.map.entries_of(old_id);
+                let mut entries = self.map.entries_of(old_id);
+                // copied in the order they lie in the archive, rather than the map's hash order
+                // ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
+                entries.sort_unstable_by_key(|entry| entry.offset);
                 if !entries.is_empty() {
                     // build the path to this archive file
                     let path = self.archive_path.join(old_id.to_string());
@@ -1550,8 +1561,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     let head = archive.read_at(0, ARCHIVE_HEADER_LEN).await?;
                     let unverified = ArchiveFormat::detect(&head) == ArchiveFormat::Unverified
                         && *old_id != *self.map.active.borrow();
-                    // skip this file if its more then 50% utilized
-                    if !unverified && *used as f64 > size as f64 * 0.50 {
+                    // skip this file if more of it is live than the pass is told to leave alone
+                    // (`archive_pass_live_percent`, half by default)
+                    if !unverified
+                        && (*used as u64).saturating_mul(100) > size.saturating_mul(self.pass_live_percent)
+                    {
                         // this file is largely valid so don't compact it
                         event!(Level::DEBUG, archive = old_id.to_string(), skip = true);
                         // close this archive

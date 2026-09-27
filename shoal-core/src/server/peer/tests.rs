@@ -566,3 +566,32 @@ fn identity_verdicts_wait_out_the_backoff() {
         assert!(!is_identity_verdict(&error), "{error:?} waits out its backoff");
     }
 }
+
+/// A peer connection is told to give up on data unacknowledged for the transport's timeout
+///
+/// What turns a link a long partition left waiting on a backed-off retransmission timer into a
+/// link that is aborted and dialled again ([Resolved #181](../../../../docs/src/appendix/resolved/partition-retransmit-backoff.md)).
+#[test]
+fn unacked_timeout_is_set_on_the_socket() {
+    use std::os::fd::AsRawFd;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+    let stream =
+        std::net::TcpStream::connect(listener.local_addr().expect("its address")).expect("a dial");
+    // set, and read back from the kernel
+    super::set_unacked_timeout(&stream, std::time::Duration::from_millis(5000))
+        .expect("the option is set");
+    let mut millis: libc::c_uint = 0;
+    let mut len = std::mem::size_of::<libc::c_uint>() as libc::socklen_t;
+    // SAFETY: the descriptor is an open TCP socket and the out pointers are valid for their sizes
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_USER_TIMEOUT,
+            std::ptr::from_mut(&mut millis).cast(),
+            &raw mut len,
+        )
+    };
+    assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+    assert_eq!(millis, 5000);
+}

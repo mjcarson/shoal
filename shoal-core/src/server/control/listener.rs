@@ -134,6 +134,8 @@ impl Admission for StateAdmission {
 /// * `local` - What this node says about itself
 /// * `tls` - What to take the wire with, read at every accept, if the lanes are encrypted
 /// * `inbound` - Where the membership RPCs go, for the control loop to answer
+/// * `unacked_timeout` - How long sent data may go unacknowledged before a connection is aborted
+#[allow(clippy::too_many_arguments)]
 pub async fn control_acceptor(
     listener: TcpListener,
     raft: Raft<ControlConfig, ControlStateMachine>,
@@ -141,6 +143,7 @@ pub async fn control_acceptor(
     local: Rc<RefCell<Local>>,
     tls: PeerTlsHolder,
     inbound: kanal::AsyncSender<Inbound>,
+    unacked_timeout: std::time::Duration,
 ) -> Result<(), ServerError> {
     let admission = Rc::new(StateAdmission {
         machine: machine.clone(),
@@ -167,8 +170,11 @@ pub async fn control_acceptor(
         let tls = tls.clone();
         let inbound = inbound.clone();
         glommio::spawn_local(async move {
-            // nodelay's error is this connection's alone, not the listener's
+            // nodelay's error is this connection's alone, not the listener's, and so is the
+            // abort of a connection whose data goes unacknowledged
+            // ([Resolved #181](../../../../docs/src/appendix/resolved/partition-retransmit-backoff.md))
             let _ = stream.set_nodelay(true);
+            let _ = crate::server::peer::set_unacked_timeout(&stream, unacked_timeout);
             // take the wire with the material as it is right now, then shake hands on the
             // control lane with what the certificate said
             let certified = match tls.server() {

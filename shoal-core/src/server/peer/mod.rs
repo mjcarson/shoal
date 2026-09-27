@@ -76,6 +76,46 @@ pub fn bind_reusable(addr: std::net::SocketAddr) -> std::io::Result<glommio::net
     // for, and it is owned by nothing else once it leaves the socket
     Ok(unsafe { glommio::net::TcpListener::from_raw_fd(socket.into_raw_fd()) })
 }
+/// Abort a peer connection whose sent data goes unacknowledged for this long
+///
+/// Sets `TCP_USER_TIMEOUT`. The kernel then gives up on the connection rather than doubling its
+/// retransmission timer for a quarter of an hour, so a link cut by dropped packets goes down and
+/// is dialled again, and is back within a dial of the heal rather than when the timer next
+/// fires ([Resolved #181](../../../../docs/src/appendix/resolved/partition-retransmit-backoff.md)).
+/// Only unacknowledged data counts, which the kernel acknowledges however busy the process is.
+///
+/// # Arguments
+///
+/// * `stream` - The connection
+/// * `timeout` - How long its data may go unacknowledged; zero leaves the kernel's default
+///
+/// # Errors
+///
+/// Fails as `setsockopt` does.
+pub fn set_unacked_timeout<S: std::os::fd::AsRawFd>(
+    stream: &S,
+    timeout: std::time::Duration,
+) -> std::io::Result<()> {
+    // zero is the kernel's own default, which is what zero means here too
+    let millis = libc::c_uint::try_from(timeout.as_millis()).unwrap_or(libc::c_uint::MAX);
+    // SAFETY: the descriptor is an open TCP socket for as long as the stream is borrowed, and the
+    // value is a c_uint of the size passed
+    let rc = unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_USER_TIMEOUT,
+            std::ptr::from_ref(&millis).cast(),
+            std::mem::size_of::<libc::c_uint>() as libc::socklen_t,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 pub use link::{Frame, FrameKey, Link, LinkEvent, LinkView};
 pub use listener::{peer_acceptor, ListenerContext, ReplicateReply};
 pub use peers::{Peers, Pending};
