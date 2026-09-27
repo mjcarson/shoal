@@ -3463,9 +3463,12 @@ where
         // a shard under the append reserve stands for no election either: it would take a lead
         // it has to hand on ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md))
         let stands = !isolated && replication.disk_low.is_none();
-        // on every change, and on every tick while it should not stand, since a handle built or
-        // started since would stand when its own head start ends
-        if stands != replication.stands || !stands {
+        // on every change; and on every tick while the reserve holds, since a handle built or
+        // started since would stand when its own head start ends. Never every tick for
+        // isolation alone: an isolated shard sends nothing, and it is a head start ending, or a
+        // peer's pre-vote, that dials the links which end the isolation. Held off every tick,
+        // a node restarted alone never stood again (`an_idle_cluster_elects_again_after_restarts_with_a_voter_gone`)
+        if stands != replication.stands || replication.disk_low.is_some() {
             replication.stands = stands;
             for slot in replication.groups.values() {
                 if let Some(raft) = &slot.raft {
