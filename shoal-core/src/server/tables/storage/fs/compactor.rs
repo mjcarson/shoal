@@ -335,6 +335,8 @@ pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport, 
     shard_local_tx: AsyncSender<ServerMsg<S>>,
     /// The path to this tables archive folder
     archive_path: PathBuf,
+    /// Where the job in progress spent its time, reported if it runs long
+    phases: JobPhases,
     /// The last entry of each tablet group merged into the archives since this compactor started
     ///
     /// What a snapshot cut between two jobs takes as its boundary
@@ -381,6 +383,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             backlog: VecDeque::new(),
             shard_local_tx: shard_local_tx.clone(),
             archive_path: conf.get_archive_path(R::name()),
+            phases: JobPhases::default(),
             merged: HashMap::new(),
             row_kind: PhantomData,
         };
@@ -392,6 +395,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     /// Everything a job writes to the map's intent log goes through here, so an intent is never
     /// on disk before its record ([Resolved #159](../../../../../docs/src/appendix/resolved/map-ahead-of-archive.md)).
     async fn sync_job(&mut self) -> Result<(), ServerError> {
+        let started = Instant::now();
         // the records, then the intents that name them
         if let Some(writer) = self.writer.as_mut() {
             writer.sync().await?;
@@ -399,6 +403,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         write_staged(&mut self.writer, &mut self.map_writer, &mut self.staged).await?;
         // and the intents durable before the map is repointed
         self.map_writer.sync().await?;
+        self.phases.sync += started.elapsed();
         Ok(())
     }
 
@@ -455,12 +460,14 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             >,
         >,
     {
+        let started = Instant::now();
         // crawl over all partitions with intents
         for partition in self.changes.keys() {
             // get this partiitons current archive if it exists
             // the entry is copied out so no borrow of the map is held across the read
             let entry = self.map.to_archive.borrow().get(partition).copied();
             if let Some(entry) = entry {
+                self.phases.loaded += 1;
                 // read this partitions record, verified against its checksum
                 let read = self.map.read_record(&entry).await?;
                 // load this partitions data
@@ -471,6 +478,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 self.loaded.insert(*partition, deserialized);
             }
         }
+        self.phases.load += started.elapsed();
         Ok(())
     }
 
@@ -492,6 +500,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             truncated_logs: u64::from(loss != TailLoss::None),
             ..RecoveryStats::default()
         };
+        let started = Instant::now();
         // replay all intents over our partitions
         for (partition, intents) in self.changes.drain() {
             // apply these intents to the correct partition
@@ -516,6 +525,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 updates_after_delete = stats.updates_after_delete,
             );
         }
+        self.phases.apply += started.elapsed();
         Ok(())
     }
 
@@ -531,8 +541,10 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             self.map_writer.current_pos(),
             self.map_writer.current_flushed_pos(),
         );
+        let started = Instant::now();
         // write all of our compacted partitions to disk
         for (key, partition) in &self.loaded {
+            self.phases.written += 1;
             // serialize this partitions data
             let archived = rkyv::to_bytes::<_>(partition)?;
             // write this archived partition as a record: its size, its checksum, its bytes
@@ -580,6 +592,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         // drop the partitions we just wrote so the next job starts from their archive
         // copies instead of rewriting every partition this compactor has ever loaded
         self.loaded.clear();
+        self.phases.write += started.elapsed();
         // flush our current writers
         self.sync_job().await?;
         // add the archive entries for the data we just synced
@@ -597,10 +610,12 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             .map
             .compaction_due(self.map_writer.current_flushed_pos())
         {
+            let started = Instant::now();
             // close our current map writer
             self.map_writer.close().await?;
             // compact our map data and get a new intent writer
             self.map_writer = self.map.compact_map().await?;
+            self.phases.fold += started.elapsed();
         }
         Ok(to_mark)
     }
@@ -787,6 +802,8 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
     {
+        let started = Instant::now();
+        self.phases.frames = frames.len() as u64;
         // read every frame named, and sort its command's intent under its partition
         if !frames.is_empty() {
             // reading the segment writes nothing, so a failure here is tried again
@@ -829,6 +846,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 .await
                 .map_err(|error| JobFailure::Retry(error.into()))?;
         }
+        self.phases.read += started.elapsed();
         // merge what was read the way an intent log is merged; a resolved segment is whole by
         // construction, so nothing was lost reading it
         let partitions = if self.changes.is_empty() {
@@ -1493,7 +1511,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                         // quarantined; failing the pass instead retried it every five seconds,
                         // each try rewriting the records before it into the active archive
                         // for nothing, 38 GB on the lab ([Resolved #165](../../../../../../docs/src/appendix/resolved/corrupt-record-compaction-loop.md))
-                        let read = match self.map.read_record(&entry).await {
+                        self.phases.loaded += 1;
+                        let read_started = Instant::now();
+                        let read = self.map.read_record(&entry).await;
+                        self.phases.load += read_started.elapsed();
+                        let read = match read {
                             Ok(read) => read,
                             Err(ServerError::Shoal(ShoalError::CorruptArchive { .. })) => {
                                 kept_corrupt = true;
@@ -1530,6 +1552,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     // stage an intent that we are deleting this archive, written after the
                     // records copied out of it are durable
                     stage_intent(&mut self.staged, &MapIntent::DeleteArchive(*old_id))?;
+                    self.phases.archives += 1;
                     // save this archive path for deletion
                     old_paths.push((old_id, path));
                     // add this to our total compacted size
@@ -1577,10 +1600,12 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             .map
             .compaction_due(self.map_writer.current_flushed_pos())
         {
+            let started = Instant::now();
             // close our current map writer
             self.map_writer.close().await?;
             // compact our map data and get a new intent writer
             self.map_writer = self.map.compact_map().await?;
+            self.phases.fold += started.elapsed();
         }
         // delete our old archive files
         for (_, old_archive) in old_paths {
@@ -1867,9 +1892,31 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             // how long a job holds the compactor, which a queued cut waits out
             let kind = job_kind(&job);
             let started = Instant::now();
+            self.phases = JobPhases::default();
             let outcome = self.run_job(job.clone()).await;
+            // and where it went: the frames read, the partitions or records read and their
+            // time, the apply, the writes, the syncs and the map fold, in milliseconds
+            // ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
             if started.elapsed() >= LONG_JOB {
-                event!(Level::INFO, msg = "a compaction job ran long", table = R::name(), kind, secs = started.elapsed().as_secs_f64(), backlog = self.backlog.len() + self.jobs_rx.len());
+                let phases = &self.phases;
+                event!(
+                    Level::INFO,
+                    msg = "a compaction job ran long",
+                    table = R::name(),
+                    kind,
+                    secs = started.elapsed().as_secs_f64(),
+                    backlog = self.backlog.len() + self.jobs_rx.len(),
+                    frames = phases.frames,
+                    read_ms = phases.read.as_millis() as u64,
+                    loaded = phases.loaded,
+                    load_ms = phases.load.as_millis() as u64,
+                    apply_ms = phases.apply.as_millis() as u64,
+                    written = phases.written,
+                    write_ms = phases.write.as_millis() as u64,
+                    sync_ms = phases.sync.as_millis() as u64,
+                    fold_ms = phases.fold.as_millis() as u64,
+                    archives = phases.archives,
+                );
             }
             // and what came of it, keeping a copy in case it has to be tried again
             match outcome {
@@ -1919,6 +1966,35 @@ fn is_redundant(job: &CompactionJob, backlog: &VecDeque<CompactionJob>) -> bool 
 
 /// How long a job may hold the compactor before it is reported
 const LONG_JOB: Duration = Duration::from_secs(5);
+
+/// Where one compaction job spent its time, for the report of one that ran long
+///
+/// A merge's phases are the frames it read from its segment, the partitions it read from the
+/// archives, the apply, the records written, the syncs and a map fold; an archive pass's reads
+/// are its records copied ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)).
+#[derive(Debug, Default)]
+struct JobPhases {
+    /// The frames a merge was handed
+    frames: u64,
+    /// Reading and decoding the frames
+    read: Duration,
+    /// The partitions a merge read from the archives, or the records a pass copied
+    loaded: u64,
+    /// Reading and decoding them
+    load: Duration,
+    /// Applying the intents to the partitions
+    apply: Duration,
+    /// The partitions a merge wrote
+    written: u64,
+    /// Serializing and writing them, with any early syncs of staged intents
+    write: Duration,
+    /// Syncing the archive and the map's intent log at the job's end
+    sync: Duration,
+    /// Folding the map's intent log into a new map
+    fold: Duration,
+    /// The archives a pass emptied
+    archives: u64,
+}
 
 /// A job's kind, for the report of one that ran long
 ///
