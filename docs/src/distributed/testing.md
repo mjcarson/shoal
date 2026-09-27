@@ -64,6 +64,7 @@ defect - the fencing failure that was filed against that load was a race of the 
 | `PING`, `VOTE_PROBE`, `TRANSPORT`, `PROBE_BULK`, `FLUSH` | A peer ping, a control vote probe, the lanes' counters, a bulk lane probe, a flush | F38 |
 | `MEMBERS`, `READINESS`, `MAP`, `INITIALIZE`, `SET_VOTERS`, `ADMIN`, `INCARNATION`, `LOG_LEN`, `FAIL_SHARD`, `STALE_REPORT` | The admin reads, an admin mutation as the process, this start's incarnation, the control log's bytes, a shard failed on purpose, a stale status report sent on purpose | F39 |
 | `GROUPS`, `DIGEST <table>`, `ROTATE`, `COMPACT`, `STALL_WAL <group>` / `RELEASE_WAL <group>` | Every group with its members, leader, applied, committed and checkpoint indexes; the rows and a hash over every shard's applied state, archived partitions included; a rotation, a compaction; a group's flush completions held on this node so a quorum is short by exactly one durable voter | F40 |
+| `HOLD_COMPACTION` / `RELEASE_COMPACTION` | No sealed segment handed to this node's compactors until released, so its checkpoints stay behind its log the way a backlogged compactor leaves them | [#176](../appendix/resolved/unreadable-voter-log.md) |
 | `HOLD_SHARES <shard> <ms> [dup]`, `GATHERS`, `SET_TABLE_READ_POLICY <table> <one\|quorum\|clear>` | Every share a shard would send held that long and sent twice on release if asked; the resident gathers and the read counters; a table's level | F41 |
 | `STALL_SHARD <shard> <ms>`, `DROP_REPLIES <n>` | A shard's executor blocked while the control thread keeps reporting; the next `n` committed write replies dropped | F42 |
 | `SNAPSHOT <group>`, `CRASH_AT <point>` | The manifest of a cut taken now; the child armed to exit at one of the seven points of an install | F43 |
@@ -110,7 +111,7 @@ regenerates them after a model change; the tests only load. The model's oracle r
 | Traffic-class fault | A lane cut, delayed or throttled on its own; `DROP_REPLIES` for client responses; `HOLD_SHARES` for gather shares |
 | Duplicate and reorder | `HOLD_SHARES ... dup` and the model's schedules, never an assumption about TCP order |
 | Partial node failure | `STALL_SHARD`, `FAIL_SHARD`, `STALL_WAL` for a disk completion, a stalled data lane under a live control thread |
-| Storage faults | `STALL_WAL` for a delayed fsync; `CORRUPT`, `FORGET`, `ERASE` for the archives; a corrupt checkpoint or sidecar refused at open by its checksum (`checkpoint_and_retries_are_checksummed`); the control store's torn append |
+| Storage faults | `STALL_WAL` for a delayed fsync; `CORRUPT`, `FORGET`, `ERASE` for the archives; `HOLD_COMPACTION` / `RELEASE_COMPACTION` to keep a node's checkpoint behind its sealed segments, then a segment deleted from the test process for a hole in a voter's log ([#176](../appendix/resolved/unreadable-voter-log.md)); a corrupt checkpoint or sidecar refused at open by its checksum (`checkpoint_and_retries_are_checksummed`); the control store's torn append |
 | Recovery faults | `CRASH_AT` at each of an install's seven points; `MOVE_CRASH_AT` at each move phase, beside the destination and the control leader killed as the phase is reached; the rehome's seven points |
 
 `kill` proves nothing about durability: SIGKILL does not lose OS or device caches, and bytes in

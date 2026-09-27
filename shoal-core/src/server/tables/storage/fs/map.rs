@@ -1001,7 +1001,11 @@ impl ArchiveMap {
         // was a copy of the whole index on every compaction
         // ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index))
         for (_, archive_entry) in self.to_archive.borrow().iter() {
-            *used_by.entry(archive_entry.archive).or_default() += archive_entry.size;
+            // a record's footprint in its archive is its prefix and its payload: counted as the
+            // payload alone, a fully live archive of short records read as under half live and
+            // every pass copied it ([Resolved #179](../../../../../../docs/src/appendix/resolved/archive-usage-prefix.md))
+            *used_by.entry(archive_entry.archive).or_default() +=
+                archive_entry.size + RECORD_PREFIX_LEN as usize;
         }
         // the archives by how much they hold, least first
         let mut sorted = SortedUsageMap::new();
@@ -1319,13 +1323,14 @@ mod tests {
                     key += 1;
                 }
             }
-            // ordered least used first, by the bytes each holds
+            // ordered least used first, by the bytes each holds: every record's payload and its
+            // sixteen byte prefix (item 179)
             let sorted = map.sort_by_load();
             let order: Vec<(usize, Vec<Uuid>)> = sorted.sorted.into_iter().collect();
             let expected: Vec<(usize, Vec<Uuid>)> = archives
                 .iter()
                 .enumerate()
-                .map(|(at, archive)| ((at + 1) * 128, vec![*archive]))
+                .map(|(at, archive)| ((at + 1) * (128 + 16), vec![*archive]))
                 .collect();
             assert_eq!(order, expected);
             // and each archive's entries are its own, all of them

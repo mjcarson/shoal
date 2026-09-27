@@ -315,8 +315,12 @@ buckets archives by that total in a `BTreeMap` — so iterating it yields archiv
 to most utilised, which is the order archive compaction wants. Archives in `all_archives` with
 no live entries appear at key 0 and are reclaimed outright.
 
-Note it sums `entry.size`, the live bytes, and compares against the file's actual size
-(`.../fs/compactor.rs:334-336`) — so the ratio is genuinely live/total, not an estimate.
+~~Note it sums `entry.size`, the live bytes, and compares against the file's actual size
+(`.../fs/compactor.rs:334-336`) — so the ratio is genuinely live/total, not an estimate.~~
+It summed `entry.size`, the *payload* bytes, against a file that also holds every record's
+sixteen byte prefix and the header, so a fully live archive of short records read as under half
+live and every pass copied it. Since [Resolved #179](../appendix/resolved/archive-usage-prefix.md)
+each entry counts its payload and its prefix, and the ratio is live over total but for the header.
 
 ## Design notes
 

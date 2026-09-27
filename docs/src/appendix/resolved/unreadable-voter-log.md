@@ -70,9 +70,13 @@ segments, and restarts it.
 - **On the fixed tree**, the test passes: node two reports the lost log, is fed past its floor, and
   serves every note (`target/lab/r176/fixed.log`).
 
-The lab reproduction, with a hyperion segment deleted under the bench, is
-[section 9](../../cluster-testing/correctness.md#9-a-voter-whose-log-has-a-hole) of the cluster
-testing chapter.
+**On the lab, on the fixed build** ([section 9](../../cluster-testing/correctness.md#9-a-voter-whose-log-has-a-hole)
+of the cluster testing chapter), hyperion was killed under the bench and its newest sealed WAL
+segment deleted. At its start it found holes about 6,300 entries past the checkpoint in three
+`Movie` groups. It forgot each log under a floor, keeping its vote, and was fed past the floors in
+4, 4 and 16 s, with no restart. All 1,379,242 acknowledged inserts, and every csv row, read back
+through each member alone. Deleting an older segment gave holes below the checkpoint, which were
+purged, and nothing was lost either time.
 
 ## The fix
 
