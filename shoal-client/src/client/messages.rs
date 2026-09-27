@@ -40,10 +40,16 @@ pub struct SendOptions {
     pub identity: Option<Uuid>,
     /// How long to keep re-sending the bundle while the server's answer says to try again
     ///
-    /// `NotLeader`, `Unavailable`, `QuorumUnavailable`, `ConnectionLost`, `OutcomeUnknown` and
-    /// `Timeout` are tried again under the same identity with a growing pause between tries,
-    /// until one succeeds, another code comes back, or this budget runs out - and then the
-    /// last answer is the caller's. Only a collected send retries; a stream never does.
+    /// `NotLeader`, `Unavailable`, `QuorumUnavailable`, `ConnectionLost`, `OutcomeUnknown`,
+    /// `Timeout` and `Shedding` are tried again under the same identity with a growing pause
+    /// between tries, until one succeeds, another code comes back, or this budget runs out - and
+    /// then the last answer is the caller's. Only a collected send retries (`exec_with`,
+    /// `send_one_with`); a stream never does, and `send_with` returns one.
+    ///
+    /// The one exception to the same identity: a bundle of one query, with no pinned identity,
+    /// that no try can have applied is sent again under a new one, because a group may refuse
+    /// an identity it forgot while the write queued, and would refuse it again
+    /// ([#180](../../../../docs/src/appendix/resolved/first-write-past-identity-memory.md)).
     pub retry: Option<Duration>,
 }
 

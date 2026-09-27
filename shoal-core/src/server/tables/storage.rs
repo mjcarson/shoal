@@ -1019,6 +1019,8 @@ mod tests {
                 // and a write waits on nothing a read does
                 read: crate::server::messages::ReadPlan::one(Stamp::now()),
                 from_peer: false,
+                // built by hand for a write that already ran, so nothing judges its arrival
+                received_ms: 0,
             };
             pending.add(meta, *pos, ResponseAction::Insert(true));
         }
@@ -1199,6 +1201,8 @@ mod tests {
                 // and a write waits on nothing a read does
                 read: crate::server::messages::ReadPlan::one(Stamp::now()),
                 from_peer: false,
+                // built by hand for a write that already ran, so nothing judges its arrival
+                received_ms: 0,
             };
             pending.add(meta, pos, ResponseAction::Insert(true));
             // the watermark has not moved, so neither has what is releasable

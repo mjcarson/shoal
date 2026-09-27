@@ -1696,9 +1696,9 @@ impl<S: QuerySupport> Shoal<S> {
     {
         // one identity for every try, serialized once: time-ordered, so a group that forgot it
         // can say so by its age ([F45](../../../docs/src/features/replica-migration.md))
-        let identity = options.identity.unwrap_or_else(Uuid::now_v7);
+        let mut identity = options.identity.unwrap_or_else(Uuid::now_v7);
         queries.id = identity;
-        let archived = rkyv::to_bytes::<_>(&queries)?;
+        let mut archived = rkyv::to_bytes::<_>(&queries)?;
         let budget = options.retry;
         let started = Instant::now();
         let mut pause = RETRY_BACKOFF_MIN;
@@ -1757,6 +1757,17 @@ impl<S: QuerySupport> Shoal<S> {
                     }
                     // remember a try that may have applied before this one is sent again
                     unknown |= outcome_unknown(&error);
+                    // a single write no try can have applied is sent again as a new write: a
+                    // group that forgot identities minted after its own while it queued refuses
+                    // it retriably, and the same identity would only be refused again
+                    // ([#180](../../../docs/src/appendix/resolved/first-write-past-identity-memory.md)).
+                    // a bundle of several may have applied some of its queries, and a pinned
+                    // identity is the caller's, so neither is ever minted again
+                    if sent_again_as_new(unknown, options.identity.is_some(), queries.queries.len()) {
+                        identity = Uuid::now_v7();
+                        queries.id = identity;
+                        archived = rkyv::to_bytes::<_>(&queries)?;
+                    }
                     event!(Level::DEBUG, msg = "trying a bundle again", id = %identity, attempts, ?error, ?pause);
                     tokio::time::sleep(pause).await;
                     pause = (pause * 2).min(RETRY_BACKOFF_MAX);
@@ -3771,7 +3782,7 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
 
 #[cfg(test)]
 mod tests {
-    use super::SendOptions;
+    use super::{sent_again_as_new, SendOptions};
     use shoal_channel::KeptReceiver;
     use super::{
         endpoint_order, error, outcome_unknown, protocol, retriable, settle, ClientMsg, ErrorCode,
@@ -3790,6 +3801,18 @@ mod tests {
     /// The codes a retried bundle is sent again on are the definite refusals and the unknown
     /// outcomes a repeat under one identity is safe against; a query that worked and found
     /// nothing, a caller's mistake and a payload that does not serialize are not tried again.
+    /// Only a lone write no try can have applied, under an identity nobody pinned, is minted again
+    #[test]
+    fn only_a_lone_unapplied_write_is_sent_under_a_new_identity() {
+        assert!(sent_again_as_new(false, false, 1));
+        // a try that may have applied keeps its identity, so a retry is answered as it was
+        assert!(!sent_again_as_new(true, false, 1));
+        // an identity the caller chose is the caller's
+        assert!(!sent_again_as_new(false, true, 1));
+        // a bundle of several may have applied some of its queries under the old identity
+        assert!(!sent_again_as_new(false, false, 2));
+    }
+
     #[test]
     fn a_retry_repeats_only_what_says_to_try_again() {
         let server = |code: ErrorCode| Errors::Server {
@@ -4744,6 +4767,24 @@ fn settle(error: Errors, unknown: bool) -> Errors {
             "an earlier try's outcome is unknown and it may have applied; the last try failed with {error}"
         ),
     }
+}
+
+/// Whether a refused bundle is sent again under a new identity rather than its own
+///
+/// Only a bundle of one query, with no identity the caller pinned, that no try can have applied:
+/// a group may refuse an identity it forgot while the write queued, and would refuse it again,
+/// while a new identity is a new write
+/// ([#180](../../../docs/src/appendix/resolved/first-write-past-identity-memory.md)). A bundle
+/// of several may have applied some of its queries under the old identity, and sending those
+/// again under a new one would apply them twice.
+///
+/// # Arguments
+///
+/// * `unknown` - Whether an earlier try may have applied
+/// * `pinned` - Whether the caller chose the identity
+/// * `queries` - How many queries the bundle holds
+fn sent_again_as_new(unknown: bool, pinned: bool, queries: usize) -> bool {
+    !unknown && !pinned && queries == 1
 }
 
 /// Whether a failed try of a bundle says to try again under the same identity

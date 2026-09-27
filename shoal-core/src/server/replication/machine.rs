@@ -56,6 +56,17 @@ use uuid::Uuid;
 /// forgotten is recorded with the checkpoint for M9a's expiry check to read.
 pub const REMEMBERED_REQUESTS: usize = 4096;
 
+/// How soon after its identity was minted a write must reach a server to count as a first try
+///
+/// A write whose identity its group has forgotten is refused either way, since the group cannot
+/// tell a first try from a late retry. But one that arrived within this of being minted cannot
+/// be a retry of a write that was applied and then forgotten long enough ago to matter, so it
+/// is refused retriably (`Shedding`) and a client sends it again as a new write, rather than
+/// being refused `IdentityExpired`, which no client retries
+/// ([#180](../../../../docs/src/appendix/resolved/first-write-past-identity-memory.md)). A
+/// genuine retry sent this soon is refused retriably for at most this long, then as expired.
+pub const FRESH_AT_RECEIPT_MS: u64 = 5_000;
+
 /// A snapshot's data: a lazy handle at this group's checkpoint, or a file received from a peer
 ///
 /// The rows are never in memory. This group's own snapshot is the promise of a file the loop
@@ -306,6 +317,16 @@ impl MachineState {
             return false;
         };
         minted < now_ms.saturating_sub(window_ms) || minted < self.expired_before
+    }
+
+    /// Whether an identity is one this replica has forgotten, as opposed to one past the window
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The identity
+    #[must_use]
+    pub fn forgotten(&self, request: &RequestId) -> bool {
+        identity_ms(request).is_some_and(|minted| minted < self.expired_before)
     }
 
     /// Whether the checkpoint is held where it is for a repair stream

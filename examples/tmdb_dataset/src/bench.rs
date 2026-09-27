@@ -923,15 +923,12 @@ async fn read_movies(
             Some(within) => options.clone().retry(within),
             None => options.clone(),
         };
-        let mut results = client
-            .send_with(queries, &options)
+        // collected, since only a collected send retries: a stream never does
+        let results = client
+            .exec_with(queries, &options)
             .await
             .map_err(|error| eyre!("a read back failed: {error}"))?;
-        while let Some(response) = results
-            .next()
-            .await
-            .map_err(|error| eyre!("a read back failed: {error}"))?
-        {
+        for response in results {
             if let Some(error) = response.error() {
                 bail!("a read back failed with {:?}", error.code());
             }
@@ -1187,15 +1184,12 @@ pub async fn verify(args: VerifyArgs) -> color_eyre::Result<()> {
                     for keyword in bundle {
                         queries.add_mut(MovieByKeywordGet::new(vec![keyword.clone()]));
                     }
-                    let mut results = client
-                        .send_with(queries, &options)
+                    // collected, since only a collected send retries: a stream never does
+                    let results = client
+                        .exec_with(queries, &options)
                         .await
                         .map_err(|error| eyre!("a keyword read failed: {error}"))?;
-                    while let Some(response) = results
-                        .next()
-                        .await
-                        .map_err(|error| eyre!("a keyword read failed: {error}"))?
-                    {
+                    for response in results {
                         let keyword = &bundle[response.get_index()];
                         if let Some(error) = response.error() {
                             failures.push(format!("{keyword}: {:?}", error.code()));
