@@ -429,21 +429,28 @@ async fn forget_durable_log<D: ShoalDatabase>(
 
 /// Whether an empty volatile copy grants a vote to the candidate asking
 ///
-/// A volatile group's log lives in memory, so a member that restarts comes back with none. Two
-/// of three voters restarting at once come back empty together and can elect each other - an
-/// empty log is as up to date as another empty log - and the new leader then appends fresh
-/// entries at indexes the surviving third has committed, which trips openraft's `has_log_id`
-/// on the survivor. So a copy that is empty since its start grants nothing to a candidate
-/// whose log is as empty - none, or the bootstrap entry alone - and grants to one with a real
-/// log, which is the survivor, who then leads and feeds the empties. The grace bounds it: a
-/// group where every member lost its memory would otherwise elect nobody, so after two
-/// election timeouts without being fed an empty copy grants as any other would, and the
-/// ephemeral contract - a majority's memory lost is the data lost - is honoured explicitly
-/// ([Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md)).
+/// A volatile group's log lives in memory, so a member that restarts comes back with none, and
+/// with no vote. Whatever it acknowledged before is gone, and so is the one thing Raft's safety
+/// rests on: that every majority which committed an entry holds it, so a candidate missing it
+/// cannot gather a majority of votes. A copy that forgot what it acknowledged would vote for
+/// such a candidate. That is how a leader that committed rows with one follower, restarted and
+/// asked by the other follower, which had missed them, elected it and lost the rows, and how
+/// the follower that kept them met the new leader's entries under its committed index and
+/// tripped openraft's `has_log_id`
+/// ([Resolved #142](../../../../docs/src/appendix/resolved/volatile-amnesiac-vote.md)).
+///
+/// So a copy that is empty since its start and held the group before counts as down: for the
+/// grace it grants nothing, and the members that kept their memory elect among themselves,
+/// which a majority of them can do alone. Only after the grace does it grant, and then first
+/// to a candidate with a real log - the survivor of a group most of whose members lost their
+/// memory ([Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md)) -
+/// and to a candidate as empty as itself only after half a grace more, when nobody with a log
+/// has asked: the whole group lost its memory, and the ephemeral contract - a majority's memory
+/// lost is the data lost - is honoured explicitly.
 ///
 /// A copy that never held the group has lost nothing, so it grants as openraft would: a fresh
-/// group's copies elect at once. The rule is for a copy that held the group in a run that is
-/// over, which is empty because its memory went.
+/// group's copies elect at once. A copy fed a log again judges as openraft does too: what it
+/// holds came from a leader.
 ///
 /// # Arguments
 ///
@@ -452,7 +459,7 @@ async fn forget_durable_log<D: ShoalDatabase>(
 /// * `own_last_index` - The last log index this copy holds, if any
 /// * `candidate_last_index` - The last log index the candidate holds, if any
 /// * `up_for` - How long this copy's handle has been up
-/// * `grace` - How long an empty copy holds out, two election timeouts
+/// * `grace` - How long an empty copy counts as down, two election timeouts
 #[must_use]
 pub(super) fn grants_to_empty_candidate(
     volatile: bool,
@@ -467,12 +474,16 @@ pub(super) fn grants_to_empty_candidate(
     if !volatile || !restarted || own_last_index.is_some_and(|index| index > 0) {
         return true;
     }
-    // a candidate with a real log is the survivor, and gets the vote
+    // for the grace a copy that forgot what it acknowledged is as good as down
+    if up_for < grace {
+        return false;
+    }
+    // then a candidate with a real log is the survivor, and gets the vote
     if candidate_last_index.is_some_and(|index| index > 0) {
         return true;
     }
-    // two empties: not until the grace says nobody is coming to feed this copy
-    up_for >= grace
+    // two empties: not until half a grace more says nobody with a log is coming
+    up_for >= grace + grace / 2
 }
 
 /// An apply batch stopped on a partition read
@@ -2479,9 +2490,12 @@ where
                 // ([Resolved #144](../../../../docs/src/appendix/resolved/post-heal-elections.md))
                 ReplicateKind::Vote | ReplicateKind::PreVote => match postcard::from_bytes::<openraft::raft::VoteRequest<DataConfig>>(&payload) {
                     Ok(rpc) => {
-                        // an empty volatile copy grants nothing to a candidate as empty as
-                        // itself, so two members that lost their memory at once cannot elect
-                        // each other over a survivor that kept it
+                        // an empty volatile copy that forgot what it acknowledged grants
+                        // nothing for the grace, so it cannot elect a candidate missing what it
+                        // committed ([Resolved #142](../../../../docs/src/appendix/resolved/volatile-amnesiac-vote.md)),
+                        // and nothing to a candidate as empty as itself for longer, so two
+                        // members that lost their memory at once cannot elect each other over
+                        // a survivor that kept it
                         // ([Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md))
                         let (own_last, own_vote, grace) = {
                             let metrics = raft.metrics();
@@ -2494,7 +2508,7 @@ where
                         };
                         let candidate_last = rpc.last_log_id.as_ref().map(|log_id| log_id.index);
                         if !grants_to_empty_candidate(volatile, restarted, own_last, candidate_last, up_for, grace) {
-                            event!(Level::WARN, msg = "an empty volatile copy refused an empty candidate's vote", group = %group, candidate = %rpc.vote);
+                            event!(Level::WARN, msg = "a volatile copy that lost its memory refused a vote", group = %group, candidate = %rpc.vote, candidate_last = ?rpc.last_log_id, up_for = ?up_for);
                             let refused = openraft::raft::VoteResponse::<DataConfig>::new(own_vote, None, false);
                             encode_reply(head.id, &refused)
                         } else if !grants_above_floor(floor.as_ref(), own_last, rpc.last_log_id.as_ref()) {
@@ -4810,103 +4824,43 @@ mod tests {
     use crate::shared::identity::ShardAddr;
     use std::time::Duration;
 
-    /// An empty volatile copy that lost its memory grants no vote to a candidate as empty
+    /// An empty volatile copy that lost its memory grants no vote at all for the grace
     ///
-    /// The rule of [Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md),
+    /// The rule of [Resolved #142](../../../../docs/src/appendix/resolved/volatile-amnesiac-vote.md)
+    /// and [Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md),
     /// judged case by case: a durable copy grants as openraft would, a copy that never held the
-    /// group grants, a copy holding a log grants, a candidate with a real log is granted to,
-    /// two empties are not - until the grace says nobody is coming to feed this one.
+    /// group grants, a copy holding a log grants; an empty copy that lost its memory grants
+    /// nothing for the grace, then to a candidate with a real log, then to any.
     #[test]
-    fn an_empty_volatile_copy_grants_no_vote_to_an_empty_candidate() {
+    fn an_empty_volatile_copy_grants_no_vote_for_the_grace() {
         let grace = Duration::from_secs(4);
         let fresh = Duration::from_millis(100);
+        let after = grace + Duration::from_millis(100);
+        let later = grace + grace / 2;
         // a durable copy never judges: openraft does
-        assert!(grants_to_empty_candidate(
-            false, true, None, None, fresh, grace
-        ));
+        assert!(grants_to_empty_candidate(false, true, None, None, fresh, grace));
         // a copy that never held the group is a fresh group's copy, and grants
-        assert!(grants_to_empty_candidate(
-            true, false, None, None, fresh, grace
-        ));
-        assert!(grants_to_empty_candidate(
-            true,
-            false,
-            None,
-            Some(0),
-            fresh,
-            grace
-        ));
-        // a copy that holds a log judges the candidate the way openraft does
-        assert!(grants_to_empty_candidate(
-            true,
-            true,
-            Some(8),
-            None,
-            fresh,
-            grace
-        ));
-        assert!(grants_to_empty_candidate(
-            true,
-            true,
-            Some(8),
-            Some(0),
-            fresh,
-            grace
-        ));
-        // an empty copy that lost its memory grants to the survivor with a real log
-        assert!(grants_to_empty_candidate(
-            true,
-            true,
-            None,
-            Some(8),
-            fresh,
-            grace
-        ));
-        assert!(grants_to_empty_candidate(
-            true,
-            true,
-            Some(0),
-            Some(1),
-            fresh,
-            grace
-        ));
-        // and not to another empty, whether it has nothing or the bootstrap entry alone
-        assert!(!grants_to_empty_candidate(
-            true, true, None, None, fresh, grace
-        ));
-        assert!(!grants_to_empty_candidate(
-            true,
-            true,
-            None,
-            Some(0),
-            fresh,
-            grace
-        ));
-        assert!(!grants_to_empty_candidate(
-            true,
-            true,
-            Some(0),
-            Some(0),
-            fresh,
-            grace
-        ));
-        // until the grace has passed with nobody feeding it: the whole group lost its memory
-        assert!(grants_to_empty_candidate(
-            true,
-            true,
-            None,
-            Some(0),
-            grace,
-            grace
-        ));
-        assert!(grants_to_empty_candidate(
-            true,
-            true,
-            None,
-            None,
-            grace * 2,
-            grace
-        ));
+        assert!(grants_to_empty_candidate(true, false, None, None, fresh, grace));
+        assert!(grants_to_empty_candidate(true, false, None, Some(0), fresh, grace));
+        // a copy that holds a log again judges the candidate the way openraft does
+        assert!(grants_to_empty_candidate(true, true, Some(8), None, fresh, grace));
+        assert!(grants_to_empty_candidate(true, true, Some(8), Some(0), fresh, grace));
+        // an empty copy that lost its memory grants nothing for the grace, not even to a
+        // candidate with a real log: that candidate may be missing what this copy acknowledged
+        assert!(!grants_to_empty_candidate(true, true, None, Some(8), fresh, grace));
+        assert!(!grants_to_empty_candidate(true, true, Some(0), Some(1), fresh, grace));
+        assert!(!grants_to_empty_candidate(true, true, None, None, fresh, grace));
+        assert!(!grants_to_empty_candidate(true, true, Some(0), Some(0), fresh, grace));
+        // after the grace, the survivor with a real log is granted
+        assert!(grants_to_empty_candidate(true, true, None, Some(8), after, grace));
+        assert!(grants_to_empty_candidate(true, true, Some(0), Some(1), after, grace));
+        // and not another empty, whether it has nothing or the bootstrap entry alone
+        assert!(!grants_to_empty_candidate(true, true, None, None, after, grace));
+        assert!(!grants_to_empty_candidate(true, true, None, Some(0), after, grace));
+        assert!(!grants_to_empty_candidate(true, true, Some(0), Some(0), after, grace));
+        // until half a grace more: the whole group lost its memory
+        assert!(grants_to_empty_candidate(true, true, None, Some(0), later, grace));
+        assert!(grants_to_empty_candidate(true, true, None, None, grace * 2, grace));
     }
 
     /// The rule of [Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md),

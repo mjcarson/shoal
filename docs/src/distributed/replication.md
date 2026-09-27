@@ -29,7 +29,9 @@ does one `write_at` and one `fdatasync` per batch **across every group on the sh
 completes every `IOFlushed` in it - the group commit across groups the M1 spike asked for
 ([C13](protocol.md#q1-and-q13-at-m1)). A segment is sealed past `replication.segment_bytes`;
 rotation advances the durable position and releases nothing. A volatile group - an ephemeral
-table's - logs into a `MemoryWal` bounded by `volatile_log_bytes`, which a restart empties.
+table's - logs into a `MemoryWal` bounded by `volatile_log_bytes`, which a restart empties. A copy
+emptied that way has forgotten what it acknowledged, so for two election timeouts it grants no vote
+and counts as a member that is down ([Resolved #142](../appendix/resolved/volatile-amnesiac-vote.md)).
 
 ### A write's path
 
