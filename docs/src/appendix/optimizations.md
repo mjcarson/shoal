@@ -3081,6 +3081,20 @@ single hot group decides anything. The mode is still unexplained.
 The investigation also found [#158](resolved/runtime-waker-lists.md), and tried
 [O69](#o69-every-idle-moment-parks-an-executor).
 
+**Round 12: five more candidates ruled out, and the resource named.** About forty fresh loads with
+a rate every five seconds and each member's storage pipeline in `Stats`
+([cluster testing, round 12](../cluster-testing/performance.md#o64-in-round-12-what-the-mode-is-not)):
+the page cache, TRIM after `destroy`, the disks' flush latency before a load, one shard carrying
+more than its share, and who leads made no difference. The spread, 36,000 to 48,000 rows a second,
+is set in a load's first ten seconds. A write-only load is paced by the Zen1 hosts' 970 EVOs, which
+flush their cache on every `fdatasync` (3 ms for one writer, about 900 synced writes a second for
+six). A 2 ms `wal_commit_delay` on those hosts made the slow mode rarer (1 of 8 loads under 42,000
+against 9 of 15), which is what a group commit with two equilibria would show. The mixed bench under it showed no
+latency cost and about 8% more throughput, so it is **applied to the lab's inventory** (a
+deployment setting, not a default). **Status:** the cause of the mode is still not established;
+the next step is a batch-size distribution per sync on the Zen1 WALs, to see the two equilibria
+directly.
+
 ### O65. Heartbeats to followers that just acknowledged replication
 
 | | |

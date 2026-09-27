@@ -30,7 +30,8 @@ runs the clients and the builds, and its numbers carry that noise.
 
 The cluster is `tmdb_cluster.yaml` at the repository root, deployed with
 [F51](../features/cluster-deployment.md)'s `cluster bootstrap`: replication factor 3, three control
-voters, six cores and 8 GiB per node with a dedicated control core, mutual TLS on the peer lanes,
+voters, six cores and 8 GiB per node with a dedicated control core, since round 12 europa at
+`lead_weight: 2` and the Zen1 hosts at a 2 ms `wal_commit_delay`, mutual TLS on the peer lanes,
 SCRAM for clients, and nodes running as the system user `shoal` under systemd with
 `Restart=on-failure`. The schema is [F54](../features/tmdb-dataset-deployment.md)'s: `Movie`
 (unsorted, by id) and `MovieByKeyword` (sorted, by keyword then title and id). The dataset is

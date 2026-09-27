@@ -94,7 +94,13 @@ lead is refused under the append reserve
 
 ## Performance
 
-Measured on the lab in [round 12](../cluster-testing/performance.md#weighted-leadership).
+Measured on the lab in [round 12](../cluster-testing/performance.md#weighted-leadership), with
+europa (16 cores, Optane) at `lead_weight: 2` against two four-core Zen1 hosts at one, interleaved
+with even weights on one running cluster. Europa led 21 of 36 groups. The mixed bench ran about 9%
+faster (118,600 against 108,400 operations a second), reads' p99 fell by about a third (20 ms
+against 30) and writes' by 13% (164 ms against 190). A write-only load did not move, since every
+member applies every write and the Zen1 hosts' disk flushes pace it whoever leads. These are lab
+runs, not captures.
 
 ## Tests
 

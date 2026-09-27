@@ -319,3 +319,69 @@ was waiting for: whether the load's bimodal throughput depends on which host lea
 groups. Five fresh bootstraps loaded at 39,389 to 49,856 rows a second, and the spread of the
 busiest groups' leaders did not follow the rate. The fastest and the two slowest runs each had
 europa leading five of the ten. The mode is still unexplained.
+
+## O64 in round 12: what the mode is not
+
+[O64](../appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)'s
+whole-load rate still varies from one fresh bootstrap to the next. Round 12 gave the loader a rate
+every five seconds (`load --series`) and `cluster stats` each member's storage pipeline, then
+loaded about forty fresh clusters on the build of `00149e7` and later (`target/lab/r12/o64*.sh`). The
+spread was 36,000 to 48,000 rows a second, and it is set within the first ten seconds: a slow load
+is slow throughout, and no load changed pace partway through.
+
+| Candidate | Arms | Rows a second | Verdict |
+| --- | --- | --- | --- |
+| The page cache | every host's dropped before the bootstrap, or not | cold 41.1–46.8k (4 loads), warm 38.7–47.0k (4) | Not it |
+| The Zen1 disks' state after `destroy` deleted gigabytes | `fstrim` first, `fstrim` and two minutes, neither | 36.0–44.6k (5), 38.0–47.7k (2), 40.5–47.3k (5) | Not it. The first three of each looked like it (trim 38.3k against 45.0k), and the next nine did not |
+| The disks' flush latency before a load | fio, 64 KiB direct writes each followed by `fdatasync`, before and after every load | 299–317 writes a second on titan and hyperion in every probe | Constant; not it |
+| One shard carrying more than its share | each shard's applied writes a second, sampled every 10 s | within 1.4× on every node in fast and slow loads alike | Not it |
+| Who leads | 2:1:1 lead weights ([F58](../features/weighted-leadership.md)) against even, 4 loads | 38.3–46.9k | No change to the load |
+
+What the figures do show is where the time goes. Titan's and hyperion's 970 EVOs flush their
+cache on every `fdatasync`: 3 ms at the median for one writer, 5.9 ms each with six at once (about
+900 synced writes a second in total), where europa's Optane takes 0.2 ms. Their WALs settle at 250
+to 700 syncs a second a node while the bytes a second hold, so each sync carries more as the load
+goes on. A write-only load is paced by the Zen1 nodes' flushes, whoever leads, since every member
+applies every write.
+
+One setting moved the distribution. `wal_commit_delay: 2ms` on the Zen1 group (O61's knob, which
+makes a writer wait after a sync for more appends to join the next batch) gave 8 loads averaging
+44,500 rows a second with one below 42,000, against 43,100 and 9 of 15 below 42,000 without it.
+That is what a group commit with two equilibria would show, where a batch that starts small stays
+small. O61 had measured a delay costing a slow device latency, so the mixed bench was measured
+under it too, interleaved on one cluster:
+
+| Arm | Operations a second | p99 get | p99 update |
+| --- | --- | --- | --- |
+| no delay | 110,664 | 32.3 ms | 189.2 ms |
+| 2 ms on the Zen1 group | 109,300 | 29.9 ms | 212.7 ms |
+| 2 ms on the Zen1 group | 116,980 | 22.3 ms | 205.5 ms |
+| no delay | 99,045 | 30.6 ms | 242.8 ms |
+
+No latency cost the bench can see, the write p99s overlapping, and about 8% more throughput (the
+third arm needed no restart, which flatters it). **Applied to the lab's inventory** from here on,
+beside the lead weights below.
+
+## Weighted leadership
+
+[F58](../features/weighted-leadership.md) sends each group's lead to the voter a weighted rendezvous
+names. The lab's inventory with europa's group at `lead_weight: 2` and the Zen1 group at the default
+one, rolled onto one running cluster with `cluster reconfigure` and interleaved with even weights
+(`target/lab/r12/leadab.sh`), a 120 s mixed bench after the leads settled 90 s:
+
+| Arm | Leads europa / titan / hyperion | Operations a second | p99 get | p99 keyword | p99 update | p99 insert |
+| --- | --- | --- | --- | --- | --- | --- |
+| even | 12 / 12 / 12 | 112,961 | 27.9 ms | 28.2 ms | 189.5 ms | 187.8 ms |
+| 2:1:1 | 21 / 10 / 5 | 114,535 | 20.7 ms | 21.0 ms | 164.7 ms | 163.5 ms |
+| 2:1:1 | 21 / 10 / 5 | 122,649 | 19.0 ms | 19.2 ms | 164.7 ms | 163.6 ms |
+| even | 12 / 12 / 12 | 103,903 | 32.0 ms | 31.7 ms | 190.5 ms | 185.7 ms |
+
+Weighted, the mixed bench ran about 9% faster (118,600 against 108,400 operations a second on
+average), reads' p99 fell by about a third and writes' by 13%. Europa led 21 of the 36 groups where
+the weights give it half on average; with 36 groups the rendezvous lands within a few of that.
+Whole loads did not move (four at 2:1:1: 38,300–46,900 rows a second), for the reason above.
+
+**Applied to the lab's inventory** at the end of round 12: `tmdb_cluster.yaml` sets
+`lead_weight: 2` on europa's group and `wal_commit_delay: 2ms` on the Zen1 group. Every figure in
+this chapter before that point ran with even leads and no Zen1 delay, and a comparison with them
+has to say so. A deployment of unequal hosts should set weights.

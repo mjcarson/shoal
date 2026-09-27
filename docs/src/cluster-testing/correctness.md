@@ -1262,8 +1262,8 @@ of delay and 1% loss were clean. The two-backoff build refused 80 writes in 20 s
 Every acknowledged insert was read back through every member after each run (629,239, 489,628
 and 690,658), and no node restarted.
 
-The one-way cuts were rerun on the one-backoff build: the second of the cut ran at 38% and 56% of
-the second before, where round 11's ran at 19% and 21%.
+The one-way cuts were rerun on the one-backoff build: the second of the cut ran at 38% and 51% of
+the second before, where round 11's ran at 19% and 22%.
 
 **Verdict: pass.** No second of the partition runs below 44%, and nothing slow or lossy is taken
 for a cut.
