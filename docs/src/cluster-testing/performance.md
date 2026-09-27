@@ -294,3 +294,28 @@ The difference is inside the lab's spread and, if anything, against the sort. Wi
 in flight on NVMe the order they are asked in does not matter, so the sort was taken out again.
 Eight archive passes a host ran over 5 s in the four arms: 5.6 s on titan and 8.9 s on hyperion on
 average, nearly all of it reading.
+
+## Who leads the busiest groups
+
+`Stats` could not say which member does a cluster's write work: every member applies every row.
+It now names each member's eight busiest led groups by writes a second
+(`NodeStats::hot_groups`), and the memory the eviction budget leaves out. Under the default bench
+on the lab:
+
+```text
+memory               rows       budget     resident
+22c7a330         339.6MiB       8.0GiB       2.9GiB
+
+busiest groups     table                led by           writes/s      bytes/s
+8c070e01d3d921af   Movie                6e70a2bd             1.1k   469.8KiB/s
+a9d80c97999fdf1c   Movie                6e70a2bd             1.1k   466.5KiB/s
+```
+
+Rows are a tenth of what the process holds. The busiest groups write within a few percent of each
+other.
+
+That was the tool [O64](../appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)
+was waiting for: whether the load's bimodal throughput depends on which host leads the hottest
+groups. Five fresh bootstraps loaded at 39,389 to 49,856 rows a second, and the spread of the
+busiest groups' leaders did not follow the rate. The fastest and the two slowest runs each had
+europa leading five of the ten. The mode is still unexplained.

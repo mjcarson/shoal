@@ -3058,8 +3058,25 @@ table's hottest partitions. Twelve leads each do not mean equal work, and europa
 host. Per-member stats cannot show it, since every member applies every row.
 
 **Status:** the cause of the original halving is not established, and it is not present on the
-current tree. The default stays at 5 s. What would settle the mode question is per-group write
-rates in `Stats`, filed in [todos](todos.md#per-group-write-rates-in-stats).
+current tree. The default stays at 5 s. ~~What would settle the mode question is per-group write
+rates in `Stats`, filed in [todos](todos.md#per-group-write-rates-in-stats).~~
+
+**The hypothesis tested, and not supported.** `Stats` now names each member's busiest led groups
+(`NodeStats::hot_groups`, [cluster testing, round 11](../cluster-testing/performance.md#who-leads-the-busiest-groups)).
+Five fresh bootstraps, each loaded whole, with the stats read 20 s into the load
+(`target/lab/r11/o64.sh`):
+
+| Run | Rows a second | The ten busiest groups, by the host leading them |
+| --- | --- | --- |
+| 1 | 40,023 | europa 5, titan 3, hyperion 2 |
+| 2 | 39,389 | europa 5, titan 5 |
+| 3 | 40,618 | titan 8, europa 1, hyperion 1 |
+| 4 | 49,856 | europa 5, titan 4, hyperion 1 |
+| 5 | 42,713 | hyperion 7, titan 2, europa 1 |
+
+The fastest run and the two slowest had the same spread, europa leading five of the ten. And the
+busiest groups each wrote about a thousand rows a second, within a few percent of each other: no
+single hot group decides anything. The mode is still unexplained.
 
 The investigation also found [#158](resolved/runtime-waker-lists.md), and tried
 [O69](#o69-every-idle-moment-parks-an-executor).

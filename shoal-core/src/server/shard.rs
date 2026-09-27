@@ -850,7 +850,7 @@ const MEMORY_CHECK: Duration = Duration::from_millis(250);
 /// The process's resident memory in bytes, as the kernel counts it, or nothing if unreadable
 ///
 /// `/proc/self/statm`'s second field, resident pages. A read of procfs, which touches no device.
-fn process_resident_bytes() -> Option<usize> {
+pub(crate) fn process_resident_bytes() -> Option<usize> {
     // the pages, read fresh, and the page size they are counted in
     let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
     // SAFETY: sysconf reads a constant of the running system and has no preconditions

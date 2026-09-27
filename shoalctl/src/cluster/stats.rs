@@ -21,6 +21,9 @@ use uuid::Uuid;
 
 use super::model::bytes;
 
+/// How many of the cluster's busiest led groups the view shows
+const HOT_GROUPS_SHOWN: usize = 10;
+
 /// How many finished plans the full view lists under the open ones
 const DONE_PLANS_SHOWN: usize = 3;
 
@@ -120,6 +123,57 @@ impl StatsModel {
                 byte_rates(&written),
                 byte_rates(&stats.stream_sent),
             ));
+        }
+        // every member's memory: the rows against the eviction budget, and the whole process
+        lines.push(String::new());
+        lines.push(format!(
+            "{:<12} {:>12} {:>12} {:>12}",
+            "memory", "rows", "budget", "resident"
+        ));
+        for member in &self.view.members {
+            let Some(stats) = live(member) else {
+                lines.push(format!("{:<12} {}", short(&member.node.0.to_string()), "-"));
+                continue;
+            };
+            lines.push(format!(
+                "{:<12} {:>12} {:>12} {:>12}",
+                short(&member.node.0.to_string()),
+                bytes(stats.memory_bytes),
+                bytes(stats.memory_budget),
+                bytes(stats.resident_bytes),
+            ));
+        }
+        // the busiest groups each member leads, which is where the cluster's writes go
+        let hot: Vec<(String, &shoal::shared::protocol::stats::GroupRate)> = self
+            .view
+            .members
+            .iter()
+            .filter_map(|member| live(member).map(|stats| (member, stats)))
+            .flat_map(|(member, stats)| {
+                stats
+                    .hot_groups
+                    .iter()
+                    .map(move |rate| (short(&member.node.0.to_string()), rate))
+            })
+            .collect();
+        if !hot.is_empty() {
+            let mut hot = hot;
+            hot.sort_by(|a, b| b.1.writes_per_sec.total_cmp(&a.1.writes_per_sec));
+            lines.push(String::new());
+            lines.push(format!(
+                "{:<18} {:<20} {:<12} {:>12} {:>12}",
+                "busiest groups", "table", "led by", "writes/s", "bytes/s"
+            ));
+            for (leader, busy) in hot.iter().take(HOT_GROUPS_SHOWN) {
+                lines.push(format!(
+                    "{:<18} {:<20} {:<12} {:>12} {:>12}",
+                    format!("{:016x}", busy.group),
+                    busy.table,
+                    leader,
+                    rate(busy.writes_per_sec),
+                    byte_rate(busy.bytes_per_sec),
+                ));
+            }
         }
         // the tables, summed over the members once per row, when there is more than one
         let tables = self.table_totals();

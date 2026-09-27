@@ -296,6 +296,36 @@ pub struct NodeStats {
     /// Bytes every volatile group's log holds in memory
     #[serde(default)]
     pub volatile_bytes: u64,
+    /// The groups this node leads that wrote the most over the last interval, busiest first
+    ///
+    /// Every member applies every write, so the applied rates cannot say which leader does the
+    /// work; a leader's own groups' rates can
+    /// ([O64](../../../../docs/src/appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)).
+    #[serde(default)]
+    pub hot_groups: Vec<GroupRate>,
+    /// Bytes of rows the shards hold in memory, which their eviction budgets bound
+    #[serde(default)]
+    pub memory_bytes: u64,
+    /// The shards' eviction budgets together
+    #[serde(default)]
+    pub memory_budget: u64,
+    /// The process's resident memory: the rows, and everything the eviction budget does not
+    /// count - the archive maps, the logs' caches, the groups' state and every buffer
+    #[serde(default)]
+    pub resident_bytes: u64,
+}
+
+/// How busy one group a node leads was over the last interval
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupRate {
+    /// The group
+    pub group: u64,
+    /// The table it serves, by the name the schema spells it
+    pub table: String,
+    /// Inserts, updates and deletes applied per second
+    pub writes_per_sec: f64,
+    /// Bytes of their intents per second
+    pub bytes_per_sec: f64,
 }
 
 impl NodeStats {
@@ -319,6 +349,10 @@ impl NodeStats {
             stream_received_total: 0,
             free_bytes: 0,
             volatile_bytes: 0,
+            hot_groups: Vec::new(),
+            memory_bytes: 0,
+            memory_budget: 0,
+            resident_bytes: 0,
         }
     }
 

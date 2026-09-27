@@ -2268,7 +2268,10 @@ cannot be told apart. Keying each frame's checksum by its offset (or giving it a
 would make a frame valid only where it was written, at the cost of a format change the reader has
 to accept both sides of.
 
-## A node's memory on `Stats`
+## ~~A node's memory on `Stats`~~
+
+**Done in round 11** of the [cluster testing](../cluster-testing/performance.md#who-leads-the-busiest-groups): `NodeStats` carries the shards' row bytes, their eviction budgets and the process's resident memory, and `cluster stats` prints them. On the lab under the bench: about 340 MiB of rows against 2.9 GiB resident a node. What follows is the todo as it was filed.
+
 
 Filed by [Resolved #149](resolved/node-memory-budget.md). The eviction budget counts table data
 alone. The archive maps (an entry per partition), the WAL's index and caches, openraft's state and
@@ -2276,7 +2279,10 @@ every I/O buffer sit outside it, and nothing reports them. A deployment sizes th
 the host's memory by guessing the headroom. Each shard's `memory_usage` and budget, and the
 process's resident memory, on the node's `Stats`, would let an operator read it instead.
 
-## Per-group write rates in `Stats`
+## ~~Per-group write rates in `Stats`~~
+
+**Done in round 11** of the [cluster testing](../cluster-testing/performance.md#who-leads-the-busiest-groups): `NodeStats::hot_groups` names the eight busiest groups a node leads, by writes a second over the last interval, and `cluster stats` prints the cluster's ten busiest with their leaders. It did not support O64's hypothesis. Weighing leadership balance by it is not done: see [weighted leadership](#leadership-is-spread-evenly-whatever-each-member-can-do). What follows is the todo as it was filed.
+
 
 Filed by [O64](optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab).
 `Stats` reports each member's applied rates, and every member applies every row, so nothing shows
