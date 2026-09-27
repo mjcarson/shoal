@@ -231,6 +231,12 @@ const CUT_READS_IN_FLIGHT: usize = 32;
 /// ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)).
 const MERGE_READS_IN_FLIGHT: usize = 32;
 
+/// How many archived records an archive pass reads at once
+///
+/// Fewer than a merge: a pass is background work, and 32 in flight on a Zen1 node cost the
+/// foreground's reads their device ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)).
+const PASS_READS_IN_FLIGHT: usize = 8;
+
 /// How many bytes one archive pass copies before it ends and is queued again
 ///
 /// A pass repoints the index only once it ends, so a cut waits for a whole pass
@@ -349,6 +355,10 @@ pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport, 
     archive_path: PathBuf,
     /// Where the job in progress spent its time, reported if it runs long
     phases: JobPhases,
+    /// When the last archive pass began, which the next waits out the interval from
+    last_pass: Option<Instant>,
+    /// Whether the archive pass queued next continues one that stopped at its budget
+    pass_continues: bool,
     /// The last entry of each tablet group merged into the archives since this compactor started
     ///
     /// What a snapshot cut between two jobs takes as its boundary
@@ -396,6 +406,8 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             shard_local_tx: shard_local_tx.clone(),
             archive_path: conf.get_archive_path(R::name()),
             phases: JobPhases::default(),
+            last_pass: None,
+            pass_continues: false,
             merged: HashMap::new(),
             row_kind: PhantomData,
         };
@@ -841,6 +853,29 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             let file = BufferedFile::open(&path)
                 .await
                 .map_err(|error| JobFailure::Retry(error.into()))?;
+            // every frame this table has in the segment, read as one span: a read per frame,
+            // eighteen thousand of them from a segment out of the page cache, held a Zen1 node's
+            // merge for up to twenty-three seconds, where the span is one read of at most a
+            // segment ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
+            let start = frames.iter().map(|frame| frame.offset).min().unwrap_or(0);
+            let end = frames
+                .iter()
+                .map(|frame| frame.offset + u64::from(frame.len))
+                .max()
+                .unwrap_or(0);
+            let span = file
+                .read_at(start, (end - start) as usize)
+                .await
+                .map_err(|error| JobFailure::Retry(error.into()))?;
+            // a span shorter than the frames it covers is a segment shorter than its index says
+            if (span.len() as u64) < end - start {
+                return Err(JobFailure::Retry(ServerError::GlommioGeneric(format!(
+                    "{} held {} bytes from {start} where its frames need {}",
+                    path.display(),
+                    span.len(),
+                    end - start
+                ))));
+            }
             for frame in &frames {
                 // a frame a repair install has replaced since this job was built is not merged
                 // over it: the install's rows are newer ([Resolved #166](../../../../../../docs/src/appendix/resolved/segment-compaction-corrupt-loop.md))
@@ -852,13 +887,12 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     continue;
                 }
                 let (offset, len) = (&frame.offset, &frame.len);
-                let read = file
-                    .read_at(*offset, *len as usize)
-                    .await
-                    .map_err(|error| JobFailure::Retry(error.into()))?;
+                // this frame's bytes within the span
+                let at = (offset - start) as usize;
+                let read = &span[at..at + *len as usize];
                 // a frame that is not a whole command is a shard bug, not a torn log: the shard
                 // named it from an index it built from whole frames
-                let Some(command) = crate::server::wal::frame::command_of(&read) else {
+                let Some(command) = crate::server::wal::frame::command_of(read) else {
                     return Err(JobFailure::Fatal(ServerError::GlommioGeneric(format!(
                         "the frame at {}:{offset} named for compaction is not a command",
                         path.display()
@@ -1562,7 +1596,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                                 (entry, read)
                             }
                         })
-                        .buffered(MERGE_READS_IN_FLIGHT);
+                        .buffered(PASS_READS_IN_FLIGHT);
                     let mut read_started = Instant::now();
                     while let Some((mut entry, read)) = reads.next().await {
                         // read this entry from our archive file, verified against its
@@ -1865,9 +1899,14 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             }
             // rewriting the archives copies live records forward and repoints the map once the
             // pass ends, so a failure part way leaves dead bytes and nothing lost: tried again.
-            // A pass that stopped at its budget goes again behind the jobs queued meanwhile
+            // A pass that stopped at its budget goes again behind the jobs queued meanwhile,
+            // exempt from the interval as part of the pass it continues
             CompactionJob::Archives => {
-                if self.compact_archives().await.map_err(JobFailure::Retry)? {
+                if !self.pass_continues {
+                    self.last_pass = Some(Instant::now());
+                }
+                self.pass_continues = self.compact_archives().await.map_err(JobFailure::Retry)?;
+                if self.pass_continues {
                     self.backlog.push_back(CompactionJob::Archives);
                 }
             }
@@ -1955,6 +1994,25 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             if is_redundant(&job, &self.backlog) {
                 continue;
             }
+            // an archive pass waits out the interval since the last one began, once: it is
+            // queued behind every segment, and one run as each merge ended copied an archive as
+            // soon as it fell under half live, over and over, and cost the node's foreground a
+            // tenth of its throughput ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
+            if matches!(job, CompactionJob::Archives) && !self.pass_continues {
+                if let Some(wait) = pass_wait(self.last_pass, Instant::now()) {
+                    if !retries
+                        .iter()
+                        .any(|retry| matches!(retry.job, CompactionJob::Archives))
+                    {
+                        retries.push(RetryJob {
+                            at: Instant::now() + wait,
+                            job,
+                            attempts: 0,
+                        });
+                    }
+                    continue;
+                }
+            }
             // how long a job holds the compactor, which a queued cut waits out
             let kind = job_kind(&job);
             let started = Instant::now();
@@ -2032,6 +2090,25 @@ fn is_redundant(job: &CompactionJob, backlog: &VecDeque<CompactionJob>) -> bool 
 
 /// How long a job may hold the compactor before it is reported
 const LONG_JOB: Duration = Duration::from_secs(5);
+
+/// The least time between the starts of two archive passes
+///
+/// A pass copies the live records out of every archive under half live. Run after every merge
+/// it copies each archive as soon as it crosses half, where a later pass finds it deader and
+/// copies less for the same space ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)).
+const ARCHIVE_PASS_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How long an archive pass asked for now waits, if the last one began too recently
+///
+/// # Arguments
+///
+/// * `last_pass` - When the last pass began, if one has
+/// * `now` - The time now
+fn pass_wait(last_pass: Option<Instant>, now: Instant) -> Option<Duration> {
+    // no pass yet, or the interval since the last one is over
+    let due = last_pass? + ARCHIVE_PASS_INTERVAL;
+    (due > now).then(|| due - now)
+}
 
 /// Where one compaction job spent its time, for the report of one that ran long
 ///
@@ -2184,5 +2261,24 @@ mod order_tests {
         assert_eq!(take_next(&mut backlog).as_ref().map(label).as_deref(), Some("merge 1"));
         assert_eq!(take_next(&mut backlog).as_ref().map(label).as_deref(), Some("merge 2"));
         assert!(take_next(&mut backlog).is_none());
+    }
+
+    /// The first archive pass runs at once, and each after it waits out the interval since the
+    /// last one began (O74)
+    #[test]
+    fn an_archive_pass_waits_out_the_interval() {
+        let now = Instant::now();
+        // no pass yet: at once
+        assert_eq!(pass_wait(None, now), None);
+        // one just begun: the whole interval
+        assert_eq!(pass_wait(Some(now), now), Some(ARCHIVE_PASS_INTERVAL));
+        // one begun part of an interval ago: the rest of it
+        let earlier = now - Duration::from_secs(20);
+        assert_eq!(
+            pass_wait(Some(earlier), now),
+            Some(ARCHIVE_PASS_INTERVAL - Duration::from_secs(20))
+        );
+        // one begun an interval ago or more: at once
+        assert_eq!(pass_wait(Some(now - ARCHIVE_PASS_INTERVAL), now), None);
     }
 }
