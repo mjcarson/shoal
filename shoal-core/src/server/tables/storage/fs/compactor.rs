@@ -41,7 +41,7 @@ use crate::storage::ArchiveFault;
 use crate::storage::{CompactionJob, IntentReadSupport, RecoveryStats, ShouldPrune};
 
 /// The minimum size an active archive must be in order to be considered for compaction
-/// This is 100 Mebibytes
+/// This is 10 Mebibytes
 const MIN_ARCHIVE_COMPACTABLE: u64 = 10 << 20;
 
 /// What reading an intent log for compaction cost us
@@ -225,6 +225,18 @@ fn written_to(writer: Option<&DmaStreamWriter>) -> u64 {
 /// in key order ([O70](../../../../../../docs/src/appendix/optimizations.md#o70-a-snapshot-cut-reads-its-records-one-at-a-time)).
 const CUT_READS_IN_FLIGHT: usize = 32;
 
+/// How many partition reads a segment merge keeps in flight
+///
+/// The same bound as a cut's, for the same reason: each is a direct read at a random offset
+/// ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)).
+const MERGE_READS_IN_FLIGHT: usize = 32;
+
+/// How many bytes one archive pass copies before it ends and is queued again
+///
+/// A pass repoints the index only once it ends, so a cut waits for a whole pass
+/// ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)).
+const ARCHIVE_PASS_BYTES: u64 = 64 << 20;
+
 /// The first wait before a compaction job that failed before writing is tried again
 const COMPACTION_RETRY_MIN: Duration = Duration::from_millis(100);
 
@@ -396,11 +408,16 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     /// on disk before its record ([Resolved #159](../../../../../docs/src/appendix/resolved/map-ahead-of-archive.md)).
     async fn sync_job(&mut self) -> Result<(), ServerError> {
         let started = Instant::now();
-        // the records, then the intents that name them
+        // the records, then the intents that name them: the archive is synced once here, where
+        // `write_staged` would sync it a second time with nothing written between
+        // ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
         if let Some(writer) = self.writer.as_mut() {
             writer.sync().await?;
         }
-        write_staged(&mut self.writer, &mut self.map_writer, &mut self.staged).await?;
+        if !self.staged.is_empty() {
+            self.map_writer.write_all(&self.staged).await?;
+            self.staged.clear();
+        }
         // and the intents durable before the map is repointed
         self.map_writer.sync().await?;
         self.phases.sync += started.elapsed();
@@ -461,22 +478,36 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         >,
     {
         let started = Instant::now();
-        // crawl over all partitions with intents
-        for partition in self.changes.keys() {
-            // get this partiitons current archive if it exists
-            // the entry is copied out so no borrow of the map is held across the read
-            let entry = self.map.to_archive.borrow().get(partition).copied();
-            if let Some(entry) = entry {
-                self.phases.loaded += 1;
-                // read this partitions record, verified against its checksum
-                let read = self.map.read_record(&entry).await?;
-                // load this partitions data
-                let archived = <T as RkyvSupport>::access(&read)?;
-                // deserialize this partition
-                let deserialized = <T as RkyvSupport>::deserialize(archived)?;
-                // add this deserialized partition to our loaded partition map
-                self.loaded.insert(*partition, deserialized);
-            }
+        // the archive entry of every partition with intents that the map names, copied out so
+        // no borrow of the map is held across a read
+        let entries: Vec<ArchiveEntry> = {
+            let to_archive = self.map.to_archive.borrow();
+            self.changes
+                .keys()
+                .filter_map(|partition| to_archive.get(partition).copied())
+                .collect()
+        };
+        self.phases.loaded += entries.len() as u64;
+        // read a few at a time: one direct read at a random offset after another, each waiting
+        // its turn on a busy shard, held a Zen1 node's merges five to twenty seconds each, and
+        // its compactor hundreds of jobs behind
+        // ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
+        let map = self.map.clone();
+        let mut reads = futures::stream::iter(entries)
+            .map(|entry| {
+                let map = map.clone();
+                async move { map.read_record(&entry).await.map(|read| (entry.key, read)) }
+            })
+            .buffer_unordered(MERGE_READS_IN_FLIGHT);
+        while let Some(read) = reads.next().await {
+            // every record verified against its checksum as it is read
+            let (partition, read) = read?;
+            // load this partitions data
+            let archived = <T as RkyvSupport>::access(&read)?;
+            // deserialize this partition
+            let deserialized = <T as RkyvSupport>::deserialize(archived)?;
+            // add this deserialized partition to our loaded partition map
+            self.loaded.insert(partition, deserialized);
         }
         self.phases.load += started.elapsed();
         Ok(())
@@ -1439,8 +1470,13 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     }
 
     /// Compact archives with the least amount of active data
+    ///
+    /// Returns whether the pass stopped at its budget of copied bytes with archives left to
+    /// copy, in which case it is queued again: the index is repointed only when a pass ends,
+    /// so a queued cut waits for the whole of it
+    /// ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)).
     #[instrument(name = "FileSystemCompactor::compact_archives", skip_all, err(Debug))]
-    async fn compact_archives(&mut self) -> Result<(), ServerError> {
+    async fn compact_archives(&mut self) -> Result<bool, ServerError> {
         // find the archives with the least amount of active data
         let sorted = self.map.sort_by_load();
         // keep a list of old archive paths to delete
@@ -1448,10 +1484,21 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         // track the stats for this compaction attempt
         let start_pos = written_to(self.writer.as_ref());
         let mut precompaction = 0;
+        // the bytes this pass copied, and whether it stopped with archives left to copy
+        let mut copied = 0u64;
+        let mut more = false;
         // start compacting from the lowest utilization to the highest
-        for (used, archive_ids) in &sorted.sorted {
+        'archives: for (used, archive_ids) in &sorted.sorted {
             // compact this group of archives
             for old_id in archive_ids {
+                // a pass that copied its budget ends here and is queued again behind what is
+                // waiting, so a cut is never held behind the whole of a large pass: one held a
+                // cut three minutes on a Zen1 node, since the index is repointed only at a
+                // pass's end ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
+                if copied >= ARCHIVE_PASS_BYTES {
+                    more = true;
+                    break 'archives;
+                }
                 // get this archives valid data entries, gathered now rather than for every
                 // archive up front: the index is not changed until this pass ends
                 // ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index))
@@ -1478,9 +1525,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                         continue;
                     }
                     // TODO make size configurable
-                    // if this is our active file and its under 100MiB then skip it
+                    // if this is our active file and its under MIN_ARCHIVE_COMPACTABLE (10 MiB) then skip it
                     if *old_id == *self.map.active.borrow() {
-                        // if this file is under 100 MiB then skip it
+                        // if this file is under 10 MiB then skip it
                         if size < MIN_ARCHIVE_COMPACTABLE {
                             // close this archive since its under our minumum active archive
                             // compaction size
@@ -1503,8 +1550,21 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     let active_id = *self.map.active.borrow();
                     // whether a record here failed its checksum, which keeps the archive
                     let mut kept_corrupt = false;
-                    // read all of the still valid data from this archive
-                    for mut entry in entries {
+                    // read all of the still valid data from this archive, a few records at a
+                    // time, as a snapshot cut does
+                    // ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
+                    let map = self.map.clone();
+                    let mut reads = futures::stream::iter(entries)
+                        .map(|entry| {
+                            let map = map.clone();
+                            async move {
+                                let read = map.read_record(&entry).await;
+                                (entry, read)
+                            }
+                        })
+                        .buffered(MERGE_READS_IN_FLIGHT);
+                    let mut read_started = Instant::now();
+                    while let Some((mut entry, read)) = reads.next().await {
                         // read this entry from our archive file, verified against its
                         // checksum: a corrupt record is never rewritten under a fresh one. It
                         // is left where it is, with its archive, and the copy holding it is
@@ -1512,8 +1572,6 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                         // each try rewriting the records before it into the active archive
                         // for nothing, 38 GB on the lab ([Resolved #165](../../../../../../docs/src/appendix/resolved/corrupt-record-compaction-loop.md))
                         self.phases.loaded += 1;
-                        let read_started = Instant::now();
-                        let read = self.map.read_record(&entry).await;
                         self.phases.load += read_started.elapsed();
                         let read = match read {
                             Ok(read) => read,
@@ -1530,6 +1588,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                             &read[..],
                         )
                         .await?;
+                        copied += read.len() as u64;
                         // update our entries info
                         entry.archive = active_id;
                         entry.offset = start;
@@ -1541,7 +1600,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                         bound_staged(&mut self.writer, &mut self.map_writer, &mut self.staged)
                             .await?;
                         // add this entry to our entries list
-                        self.entries.push((entry.key, entry))
+                        self.entries.push((entry.key, entry));
+                        // the wait for the next read starts once this one is written
+                        read_started = Instant::now();
                     }
                     // close our archive
                     archive.close().await?;
@@ -1577,7 +1638,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         // remove any archives that are no longer in used from our map
         // short circut and stop compacting early if we didn't compact any archives
         if self.entries.is_empty() && old_paths.is_empty() {
-            return Ok(());
+            return Ok(more);
         }
         // flush our current writers
         self.sync_job().await?;
@@ -1618,7 +1679,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 path = old_archive.to_str()
             );
         }
-        Ok(())
+        Ok(more)
     }
 
     /// Shutdown this compactor
@@ -1802,9 +1863,14 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 let outcome = self.inject_fault(fault, key).await;
                 let _ = reply.send(outcome);
             }
-            // rewriting the archives copies live records forward and repoints the map after
-            // each archive, so a failure part way leaves dead bytes and nothing lost: tried again
-            CompactionJob::Archives => self.compact_archives().await.map_err(JobFailure::Retry)?,
+            // rewriting the archives copies live records forward and repoints the map once the
+            // pass ends, so a failure part way leaves dead bytes and nothing lost: tried again.
+            // A pass that stopped at its budget goes again behind the jobs queued meanwhile
+            CompactionJob::Archives => {
+                if self.compact_archives().await.map_err(JobFailure::Retry)? {
+                    self.backlog.push_back(CompactionJob::Archives);
+                }
+            }
             CompactionJob::Shutdown => {
                 // shutdown this compactor
                 self.shutdown().await.map_err(JobFailure::Fatal)?;
