@@ -18819,6 +18819,66 @@ async fn a_node_under_the_append_reserve_leads_nothing_and_serves() -> Result<()
     Ok(())
 }
 
+/// A node whose links are slow hands its leads on, and takes them back once they are well (item 182)
+///
+/// On the lab a 100 ms delay on one node's peer links took the whole cluster to a third of its
+/// throughput: the slow node kept leading its third of the groups, and every pipelined client
+/// filled its window with their writes. A node whose round trip to every peer is far above what
+/// it was now judges its own links slow, hands its leads on and answers `MayLead` with no, so
+/// the handback leaves them where they went; its peers, which each see only it slow, judge
+/// nothing ([Resolved #182](../../docs/src/appendix/resolved/slow-link-leadership.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_with_slow_links_hands_its_leads_on() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(2))
+        .replication_factor(3)
+        .lane_links(true)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    // the pings have to learn each peer's round trip first
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let led = groups_led_by(&mut cluster, 1)?;
+    assert!(led > 0, "node one leads nothing to hand on");
+    // every lane in and out of node one holds each chunk 100 ms
+    cluster.lag(1, Duration::from_millis(100));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let now_led = groups_led_by(&mut cluster, 1)?;
+        if now_led == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node one still leads {now_led} of its {led} groups with its links slow"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    // and none comes back while they stay slow, past the handback's settle and interval
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    assert_eq!(
+        groups_led_by(&mut cluster, 1)?,
+        0,
+        "a lead went back to a node whose links are slow"
+    );
+    // the other two judged nothing: they lead every group between them and take writes
+    let through_zero = cluster.node(0).endpoints.client.to_string();
+    for key in 15_000..15_020u64 {
+        write_note(&through_zero, key, "while slow").await?;
+    }
+    // well again, the handback returns node one its placement's leads
+    cluster.heal(1);
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while groups_led_by(&mut cluster, 1)? == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "node one never led again once its links were well"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    Ok(())
+}
+
 /// Every group's term as one node sees it, by group
 ///
 /// # Arguments

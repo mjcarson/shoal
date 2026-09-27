@@ -582,6 +582,9 @@ pub(super) struct Replication<D: ShoalDatabase> {
     /// Whether this shard's groups stand for election: not while it is isolated or under the
     /// append reserve
     pub(super) stands: bool,
+    /// Whether this node's links are judged slow, which hands its leads on as a low disk does
+    /// ([Resolved #182](../../../../docs/src/appendix/resolved/slow-link-leadership.md))
+    pub(super) links_impaired: bool,
     /// Whether a segment sweep is wanted before the next message
     pub(super) sweep_due: bool,
     /// The shard's WAL directory, where quarantine markers live
@@ -748,6 +751,7 @@ where
             disk_checked: None,
             disk_handoff: None,
             stands: true,
+            links_impaired: false,
             sweep_due: false,
             wal_dir: dir.clone(),
             quarantines,
@@ -2387,7 +2391,8 @@ where
         // whether this node may lead now: not while it is under the append reserve
         // ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md))
         if head.kind == ReplicateKind::MayLead {
-            let _ = reply.try_send(encode_reply(head.id, &replication.disk_low.is_none()));
+            let may = replication.disk_low.is_none() && !replication.links_impaired;
+            let _ = reply.try_send(encode_reply(head.id, &may));
             return;
         }
         // how far this copy has applied is answered from what the loop holds
@@ -3231,6 +3236,33 @@ where
         let Some(replication) = self.replication.as_mut() else {
             return;
         };
+        // a node whose links the control thread judges slow hands its leads on as well
+        // ([Resolved #182](../../../../docs/src/appendix/resolved/slow-link-leadership.md))
+        let impaired = crate::server::control::links::impaired();
+        if impaired != replication.links_impaired {
+            replication.links_impaired = impaired;
+            replication.disk_handoff = None;
+        }
+        if impaired
+            && !replication.stopping
+            && replication
+                .disk_handoff
+                .is_none_or(|handed| handed.elapsed() >= DISK_HANDOFF_INTERVAL)
+        {
+            replication.disk_handoff = Some(Instant::now());
+            let rafts: Vec<Raft<DataConfig, GroupMachine<D>>> = replication
+                .groups
+                .values()
+                .filter_map(|slot| slot.raft.clone())
+                .collect();
+            glommio::spawn_local(async move {
+                let (led, handed) = hand_off_leadership(&rafts).await;
+                if led > 0 {
+                    event!(Level::WARN, msg = "handed on the leads of a shard whose links are slow", shard, led, handed);
+                }
+            })
+            .detach();
+        }
         // a reserve of zero is off, and the disk is read once an interval
         if reserve == 0
             || replication
@@ -3303,6 +3335,7 @@ where
         // often than the interval
         if replication.stopping
             || replication.disk_low.is_some()
+            || replication.links_impaired
             || replication.last_balance.elapsed() < BALANCE_INTERVAL
         {
             return;

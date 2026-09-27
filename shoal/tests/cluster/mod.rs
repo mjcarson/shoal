@@ -1191,6 +1191,20 @@ impl Cluster {
         }
     }
 
+    /// Slow every lane in both directions between a node and every other: each chunk held
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node whose links are slow
+    /// * `lag` - How long each chunk is held
+    pub fn lag(&self, id: usize, lag: Duration) {
+        for ((from, to), link) in self.control_links.iter().chain(self.data_links.iter()) {
+            if *from == id || *to == id {
+                link.lag(lag);
+            }
+        }
+    }
+
     /// Heal every lane in both directions between a node and every other
     ///
     /// # Arguments

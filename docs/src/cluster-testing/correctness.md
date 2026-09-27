@@ -1130,11 +1130,13 @@ No node restarted in any run, and nothing acknowledged was lost.
 
 **What the table shows.**
 
-- **A slow link to one node costs the whole cluster.** At 100 ms, a third of the groups are led
-  across the slow link, and every pipelined client fills its window with their writes, so the
-  cluster ran at a third of its rate. Nothing moves leadership off a member whose links are slow:
+- **A slow link to one node cost the whole cluster.** At 100 ms, a third of the groups were led
+  across the slow link, and every pipelined client filled its window with their writes, so the
+  cluster ran at a third of its rate. Nothing moved leadership off a member whose links were slow:
   leads are balanced by count ([O63](../appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary)).
-  Filed with the weighted leadership todo, which this is the best evidence for yet.
+  Fixed as [#182](../appendix/resolved/slow-link-leadership.md): a node whose round trip to every
+  peer is far above its baseline judges its own links slow and hands its leads on. Rerun, it did
+  so a second into the delay, and the cluster served 56,000–70,000 operations a second through it.
 - **One-way partitions and a control-port cut behave well.** Either direction breaks TCP, so both
   are a partition as far as a connection goes, and #143's refusals apply. They start after the
   hop silence, and throughput rises while hyperion's groups are refused. The control port alone
@@ -1192,5 +1194,4 @@ failed after that. The two minutes between host and node were `systemd-networkd-
 host configuration. The device's write cache was not lost: the power stayed on. A cut of the power
 itself remains to be done by hand.
 
-**Verdict: pass**, with two findings, both fixed: #181 and O76. The slow link is filed with the
-weighted leadership todo.
+**Verdict: pass**, with three findings, all fixed: #181, #182 and O76.
