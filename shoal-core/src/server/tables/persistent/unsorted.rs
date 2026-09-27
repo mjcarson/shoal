@@ -616,7 +616,10 @@ where
     ///
     /// * `meta` - The metadata for this query
     /// * `archived` - The archived query to execute
-    #[instrument(name = "PersistentTable::handle", skip(self, query))]
+    // every argument skipped: the query's metadata and its seal were recorded with `Debug` on
+    // every query, formatted by the console layer at the default level, and the span this hangs
+    // off already names the query ([O75](../../../../../docs/src/appendix/optimizations.md#o75-every-query-formatted-its-metadata-into-a-tracing-span))
+    #[instrument(name = "PersistentTable::handle", skip_all)]
     pub async fn handle<P: ShoalProjection<Row = R>>(
         &mut self,
         mut meta: QueryMetadata,
