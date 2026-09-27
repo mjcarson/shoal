@@ -250,6 +250,7 @@
   - [126. A storage directory the node could not create was refused without its path](appendix/resolved/storage-directory-unusable.md)
   - [127. The wizard saved an inventory bootstrap refused from the same host](appendix/resolved/wizard-loopback-address.md)
   - [128. A hopped write reported the replication rpc timed out for a leader that answered](appendix/resolved/hop-deadline-margin.md)
+  - [129. An overloaded group answered OutcomeUnknown rather than shedding](appendix/resolved/overload-sheds.md)
   - [133. A get naming two partitions crashed the node that coordinated it](appendix/resolved/read-plan-rc-across-shards.md)
   - [134. A deployed node on the development host failed six fixture tests](appendix/resolved/fixture-default-peer-ports.md)
   - [135. A node killed while saving an archive map could never start again](appendix/resolved/leftover-temp-map.md)

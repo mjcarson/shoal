@@ -319,6 +319,16 @@ struct WalInner {
     stalled: HashSet<GroupId>,
     /// The completions held back, with their groups
     held: Vec<(GroupId, IOFlushed<DataConfig>)>,
+    /// The groups whose flush completions are released one at a time after a delay, for a test
+    ///
+    /// What gives a group a commit rate the fixture chooses: a follower whose every append
+    /// completes this long after its sync, and never two at once
+    /// ([Resolved #129](../../../../docs/src/appendix/resolved/overload-sheds.md)).
+    slowed: HashMap<GroupId, Duration>,
+    /// The slowed groups' completions waiting for their turn, oldest first
+    slow_queue: VecDeque<(GroupId, IOFlushed<DataConfig>)>,
+    /// Whether a task is releasing the slowed completions
+    slow_draining: bool,
     /// Who to wake when a batch is ready for the writer
     waker: Option<Waker>,
     /// Whoever is waiting for the queue to drain
@@ -1239,6 +1249,7 @@ async fn writer(inner: Rc<RefCell<WalInner>>) {
 /// * `batch` - The batch
 fn complete_batch(inner: &Rc<RefCell<WalInner>>, batch: Batch) {
     let mut fire = Vec::new();
+    let mut drain = false;
     {
         let mut guard = inner.borrow_mut();
         guard.durable = (batch.generation, batch.end());
@@ -1259,21 +1270,60 @@ fn complete_batch(inner: &Rc<RefCell<WalInner>>, batch: Batch) {
             }
         }
         guard.synced_batches += 1;
-        // a stalled group's completions are held; everybody else's fire now
+        // a stalled group's completions are held, a slowed group's wait their turn, and
+        // everybody else's fire now
         for (group, callback) in batch.callbacks {
             if guard.stalled.contains(&group) {
                 guard.held.push((group, callback));
+            } else if guard.slowed.contains_key(&group) {
+                guard.slow_queue.push_back((group, callback));
             } else {
                 fire.push(callback);
             }
         }
+        // the slowed completions are released by one task, so they stay in order
+        if !guard.slow_queue.is_empty() && !guard.slow_draining {
+            guard.slow_draining = true;
+            drain = true;
+        }
         guard.evict();
+    }
+    // spawned with the borrow let go, since the task may run before this returns
+    if drain {
+        glommio::spawn_local(drain_slowed(inner.clone())).detach();
     }
     for callback in fire {
         callback.io_completed(Ok(()));
     }
     for waiter in batch.waiters {
         let _ = waiter.send(Ok(()));
+    }
+}
+
+/// Release the slowed groups' completions one at a time, each after its group's delay
+///
+/// # Arguments
+///
+/// * `inner` - The store
+async fn drain_slowed(inner: Rc<RefCell<WalInner>>) {
+    loop {
+        // the next completion's delay, or the end of the queue
+        let delay = {
+            let mut guard = inner.borrow_mut();
+            match guard.slow_queue.front() {
+                Some((group, _)) => guard.slowed.get(group).copied().unwrap_or_default(),
+                None => {
+                    guard.slow_draining = false;
+                    return;
+                }
+            }
+        };
+        // wait out the delay with no borrow held, then release the completion
+        glommio::timer::sleep(delay).await;
+        let next = inner.borrow_mut().slow_queue.pop_front();
+        if let Some((_, callback)) = next {
+            callback.io_completed(Ok(()));
+        }
     }
 }
 
@@ -1350,6 +1400,9 @@ impl ShardWal {
             segment_bytes,
             stalled: HashSet::new(),
             held: Vec::new(),
+            slowed: HashMap::new(),
+            slow_queue: VecDeque::new(),
+            slow_draining: false,
             waker: None,
             idle_waiters: Vec::new(),
             closed: false,
@@ -1608,6 +1661,24 @@ impl ShardWal {
         };
         for (_, callback) in held {
             callback.io_completed(Ok(()));
+        }
+    }
+
+    /// Release a group's flush completions one at a time, each this long after the last
+    ///
+    /// Zero lifts it: what is queued is released at once, in order, by the task already
+    /// draining it.
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `delay` - How long each completion waits for its turn
+    pub fn slow(&self, group: GroupId, delay: Duration) {
+        let mut inner = self.inner.borrow_mut();
+        if delay.is_zero() {
+            inner.slowed.remove(&group);
+        } else {
+            inner.slowed.insert(group, delay);
         }
     }
 

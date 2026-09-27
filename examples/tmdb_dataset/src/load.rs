@@ -151,6 +151,14 @@ pub struct Counts {
     pub skipped: AtomicUsize,
     /// How many queries were sent again after a failure that said to try again
     pub retried: AtomicUsize,
+    /// How many of those retries were after an unknown outcome
+    pub retried_unknown: AtomicUsize,
+    /// How many of those retries were after a shed
+    pub retried_shed: AtomicUsize,
+    /// How many of those retries were after a refusal naming no leader here
+    pub retried_not_leader: AtomicUsize,
+    /// How many of those retries were after any other code
+    pub retried_other: AtomicUsize,
 }
 
 /// Connect to every member of a deployed cluster that answers, as its admin
@@ -548,6 +556,32 @@ async fn worker(
         if let (Some(error), Some((row, attempts))) = (response.error(), sent) {
             if retriable(error.code()) && attempts < args.retries {
                 counts.retried.fetch_add(1, Ordering::Relaxed);
+                // which kind of refusal it was, since an unknown outcome is the one that
+                // costs a client more than a retry
+                match error.code() {
+                    ErrorCode::OutcomeUnknown => {
+                        counts.retried_unknown.fetch_add(1, Ordering::Relaxed);
+                    }
+                    ErrorCode::Shedding => {
+                        counts.retried_shed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    ErrorCode::NotLeader => {
+                        counts.retried_not_leader.fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => {
+                        counts.retried_other.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                // the first few of each kind say why, which a count alone cannot
+                let sampled = match error.code() {
+                    ErrorCode::OutcomeUnknown => counts.retried_unknown.load(Ordering::Relaxed),
+                    ErrorCode::Shedding => counts.retried_shed.load(Ordering::Relaxed),
+                    ErrorCode::NotLeader => counts.retried_not_leader.load(Ordering::Relaxed),
+                    _ => counts.retried_other.load(Ordering::Relaxed),
+                };
+                if sampled <= 3 {
+                    eprintln!("  retrying after {:?}: {}", error.code(), error.msg());
+                }
                 pipe.retries.push(Retry {
                     at: Instant::now() + backoff(attempts + 1),
                     row,
@@ -753,7 +787,13 @@ async fn write_all(
     // a retry is a sign the cluster was pushed past what it commits, so say how many there were
     let retried = counts.retried.load(Ordering::Relaxed);
     if retried > 0 {
-        println!("  retried {retried} queries after a failure that said to try again");
+        println!(
+            "  retried {retried} queries after a failure that said to try again ({} unknown, {} shed, {} not leader, {} other)",
+            counts.retried_unknown.load(Ordering::Relaxed),
+            counts.retried_shed.load(Ordering::Relaxed),
+            counts.retried_not_leader.load(Ordering::Relaxed),
+            counts.retried_other.load(Ordering::Relaxed)
+        );
     }
     Ok(ids)
 }

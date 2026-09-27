@@ -19,8 +19,8 @@ $L load -i tmdb_cluster.yaml --dataset ~/datasets/TMDB_movie_dataset_v11.csv
 
 Two csv rows do not parse and are skipped. Neither load needed a retry: the smaller in-flight gate
 F54 shipped with holds the queue under `write_timeout` on this lab
-([item 129](../appendix/known-issues.md#129-an-overloaded-group-answers-outcomeunknown-rather-than-shedding)
-still stands for a client that does not hold it).
+([item 129](../appendix/resolved/overload-sheds.md) stood for a client that does not hold it,
+until [section 11](#11-overload-silence-and-a-nearly-full-disk) fixed it).
 
 **Verdict: pass.**
 
@@ -421,7 +421,7 @@ was loaded.
   `One` equalled the csv.
 
 **Verdict:** durability **pass**. Availability through a node with a full disk **fail**, filed as
-[known issue 156](../appendix/known-issues.md#156-a-full-disk-stops-every-group-on-a-node-until-it-is-restarted).
+[known issue 156](../appendix/resolved/wal-failure-stops-the-node.md).
 Cleaning up also found `cluster destroy` unable to remove a storage path that is itself a mount
 point ([#157](../appendix/resolved/destroy-mount-point.md), fixed).
 
@@ -463,7 +463,7 @@ Every acknowledged insert was read back through every member after every fault. 
 more than the one restart its fault gave it, and after the pause every member read `up`. What
 remains is filed: the first two to three seconds of a silent partition or a pause
 ([#143](../appendix/resolved/silent-partition-hops.md#still-open)), a full disk
-([156](../appendix/known-issues.md#156-a-full-disk-stops-every-group-on-a-node-until-it-is-restarted)),
+([156](../appendix/resolved/wal-failure-stops-the-node.md)),
 and a restore that fails part way (155, since [resolved](../appendix/resolved/restore-retry.md)).
 
 ## 6. A second regression pass, and a crash mid compaction

@@ -443,6 +443,15 @@ fn default_write_timeout() -> DurationSpec {
     DurationSpec(Duration::from_secs(5))
 }
 
+/// The default bytes a node keeps free below which it takes no new write
+///
+/// Half of `migration.disk_reserve`'s default: a node refuses to install a stream before it
+/// refuses writes, and what is left under this is what its followers' appends fill while
+/// the cluster reacts ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md)).
+fn default_append_reserve() -> u64 {
+    512 * 1024 * 1024
+}
+
 /// The default bound on bytes proposed and not yet answered, per shard
 fn default_pending_bytes() -> usize {
     64 * 1024 * 1024
@@ -597,6 +606,18 @@ pub struct Replication {
     /// straight away ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page)).
     #[serde(default = "default_wal_commit_delay")]
     pub wal_commit_delay: DurationSpec,
+    /// The bytes this node keeps free on its storage below which it takes no new write
+    ///
+    /// Below it a write proposed through this node is refused `Shedding`, the groups it leads
+    /// are handed to other members, and it takes no lead back, while it goes on serving reads
+    /// and following its groups. A disk that fills anyway stops the node
+    /// ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md)).
+    /// Zero turns it off.
+    #[serde(
+        default = "default_append_reserve",
+        deserialize_with = "utils::deserialize_byte_size_u64"
+    )]
+    pub append_reserve: u64,
 }
 
 impl Default for Replication {
@@ -616,6 +637,7 @@ impl Default for Replication {
             retained_bytes: default_retained_bytes(),
             wal_commit_delay: default_wal_commit_delay(),
             retry_window: default_retry_window(),
+            append_reserve: default_append_reserve(),
         }
     }
 }

@@ -347,34 +347,6 @@ here before them are resolved, all in one change:
 reported as the last try's refusal. Item 125 was filed at the end of this page, with the
 entries that came after the triage order, and carried its severity in its first line.
 
-### 129. An overloaded group answers `OutcomeUnknown` rather than `Shedding`
-
-A client that keeps more writes outstanding than a cluster commits within
-`replication.write_timeout` gets `OutcomeUnknown` for the writes at the back of the queue. It
-does not get `Shedding`, the refusal that says nothing was applied. The only admission bound
-on a group's proposals is `replication.pending_bytes` (`GroupSlot::pending_bytes`, checked in
-`ShardGroups::propose` in `server/shard/groups.rs`). At its default of 64 MiB per group, with
-rows of a few kilobytes, that is tens of thousands of writes, far more than a group commits in
-5s. The bound is also counted on the shard that proposes. A write that hops to its leader
-(the `ReplicateKind::Propose` arm) goes straight into `propose_through` there, and is counted
-against no budget on the leader.
-
-So overload shows up as timeouts. A caller has to treat `OutcomeUnknown` as retriable to get
-through it, and that is safe only for a write that replaces its row. A cheap refusal at
-admission would be definite.
-
-**Established by running it**: the [TMDB loader](../features/tmdb-dataset-deployment.md) at its
-old defaults (8 workers × 4096 in flight, plus each movie's keyword rows) against the three-node
-lab cluster. `OutcomeUnknown` came six seconds in, one `write_timeout` after the load started,
-with every member up and no election. The loader now retries and ships with a smaller gate,
-which works around this item without fixing it. Where the reason was lost on the way back is
-[Resolved #128](resolved/hop-deadline-margin.md).
-
-A fix would shed at admission once a group's queue would take longer than `write_timeout` to
-commit. That means an estimate of commit rate per group, or a bound on count or bytes derived
-from `write_timeout`, and a check on the leader for writes that arrive by hop. That is a
-behaviour change and needs a benchmark (the grid's high-depth rungs are where it would show).
-
 ### 132. `ephemeral_sorted_table` aborted once in glibc's thread-cache teardown
 
 One workspace run aborted this test binary with SIGABRT after its first test passed. glibc
@@ -498,25 +470,38 @@ times of three and eighteen of eighteen with six copies at once. A paced pass ne
 job, since the loop takes whichever retry is due and waits no longer than the earliest; nothing
 found links the change to this.
 
-### 156. A full disk stops every group on a node until it is restarted
+### 180. A first write queued past a group's identity memory is refused `IdentityExpired`
 
-*Partly resolved:* a node whose WAL cannot be written now stops, and a restart recovers it
-([Resolved #156](resolved/wal-failure-stops-the-node.md)). What remains is refusing appends before
-the disk is full.
+A group remembers the result of its last `REMEMBERED_REQUESTS` (4,096) write identities
+(`MachineState::remember` in `server/replication/machine.rs`). Evicting one moves
+`expired_before` to the time that identity was minted, and `is_expired` refuses any identity
+minted before it, so a retry of a write whose first result is gone is never applied twice. The
+check cannot tell a retry from a first attempt. A write minted at T that waits in the server's
+queues until the group has applied and evicted 4,096 writes minted after T is refused as though
+it were a late retry, although it was never applied. The refusal is definite and nothing is lost,
+but a legitimate write fails, and `IdentityExpired` is not retriable.
 
-When a node's WAL write fails for want of space, openraft stops the core of every group the write
-was for with a fatal storage error, and the shard's probe marks each copy dead "until the process
-restarts" (`probe_cores`). Nothing refuses writes while the disk nears full: `disk_reserve` guards
-snapshot installs, not appends. And a write coordinated through the node goes to its own dead core,
-failing `Unavailable` for as long as the node runs, rather than hopping to the group's new leader.
-Found on the lab ([cluster testing](../cluster-testing/correctness.md#fill-a-nodes-disk)), where
-a loader connected to every member stopped at those writes. Nothing was corrupted: freed and
-restarted, the node caught up exactly. That paragraph describes the tree before the fix. The node
-now stops instead of holding dead cores, so writes through it are never answered by a dead core and
-a restart once space returns brings it back (on the lab with no restart by hand). The one fix still
-wanted is to shed appends below a reserve with a retriable refusal, so that a nearly full node
-keeps serving reads rather than stopping.
+**Established by running it.** The TMDB loader at 8 × 4,096 in flight on a fresh lab cluster, with
+retries unbounded, stopped on it in two of three runs of `35d47a6` and in one of three runs of
+the tree with the gate switched off. Each time it was early in the load, at query 2,402, 4,427 and
+7,397 of a worker's stream:
 
+```text
+code: IdentityExpired, msg: "the identity of this write is older than the 300s retry window, or older than an identity group c5724bd0b94902bf has forgotten; a retry this late is not answered its first result"
+```
+
+At about 1,000 writes a second per group, 4,096 identities are four seconds of memory, which is
+[F45's limitation](../features/replica-migration.md#limitations) seen from the other side. The
+gate [#129](resolved/overload-sheds.md) put before openraft keeps the queue after admission short,
+and none of the six gated runs met this. The queue in front of admission, the shard loop's, is
+not bounded that way.
+
+A fix has to keep the guarantee for retries, and nothing the server sees tells a retry from a
+first attempt: a retry is received later too. So the memory has to cover the longest a first
+attempt can wait before admission. That means remembering identities for a time rather than a
+count (bounded in bytes, since a busy group mints thousands a second), or bounding the wait in
+front of admission as the gate bounds the one behind it. The first changes what the checkpoint
+persists, and needs its cost on the benchmark host measured.
 
 ---
 

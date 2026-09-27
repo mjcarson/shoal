@@ -84,7 +84,7 @@ deduplicated, are read back. A movie that was written and is not found fails the
 - **Retrying is safe for the same reason, and a retry is a new query.** The first run against the
   lab stopped six seconds in on `OutcomeUnknown`: eight workers × 4,096 in flight is a queue, and
   a write that waited in it past `replication.write_timeout` could not commit
-  ([item 129](../appendix/known-issues.md#129-an-overloaded-group-answers-outcomeunknown-rather-than-shedding),
+  ([Resolved #129](../appendix/resolved/overload-sheds.md), since fixed,
   and [Resolved #128](../appendix/resolved/hop-deadline-margin.md) for why it read as a timed out
   RPC). ~~The loader stops on the first failed write.~~ Each worker keeps the row behind every query it
   has sent, by the query's index in its stream (`Pipeline::outstanding`), and a retriable failure
@@ -150,10 +150,12 @@ deduplicated, are read back. A movie that was written and is not found fails the
 - **Verification samples movies, not keyword rows.** A keyword row that failed to land would have
   failed its write and stopped the load, but nothing reads keyword rows back.
 - **Retries hide overload rather than fix it.** A load that retries a lot is a load pushed past
-  what the cluster commits. The server answers that with `OutcomeUnknown` at the write deadline
-  rather than a cheap `Shedding` at admission
-  ([item 129](../appendix/known-issues.md#129-an-overloaded-group-answers-outcomeunknown-rather-than-shedding)).
-  Lower `--in-flight` or `--workers` if the retry count is large.
+  what the cluster commits. ~~The server answers that with `OutcomeUnknown` at the write deadline
+  rather than a cheap `Shedding` at admission.~~ Since [Resolved #129](../appendix/resolved/overload-sheds.md)
+  the server sheds it at a gate before openraft, and the load prints its retries by code. Lower
+  `--in-flight` or `--workers` if the retry count is large, and raise `--retries` (8 by default)
+  for a load that is meant to run past what the cluster commits: a shed row is retried on a
+  backoff capped at half a second, so eight tries are about three seconds of overload.
 - **A retried query is not deduplicated.** It is safe only because every write this loader makes
   replaces its row. A write that did not (an update that adds, or an insert with a generated key)
   could not be retried this way.
@@ -202,7 +204,7 @@ deployed cluster from this change.~~
 Against the three-node lab cluster (`tmdb_cluster.yaml`: europa, titan, hyperion, six cores each,
 a factor of three), the loader at the old defaults stopped six seconds in on `OutcomeUnknown`
 ([Resolved #128](../appendix/resolved/hop-deadline-margin.md),
-[item 129](../appendix/known-issues.md#129-an-overloaded-group-answers-outcomeunknown-rather-than-shedding)).
+[Resolved #129](../appendix/resolved/overload-sheds.md)).
 With the retry, the 1,024 gate and the drain, the full file (1,188,548 movies) wrote 2,193,788
 rows in 53.2s and read 10,073 back in 60ms, with no retries. The run before the drain was added
 wrote everything and hung in verify (item 130).

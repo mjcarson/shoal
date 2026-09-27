@@ -80,7 +80,14 @@ same payload digest; `Refused` when the digest differs. Past `replication.write_
 `OutcomeUnknown`, which is what it is: the command may commit later. A group with no leader
 this shard can reach is `NotLeader`; a shard whose pending bytes for the group would pass
 `pending_bytes`, or whose volatile logs would pass `volatile_log_bytes`, sheds the write
-`Shedding` before recording anything. Under `write_consistency: All` the answer also waits
+`Shedding` before recording anything. A leader lets a group's writes into openraft through a
+gate, a bounded number at once, and sheds `Shedding` a write that waits there past a quarter of
+its budget, so overload is refused rather than answered unknown
+([Resolved #129](../appendix/resolved/overload-sheds.md)). A leader that has heard nothing from
+a quorum of its members' nodes for the hop silence refuses `NotLeader` before appending, and a
+node under `append_reserve` leads nothing
+([Resolved #143](../appendix/resolved/silent-partition-hops.md),
+[#156](../appendix/resolved/wal-failure-stops-the-node.md)). Under `write_consistency: All` the answer also waits
 until every voter's matched index covers the entry, read from the group's metrics, and no
 `Down` verdict shrinks that set. `One` writes are refused at validation naming the
 accepted-or-pending API they would need; a persistent table configured `Async` on a cluster
@@ -218,7 +225,8 @@ shard and a write past it is shed before it is recorded, so a stalled group hold
 amount of memory and nothing else waits on it - `slow_tablet_does_not_block_other_tablets`
 holds both followers' flush completions of one group and writes to another at the same time.
 `write_timeout` turns a proposal that did not commit into an unknown outcome rather than a
-queue; `volatile_log_bytes` bounds every in-memory log together; `replication_queue_bytes`
+queue, and the gate in front of openraft keeps that queue short enough that a write let in has
+time to commit ([Resolved #129](../appendix/resolved/overload-sheds.md)); `volatile_log_bytes` bounds every in-memory log together; `replication_queue_bytes`
 bounds what one link will hold for a follower that is not reading.
 
 **Dedup is an LRU with a digest, for now.** A group remembers the last 4096 request

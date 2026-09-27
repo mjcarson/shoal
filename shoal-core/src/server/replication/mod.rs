@@ -8,6 +8,7 @@
 //! the groups run under, the state machine that hands committed entries to the shard loop, and
 //! the network that carries the group's RPCs over the replication lane.
 
+pub mod admission;
 pub mod digest;
 pub mod install;
 pub mod lease;
@@ -18,6 +19,7 @@ pub mod report;
 pub mod snapshot;
 pub mod types;
 
+pub use admission::{ProposalGate, ProposalPermit};
 pub use digest::{
     ArchivedCut, DigestAnswer, DigestIntegrity, DigestReport, PartitionDigest, PendingDigest,
 };

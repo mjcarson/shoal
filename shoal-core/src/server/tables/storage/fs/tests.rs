@@ -897,6 +897,25 @@ fn tablet_bytes_follow_the_map() {
             .unwrap();
         assert_eq!(reopened.tablet_bytes(), bytes);
         assert_eq!(reopened.tablet_usage(), usage);
+        // the counters equal a pass over the map through a churn of inserts, replacements of a
+        // partition onto another tablet's neighbour, and removals, including of keys never set
+        // ([O57](../../../../../../docs/src/appendix/optimizations.md#o57-tablet-bytes-are-rescanned-from-the-whole-archive-map-on-every-report))
+        for round in 0..2000u64 {
+            let key = (round % 97).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            match round % 3 {
+                0 | 1 => reopened.set_partition(
+                    key,
+                    ArchiveEntry {
+                        key,
+                        archive,
+                        offset: round,
+                        size: usize::try_from(round % 13 + 1).unwrap(),
+                    },
+                ),
+                _ => reopened.remove_partition(key ^ (round & 1)),
+            }
+        }
+        assert_eq!(reopened.tablet_usage(), reopened.tablet_usage_by_pass());
         reopened.close_all().await.unwrap();
     });
 }

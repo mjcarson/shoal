@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use openraft_rt::WatchReceiver as _;
 use openraft::error::{LinearizableReadError, RaftError};
 use openraft::raft::linearizable_read::Linearizer;
 use openraft::{Raft, ReadPolicy};
@@ -288,6 +289,14 @@ where
         // the handles the task needs: one raft per group, and the network for a hop
         let mut rafts = Vec::with_capacity(groups.len());
         for (group, bound) in groups {
+            // a durable copy on a node under the append reserve takes no entries, so a read
+            // waiting for one to apply is refused rather than held for its deadline
+            // ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md))
+            let frozen = replication.disk_low.is_some()
+                && replication
+                    .groups
+                    .get(&group)
+                    .is_some_and(|slot| !slot.store.is_volatile());
             let Some((raft, me)) = replication
                 .groups
                 .get(&group)
@@ -301,7 +310,7 @@ where
             };
             // this node's member of the group is the slot hosting it, which is this executor's
             // address as the group knows it ([F47](../../../../docs/src/features/local-rehome.md))
-            rafts.push((group, raft, bound, me));
+            rafts.push((group, raft, bound, me, frozen));
         }
         let network = replication.network.clone();
         let level = meta.read.level;
@@ -315,9 +324,9 @@ where
                 ..ReadWaits::default()
             };
             let mut outcome = Ok(());
-            for (group, raft, bound, me) in rafts {
+            for (group, raft, bound, me, frozen) in rafts {
                 match wait_on_group(
-                    &raft, &network, group, me, level, bound, deadline, &mut waits,
+                    &raft, &network, group, me, level, bound, deadline, frozen, &mut waits,
                 )
                 .await
                 {
@@ -744,6 +753,7 @@ where
 /// * `level` - The read's level
 /// * `bound` - The lowest index a token asks this replica to have applied, or zero
 /// * `deadline` - When the read stops waiting
+/// * `frozen` - Whether this copy takes no entries, being on a node under the append reserve
 /// * `waits` - Where what the waits cost is added up
 #[allow(clippy::too_many_arguments)]
 async fn wait_on_group<D: ShoalDatabase>(
@@ -754,6 +764,7 @@ async fn wait_on_group<D: ShoalDatabase>(
     level: ReadLevel,
     bound: u64,
     deadline: Stamp,
+    frozen: bool,
     waits: &mut ReadWaits,
 ) -> Result<(), ResponseError> {
     // the index this replica has to have applied before the read is served
@@ -769,6 +780,23 @@ async fn wait_on_group<D: ShoalDatabase>(
         }
         waits.barrier_ns += barrier_ns;
         need = need.max(index);
+    }
+    // a copy that takes no entries will not apply past where it is: a read that needs more is
+    // refused now, retriably, so its client asks another member
+    // ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md))
+    if frozen && need > 0 {
+        let applied = raft
+            .metrics()
+            .borrow_watched()
+            .last_applied
+            .as_ref()
+            .map_or(0, |log_id| log_id.index);
+        if applied < need {
+            return Err(ResponseError::new(
+                ErrorCode::Unavailable,
+                format!("this replica of group {group} has applied {applied} of the {need} the read needs, and takes no entries while its node's storage is under the append reserve; read through another member"),
+            ));
+        }
     }
     // then applies through it, and past every token, before anything is read
     if need > 0 {
@@ -823,6 +851,14 @@ async fn read_barrier<D: ShoalDatabase>(
             // follow the hint this shard was given
             Some(leader) => Some(leader),
             None => {
+                // a leader no quorum has answered for the hop silence cannot complete a
+                // heartbeat round either ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md))
+                if let Some(quiet) = Lease::quorum_quiet(raft, network) {
+                    return Err(ResponseError::new(
+                        ErrorCode::QuorumUnavailable,
+                        format!("{me} leads group {group} but no quorum of its members' nodes has been heard from for {quiet:?}"),
+                    ));
+                }
                 // a lease that lapsed cannot complete a heartbeat round: answered by name rather
                 // than waited out ([F42](../../../../docs/src/features/primary-failover.md))
                 if Lease::of(raft, me) == Lease::Lapsed {
