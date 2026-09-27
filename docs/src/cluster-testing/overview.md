@@ -92,7 +92,18 @@ a move's destination has made no progress  group=… stalled_secs=270 sent=14788
 index the copy accepted. `failed` and `last_error` say whether the link is at fault. The compactor
 logs how long each snapshot cut waited (`taking a snapshot cut … queued_ms= backlog=`) and every job
 that held it over 5 s (`a compaction job ran long … kind= secs=`). These are the tools that found
-[#174](../appendix/resolved/snapshot-cut-queue.md).
+[#174](../appendix/resolved/snapshot-cut-queue.md). Since
+[O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)
+a long job also says where its time went: `frames` and `read_ms` for a merge's segment,
+`loaded` and `load_ms` for the partitions it read (or the records a pass copied), `apply_ms`,
+`written` and `write_ms`, `sync_ms`, `fold_ms`, and `archives` emptied. `target/lab/o74/summary.py`
+averages them per host and kind from each host's journal (`target/lab/o74/journal.sh`).
+
+A copy that lost part of its log says so at its start, by group
+([#176](../appendix/resolved/unreadable-voter-log.md)): `a durable log has a hole below its
+checkpoint` (purged, nothing lost) or `… past its checkpoint; forgetting it` under a floor on its
+vote, then `a copy was fed past its floor` once its leader has fed it. The replication report
+carries `floor` on a group while it holds.
 
 **Do not turn on openraft's debug tracing on a loaded lab node.** `RUST_LOG` at debug for
 `openraft::replication` wrote about 150,000 lines a second a node under the bench. rsyslog copied it

@@ -996,6 +996,6 @@ hyperion 25 s in. The runs are under `target/lab/o74/`.
 c3 is the fastest rebuild on record: section 8's rebuilds 8 and 9 took 979 s and 748 s. Its longest
 wait for a snapshot cut was 0.7 s, against 147.5 s in rebuild 8. The part of O74 still open is the
 cost of reclaiming space. With the backlog gone, the archive passes run at the rate the bench makes
-garbage, where before they were skipped behind it. That costs 4 to 5% of throughput in steady state.
+garbage, where before they were skipped behind it. That costs about 6% of throughput in steady state.
 
 **Verdict: pass.** No run lost an acknowledged write or a row.

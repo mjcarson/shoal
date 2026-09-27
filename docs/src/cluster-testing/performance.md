@@ -184,3 +184,53 @@ every 30 s:
 The nodes rise until the process passes the budget, then evict and hover under it. The fresh
 cluster's load after the rebuild ran at 33,283 rows/s. That is within the range of first loads after a
 bootstrap (35,800 last time), not a measured cost of the fixes.
+
+## O74, the compactor under the bench
+
+Section 8 of [Correctness](correctness.md#8-an-unplaced-member-coordinates) left titan's compactor
+hundreds of jobs behind under the mixed bench, with every snapshot cut, and every rebuild, waiting on
+it. A compaction job that holds the compactor over 5 s now logs where its time went:
+
+```text
+a compaction job ran long table="Movie" kind="segment" secs=5.517 backlog=3 frames=16786 read_ms=2208
+  loaded=5256 load_ms=3195 apply_ms=16 written=15693 write_ms=74 sync_ms=18 fold_ms=0 archives=0
+```
+
+The first run with it (a fresh cluster, the bench, hyperion rebuilt 25 s in) answered the question
+O74 had left open. Of a Zen1 node's average long merge, 6.8 s, **5.8 s was reading the ~9,500
+partitions it merges onto, one direct read at a time**. Reading the segment's frames took 0.9 s, and
+the apply, writes, syncs and map fold 0.2 s between them. Europa's Optane ran the same merges under
+the 5 s bar. A merge now reads 32 partitions at a time, as a snapshot cut has since O70.
+
+That changed what the compactor spent its time on, and three rebuilds and three A/B runs followed
+it. The details are on [O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench).
+The rebuilds, each on a fresh cluster loaded from the csv (build c3 is `c3b8874`):
+
+| | base | c3 |
+| --- | --- | --- |
+| Long merges on titan | 762, mean 6.8 s | **0** |
+| Longest archive pass | 294 s (hyperion) | **5.9 s** |
+| Peak compactor backlog on titan | 139 | **4** |
+| Longest wait for a snapshot cut | 6.1 s | **0.7 s** |
+| Forced purges | 3 | **0** |
+| Whole rebuild | 430 s | **272 s**, the fastest on record |
+| Throughput after the rebuild | 30.1k ops/s | 27.9k ops/s |
+
+**Throughput is lower, and that is the work that was not being done.** With merges backlogged,
+nearly every archive pass was skipped behind the next one. The dead records the bench's rewrites
+leave stayed in the archives, and the log the backlog held grew: 0.5 to 1.7 GB of WAL every five minutes on
+titan. With the backlog gone, a pass ran after every merge and copied each archive as soon as it
+fell under half live: 2,139 MiB in five minutes on titan, and 10% of the cluster's throughput. So a
+pass now waits a minute since the last one began, copies at most 16 MiB before it yields, stopping
+inside an archive if it must, and keeps 16 reads in flight. The steady state, 300 s arms on one
+cluster, each build following the other:
+
+| A/B, 300 s arms | Build | ops/s, each arm | Update p99 | Titan's archives, each arm | Titan's WAL, each arm |
+| --- | --- | --- | --- | --- | --- |
+| first | phases logged (`fc91fb7`) | 34,368 / 35,045 | 111 / 112 ms | passes copied 42 MiB in an arm | – |
+| | c1: 32 in flight, passes unpaced (`e7302c5`) | 31,518 / 30,878 | 149 / 160 ms | passes copied 2,139 MiB in an arm | – |
+| last | phases logged (`fc91fb7`) | 35,824 / 32,852 | 109 / 125 ms | **+2,523 / +2,576 MB** | **+805 / +514 MB** |
+| | c3, kept (`c3b8874`) | 32,762 / 31,354 | 133 / 143 ms | −948 / −736 MB | +62 / +53 MB |
+
+The lab's bench is a worst case for this: 45% of its operations rewrite a row, so about 6,000 rows
+a second leave a dead copy behind on every node.

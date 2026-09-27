@@ -3341,21 +3341,21 @@ claimed.
 
 | | |
 | --- | --- |
-| **Rank** | **B32** — partly applied (archive passes coalesced), open |
+| **Rank** | ~~**B32**~~ **done** — applied; the cost of reclaiming space at the rate the bench makes garbage is measured and kept |
 | **Impact** | Measured on the lab — titan's `Movie` compactor had 180 jobs queued when a snapshot cut reached the front after 9.4 minutes, under the mixed bench through all three members ([#174](resolved/snapshot-cut-queue.md)). Sealed segments wait for their merge, the groups' logs pass `retained_bytes`, and the retention budget forces purges ("forcing a group past a sealed segment") |
 | **Difficulty** | M |
 | **Depends on** | nothing |
 | **Blocks** | nothing |
-| **Tradeoff** | unknown until the cost of a segment merge is broken down |
-| **Benchmark** | the lab's rebuild under the bench: `taking a snapshot cut` `backlog=` on titan, and the rate of forced purges |
+| **Tradeoff** | about 6% of steady-state throughput on the Zen1 hosts under a rewrite-heavy bench, which is the archive passes reclaiming space the backlog used to leave on disk; the WAL no longer grows 1.7 GB every five minutes |
+| **Benchmark** | the lab's rebuild under the bench (`rebuild-exp.sh`), read from the compactor's `a compaction job ran long` phases, the cuts' `queued_ms`, the forced purges and the rebuild's time; and a steady-state A/B of builds on one cluster (`target/lab/o74/ab.sh`), read with each arm's archive and WAL bytes |
 
 Since #174 a cut no longer waits for the backlog, but every other job still does, and a backlog is
 held WAL. A cut still waits for the job running when it arrives. Rebuild 8 saw that cost 147 s,
 behind a backlog that was mostly archive passes, each redundant with the next.
 
-**Partly applied: coalesced archive passes.** An archive pass with another queued behind it is now
-skipped (`is_redundant`), since a pass compacts whatever qualifies when it runs. A job that holds
-the compactor for over 5 s is logged with its kind. Rebuild 9, on the cluster rebuild 8 left:
+**Partly applied first: coalesced archive passes.** An archive pass with another queued behind it
+is skipped (`is_redundant`), since a pass compacts whatever qualifies when it runs. Rebuild 9, on
+the cluster rebuild 8 left:
 
 | | Rebuild 8, passes not coalesced | Rebuild 9, coalesced |
 | --- | --- | --- |
@@ -3363,15 +3363,83 @@ the compactor for over 5 s is logged with its kind. Rebuild 9, on the cluster re
 | Cuts' median and p90 wait | 0 and – | 0 and 6.2 s |
 | Whole rebuild | 979 s | 748 s |
 
-| Job kind, rebuild 9, both leaders | Ran over 5 s | Mean of those | Longest |
-| --- | --- | --- | --- |
-| segment merge | 682 | 6.8 s | 20.9 s |
-| archive pass | 39 | 16.4 s | 182.4 s |
-| snapshot cut | 6 | 25.2 s | 37.4 s |
+**Measured: where a merge's time goes.** A job that holds the compactor over 5 s now logs its
+phases: the frames it read, the partitions it read from the archives, the apply, the writes, the
+syncs and a map fold (`JobPhases`). On a fresh cluster under the bench with hyperion rebuilt
+(run *base*, build `fc91fb7`), the average long segment merge:
 
-So the compactor's time on these hosts goes into segment merges: hundreds a run take five to twenty
-seconds each. That is the open part. What is not known is where a segment merge's time goes on a
-four-core node that is also applying and serving the bench: the merge itself, the archive map's
-intents ([O62](#o62-every-compaction-rewrites-the-shards-whole-archive-map)), or the scheduling of a
-compactor task on a busy shard. And one archive pass can still hold a cut for three minutes, because
-a pass cannot stop part way: the index is repointed only when it ends.
+| Phase | titan (762 long merges) | hyperion (424) |
+| --- | --- | --- |
+| Whole job | 6.8 s | 6.5 s |
+| Reading ~19,000 frames from the segment | 0.88 s | 0.85 s |
+| **Reading ~9,500 partitions from the archives** | **5.8 s** | **5.4 s** |
+| Apply, write ~14,000 records, sync, map fold | 0.19 s | 0.18 s |
+
+So nearly all of it was one direct read at a random offset after another, about 0.6 ms each on a
+busy four-core node. That is O70's shape again: O70 fixed it for a snapshot cut, and a merge still
+had it. Not the merge's own work, not the map's intents (O62), and not the scheduling. The archive
+passes were the same shape, and hyperion's longest took 294 s.
+
+**Applied:**
+
+1. **A merge reads its partitions 32 at a time** (`MERGE_READS_IN_FLIGHT`, `buffer_unordered`).
+   Run *c1*: the long merges fell to 4 on titan and 1 on hyperion. The peak backlog fell from 139 to
+   18, forced purges from 3 to 0, and the rebuild from 430 s to 315 s.
+2. **Archive passes are paced.** The fast merges exposed a cost the backlog had hidden. A pass is
+   queued behind every segment, and with no backlog nothing made it redundant, so one ran after
+   every merge. A steady-state A/B on one cluster, 300 s arms, measured the c1 build 10% below the
+   timing-only one: update p99 111 → 155 ms, get p99 roughly doubled. On titan the passes copied
+   2,139 MiB in five minutes, against 42 MiB. Running a pass as soon as an archive crosses half
+   live is the worst time to run one. A later pass finds the archive deader and copies less for the
+   same space. So a new pass now waits out `archive_pass_interval`, a minute, since the last one
+   began.
+3. **A pass stops at its budget, inside an archive if it must.** The index is repointed only when
+   a pass ends, so a queued cut waits for a whole pass, and one archive can hold hundreds of
+   megabytes. Run *c2* had passes of up to 228 s and a cut that waited 32.9 s. A pass now checks
+   `archive_pass_bytes` (16 MiB) after every record, repoints what it copied, leaves the rest of the
+   archive for its next turn, and is queued again behind the jobs waiting. It keeps 16 reads in
+   flight. 8 made each pass hold the compactor longer, and 32 took the foreground's device.
+4. **A merge reads its frames as one span** of the segment, not one read per frame. Merges that
+   met a segment out of the page cache spent 9–23 s reading 18,000 frames.
+5. **A job's end syncs the archive once**, not twice.
+
+The rebuild on each build, each on a fresh cluster loaded from the csv (section 10 of
+[Correctness](../cluster-testing/correctness.md#10-the-compactors-backlog-and-four-rebuilds)
+checked the data):
+
+| | base | c1 | c2 | **c3** |
+| --- | --- | --- | --- | --- |
+| Build | phases logged | + 32 reads in flight | + passes paced, 8 in flight, span reads | + budget inside an archive, 16 in flight |
+| Long merges, titan / hyperion | 762 / 424 | 4 / 1 | 0 / 0 | **0 / 0** |
+| Long archive passes on titan, and the longest | 2, 23 s | 24, 67 s | 35, 228 s | **15, 5.9 s** |
+| Peak backlog on titan | 139 | 18 | 76 | **4** |
+| Longest wait for a cut on titan | 6.1 s | 3.5 s | 32.9 s | **0.7 s** |
+| Forced purges on titan | 3 | 0 | 0 | **0** |
+| Whole rebuild | 430 s | 315 s | 534 s | **272 s** |
+
+The steady state, on one cluster, arms alternated so each build follows the other:
+
+| A/B, 300 s arms | Build | ops/s, each arm | Update p99 | Titan's archives, each arm | Titan's WAL, each arm |
+| --- | --- | --- | --- | --- | --- |
+| first | phases logged (`fc91fb7`) | 34,368 / 35,045 | 111 / 112 ms | passes copied 42 MiB in an arm | – |
+| | c1: 32 in flight, passes unpaced (`e7302c5`) | 31,518 / 30,878 | 149 / 160 ms | passes copied 2,139 MiB in an arm | – |
+| last | phases logged (`fc91fb7`) | 35,824 / 32,852 | 109 / 125 ms | **+2,523 / +2,576 MB** | **+805 / +514 MB** |
+| | c3, kept (`c3b8874`) | 32,762 / 31,354 | 133 / 143 ms | −948 / −736 MB | +62 / +53 MB |
+
+**What it costs.** The kept build serves about 6% fewer operations a second than the timing-only
+one in a 300 s window, with update p99 about 20 ms higher. The timing-only build is faster because it
+is not doing the work. Its merges are backlogged, so nearly every archive pass is skipped as
+redundant, and the space the bench's rewrites leave dead stays on disk: titan's archives grew
+2.5 GB in each of its arms, where the kept build's shrank. Its WAL grows too, by 0.5 to 1.7 GB an
+arm across the A/B runs, against a 1 GiB retention budget. That is where the forced purges come
+from, and the snapshot installs they cause. The kept build reclaims the space as it is made, and its
+WAL stays flat. A 5-minute interval against 1 minute moved throughput and p99 within the runs'
+noise (`target/lab/o74/ab3`) and held more dead bytes, so the minute is the default. Europa, on the
+Optane, logged no long compaction job in any run. The cost is the Zen1 hosts' devices, and the
+cluster's throughput follows its slowest members.
+
+**Kept.** Filed on the way: [#179](resolved/archive-usage-prefix.md), an archive's live bytes counted
+without its records' prefixes.
+
+**Still open:** the 50% threshold is hardcoded, and neither a merge nor a pass sorts its reads by
+offset.
