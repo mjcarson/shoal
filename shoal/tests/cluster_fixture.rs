@@ -18582,6 +18582,52 @@ async fn a_silent_partitions_first_seconds_hold_no_writes() -> Result<(), Fixtur
     Ok(())
 }
 
+/// Writes through a copy that applies late are not each held for the whole apply bound (O76)
+///
+/// A write coordinated through a follower commits on the other two and then waits for the
+/// follower's own copy to apply it, for at most two heartbeat intervals
+/// ([Resolved #146](../../docs/src/appendix/resolved/apply-wait-on-a-lagging-copy.md)). A copy
+/// behind a slow disk applies every write late, so every write through its node waited the whole
+/// second and was answered unapplied anyway; on the lab a 50 ms disk held the write p99 at 1,022 ms.
+/// A copy whose last wait ran out now waits one poll, until a write sees its own apply in time
+/// ([O76](../../docs/src/appendix/optimizations.md#o76-a-write-through-a-lagging-copy-waits-its-whole-apply-bound)).
+#[tokio::test(flavor = "multi_thread")]
+async fn writes_through_a_lagging_copy_are_not_held_for_the_bound() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        // the default base, whose apply bound is a second
+        .primary_failover_after(Duration::from_secs(5))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let (key, group) = key_led_by(&mut cluster, "Note", 0, 14_700)?;
+    let through_one = cluster.node(1).endpoints.client.to_string();
+    write_note(&through_one, key, "before").await?;
+    // node one's copy completes each append 1.5 s after the last, so it applies later than the
+    // bound while the group commits on nodes zero and two
+    let slowed = cluster
+        .node_mut(1)
+        .command(&format!("SLOW_WAL {group} 1500"))?;
+    assert!(slowed.get("ok").is_some(), "{slowed}");
+    // ten writes through node one, one after another
+    let started = Instant::now();
+    for round in 0..10 {
+        write_note(&through_one, key, &format!("round {round}")).await?;
+    }
+    let took = started.elapsed();
+    eprintln!("ten writes through a lagging copy took {took:?}");
+    // the default base's bound is a second a write: ten of them held for it take ten seconds
+    assert!(
+        took < Duration::from_secs(4),
+        "ten writes through a lagging copy took {took:?}"
+    );
+    // lifted, the copy catches up and a read through it sees the last write
+    cluster.node_mut(1).command(&format!("SLOW_WAL {group} 0"))?;
+    wait_note(&through_one, key, Some("round 9"), Duration::from_secs(30)).await?;
+    Ok(())
+}
+
 /// How many groups a node leads, as it reports them itself
 ///
 /// # Arguments
