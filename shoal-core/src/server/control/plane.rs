@@ -1099,6 +1099,10 @@ struct Core {
     report_seq: u64,
     /// What this node's own pings learned
     reachability: BTreeMap<NodeId, Reachability>,
+    /// Every peer's smoothed round trips, which judge whether this node's own links are slow
+    link_rtts: BTreeMap<NodeId, super::links::LinkRtt>,
+    /// The judgement of this node's own links over time
+    link_judge: super::links::LinkJudge,
     /// The shard health last proposed, so a change is proposed once
     reported_shards: Vec<u16>,
     /// The quarantined copies across this node's shards, as they last reported
@@ -1673,6 +1677,8 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         shards_failed: Vec::new(),
         report_seq: 0,
         reachability: BTreeMap::new(),
+        link_rtts: BTreeMap::new(),
+        link_judge: super::links::LinkJudge::default(),
         reported_shards: Vec::new(),
         quarantined: Vec::new(),
         reported_quarantine: Vec::new(),
@@ -2919,6 +2925,7 @@ impl Core {
             // a new leader starts with no evidence about anybody: its detector is seeded with
             // every up member and a grace period, so the election itself calls nobody down
             self.reachability.clear();
+            self.link_rtts.clear();
             self.detector.reset();
             self.health_in_flight.clear();
             // and no count of anybody's grace, no plan in hand: both resume from what is
@@ -3540,8 +3547,37 @@ impl Core {
                 let rtt_us = rtt.as_micros().min(u128::from(u32::MAX)) as u32;
                 entry.rtt_us = rtt_us;
                 entry.misses = 0;
+                // and the smoothed figure that judges this node's own links
+                match self.link_rtts.get_mut(&node) {
+                    Some(link) => link.observe(rtt),
+                    None => {
+                        self.link_rtts
+                            .insert(node, super::links::LinkRtt::new(rtt));
+                    }
+                }
             }
-            Err(()) => entry.misses = entry.misses.saturating_add(1),
+            Err(()) => {
+                entry.misses = entry.misses.saturating_add(1);
+                // the answers a partition held are not counted when it heals
+                if let Some(link) = self.link_rtts.get_mut(&node) {
+                    link.missed();
+                }
+            }
+        }
+        // every peer slow at once, for a while, is this node's links: its leads are handed on
+        // while it lasts
+        if let Some(now) = self.link_judge.update(self.link_rtts.values()) {
+            super::links::set_impaired(now);
+            let rtts: Vec<u64> = self
+                .link_rtts
+                .values()
+                .map(|link| link.ewma_us() as u64)
+                .collect();
+            if now {
+                event!(Level::WARN, msg = "every peer's round trip is far above what it was; this node's links are slow, and it hands its leads on", ?rtts);
+            } else {
+                event!(Level::INFO, msg = "this node's links are well again; it may lead", ?rtts);
+            }
         }
     }
 

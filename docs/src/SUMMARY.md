@@ -299,6 +299,7 @@
   - [178. A move failed if its learner was added while a membership change was still committing](appendix/resolved/learner-in-progress.md)
   - [179. A fully live archive of short records was judged under half live](appendix/resolved/archive-usage-prefix.md)
   - [181. A silent partition's links stayed down for most of a minute after it healed](appendix/resolved/partition-retransmit-backoff.md)
+  - [182. A node whose links were slow went on leading a third of the groups](appendix/resolved/slow-link-leadership.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

@@ -36,6 +36,10 @@ pub enum LinkState {
     /// A partition by dropped packets rather than by a reset: nothing a peer sends reaches the
     /// other side and nothing says so ([Resolved #143](../../../docs/src/appendix/resolved/silent-partition-hops.md)).
     Blackhole,
+    /// Forward, holding every chunk this long before it is written: a slow link, on live
+    /// connections and new ones alike
+    /// ([Resolved #182](../../../docs/src/appendix/resolved/slow-link-leadership.md)).
+    Lag(Duration),
 }
 
 /// A directed proxy
@@ -122,6 +126,15 @@ impl Link {
         *self.state.lock().unwrap() = LinkState::Throttle(bytes_per_second);
     }
 
+    /// Hold every chunk on every connection, live or new, this long before it is written
+    ///
+    /// # Arguments
+    ///
+    /// * `lag` - How long
+    pub fn lag(&self, lag: Duration) {
+        *self.state.lock().unwrap() = LinkState::Lag(lag);
+    }
+
     /// Hold every byte on every connection, live or new, without closing any
     pub fn blackhole(&self) {
         *self.state.lock().unwrap() = LinkState::Blackhole;
@@ -170,7 +183,8 @@ async fn accept_loop(
             LinkState::Pass
             | LinkState::Delay(_)
             | LinkState::Throttle(_)
-            | LinkState::Blackhole => {
+            | LinkState::Blackhole
+            | LinkState::Lag(_) => {
                 let handle = tokio::spawn(forward(inbound, target, current, state.clone()));
                 streams.lock().unwrap().push(handle);
             }
@@ -238,6 +252,14 @@ async fn hold_or_copy(
         // a blackhole keeps the bytes and the connection, and says nothing
         while matches!(*live.lock().unwrap(), LinkState::Blackhole) {
             tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // a slow link holds each chunk before it is written
+        let lag = match *live.lock().unwrap() {
+            LinkState::Lag(lag) => Some(lag),
+            _ => None,
+        };
+        if let Some(lag) = lag {
+            tokio::time::sleep(lag).await;
         }
         if to.write_all(&buffer[..read]).await.is_err() {
             break;

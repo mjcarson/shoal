@@ -73,11 +73,35 @@ Synthetic ids are offset by `--run` and by worker, so no two runs write the same
 
 Faults are injected from outside the process with `systemctl kill -s SIGKILL`, `SIGSTOP` and
 `SIGCONT`, `iptables` rules that drop a peer's traffic, and `tc netem` delay and loss. Every rule is
-removed at the end of the test that added it.
+removed at the end of the test that added it. [Section 12](correctness.md#12-scenarios-nobody-had-run)
+added the rest:
+
+| Script (`target/lab/r11/`) | What it injects |
+| --- | --- |
+| `netem.sh <host> add "<args>" \| del` | `tc netem` on one host's egress, filtered to the peer ports (12001–12002) so ssh and clients are untouched |
+| `oneway.sh <host> in \| out \| control \| heal` | a partition one way only, or of the control port alone |
+| `slowdisk.sh setup \| delay <r> <w> \| teardown` | hyperion's storage on a `dm-delay` device over a loop file, its delay changed live |
+| `powercut.sh <host> <dir> <run>` | `sysrq b` 15 s into a bench: a reboot without sync, then every row verified |
+| `fault2.sh <dir> <run> <secs> <inject> <heal>` | `fault.sh` with the fault held for any length |
+| clock skew | `timedatectl set-ntp false; date -s "+30 sec"` on titan, and back |
+
+The runs that compare builds use `abload.sh` (a fresh cluster, the csv, `verify`, the bench, every
+acknowledged insert back through each member), `fresh-sweep.sh` (the loader past what the cluster
+commits, on fresh clusters), `benchab.sh` and `benchab2.sh` (arms rolled onto one cluster in turn)
+and `profab.sh` (the same, with a titan profile). **Interleave arms and reverse their order**: on
+this lab the first arm after an upgrade wins by 2–6% whichever build it is
+([performance](performance.md#the-admission-gate-and-the-bench)).
 
 Each run is recorded by `target/lab/record.sh`, which runs `vmstat 1` on every host beside it. Disk
 writes are counted per device from `/proc/diskstats` before and after (`target/lab/diskstats.sh`).
 These scripts are scratch and are not committed. What they measured is on these pages.
+
+## Reading a node's figures
+
+`cluster stats` prints, since round 11, each member's row memory against its eviction budget and
+its resident memory, and the cluster's ten busiest groups with the member leading each. A node
+that judges its own links slow says so in its journal (`this node's links are slow, and it hands
+its leads on`), as does one under its append reserve (`under the append reserve`).
 
 ## When a move is slow
 

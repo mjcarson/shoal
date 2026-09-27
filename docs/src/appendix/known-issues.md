@@ -501,7 +501,12 @@ first attempt: a retry is received later too. So the memory has to cover the lon
 attempt can wait before admission. That means remembering identities for a time rather than a
 count (bounded in bytes, since a busy group mints thousands a second), or bounding the wait in
 front of admission as the gate bounds the one behind it. The first changes what the checkpoint
-persists, and needs its cost on the benchmark host measured.
+persists, and needs its cost on the benchmark host measured. The retry sidecar (`Retries` in
+`server/wal/mod.rs`) is written whole, every group of the shard, at each checkpoint: at 4,096
+identities of about fifty bytes and six groups a shard, 1.2 MB a shard each time. Raising the
+bound four times over would write about 5 MB a shard every few seconds under the lab's load, on the
+hosts whose disks are already the limit. Written incrementally, as the log is, it would cost what
+it adds.
 
 ---
 

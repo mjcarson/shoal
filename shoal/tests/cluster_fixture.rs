@@ -1417,6 +1417,9 @@ async fn cluster_server_child() {
             if let Some(lag) = staged.catchup_lag {
                 block.migration.catchup_lag = lag;
             }
+            if let Some(bytes) = staged.snapshot_feed_bytes {
+                block.migration.snapshot_feed_bytes = bytes;
+            }
             if let Some(ms) = staged.migration_timeout_ms {
                 block.migration.timeout = Duration::from_millis(ms).into();
             }
@@ -12147,6 +12150,56 @@ async fn unplaced_member_forwards_every_query() -> Result<(), FixtureError> {
     Ok(())
 }
 
+/// A moved set whose log outweighs it is fed to its destination by snapshot (#170's follow-up)
+///
+/// openraft feeds a new copy from the log whenever the leader still holds the entries it needs,
+/// and after a load that was up to a gigabyte of a group's log from index one, ten times its
+/// set's snapshot on the lab, every overwrite included. When the log the destination would be
+/// fed is larger than the set's archives, the leader now purges through its checkpoint, as far
+/// as every other voter has matched, before the learner is added, so the destination installs a
+/// snapshot ([Resolved #170](../../docs/src/appendix/resolved/uncached-log-reads.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_moved_set_whose_log_outweighs_it_is_fed_a_snapshot() -> Result<(), FixtureError> {
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(2))
+            // the lab's floor is 64 MiB; this log is a few hundred kilobytes
+            .snapshot_feed_bytes(64 * 1024),
+    )
+    .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    // a set node two leads, and one key in it overwritten two thousand times: a long log over
+    // a set of one row
+    let (key, group) = key_led_by(&mut cluster, "Note", 2, 9500)?;
+    for round in 0..20 {
+        write_notes_batch(&addr0, &[key; 100], &format!("round {round} {}", "x".repeat(200))).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // every copy checkpointed well past the overwrites, so there is a snapshot to feed
+    wait_checkpoint_past(&mut cluster, &[0, 1, 2], &group, 1500, Duration::from_secs(60))?;
+    let before = snapshots_of(&mut cluster, 3)?["installed"].as_u64().unwrap_or(0);
+    // the set moved from node two to the spare
+    let op = move_as_process(&mut cluster, 0, key, 2, 3)?;
+    let record = wait_move_done_via(&mut cluster, 0, op, Duration::from_secs(120))?;
+    assert_eq!(record["outcome"], serde_json::json!("Moved"), "{record}");
+    // the destination installed a snapshot rather than replaying the log from the start
+    let after = snapshots_of(&mut cluster, 3)?["installed"].as_u64().unwrap_or(0);
+    assert!(
+        after > before,
+        "the destination was fed the log: {before} installs before the move, {after} after"
+    );
+    // and holds what the set holds
+    wait_note(
+        &cluster.node(3).endpoints.client.to_string(),
+        key,
+        Some(&format!("round 19 {}", "x".repeat(200))),
+        Duration::from_secs(30),
+    )
+    .await?;
+    Ok(())
+}
+
 /// A write acknowledged after the destination reports zero lag is on the destination (C8 M9a)
 ///
 /// Three placed nodes and a spare. The set node two leads is moved to node three while
@@ -18660,10 +18713,25 @@ async fn a_node_under_the_append_reserve_leads_nothing_and_serves() -> Result<()
     let mut cluster = Cluster::builder()
         .cluster(3, CoreClaim::Count(2))
         .replication_factor(3)
+        // the default base: a group left leaderless by a refused transfer would stay so for
+        // an election timeout, five seconds or more, which the writes below would see
+        .primary_failover_after(Duration::from_secs(5))
         .start()
         .await?;
     cluster.wait_voters(0, 3)?;
     let (led_key, _group) = key_led_by(&mut cluster, "Note", 1, 14_500)?;
+    // a key in every group of either table node one leads, which the handback would send
+    // back to it
+    let mut watched_keys: Vec<(&str, u64)> = Vec::new();
+    let mut watched_groups = std::collections::HashSet::new();
+    for table in ["Note", "Row"] {
+        for key in 14_500..14_756u64 {
+            let (group, leader) = wait_group_leader(&mut cluster, table, key)?;
+            if leader == 1 && watched_groups.insert(group) {
+                watched_keys.push((table, key));
+            }
+        }
+    }
     let through_one = cluster.node(1).endpoints.client.to_string();
     let through_zero = cluster.node(0).endpoints.client.to_string();
     write_note(&through_one, led_key, "before").await?;
@@ -18700,8 +18768,41 @@ async fn a_node_under_the_append_reserve_leads_nothing_and_serves() -> Result<()
         "a read through node one under the reserve"
     );
     // no lead comes back to it while it stays under: past the handback's settle and
-    // interval, which would hand a primary's groups back to it
-    tokio::time::sleep(Duration::from_secs(20)).await;
+    // interval, which would hand a primary's groups back to it. The handback asks first, and
+    // a group is never left leaderless by a transfer to a node that may not lead: writes to
+    // a group node one used to lead go on landing through node zero the whole time
+    let watched = Instant::now();
+    let mut slowest = Duration::ZERO;
+    while watched.elapsed() < Duration::from_secs(22) {
+        for (table, key) in &watched_keys {
+            let sent = Instant::now();
+            if *table == "Note" {
+                write_note_eventually(&through_zero, *key, "watched", Duration::from_secs(15))
+                    .await?;
+            } else {
+                // a row written until it lands, as a client that retries would
+                let client = Shoal::<TestDbClient>::new(&through_zero).await?;
+                loop {
+                    let landed = client
+                        .send_one(Row {
+                            key: *key,
+                            data: "watched".to_string(),
+                        })
+                        .await;
+                    if landed.is_ok() || sent.elapsed() > Duration::from_secs(15) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+            slowest = slowest.max(sent.elapsed());
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        slowest < Duration::from_secs(3),
+        "a write to a group node one had led took {slowest:?} while node one was under the reserve"
+    );
     assert_eq!(
         groups_led_by(&mut cluster, 1)?,
         0,
@@ -18715,6 +18816,66 @@ async fn a_node_under_the_append_reserve_leads_nothing_and_serves() -> Result<()
     }
     write_note(&through_one, led_key, "after").await?;
     wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    Ok(())
+}
+
+/// A node whose links are slow hands its leads on, and takes them back once they are well (item 182)
+///
+/// On the lab a 100 ms delay on one node's peer links took the whole cluster to a third of its
+/// throughput: the slow node kept leading its third of the groups, and every pipelined client
+/// filled its window with their writes. A node whose round trip to every peer is far above what
+/// it was now judges its own links slow, hands its leads on and answers `MayLead` with no, so
+/// the handback leaves them where they went; its peers, which each see only it slow, judge
+/// nothing ([Resolved #182](../../docs/src/appendix/resolved/slow-link-leadership.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_with_slow_links_hands_its_leads_on() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(2))
+        .replication_factor(3)
+        .lane_links(true)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    // the pings have to learn each peer's round trip first
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let led = groups_led_by(&mut cluster, 1)?;
+    assert!(led > 0, "node one leads nothing to hand on");
+    // every lane in and out of node one holds each chunk 100 ms
+    cluster.lag(1, Duration::from_millis(100));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let now_led = groups_led_by(&mut cluster, 1)?;
+        if now_led == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node one still leads {now_led} of its {led} groups with its links slow"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    // and none comes back while they stay slow, past the handback's settle and interval
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    assert_eq!(
+        groups_led_by(&mut cluster, 1)?,
+        0,
+        "a lead went back to a node whose links are slow"
+    );
+    // the other two judged nothing: they lead every group between them and take writes
+    let through_zero = cluster.node(0).endpoints.client.to_string();
+    for key in 15_000..15_020u64 {
+        write_note(&through_zero, key, "while slow").await?;
+    }
+    // well again, the handback returns node one its placement's leads
+    cluster.heal(1);
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while groups_led_by(&mut cluster, 1)? == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "node one never led again once its links were well"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
     Ok(())
 }
 

@@ -97,6 +97,9 @@ const BALANCE_RETRY: Duration = Duration::from_secs(60);
 /// ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md))
 const QUIET_POLL: Duration = Duration::from_millis(100);
 
+/// How long a handback waits for its primary to say whether it may lead
+const MAY_LEAD_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// How often a shard reads the free bytes of its storage against the append reserve
 /// ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md))
 const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(1);
@@ -576,6 +579,12 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) disk_checked: Option<Instant>,
     /// When the leads were last handed on for want of space
     pub(super) disk_handoff: Option<Instant>,
+    /// Whether this shard's groups stand for election: not while it is isolated or under the
+    /// append reserve
+    pub(super) stands: bool,
+    /// Whether this node's links are judged slow, which hands its leads on as a low disk does
+    /// ([Resolved #182](../../../../docs/src/appendix/resolved/slow-link-leadership.md))
+    pub(super) links_impaired: bool,
     /// Whether a segment sweep is wanted before the next message
     pub(super) sweep_due: bool,
     /// The shard's WAL directory, where quarantine markers live
@@ -741,6 +750,8 @@ where
             disk_low: None,
             disk_checked: None,
             disk_handoff: None,
+            stands: true,
+            links_impaired: false,
             sweep_due: false,
             wal_dir: dir.clone(),
             quarantines,
@@ -2377,6 +2388,13 @@ where
             }
             return;
         }
+        // whether this node may lead now: not while it is under the append reserve
+        // ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md))
+        if head.kind == ReplicateKind::MayLead {
+            let may = replication.disk_low.is_none() && !replication.links_impaired;
+            let _ = reply.try_send(encode_reply(head.id, &may));
+            return;
+        }
         // how far this copy has applied is answered from what the loop holds
         // ([F45](../../../../docs/src/features/replica-migration.md))
         if head.kind == ReplicateKind::Applied {
@@ -2503,12 +2521,11 @@ where
                 },
                 // the lead handed to this member, or to another it is told about
                 // ([F45](../../../../docs/src/features/replica-migration.md))
-                // a node under the append reserve takes no lead
+                // a transfer is taken whatever this node's space: one refused leaves its leader
+                // forwarding every write and sending no heartbeat until an election, and a node
+                // under the append reserve hands the lead on again at its next check; the
+                // handback asks `MayLead` first so it seldom comes to that
                 // ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md))
-                ReplicateKind::TransferLeader if disk_low.is_some() => ReplicateReply::error(
-                    head.id,
-                    "transfer_leader: this node's storage is under the append reserve; it takes no lead".to_string(),
-                ),
                 ReplicateKind::TransferLeader => match postcard::from_bytes(&payload) {
                     Ok(request) => match raft.handle_transfer_leader(request).await {
                         Ok(response) => encode_reply(head.id, &response),
@@ -2529,7 +2546,8 @@ where
                 | ReplicateKind::Digest
                 | ReplicateKind::Quarantine
                 | ReplicateKind::Applied
-                | ReplicateKind::Retired => {
+                | ReplicateKind::Retired
+                | ReplicateKind::MayLead => {
                     unreachable!("answered on the loop")
                 }
                 // a read barrier: confirm leadership with a heartbeat round and answer the
@@ -3218,6 +3236,33 @@ where
         let Some(replication) = self.replication.as_mut() else {
             return;
         };
+        // a node whose links the control thread judges slow hands its leads on as well
+        // ([Resolved #182](../../../../docs/src/appendix/resolved/slow-link-leadership.md))
+        let impaired = crate::server::control::links::impaired();
+        if impaired != replication.links_impaired {
+            replication.links_impaired = impaired;
+            replication.disk_handoff = None;
+        }
+        if impaired
+            && !replication.stopping
+            && replication
+                .disk_handoff
+                .is_none_or(|handed| handed.elapsed() >= DISK_HANDOFF_INTERVAL)
+        {
+            replication.disk_handoff = Some(Instant::now());
+            let rafts: Vec<Raft<DataConfig, GroupMachine<D>>> = replication
+                .groups
+                .values()
+                .filter_map(|slot| slot.raft.clone())
+                .collect();
+            glommio::spawn_local(async move {
+                let (led, handed) = hand_off_leadership(&rafts).await;
+                if led > 0 {
+                    event!(Level::WARN, msg = "handed on the leads of a shard whose links are slow", shard, led, handed);
+                }
+            })
+            .detach();
+        }
         // a reserve of zero is off, and the disk is read once an interval
         if reserve == 0
             || replication
@@ -3290,6 +3335,7 @@ where
         // often than the interval
         if replication.stopping
             || replication.disk_low.is_some()
+            || replication.links_impaired
             || replication.last_balance.elapsed() < BALANCE_INTERVAL
         {
             return;
@@ -3384,7 +3430,19 @@ where
             .handed_back
             .retain(|_, tried| now.duration_since(*tried) < BALANCE_RETRY);
         event!(Level::INFO, msg = "handing a group back to its placement primary", group = %group, to = %primary);
+        let network = replication.network.clone();
         glommio::spawn_local(async move {
+            // the primary is asked first: a transfer once started cannot be taken back, and one
+            // to a member that cannot lead leaves the group leaderless until an election. An
+            // error is a yes, since a member on an older build does not know the question
+            // ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md))
+            let asked = ShardPeer::new(primary, network)
+                .may_lead(group, MAY_LEAD_TIMEOUT)
+                .await;
+            if asked == Ok(false) {
+                event!(Level::INFO, msg = "a placement primary may not lead now; its group stays here", group = %group, to = %primary);
+                return;
+            }
             if let Err(error) = raft.trigger().transfer_leader(primary).await {
                 event!(Level::WARN, msg = "a lead could not be handed back", group = %group, ?error);
             }
@@ -3402,13 +3460,24 @@ where
         // elections they cannot win, and lets them stand again once a link is back
         // ([Resolved #106](../../../../docs/src/appendix/resolved/isolated-member-term-inflation.md))
         let isolated = replication.network.is_isolated();
-        if isolated != replication.isolated {
-            replication.isolated = isolated;
+        // a shard under the append reserve stands for no election either: it would take a lead
+        // it has to hand on ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md))
+        let stands = !isolated && replication.disk_low.is_none();
+        // on every change; and on every tick while the reserve holds, since a handle built or
+        // started since would stand when its own head start ends. Never every tick for
+        // isolation alone: an isolated shard sends nothing, and it is a head start ending, or a
+        // peer's pre-vote, that dials the links which end the isolation. Held off every tick,
+        // a node restarted alone never stood again (`an_idle_cluster_elects_again_after_restarts_with_a_voter_gone`)
+        if stands != replication.stands || replication.disk_low.is_some() {
+            replication.stands = stands;
             for slot in replication.groups.values() {
                 if let Some(raft) = &slot.raft {
-                    raft.runtime_config().elect(!isolated);
+                    raft.runtime_config().elect(stands);
                 }
             }
+        }
+        if isolated != replication.isolated {
+            replication.isolated = isolated;
             if isolated {
                 event!(Level::WARN, msg = "every replication link is down; this shard's groups stop standing for election until one comes back", shard = self.shard_id);
             } else {

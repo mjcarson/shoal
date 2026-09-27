@@ -248,6 +248,9 @@ pub struct StagedCluster {
     /// How far behind a learner may be when it is made a voter, if the test set it
     #[serde(default)]
     pub catchup_lag: Option<u64>,
+    /// The least log a move's destination is fed a snapshot in place of, if the test set it
+    #[serde(default)]
+    pub snapshot_feed_bytes: Option<u64>,
     /// How long one phase of a move may take, in milliseconds, if the test shortened it
     #[serde(default)]
     pub migration_timeout_ms: Option<u64>,

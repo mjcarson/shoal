@@ -166,6 +166,14 @@ pub struct MoveContext<D: ShoalDatabase> {
     pub published: bool,
     /// How far behind the destination may be when it is made a voter
     pub catchup_lag: u64,
+    /// Whether the log the destination would be fed from is larger than the set it would build
+    ///
+    /// After a load a group's log can hold ten times what its archives do, every overwrite
+    /// included, and a new copy fed from the log replays all of it. Such a copy is fed a
+    /// snapshot instead: the leader purges through its checkpoint, as far as every other voter
+    /// has matched, before the learner is added
+    /// ([Resolved #170](../../../../docs/src/appendix/resolved/uncached-log-reads.md)).
+    pub feed_snapshot: bool,
     /// How long one phase may take
     pub timeout: Duration,
     /// How long the source keeps its retired files
@@ -354,6 +362,10 @@ async fn drive_group_inner<D: ShoalDatabase>(
         context.commit(progress).await?;
     }
     if progress.phase.rank() < MovePhase::Configured.rank() {
+        // a log larger than the set is purged first, so the learner is fed the smaller
+        if context.feed_snapshot {
+            purge_for_learner(context).await;
+        }
         add_learner(context).await?;
     }
     // the catch-up: the destination within the lag, its bytes and entries charged to the record
@@ -451,6 +463,52 @@ pub(super) fn now_ms() -> u64 {
         .map_or(0, |since| {
             u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
         })
+}
+
+/// Purge the group's log through its checkpoint, as far as every other voter has matched, so a
+/// learner added next is fed a snapshot rather than the whole log
+///
+/// Nothing is purged past a voter's matched index, so no voter is pushed onto the snapshot
+/// path by this; a voter openraft knows nothing of, or one with nothing matched, stops it
+/// ([Resolved #170](../../../../docs/src/appendix/resolved/uncached-log-reads.md)).
+///
+/// # Arguments
+///
+/// * `context` - The driver
+async fn purge_for_learner<D: ShoalDatabase>(context: &MoveContext<D>) {
+    // the checkpoint, which a snapshot is cut at and a purge may reach
+    let checkpoint = context.state.borrow().checkpoint_index();
+    // the lowest index any other voter has matched, or nothing if one has matched nothing
+    let floor = {
+        let watch = context.raft.metrics();
+        let metrics = watch.borrow_watched();
+        let matched = metrics.replication.clone().unwrap_or_default();
+        let lowest = metrics
+            .membership_config
+            .membership()
+            .voter_ids()
+            .filter(|voter| *voter != context.me)
+            .map(|voter| {
+                matched
+                    .get(&voter)
+                    .and_then(|log_id| log_id.as_ref())
+                    .map(|log_id| log_id.index)
+            })
+            .try_fold(u64::MAX, |lowest, index| index.map(|index| lowest.min(index)));
+        lowest
+    };
+    let Some(floor) = floor else {
+        event!(Level::INFO, msg = "a voter has matched nothing; the learner is fed from the log", op = %context.op, group = %context.group);
+        return;
+    };
+    let upto = checkpoint.min(floor);
+    if upto == 0 {
+        return;
+    }
+    event!(Level::INFO, msg = "purging a group's log for its new learner, which is fed a snapshot", op = %context.op, group = %context.group, checkpoint, floor, upto);
+    // the snapshot first, so the purge has one to stop at
+    let _ = context.raft.trigger().snapshot().await;
+    let _ = context.raft.trigger().purge_log(upto).await;
 }
 
 /// Add the destination as a learner, which a repeat re-adds harmlessly
@@ -782,6 +840,28 @@ where
                     continue;
                 }
                 replication.driving_moves.insert((record.op, *group));
+                // before its learner is added, whether the destination is better fed a snapshot:
+                // the log it would replay, against what the set's archives hold
+                let feed_snapshot = progress.phase.rank() < MovePhase::Learner.rank()
+                    && !slot.store.is_volatile()
+                    && {
+                        let usage = self.table_map.tablet_usage(slot.table);
+                        let set_bytes: u64 = slot
+                            .spec
+                            .tablets
+                            .iter()
+                            .map(|tablet| {
+                                usage.bytes.get(usize::from(*tablet)).copied().unwrap_or(0)
+                            })
+                            .sum();
+                        let log_bytes = replication.wal.log_bytes(*group);
+                        // a snapshot only where it is worth its fixed cost: a long log, and more
+                        // than twice the set it would rebuild
+                        let snapshot = log_bytes >= migration.snapshot_feed_bytes
+                            && log_bytes > set_bytes.saturating_mul(2);
+                        event!(Level::INFO, msg = "how a move's destination is fed", op = %record.op, group = %group, log_bytes, set_bytes, snapshot);
+                        snapshot
+                    };
                 event!(Level::INFO, msg = "driving a group's move", op = %record.op, group = %group, phase = progress.phase.name(), from = %record.from, to = %record.to);
                 let context = MoveContext {
                     raft,
@@ -799,6 +879,7 @@ where
                     start: progress,
                     published: record.is_published(),
                     catchup_lag: migration.catchup_lag,
+                    feed_snapshot,
                     timeout: migration.timeout.duration(),
                     retire_after: migration.retire_after.duration(),
                     control: control.clone(),

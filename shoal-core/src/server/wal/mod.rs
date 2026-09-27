@@ -1808,6 +1808,25 @@ impl ShardWal {
             .and_then(|log| log.vote.clone())
     }
 
+    /// How many bytes of frames a group's log holds past its purge point
+    ///
+    /// What a new copy fed from the log would be sent, near enough: the frames' lengths, prefixes
+    /// included ([Resolved #170](../../../../docs/src/appendix/resolved/uncached-log-reads.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    #[must_use]
+    pub fn log_bytes(&self, group: GroupId) -> u64 {
+        self.inner.borrow().groups.get(&group).map_or(0, |log| {
+            // the index holds only what is past the purge point
+            log.index
+                .values()
+                .map(|slot| u64::from(slot.loc.len))
+                .sum()
+        })
+    }
+
     /// The indexes a group's log holds, for a test
     ///
     /// # Arguments
