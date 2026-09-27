@@ -4644,21 +4644,28 @@ async fn wait_applied_here<D: ShoalDatabase>(
     index: u64,
     remaining: Duration,
 ) {
-    // two heartbeats, or what is left of the deadline if that is less
-    let bound = Duration::from_millis(raft.config().heartbeat_interval.saturating_mul(2));
+    // two heartbeats, or one poll for a copy whose last wait ran out, or what is left of the
+    // deadline if that is less ([O76](../../../../docs/src/appendix/optimizations.md#o76-a-write-through-a-lagging-copy-waits-its-whole-apply-bound))
+    let bound = if state.borrow().apply_lagging {
+        APPLY_POLL
+    } else {
+        Duration::from_millis(raft.config().heartbeat_interval.saturating_mul(2))
+    };
     let until = Instant::now() + bound.min(remaining);
     loop {
-        // applied here: the answer can go
+        // applied here: the answer can go, and the copy is keeping up
         if applied_of(raft) >= index {
+            state.borrow_mut().apply_lagging = false;
             return;
         }
         // an install applies nothing until it ends
         if state.borrow().installing {
             return;
         }
-        // out of time
+        // out of time: answered unapplied, and the next write through this copy waits a poll
         let now = Instant::now();
         if now >= until {
+            state.borrow_mut().apply_lagging = true;
             return;
         }
         // wait a little for the apply, then look again

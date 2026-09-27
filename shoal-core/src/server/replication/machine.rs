@@ -147,6 +147,13 @@ pub struct MachineState {
     /// unreadable, and a restart from a repair snapshot is what clears this
     /// ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md)).
     pub stalled: Option<Stall>,
+    /// Whether the last write this copy waited to apply ran out its wait
+    ///
+    /// A copy behind a slow disk applies every write late, and each write through its node
+    /// waited the whole bound, a second at the default base, to be answered unapplied anyway.
+    /// While this is set the wait is one short poll; the first write that sees its own apply in
+    /// time clears it ([O76](../../../../docs/src/appendix/optimizations.md#o76-a-write-through-a-lagging-copy-waits-its-whole-apply-bound)).
+    pub apply_lagging: bool,
 }
 
 /// Where a copy stopped applying, and on what
@@ -215,6 +222,7 @@ impl MachineState {
             memberships: VecDeque::new(),
             expired_before: 0,
             stalled: None,
+            apply_lagging: false,
         }
     }
 

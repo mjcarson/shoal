@@ -71,7 +71,10 @@ one alike.
 
 ## Still open
 
-- Nothing about this wait. The lab rerun is in the
+- ~~A copy that lags every write waits the whole bound for each.~~ Since
+  [O76](../optimizations.md#o76-a-write-through-a-lagging-copy-waits-its-whole-apply-bound) a copy
+  whose last wait ran out waits one poll, until a write sees its own apply in time.
+- ~~Nothing about this wait.~~ The lab rerun is in the
   [chapter](../../cluster-testing/correctness.md#pause-one-node).
 
 ## Tests
@@ -79,6 +82,7 @@ one alike.
 | Test | What breaks if this is reverted |
 | --- | --- |
 | `a_write_through_a_lagging_copy_is_answered_within_two_heartbeats` (`shoal/tests/cluster_fixture.rs`) | A write through a node catching up from the log waits for its whole backlog |
+| `writes_through_a_lagging_copy_are_not_held_for_the_bound` (`shoal/tests/cluster_fixture.rs`) | A copy that lags every write holds each write through its node for the whole bound (O76) |
 | `a_write_through_an_installing_copy_is_answered_at_commit` (`shoal/tests/cluster_fixture.rs`) | The installing case, which the bound also covers but the installing check answers at once |
 | Pause one node ([cluster testing](../../cluster-testing/correctness.md#pause-one-node)) | Seconds-long writes through a node resumed after a stall |
 

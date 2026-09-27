@@ -1096,3 +1096,101 @@ All 133 cluster fixture tests passed at six threads on `c9d6a61`, two ignored as
 and `a_node_under_the_append_reserve_leads_nothing_and_serves`. Each fails without its fix: 5,300
 writes unknown with the gate out of reach, a write through the cut-off node answered in 5.0 s, and
 "node one still leads 4 groups under the append reserve".
+
+## 12. Scenarios nobody had run
+
+[What is left](todo.md) listed faults no section had tried: a network that is slow or lossy rather
+than cut, partitions in one direction or of the control port alone, losing a quorum, a slow disk,
+clock skew, a real power cut, and a partition long enough to outlast the kernel's patience. All of
+them ran on the build at `e34fd0f`, and the long partition again on `80b44ec`. The scripts are
+under `target/lab/r11/`, the runs under `target/lab/r11/sc/`.
+
+**How.** `fault.sh` as in [section 4](#4-faults-under-load): the mixed bench for 60 s (get 55,
+keyword 15, update 15, insert 15), the fault at 15 s and healed 20 s later. Every acknowledged
+insert was then read back through each member alone. The table gives medians of each second's
+operations, errors and write p99 over the 10 s before the fault, the middle of it (18–34 s), and
+40–55 s, after the heal. The faults are on hyperion unless the row says otherwise.
+
+| Scenario | How | Before | During | After | Acknowledged inserts, each member alone |
+| --- | --- | --- | --- | --- | --- |
+| Delay 20 ms | `tc netem` on hyperion's egress to the peer ports (`netem.sh`) | 81k, p99 194 ms | 65k, p99 158 ms | 71k | 644,291, 0 lost |
+| Delay 100 ms | the same | 69k | **22k**, p99 504 ms | 71k | 478,046, 0 lost |
+| Loss 1% | the same | 76k | 72k | 65k | 623,339, 0 lost |
+| Loss 5% | the same | 76k | **41k**, p99 586 ms | 69k | 540,579, 0 lost |
+| One way, in | `iptables` drops what the peers send hyperion (`oneway.sh in`) | 75k | 110k, 22.7k/s refused `NotLeader` | 74k | 567,559, 0 lost |
+| One way, out | drops what hyperion sends its peers | 77k | 114k, 22.3k/s refused | 65k | 565,859, 0 lost |
+| Control port only | both ways, port 12002 alone | 69k | 77k | 62k | 630,033, 0 lost |
+| Two of three down | titan and hyperion `SIGKILL`ed and held stopped | 69k | 113k reads, **every write refused** `NotLeader` (48k/s) | 71k, refusals tapering to none by 20 s after | 303,073, 0 lost |
+| Clock +30 s | titan's clock stepped ahead with NTP off | 74k | 71k | 64k | 608,003, 0 lost |
+| Clock −30 s | stepped back | 72k | 77k | 61k | 621,552, 0 lost |
+| Slow disk, 10 ms | hyperion's storage on `dm-delay`, every read and write delayed (`slowdisk.sh`) | 72k | 55k, p99 210 ms | 53k | 517,372, 0 lost |
+| Slow disk, 50 ms | the same | 72k | 64k, **p99 1,022 ms** | 66k | 592,599, 0 lost |
+
+No node restarted in any run, and nothing acknowledged was lost.
+
+**What the table shows.**
+
+- **A slow link to one node costs the whole cluster.** At 100 ms, a third of the groups are led
+  across the slow link, and every pipelined client fills its window with their writes, so the
+  cluster ran at a third of its rate. Nothing moves leadership off a member whose links are slow:
+  leads are balanced by count ([O63](../appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary)).
+  Filed with the weighted leadership todo, which this is the best evidence for yet.
+- **One-way partitions and a control-port cut behave well.** Either direction breaks TCP, so both
+  are a partition as far as a connection goes, and #143's refusals apply. They start after the
+  hop silence, and throughput rises while hyperion's groups are refused. The control port alone
+  changed nothing the bench could see: the data plane does not need it second to second.
+- **Losing a quorum is loud and definite.** Every write was refused `NotLeader` at once, with
+  753 and 174 unknown outcomes in the two seconds of the kill and none after. Reads at `One`
+  through europa went on. The cluster recovered with nobody's help once the two nodes started.
+- **Clock steps change nothing.** Leases, the detector and every deadline run on monotonic
+  clocks. Only identities are minted from the wall clock (by the client), and the retry window is
+  five minutes, far wider than the step.
+- **A slow disk caps writes through its node at a second.** At 50 ms, the write p99 was 1,022 ms
+  for the whole fault. A write coordinated through hyperion commits on the other two, then waits
+  for hyperion's own copy to apply it, bounded at two heartbeats
+  ([#146](../appendix/resolved/apply-wait-on-a-lagging-copy.md)). Applied as
+  [O76](../appendix/optimizations.md#o76-a-write-through-a-lagging-copy-waits-its-whole-apply-bound):
+  a copy whose last wait ran out waits one poll. Rerun at 50 ms, the p99 was a second for the
+  fault's first two seconds and 107–253 ms for the rest.
+
+### A longer partition
+
+The partition of [section 4](#partition-one-node) held for 60 s instead of 20
+(`target/lab/r11/fault2.sh`). The cluster did not recover when it healed. Refusals went on at
+19,000 a second for the rest of the run, 45 s. hyperion's journal logged its last failed RPC 48 s
+after the heal. The 20 s partition had taken about 6.5 s to recover, and nobody had asked why.
+
+It was TCP. A connection whose packets are dropped stays open, its retransmission timer doubling
+each try, and after a heal nothing moves until the timer next fires: tens of seconds after a
+minute of backoff. Fixed as [#181](../appendix/resolved/partition-retransmit-backoff.md): every
+peer connection sets `TCP_USER_TIMEOUT` (`transport.unacked_timeout`, 5 s), so the kernel aborts
+it and the link dials again. On `80b44ec`, the same 60 s partition:
+
+| Seconds after the heal | Before #181 | After |
+| --- | --- | --- |
+| 1 | 17,690 refused | 5,258 refused |
+| 2 | 19,257 refused | none |
+| 44 | 19,044 refused, the run ending | none |
+
+1,003,763 acknowledged inserts were read back through each member, 0 lost.
+
+### A real power cut
+
+`echo b > /proc/sysrq-trigger` reboots a host immediately, without syncing: the page cache is lost,
+as it is in a power cut, and only what the processes had synced and the device had written
+survives. Each was 15 s into a 180 s bench (`target/lab/r11/powercut.sh`). The node's unit is
+enabled at boot and started itself when the host came back.
+
+| Host | Back | Acknowledged inserts, each member alone | `verify`, every movie and keyword partition |
+| --- | --- | --- | --- |
+| titan | host up in about 20 s, node started 2 min later | 1,205,717, 0 lost | 0 missing, 0 different |
+| hyperion | the same | 1,155,375, 0 lost | 0 missing, 0 different |
+
+After the cut, titan's groups were refused for about 15 s, until they elected elsewhere (the lease
+and an election, [C7](../distributed/failover.md#the-window-and-what-a-client-sees)), and nothing
+failed after that. The two minutes between host and node were `systemd-networkd-wait-online`,
+host configuration. The device's write cache was not lost: the power stayed on. A cut of the power
+itself remains to be done by hand.
+
+**Verdict: pass**, with two findings, both fixed: #181 and O76. The slow link is filed with the
+weighted leadership todo.

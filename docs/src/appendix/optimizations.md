@@ -3490,3 +3490,35 @@ after: within the lab's spread, so the saving is claimed only as the CPU it meas
 **What is left** is the spans themselves: `sharded_slab`'s pool, 0.8% of titan's samples, is a
 slot per open span. Dropping the per-query spans below `Info` would remove it, and the traces a
 collector gets at `Info` with it ([F35](../features/wire-trace-context.md)).
+
+### O76. A write through a lagging copy waits its whole apply bound
+
+| | |
+| --- | --- |
+| **Rank** | ~~**B34**~~ **done** — applied, measured in the fixture and on the lab |
+| **Impact** | Measured — on the lab with hyperion's storage delayed 50 ms, the write p99 was 1,022 ms for the whole fault: every write coordinated through hyperion waited the bound |
+| **Difficulty** | S |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | None a client can rely on: a write whose wait runs out is answered unapplied either way; a lagging copy now says so after a poll rather than a second |
+| **Benchmark** | the lab's slow-disk scenario (`target/lab/r11/slowdisk.sh`, [cluster testing, section 12](../cluster-testing/correctness.md#12-scenarios-nobody-had-run)); `writes_through_a_lagging_copy_are_not_held_for_the_bound` |
+
+Found by the [distributed cluster testing](../cluster-testing/correctness.md#12-scenarios-nobody-had-run)
+chapter's slow disk. A write committed through a follower waits for the follower's own copy to
+apply it, so a `One` read through the same node sees it, for at most two heartbeat intervals: a
+second at the default base ([Resolved #146](resolved/apply-wait-on-a-lagging-copy.md)). A copy
+behind a slow device applies every write late, so every write through its node waited the whole
+second, and was then answered unapplied anyway.
+
+**Applied:** `MachineState::apply_lagging` records that this copy's last wait ran out. While it is
+set, the wait is one `APPLY_POLL` (50 ms). The first write whose apply lands inside the wait clears
+it (`wait_applied_here` in `server/shard/groups.rs`). A copy that is keeping up never sets it, and
+waits as before.
+
+**Measured.** In the fixture, ten writes one after another through a follower whose appends
+complete 1.5 s apart, at the default base: 8.0 s before, 2.1 s after (the first waits its second,
+the rest a poll each). On the lab, hyperion's storage delayed 50 ms again
+(`r11/sc/slowdisk-50ms-o76`): the write p99 reached a second for the fault's first two seconds,
+while each group's first wait ran out, and held at 107–253 ms for the rest of it, where it had
+been 1,022 ms throughout. Throughput was 50–79k operations a second, as before, and all 540,837
+acknowledged inserts were read back through each member.
