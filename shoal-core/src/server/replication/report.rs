@@ -568,6 +568,15 @@ pub enum ReplicationVerb {
         /// The group
         group: GroupId,
     },
+    /// Release a group's flush completions one at a time, each this many milliseconds after
+    /// the last, or lift that with zero: a follower that commits at a rate the test chooses
+    /// ([Resolved #129](../../../../docs/src/appendix/resolved/overload-sheds.md))
+    Slow {
+        /// The group
+        group: GroupId,
+        /// The delay before each completion, in milliseconds
+        delay_ms: u64,
+    },
     /// Cut a snapshot of a group now, and say what was built
     ///
     /// What the boundary test reads: the manifest of a cut taken between two compactions

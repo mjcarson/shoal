@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use openraft::{Raft, ServerState};
+use openraft::{Raft, RaftMetrics, ServerState};
 use openraft_rt::WatchReceiver as _;
 
 use super::machine::GroupMachine;
@@ -50,8 +50,21 @@ impl Lease {
     /// * `me` - This shard's address
     #[must_use]
     pub fn of<D: ShoalDatabase>(raft: &Raft<DataConfig, GroupMachine<D>>, me: ShardAddr) -> Self {
-        // one snapshot of the metrics, and the lock released at once
-        let metrics = raft.metrics().borrow_watched().clone();
+        // judged under the watch's lock, which nothing in here holds across an await
+        let metrics = raft.metrics();
+        let metrics = metrics.borrow_watched();
+        Self::judge(&metrics, me, Self::length(raft))
+    }
+
+    /// Judge one handle's authority from a view of its metrics
+    ///
+    /// # Arguments
+    ///
+    /// * `metrics` - The handle's metrics
+    /// * `me` - This shard's address
+    /// * `lease` - The lease openraft applies to the group
+    #[must_use]
+    pub fn judge(metrics: &RaftMetrics<DataConfig>, me: ShardAddr, lease: Duration) -> Self {
         // judged from the server state rather than from the committed vote alone: a restarted
         // node holds a vote for itself from its last term and leads nothing until it is elected
         // again, and a lease on a vote that is not being led would be polled for nothing
@@ -65,12 +78,57 @@ impl Lease {
         if metrics.membership_config.membership().voter_ids().count() <= 1 {
             return Lease::Leads;
         }
-        let lease = Duration::from_millis(raft.config().election_timeout_max);
         match metrics.last_quorum_acked {
             None => Lease::NotStarted,
             Some(acked) if acked.into_inner().elapsed() > lease => Lease::Lapsed,
             Some(_) => Lease::Leads,
         }
+    }
+
+    /// How long this shard's leadership has gone without a quorum's acknowledgement, once that
+    /// is longer than `quiet`
+    ///
+    /// openraft's lease is `election_timeout_max`, twice the failover base: ten seconds at the
+    /// default base, for which a leader cut off by dropped packets still takes writes it cannot
+    /// commit, and each waits out the write timeout. The hop silence is what the rest of the
+    /// node already takes a peer's silence to mean, so a leader that no quorum has answered for
+    /// that long refuses a write before it appends it: definite, and retried elsewhere
+    /// ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)).
+    /// A leader no quorum has acknowledged yet, or a voter alone, is never quiet.
+    ///
+    /// # Arguments
+    ///
+    /// * `raft` - This shard's handle on the group
+    /// * `quiet` - How long a leader may go unacknowledged
+    #[must_use]
+    pub fn quorum_quiet<D: ShoalDatabase>(
+        raft: &Raft<DataConfig, GroupMachine<D>>,
+        quiet: Duration,
+    ) -> Option<Duration> {
+        let metrics = raft.metrics();
+        let metrics = metrics.borrow_watched();
+        Self::quiet_of(&metrics, quiet)
+    }
+
+    /// How long a leader has gone without a quorum's acknowledgement, once that is longer than
+    /// `quiet`, from a view of its metrics
+    ///
+    /// # Arguments
+    ///
+    /// * `metrics` - The handle's metrics
+    /// * `quiet` - How long a leader may go unacknowledged
+    #[must_use]
+    pub fn quiet_of(metrics: &RaftMetrics<DataConfig>, quiet: Duration) -> Option<Duration> {
+        // only a leader of more than itself answers to a quorum
+        if metrics.state != ServerState::Leader
+            || metrics.membership_config.membership().voter_ids().count() <= 1
+        {
+            return None;
+        }
+        metrics
+            .last_quorum_acked
+            .map(|acked| acked.into_inner().elapsed())
+            .filter(|age| *age > quiet)
     }
 
     /// The lease openraft applies to the group, for a message

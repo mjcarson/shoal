@@ -329,6 +329,48 @@ impl ReplicationLink {
         budget: Duration,
         deadline: Duration,
     ) -> Result<Vec<u8>, RpcFailure> {
+        self.rpc_watched(
+            kind,
+            group,
+            target_shard,
+            version,
+            payload,
+            budget,
+            deadline,
+            || None,
+        )
+        .await
+    }
+
+    /// Send one RPC with a budget of its own, and give up on it early once the peer is silent
+    ///
+    /// The same as [`Self::rpc_budgeted`], except that while it waits the answer it asks
+    /// `silent` every [`SILENCE_POLL`], and once that says the peer has answered nothing for too
+    /// long it stops waiting. What was sent may still land, so that is `Unreachable`, never
+    /// `NotSent` ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - Which RPC this is
+    /// * `group` - The group
+    /// * `target_shard` - The shard on the peer that hosts the group
+    /// * `version` - The version the payload was encoded at, if not the link's
+    /// * `payload` - Its serialized request
+    /// * `budget` - How long the peer is told it has
+    /// * `deadline` - How long to wait for the answer
+    /// * `silent` - How long the peer has been silent, once that is too long
+    #[allow(clippy::too_many_arguments)]
+    pub async fn rpc_watched<F: Fn() -> Option<Duration>>(
+        &self,
+        kind: ReplicateKind,
+        group: GroupId,
+        target_shard: u16,
+        version: Option<u8>,
+        payload: Vec<u8>,
+        budget: Duration,
+        deadline: Duration,
+        silent: F,
+    ) -> Result<Vec<u8>, RpcFailure> {
         // mint an id and a oneshot for the answer
         let id = self.next_id.get();
         self.next_id.set(id.wrapping_add(1));
@@ -378,8 +420,31 @@ impl ReplicationLink {
                 "the replication link's queue is full or its link is down".to_string(),
             ));
         }
-        // wait for the answer, or the deadline, whichever comes first
-        match glommio::timer::timeout(deadline, async { Ok(rx.await) }).await {
+        // wait for the answer, the deadline or the peer's silence, whichever comes first
+        let started = Instant::now();
+        let mut rx = rx;
+        let answer = loop {
+            let left = deadline.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                break Err(());
+            }
+            match glommio::timer::timeout(left.min(SILENCE_POLL), async { Ok((&mut rx).await) })
+                .await
+            {
+                Ok(answer) => break Ok(answer),
+                // a poll with no answer: a peer silent too long is not waited on any longer
+                Err(_) => {
+                    if let Some(quiet) = silent() {
+                        self.pending.borrow_mut().remove(&id);
+                        self.note_pending(false);
+                        return Err(RpcFailure::Unreachable(format!(
+                            "the peer has answered nothing on the replication lane for {quiet:?}; the request was sent and may yet land"
+                        )));
+                    }
+                }
+            }
+        };
+        match answer {
             Ok(Ok(Outcome::Ok(payload))) => Ok(payload),
             Ok(Ok(Outcome::Remote(msg))) => Err(RpcFailure::Remote(msg)),
             Ok(Ok(Outcome::NotSent(msg))) => Err(RpcFailure::NotSent(msg)),
@@ -803,14 +868,15 @@ impl ShardNetwork {
 
     /// Set the silence a hop is refused after from the failover base the groups run at
     ///
-    /// A group heartbeats its followers every tenth of the base, so four heartbeats is a tenth
-    /// of that times four; a long base must not make a healthy leader look silent.
+    /// A group heartbeats its followers every tenth of the base, so three heartbeats is a tenth
+    /// of that times three; a long base must not make a healthy leader look silent.
     ///
     /// # Arguments
     ///
     /// * `failover_ms` - The base, in milliseconds
     pub fn set_failover_base(&self, failover_ms: u64) {
-        let heartbeats = Duration::from_millis(failover_ms.saturating_mul(4) / 10);
+        let heartbeats =
+            Duration::from_millis(failover_ms.saturating_mul(HOP_SILENCE_HEARTBEATS) / 10);
         self.shared.hop_silence.set(heartbeats.max(HOP_SILENCE));
     }
 
@@ -915,10 +981,19 @@ impl ShardNetwork {
 
 /// The least silence from a peer after which a write is not hopped to it
 ///
-/// Four heartbeats at the default failover base: a leader replicating to anyone answers
-/// something several times in that long, and one that answers nothing is cut off or stopped. A
-/// longer base raises it to four of its own heartbeats (`ShardNetwork::set_failover_base`).
-const HOP_SILENCE: Duration = Duration::from_secs(2);
+/// A second: a leader replicating to anyone answers something several times in that long, and
+/// one that answers nothing is cut off or stopped. The failover base raises it to three of the
+/// groups' heartbeats, a second and a half at the default base (`ShardNetwork::set_failover_base`).
+/// It was two seconds and four heartbeats until the lab showed a silent partition holding every
+/// pipelined client for those two seconds
+/// ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)).
+const HOP_SILENCE: Duration = Duration::from_secs(1);
+
+/// How many of the groups' heartbeats a peer may miss before it is taken as silent
+const HOP_SILENCE_HEARTBEATS: u64 = 3;
+
+/// How often a request waiting on a peer asks whether the peer has fallen silent
+const SILENCE_POLL: Duration = Duration::from_millis(100);
 
 /// The most a forwarded proposal holds back from the leader's budget for its answer's trip home
 const HOP_MARGIN: Duration = Duration::from_millis(250);
@@ -993,17 +1068,16 @@ impl ShardPeer {
         // rather than holding the write for its whole deadline. silent either way counts: this
         // shard's own requests unanswered, or the leader's heartbeats to this follower stopped
         // ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md))
-        let silence = self.network.hop_silence();
-        if let Some(silent) = link
-            .silent_for(silence)
-            .or_else(|| self.network.silent_for(self.target.node, silence))
-        {
+        if let Some(silent) = self.silent(&link) {
             return Err(RpcFailure::NotSent(format!(
                 "{} has answered nothing on the replication lane for {silent:?}; the write was not sent",
                 self.target.node
             )));
         }
-        link.rpc_budgeted(
+        // and a write already sent to a leader that falls silent is not waited on for its
+        // whole deadline: the client's window would fill with such writes and send nothing
+        // else, reads included, until each timed out
+        link.rpc_watched(
             ReplicateKind::Propose,
             group,
             self.target.shard,
@@ -1011,8 +1085,21 @@ impl ShardPeer {
             payload,
             hop_budget(deadline),
             deadline,
+            || self.silent(&link),
         )
         .await
+    }
+
+    /// How long the member's node has been silent on the replication lane, once that is past
+    /// the hop silence: this shard's own requests unanswered, or nothing heard from it at all
+    ///
+    /// # Arguments
+    ///
+    /// * `link` - This shard's link to the member's node
+    fn silent(&self, link: &ReplicationLink) -> Option<Duration> {
+        let silence = self.network.hop_silence();
+        link.silent_for(silence)
+            .or_else(|| self.network.silent_for(self.target.node, silence))
     }
 
     /// Ask the member, which should be the group's leader, for a read barrier
@@ -1033,8 +1120,32 @@ impl ShardPeer {
         group: GroupId,
         deadline: Duration,
     ) -> Result<Vec<u8>, RpcFailure> {
-        self.rpc(ReplicateKind::ReadBarrier, group, Vec::new(), deadline)
-            .await
+        let Some(link) = self.network.link(self.target.node) else {
+            return Err(RpcFailure::Unreachable(format!(
+                "{} is not a member the map knows",
+                self.target.node
+            )));
+        };
+        // a leader that has answered nothing for a while cannot complete a heartbeat round
+        // either: the read is answered now, retriably, rather than held for its deadline
+        // ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md))
+        if let Some(silent) = self.silent(&link) {
+            return Err(RpcFailure::Unreachable(format!(
+                "{} has answered nothing on the replication lane for {silent:?}; no barrier was asked",
+                self.target.node
+            )));
+        }
+        link.rpc_watched(
+            ReplicateKind::ReadBarrier,
+            group,
+            self.target.shard,
+            None,
+            Vec::new(),
+            deadline,
+            deadline,
+            || self.silent(&link),
+        )
+        .await
     }
 
     /// Ask the member for its canonical digest of the group at a scrub

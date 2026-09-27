@@ -2015,6 +2015,30 @@ fn handle_command(
             }
             None => Err(format!("{verb} needs a group id in hex")),
         },
+        // a group whose completions are released one at a time, a delay apart, so it commits
+        // at a rate the test chooses ([Resolved #129](../../docs/src/appendix/resolved/overload-sheds.md))
+        "SLOW_WAL" => match (
+            parts
+                .next()
+                .and_then(|hex| u64::from_str_radix(hex, 16).ok()),
+            parts.next().and_then(|ms| ms.parse::<u64>().ok()),
+        ) {
+            (Some(group), Some(delay_ms)) => {
+                let group = shoal::shared::identity::GroupId(group);
+                pool.replication_verb(shoal::server::replication::ReplicationVerb::Slow {
+                    group,
+                    delay_ms,
+                })
+                .map_err(|error| format!("{error:?}"))
+                .and_then(|answers| {
+                    answers
+                        .into_iter()
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(serde_json::Value::Array)
+                })
+            }
+            _ => Err("SLOW_WAL needs a group id in hex and a delay in milliseconds".to_string()),
+        },
         // hold one shard's shares for a while, sending each twice on release if asked
         // ([F41](../../docs/src/features/read-consistency.md))
         "HOLD_SHARES" => {
@@ -8874,6 +8898,118 @@ async fn conditional_results_follow_committed_order() -> Result<(), FixtureError
     let ledger = ledger.lock().unwrap().clone();
     shoal_model::oracle::check(&ledger)
         .unwrap_or_else(|error| panic!("the history is not sequential: {error:?}"));
+    Ok(())
+}
+
+/// Send many notes to one group through a node in one bundle, and count the answers by code
+///
+/// # Arguments
+///
+/// * `addr` - The endpoint
+/// * `keys` - The keys, written in turn until `count` notes are sent
+/// * `count` - How many notes to send
+async fn flood_notes(
+    addr: &str,
+    keys: &[u64],
+    count: usize,
+) -> Result<std::collections::BTreeMap<String, usize>, FixtureError> {
+    use shoal::client::QuerySuceededOpts;
+    let client = Shoal::<TestDbClient>::new(addr).await?;
+    // one bundle, every note in it outstanding at once
+    let mut queries = client.query();
+    for index in 0..count {
+        queries = queries.add(Note {
+            key: keys[index % keys.len()],
+            text: format!("flood {index}"),
+        });
+    }
+    let mut stream = client.send(queries).await?;
+    // each answer counted by its code, or as ok
+    let mut codes = std::collections::BTreeMap::new();
+    let mut answered = 0;
+    loop {
+        // an answer that never comes is counted rather than waited on for ever
+        let Ok(next) = tokio::time::timeout(Duration::from_secs(60), stream.next()).await else {
+            codes.insert("unanswered".to_string(), count - answered);
+            break;
+        };
+        let Some(response) = next? else {
+            break;
+        };
+        answered += 1;
+        let code = if response.suceeded(QuerySuceededOpts::default()).is_ok() {
+            "ok".to_string()
+        } else {
+            response
+                .error()
+                .map_or_else(|| "no error".to_string(), |error| format!("{:?}", error.code()))
+        };
+        *codes.entry(code).or_insert(0) += 1;
+    }
+    Ok(codes)
+}
+
+/// A group given more writes than it commits within the write timeout sheds them (item 129)
+///
+/// One group's followers complete their appends a delay apart, so it commits at a bounded rate,
+/// and two bundles of writes far past what it commits in `write_timeout` are sent at once: one
+/// through its leader and one through a follower, which hops each write to the leader. Every
+/// write that could not be committed in time used to wait out the timeout in openraft's queue
+/// and be answered `OutcomeUnknown`. Admission now sheds a write once the group's oldest
+/// unanswered proposal is past half the timeout, on the proposing shard and on the leader a
+/// hop lands on, so the answers are writes that committed and writes refused `Shedding`,
+/// which is definite, and no unknown outcome at all
+/// ([Resolved #129](../../docs/src/appendix/resolved/overload-sheds.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_overloaded_group_sheds_rather_than_timing_out() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .write_timeout(Duration::from_secs(1))
+        .query_deadline(Duration::from_secs(20))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let (slow_key, group) = key_led_by(&mut cluster, "Note", 0, 14_000)?;
+    let keys = keys_in_group(&mut cluster, "Note", &group, slow_key, 8)?;
+    // both followers complete each append 100 ms after the last, so the group commits a
+    // bounded number of writes a second whatever the leader has queued
+    for follower in [1, 2] {
+        let slowed = cluster
+            .node_mut(follower)
+            .command(&format!("SLOW_WAL {group} 100"))?;
+        assert!(slowed.get("ok").is_some(), "{slowed}");
+    }
+    // far more writes than that, through the leader and through a follower at once
+    let leader = cluster.node(0).endpoints.client.to_string();
+    let follower = cluster.node(1).endpoints.client.to_string();
+    let (local, hopped) = tokio::join!(
+        flood_notes(&leader, &keys, 4_000),
+        flood_notes(&follower, &keys, 4_000)
+    );
+    let (local, hopped) = (local?, hopped?);
+    eprintln!("through the leader: {local:?}; through a follower: {hopped:?}");
+    // lift the delay so the cluster can be read and stopped
+    for follower in [1, 2] {
+        cluster
+            .node_mut(follower)
+            .command(&format!("SLOW_WAL {group} 0"))?;
+    }
+    for (path, codes) in [("the leader", &local), ("a follower", &hopped)] {
+        let unknown = codes.get("OutcomeUnknown").copied().unwrap_or(0);
+        assert_eq!(
+            unknown, 0,
+            "writes through {path} were answered OutcomeUnknown: {codes:?}"
+        );
+        assert!(
+            codes.get("Shedding").copied().unwrap_or(0) > 0,
+            "nothing through {path} was shed: {codes:?}"
+        );
+    }
+    // the gate is one line in arrival order, so which path's writes commit is the order they
+    // reached the leader in; that some did is the point
+    let committed = local.get("ok").copied().unwrap_or(0) + hopped.get("ok").copied().unwrap_or(0);
+    assert!(committed > 0, "nothing committed: {local:?}, {hopped:?}");
     Ok(())
 }
 
@@ -18346,6 +18482,184 @@ async fn a_write_to_a_silently_cut_leader_fails_fast() -> Result<(), FixtureErro
         waited < Duration::from_secs(1),
         "a write to a silently cut leader waited {waited:?}, where the write timeout is {write_timeout:?}"
     );
+    Ok(())
+}
+
+/// A silent partition's first seconds hold neither the writes already hopped nor those through the cut-off node (item 143)
+///
+/// The first fix refused a hop once the leader had been silent for two seconds, and left two
+/// waits: a write hopped to the leader just before the cut waited out its whole deadline, and
+/// a write through the cut-off node itself was appended by its leader, which openraft's ten
+/// second lease let go on taking writes, and waited out its deadline too. On the lab both held
+/// every pipelined client for the first two to three seconds of a partition. A hop in flight
+/// now gives up once the leader is judged silent, and a leader no quorum has acknowledged for
+/// that long refuses a write before appending it
+/// ([Resolved #143](../../docs/src/appendix/resolved/silent-partition-hops.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_silent_partitions_first_seconds_hold_no_writes() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::error::ErrorCode;
+    let write_timeout = Duration::from_secs(5);
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        // the default base: a lease of ten seconds, which the waits above sat inside
+        .primary_failover_after(Duration::from_secs(5))
+        .write_timeout(write_timeout)
+        .query_deadline(Duration::from_secs(8))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let (key, _group) = key_led_by(&mut cluster, "Note", 1, 14_300)?;
+    let through_zero = cluster.node(0).endpoints.client.to_string();
+    let through_one = cluster.node(1).endpoints.client.to_string();
+    write_note(&through_zero, key, "before").await?;
+    // node one is cut off by dropped packets, and both writes are sent at once: one hopped
+    // to it from node zero before anything has been judged silent, one through node one itself
+    cluster.blackhole(1);
+    let sent = Instant::now();
+    let hopped = {
+        let addr = through_zero.clone();
+        tokio::spawn(async move {
+            let outcome = write_note(&addr, key, "hopped").await;
+            (outcome, Instant::now())
+        })
+    };
+    let local = {
+        let addr = through_one.clone();
+        tokio::spawn(async move {
+            let outcome = write_note(&addr, key, "local").await;
+            (outcome, Instant::now())
+        })
+    };
+    let (hopped, hopped_at) = hopped.await.expect("the hopped writer panicked");
+    let (local, local_at) = local.await.expect("the local writer panicked");
+    let (hopped_took, local_took) = (hopped_at - sent, local_at - sent);
+    eprintln!("hopped: {hopped:?} in {hopped_took:?}; through the cut-off node: {local:?} in {local_took:?}");
+    // neither waited out the write timeout: each was given up on once the silence was judged
+    for (path, outcome, took) in [
+        ("hopped to the cut-off leader", &hopped, hopped_took),
+        ("through the cut-off leader", &local, local_took),
+    ] {
+        assert!(
+            took < Duration::from_millis(3500),
+            "a write {path} took {took:?}, where the write timeout is {write_timeout:?}: {outcome:?}"
+        );
+    }
+    // the hopped write was sent, so it may have landed: unknown, or refused if it was not sent
+    assert!(
+        matches!(
+            failure_code(&hopped),
+            Some(ErrorCode::OutcomeUnknown | ErrorCode::NotLeader)
+        ),
+        "the hopped write was answered {hopped:?}"
+    );
+    // the write through the cut-off node was refused if its leader had already gone quiet,
+    // and given up on as unknown if it was appended first
+    assert!(
+        matches!(
+            failure_code(&local),
+            Some(ErrorCode::OutcomeUnknown | ErrorCode::NotLeader)
+        ),
+        "the write through the cut-off node was answered {local:?}"
+    );
+    // and once it has gone quiet, a write through it is refused before it is appended
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let refused_at = Instant::now();
+    let refused = write_note(&through_one, key, "later").await;
+    assert_eq!(
+        failure_code(&refused),
+        Some(ErrorCode::NotLeader),
+        "a write through the quiet leader was answered {refused:?}"
+    );
+    assert!(
+        refused_at.elapsed() < Duration::from_millis(500),
+        "the refusal took {:?}",
+        refused_at.elapsed()
+    );
+    cluster.heal(1);
+    Ok(())
+}
+
+/// How many groups a node leads, as it reports them itself
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+fn groups_led_by(cluster: &mut Cluster, node: usize) -> Result<usize, FixtureError> {
+    let view = groups_of(cluster, node)?;
+    let id = cluster.node_ids()[node].clone();
+    Ok(view["shards"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
+        .filter(|group| group["leader"]["node"].as_str() == Some(id.as_str()))
+        .count())
+}
+
+/// A node under the append reserve leads nothing and goes on serving (item 156)
+///
+/// A node whose disk filled stopped, which is right for a full disk and wrong for a nearly full
+/// one, since a stopped node serves no reads. Under `replication.append_reserve` a node now
+/// hands on every group it leads and refuses to take one back, while writes through it hop to
+/// the new leaders and reads through it are served. Over the reserve again, it leads again
+/// ([Resolved #156](../../docs/src/appendix/resolved/wal-failure-stops-the-node.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_under_the_append_reserve_leads_nothing_and_serves() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(2))
+        .replication_factor(3)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let (led_key, _group) = key_led_by(&mut cluster, "Note", 1, 14_500)?;
+    let through_one = cluster.node(1).endpoints.client.to_string();
+    write_note(&through_one, led_key, "before").await?;
+    assert!(groups_led_by(&mut cluster, 1)? > 0, "node one leads nothing to hand on");
+    // node one's storage reads 100 MiB free, under the 512 MiB default reserve
+    let low = cluster.node_mut(1).command("FREE_BYTES 104857600")?;
+    assert!(low.get("ok").is_some(), "{low}");
+    // within a few seconds it has handed on everything it led
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let led = groups_led_by(&mut cluster, 1)?;
+        if led == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node one still leads {led} groups under the append reserve"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // writes through it land, hopped to the new leaders, and reads through it are served
+    let keys: Vec<u64> = (14_600..14_640).collect();
+    for key in &keys {
+        write_note(&through_one, *key, "under the reserve").await?;
+    }
+    for key in &keys {
+        assert_eq!(
+            read_note(&through_one, *key).await?.as_deref(),
+            Some("under the reserve"),
+            "a read through node one of {key}"
+        );
+    }
+    // and no lead comes back to it while it stays under: past the handback's settle and
+    // interval, which would hand a primary's groups back to it
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    assert_eq!(
+        groups_led_by(&mut cluster, 1)?,
+        0,
+        "a lead was handed back to a node under the append reserve"
+    );
+    write_note(&through_one, led_key, "still under").await?;
+    // over the reserve again it takes writes as ever
+    let back = cluster.node_mut(1).command("FREE_BYTES none")?;
+    assert!(back.get("ok").is_some(), "{back}");
+    write_note(&through_one, led_key, "after").await?;
+    assert_eq!(read_note(&through_one, led_key).await?.as_deref(), Some("after"));
     Ok(())
 }
 

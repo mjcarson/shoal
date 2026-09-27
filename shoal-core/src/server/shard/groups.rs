@@ -45,6 +45,7 @@ use crate::server::database::ShoalDatabase;
 use crate::server::map::GroupSpec;
 use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::peer::{LinkEvent, ReplicateReply};
+use crate::server::replication::admission::{ProposalGate, ProposalPermit};
 use crate::server::replication::install::{crash_point, CrashPoint};
 use crate::server::replication::snapshot::{
     self, BuiltSnapshot, SnapshotManifest, SnapshotProvenance, SnapshotWriter, SNAPSHOTS_DIR,
@@ -91,6 +92,17 @@ const BALANCE_LAG: u64 = 16;
 
 /// How long after trying to hand a group back a shard waits before trying that group again
 const BALANCE_RETRY: Duration = Duration::from_secs(60);
+
+/// How often a proposal waiting in openraft asks whether its leader has gone quiet
+/// ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md))
+const QUIET_POLL: Duration = Duration::from_millis(100);
+
+/// How often a shard reads the free bytes of its storage against the append reserve
+/// ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md))
+const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How often a shard under the append reserve hands on the leads it still holds
+const DISK_HANDOFF_INTERVAL: Duration = Duration::from_secs(5);
 
 /// How many deadline ticks pass between two sweeps of the WAL segments
 const REPORT_EVERY_TICKS: u32 = 10;
@@ -152,6 +164,9 @@ pub(super) struct Group<D: ShoalDatabase> {
     pub(super) store: GroupStore,
     /// Bytes proposed through this shard for it and not yet answered
     pub(super) pending_bytes: usize,
+    /// The gate its writes pass into openraft through on this shard, local and hopped alike
+    /// ([Resolved #129](../../../../docs/src/appendix/resolved/overload-sheds.md))
+    pub(super) gate: ProposalGate,
     /// Writes that arrived while the handle was still being built, proposed once it is
     ///
     /// A map install rebuilds a group's handle on a task of its own, and a write in the gap
@@ -551,6 +566,16 @@ pub(super) struct Replication<D: ShoalDatabase> {
     /// When this shard last tried to hand each group back, so a transfer that did not take is
     /// not tried again, with the leader change each try costs, until `BALANCE_RETRY` has passed
     pub(super) handed_back: HashMap<GroupId, Instant>,
+    /// The free bytes of this node's storage and the reserve they are under, while they are
+    ///
+    /// Below `replication.append_reserve` the shard leads nothing: a write it would append as
+    /// a leader is refused, its leads are handed on and none is taken back, and it goes on
+    /// following and serving reads ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md)).
+    pub(super) disk_low: Option<(u64, u64)>,
+    /// When the free bytes were last read
+    pub(super) disk_checked: Option<Instant>,
+    /// When the leads were last handed on for want of space
+    pub(super) disk_handoff: Option<Instant>,
     /// Whether a segment sweep is wanted before the next message
     pub(super) sweep_due: bool,
     /// The shard's WAL directory, where quarantine markers live
@@ -713,6 +738,9 @@ where
             led_since: HashMap::new(),
             last_balance: Instant::now(),
             handed_back: HashMap::new(),
+            disk_low: None,
+            disk_checked: None,
+            disk_handoff: None,
             sweep_due: false,
             wal_dir: dir.clone(),
             quarantines,
@@ -985,6 +1013,7 @@ where
                 state,
                 store: store.clone(),
                 pending_bytes: 0,
+                gate: ProposalGate::default(),
                 waiting: Vec::new(),
                 snapshot: None,
                 retired: Vec::new(),
@@ -2050,6 +2079,10 @@ where
         };
         let raft = group.raft.clone();
         let network = replication.network.clone();
+        // the gate the write passes into openraft through, if this shard leads the group
+        let gate = group.gate.clone();
+        // and whether this node has the space to take it as a leader
+        let disk_low = replication.disk_low;
         // this copy's state, which says whether it is installing a snapshot
         let state = group.state.clone();
         // this node's member of the group: the slot hosting it, not the executor
@@ -2072,6 +2105,8 @@ where
                 raft.as_ref(),
                 &network,
                 &state,
+                &gate,
+                disk_low,
                 id,
                 me,
                 command,
@@ -2379,6 +2414,10 @@ where
             return;
         };
         let network = replication.network.clone();
+        // the gate a hopped write passes into openraft through, the same one this shard's own
+        // writes to the group take ([Resolved #129](../../../../docs/src/appendix/resolved/overload-sheds.md))
+        let gate = slot.gate.clone();
+        let disk_low = replication.disk_low;
         let me = slot.spec.me(node);
         let deadline = Duration::from_millis(u64::from(head.deadline_ms.max(1)));
         let all =
@@ -2455,6 +2494,12 @@ where
                 },
                 // the lead handed to this member, or to another it is told about
                 // ([F45](../../../../docs/src/features/replica-migration.md))
+                // a node under the append reserve takes no lead
+                // ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md))
+                ReplicateKind::TransferLeader if disk_low.is_some() => ReplicateReply::error(
+                    head.id,
+                    "transfer_leader: this node's storage is under the append reserve; it takes no lead".to_string(),
+                ),
                 ReplicateKind::TransferLeader => match postcard::from_bytes(&payload) {
                     Ok(request) => match raft.handle_transfer_leader(request).await {
                         Ok(response) => encode_reply(head.id, &response),
@@ -2465,7 +2510,7 @@ where
                 ReplicateKind::Propose => match Command::decode(&payload) {
                     Ok(command) => {
                         // one hop only: a proposal that arrived here is not forwarded again
-                        let outcome = propose_through(Some(&raft), &network, &state, group, me, command, deadline, false, all).await;
+                        let outcome = propose_through(Some(&raft), &network, &state, &gate, disk_low, group, me, command, deadline, false, all).await;
                         encode_reply(head.id, &outcome)
                     }
                     Err(error) => ReplicateReply::error(head.id, format!("decoding a proposal: {error}")),
@@ -2482,7 +2527,13 @@ where
                 // read log id, or say who leads instead. A lapsed lease is answered by name
                 // rather than waited out, since its heartbeat round cannot complete
                 ReplicateKind::ReadBarrier => {
-                    if Lease::of(&raft, me) == Lease::Lapsed {
+                    let quiet = Lease::quorum_quiet(&raft, network.hop_silence());
+                    if let Some(quiet) = quiet {
+                        let answer = BarrierAnswer::NoQuorum(format!(
+                            "{me} leads the group but no quorum has acknowledged it for {quiet:?}"
+                        ));
+                        encode_reply(head.id, &answer)
+                    } else if Lease::of(&raft, me) == Lease::Lapsed {
                         let answer = BarrierAnswer::NoQuorum(format!(
                             "the lease of {me} on the group lapsed: no quorum acknowledged it within {:?}",
                             Lease::length(&raft)
@@ -3125,6 +3176,87 @@ where
         }
     }
 
+    /// Read the storage's free bytes against the append reserve, and hand on the leads this
+    /// shard holds while they are under it
+    ///
+    /// A WAL write that fails for want of space stops the node, which is right for a disk that
+    /// is full and wrong for one that is nearly so: a node that stops serves no reads either.
+    /// Under the reserve the shard leads nothing - the writes it would append as a leader are
+    /// refused, its leads go to other members and it refuses to take one - so the space left
+    /// is spent on following, which the cluster's reaction, or an operator's, has until it is
+    /// gone. Back over the reserve by an eighth, it leads again
+    /// ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md)).
+    pub(super) fn check_disk(&mut self) {
+        let reserve = self
+            .conf
+            .cluster
+            .as_ref()
+            .map_or(0, |cluster| cluster.replication.append_reserve);
+        let root = self
+            .conf
+            .storage
+            .default
+            .filesystem
+            .latency_sensitive
+            .path
+            .clone();
+        let shard = self.shard_id;
+        let Some(replication) = self.replication.as_mut() else {
+            return;
+        };
+        // a reserve of zero is off, and the disk is read once an interval
+        if reserve == 0
+            || replication
+                .disk_checked
+                .is_some_and(|checked| checked.elapsed() < DISK_CHECK_INTERVAL)
+        {
+            return;
+        }
+        replication.disk_checked = Some(Instant::now());
+        let Some(free) = crate::server::control::capacity::free_bytes(&root) else {
+            return;
+        };
+        // under the reserve it is low; it is well again only an eighth over it, so a disk
+        // hovering at the line does not hand leads back and forth
+        let low = match replication.disk_low {
+            None => free < reserve,
+            Some(_) => free < reserve.saturating_add(reserve / 8),
+        };
+        match (low, replication.disk_low.is_some()) {
+            (true, false) => {
+                event!(Level::WARN, msg = "this node's storage is under the append reserve; it takes no new write as a leader and hands its leads on", shard, free, reserve);
+            }
+            (false, true) => {
+                event!(Level::INFO, msg = "this node's storage is back over the append reserve; it leads again", shard, free, reserve);
+                replication.disk_handoff = None;
+            }
+            _ => {}
+        }
+        replication.disk_low = low.then_some((free, reserve));
+        // while low, whatever this shard still leads is handed on, again every interval for a
+        // lead an election gave back to it
+        if low
+            && !replication.stopping
+            && replication
+                .disk_handoff
+                .is_none_or(|handed| handed.elapsed() >= DISK_HANDOFF_INTERVAL)
+        {
+            replication.disk_handoff = Some(Instant::now());
+            let rafts: Vec<Raft<DataConfig, GroupMachine<D>>> = replication
+                .groups
+                .values()
+                .filter_map(|slot| slot.raft.clone())
+                .collect();
+            glommio::spawn_local(async move {
+                let (led, handed) = hand_off_leadership(&rafts).await;
+                if led > 0 {
+                    event!(Level::WARN, msg = "handed on the leads of a shard under the append reserve", shard, led, handed);
+                }
+            })
+            .detach();
+        }
+    }
+
     /// Hand one group this shard leads back to its placement primary, if one is due
     ///
     /// The placement spreads primaries evenly over the members, and a group's lead starts there.
@@ -3140,8 +3272,12 @@ where
         let Some(replication) = self.replication.as_mut() else {
             return;
         };
-        // nothing moves while the groups stop, or more often than the interval
-        if replication.stopping || replication.last_balance.elapsed() < BALANCE_INTERVAL {
+        // nothing moves while the groups stop, while this node has no space to lead, or more
+        // often than the interval
+        if replication.stopping
+            || replication.disk_low.is_some()
+            || replication.last_balance.elapsed() < BALANCE_INTERVAL
+        {
             return;
         }
         replication.last_balance = Instant::now();
@@ -3390,6 +3526,12 @@ where
             ReplicationVerb::Release { group } => {
                 replication.wal.release(group);
                 Ok(serde_json::json!({ "released": group.to_string() }))
+            }
+            ReplicationVerb::Slow { group, delay_ms } => {
+                replication
+                    .wal
+                    .slow(group, Duration::from_millis(delay_ms));
+                Ok(serde_json::json!({ "slowed": group.to_string(), "delay_ms": delay_ms }))
             }
             ReplicationVerb::DropReplies { n } => {
                 replication.drop_replies = n;
@@ -4233,6 +4375,8 @@ async fn propose_through<D: ShoalDatabase>(
     raft: Option<&Raft<DataConfig, GroupMachine<D>>>,
     network: &ShardNetwork,
     state: &Rc<RefCell<MachineState>>,
+    gate: &ProposalGate,
+    disk_low: Option<(u64, u64)>,
     group: GroupId,
     me: ShardAddr,
     command: Command,
@@ -4246,6 +4390,9 @@ async fn propose_through<D: ShoalDatabase>(
         ));
     };
     let started = Instant::now();
+    // the write's place in openraft, taken only where it is about to be appended and let go
+    // whenever it turns out not to be
+    let mut permit: Option<ProposalPermit> = None;
     let outcome = loop {
         let remaining = deadline.saturating_sub(started.elapsed());
         if remaining.is_zero() {
@@ -4253,19 +4400,87 @@ async fn propose_through<D: ShoalDatabase>(
                 "no leader of group {group} took the write within the deadline"
             ));
         }
+        // one look at the handle's metrics for every judgement below, under the watch's lock
+        // and without a copy: this runs for every write a leader takes
+        let (lease, quiet) = {
+            let metrics = raft.metrics();
+            let metrics = metrics.borrow_watched();
+            (
+                Lease::judge(&metrics, me, Lease::length(raft)),
+                Lease::quiet_of(&metrics, network.hop_silence()),
+            )
+        };
+        let leads = matches!(lease, Lease::Leads | Lease::NotStarted);
         // a lease that lapsed is a definite refusal before anything is appended: openraft would
         // refuse the write with an empty hint, and waiting for "a leader" on a handle that
         // names itself is satisfied at once ([F42](../../../../docs/src/features/primary-failover.md))
-        if Lease::of(raft, me) == Lease::Lapsed {
+        if lease == Lease::Lapsed {
             return ProposalOutcome::NotLeader(format!(
                 "the lease of {me} on group {group} lapsed: no quorum acknowledged it within {:?}",
                 Lease::length(raft)
             ));
         }
-        let written = glommio::timer::timeout(remaining, async {
-            Ok(raft.client_write(command.clone()).await)
-        })
-        .await;
+        // a leader on a node under the append reserve appends nothing more: the write is refused
+        // before it is appended, and the lead is being handed to a member with the space
+        // ([Resolved #156](../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md))
+        if let Some((free, reserve)) = disk_low {
+            if leads {
+                return ProposalOutcome::NotLeader(format!(
+                    "{me} leads group {group} but its storage has {free} bytes free, under the {reserve} byte append reserve; its lead is being handed on"
+                ));
+            }
+        }
+        // a leader no quorum has answered for as long as a silent peer is judged by cannot
+        // commit, whatever openraft's longer lease says: refused before anything is appended
+        // ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md))
+        if let Some(quiet) = quiet {
+            return ProposalOutcome::NotLeader(format!(
+                "{me} leads group {group} but no quorum has acknowledged it for {quiet:?}; the write was not appended"
+            ));
+        }
+        // a leader lets the write into openraft only through the gate: past the bound it waits
+        // there, where nothing is appended, and a write whose turn does not come within half its
+        // budget is refused `Shedding` - definite - rather than queued to an unknown outcome
+        // ([Resolved #129](../../../../docs/src/appendix/resolved/overload-sheds.md))
+        if permit.is_none() && leads {
+            match gate.enter(remaining).await {
+                Ok(entered) => permit = Some(entered),
+                Err(waited) => {
+                    return ProposalOutcome::Shed(format!(
+                        "group {group} has {} writes in its log queue on {me}, and this one waited {waited:?} for a place",
+                        gate.in_flight()
+                    ));
+                }
+            }
+        }
+        let remaining = deadline.saturating_sub(started.elapsed());
+        // the write in openraft, watched as it waits: a leader that falls quiet after taking it
+        // cannot commit it, and holding the client for the rest of the deadline is what held
+        // every pipelined client through a silent partition's first seconds. Given up on then,
+        // it is unknown, since it was appended
+        // ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md))
+        let waiting = Instant::now();
+        let mut write = std::pin::pin!(raft.client_write(command.clone()));
+        let written = loop {
+            let left = remaining.saturating_sub(waiting.elapsed());
+            if left.is_zero() {
+                break Err(());
+            }
+            match glommio::timer::timeout(left.min(QUIET_POLL), async {
+                Ok((&mut write).await)
+            })
+            .await
+            {
+                Ok(written) => break Ok(written),
+                Err(_) => {
+                    if let Some(quiet) = Lease::quorum_quiet(raft, network.hop_silence()) {
+                        return ProposalOutcome::Unknown(format!(
+                            "{me} took the write for group {group} and then no quorum acknowledged it for {quiet:?}; it may yet commit"
+                        ));
+                    }
+                }
+            }
+        };
         match written {
             // the leader took it and did not commit it in time: it may yet
             Err(_) => {
@@ -4311,6 +4526,8 @@ async fn propose_through<D: ShoalDatabase>(
                 };
             }
             Ok(Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward)))) => {
+                // nothing was appended, so the place in openraft goes back to the next write
+                permit = None;
                 match forward.leader_node.or(forward.leader_id) {
                     // a hint naming this shard is a lease that has not started: wait for it
                     Some(leader) if leader == me => {
