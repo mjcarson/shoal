@@ -452,6 +452,15 @@ The full run for [Resolved #176](resolved/unreadable-voter-log.md) at six thread
 item: its first move ended `Moved` before the test cut the spare's links, so the failure it waits
 for never came. All three passed alone straight after.
 
+**The openraft assertion is resolved** ([Resolved #142](resolved/volatile-amnesiac-vote.md)), and
+it was not a timing. It was an acknowledged write lost. The group was the ephemeral table's, and
+the leader the test restarts at the `reconfiguring` phase came back with its memory log gone. It
+then granted its vote to a follower that had missed the last committed entry, and the follower
+that kept it asserted when the new leader's entries reached it. The deadlines above remain open:
+the checkpoint wait, the rehome's missing file, the scrub's quarantine and the restore's
+isolation. After the fix, `down_retains_placement_during_grace` also failed once in a loaded run
+of the fixture binary and passed three times of three alone.
+
 ### 152. `a_compaction_that_meets_an_unreadable_archive_is_tried_again` fails intermittently
 
 `shoal/tests/persistent_unsorted_table.rs`: the rotated intent logs are not all compacted within

@@ -261,6 +261,7 @@
   - [139. A planned stop took its groups' leaders down with it](appendix/resolved/leadership-handoff-on-stop.md)
   - [140. A shard read its intent logs one direct read per field, and a long one failed the start](appendix/resolved/intent-log-read-ahead.md)
   - [141. A stream that failed handed its channel, and its late answers, to the next stream](appendix/resolved/recycled-stream-channels.md)
+  - [142. A volatile leader restarted empty voted for a follower missing what it had committed](appendix/resolved/volatile-amnesiac-vote.md)
   - [143. A write to a leader cut off by dropped packets waited out its whole deadline](appendix/resolved/silent-partition-hops.md)
   - [144. A node cut off by dropped packets came back at a higher term and unseated healthy leaders](appendix/resolved/post-heal-elections.md)
   - [145. A write through a node whose copy was installing a snapshot waited out the whole write timeout](appendix/resolved/apply-wait-on-a-stalled-copy.md)

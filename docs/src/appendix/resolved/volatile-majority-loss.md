@@ -59,12 +59,16 @@ Three parts in `shoal-core/src/server/shard/groups.rs`:
   memory lead and feed it, and if none did the group is new again after the grace, which is
   the ephemeral contract said out loud.
 - **Such a copy grants no vote to a candidate as empty as itself.** `grants_to_empty_candidate`
-  is judged on the replication lane before openraft sees the request: a volatile copy that
+  is judged on the replication lane before openraft sees the request. ~~A volatile copy that
   held the group before and holds no log now refuses a candidate whose last log index is at
   or below the bootstrap entry, and grants to one with a real log - the survivor - until two
   election timeouts have passed with nobody feeding it, after which it grants as any copy
-  would. Two empties cannot elect each other over a survivor; a group where every member lost
-  its memory elects after the grace.
+  would.~~ Granting at once to any candidate with a real log lost writes: a restarted leader
+  elected a follower that had missed its last commits
+  ([Resolved #142](volatile-amnesiac-vote.md)). Such a copy now grants nothing for the grace,
+  then to a candidate with a real log, and to an empty one only after half a grace more. Two
+  empties still cannot elect each other over a survivor; a group where every member lost its
+  memory elects after one and a half graces.
 
 And the shard notices a dead core: on every sweep `probe_cores` asks each group's handle a
 question only a running core answers, bounded to two hundred milliseconds, and a `Fatal`
@@ -105,8 +109,9 @@ with an error, not one that panicked; the probe answers for both.
 
 ## Still open
 
-- A group where every member lost its memory is dead for the grace, two election timeouts,
-  before it is new again.
+- A group where every member lost its memory is dead for ~~the grace, two election timeouts,~~
+  one and a half graces, three election timeouts, before it is new again
+  ([Resolved #142](volatile-amnesiac-vote.md)).
 - A dead core is reported and not restarted; the copy serves nothing until the process does.
 - A restarted volatile copy that is fed by snapshot rather than log is
   [F43](../../features/node-recovery.md)'s path, unchanged - which means it is `installing`,
@@ -120,7 +125,7 @@ with an error, not one that panicked; the probe answers for both.
 | Test | Where | What breaks if this is reverted |
 | --- | --- | --- |
 | `two_volatile_voters_lost_at_once_do_not_kill_the_survivor` | `shoal/tests/cluster_fixture.rs` | The empties initialize the group again and elect between themselves; the survivor follows a foreign log or its core dies; the rows are lost |
-| `an_empty_volatile_copy_grants_no_vote_to_an_empty_candidate` | `shoal-core/src/server/shard/groups.rs` | The grant rule's cases, one by one |
+| `an_empty_volatile_copy_grants_no_vote_for_the_grace` (was `…_to_an_empty_candidate`) | `shoal-core/src/server/shard/groups.rs` | The grant rule's cases, one by one, as [#142](volatile-amnesiac-vote.md) changed them |
 | `volatile_replication_uses_common_encoding`, `a_volatile_group_purges_its_log` | `shoal/tests/cluster_fixture.rs` | A fresh volatile group's first election, and a whole restart's, still happen |
 | `scheduled_scrub_quarantines_without_an_operator`, `corrupt_follower_is_quarantined_and_repaired_from_a_verified_source` | `shoal/tests/cluster_fixture.rs` | A `Rebuild` restart of a volatile copy is still fed by its leader |
 

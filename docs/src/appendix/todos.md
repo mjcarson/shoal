@@ -482,7 +482,9 @@ list rather than from the diff:
 - ~~**A volatile group that loses a majority's memory at once** elects an empty leader over a
   full survivor.~~ An empty copy that held the group before neither initializes it again nor
   grants to an empty candidate, so the survivor leads
-  ([Resolved #109](resolved/volatile-majority-loss.md)).
+  ([Resolved #109](resolved/volatile-majority-loss.md)). Since
+  [Resolved #142](resolved/volatile-amnesiac-vote.md) it grants no vote at all for two election
+  timeouts, so one member's lost memory cannot elect a follower missing what it committed.
 
 **What F44 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:

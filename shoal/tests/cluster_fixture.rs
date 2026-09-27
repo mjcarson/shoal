@@ -9318,6 +9318,131 @@ async fn two_volatile_voters_lost_at_once_do_not_kill_the_survivor() -> Result<(
     Ok(())
 }
 
+/// Cut the data lanes between two nodes in both directions, leaving their control lanes up
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `a` - One node
+/// * `b` - The other
+fn cut_data(cluster: &Cluster, a: usize, b: usize) {
+    cluster.data_link(a, b).cut();
+    cluster.data_link(b, a).cut();
+}
+
+/// Heal the data lanes between two nodes in both directions
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `a` - One node
+/// * `b` - The other
+fn heal_data(cluster: &Cluster, a: usize, b: usize) {
+    cluster.data_link(a, b).heal();
+    cluster.data_link(b, a).heal();
+}
+
+/// A volatile leader restarted empty elects nobody who is missing what it committed (item 142)
+///
+/// [Item 142](../../docs/src/appendix/resolved/volatile-amnesiac-vote.md): a volatile copy that
+/// restarts comes back with no log and no vote, and item 109's rule let it grant its vote to any
+/// candidate with a real log. So a leader that committed rows with one follower, restarted,
+/// and was asked by the other follower - which missed those rows - elected it, and the rows
+/// were gone: overwritten by the new leader's entries, with openraft's `has_log_id` asserting on
+/// the follower that had committed them. Here node C is cut off while rows are written through
+/// the group's leader L, so L and B commit them; L is killed, B cut off, C healed and L started
+/// again empty. For two seconds C and the empty L are the only reachable voters. Then B is
+/// healed: every row reads back through B, and no copy's core died.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restarted_volatile_leader_elects_nobody_missing_its_commits() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .primary_failover_after(Duration::from_secs(1))
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .read_consistency("quorum")
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    // the group serving the first key, its leader L, and the two followers
+    let (group, leader) = wait_group_leader(&mut cluster, "Row", 400)?;
+    let lagger = (leader + 1) % 3;
+    let keeper = (leader + 2) % 3;
+    eprintln!("group {group}: leader {leader}, lagging {lagger}, keeping {keeper}");
+    // twenty keys that group serves, so every row is committed by L and the keeper alone
+    let mut keys = Vec::new();
+    for key in 400..4000u64 {
+        if group_of(&mut cluster, leader, "Row", key)?.0 == group {
+            keys.push(key);
+        }
+        if keys.len() == 20 {
+            break;
+        }
+    }
+    // the lagging follower misses every row, so only L and the keeper commit them: its data
+    // lanes to L are cut and nothing else, so it is never judged isolated and stands
+    cut_data(&cluster, leader, lagger);
+    let addr = cluster.node(leader).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    for &key in &keys {
+        client
+            .send_one(Row {
+                key,
+                data: format!("row {key}"),
+            })
+            .await?;
+    }
+    drop(client);
+    // L loses its memory; the keeper's data lanes are cut and the lagging follower's to L
+    // are back, so the lagging follower and the empty L are the only voters in reach
+    cluster.kill(leader)?;
+    cut_data(&cluster, keeper, leader);
+    cut_data(&cluster, keeper, lagger);
+    heal_data(&cluster, leader, lagger);
+    cluster.restart(leader, NodeKind::Server)?;
+    cluster.wait_joined(&[leader])?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    heal_data(&cluster, keeper, leader);
+    heal_data(&cluster, keeper, lagger);
+    // every row the keeper and L committed reads back through the keeper, at quorum, so
+    // through whichever copy leads
+    let addr = cluster.node(keeper).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    for &key in &keys {
+        loop {
+            let found = client.send_one(RowGet::new(vec![key])).await;
+            if let Ok(found) = &found {
+                if found.access::<Row>()?.is_some_and(|rows| rows.len() == 1) {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "row {key}, committed by the leader and the keeper, is lost: {:?}",
+                found.map(|_| "found nothing")
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+    // and no copy of a volatile group died on the way
+    for node in 0..3 {
+        assert_eq!(cluster.node(node).failure(), None, "node {node} died");
+        let view = groups_of(&mut cluster, node)?;
+        for shard in view["shards"].as_array().into_iter().flatten() {
+            for group in shard["groups"].as_array().into_iter().flatten() {
+                assert!(
+                    group["core_dead"].is_null(),
+                    "node {node}'s copy of a group died: {group}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A member isolated on every lane long enough to inflate its term heals without dying (C3 M6)
 ///
 /// [Item 106](../../docs/src/appendix/resolved/isolated-member-term-inflation.md): a node cut
