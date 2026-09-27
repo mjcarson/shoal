@@ -24,7 +24,7 @@ use super::ops::{
     digest, install_binary, step, wait_for_members, Deployment, POLL_INTERVAL, UP_TIMEOUT,
 };
 use super::remote::{quote, Host, SIGILL_STATUS};
-use super::render::Layout;
+use super::render::{Entry, Layout};
 use super::state::{ClusterRecord, NodeRecord};
 use crate::cluster::ClusterModel;
 
@@ -508,6 +508,201 @@ impl Deployment {
         Err(self
             .revert::<S>(record, name, node, ids, voters, &error)
             .await)
+    }
+
+    /// Render every deployed node's `shoal.yml` again from the inventory, one node at a time
+    ///
+    /// `upgrade` swaps a node's program and never its configuration, so a change to what the
+    /// inventory says, or to what the renderer writes, reached no deployed node: the lab's
+    /// nodes had `node_memory` added by hand, and O61's commit delay set by hand on europa. This
+    /// renders each node's file as a bootstrap would, keeping the entry it was deployed with,
+    /// and restarts only the nodes whose file changed, the control leader last
+    /// ([O61](../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page)).
+    ///
+    /// # Arguments
+    ///
+    /// * `only` - The nodes to act on, or none for every deployed node
+    /// * `force` - Restart a node even when its file did not change
+    ///
+    /// # Errors
+    ///
+    /// When the cluster is not healthy, or a node does not come back on its new file; that
+    /// node is put back on the file it had.
+    pub async fn reconfigure<S>(&self, only: &[String], force: bool) -> color_eyre::Result<()>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        // only a cluster that was bootstrapped has files to render again
+        let record = self.state.record()?;
+        if !record.initialized {
+            bail!(
+                "{} has not been bootstrapped from {}",
+                self.inventory.name,
+                self.state.dir().display()
+            );
+        }
+        // an inventory that does not validate renders nothing
+        self.inventory.validate()?;
+        // judged healthy before anything is touched, and the leader last, as an upgrade is
+        let shoal = self.any_member::<S>(&record).await?;
+        let model = crate::cluster::poll(&shoal)
+            .await
+            .map_err(|error| eyre!(error))?;
+        judge_health(&model, &record, only).map_err(|why| {
+            eyre!(
+                "{} is not ready for a rolling restart: {why}",
+                self.inventory.name
+            )
+        })?;
+        let order =
+            upgrade_order(&record, only, model.leader.as_deref()).map_err(|error| eyre!(error))?;
+        let ids = record
+            .nodes
+            .values()
+            .map(|node| node.node.parse::<Uuid>().map(NodeId))
+            .collect::<Result<Vec<_>, _>>()?;
+        let voters = (self.inventory.control_voters as usize).min(ids.len());
+        // the credential every file is rendered with
+        let password = self.state.password()?;
+        let mut changed = 0;
+        for name in &order {
+            let node = &record.nodes[name];
+            if self
+                .reconfigure_node::<S>(&record, name, node, &ids, voters, &password, force)
+                .await?
+            {
+                changed += 1;
+            }
+        }
+        step(
+            None,
+            &format!(
+                "{} of {} node{} reconfigured",
+                changed,
+                order.len(),
+                if order.len() == 1 { "" } else { "s" }
+            ),
+        );
+        Ok(())
+    }
+
+    /// Render one node's file again, and restart it on the new one if it changed
+    ///
+    /// # Arguments
+    ///
+    /// * `record` - What the deployment recorded
+    /// * `name` - The node's inventory name
+    /// * `node` - Its record
+    /// * `ids` - Every recorded node, which all have to be up afterwards
+    /// * `voters` - How many voters the control group has to have afterwards
+    /// * `password` - The admin password the file's credential is derived from
+    /// * `force` - Restart it even when its file did not change
+    ///
+    /// Returns whether the node was restarted.
+    ///
+    /// # Errors
+    ///
+    /// When its file cannot be read or written, or it does not come back on the new one.
+    #[allow(clippy::too_many_arguments)]
+    async fn reconfigure_node<S>(
+        &self,
+        record: &ClusterRecord,
+        name: &str,
+        node: &NodeRecord,
+        ids: &[NodeId],
+        voters: usize,
+        password: &str,
+        force: bool,
+    ) -> color_eyre::Result<bool>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        let host = Host {
+            target: node.target.clone(),
+        };
+        let layout = Layout {
+            dir: self.inventory.remote_dir(),
+        };
+        let path = layout.conf();
+        // the file the node runs on now, and who owns it
+        let current = host.run(&format!("sudo -n cat {}", quote(&path)))?;
+        let owner = host
+            .run(&format!("sudo -n stat -c %U {}", quote(&path)))?
+            .trim()
+            .to_string();
+        // the entry it was deployed with, kept: a node that bootstrapped says so, a joiner
+        // keeps the seeds it was given
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&current)
+            .map_err(|error| eyre!("{name}'s {path} is not YAML: {error}"))?;
+        let bootstrap = parsed["cluster"]["bootstrap"].as_bool().unwrap_or(false);
+        let entry = if bootstrap {
+            Entry::Bootstrap
+        } else {
+            let seeds = parsed["cluster"]["seeds"]
+                .as_sequence()
+                .map(|seeds| {
+                    seeds
+                        .iter()
+                        .filter_map(|seed| seed.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Entry::Join(seeds)
+        };
+        // rendered as the inventory says now
+        let resolved = self.inventory.node(name)?;
+        let rendered = super::render::render(&self.inventory, &resolved, &entry, password)?;
+        // the credential's salt is new every render, so the two are judged without it
+        if !force && same_but_credentials(&current, &rendered)? {
+            step(Some(name), "its file is already what the inventory renders");
+            return Ok(false);
+        }
+        step(Some(name), &format!("writing its new {path}"));
+        host.write(&path, rendered.as_bytes(), 0o600, Some(&owner))?;
+        // restarted on it, and put back on the old file if it does not come back
+        let Err(error) = self
+            .restart_and_wait::<S>(record, name, node, ids, voters)
+            .await
+        else {
+            return Ok(true);
+        };
+        step(
+            Some(name),
+            "it did not come back on its new file; putting the old one back",
+        );
+        host.write(&path, current.as_bytes(), 0o600, Some(&owner))?;
+        let restored = self
+            .restart_and_wait::<S>(record, name, node, ids, voters)
+            .await;
+        match restored {
+            Ok(()) => Err(eyre!(
+                "{name} did not come back on its new file and is back on its old one: {error}"
+            )),
+            Err(again) => Err(eyre!(
+                "{name} did not come back on its new file ({error}), nor on its old one ({again}){}",
+                self.journal(&host)
+            )),
+        }
     }
 
     /// Roll one node back onto the program it kept
@@ -1028,5 +1223,45 @@ mod tests {
         model.activated_wire = 5;
         model.wire_range = (5, 5);
         assert_eq!(activation_target(&model), None);
+    }
+}
+
+/// Whether two renderings of a node's file say the same thing apart from the admin credential
+///
+/// The credential is derived with a fresh salt every render, so it always differs.
+///
+/// # Arguments
+///
+/// * `current` - The file a node runs on
+/// * `rendered` - The file the inventory renders for it now
+///
+/// # Errors
+///
+/// When either is not YAML.
+fn same_but_credentials(current: &str, rendered: &str) -> color_eyre::Result<bool> {
+    // both as values, each without the users the credential is kept under
+    let strip = |text: &str| -> color_eyre::Result<serde_yaml::Value> {
+        let mut value: serde_yaml::Value = serde_yaml::from_str(text)?;
+        if let Some(auth) = value.get_mut("auth").and_then(serde_yaml::Value::as_mapping_mut) {
+            auth.remove("users");
+        }
+        Ok(value)
+    };
+    Ok(strip(current)? == strip(rendered)?)
+}
+
+#[cfg(test)]
+mod reconfigure_tests {
+    use super::same_but_credentials;
+
+    /// Two renderings that differ only in the credential's salt are the same file; any other
+    /// difference is a change
+    #[test]
+    fn only_the_credential_is_ignored() {
+        let a = "auth:\n  required: true\n  users:\n    admin:\n      scram_sha_256: {salt: aa}\ncluster:\n  bootstrap: true\n";
+        let b = "auth:\n  required: true\n  users:\n    admin:\n      scram_sha_256: {salt: bb}\ncluster:\n  bootstrap: true\n";
+        let c = "auth:\n  required: true\n  users:\n    admin:\n      scram_sha_256: {salt: bb}\ncluster:\n  bootstrap: true\n  replication: {wal_commit_delay: 3ms}\n";
+        assert!(same_but_credentials(a, b).expect("yaml"));
+        assert!(!same_but_credentials(a, c).expect("yaml"));
     }
 }

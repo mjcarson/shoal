@@ -151,6 +151,17 @@ pub struct ClusterConf {
     /// The failover base the inventory names, if any
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_failover_after: Option<String>,
+    /// The replication settings the inventory names for this node, if any
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replication: Option<ReplicationConf>,
+}
+
+/// `cluster.replication`, only the keys an inventory can set
+#[derive(Serialize, Debug)]
+pub struct ReplicationConf {
+    /// How long the WAL writer waits after a sync for more appends
+    /// ([O61](../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page))
+    pub wal_commit_delay: String,
 }
 
 /// `cluster.migration`, only the keys an inventory can set
@@ -310,6 +321,11 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
                 .clone()
                 .map(|retire_after| MigrationConf { retire_after }),
             primary_failover_after: inventory.failover.clone(),
+            // the node's own, its group's or the deployment's WAL delay (O61)
+            replication: node
+                .wal_commit_delay
+                .clone()
+                .map(|wal_commit_delay| ReplicationConf { wal_commit_delay }),
         },
     }
 }

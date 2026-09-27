@@ -207,6 +207,8 @@ fn a_group_split_renders_the_roots_the_engine_claims() {
                 latency: Some(fast.display().to_string()),
                 throughput: Some(format!("{}/", bulk.display())),
             }),
+            // the WAL commit delay belongs to the device, so a group sets it (O61)
+            wal_commit_delay: Some("3ms".to_string()),
         },
     );
     inventory.nodes[0].group = Some("split".to_string());
@@ -230,6 +232,20 @@ fn a_group_split_renders_the_roots_the_engine_claims() {
         .collect();
     assert_eq!(roots, a.storage.roots());
     assert_eq!(roots, vec![fast.display().to_string(), bulk.display().to_string()]);
+    // and the group's WAL commit delay reached the engine as the duration it named
+    let cluster = conf.cluster.as_ref().expect("a cluster block");
+    assert_eq!(
+        cluster.replication.wal_commit_delay.duration(),
+        std::time::Duration::from_millis(3)
+    );
+    // a node of no group renders none, which the engine reads as its default of zero
+    let b = inventory.node("b").expect("node b");
+    assert_eq!(b.wal_commit_delay, None);
+    // and a delay past the engine's 10ms is refused before anything is rendered
+    let mut slow = inventory.clone();
+    slow.groups.get_mut("split").expect("the group").wal_commit_delay = Some("20ms".to_string());
+    let refused = slow.validate().expect_err("20ms is refused");
+    assert!(refused.to_string().contains("at most 10ms"), "{refused}");
     // a claim marks the primary, the first root, which is what preflight finds on a node that
     // was claimed and never started; a start mirrors it into the rest, which preflight also reads
     shoal::server::node::claim(&conf).expect("a claim");

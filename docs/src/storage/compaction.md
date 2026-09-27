@@ -527,9 +527,9 @@ Zen1 node - where a later pass finds it deader and copies less for the same spac
 - ~~`load_partitions_for_intents` issues one random read per changed partition with no
   batching, sorting by offset, or readahead.~~ It keeps 32 reads in flight since
   [O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench),
-  where one at a time was five of a merge's seven seconds on a Zen1 node. ~~Still no sorting by
-  offset or readahead.~~ A merge's reads are sorted by archive and offset, and a pass's by offset,
-  since O74's remainder. Still no readahead.
+  where one at a time was five of a merge's seven seconds on a Zen1 node. Still no sorting by
+  offset or readahead: sorting was tried on the lab and measured no gain on NVMe with reads in
+  flight ([O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)).
 - No throttling: a large rotation floods the medium-priority queue with reads and writes.
 - `changes`, `entries`, and `removals` are drained per job and `loaded` is cleared after each
   write, but an error mid-job leaves all four dirty for the next one.

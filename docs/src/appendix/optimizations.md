@@ -3451,8 +3451,16 @@ cluster's throughput follows its slowest members.
 **Kept.** Filed on the way: [#179](resolved/archive-usage-prefix.md), an archive's live bytes counted
 without its records' prefixes.
 
-**Still open:** the 50% threshold is hardcoded, and neither a merge nor a pass sorts its reads by
-offset.
+~~**Still open:** the 50% threshold is hardcoded, and neither a merge nor a pass sorts its reads by
+offset.~~ Both done in the [cluster testing's round 11](../cluster-testing/performance.md#o74s-remainder):
+
+- **The threshold is a setting**, `throughput_sensitive.archive_pass_live_percent`, 50 by default
+  and held to 1–99. It is not swept yet: the rewrite-heavy bench is where a sweep would show it.
+- **Sorting the reads by offset was tried and not kept.** A merge's reads sorted by archive and
+  offset, a pass's by offset, against the same build without, A B B A with 180 s of the
+  rewrite-heavy mix: 35,606 and 34,863 operations a second sorted, 36,136 and 36,450 not. On the
+  lab's NVMe with 16 to 32 reads in flight the order does not matter, and a sort costs a pass
+  over the entries.
 
 ### O75. Every query formatted its metadata into a tracing span
 

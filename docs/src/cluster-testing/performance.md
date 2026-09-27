@@ -276,3 +276,21 @@ applied in the same change.
 
 **How to compare two builds on this lab.** Interleave the arms and reverse the order, A B B A or
 two pairs each way. Compare means, never a single pair.
+
+## O74's remainder
+
+[O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)
+left two things: the archive pass's 50% live threshold was hardcoded, and neither a merge nor a
+pass sorted its reads by offset. The threshold is now `archive_pass_live_percent`. The sort was
+built and measured: the same tree with and without it, A B B A, 180 s of O74's rewrite-heavy mix
+(get 40, update 45, insert 15) each (`target/lab/r11/benchab2.sh`):
+
+| Arm | Sorted | Not sorted |
+| --- | --- | --- |
+| 1 and 4 | 35,606 and 34,863 ops/s | |
+| 2 and 3 | | 36,136 and 36,450 ops/s |
+
+The difference is inside the lab's spread and, if anything, against the sort. With 16 to 32 reads
+in flight on NVMe the order they are asked in does not matter, so the sort was taken out again.
+Eight archive passes a host ran over 5 s in the four arms: 5.6 s on titan and 8.9 s on hyperion on
+average, nearly all of it reading.

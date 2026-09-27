@@ -119,6 +119,7 @@
   - [F54. The TMDB dataset as a deployable database, and a loader for it](features/tmdb-dataset-deployment.md)
   - [F55. A rolling upgrade with `shoalctl cluster upgrade`](features/cluster-upgrade.md)
   - [F56. Rebuilding a node from its peers with `shoalctl cluster rebuild`](features/cluster-rebuild.md)
+  - [F57. Rendering a deployed cluster's files again with `shoalctl cluster reconfigure`](features/cluster-reconfigure.md)
 
 # Direction
 
