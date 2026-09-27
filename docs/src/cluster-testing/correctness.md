@@ -913,3 +913,89 @@ their source was down. The TMDB inventories do not set it, and `lab.yml` sets 15
 plan finished on its own.
 
 **Verdict: pass.**
+
+## 9. A voter whose log has a hole
+
+The item section 8 left filed: [#176](../appendix/resolved/unreadable-voter-log.md). A durable voter
+whose WAL could not be read stopped its node at every start. #175 had built a *learner* again with no
+log in that case, and a voter was left alone because an emptied voter can elect a leader that is
+missing what it acknowledged.
+
+**Reproducing it found a worse form.** In the fixture, a voter's middle segment was deleted while
+its checkpoint was held behind its sealed segments, as a Zen1 node's backlogged compactor leaves it.
+The node did not stop. It came back with 94 of 110 notes, at the same applied index as its peers,
+and served "not found" for the other sixteen. A read of the log skipped the indexes it did not
+have, and openraft's re-apply checks only the ends of each chunk it reads. So a hole inside a chunk
+was applied around, in silence. A hole that covers a chunk's end gives the lab's error from #175
+(`Failed to get log entries … got [None, None)`). Both are fixed:
+
+- a read across a gap is refused;
+- a hole wholly at or below the checkpoint is purged;
+- a hole past the checkpoint forgets the copy's log under a **floor** on its vote. The floor is
+  written, synced, before the log goes, and the copy's vote is kept. Until the copy has applied past
+  the floor, it grants no vote to a candidate behind it.
+
+The fixture test is `a_voter_whose_log_has_a_hole_is_fed_not_fatal`, with the new `HOLD_COMPACTION`
+verb.
+
+**How, on the lab.** `target/lab/r176/hole.sh`:
+
+1. With the mixed bench (`get:40,update:45,insert:15`) running through all three members, or with
+   nothing running, hyperion is killed with `SIGKILL` and stopped, so systemd does not start it.
+2. One of its Shard-0 WAL segments is deleted.
+3. Hyperion is started again.
+
+Afterwards every acknowledged insert, and the csv, is read back through each member alone at `One`.
+The build is `c3b8874`, which is also the build of section 10's last rebuild. The runs are under
+`target/lab/r176/`.
+
+| | Idle, third newest segment | Bench, third newest | Bench, newest sealed |
+| --- | --- | --- | --- |
+| What hyperion found at its start | holes in 3 `Movie` groups, each wholly below its checkpoint | the same | holes in 3 `Movie` groups, each about 6,300 entries **past** its checkpoint |
+| What it did | purged each log through its checkpoint; logs and votes kept | the same | forgot each log under a floor, keeping its vote. One group was led by hyperion when it was killed, and kept its own vote |
+| Fed past the floor after | – | – | 4 s, 4 s and 16 s |
+| Restarts by systemd | 0 | 0 | 0 |
+| Acknowledged inserts, each member alone | no bench | 1,517,309, 0 lost | 1,379,242, 0 lost |
+| csv, each member alone | 0 missing, 0 different, every keyword partition equal | the same | the same |
+
+```text
+ERROR a durable log has a hole past its checkpoint; forgetting it, and its leader will feed it again
+      group=4a08067dafc8c382 table=Movie from=1341493 to=1347782 checkpoint=1341492
+WARN  a copy's log is forgotten; it grants no vote below its floor until it is fed past it
+      group=4a08067dafc8c382 floor=T1-…/0.1348627 vote=Some(Vote { leader_id: LeaderId { term: 1, … }, committed: true })
+INFO  a copy was fed past its floor, and votes as any copy again  group=4a08067dafc8c382
+```
+
+With the compactor keeping up since section 10, the third newest segment was already merged even
+under the bench. So only the newest sealed segment lay past the checkpoints, and that segment is
+the one the third run deleted. On the build before this fix, a node in that state either stopped at
+every start or, with the hole inside a chunk, served with rows missing.
+
+**Verdict: pass.** A voter whose log lost a segment comes back by itself. It loses nothing it
+acknowledged, and it cannot vote for a leader missing any of it.
+
+## 10. The compactor's backlog, and four rebuilds
+
+[O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)
+was the other item section 8 left open. On titan, under the bench, the compactor fell hundreds of
+jobs behind. It is a performance item, and [its page](performance.md#o74-the-compactor-under-the-bench)
+has the numbers. The runs are here because every change to the compactor changes what the archives
+hold, and each rebuild was checked the way section 8's were.
+
+**How.** On a cluster destroyed, bootstrapped on the build under test and loaded from the csv,
+`target/lab/rebuild-exp.sh` runs the mixed bench through all three members for 900 s and rebuilds
+hyperion 25 s in. The runs are under `target/lab/o74/`.
+
+| Run | Build | Plan | Whole rebuild | Acknowledged inserts, each member alone | csv, each member alone |
+| --- | --- | --- | --- | --- | --- |
+| base | `fc91fb7`, the compactor's phases logged | 18 moved | 430 s | not read back | not read back |
+| c1 | + 32 reads in flight for a merge and a pass | 18 moved | 315 s | 3,926,919, 0 lost | 0 missing, 0 different |
+| c2 | + passes paced a minute apart, 8 reads in flight, frames read as one span | 18 moved | 534 s | not read back | not read back |
+| c3 | + a pass stops inside an archive at 16 MiB, 16 reads in flight | 18 moved | **272 s** | 3,950,753, 0 lost | 0 missing, 0 different |
+
+c3 is the fastest rebuild on record: section 8's rebuilds 8 and 9 took 979 s and 748 s. Its longest
+wait for a snapshot cut was 0.7 s, against 147.5 s in rebuild 8. The part of O74 still open is the
+cost of reclaiming space. With the backlog gone, the archive passes run at the rate the bench makes
+garbage, where before they were skipped behind it. That costs 4 to 5% of throughput in steady state.
+
+**Verdict: pass.** No run lost an acknowledged write or a row.

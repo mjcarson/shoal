@@ -900,3 +900,53 @@ fn tablet_bytes_follow_the_map() {
         reopened.close_all().await.unwrap();
     });
 }
+
+/// A fully live archive of short records is not judged under half live (item 179)
+///
+/// An archive pass copies every archive whose live bytes are under half its file. The live
+/// bytes were counted as the records' payloads alone, and the file holds each record's sixteen
+/// byte prefix and the archive's header as well, so an archive of records of sixteen bytes or
+/// fewer read as half dead with nothing dead in it and was copied by every pass
+/// ([Resolved #179](../../../../../../docs/src/appendix/resolved/archive-usage-prefix.md)).
+#[test]
+fn a_fully_live_archive_of_short_records_is_not_under_half_live() {
+    use super::map::{write_record, ArchiveEntry};
+    use futures::AsyncWriteExt;
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let (conf, map) = archive_map(&temp_dir).await;
+        let mut writer = map.get_active_writer().await.unwrap();
+        let active = *map.active.borrow();
+        // a thousand twelve byte records, every one of them live
+        for key in 0..1000u64 {
+            let payload = key.to_le_bytes().repeat(2)[..12].to_vec();
+            let offset = write_record(&mut writer, &payload).await.unwrap();
+            map.set_partition(
+                key,
+                ArchiveEntry {
+                    key,
+                    archive: active,
+                    offset,
+                    size: payload.len(),
+                },
+            );
+        }
+        writer.sync().await.unwrap();
+        writer.close().await.unwrap();
+        let size = std::fs::metadata(conf.get_archive_path("TestRecord").join(active.to_string()))
+            .unwrap()
+            .len();
+        // what the pass weighs the archive by, against the half it copies under
+        let used = map
+            .sort_by_load()
+            .sorted
+            .iter()
+            .find(|(_, archives)| archives.contains(&active))
+            .map(|(used, _)| *used)
+            .unwrap();
+        assert!(
+            used as f64 > size as f64 * 0.50,
+            "a fully live archive of {size} bytes was weighed at {used}"
+        );
+    });
+}

@@ -380,8 +380,13 @@ report of *what the removal discarded* behind in one branch, which is
 
 ## Archive compaction
 
-`compact_archives` (`.../fs/compactor.rs:443-500`) reclaims space from archives whose live
-fraction has dropped.
+`compact_archives` (`.../fs/compactor.rs`) reclaims space from archives whose live fraction has
+dropped. Since [O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)
+a pass reads the records it copies 16 at a time, stops once it has copied
+`throughput_sensitive.archive_pass_bytes` (16 MiB) - inside an archive if it has to, leaving the
+rest of that archive for the next pass - and is queued again behind the jobs waiting; and a new
+pass waits out `archive_pass_interval` (a minute) since the last one began. The sketch below is the
+shape of one pass before those changes.
 
 ```rust
 let mut sorted = self.map.sort_by_load();          // least utilised first
@@ -422,11 +427,12 @@ The rules:
   small — otherwise a lightly used table would churn through uuids.
 
   ```rust
-  /// This is 100 Mebibytes
+  /// This is 10 Mebibytes
   const MIN_ARCHIVE_COMPACTABLE: u64 = 10 << 20;
   ```
 
-  `.../fs/compactor.rs:31-33` — the comment says 100 MiB; the value is 10 MiB.
+  ~~`.../fs/compactor.rs:31-33` — the comment says 100 MiB; the value is 10 MiB.~~ The comment
+  said 100 MiB, and was corrected with O74.
 
 - **Empty archives are deleted outright**, unless active — an empty active archive might just
   not have been written to yet (`.../fs/compactor.rs:541-546`).
@@ -443,7 +449,14 @@ made, ahead of the copy they named. Staged since [#159](../appendix/resolved/map
 they are written after the new archive is synced, so a crash anywhere leaves the map on disk
 pointing at data that exists.
 
-### None of the above has ever run in a test
+### ~~None of the above has ever run in a test~~
+
+**It does now.** `an_archive_pass_stopped_inside_an_archive_loses_nothing`
+(`shoal/tests/persistent_unsorted_table.rs`, O74) writes twelve megabytes of rows, rewrites seven in
+ten, and has passes with a 64 KiB budget copy the rest out of the largest archive a piece at a time
+until it is deleted, then reads every row back. The fixture's
+`an_archive_compaction_leaves_a_corrupt_record_and_quarantines_it` runs a pass too, and the lab
+runs thousands. What follows is the section as it stood.
 
 This section describes the only component in Shoal that **rewrites committed data**, and the whole
 of it is unexercised. `MIN_ARCHIVE_COMPACTABLE` is 10 MiB and no test writes near that, so
@@ -497,7 +510,11 @@ not on disk.
 **50% is the space/write-amplification knob.** Compacting at higher utilisation reclaims less
 per byte rewritten. It is hardcoded (`.../fs/compactor.rs:336`), as is
 `MIN_ARCHIVE_COMPACTABLE` (marked `// TODO make size configurable`,
-`.../fs/compactor.rs:343`).
+`.../fs/compactor.rs:343`). **So is how often it is asked**, which matters as much: a pass
+is queued behind every compaction, and on a cluster node the lab measured that one run after
+every merge copies each archive as soon as it crosses half live - 2,139 MiB in five minutes on one
+Zen1 node - where a later pass finds it deader and copies less for the same space. That interval is
+`archive_pass_interval` since O74.
 
 ## Limitations
 
@@ -505,9 +522,13 @@ per byte rewritten. It is hardcoded (`.../fs/compactor.rs:336`), as is
   rotated log since [item 14](../appendix/resolved/empty-rotated-logs.md). They are still
   *created* on every forced rotation
   ([O21](../appendix/optimizations.md#o21-a-forced-rotation-of-an-empty-intent-log-does-the-whole-rotation-anyway)).
-- Compaction thresholds are hardcoded.
-- `load_partitions_for_intents` issues one random read per changed partition with no
-  batching, sorting by offset, or readahead.
+- ~~Compaction thresholds are hardcoded.~~ The 50% threshold and `MIN_ARCHIVE_COMPACTABLE`
+  are; an archive pass's budget and interval are settings since O74.
+- ~~`load_partitions_for_intents` issues one random read per changed partition with no
+  batching, sorting by offset, or readahead.~~ It keeps 32 reads in flight since
+  [O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench),
+  where one at a time was five of a merge's seven seconds on a Zen1 node. Still no sorting by
+  offset or readahead.
 - No throttling: a large rotation floods the medium-priority queue with reads and writes.
 - `changes`, `entries`, and `removals` are drained per job and `loaded` is cleared after each
   write, but an error mid-job leaves all four dirty for the next one.
