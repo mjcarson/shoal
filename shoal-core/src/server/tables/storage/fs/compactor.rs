@@ -4,6 +4,7 @@ use futures::{select, AsyncWriteExt, FutureExt, StreamExt};
 use glommio::io::{BufferedFile, DmaFile, DmaStreamWriter, OpenOptions};
 use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
+use shoal_channel::KeptReceiver;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
 use rkyv::rancor::{Error, Strategy};
@@ -337,7 +338,11 @@ pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport, 
     /// ([Resolved #159](../../../../../docs/src/appendix/resolved/map-ahead-of-archive.md)).
     staged: Vec<u8>,
     /// The channel to listen for paths to intent logs to compact
-    jobs_rx: AsyncReceiver<CompactionJob>,
+    ///
+    /// Kept, because the wait for a job is raced against the earliest retry, and a bare kanal
+    /// receive dropped by that race loses the job handed to it
+    /// ([Resolved #152](../../../../../docs/src/appendix/resolved/kanal-receive-races.md)).
+    jobs_rx: KeptReceiver<CompactionJob>,
     /// The jobs taken off the channel and not yet run, in the order they were sent
     ///
     /// Drained from the channel before each job so a snapshot cut can be taken ahead of the
@@ -401,7 +406,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             entries: Vec::with_capacity(capacity),
             removals: Vec::with_capacity(capacity),
             staged: Vec::new(),
-            jobs_rx,
+            jobs_rx: KeptReceiver::new(jobs_rx),
             backlog: VecDeque::new(),
             shard_local_tx: shard_local_tx.clone(),
             archive_path: conf.get_archive_path(R::name()),
@@ -1888,7 +1893,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             } => {
                 // how long the cut waited behind other jobs, and how many are still queued
                 // ([Resolved #174](../../../../../../docs/src/appendix/resolved/snapshot-cut-queue.md))
-                event!(Level::INFO, msg = "taking a snapshot cut", table = R::name(), group = %group, queued_ms = requested.elapsed().as_millis() as u64, backlog = self.backlog.len() + self.jobs_rx.len());
+                event!(Level::INFO, msg = "taking a snapshot cut", table = R::name(), group = %group, queued_ms = requested.elapsed().as_millis() as u64, backlog = self.backlog.len() + self.jobs_rx.receiver().len());
                 self.cut_snapshot(
                     group,
                     schema_id,
@@ -1985,7 +1990,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     // everything already sent comes off the channel first, so a cut asked for
                     // behind a run of merges is taken before them
                     // ([Resolved #174](../../../../../../docs/src/appendix/resolved/snapshot-cut-queue.md))
-                    while let Ok(Some(job)) = self.jobs_rx.try_recv() {
+                    while let Ok(Some(job)) = self.jobs_rx.try_next() {
                         self.backlog.push_back(job);
                     }
                     if let Some(job) = take_next(&mut self.backlog) {
@@ -1999,14 +2004,16 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                             .map(|at| at.saturating_duration_since(Instant::now()));
                         match earliest {
                             Some(wait) => {
-                                let mut recv = Box::pin(self.jobs_rx.recv()).fuse();
+                                // the kept receive survives the timer winning, so a job handed
+                                // to it in the meantime is returned by the next wait
+                                let mut recv = self.jobs_rx.next().fuse();
                                 let mut timer = Box::pin(glommio::timer::sleep(wait)).fuse();
                                 select! {
                                     job = recv => (job?, 0),
                                     () = timer => continue,
                                 }
                             }
-                            None => (self.jobs_rx.recv().await?, 0),
+                            None => (self.jobs_rx.next().await?, 0),
                         }
                     }
                 }
@@ -2052,7 +2059,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     table = R::name(),
                     kind,
                     secs = started.elapsed().as_secs_f64(),
-                    backlog = self.backlog.len() + self.jobs_rx.len(),
+                    backlog = self.backlog.len() + self.jobs_rx.receiver().len(),
                     frames = phases.frames,
                     read_ms = phases.read.as_millis() as u64,
                     loaded = phases.loaded,

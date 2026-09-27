@@ -43,7 +43,7 @@ first test to run an archive pass that rewrites anything. `rotation_preserves_pe
 now reads its sparse indexes one at a time, since a read across a gap is refused. The workspace run
 at six threads with `--no-fail-fast` passed 1,682, the fixture suite 130 of 130, and failed
 `a_compaction_that_meets_an_unreadable_archive_is_tried_again` in `persistent_sorted_table.rs`
-([item 152](known-issues.md#152-a_compaction_that_meets_an_unreadable_archive_is_tried_again-fails-intermittently)),
+([item 152](resolved/kanal-receive-races.md), since resolved),
 which passed alone three of three and eighteen of eighteen six at a time.
 
 **Items 169 to 178 added 10, and one ignored**, 1,674 → 1,685 with eight ignored: three in

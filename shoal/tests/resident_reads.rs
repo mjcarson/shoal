@@ -22,6 +22,7 @@ use rkyv::util::AlignedVec;
 use rkyv::{Archive, Deserialize, Serialize};
 use shoal::glommio::{Latency, LocalExecutorBuilder, Shares};
 use shoal::gxhash::GxHasher;
+use shoal::channel::LocalKeptReceiver;
 use shoal::kanal::{self, AsyncReceiver, AsyncSender};
 use shoal::lru::LruCache;
 use shoal::server::conf::Conf;
@@ -158,7 +159,7 @@ struct Harness {
     /// The channel the loader and the compactors answer the shard on
     shard: (
         AsyncSender<ServerMsg<ResidentDb>>,
-        AsyncReceiver<ServerMsg<ResidentDb>>,
+        LocalKeptReceiver<ServerMsg<ResidentDb>>,
     ),
     /// The shard's memory counter, which the tables charge and credit
     memory: Arc<RefCell<usize>>,
@@ -301,7 +302,9 @@ impl Harness {
         let lru: Arc<RefCell<Lru>> = Arc::new(RefCell::new(LruCache::unbounded_with_hasher(
             BuildHasherDefault::<GxHasher>::default(),
         )));
-        let shard = kanal::unbounded_async();
+        // the shard's receive is raced against a timeout, so it is kept rather than bare (#152)
+        let (shard_tx, shard_rx) = kanal::unbounded_async();
+        let mut shard = (shard_tx, LocalKeptReceiver::new(shard_rx));
         // build the tables, which replays the seed and starts compacting it
         let mut db = <ResidentDb as ShoalDatabase>::new(
             SHARD_NAME,
@@ -328,7 +331,7 @@ impl Harness {
                 generation,
                 partitions,
                 ..
-            } = recv_within(&shard.1).await?
+            } = recv_within(&mut shard.1).await?
             {
                 // hand the marking to both tables, since only the one it names holds its keys
                 db.sorted.mark_evictable(generation, partitions.clone());
@@ -367,10 +370,10 @@ impl Harness {
     }
 
     /// Wait for the next partition the loader read
-    async fn next_read(&self) -> Result<LoadedPartition, String> {
+    async fn next_read(&mut self) -> Result<LoadedPartition, String> {
         loop {
             // skip whatever else the shard is told while it waits
-            if let ServerMsg::Partition(kinds) = recv_within(&self.shard.1).await? {
+            if let ServerMsg::Partition(kinds) = recv_within(&mut self.shard.1).await? {
                 return Ok(kinds.loaded);
             }
         }
@@ -425,7 +428,7 @@ impl Harness {
                 generation,
                 partitions,
                 ..
-            } = recv_within(&self.shard.1).await?
+            } = recv_within(&mut self.shard.1).await?
             {
                 // hand the marking to both tables, since only the one it names holds its keys
                 self.db
@@ -465,10 +468,10 @@ impl Harness {
 ///
 /// * `rx` - The channel to wait on
 async fn recv_within(
-    rx: &AsyncReceiver<ServerMsg<ResidentDb>>,
+    rx: &mut LocalKeptReceiver<ServerMsg<ResidentDb>>,
 ) -> Result<ServerMsg<ResidentDb>, String> {
     // glommio's own timeout, since this runs on no tokio runtime
-    shoal::glommio::timer::timeout(Duration::from_secs(10), async { Ok(rx.recv().await) })
+    shoal::glommio::timer::timeout(Duration::from_secs(10), async { Ok(rx.next().await) })
         .await
         .map_err(|_| "timed out waiting on the shard's channel".to_owned())?
         .map_err(|error| format!("the shard's channel closed: {error:?}"))

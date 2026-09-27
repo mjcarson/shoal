@@ -1,0 +1,14 @@
+[package]
+name = "shoal-channel"
+version = "0.1.0"
+edition = "2021"
+description = "A kanal receiver that can be raced against a timer without losing a message."
+license = "MIT"
+
+[lib]
+name = "shoal_channel"
+path = "src/lib.rs"
+
+# kanal alone: no async runtime, so both the glommio server and the tokio client use it
+[dependencies]
+kanal = { workspace = true }

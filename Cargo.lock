@@ -5493,6 +5493,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "shoal-channel"
+version = "0.1.0"
+dependencies = [
+ "kanal",
+]
+
+[[package]]
 name = "shoal-client"
 version = "0.1.0"
 dependencies = [
@@ -5507,6 +5514,7 @@ dependencies = [
  "rkyv 0.8.12",
  "rustls",
  "rustls-pki-types",
+ "shoal-channel",
  "shoal-proto",
  "tempfile",
  "tokio",
@@ -5557,6 +5565,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "shoal-channel",
  "shoal-proto",
  "signal-hook 0.3.18",
  "socket2",

@@ -271,6 +271,7 @@
   - [149. A deployed node's memory budget was every shard's, so a node could hold its core count times it](appendix/resolved/node-memory-budget.md)
   - [150. A table's partition map held every loaded row inline in its buckets, at its peak capacity](appendix/resolved/inline-partition-buckets.md)
   - [151. A WAL segment was deleted behind a purge whose marker a crash then lost](appendix/resolved/purge-ahead-of-its-marker.md)
+  - [152. A kanal receive raced against a timer lost the message handed to it](appendix/resolved/kanal-receive-races.md)
   - [153. A restore on a shard that had received no stream killed the shard](appendix/resolved/install-dir-absent.md)
   - [154. `cluster admin` reported a restore with a failed group as done](appendix/resolved/admin-hides-failed-groups.md)
   - [155. A restore failed a group for good when a member was out of reach for a while](appendix/resolved/restore-retries-unreachable.md)

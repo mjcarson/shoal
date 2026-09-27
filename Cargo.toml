@@ -5,6 +5,7 @@ members = [
     "shoal",
     "shoal-bench",
     "shoal-client",
+    "shoal-channel",
     "shoal-client-check",
     "shoal-core",
     "shoal-derive",

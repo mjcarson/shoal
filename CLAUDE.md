@@ -437,6 +437,11 @@ go through `shoal`.**
   `shared/responses.rs`, `shared/traits.rs`, `shared/auth/` (SCRAM), `shared/tls.rs` (rustls
   config, no I/O), `client/errors.rs`, `stamps.rs`. **Links no async runtime.** Do not add tokio,
   glommio or kanal here
+- **shoal-channel** - `KeptReceiver`, a kanal receiver whose receive in progress survives the
+  future that waited on it ([Resolved #152](docs/src/appendix/resolved/kanal-receive-races.md)).
+  **Never race a bare kanal `recv()`** (`select!`, `timeout`, `race`): a dropped receive loses a
+  value already handed to it. Race a kept receiver's `next`; `tests/no_raced_receives.rs` scans
+  the workspace for the bare form. Depends on kanal alone
 - **shoal-client** - The tokio client: `Shoal<S>`, the three streaming modes, the `bb8` pool.
   Links no storage engine
 - **shoal-core** - The database engine:

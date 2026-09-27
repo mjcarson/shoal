@@ -1,5 +1,6 @@
 //! The client for a Shoal database
 
+use shoal_channel::KeptReceiver;
 use bb8::ManageConnection;
 use kanal::{AsyncReceiver, AsyncSender};
 use papaya::HashMap;
@@ -1637,7 +1638,7 @@ impl<S: QuerySupport> Shoal<S> {
         let result_stream = ShoalResultStream {
             id,
             response_tx: Some(response_tx),
-            response_rx: Some(response_rx),
+            response_rx: Some(KeptReceiver::new(response_rx)),
             channel_map: self.channel_map.clone(),
             channel_queue_tx: self.channel_queue_tx.clone(),
             next_index: 0,
@@ -2092,7 +2093,7 @@ impl<S: QuerySupport> Shoal<S> {
         let result_stream = ShoalResultStream {
             id,
             response_tx: Some(response_tx.clone()),
-            response_rx: Some(response_rx),
+            response_rx: Some(KeptReceiver::new(response_rx)),
             channel_map: self.channel_map.clone(),
             channel_queue_tx: self.channel_queue_tx.clone(),
             next_index: 0,
@@ -2148,7 +2149,7 @@ impl<S: QuerySupport> Shoal<S> {
         let result_stream = ShoalUnorderedResultStream {
             id,
             response_tx: Some(response_tx.clone()),
-            response_rx: Some(response_rx),
+            response_rx: Some(KeptReceiver::new(response_rx)),
             channel_map: self.channel_map.clone(),
             channel_queue_tx: self.channel_queue_tx.clone(),
             next_index: 0,
@@ -2999,7 +3000,11 @@ pub struct ShoalResultStream<S: QuerySupport> {
     /// The transmission side of the response stream channel
     response_tx: Option<AsyncSender<ClientMsg>>,
     /// the receive side of the response stream channel
-    response_rx: Option<AsyncReceiver<ClientMsg>>,
+    ///
+    /// Kept, so a caller that races `next` against a timer and drops it loses no answer: a bare
+    /// kanal receive dropped after an answer was handed to it drops the answer
+    /// ([Resolved #152](../../../docs/src/appendix/resolved/kanal-receive-races.md)).
+    response_rx: Option<KeptReceiver<ClientMsg>>,
     /// A concurrent map of what channel to send streaming results too
     channel_map: Arc<HashMap<Uuid, Waiter>>,
     /// The channel to add unused response streams too
@@ -3121,7 +3126,7 @@ where
             }
             // get the next response from our query, for as long as this client will wait
             let msg = match self.deadline {
-                Some(deadline) => match tokio::time::timeout_at(deadline, response_rx.recv()).await {
+                Some(deadline) => match tokio::time::timeout_at(deadline, response_rx.next()).await {
                     Ok(received) => received.map_err(receive_failed)?,
                     // nothing came in time: the outcome is unknown, and the stream is over
                     Err(_) => {
@@ -3133,7 +3138,7 @@ where
                         })
                     }
                 },
-                None => response_rx.recv().await.map_err(receive_failed)?,
+                None => response_rx.next().await.map_err(receive_failed)?,
             };
             // handle the different client messages
             match msg {
@@ -3258,7 +3263,7 @@ where
         if let (Some(tx), Some(rx)) = (self.response_tx.take(), self.response_rx.take()) {
             if clean {
                 self.channel_queue_tx
-                    .send((tx, rx))
+                    .send((tx, rx.into_receiver()))
                     .await
                     .map_err(send_failed)?;
             }
@@ -3382,7 +3387,11 @@ pub struct ShoalUnorderedResultStream<S: QuerySupport> {
     /// The transmission side of the response stream channel
     response_tx: Option<AsyncSender<ClientMsg>>,
     /// the receive side of the response stream channel
-    response_rx: Option<AsyncReceiver<ClientMsg>>,
+    ///
+    /// Kept, so a caller that races `next` against a timer and drops it loses no answer: a bare
+    /// kanal receive dropped after an answer was handed to it drops the answer
+    /// ([Resolved #152](../../../docs/src/appendix/resolved/kanal-receive-races.md)).
+    response_rx: Option<KeptReceiver<ClientMsg>>,
     /// A concurrent map of what channel to send streaming results too
     channel_map: Arc<HashMap<Uuid, Waiter>>,
     /// The channel to add unused response streams too
@@ -3452,7 +3461,7 @@ where
         // keep looping until we have a message to return
         loop {
             // wait for the next message to return
-            match response_rx.recv().await.map_err(receive_failed)? {
+            match response_rx.next().await.map_err(receive_failed)? {
                 ClientMsg::Response(archived, stamps, token) => {
                     // wrap our response so we don't have to keep repaying access costs
                     let response = ShoalResponse::<S>::new(archived, stamps, token, self.id)?;
@@ -3540,7 +3549,7 @@ where
         if let (Some(tx), Some(rx)) = (self.response_tx.take(), self.response_rx.take()) {
             if clean {
                 self.channel_queue_tx
-                    .send((tx, rx))
+                    .send((tx, rx.into_receiver()))
                     .await
                     .map_err(send_failed)?;
             }
@@ -3763,6 +3772,7 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
 #[cfg(test)]
 mod tests {
     use super::SendOptions;
+    use shoal_channel::KeptReceiver;
     use super::{
         endpoint_order, error, outcome_unknown, protocol, retriable, settle, ClientMsg, ErrorCode,
         Errors, Frame, Span, TcpProxy, TopologyState, Waiter,
@@ -4302,7 +4312,7 @@ mod tests {
         );
         tokio::spawn(proxy.start());
         // the failure arrives on that query's channel, with the code and message it was sent with
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), KeptReceiver::new(rx.clone()).next())
             .await
             .expect("the failure never arrived")
             .expect("the channel closed instead of delivering the failure");
@@ -4361,7 +4371,7 @@ mod tests {
         );
         tokio::spawn(proxy.start());
         // the second frame still arrives, which it could not do if the first had ended the loop
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), KeptReceiver::new(rx.clone()).next())
             .await
             .expect("the read loop died on a frame nobody was waiting on")
             .expect("the channel closed instead of delivering the failure");
@@ -4489,7 +4499,7 @@ mod tests {
         );
         tokio::spawn(proxy.start());
         // the live stream gets its response rather than a failure
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), live_rx.recv())
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), KeptReceiver::new(live_rx.clone()).next())
             .await
             .expect("the live stream was never answered")
             .expect("the live stream's channel closed");

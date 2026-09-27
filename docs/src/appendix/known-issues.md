@@ -460,24 +460,11 @@ that kept it asserted when the new leader's entries reached it. The deadlines ab
 the checkpoint wait, the rehome's missing file, the scrub's quarantine and the restore's
 isolation. After the fix, `down_retains_placement_during_grace` also failed once in a loaded run
 of the fixture binary and passed three times of three alone.
-
-### 152. `a_compaction_that_meets_an_unreadable_archive_is_tried_again` fails intermittently
-
-`shoal/tests/persistent_unsorted_table.rs`: the rotated intent logs are not all compacted within
-the test's 30 s once the archives are readable again (*"the rotated logs were never compacted once
-the archives were readable again: N left"*). Found during the
-[distributed cluster testing](../cluster-testing/overview.md) chapter: one failure in the first
-four runs of the suite at six threads before [#148](resolved/stale-intent-log-tail.md)'s change,
-one in the first of six after [#150](resolved/inline-partition-buckets.md)'s, and none in the
-ten other runs or in three runs of the test alone. The test takes the permissions off a table's
-archives, so it is the family item 113's `statfs` panic came from. That panic is fixed, so this
-is another timing. Filed with its rate so the next change to the retry path can say more.
-[O74](optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)
-was that change: an archive pass asked for within a minute of the last now waits in the same retry
-list as a failed job. The workspace run after it failed the sorted twin once. It passed alone three
-times of three and eighteen of eighteen with six copies at once. A paced pass never delays another
-job, since the loop takes whichever retry is due and waits no longer than the earliest; nothing
-found links the change to this.
+[Resolved #152](resolved/kanal-receive-races.md) found that the compactor could lose a job it was
+handed when its wait for the next job lost a race against a retry's timer. A lost merge holds its
+WAL segment, and a held segment holds every group's checkpoint on its shard, which is the shape of
+the lost-response test's *"checkpoint never reached 5"*. Whether it was the cause is not
+established; round 12's suite runs record the rate on the fixed tree.
 
 ### 180. A first write queued past a group's identity memory is refused `IdentityExpired`
 
