@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::instrument;
 
+use crate::server::conf::cluster::DurationSpec;
 use crate::server::ServerError;
 use crate::utils;
 
@@ -178,6 +179,23 @@ fn default_throughput_write_behind() -> usize {
     4
 }
 
+/// Set how many bytes one archive pass copies before it ends and is queued again, 16 Mebibytes
+///
+/// A pass repoints the archive index only once it ends, so a snapshot cut queued behind one waits
+/// for all of it ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)).
+fn default_archive_pass_bytes() -> usize {
+    16 << 20
+}
+
+/// Set the least time between the starts of two archive passes, a minute
+///
+/// A pass is queued behind every compaction; run after each one it copies an archive as soon
+/// as it falls under half live, where a later pass finds it deader and copies less for the same
+/// space ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)).
+fn default_archive_pass_interval() -> DurationSpec {
+    DurationSpec(std::time::Duration::from_secs(60))
+}
+
 /// The settings to use for a specific writer
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FileSystemThroughputWriterConf {
@@ -192,6 +210,13 @@ pub struct FileSystemThroughputWriterConf {
     #[serde(default = "default_throughput_write_behind")]
     #[serde(deserialize_with = "utils::deserialize_byte_size")]
     pub write_behind: usize,
+    /// How many bytes one archive pass copies before it ends and is queued again
+    #[serde(default = "default_archive_pass_bytes")]
+    #[serde(deserialize_with = "utils::deserialize_byte_size")]
+    pub archive_pass_bytes: usize,
+    /// The least time between the starts of two archive passes
+    #[serde(default = "default_archive_pass_interval")]
+    pub archive_pass_interval: DurationSpec,
 }
 
 impl Default for FileSystemThroughputWriterConf {
@@ -201,6 +226,8 @@ impl Default for FileSystemThroughputWriterConf {
             path: default_path(),
             buffer_size: default_throughput_buffer_size(),
             write_behind: default_throughput_write_behind(),
+            archive_pass_bytes: default_archive_pass_bytes(),
+            archive_pass_interval: default_archive_pass_interval(),
         }
     }
 }
@@ -226,6 +253,26 @@ impl FileSystemThroughputWriterConf {
     /// Set the number of write behind buffers
     pub fn write_behind(mut self, write_behind: usize) -> Self {
         self.write_behind = write_behind;
+        self
+    }
+
+    /// Set how many bytes one archive pass copies before it ends and is queued again
+    ///
+    /// # Arguments
+    ///
+    /// * `archive_pass_bytes` - The budget in bytes
+    pub fn archive_pass_bytes(mut self, archive_pass_bytes: usize) -> Self {
+        self.archive_pass_bytes = archive_pass_bytes;
+        self
+    }
+
+    /// Set the least time between the starts of two archive passes
+    ///
+    /// # Arguments
+    ///
+    /// * `archive_pass_interval` - The interval
+    pub fn archive_pass_interval(mut self, archive_pass_interval: std::time::Duration) -> Self {
+        self.archive_pass_interval = DurationSpec(archive_pass_interval);
         self
     }
 }

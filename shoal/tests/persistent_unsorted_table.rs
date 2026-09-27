@@ -998,3 +998,140 @@ async fn a_compaction_that_meets_an_unreadable_archive_is_tried_again() -> Resul
     pool.exit()?;
     Ok(())
 }
+
+/// Every archive file under a server's storage directory, by path
+///
+/// # Arguments
+///
+/// * `root` - The server's storage directory
+fn archive_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    // a stack of directories still to read, and the archives found so far
+    let mut dirs = vec![root.to_path_buf()];
+    let mut found = Vec::new();
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if dir.file_name().is_some_and(|name| name == "archives") {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// Write a run of rows through one query bundle per hundred
+///
+/// # Arguments
+///
+/// * `client` - The client to write through
+/// * `keys` - The rows' partition keys
+/// * `data` - What every row holds
+async fn write_rows(
+    client: &shoal::client::Shoal<TestDbClient>,
+    keys: &[String],
+    data: &str,
+) -> Result<(), TestError> {
+    for chunk in keys.chunks(100) {
+        // one bundle of a hundred inserts, each answered before the next bundle is sent
+        let mut query = client.query();
+        for key in chunk {
+            query = query.add(TestRecord::new(key.clone(), data.to_string()));
+        }
+        let mut stream = client.send(query).await?;
+        while stream.next().await?.is_some() {}
+    }
+    Ok(())
+}
+
+/// An archive pass that stops at its budget inside an archive loses nothing, and finishes (O74)
+///
+/// A pass repoints the archive index only when it ends, so one copying a large archive held a
+/// snapshot cut for minutes on the lab; it now stops after its budget of copied bytes, inside an
+/// archive if it has to, repoints what it copied, and is queued again
+/// ([O74](../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)).
+/// Twelve megabytes of rows land in archives of about ten; seven in ten are then rewritten, which
+/// leaves the largest under half live, and a pass with a 64 KiB budget
+/// and no interval copies the rest out of it a piece at a time. Every row reads back as last
+/// written, across restarts, and the archive is gone once the passes are through with it.
+#[tokio::test]
+async fn an_archive_pass_stopped_inside_an_archive_loses_nothing() -> Result<(), TestError> {
+    let temp_dir = utils::test_dir();
+    // one shard, a budget far under any archive, and no wait between passes
+    let conf = || {
+        let mut conf = utils::build_single_shard_config(&temp_dir);
+        let throughput = &mut conf.storage.default.filesystem.throughput_sensitive;
+        *throughput = throughput
+            .clone()
+            .archive_pass_bytes(64 << 10)
+            .archive_pass_interval(Duration::ZERO);
+        conf
+    };
+    let keys: Vec<String> = (0..12_000).map(|index| format!("pass-{index:05}")).collect();
+    let original = "o".repeat(1000);
+    let rewritten = "r".repeat(1000);
+    // the rows, then two restarts that compact them into archives and rotate the active one
+    let (client, pool) = utils::start_with_conf::<TestDb>(conf()).await?;
+    write_rows(&client, &keys, &original).await?;
+    pool.exit()?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    for _ in 0..2 {
+        let (_client, pool) = utils::start_with_conf::<TestDb>(conf()).await?;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        pool.exit()?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let loaded = archive_files(temp_dir.path());
+    let largest = loaded
+        .iter()
+        .max_by_key(|path| std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0))
+        .cloned()
+        .expect("the rows reached no archive");
+    let largest_bytes = std::fs::metadata(&largest).map(|meta| meta.len()).unwrap_or(0);
+    // many times the budget, so emptying it takes many passes that stop inside it
+    assert!(largest_bytes > 4 << 20, "the rows' archive holds only {largest_bytes} bytes");
+    // seven in ten rewritten, which leaves that archive under half live
+    let rewritten_keys: Vec<String> = keys
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| index % 10 < 7)
+        .map(|(_, key)| key.clone())
+        .collect();
+    let (client, pool) = utils::start_with_conf::<TestDb>(conf()).await?;
+    write_rows(&client, &rewritten_keys, &rewritten).await?;
+    pool.exit()?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // restarts until the passes have copied the rest out of it and deleted it
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    while largest.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the archive under half live was never emptied: {:?}",
+            archive_files(temp_dir.path())
+        );
+        let (_client, pool) = utils::start_with_conf::<TestDb>(conf()).await?;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        pool.exit()?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    // every row reads back as last written, from the archives the passes left
+    let (client, pool) = utils::start_with_conf::<TestDb>(conf()).await?;
+    for (index, key) in keys.iter().enumerate() {
+        let response = client.send_one(TestRecordGet::new(vec![key.clone()])).await?;
+        let row = TestRecord::deserialize(
+            response
+                .access::<TestRecord>()?
+                .and_then(|rows| rows.first())
+                .unwrap_or_else(|| panic!("row {key} is gone")),
+        )
+        .unwrap();
+        let expected = if index % 10 < 7 { &rewritten } else { &original };
+        assert_eq!(&row.data, expected, "row {key}");
+    }
+    pool.exit()?;
+    Ok(())
+}

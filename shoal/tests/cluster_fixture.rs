@@ -11714,6 +11714,9 @@ async fn a_move_asked_again_rebuilds_its_learner_from_nothing() -> Result<(), Fi
     let keys = note_keys_in_group(&mut cluster, &group, 17_500, 30)?;
     assert!(keys.contains(&key));
     write_notes_batch(&addr0, &keys, "first").await?;
+    // the spare's segments held from its compactor, so what its copy takes stays ahead of its
+    // checkpoint without more writes racing the move to its end
+    cluster.node_mut(3).command("HOLD_COMPACTION")?;
     // the move onto the spare, cut off once the spare's copy has started taking entries
     let op = move_as_process(&mut cluster, 0, key, 2, 3)?;
     wait_move_phase(&mut cluster, 0, op, 3, Duration::from_secs(30))?;
@@ -11739,14 +11742,15 @@ async fn a_move_asked_again_rebuilds_its_learner_from_nothing() -> Result<(), Fi
         assert!(Instant::now() < deadline, "the spare's Note copy never took an entry");
         std::thread::sleep(Duration::from_millis(50));
     }
-    // more rows while it catches up, which reach the spare's log ahead of its checkpoint
-    write_notes_batch(&addr0, &keys, "second").await?;
-    std::thread::sleep(Duration::from_millis(500));
-    let (last, checkpoint) = note_log(&mut cluster)?;
-    assert!(checkpoint < last, "the spare's copy checkpointed everything: {checkpoint} of {last}");
+    // cut off at once: a batch of writes and a pause before the cut let the move finish first
+    // under a loaded suite, and the failure the test waits for never came
     for link in cluster.data_links_into(3) {
         link.cut();
     }
+    let (last, checkpoint) = note_log(&mut cluster)?;
+    assert!(checkpoint < last, "the spare's copy checkpointed everything: {checkpoint} of {last}");
+    // more rows while it is cut off, which the retry has to bring it
+    write_notes_batch(&addr0, &keys, "second").await?;
     // it fails at its timeout, and the record ends without publishing
     let record = wait_move_done_via(&mut cluster, 0, op, Duration::from_secs(60))?;
     assert!(record["outcome"]["Failed"].is_object(), "{record}");
@@ -11754,6 +11758,7 @@ async fn a_move_asked_again_rebuilds_its_learner_from_nothing() -> Result<(), Fi
         link.heal();
     }
     // the spare stops its learners and reclaims every segment their entries were in
+    cluster.node_mut(3).command("RELEASE_COMPACTION")?;
     for _ in 0..10 {
         let _ = cluster.node_mut(3).command("ROTATE")?;
         let _ = cluster.node_mut(3).command("COMPACT")?;

@@ -473,6 +473,12 @@ Two failures in those runs were not this item and were fixed: `mixed_versions_ex
 raced its activation against a member report (on [Resolved #155](resolved/restore-retry.md)), and
 `an_unreadable_partition_stalls_one_copy_and_repairs_it` did not retry a write the stalled copy
 refused retriably.
+The full run for [Resolved #176](resolved/unreadable-voter-log.md) at six threads passed 127 of 130:
+`local_rehome_recovers_after_each_crash_point` (*"No such file or directory"* from a child again),
+`scheduled_scrub_quarantines_without_an_operator` (its quarantine never committed in time), and
+`a_move_asked_again_rebuilds_its_learner_from_nothing`, which is the test's own race and not this
+item: its first move ended `Moved` before the test cut the spare's links, so the failure it waits
+for never came. All three passed alone straight after.
 
 ### 152. `a_compaction_that_meets_an_unreadable_archive_is_tried_again` fails intermittently
 
@@ -518,12 +524,9 @@ keeps serving reads rather than stopping.
 
 ### 21. Constant and comment mismatches
 
-| Constant | Comment says | Value is |
-| --- | --- | --- |
-| `MIN_ARCHIVE_COMPACTABLE` (`.../fs/compactor.rs:31-33`) | 100 MiB | `10 << 20` = 10 MiB |
-| Its two use sites (`.../fs/compactor.rs:472`, `:474`) | "under 100MiB" | the same 10 MiB |
-
-(`default_intent_log_size` had the same mismatch and has been corrected to say 10 MiB.)
+(`MIN_ARCHIVE_COMPACTABLE` and its two use sites said 100 MiB of a value that is 10 MiB, and were
+corrected with [O74](optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench);
+`default_intent_log_size` had the same mismatch and was corrected before it.)
 
 Also `RemoteTracing::Grpc` exports over HTTP (`trace.rs:33-37`, `.with_http()`), and
 `FileSystemThroughputWriterConf::write_behind` — a count of buffers, defaulting to 4 — is
