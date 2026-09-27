@@ -67,6 +67,8 @@ pub struct ListenerContext<S: ShoalDatabase> {
     pub tls: PeerTlsHolder,
     /// How long a peer has to finish its handshake
     pub handshake_timeout: Duration,
+    /// How long sent data may go unacknowledged before the kernel aborts the connection
+    pub unacked_timeout: Duration,
     /// The most forwarded bytes one connection may hold unanswered
     pub inflight_bound: usize,
     /// How many slots this node has, which every entry's shard is checked against
@@ -87,6 +89,7 @@ impl<S: ShoalDatabase> Clone for ListenerContext<S> {
             map: self.map.clone(),
             tls: self.tls.clone(),
             handshake_timeout: self.handshake_timeout,
+            unacked_timeout: self.unacked_timeout,
             inflight_bound: self.inflight_bound,
             shard_count: self.shard_count,
             hosting: self.hosting.clone(),
@@ -220,8 +223,11 @@ pub async fn peer_acceptor<S: ShoalDatabase>(
         };
         let ctx = ctx.clone();
         glommio::spawn_local(async move {
-            // nodelay's error is this connection's alone, not the listener's
+            // nodelay's error is this connection's alone, not the listener's, and so is the
+            // abort of a connection whose data goes unacknowledged
+            // ([Resolved #181](../../../../docs/src/appendix/resolved/partition-retransmit-backoff.md))
             let _ = stream.set_nodelay(true);
+            let _ = super::set_unacked_timeout(&stream, ctx.unacked_timeout);
             // take the wire and shake hands under one deadline
             let accepted = glommio::timer::timeout(ctx.handshake_timeout, async {
                 // the material as it is right now, and what the peer's certificate said

@@ -508,9 +508,9 @@ the data and the map intent have been synced. The shared map never points at byt
 not on disk.
 
 **50% is the space/write-amplification knob.** Compacting at higher utilisation reclaims less
-per byte rewritten. It is hardcoded (`.../fs/compactor.rs:336`), as is
-`MIN_ARCHIVE_COMPACTABLE` (marked `// TODO make size configurable`,
-`.../fs/compactor.rs:343`). **So is how often it is asked**, which matters as much: a pass
+per byte rewritten. ~~It is hardcoded~~ It is `throughput_sensitive.archive_pass_live_percent`
+since O74's remainder, 50 by default and held to 1–99. `MIN_ARCHIVE_COMPACTABLE` is still
+hardcoded (marked `// TODO make size configurable` in `.../fs/compactor.rs`). **So is how often it is asked**, which matters as much: a pass
 is queued behind every compaction, and on a cluster node the lab measured that one run after
 every merge copies each archive as soon as it crosses half live - 2,139 MiB in five minutes on one
 Zen1 node - where a later pass finds it deader and copies less for the same space. That interval is
@@ -522,13 +522,14 @@ Zen1 node - where a later pass finds it deader and copies less for the same spac
   rotated log since [item 14](../appendix/resolved/empty-rotated-logs.md). They are still
   *created* on every forced rotation
   ([O21](../appendix/optimizations.md#o21-a-forced-rotation-of-an-empty-intent-log-does-the-whole-rotation-anyway)).
-- ~~Compaction thresholds are hardcoded.~~ The 50% threshold and `MIN_ARCHIVE_COMPACTABLE`
-  are; an archive pass's budget and interval are settings since O74.
+- ~~Compaction thresholds are hardcoded.~~ `MIN_ARCHIVE_COMPACTABLE` is; an archive pass's
+  budget, interval and live threshold are settings since O74.
 - ~~`load_partitions_for_intents` issues one random read per changed partition with no
   batching, sorting by offset, or readahead.~~ It keeps 32 reads in flight since
   [O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench),
-  where one at a time was five of a merge's seven seconds on a Zen1 node. Still no sorting by
-  offset or readahead.
+  where one at a time was five of a merge's seven seconds on a Zen1 node. ~~Still no sorting by
+  offset or readahead.~~ A merge's reads are sorted by archive and offset, and a pass's by offset,
+  since O74's remainder. Still no readahead.
 - No throttling: a large rotation floods the medium-priority queue with reads and writes.
 - `changes`, `entries`, and `removals` are drained per job and `loaded` is cleared after each
   write, but an error mid-job leaves all four dirty for the next one.

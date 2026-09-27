@@ -84,7 +84,8 @@ Throughput, not service time, so read the `queries/s` column rather than the per
 - **`throughput_sensitive.archive_pass_interval` and `archive_pass_bytes`** pace the archive passes
   that reclaim the space a rewritten row leaves behind
   ([O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)).
-  A pass copies the live rows out of every archive under half live. A longer interval lets archives
+  A pass copies the live rows out of every archive under `archive_pass_live_percent` live (half
+  by default). A longer interval lets archives
   get deadder first, so each pass copies less for the same space, and holds more dead bytes on
   disk meanwhile. The budget bounds how long one pass holds the compactor, and so how long a
   snapshot cut queued behind it waits. On the lab's Zen1 nodes under a rewrite-heavy bench,

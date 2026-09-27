@@ -1566,6 +1566,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         local.clone(),
         tls.clone(),
         inbound_tx,
+        transport.unacked_timeout.duration(),
     ));
     // the relays: the pool's requests, the listener's RPCs, the metrics and the two timers
     let pool_relay = {

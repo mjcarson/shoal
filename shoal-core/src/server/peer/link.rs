@@ -383,6 +383,7 @@ impl Link {
             local,
             tls,
             handshake_timeout: transport.handshake_timeout.duration(),
+            unacked_timeout: transport.unacked_timeout.duration(),
             reconnect_min: transport.reconnect_min.duration(),
             reconnect_max: transport.reconnect_max.duration(),
         };
@@ -524,6 +525,8 @@ struct Settings {
     tls: PeerTlsHolder,
     /// How long a dial and handshake may take
     handshake_timeout: Duration,
+    /// How long sent data may go unacknowledged before the kernel aborts the connection
+    unacked_timeout: Duration,
     /// The shortest backoff
     reconnect_min: Duration,
     /// The longest backoff
@@ -768,6 +771,10 @@ async fn connect(settings: &Settings) -> Result<(TcpStream, u64, Negotiated), Se
     })?;
     let mut stream = TcpStream::connect(addr).await?;
     stream.set_nodelay(true)?;
+    // a connection whose data goes unacknowledged is aborted and dialled again, rather than
+    // left waiting on a retransmission timer a long partition has backed off
+    // ([Resolved #181](../../../../docs/src/appendix/resolved/partition-retransmit-backoff.md))
+    super::set_unacked_timeout(&stream, settings.unacked_timeout)?;
     // take the wire first, if the lanes are encrypted, with the material as it is right now
     let certified = match settings.tls.client() {
         Some(config) => {

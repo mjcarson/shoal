@@ -3962,6 +3962,7 @@ where
             map: self.map.clone(),
             tls: setup.tls.clone(),
             handshake_timeout: setup.transport.handshake_timeout.duration(),
+            unacked_timeout: setup.transport.unacked_timeout.duration(),
             inflight_bound: setup.transport.inflight_bytes,
             // a frame names a slot, and the slots are what a peer may name; which executor
             // hosts one is the dispatch's business ([F47](../../../docs/src/features/local-rehome.md))

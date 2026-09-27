@@ -196,6 +196,15 @@ fn default_archive_pass_interval() -> DurationSpec {
     DurationSpec(std::time::Duration::from_secs(60))
 }
 
+/// Set the share of an archive that has to be live for a pass to leave it alone, 50 percent
+///
+/// An archive under it is copied: its live records into the active archive, and the file deleted.
+/// Higher reclaims space sooner and copies more for it; the lab's rewrite-heavy bench paid about 6%
+/// of its throughput at 50 ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)).
+fn default_archive_pass_live_percent() -> u8 {
+    50
+}
+
 /// The settings to use for a specific writer
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FileSystemThroughputWriterConf {
@@ -217,6 +226,9 @@ pub struct FileSystemThroughputWriterConf {
     /// The least time between the starts of two archive passes
     #[serde(default = "default_archive_pass_interval")]
     pub archive_pass_interval: DurationSpec,
+    /// The percent of an archive that has to be live for a pass to leave it alone, 1 to 99
+    #[serde(default = "default_archive_pass_live_percent")]
+    pub archive_pass_live_percent: u8,
 }
 
 impl Default for FileSystemThroughputWriterConf {
@@ -228,6 +240,7 @@ impl Default for FileSystemThroughputWriterConf {
             write_behind: default_throughput_write_behind(),
             archive_pass_bytes: default_archive_pass_bytes(),
             archive_pass_interval: default_archive_pass_interval(),
+            archive_pass_live_percent: default_archive_pass_live_percent(),
         }
     }
 }
@@ -273,6 +286,16 @@ impl FileSystemThroughputWriterConf {
     /// * `archive_pass_interval` - The interval
     pub fn archive_pass_interval(mut self, archive_pass_interval: std::time::Duration) -> Self {
         self.archive_pass_interval = DurationSpec(archive_pass_interval);
+        self
+    }
+
+    /// Set the percent of an archive that has to be live for a pass to leave it alone
+    ///
+    /// # Arguments
+    ///
+    /// * `percent` - The share, from 1 to 99
+    pub fn archive_pass_live_percent(mut self, percent: u8) -> Self {
+        self.archive_pass_live_percent = percent;
         self
     }
 }
