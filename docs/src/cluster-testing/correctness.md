@@ -999,3 +999,100 @@ reclaiming space. With the backlog gone, the archive passes run at the rate the 
 garbage, where before they were skipped behind it. That costs about 6% of throughput in steady state.
 
 **Verdict: pass.** No run lost an acknowledged write or a row.
+
+## 11. Overload, silence and a nearly full disk
+
+Three defects were left open by the sections above: overload answered `OutcomeUnknown` rather than
+`Shedding` ([#129](../appendix/resolved/overload-sheds.md)), the first seconds of a silent partition
+still stopped every pipelined client
+([#143](../appendix/resolved/silent-partition-hops.md#the-first-seconds-closed)), and a node whose
+disk was nearly full could only stop ([#156](../appendix/resolved/wal-failure-stops-the-node.md#the-second-part-an-append-reserve)).
+All three were fixed and each fix measured here, on builds `5efa0b9` through `d276baa`, with
+`35d47a6` as the base. The runs are under `target/lab/r11/`.
+
+**Performance first.** Every change was measured against the base, and one version of each fix was
+thrown out for costing throughput:
+
+- The gate's first cut, starting at 64 writes in flight and halving on a commit slower than half
+  its budget, cost about a fifth of the overloaded load's throughput, and shed a hot keyword group
+  at the loader's *default* gate, which the base took with no retry.
+- #143's first cut judged a leader quiet by openraft's `last_quorum_acked`. Under saturation that
+  lags for seconds on healthy groups, and the first cut refused and abandoned their writes.
+
+### The loader past what the cluster commits
+
+The loader at its original gate, 8 workers × 4,096 in flight, with retries unbounded so that every
+arm finishes if it can, each on a destroyed and freshly bootstrapped cluster
+(`target/lab/r11/fresh-sweep.sh`):
+
+| Build | Loads | Finished | Rows a second | Retried unknown | Retried shed |
+| --- | --- | --- | --- | --- | --- |
+| `35d47a6`, the base | 3 | 1; 2 died on `IdentityExpired` | 29,476 | 207,029 | 0 |
+| the gate switched off | 3 | 2; 1 died on `IdentityExpired` | 10,156, 6,659 | 1.3M, 2.0M | 0 |
+| the gate as shipped (`d276baa`) | 2 | 2 | 28,916, 32,593 | 4,031, 2,543 | 872k, 589k |
+
+A shed write was never applied, so a client can retry it at once with no identity to keep. The
+unknown outcomes that remain are writes admitted before a group's bound came down.
+
+The loads that died met a defect of their own, filed as
+[#180](../appendix/known-issues.md#180-a-first-write-queued-past-a-groups-identity-memory-is-refused-identityexpired).
+A group remembers 4,096 write identities, about four seconds of this load. A first attempt that
+waited in the server's queues longer than that was refused as though it were a retry of a write
+the group had forgotten. None of the gated loads met it.
+
+**At a normal load nothing moved.** The loader at its default gate on a fresh cluster: 28,730 and
+29,226 rows/s on the base, 29,010 on `5efa0b9` and 30,350 on `d276baa`, with no retry. On
+`c9d6a61`, whose gate started at 64, the first load shed one hot keyword group until a row ran out
+of its eight retries, and the load after it ran at 31,432 with 6,399 writes shed. That is the cut
+this section threw out. Every run was read back
+whole with `verify` (0 missing, 0 different). Every acknowledged insert of the bench that followed
+was read back through each member alone: 0 lost in every run. The bench's own comparison is on
+[Performance](performance.md#the-admission-gate-and-the-bench).
+
+### A silent partition's first seconds
+
+The partition test of [section 4](#partition-one-node) again: hyperion's peer ports dropped both
+ways for 20 s under the mixed bench.
+
+| Second | t05f, before | After (`c9d6a61`) |
+| --- | --- | --- |
+| cut −1 | 44,300 | 72,067 |
+| cut | 10,784 | 25,961 |
+| +1 | 372 | 22,447 |
+| +2 | 0 | 121,792, hyperion's groups refused |
+| +3 | 0 | 122,195 |
+| +4 | 25,835, hyperion's groups refused | 121,276 |
+
+All 620,159 acknowledged inserts were read back through each member, and no node restarted.
+
+**Verdict: pass.** No second of the partition runs at zero.
+
+### A nearly full disk
+
+[Fill a node's disk](#fill-a-nodes-disk) again: hyperion on a 2 GiB loop filesystem, the whole csv
+loaded (`target/lab/r11/diskfill.sh`).
+
+| | The base, section 4 | Fixed (`d276baa`) |
+| --- | --- | --- |
+| At about 1.35 GB used | the disk filled 70 s in and hyperion stopped, then failed every start until the disk grew | all six shards went under the 512 MiB reserve together and handed on 12 leads in 0.6 s |
+| For the rest of the load | down, restarting | up, no restart, 478 MB free for ten minutes |
+| The load | stopped at writes through hyperion (first run), or went on without it | finished: 2,193,788 rows at 14,023 a second, retrying 122 unknown and 327 `NotLeader` |
+| Reading hyperion's copy alone at `One` | nothing to read | served: 666,405 of 1,187,691 movies missing, **0 different**, a consistent prefix |
+| Once the disk grew | the next scheduled restart | all six shards back over the reserve at the next check; 120 s later every movie through hyperion alone equalled the csv |
+
+The run found one more wait. The loader's sample read-back carries the session tokens of its own
+writes, and on hyperion's frozen copy each such read waited out its deadline for an apply that
+would not come, and was retried there without end. A read that needs an index a copy under the
+reserve has not applied is now refused `Unavailable` at once.
+
+**Verdict: pass.** A nearly full node leads nothing, stops filling, serves what it holds and
+recovers on its own.
+
+### The suite
+
+All 133 cluster fixture tests passed at six threads on `c9d6a61`, two ignored as before, and the 331
+`shoal-core` unit tests. The three fixes' own tests are
+`an_overloaded_group_sheds_rather_than_timing_out`, `a_silent_partitions_first_seconds_hold_no_writes`
+and `a_node_under_the_append_reserve_leads_nothing_and_serves`. Each fails without its fix: 5,300
+writes unknown with the gate out of reach, a write through the cut-off node answered in 5.0 s, and
+"node one still leads 4 groups under the append reserve".

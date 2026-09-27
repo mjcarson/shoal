@@ -2691,7 +2691,7 @@ where
     #[instrument(
         name = "Coordinator::handle_client",
         parent = &span,
-        skip(self, peer, span, data, options),
+        skip_all,
         err(Debug)
     )]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -2922,7 +2922,7 @@ where
         name = "Shard::handle_query",
         parent = &meta.span,
         skip(self, body, keys),
-        fields(index = meta.index, id = meta.id.to_string())
+        fields(index = meta.index)
     )]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn handle_query(
@@ -2991,7 +2991,7 @@ where
         name = "Shard::handle_released",
         parent = &meta.span,
         skip(self, query),
-        fields(index = meta.index, id = meta.id.to_string())
+        fields(index = meta.index)
     )]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn handle_released(
@@ -3214,7 +3214,7 @@ where
         name = "Shard::handle_gathered",
         parent = &meta.span,
         skip(self, response, failed),
-        fields(index = meta.index, id = meta.id.to_string()),
+        fields(index = meta.index),
         err(Debug)
     )]
     async fn handle_gathered(

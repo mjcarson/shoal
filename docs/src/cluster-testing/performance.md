@@ -25,6 +25,13 @@ A `perf` profile of titan's node under the mixed bench is flat. No Shoal functio
 describes, now measured), `sort_by_load` at 0.4%, and about 2% formatting strings for tracing
 fields. Titan's cpu is not what limits the cluster; its disk is.
 
+Both were taken off in [section 11](correctness.md#11-overload-silence-and-a-nearly-full-disk)'s
+round: `tablet_usage` is a counter now, and absent from titan's profile
+([O57](../appendix/optimizations.md#o57-tablet-bytes-are-rescanned-from-the-whole-archive-map-on-every-report)).
+The formatting was per-query spans recording their arguments with `Debug`. Skipping them took
+tracing and formatting from 3.4–3.6% of titan's samples to 2.3%
+([O75](../appendix/optimizations.md#o75-every-query-formatted-its-metadata-into-a-tracing-span)).
+
 An io_uring trace of europa's node over the same 12 seconds counted about 124,000 cancelled
 timeouts a second: glommio arms a timer per timed operation and cancels it on completion. That is
 glommio's cost and shows as nothing in the profile, so it is recorded and not pursued.
@@ -234,3 +241,38 @@ cluster, each build following the other:
 
 The lab's bench is a worst case for this: 45% of its operations rewrite a row, so about 6,000 rows
 a second leave a dead copy behind on every node.
+
+## The admission gate and the bench
+
+[Section 11](correctness.md#11-overload-silence-and-a-nearly-full-disk) put a gate in front of every
+group's openraft queue ([#129](../appendix/resolved/overload-sheds.md)), a quorum judgement before
+every write a leader appends ([#143](../appendix/resolved/silent-partition-hops.md#the-first-seconds-closed))
+and a free-space check once a second a shard ([#156](../appendix/resolved/wal-failure-stops-the-node.md#the-second-part-an-append-reserve)).
+All three sit on the write path, so each build was benched against the base, `35d47a6`: the
+default 120 s mixed bench (get 70, keyword 15, update 10, insert 5; eight workers × 128 in flight),
+on one loaded cluster, rolling every node onto each build in turn (`target/lab/r11/benchab.sh`).
+
+**The arm order moves the result more than the builds do.** The first run put the base first in
+both pairs, and the fixed build came out 3.5% behind twice. The second reversed the order, and the
+fixed build came out ahead twice:
+
+| Pair | First arm | Second arm |
+| --- | --- | --- |
+| 1 | base 96,746 | fixed 93,384 |
+| 2 | base 105,888 | fixed 101,997 |
+| 3 | fixed 99,082 | base 97,505 |
+| 4 | fixed 94,748 | base 88,634 |
+
+Over the four pairs the fixed build averaged 97,300 operations a second and the base 97,200. The
+first arm after an upgrade was ahead in every pair, by 2–6%. The one that follows inherits the
+compaction backlog and the dead bytes of the one before, as [findings](findings.md#deployment-and-lab-findings)
+records for O74's runs. No bench error of any code in any arm.
+
+**Profiles agree.** A 20 s `perf` profile of titan under the bench on each build
+(`target/lab/r11/profab.sh`) showed no new symbol above 0.25%. The one large difference was
+`ArchiveMap::tablet_usage`, 1.36% of titan's samples on the base and nothing on the fixed build,
+which is [O57](../appendix/optimizations.md#o57-tablet-bytes-are-rescanned-from-the-whole-archive-map-on-every-report)
+applied in the same change.
+
+**How to compare two builds on this lab.** Interleave the arms and reverse the order, A B B A or
+two pairs each way. Compare means, never a single pair.

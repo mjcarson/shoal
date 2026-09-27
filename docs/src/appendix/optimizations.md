@@ -194,7 +194,7 @@ so they get worse by existing longer rather than under load.
 | **B12** | [**O54**](#o54-a-scrub-reads-every-archived-partition-of-a-group-once-per-pass) — a scrub reads every archived partition of a group once per pass | Measured in shape — the background arm's `bytes` is the group's archives whole, per pass | M | `macro/cluster/background/repair` at full scale, where the archives are wider than memory | Contained | no |
 | **B13** | [**O55**](#o55-a-learner-inside-the-retained-log-is-fed-a-snapshot-when-the-leaders-cached-cut-is-newer-than-its-purge-point) — a learner inside the retained log is fed a snapshot when the leader's cached cut is newer than its purge point | Argued — a whole group's archives on the bulk lane where a log tail would do | M | `macro/cluster/migration/move` at full scale, whose `bytes` is zero when the log fed the destination | Contained | no |
 | **B14** | [**O56**](#o56-the-planner-recomputes-every-rule-set-on-every-look) — the planner recomputes every rule set on every look | Argued — four thousand rule derivations per open plan per look, on the control core | S | none; the rebalance arms' windows would carry a control stall as a tail | Contained | no |
-| **B15** | [**O57**](#o57-tablet-bytes-are-rescanned-from-the-whole-archive-map-on-every-report) — tablet bytes are rescanned from the whole archive map on every report | Argued — a pass over every archived partition of a table per report tick, on the shard | S | none; a grid cell on a persistent table under writes is where the pass would show | Contained | no |
+| ~~**B15**~~ | ~~[**O57**](#o57-tablet-bytes-are-rescanned-from-the-whole-archive-map-on-every-report) — tablet bytes are rescanned from the whole archive map on every report~~ **done**, a counter kept by the map, measured on the lab | Argued — a pass over every archived partition of a table per report tick, on the shard | S | none; a grid cell on a persistent table under writes is where the pass would show | Contained | no |
 | **B16** | [**O58**](#o58-a-rehomes-moved-records-are-copied-and-a-donors-archives-keep-the-dead-ones) — a rehome's moved records are copied, and a donor's archives keep the dead ones | Argued — a read and a write per moved record at start, and a growth's donor holding dead records until its own compaction | M | `macro/rehome/shrink`, whose `bytes` over `millis` is the copy's pace | Contained | no |
 | **B17** | [**O59**](#o59-the-rehome-runs-on-one-core-and-blocks-the-start) — the rehome runs on one core and blocks the start | Argued — the start held for the whole move while every other core idles | M | `macro/rehome/shrink`, whose `millis` is the hold | Contained | no |
 | **B18** | [**O60**](#o60-a-nodes-figures-ride-its-status-report-as-verbose-json) — a node's figures ride its status report as verbose JSON | Measured in shape — about 7.4 KB a report for four busy tables, one report in four, 1.6× the leader's intake at 64 members | S | none; the spike's `fanout` table prices it, and no arm drives a cluster of that size | Contained | no |
@@ -2765,7 +2765,7 @@ Filed by [F46](../features/capacity-rebalancing.md). `TabletMap::from_state` is 
 
 | | |
 | --- | --- |
-| **Rank** | **B15** — argued, contained |
+| **Rank** | ~~**B15** — argued, contained~~ **done** — applied and measured on the lab |
 | **Impact** | Argued — `replication_report` asks each table's archive map for its bytes per tablet once per report, which is one pass over `to_archive` - every archived partition of the table on the shard - summing sizes into a vector of four thousand; a report is built on every deadline tick and sent when it differs from the last, and with `bytes` on it a shard under writes differs on most ticks. A shard with a million archived partitions walks a million entries a few times a second on its own core |
 | **Difficulty** | S — a counter per tablet maintained at `set_partition` and `remove_partition` and rebuilt at open, which is what the first plan for this feature sketched; the pass was chosen because it cannot drift from the map, and the drift a counter risks is exactly the compactor's replace-in-place paths |
 | **Blocks** | nothing |
@@ -2775,6 +2775,16 @@ Filed by [F46](../features/capacity-rebalancing.md). `TabletMap::from_state` is 
 Filed by [F46](../features/capacity-rebalancing.md). Since [F52](../features/cluster-stats.md)
 the same pass counts each tablet's partitions as well (`ArchiveMap::tablet_usage`), so a counter
 that replaces it has to keep both figures, or they drift apart.
+
+**Applied** in the [cluster testing's section 11](../cluster-testing/correctness.md#11-overload-silence-and-a-nearly-full-disk)
+change. `ArchiveMap` keeps a `TabletUsage` of both figures. It is counted as the map is loaded at
+open, and moved by `set_partition` (the old entry off, the new one on) and `remove_partition`,
+which are the only two ways `to_archive` changes. `tablet_usage` copies it, and
+`tablet_usage_by_pass` keeps the old pass for the drift test. **Measured:** on titan under the
+lab's mixed bench, `ArchiveMap::tablet_usage` was 1.36% of the node's samples on `35d47a6` and
+absent on the fixed build ([performance](../cluster-testing/performance.md#the-admission-gate-and-the-bench)).
+`tablet_bytes_follow_the_map` now also churns 2,000 inserts, replacements and removals and
+checks the counters against a pass.
 
 ### O58. A rehome's moved records are copied, and a donor's archives keep the dead ones
 
@@ -3443,3 +3453,40 @@ without its records' prefixes.
 
 **Still open:** the 50% threshold is hardcoded, and neither a merge nor a pass sorts its reads by
 offset.
+
+### O75. Every query formatted its metadata into a tracing span
+
+| | |
+| --- | --- |
+| **Rank** | ~~**B33**~~ **done** — applied and measured on the lab |
+| **Impact** | Measured — on titan under the lab's mixed bench, formatting and span bookkeeping were 3.4–3.6% of the node's samples; with the arguments skipped, 2.3% |
+| **Difficulty** | S |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | The console and the collector lose the query's metadata on `PersistentTable::handle`, and its id on the three shard spans below `Coordinator::route`, which still carries it |
+| **Benchmark** | a `perf` profile of a Zen1 node under the lab's bench (`target/lab/r11/profab.sh`); the grid's `r50` cells on the benchmark host would carry it as a per-query cost |
+
+Found by the [distributed cluster testing](../cluster-testing/performance.md#where-the-time-goes)
+chapter, where about 2% of titan's samples went to formatting strings for tracing fields.
+
+`#[instrument]` records every argument it is not told to skip, with `Debug`, and the console layer
+(`tracing_subscriber::fmt`) formats a span's fields when the span opens, whether or not an event
+is ever written under it. At the default `Info` level every per-query span is open, so:
+
+- `PersistentTable::handle`, on both table kinds, skipped only `self` and the query, and formatted
+  the whole `QueryMetadata` and the seal with `Debug` for every query;
+- `Coordinator::handle_client` recorded the bundle's `Stamp`;
+- `Shard::handle_query`, `handle_released` and `handle_gathered` each built a `String` of the
+  query's id.
+
+**Applied:** the two `handle`s and `handle_client` skip every argument, and the three shard spans
+keep only `index`. The id is on their parent, `Coordinator::route`, which every trace hangs off.
+In an A B B A run on one cluster (`target/lab/r11/prof-o75`), the tracing and formatting symbols in
+titan's profile, the slab of span data included, fell from 3.39% and 3.60% on the build before
+to 2.35% and 2.29%. `DebugStruct::field`, `str`'s `Debug`, and the console's ANSI styling were gone
+from the profile. Throughput was 93,941 and 91,703 operations a second before, 93,591 and 108,420
+after: within the lab's spread, so the saving is claimed only as the CPU it measures.
+
+**What is left** is the spans themselves: `sharded_slab`'s pool, 0.8% of titan's samples, is a
+slot per open span. Dropping the per-query spans below `Info` would remove it, and the traces a
+collector gets at `Info` with it ([F35](../features/wire-trace-context.md)).
