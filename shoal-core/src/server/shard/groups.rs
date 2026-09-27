@@ -45,6 +45,7 @@ use crate::server::database::ShoalDatabase;
 use crate::server::map::GroupSpec;
 use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::peer::{LinkEvent, ReplicateReply};
+use crate::server::replication::machine::{identity_ms, FRESH_AT_RECEIPT_MS};
 use crate::server::replication::admission::{ProposalGate, ProposalPermit};
 use crate::server::replication::install::{crash_point, CrashPoint};
 use crate::server::replication::snapshot::{
@@ -2079,15 +2080,34 @@ where
         // truncation cannot happen: a retry window is minutes, not weeks
         #[allow(clippy::cast_possible_truncation)]
         let window_ms = cluster.replication.retry_window.duration().as_millis() as u64;
-        if group
-            .state
-            .borrow()
-            .is_expired(&request, super::migrate::now_ms(), window_ms)
-        {
-            let outcome = ProposalOutcome::Expired(format!(
-                "the identity of this write is older than the {:?} retry window, or older than an identity group {id} has forgotten; a retry this late is not answered its first result",
-                cluster.replication.retry_window.duration()
-            ));
+        let now = super::migrate::now_ms();
+        let (expired, forgotten) = {
+            let state = group.state.borrow();
+            (
+                state.is_expired(&request, now, window_ms),
+                state.forgotten(&request),
+            )
+        };
+        if expired {
+            // a write that reached this server within seconds of being minted cannot be a late
+            // retry, so one whose identity was forgotten while it queued is refused retriably,
+            // for its client to send again as a new write, rather than as expired
+            // ([#180](../../../../docs/src/appendix/resolved/first-write-past-identity-memory.md))
+            let within_window = identity_ms(&request)
+                .is_some_and(|minted| minted >= now.saturating_sub(window_ms));
+            let fresh = identity_ms(&request).is_some_and(|minted| {
+                meta.received_ms.saturating_sub(minted) <= FRESH_AT_RECEIPT_MS
+            });
+            let outcome = if forgotten && within_window && fresh {
+                ProposalOutcome::Shed(format!(
+                    "this write waited in the server until group {id} forgot identities minted after its own; it was not applied, so send it again as a new write"
+                ))
+            } else {
+                ProposalOutcome::Expired(format!(
+                    "the identity of this write is older than the {:?} retry window, or older than an identity group {id} has forgotten; a retry this late is not answered its first result",
+                    cluster.replication.retry_window.duration()
+                ))
+            };
             return self
                 .answer_proposal(meta, table, tablet, None, outcome, 0)
                 .await;

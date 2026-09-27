@@ -466,44 +466,6 @@ WAL segment, and a held segment holds every group's checkpoint on its shard, whi
 the lost-response test's *"checkpoint never reached 5"*. Whether it was the cause is not
 established; round 12's suite runs record the rate on the fixed tree.
 
-### 180. A first write queued past a group's identity memory is refused `IdentityExpired`
-
-A group remembers the result of its last `REMEMBERED_REQUESTS` (4,096) write identities
-(`MachineState::remember` in `server/replication/machine.rs`). Evicting one moves
-`expired_before` to the time that identity was minted, and `is_expired` refuses any identity
-minted before it, so a retry of a write whose first result is gone is never applied twice. The
-check cannot tell a retry from a first attempt. A write minted at T that waits in the server's
-queues until the group has applied and evicted 4,096 writes minted after T is refused as though
-it were a late retry, although it was never applied. The refusal is definite and nothing is lost,
-but a legitimate write fails, and `IdentityExpired` is not retriable.
-
-**Established by running it.** The TMDB loader at 8 × 4,096 in flight on a fresh lab cluster, with
-retries unbounded, stopped on it in two of three runs of `35d47a6` and in one of three runs of
-the tree with the gate switched off. Each time it was early in the load, at query 2,402, 4,427 and
-7,397 of a worker's stream:
-
-```text
-code: IdentityExpired, msg: "the identity of this write is older than the 300s retry window, or older than an identity group c5724bd0b94902bf has forgotten; a retry this late is not answered its first result"
-```
-
-At about 1,000 writes a second per group, 4,096 identities are four seconds of memory, which is
-[F45's limitation](../features/replica-migration.md#limitations) seen from the other side. The
-gate [#129](resolved/overload-sheds.md) put before openraft keeps the queue after admission short,
-and none of the six gated runs met this. The queue in front of admission, the shard loop's, is
-not bounded that way.
-
-A fix has to keep the guarantee for retries, and nothing the server sees tells a retry from a
-first attempt: a retry is received later too. So the memory has to cover the longest a first
-attempt can wait before admission. That means remembering identities for a time rather than a
-count (bounded in bytes, since a busy group mints thousands a second), or bounding the wait in
-front of admission as the gate bounds the one behind it. The first changes what the checkpoint
-persists, and needs its cost on the benchmark host measured. The retry sidecar (`Retries` in
-`server/wal/mod.rs`) is written whole, every group of the shard, at each checkpoint: at 4,096
-identities of about fifty bytes and six groups a shard, 1.2 MB a shard each time. Raising the
-bound four times over would write about 5 MB a shard every few seconds under the lab's load, on the
-hosts whose disks are already the limit. Written incrementally, as the log is, it would cost what
-it adds.
-
 ---
 
 ## Low — hygiene and documentation drift

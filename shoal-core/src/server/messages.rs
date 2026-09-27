@@ -130,6 +130,12 @@ pub struct QueryMetadata {
     /// rather than as a response only a client could read
     /// ([F45](../../../docs/src/features/replica-migration.md)).
     pub from_peer: bool,
+    /// When this server received the query, in milliseconds since the epoch
+    ///
+    /// A write whose identity its group has forgotten but that reached a server within
+    /// seconds of being minted cannot be a late retry, so it is refused retriably rather than
+    /// as expired ([#180](../../../docs/src/appendix/resolved/first-write-past-identity-memory.md)).
+    pub received_ms: u64,
 }
 
 impl QueryMetadata {
@@ -169,6 +175,8 @@ impl QueryMetadata {
             // a plan that waits on nothing and never expires, until the coordinator sets one
             read: ReadPlan::one(Stamp::now().plus_nanos(u64::MAX / 4)),
             from_peer: false,
+            // metadata is made where a query is received, so now is when it arrived
+            received_ms: crate::server::control::stats::now_ms(),
         }
     }
 

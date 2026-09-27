@@ -18432,6 +18432,67 @@ async fn a_stream_older_than_the_retry_window_still_writes() -> Result<(), Fixtu
     Ok(())
 }
 
+/// A first write queued past what its group remembers is refused retriably, not as expired (item 180)
+///
+/// A group remembers its last 4,096 write identities, and forgetting one refuses every
+/// identity minted before it, since a retry of a write whose first result is gone must never be
+/// applied twice. A first write that waited in the server while the group applied and forgot
+/// 4,096 writes minted after it was refused `IdentityExpired` like a late retry, which no client
+/// retries. One that reached the server within seconds of being minted cannot be a late retry,
+/// so it is now refused `Shedding`, and sent again under a new identity it is written. The same
+/// identity once past that is expired as before
+/// ([Resolved #180](../../docs/src/appendix/resolved/first-write-past-identity-memory.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_write_queued_past_the_memory_is_refused_retriably() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal::shared::protocol::error::ErrorCode;
+    let cluster = Cluster::builder()
+        .cluster(1, CoreClaim::Count(1))
+        .replication_factor(1)
+        .write_timeout(Duration::from_secs(5))
+        .start()
+        .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let key = 18_000u64;
+    // the queued write's identity, minted before everything the group applies next
+    let queued = uuid::Uuid::now_v7();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    // more writes than the group remembers, all to the queued write's group and minted after it
+    let client = Shoal::<TestDbClient>::new(&addr0).await?;
+    let mut queries = shoal::client::Queries::<TestDbClient>::default();
+    for index in 0..4_200u32 {
+        queries.add_mut(Note {
+            key,
+            text: format!("filler {index}"),
+        });
+    }
+    let answers = client.exec(queries).await?;
+    assert_eq!(answers.len(), 4_200);
+    // the queued write arrives now: its group forgot identities minted after its own
+    let pinned = SendOptions::new().identity(queued);
+    let answered = write_note_as(&addr0, key, "queued", &pinned).await;
+    assert_eq!(
+        failure_code(&answered),
+        Some(ErrorCode::Shedding),
+        "a first write that queued past the memory was answered {answered:?}"
+    );
+    wait_note(&addr0, key, Some("filler 4199"), Duration::from_secs(10)).await?;
+    // sent again as a new write, it is written
+    write_note_as(&addr0, key, "queued", &SendOptions::new()).await?;
+    wait_note(&addr0, key, Some("queued"), Duration::from_secs(10)).await?;
+    // and the same identity past the few seconds a first try arrives within is a late retry
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let late = write_note_as(&addr0, key, "late", &pinned).await;
+    assert_eq!(
+        failure_code(&late),
+        Some(ErrorCode::IdentityExpired),
+        "a late retry of a forgotten identity was answered {late:?}"
+    );
+    wait_note(&addr0, key, Some("queued"), Duration::from_secs(10)).await?;
+    assert_eq!(cluster.node(0).failure(), None, "node 0 died");
+    Ok(())
+}
+
 /// A node stopped the way a supervisor stops it hands its lead off first (item 139)
 ///
 /// Stopping a node took its groups' leaders with it, and the survivors could elect only once

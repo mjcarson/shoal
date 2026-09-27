@@ -288,6 +288,10 @@ request is recorded and runs when it can, and the record says what it waits behi
   across a failover of ten seconds or more is refused `IdentityExpired`, by name and never
   applied twice. Measured on the lab under nine SIGKILLs: 3 refusals among some 1.5 million
   updates ([cluster testing](../cluster-testing/correctness.md#nine-sigkills-under-load)).
+  A *first* write that queued that long in front of admission was refused the same way, which
+  no client retried. Since [#180](../appendix/resolved/first-write-past-identity-memory.md) one
+  that reached the server within five seconds of its mint is refused `Shedding`, and a client
+  sends it again under a new identity.
 - **The manifest gained a field**, which is a wire change for a snapshot's begin RPC and its
   pending marker; ~~M10's compatibility rules are where that is judged~~ judged at
   [F48](rolling-compatibility.md): the field is in both codecs, since every build in the
