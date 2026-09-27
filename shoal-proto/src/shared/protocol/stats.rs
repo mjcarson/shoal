@@ -332,6 +332,20 @@ pub struct NodeStats {
     /// Bytes proposed through the node and not yet answered
     #[serde(default)]
     pub pending_bytes: u64,
+    /// Each shard's writes applied per second over the last interval, by shard
+    ///
+    /// A shard is one core, and every copy it hosts applies on it, so a node whose busiest
+    /// shard applies far more than its others is paced by that one core
+    /// ([O64](../../../../docs/src/appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)).
+    #[serde(default)]
+    pub shard_writes_per_sec: Vec<f64>,
+    /// How many groups each shard leads, by shard
+    ///
+    /// A leader proposes, replicates and answers for its group on its shard's core, so the
+    /// leads a node holds can sit on a few of its cores however evenly the node's share is
+    /// counted (O64).
+    #[serde(default)]
+    pub shard_groups_led: Vec<u32>,
 }
 
 /// How busy one group a node leads was over the last interval
@@ -378,6 +392,8 @@ impl NodeStats {
             compacting_segments: 0,
             apply_lag: 0,
             pending_bytes: 0,
+            shard_writes_per_sec: Vec::new(),
+            shard_groups_led: Vec::new(),
         }
     }
 

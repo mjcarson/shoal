@@ -473,6 +473,17 @@ handed when its wait for the next job lost a race against a retry's timer. A los
 WAL segment, and a held segment holds every group's checkpoint on its shard, which is the shape of
 the lost-response test's *"checkpoint never reached 5"*. Whether it was the cause is not
 established; round 12's suite runs record the rate on the fixed tree.
+The first full run of round 12 (`28f0385`, 1,715 tests at six threads) failed only
+`a_restore_rides_out_an_unreachable_member`, its second failure on record, and in the same shape
+as the first: one group left at `Pending` with no driver and no attempts, never driven again
+within 300 s, while the other two were `Done`. It passed alone straight after, and ten runs of it
+alone with twenty busy loops on the host all passed (`target/lab/r12/restore-loop.sh`). The record
+says something the deadline alone does not: the only path that leaves a group at its starting
+phase with no driver is a driver that lost its lead handing the group back for the new leader
+(`drive_group_restore`), and every shard polls for a group it leads at every tick. So either no
+member led the group for five minutes, or its leader's shard believed it was already driving a
+restore (`driving_restores` is one at a time per shard, and cleared only by `RestoreDone`). The
+next failure should be caught with `SHOAL_CHILD_LOG` to tell which.
 
 ---
 

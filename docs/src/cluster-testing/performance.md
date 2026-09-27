@@ -336,6 +336,7 @@ is slow throughout, and no load changed pace partway through.
 | The disks' flush latency before a load | fio, 64 KiB direct writes each followed by `fdatasync`, before and after every load | 299–317 writes a second on titan and hyperion in every probe | Constant; not it |
 | One shard carrying more than its share | each shard's applied writes a second, sampled every 10 s | within 1.4× on every node in fast and slow loads alike | Not it |
 | Who leads | 2:1:1 lead weights ([F58](../features/weighted-leadership.md)) against even, 4 loads | 38.3–46.9k | No change to the load |
+| Leads bunched on a few of a node's cores | the groups each shard leads, sampled at 30 s | 38.5–45.0k (6 loads); every shard of every node led exactly two groups in every load | Not it |
 
 What the figures do show is where the time goes. Titan's and hyperion's 970 EVOs flush their
 cache on every `fdatasync`: 3 ms at the median for one writer, 5.9 ms each with six at once (about

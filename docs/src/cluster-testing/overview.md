@@ -109,7 +109,8 @@ These scripts are scratch and are not committed. What they measured is on these 
 its resident memory, and the cluster's ten busiest groups with the member leading each. Since
 round 12 it also prints each member's storage pipeline: WAL syncs and bytes a second, the WAL's
 segments, the sealed segments waiting on a compactor, entries committed and not yet applied, and
-bytes proposed and not yet answered. `load --series <secs>` prints the load's rate over each
+bytes proposed and not yet answered, with each shard's applied writes a second (quietest to busiest)
+and the groups each shard leads. `load --series <secs>` prints the load's rate over each
 interval, so a load that changes pace partway through shows where. A node
 that judges its own links slow says so in its journal (`this node's links are slow, and it hands
 its leads on`), as does one under its append reserve (`under the append reserve`).

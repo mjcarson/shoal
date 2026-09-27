@@ -375,6 +375,14 @@ impl NodeStatsTracker {
             .flat_map(|report| report.groups.iter())
             .map(|group| group.committed.saturating_sub(group.applied))
             .sum();
+        // the groups each shard leads, since leading is work on that shard's one core
+        stats.shard_groups_led = shards
+            .values()
+            .map(|report| {
+                u32::try_from(report.groups.iter().filter(|group| group.is_leader).count())
+                    .unwrap_or(u32::MAX)
+            })
+            .collect();
         stats.pending_bytes = shards
             .values()
             .map(|report| u64::try_from(report.pending_bytes).unwrap_or(u64::MAX))
