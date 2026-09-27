@@ -496,17 +496,13 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         let started = Instant::now();
         // the archive entry of every partition with intents that the map names, copied out so
         // no borrow of the map is held across a read
-        let mut entries: Vec<ArchiveEntry> = {
+        let entries: Vec<ArchiveEntry> = {
             let to_archive = self.map.to_archive.borrow();
             self.changes
                 .keys()
                 .filter_map(|partition| to_archive.get(partition).copied())
                 .collect()
         };
-        // read in the order the records lie on disk, archive by archive, so neighbouring reads
-        // land together rather than in the map's hash order
-        // ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
-        entries.sort_unstable_by_key(|entry| (entry.archive, entry.offset));
         self.phases.loaded += entries.len() as u64;
         // read a few at a time: one direct read at a random offset after another, each waiting
         // its turn on a busy shard, held a Zen1 node's merges five to twenty seconds each, and
@@ -1544,10 +1540,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 // get this archives valid data entries, gathered now rather than for every
                 // archive up front: the index is not changed until this pass ends
                 // ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index))
-                let mut entries = self.map.entries_of(old_id);
-                // copied in the order they lie in the archive, rather than the map's hash order
-                // ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
-                entries.sort_unstable_by_key(|entry| entry.offset);
+                let entries = self.map.entries_of(old_id);
                 if !entries.is_empty() {
                     // build the path to this archive file
                     let path = self.archive_path.join(old_id.to_string());

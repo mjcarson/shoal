@@ -141,6 +141,12 @@ pub struct GroupSpec {
     /// Where its nodes keep their data, field by field over the deployment's
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<StorageSpec>,
+    /// How long its nodes' WAL writers wait after a sync for more appends, over the deployment's
+    ///
+    /// A setting of the device, so it belongs with the storage a group names
+    /// ([O61](../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_commit_delay: Option<String>,
 }
 
 /// Where a resolved node keeps its data
@@ -213,6 +219,10 @@ pub struct NodeSpec {
     /// Where this node keeps its data, field by field over its group's and the deployment's
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<StorageSpec>,
+    /// How long this node's WAL writers wait after a sync for more appends, over its group's
+    /// and the deployment's
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_commit_delay: Option<String>,
 }
 
 impl NodeSpec {
@@ -283,6 +293,14 @@ pub struct Inventory {
     /// window ([cluster testing](../../../docs/src/cluster-testing/performance.md#failover-time-against-primary_failover_after)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failover: Option<String>,
+    /// How long every node's WAL writers wait after a sync for more appends, as `shoal.yml`
+    /// writes a duration (`3ms`), at most 10 ms; none, the engine's, if absent
+    ///
+    /// Rendered as `cluster.replication.wal_commit_delay`. It suits a fast device and costs a
+    /// slow one latency, so it is usually set on a group rather than here
+    /// ([O61](../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_commit_delay: Option<String>,
     /// The nodes `bootstrap` forms the cluster from, in placement order; every node if absent
     ///
     /// The first is the node that mints the cluster. A node listed in `nodes` but not here is
@@ -308,6 +326,8 @@ pub struct Node {
     pub resources: Resources,
     /// Where it keeps its data
     pub storage: NodeStorage,
+    /// Its WAL group commit delay, resolved over its group and the deployment, if any sets one
+    pub wal_commit_delay: Option<String>,
 }
 
 impl Node {
@@ -515,6 +535,32 @@ impl Inventory {
                 None => bail!("failover is {failover:?}; write it as 1500ms, 2s or 1m"),
             }
         }
+        // a WAL commit delay wherever it is set: a duration the engine reads, at most its 10ms
+        let delays = std::iter::once(("the deployment".to_string(), self.wal_commit_delay.as_ref()))
+            .chain(self.groups.iter().map(|(name, group)| {
+                (format!("group {name}"), group.wal_commit_delay.as_ref())
+            }))
+            .chain(self.nodes.iter().map(|node| {
+                (format!("node {}", node.name), node.wal_commit_delay.as_ref())
+            }));
+        for (level, delay) in delays {
+            let Some(delay) = delay else { continue };
+            let split = delay
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(delay.len());
+            let (number, unit) = delay.split_at(split);
+            // the units the engine's durations take, of which only milliseconds fit under 10ms
+            let millis = number.parse::<u64>().ok().and_then(|number| match unit {
+                "ms" => Some(number),
+                "s" => number.checked_mul(1_000),
+                _ => None,
+            });
+            match millis {
+                Some(millis) if millis <= 10 => {}
+                Some(_) => bail!("wal_commit_delay of {level} is {delay:?}; the engine takes at most 10ms"),
+                None => bail!("wal_commit_delay of {level} is {delay:?}; write it as 3ms"),
+            }
+        }
         // a group name is a key an operator types, so it is held to the cluster name's alphabet
         for name in self.groups.keys() {
             if !is_plain_name(name) {
@@ -637,6 +683,23 @@ impl Inventory {
         (self.resources.clone(), Source::Deployment)
     }
 
+    /// Resolve a node's WAL group commit delay: its own, its group's or the deployment's
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The node
+    #[must_use]
+    pub fn resolve_wal_commit_delay(&self, spec: &NodeSpec) -> Option<String> {
+        // the most specific level that sets it wins
+        spec.wal_commit_delay
+            .clone()
+            .or_else(|| {
+                self.group_of(spec)
+                    .and_then(|(_, group)| group.wal_commit_delay.clone())
+            })
+            .or_else(|| self.wal_commit_delay.clone())
+    }
+
     /// The names bootstrap forms the cluster from, in placement order
     #[must_use]
     pub fn bootstrap_names(&self) -> Vec<String> {
@@ -704,6 +767,7 @@ impl Inventory {
             group: spec.group.clone(),
             resources,
             storage,
+            wal_commit_delay: self.resolve_wal_commit_delay(spec),
         })
     }
 

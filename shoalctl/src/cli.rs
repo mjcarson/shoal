@@ -209,6 +209,17 @@ pub enum ClusterCommand {
         #[clap(long, conflicts_with_all = ["force", "activate"])]
         rollback: bool,
     },
+    /// Render every node's shoal.yml again from the inventory and restart the ones that changed, the leader last
+    Reconfigure {
+        /// The inventory
+        #[clap(flatten)]
+        inventory: InventoryArg,
+        /// The nodes to reconfigure, or every deployed node if none
+        nodes: Vec<String>,
+        /// Restart a node even when its file did not change
+        #[clap(long)]
+        force: bool,
+    },
     /// Print the end of a node's journal
     Logs {
         /// The inventory
@@ -412,6 +423,15 @@ where
         } => {
             Deployment::open(&inventory.inventory)?
                 .upgrade::<S>(&nodes, force, activate, rollback)
+                .await
+        }
+        ClusterCommand::Reconfigure {
+            inventory,
+            nodes,
+            force,
+        } => {
+            Deployment::open(&inventory.inventory)?
+                .reconfigure::<S>(&nodes, force)
                 .await
         }
         ClusterCommand::Logs {

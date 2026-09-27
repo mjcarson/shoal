@@ -33,6 +33,7 @@ use super::plan::{PlanRecord, StepState};
 use crate::server::replication::ShardReplication;
 use crate::shared::identity::{GroupId, NodeId};
 use crate::shared::protocol::stats::{
+    GroupRate,
     NodeStats, PlanProgress, Rates, TableStats, WriteCounters, WriteRates,
 };
 
@@ -254,6 +255,8 @@ impl NodeStatsTracker {
         // what every table holds and gained since the tick before
         let mut ticks: BTreeMap<String, TableTick> = BTreeMap::new();
         let mut seen: HashMap<(usize, GroupId), WriteCounters> = HashMap::new();
+        // what every group this node leads gained, for the busiest of them
+        let mut led_gains: Vec<(GroupId, String, WriteCounters)> = Vec::new();
         for (shard, report) in shards {
             for group in &report.groups {
                 // a group this tick has not seen before gained everything it counts, and so
@@ -280,6 +283,7 @@ impl NodeStatsTracker {
                     tick.figures.bytes_led += group.bytes;
                     tick.figures.led_total.absorb(&group.writes);
                     tick.led.absorb(&gained);
+                    led_gains.push((group.group, group.table_name.clone(), gained));
                 }
             }
         }
@@ -317,6 +321,13 @@ impl NodeStatsTracker {
             .values()
             .map(|report| u64::try_from(report.volatile_bytes).unwrap_or(u64::MAX))
             .sum();
+        // the rows the shards hold in memory against their budgets
+        stats.memory_bytes = shards.values().map(|report| report.memory_bytes).sum();
+        stats.memory_budget = shards.values().map(|report| report.memory_budget).sum();
+        // the busiest groups this node leads over the interval, once there is one to divide by
+        if let Some(dt) = dt {
+            stats.hot_groups = hot_groups(led_gains, dt);
+        }
         stats.stream_sent = self.stream_sent.rates();
         stats.stream_received = self.stream_received.rates();
         stats.stream_sent_total = sent;
@@ -385,6 +396,35 @@ impl NodeStatsTracker {
         self.stream_received
             .observe(stream_gained.1 as f64 / dt, dt);
     }
+}
+
+/// How many of a node's busiest led groups its figures name
+const HOT_GROUPS: usize = 8;
+
+/// The busiest groups of those a node leads, by writes a second over one interval
+///
+/// # Arguments
+///
+/// * `gains` - What each group the node leads gained over the interval
+/// * `dt` - The interval, in seconds
+#[allow(clippy::cast_precision_loss)]
+fn hot_groups(gains: Vec<(GroupId, String, WriteCounters)>, dt: f64) -> Vec<GroupRate> {
+    // every group's rates over the interval, the idle ones left out
+    let mut rates: Vec<GroupRate> = gains
+        .into_iter()
+        .map(|(group, table, gained)| GroupRate {
+            group: group.0,
+            table,
+            writes_per_sec: (gained.inserts + gained.updates + gained.deletes) as f64 / dt,
+            bytes_per_sec: (gained.insert_bytes + gained.update_bytes + gained.delete_bytes) as f64
+                / dt,
+        })
+        .filter(|rate| rate.writes_per_sec > 0.0)
+        .collect();
+    // the busiest first, and only so many
+    rates.sort_by(|a, b| b.writes_per_sec.total_cmp(&a.writes_per_sec));
+    rates.truncate(HOT_GROUPS);
+    rates
 }
 
 /// Whether every window of every rate has decayed below what is worth reporting
@@ -674,6 +714,29 @@ mod tests {
                 ..ShardReplication::default()
             },
         )])
+    }
+
+    /// The busiest led groups come busiest first, idle ones left out, and no more than the cap
+    #[test]
+    fn hot_groups_are_ranked_and_capped() {
+        // a dozen groups, each writing its index's worth over a two second interval, one idle
+        let gains: Vec<(GroupId, String, WriteCounters)> = (0..12u64)
+            .map(|index| {
+                let mut gained = WriteCounters::default();
+                gained.inserts = index * 2;
+                gained.insert_bytes = index * 200;
+                (GroupId(index), "Note".to_string(), gained)
+            })
+            .collect();
+        let hot = super::hot_groups(gains, 2.0);
+        // capped, the busiest first, at its rate per second
+        assert_eq!(hot.len(), super::HOT_GROUPS);
+        assert_eq!(hot[0].group, 11);
+        assert!((hot[0].writes_per_sec - 11.0).abs() < 1e-9);
+        assert!((hot[0].bytes_per_sec - 1100.0).abs() < 1e-9);
+        assert!(hot.windows(2).all(|pair| pair[0].writes_per_sec >= pair[1].writes_per_sec));
+        // the idle group is never named
+        assert!(hot.iter().all(|rate| rate.group != 0));
     }
 
     /// The first sample of a debiased average is the sample, and a constant rate converges

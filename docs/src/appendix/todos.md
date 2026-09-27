@@ -768,7 +768,10 @@ choosing primaries by the same weight, or by measured commit latency, would put 
 writes commit fastest. Not done because it changes the placement's primaries, which every group
 identity and every initialization reads, and deserves its own design.
 
-#### The inventory wizard has no field for `failover`
+#### ~~The inventory wizard has no field for `failover`~~
+
+**Done in [F57](../features/cluster-reconfigure.md)**: a `Failover base` field on the Shape page, validated as the inventory is. What follows is the todo as it was filed.
+
 
 `shoalctl/src/wizard/form.rs`. The [cluster testing](../cluster-testing/performance.md#failover-time-against-primary_failover_after)
 chapter added `failover` to the inventory (rendered as `cluster.primary_failover_after`) to
@@ -2265,7 +2268,10 @@ cannot be told apart. Keying each frame's checksum by its offset (or giving it a
 would make a frame valid only where it was written, at the cost of a format change the reader has
 to accept both sides of.
 
-## A node's memory on `Stats`
+## ~~A node's memory on `Stats`~~
+
+**Done in round 11** of the [cluster testing](../cluster-testing/performance.md#who-leads-the-busiest-groups): `NodeStats` carries the shards' row bytes, their eviction budgets and the process's resident memory, and `cluster stats` prints them. On the lab under the bench: about 340 MiB of rows against 2.9 GiB resident a node. What follows is the todo as it was filed.
+
 
 Filed by [Resolved #149](resolved/node-memory-budget.md). The eviction budget counts table data
 alone. The archive maps (an entry per partition), the WAL's index and caches, openraft's state and
@@ -2273,7 +2279,10 @@ every I/O buffer sit outside it, and nothing reports them. A deployment sizes th
 the host's memory by guessing the headroom. Each shard's `memory_usage` and budget, and the
 process's resident memory, on the node's `Stats`, would let an operator read it instead.
 
-## Per-group write rates in `Stats`
+## ~~Per-group write rates in `Stats`~~
+
+**Done in round 11** of the [cluster testing](../cluster-testing/performance.md#who-leads-the-busiest-groups): `NodeStats::hot_groups` names the eight busiest groups a node leads, by writes a second over the last interval, and `cluster stats` prints the cluster's ten busiest with their leaders. It did not support O64's hypothesis. Weighing leadership balance by it is not done: see [weighted leadership](#leadership-is-spread-evenly-whatever-each-member-can-do). What follows is the todo as it was filed.
+
 
 Filed by [O64](optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab).
 `Stats` reports each member's applied rates, and every member applies every row, so nothing shows
@@ -2282,7 +2291,10 @@ counted, and the hypothesis is that the keyword table's hottest partitions' grou
 where they are led. A leader's proposal rate per group would test it, and would let leadership
 balancing weigh groups by load rather than count them.
 
-## The WAL group commit delay per inventory group
+## ~~The WAL group commit delay per inventory group~~
+
+**Done as part of [F57](../features/cluster-reconfigure.md)**: `wal_commit_delay` at the deployment, group and node levels, rendered as `cluster.replication.wal_commit_delay`. The lab's inventory sets 3 ms on europa's group. The wizard carries it but has no form field for it yet. What follows is the todo as it was filed.
+
 
 Filed by [O61](optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page).
 `cluster.replication.wal_commit_delay` belongs to a device, and an inventory's groups are where a
@@ -2298,7 +2310,10 @@ node at 31 million partitions. [#149](resolved/node-memory-budget.md) bounds the
 that outgrows the budget now empties the row cache instead of killing the node. Keeping the
 index on disk, or paging it, would make the budget the rows' again.
 
-## Re-render a deployment's node files
+## ~~Re-render a deployment's node files~~
+
+**Done as [F57](../features/cluster-reconfigure.md)**, `cluster reconfigure`. The credential it was thought to need is the one bootstrap keeps in the deployment's state directory. What follows is the todo as it was filed.
+
 
 Filed by [Resolved #149](resolved/node-memory-budget.md). `cluster upgrade` swaps a node's program
 and never rewrites its `shoal.yml`, so a change to what the renderer writes reaches no deployed

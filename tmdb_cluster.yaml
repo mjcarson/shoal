@@ -24,6 +24,7 @@ groups:
   bd795i:
     storage:
       latency: /optane/shoal-tmdb
+    wal_commit_delay: 3ms
   v1000:
     storage:
       latency: /optane/shoal

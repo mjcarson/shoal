@@ -3060,6 +3060,8 @@ where
             return ShardReplication {
                 shard: self.shard_id,
                 reads: self.read_stats,
+                memory_bytes: u64::try_from(*self.memory_usage.borrow()).unwrap_or(u64::MAX),
+                memory_budget: u64::try_from(self.memory_budget).unwrap_or(u64::MAX),
                 ..ShardReplication::default()
             };
         };
@@ -3156,6 +3158,9 @@ where
             .collect::<Vec<_>>();
         ShardReplication {
             shard: self.shard_id,
+            // the rows this shard holds in memory and the budget its eviction holds them to
+            memory_bytes: u64::try_from(*self.memory_usage.borrow()).unwrap_or(u64::MAX),
+            memory_budget: u64::try_from(self.memory_budget).unwrap_or(u64::MAX),
             pending_bytes: groups.iter().map(|group| group.pending_bytes).sum(),
             volatile_bytes: replication.volatile.bytes(),
             segments: replication.wal.segments().len(),

@@ -3058,8 +3058,25 @@ table's hottest partitions. Twelve leads each do not mean equal work, and europa
 host. Per-member stats cannot show it, since every member applies every row.
 
 **Status:** the cause of the original halving is not established, and it is not present on the
-current tree. The default stays at 5 s. What would settle the mode question is per-group write
-rates in `Stats`, filed in [todos](todos.md#per-group-write-rates-in-stats).
+current tree. The default stays at 5 s. ~~What would settle the mode question is per-group write
+rates in `Stats`, filed in [todos](todos.md#per-group-write-rates-in-stats).~~
+
+**The hypothesis tested, and not supported.** `Stats` now names each member's busiest led groups
+(`NodeStats::hot_groups`, [cluster testing, round 11](../cluster-testing/performance.md#who-leads-the-busiest-groups)).
+Five fresh bootstraps, each loaded whole, with the stats read 20 s into the load
+(`target/lab/r11/o64.sh`):
+
+| Run | Rows a second | The ten busiest groups, by the host leading them |
+| --- | --- | --- |
+| 1 | 40,023 | europa 5, titan 3, hyperion 2 |
+| 2 | 39,389 | europa 5, titan 5 |
+| 3 | 40,618 | titan 8, europa 1, hyperion 1 |
+| 4 | 49,856 | europa 5, titan 4, hyperion 1 |
+| 5 | 42,713 | hyperion 7, titan 2, europa 1 |
+
+The fastest run and the two slowest had the same spread, europa leading five of the ten. And the
+busiest groups each wrote about a thousand rows a second, within a few percent of each other: no
+single hot group decides anything. The mode is still unexplained.
 
 The investigation also found [#158](resolved/runtime-waker-lists.md), and tried
 [O69](#o69-every-idle-moment-parks-an-executor).
@@ -3451,8 +3468,16 @@ cluster's throughput follows its slowest members.
 **Kept.** Filed on the way: [#179](resolved/archive-usage-prefix.md), an archive's live bytes counted
 without its records' prefixes.
 
-**Still open:** the 50% threshold is hardcoded, and neither a merge nor a pass sorts its reads by
-offset.
+~~**Still open:** the 50% threshold is hardcoded, and neither a merge nor a pass sorts its reads by
+offset.~~ Both done in the [cluster testing's round 11](../cluster-testing/performance.md#o74s-remainder):
+
+- **The threshold is a setting**, `throughput_sensitive.archive_pass_live_percent`, 50 by default
+  and held to 1–99. It is not swept yet: the rewrite-heavy bench is where a sweep would show it.
+- **Sorting the reads by offset was tried and not kept.** A merge's reads sorted by archive and
+  offset, a pass's by offset, against the same build without, A B B A with 180 s of the
+  rewrite-heavy mix: 35,606 and 34,863 operations a second sorted, 36,136 and 36,450 not. On the
+  lab's NVMe with 16 to 32 reads in flight the order does not matter, and a sort costs a pass
+  over the entries.
 
 ### O75. Every query formatted its metadata into a tracing span
 

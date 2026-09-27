@@ -3659,6 +3659,11 @@ impl Core {
             &self.replication,
             free_bytes,
         );
+        // and the process's resident memory, which no shard's budget counts
+        let mut stats = stats;
+        stats.resident_bytes = crate::server::shard::process_resident_bytes()
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .unwrap_or(0);
         self.last_stats = Some(stats);
     }
 

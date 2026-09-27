@@ -277,6 +277,12 @@ pub struct ShardReplication {
     /// What the shard's storage has seen of its own integrity ([F44](../../../../docs/src/features/repair.md))
     #[serde(default)]
     pub integrity: IntegrityStats,
+    /// Bytes of rows the shard holds in memory, as its eviction counts them
+    #[serde(default)]
+    pub memory_bytes: u64,
+    /// The shard's eviction budget
+    #[serde(default)]
+    pub memory_budget: u64,
 }
 
 /// What a shard's reads have cost and dropped since it started

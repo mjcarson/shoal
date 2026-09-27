@@ -99,6 +99,8 @@ pub enum FieldId {
     ControlVoters,
     /// How long a moved copy is kept
     RetireAfter,
+    /// The failover base every group's timers derive from
+    Failover,
     /// The client port
     ClientPort,
     /// The data peer port
@@ -159,6 +161,7 @@ impl FieldId {
                 FieldId::ReplicationFactor,
                 FieldId::ControlVoters,
                 FieldId::RetireAfter,
+                FieldId::Failover,
                 FieldId::ClientPort,
                 FieldId::PeerPort,
                 FieldId::ControlPort,
@@ -220,6 +223,7 @@ impl FieldId {
             FieldId::ReplicationFactor => "Replication factor",
             FieldId::ControlVoters => "Control voters",
             FieldId::RetireAfter => "Retire after",
+            FieldId::Failover => "Failover base",
             FieldId::ClientPort => "Client port",
             FieldId::PeerPort => "Peer port",
             FieldId::ControlPort => "Control port",
@@ -266,6 +270,9 @@ impl FieldId {
             }
             (FieldId::RetireAfter, _) => {
                 "How long a moved copy is kept before it is reclaimed: 500ms, 15s, 5m or 1h. Blank is the engine's five minutes, the floor under every rebalance step."
+            }
+            (FieldId::Failover, _) => {
+                "The base every group's election timers derive from: 1500ms, 2s or 1m, at least 100ms. A crashed leader's writes are refused for three to four times this. Blank is the engine's five seconds."
             }
             (FieldId::ClientPort | FieldId::PeerPort | FieldId::ControlPort, _) => {
                 "Every node listens on the same three ports, so one host runs one node of a cluster."
@@ -331,6 +338,7 @@ impl FieldId {
             (FieldId::RemoteDir, _) => "/opt/shoal-deploy/<name>",
             (FieldId::User, _) => "the ssh login",
             (FieldId::RetireAfter, _) => "5m (the engine's)",
+            (FieldId::Failover, _) => "5s (the engine's)",
             (FieldId::Cores, Page::Defaults) => "every core",
             (FieldId::ExcludeCores, Page::Defaults) => "none",
             (FieldId::Memory, Page::Defaults) => "4Gi",
@@ -484,6 +492,8 @@ pub struct GroupDraft {
     pub resources: ResourcesDraft,
     /// Its storage
     pub storage: StorageDraft,
+    /// The WAL commit delay an inventory being edited named for it, kept as it was
+    pub wal_commit_delay: Option<String>,
 }
 
 /// A node as the wizard edits it
@@ -503,6 +513,8 @@ pub struct NodeDraft {
     pub resources: ResourcesDraft,
     /// Its own storage
     pub storage: StorageDraft,
+    /// The WAL commit delay an inventory being edited named for it, kept as it was
+    pub wal_commit_delay: Option<String>,
 }
 
 /// An inventory as the wizard edits it: every field as typed
@@ -526,9 +538,11 @@ pub struct Draft {
     pub control_voters: String,
     /// How long a moved copy is kept, blank for the engine's
     pub retire_after: String,
-    /// The failover base an inventory being edited named, kept as it was; the form has no field
-    /// for it yet
-    pub failover: Option<String>,
+    /// The failover base, blank for the engine's
+    pub failover: String,
+    /// The WAL commit delay an inventory being edited named for the deployment, kept as it was;
+    /// the form has no field for it yet
+    pub wal_commit_delay: Option<String>,
     /// The client port
     pub client_port: String,
     /// The peer port
@@ -564,7 +578,8 @@ impl Default for Draft {
             replication_factor: "3".to_string(),
             control_voters: "3".to_string(),
             retire_after: String::new(),
-            failover: None,
+            failover: String::new(),
+            wal_commit_delay: None,
             client_port: ports.client.to_string(),
             peer_port: ports.peer.to_string(),
             control_port: ports.control.to_string(),
@@ -665,6 +680,7 @@ impl Draft {
                     .map(ResourcesDraft::from_resources)
                     .unwrap_or_default(),
                 storage: StorageDraft::from_spec(group.storage.as_ref()),
+                wal_commit_delay: group.wal_commit_delay.clone(),
             })
             .collect();
         // then the nodes, naming their group by that identity
@@ -692,6 +708,7 @@ impl Draft {
                     .map(ResourcesDraft::from_resources)
                     .unwrap_or_default(),
                 storage: StorageDraft::from_spec(node.storage.as_ref()),
+                wal_commit_delay: node.wal_commit_delay.clone(),
             })
             .collect();
         Draft {
@@ -704,7 +721,8 @@ impl Draft {
             replication_factor: inventory.replication_factor.to_string(),
             control_voters: inventory.control_voters.to_string(),
             retire_after: inventory.retire_after.clone().unwrap_or_default(),
-            failover: inventory.failover.clone(),
+            failover: inventory.failover.clone().unwrap_or_default(),
+            wal_commit_delay: inventory.wal_commit_delay.clone(),
             client_port: inventory.ports.client.to_string(),
             peer_port: inventory.ports.peer.to_string(),
             control_port: inventory.ports.control.to_string(),
@@ -813,6 +831,7 @@ impl Draft {
                 resources: (!group.resources.is_empty())
                     .then(|| group.resources.build(&at, &mut issues)),
                 storage: group.storage.build(),
+                wal_commit_delay: group.wal_commit_delay.clone(),
             };
             if groups.insert(group.name.trim().to_string(), spec).is_some() {
                 issues.push(at.error(
@@ -852,6 +871,7 @@ impl Draft {
                 resources: (!node.resources.is_empty())
                     .then(|| node.resources.build(&at, &mut issues)),
                 storage: node.storage.build(),
+                wal_commit_delay: node.wal_commit_delay.clone(),
             });
             // a name is what every command addresses the node by
             if node.name.trim().is_empty() {
@@ -902,7 +922,8 @@ impl Draft {
             user: text(&self.user),
             admin: text(&self.admin).unwrap_or_else(|| "admin".to_string()),
             retire_after: text(&self.retire_after),
-            failover: self.failover.clone(),
+            failover: text(&self.failover),
+            wal_commit_delay: self.wal_commit_delay.clone(),
             bootstrap,
             nodes,
         };
@@ -983,6 +1004,8 @@ impl Draft {
             (Target::Field(Page::Shape), Some(FieldId::ReplicationFactor))
         } else if message.contains("retire_after") {
             (Target::Field(Page::Shape), Some(FieldId::RetireAfter))
+        } else if message.starts_with("failover") {
+            (Target::Field(Page::Shape), Some(FieldId::Failover))
         } else if message.contains("ports") {
             (Target::Field(Page::Shape), Some(FieldId::ClientPort))
         } else if message.contains("group name") {
@@ -1051,6 +1074,7 @@ impl Draft {
             FieldId::ReplicationFactor => &self.replication_factor,
             FieldId::ControlVoters => &self.control_voters,
             FieldId::RetireAfter => &self.retire_after,
+            FieldId::Failover => &self.failover,
             FieldId::ClientPort => &self.client_port,
             FieldId::PeerPort => &self.peer_port,
             FieldId::ControlPort => &self.control_port,
@@ -1169,6 +1193,7 @@ impl Draft {
             FieldId::User => &mut self.user,
             FieldId::Admin => &mut self.admin,
             FieldId::RetireAfter => &mut self.retire_after,
+            FieldId::Failover => &mut self.failover,
             FieldId::ReplicationFactor => &mut self.replication_factor,
             FieldId::ClientPort => &mut self.client_port,
             FieldId::PeerPort => &mut self.peer_port,
@@ -1655,6 +1680,7 @@ impl Wizard {
                     name: String::new(),
                     resources: ResourcesDraft::default(),
                     storage: StorageDraft::default(),
+                    wal_commit_delay: None,
                 });
                 self.selected = self.draft.groups.len() - 1;
             }
@@ -1670,6 +1696,7 @@ impl Wizard {
                     bootstrap: true,
                     resources: ResourcesDraft::default(),
                     storage: StorageDraft::default(),
+                    wal_commit_delay: None,
                 });
                 self.selected = self.draft.nodes.len() - 1;
             }
@@ -1835,8 +1862,8 @@ mod tests {
              resources: {cores: 4, memory: 4Gi}\nnodes:\n  - {name: hyperion, address: 172.16.2.5}\n  - {name: titan, address: 172.16.2.4}\n  - {name: europa, address: 172.16.2.10}\n",
         );
         let groups = parse(
-            "name: lab\nreplication_factor: 2\nstorage: {latency: /srv/shoal/logs}\n\
-             groups:\n  small: {resources: {cores: 4, exclude_cores: [3]}, storage: {latency: /mnt/nvme/shoal, throughput: /mnt/bulk/shoal}}\n  big: {storage: {throughput: /mnt/raid/shoal}}\n\
+            "name: lab\nreplication_factor: 2\nfailover: 2s\nwal_commit_delay: 1ms\nstorage: {latency: /srv/shoal/logs}\n\
+             groups:\n  small: {resources: {cores: 4, exclude_cores: [3]}, storage: {latency: /mnt/nvme/shoal, throughput: /mnt/bulk/shoal}, wal_commit_delay: 3ms}\n  big: {storage: {throughput: /mnt/raid/shoal}}\n\
              bootstrap: [c, a]\nnodes:\n  - {name: a, address: 10.0.0.1, group: small}\n  - {name: b, ssh: ops@b, group: big, storage: {latency: /mnt/b/shoal}}\n  - {name: c, address: 10.0.0.3, resources: {cores: 2, memory: 1Gi, control_core_shared: true}}\n",
         );
         for inventory in [lab, groups] {
@@ -1846,6 +1873,34 @@ mod tests {
             assert!(issues.is_empty(), "{issues:?}");
             assert_eq!(built, inventory);
         }
+    }
+
+    /// The failover base is a field: typed, blanked and refused where the engine would refuse it
+    #[test]
+    fn the_failover_base_is_a_field() {
+        let inventory = parse(
+            "name: lab\nreplication_factor: 1\nnodes:\n  - {name: a, address: 10.0.0.1}\n",
+        );
+        let mut draft = Draft::from_inventory(&inventory);
+        assert_eq!(draft.failover, "");
+        // typed, it is the inventory's
+        draft.failover = "1500ms".to_string();
+        let (built, issues) = draft.build(Path::new("/"));
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(built.failover.as_deref(), Some("1500ms"));
+        // blank, it is the engine's
+        draft.failover = "  ".to_string();
+        let (built, _) = draft.build(Path::new("/"));
+        assert_eq!(built.failover, None);
+        // under the engine's 100ms it is an error on the field itself
+        draft.failover = "50ms".to_string();
+        let (_, issues) = draft.build(Path::new("/"));
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.field == Some(FieldId::Failover)),
+            "{issues:?}"
+        );
     }
 
     /// Typing a cluster in page by page builds the inventory it describes

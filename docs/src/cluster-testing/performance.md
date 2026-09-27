@@ -276,3 +276,46 @@ applied in the same change.
 
 **How to compare two builds on this lab.** Interleave the arms and reverse the order, A B B A or
 two pairs each way. Compare means, never a single pair.
+
+## O74's remainder
+
+[O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)
+left two things: the archive pass's 50% live threshold was hardcoded, and neither a merge nor a
+pass sorted its reads by offset. The threshold is now `archive_pass_live_percent`. The sort was
+built and measured: the same tree with and without it, A B B A, 180 s of O74's rewrite-heavy mix
+(get 40, update 45, insert 15) each (`target/lab/r11/benchab2.sh`):
+
+| Arm | Sorted | Not sorted |
+| --- | --- | --- |
+| 1 and 4 | 35,606 and 34,863 ops/s | |
+| 2 and 3 | | 36,136 and 36,450 ops/s |
+
+The difference is inside the lab's spread and, if anything, against the sort. With 16 to 32 reads
+in flight on NVMe the order they are asked in does not matter, so the sort was taken out again.
+Eight archive passes a host ran over 5 s in the four arms: 5.6 s on titan and 8.9 s on hyperion on
+average, nearly all of it reading.
+
+## Who leads the busiest groups
+
+`Stats` could not say which member does a cluster's write work: every member applies every row.
+It now names each member's eight busiest led groups by writes a second
+(`NodeStats::hot_groups`), and the memory the eviction budget leaves out. Under the default bench
+on the lab:
+
+```text
+memory               rows       budget     resident
+22c7a330         339.6MiB       8.0GiB       2.9GiB
+
+busiest groups     table                led by           writes/s      bytes/s
+8c070e01d3d921af   Movie                6e70a2bd             1.1k   469.8KiB/s
+a9d80c97999fdf1c   Movie                6e70a2bd             1.1k   466.5KiB/s
+```
+
+Rows are a tenth of what the process holds. The busiest groups write within a few percent of each
+other.
+
+That was the tool [O64](../appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)
+was waiting for: whether the load's bimodal throughput depends on which host leads the hottest
+groups. Five fresh bootstraps loaded at 39,389 to 49,856 rows a second, and the spread of the
+busiest groups' leaders did not follow the rate. The fastest and the two slowest runs each had
+europa leading five of the ten. The mode is still unexplained.
