@@ -81,6 +81,14 @@ Throughput, not service time, so read the `queries/s` column rather than the per
   [item 71](../appendix/known-issues.md) records that it reaches the archive *map's* intent log and
   not the archive writers themselves, which use glommio's defaults. The sweep is on the page and it
   is expected to be flat. Do not spend time on this section until that item is closed.
+- **`throughput_sensitive.archive_pass_interval` and `archive_pass_bytes`** pace the archive passes
+  that reclaim the space a rewritten row leaves behind
+  ([O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench)).
+  A pass copies the live rows out of every archive under half live. A longer interval lets archives
+  get deadder first, so each pass copies less for the same space, and holds more dead bytes on
+  disk meanwhile. The budget bounds how long one pass holds the compactor, and so how long a
+  snapshot cut queued behind it waits. On the lab's Zen1 nodes under a rewrite-heavy bench,
+  5 minutes against 1 minute moved throughput and p99 within the runs' noise.
 - **`networking.max_frame_bytes`** bounds one batch, and a frame length is used as an allocation size
   before the body arrives — so it is a bound on what one client can make a shard allocate as much as
   it is a bound on a batch. Lower it if you do not trust your clients; the sweep says what it costs

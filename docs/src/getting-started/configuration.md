@@ -91,6 +91,8 @@ storage:
         path: "/opt/shoal"
         buffer_size: "128KiB"
         write_behind: 4
+        archive_pass_bytes: "16MiB"  # what one archive pass copies before it yields (O74)
+        archive_pass_interval: 1m    # least time between the starts of two archive passes
   flush_interval: 1ms                # longest a busy shard leaves a staged write unwritten
   tables:                            # per-table overrides, keyed by table name
     movies:
