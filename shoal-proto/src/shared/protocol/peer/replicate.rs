@@ -116,6 +116,14 @@ pub enum ReplicateKind {
     /// not know this kind never receives it
     /// ([Resolved #144](../../../../../docs/src/appendix/resolved/post-heal-elections.md)).
     PreVote = 11,
+    /// Ask a member whether it may take a group's lead now
+    ///
+    /// Carries no payload. A member under its append reserve answers no. A leader asks before it
+    /// hands a group back to its placement primary, since a transfer once started stops the
+    /// leader's heartbeats and forwards its writes until someone leads, and cannot be taken back
+    /// ([Resolved #156](../../../../../docs/src/appendix/resolved/wal-failure-stops-the-node.md)).
+    /// A build that does not know it answers an error, which the asker takes as yes.
+    MayLead = 12,
 }
 
 impl ReplicateKind {
@@ -144,6 +152,7 @@ impl ReplicateKind {
             9 => Ok(ReplicateKind::Retired),
             10 => Ok(ReplicateKind::TransferLeader),
             11 => Ok(ReplicateKind::PreVote),
+            12 => Ok(ReplicateKind::MayLead),
             unknown => Err(ProtocolError::UnknownReplicateKind(unknown)),
         }
     }
@@ -163,6 +172,7 @@ impl ReplicateKind {
             ReplicateKind::Retired => "retired",
             ReplicateKind::TransferLeader => "transfer_leader",
             ReplicateKind::PreVote => "pre_vote",
+            ReplicateKind::MayLead => "may_lead",
         }
     }
 }

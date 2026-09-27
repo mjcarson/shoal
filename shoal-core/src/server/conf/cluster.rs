@@ -752,6 +752,11 @@ fn default_concurrent_streams() -> u32 {
     2
 }
 
+/// The default least log a move's destination is fed a snapshot in place of, 64 MiB
+fn default_snapshot_feed_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+
 /// The default bytes a node keeps free on its storage above what a stream would land
 fn default_disk_reserve() -> u64 {
     1024 * 1024 * 1024
@@ -831,6 +836,17 @@ pub struct Migration {
         deserialize_with = "utils::deserialize_byte_size_u64"
     )]
     pub disk_reserve: u64,
+    /// The fewest bytes of log a move's destination would be fed from before it is fed a
+    /// snapshot instead, when the log is also more than twice what the set's archives hold
+    ///
+    /// A snapshot step costs a cut, a stream and an install whatever the set's size, so a short
+    /// log is cheaper to replay; a long one, every overwrite of a load included, is not
+    /// ([Resolved #170](../../../../docs/src/appendix/resolved/uncached-log-reads.md)).
+    #[serde(
+        default = "default_snapshot_feed_bytes",
+        deserialize_with = "utils::deserialize_byte_size_u64"
+    )]
+    pub snapshot_feed_bytes: u64,
 }
 
 impl Default for Migration {
@@ -844,6 +860,7 @@ impl Default for Migration {
             stream_bytes_per_sec: default_stream_bytes_per_sec(),
             concurrent_streams: default_concurrent_streams(),
             disk_reserve: default_disk_reserve(),
+            snapshot_feed_bytes: default_snapshot_feed_bytes(),
         }
     }
 }

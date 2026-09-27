@@ -69,9 +69,11 @@ in `server/shard/groups.rs`, the same `statvfs` the snapshot reserve reads). Und
 
 - **It leads nothing.** Every group the shard leads is handed to the voter furthest along
   (`hand_off_leadership`, the planned stop's handoff), again every five seconds for a lead an
-  election gave back. It refuses `TransferLeader`, so the placement's handback
-  ([O63](../optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary)) cannot
-  bring one back, and the handback itself stands down on the node.
+  election gave back. Its groups stand for no election (`runtime_config().elect(false)`, as an
+  isolated shard's do). The placement's handback
+  ([O63](../optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary)) asks
+  a primary `MayLead` before it transfers a group to it, and the node answers no. Its own
+  handback stands down.
 - **It appends nothing it would lead.** A write it would append as a leader is refused `NotLeader`
   before `client_write`. Writes through it to groups led elsewhere hop as ever.
 - **It takes no entries.** An `AppendEntries` that carries entries for a durable group is answered
@@ -133,6 +135,14 @@ what it needs (`wait_on_group` in `server/shard/reads.rs`), so a client asks ano
   openraft sees the entries.
 - **Shedding only the writes the node proposes.** A follower appends every write its leaders
   commit, so its disk goes on filling at the same rate, and it stops anyway.
+- **Refusing `TransferLeader` on the node.** This was the first cut. openraft's leader, once it
+  starts a transfer, forwards every write to the target and sends no heartbeat, and nothing
+  takes the transfer back but a new leader. A refused transfer leaves the group with no working
+  leader until an election timeout. **Reproduced** by the fixture test with the refusal put back
+  and the probe taken out: a write to a group node one had led took 9.39 s. The child logs showed
+  the group handed back at 11:01:15.27 and elected again at 11:01:23.57. So the question is
+  asked before a transfer begins, and a transfer that reaches the node anyway is taken, and
+  handed on again at the next check.
 - **Asking the control leader to decommission the node.** A plan moves its sets off, which needs
   space on the others and minutes a set, and it is an operator's decision. The reserve is what
   holds while that decision is made.
@@ -141,6 +151,9 @@ what it needs (`wait_on_group` in `server/shard/reads.rs`), so a client asks ano
 
 - **A shard never serves on after its WAL failed.**
 - **Recovery from a failed WAL is a restart**, which reads back only what is durable.
+- **A transfer is never refused.** A leader that has begun one cannot take it back. Whether a
+  member may lead is asked before (`MayLead`), and a member that took a lead it should not have
+  hands it on.
 - **Under the reserve, nothing is refused after it reached openraft.** A write is refused before
   `client_write`, and entries are refused at the RPC before `append_entries`. A storage error
   inside openraft is still fatal to the group's core.
@@ -162,7 +175,7 @@ what it needs (`wait_on_group` in `server/shard/reads.rs`), so a client asks ano
 | Test | What breaks if this is reverted |
 | --- | --- |
 | `a_node_whose_wal_cannot_be_written_stops` (`shoal/tests/cluster_fixture.rs`) | A node whose WAL cannot be written stays up, taking nothing |
-| `a_node_under_the_append_reserve_leads_nothing_and_serves` (the same file) | A node under the reserve keeps its leads, takes one back, or does not catch up once there is space |
+| `a_node_under_the_append_reserve_leads_nothing_and_serves` (the same file) | A node under the reserve keeps its leads, takes one back, or does not catch up once there is space; or a handback toward it leaves a group leaderless (a write to any group it had led takes over 3 s) |
 | Fill a node's disk ([cluster testing](../../cluster-testing/correctness.md#fill-a-nodes-disk)) | The node lingers as a member whose copies are dead |
 
 ## Related

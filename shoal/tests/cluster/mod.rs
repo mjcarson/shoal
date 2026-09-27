@@ -168,6 +168,8 @@ pub struct ClusterBuilder {
     retire_after_ms: Option<u64>,
     /// How far behind a learner may be when it is made a voter, if set
     catchup_lag: Option<u64>,
+    /// The least log a move's destination is fed a snapshot in place of, if set
+    snapshot_feed_bytes: Option<u64>,
     /// How long one phase of a move may take, in milliseconds, if shortened
     migration_timeout_ms: Option<u64>,
     /// How long a write's identity may be retried within, in milliseconds, if shortened
@@ -509,6 +511,16 @@ impl ClusterBuilder {
     /// * `entries` - The lag
     pub fn catchup_lag(mut self, entries: u64) -> Self {
         self.catchup_lag = Some(entries);
+        self
+    }
+
+    /// Set the least log a move's destination is fed a snapshot in place of
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The floor
+    pub fn snapshot_feed_bytes(mut self, bytes: u64) -> Self {
+        self.snapshot_feed_bytes = Some(bytes);
         self
     }
 
@@ -1026,6 +1038,7 @@ impl Cluster {
             repair_timeout_ms: None,
             retire_after_ms: None,
             catchup_lag: None,
+            snapshot_feed_bytes: None,
             migration_timeout_ms: None,
             retry_window_ms: None,
             auto_remove_after_ms: None,
@@ -2035,6 +2048,7 @@ fn build_membership_cluster(
             snapshot_timeout_ms: builder.snapshot_timeout_ms,
             retire_after_ms: builder.retire_after_ms,
             catchup_lag: builder.catchup_lag,
+            snapshot_feed_bytes: builder.snapshot_feed_bytes,
             migration_timeout_ms: builder.migration_timeout_ms,
             retry_window_ms: builder.retry_window_ms,
             move_crash_at: None,

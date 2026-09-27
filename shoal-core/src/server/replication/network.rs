@@ -1251,6 +1251,24 @@ impl ShardPeer {
             .map_err(|error| RpcFailure::Remote(format!("decoding an applied answer: {error}")))
     }
 
+    /// Ask the member whether it may take a group's lead now
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `deadline` - How long to wait
+    ///
+    /// # Errors
+    ///
+    /// Says whether the peer refused it or could not be reached.
+    pub async fn may_lead(&self, group: GroupId, deadline: Duration) -> Result<bool, RpcFailure> {
+        let bytes = self
+            .rpc(ReplicateKind::MayLead, group, Vec::new(), deadline)
+            .await?;
+        postcard::from_bytes::<bool>(&bytes)
+            .map_err(|error| RpcFailure::Remote(format!("decoding a may-lead answer: {error}")))
+    }
+
     /// Ask the member whether its retired copy of a group is gone
     ///
     /// # Arguments
