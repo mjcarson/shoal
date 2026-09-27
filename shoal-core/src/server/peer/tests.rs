@@ -55,6 +55,7 @@ fn two_nodes(cluster: ClusterId, a: NodeId, b: NodeId) -> MapCell {
         shards_failed: Vec::new(),
         quarantined: Vec::new(),
         phase: MemberPhase::Member,
+        lead_weight: 0,
     };
     let map = TabletMap {
         version: 1,
@@ -594,4 +595,83 @@ fn unacked_timeout_is_set_on_the_socket() {
     };
     assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
     assert_eq!(millis, 5000);
+}
+
+/// A connection the network cut is judged cut off once its timer fired and nothing came back
+/// ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md))
+#[test]
+fn a_cut_connection_is_judged_cut_off() {
+    let cut = super::TcpSample {
+        unacked: 12,
+        backoff: 1,
+        retransmits: 1,
+        last_ack_recv_ms: 600,
+        rtt_us: 150,
+    };
+    assert!(cut.cut_off());
+}
+
+/// Nothing the kernel says about a slow or lossy peer is taken for a cut
+#[test]
+fn a_slow_or_lossy_peer_is_not_cut_off() {
+    use super::{TcpSample, KERNEL_SILENCE};
+    let base = TcpSample {
+        unacked: 12,
+        backoff: 1,
+        retransmits: 1,
+        last_ack_recv_ms: 600,
+        rtt_us: 150,
+    };
+    // nothing outstanding is nothing unanswered
+    assert!(!TcpSample { unacked: 0, ..base }.cut_off());
+    // loss recovered by fast retransmit never fires the timer
+    assert!(!TcpSample {
+        backoff: 0,
+        retransmits: 0,
+        ..base
+    }
+    .cut_off());
+    // a peer acknowledging, however slowly its process answers, is heard
+    assert!(!TcpSample {
+        last_ack_recv_ms: 20,
+        ..base
+    }
+    .cut_off());
+    // a long round trip needs four of them without an acknowledgement, not the floor
+    let far = TcpSample {
+        rtt_us: 200_000,
+        last_ack_recv_ms: 600,
+        ..base
+    };
+    assert!(!far.cut_off());
+    assert!(TcpSample {
+        last_ack_recv_ms: 801,
+        ..far
+    }
+    .cut_off());
+    // and the floor itself
+    let floor = u32::try_from(KERNEL_SILENCE.as_millis()).expect("a small floor");
+    assert!(!TcpSample {
+        last_ack_recv_ms: floor - 1,
+        ..base
+    }
+    .cut_off());
+    assert!(TcpSample {
+        last_ack_recv_ms: floor,
+        ..base
+    }
+    .cut_off());
+}
+
+/// A real socket's figures can be read, and a fresh idle one is not cut off
+#[test]
+fn a_socket_can_be_sampled() {
+    use std::os::fd::AsRawFd;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let client = std::net::TcpStream::connect(listener.local_addr().expect("an address"))
+        .expect("a connection");
+    let sample = super::TcpSample::read(client.as_raw_fd()).expect("tcp_info");
+    assert!(!sample.cut_off(), "{sample:?}");
+    // a descriptor that is not a socket is an error, never a verdict
+    assert!(super::TcpSample::read(-1).is_err());
 }

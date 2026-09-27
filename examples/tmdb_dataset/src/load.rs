@@ -82,6 +82,13 @@ pub struct LoadArgs {
     /// How many of the loaded movies to read back and check, zero for none
     #[clap(long, default_value_t = 10_000)]
     pub verify: usize,
+    /// Print the load's rate over each interval of this many seconds, zero for none
+    ///
+    /// The whole load's rate is one average, and a load that changes pace partway through
+    /// looks the same in it as one that never did; a series shows where it changed
+    /// ([O64](../../../docs/src/appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)).
+    #[clap(long, default_value_t = 10)]
+    pub series: u64,
 }
 
 impl LoadArgs {
@@ -762,6 +769,14 @@ async fn write_all(
     let started = Instant::now();
     // the load's own reads, of which there are none, are served as the client's defaults say
     let (senders, handles) = spawn_workers(clients, &SendOptions::new(), args, counts);
+    // the load's pace over each interval, beside the one average the end prints
+    let series = (args.series > 0).then(|| {
+        tokio::spawn(print_series(
+            counts.clone(),
+            Duration::from_secs(args.series),
+            started,
+        ))
+    });
     // parse the csv off the runtime: it is a half gigabyte of blocking work, and leaving it on a
     // worker thread would starve the tasks draining the responses
     let reader = tokio::task::spawn_blocking({
@@ -778,6 +793,10 @@ async fn write_all(
         .await
         .wrap_err("the load stopped; loading is idempotent, so run it again to finish")?;
     let ids = read??;
+    // the series stops with the load it describes
+    if let Some(series) = series {
+        series.abort();
+    }
     report("wrote", counts.inserted.load(Ordering::Relaxed), started);
     // a skipped row is worth saying out loud, since it is data that is not in the database
     let skipped = counts.skipped.load(Ordering::Relaxed);
@@ -857,6 +876,29 @@ async fn verify(
         bail!("{} of {requested} movies read back were not found", requested - retrieved);
     }
     Ok(())
+}
+
+/// Print the rows acknowledged over each interval, until aborted
+///
+/// # Arguments
+///
+/// * `counts` - The counters the workers record what was written in
+/// * `every` - The interval
+/// * `started` - When the load began, which the printed times are from
+async fn print_series(counts: Arc<Counts>, every: Duration, started: Instant) {
+    let mut last = counts.inserted.load(Ordering::Relaxed);
+    let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    loop {
+        ticks.tick().await;
+        // the rows acknowledged since the last tick, as a rate over the interval
+        let now = counts.inserted.load(Ordering::Relaxed);
+        let rate = (now - last) as f64 / every.as_secs_f64();
+        last = now;
+        println!(
+            "  at {:>4}s {rate:>8.0} rows/s",
+            started.elapsed().as_secs()
+        );
+    }
 }
 
 /// Prints what a phase did and how long it took

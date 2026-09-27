@@ -494,6 +494,8 @@ pub struct GroupDraft {
     pub storage: StorageDraft,
     /// The WAL commit delay an inventory being edited named for it, kept as it was
     pub wal_commit_delay: Option<String>,
+    /// The lead weight an inventory being edited named for it, kept as it was (F58)
+    pub lead_weight: Option<u32>,
 }
 
 /// A node as the wizard edits it
@@ -515,6 +517,8 @@ pub struct NodeDraft {
     pub storage: StorageDraft,
     /// The WAL commit delay an inventory being edited named for it, kept as it was
     pub wal_commit_delay: Option<String>,
+    /// The lead weight an inventory being edited named for it, kept as it was (F58)
+    pub lead_weight: Option<u32>,
 }
 
 /// An inventory as the wizard edits it: every field as typed
@@ -681,6 +685,7 @@ impl Draft {
                     .unwrap_or_default(),
                 storage: StorageDraft::from_spec(group.storage.as_ref()),
                 wal_commit_delay: group.wal_commit_delay.clone(),
+                lead_weight: group.lead_weight,
             })
             .collect();
         // then the nodes, naming their group by that identity
@@ -709,6 +714,7 @@ impl Draft {
                     .unwrap_or_default(),
                 storage: StorageDraft::from_spec(node.storage.as_ref()),
                 wal_commit_delay: node.wal_commit_delay.clone(),
+                lead_weight: node.lead_weight,
             })
             .collect();
         Draft {
@@ -832,6 +838,7 @@ impl Draft {
                     .then(|| group.resources.build(&at, &mut issues)),
                 storage: group.storage.build(),
                 wal_commit_delay: group.wal_commit_delay.clone(),
+                lead_weight: group.lead_weight,
             };
             if groups.insert(group.name.trim().to_string(), spec).is_some() {
                 issues.push(at.error(
@@ -872,6 +879,7 @@ impl Draft {
                     .then(|| node.resources.build(&at, &mut issues)),
                 storage: node.storage.build(),
                 wal_commit_delay: node.wal_commit_delay.clone(),
+                lead_weight: node.lead_weight,
             });
             // a name is what every command addresses the node by
             if node.name.trim().is_empty() {
@@ -1681,6 +1689,7 @@ impl Wizard {
                     resources: ResourcesDraft::default(),
                     storage: StorageDraft::default(),
                     wal_commit_delay: None,
+                    lead_weight: None,
                 });
                 self.selected = self.draft.groups.len() - 1;
             }
@@ -1697,6 +1706,7 @@ impl Wizard {
                     resources: ResourcesDraft::default(),
                     storage: StorageDraft::default(),
                     wal_commit_delay: None,
+                    lead_weight: None,
                 });
                 self.selected = self.draft.nodes.len() - 1;
             }

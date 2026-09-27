@@ -313,6 +313,25 @@ pub struct NodeStats {
     /// count - the archive maps, the logs' caches, the groups' state and every buffer
     #[serde(default)]
     pub resident_bytes: u64,
+    /// WAL batches synced per second over the last interval, one `fdatasync` each
+    #[serde(default)]
+    pub wal_syncs_per_sec: f64,
+    /// WAL bytes synced per second over the last interval
+    #[serde(default)]
+    pub wal_bytes_per_sec: f64,
+    /// Segments the shards' WALs hold
+    #[serde(default)]
+    pub wal_segments: u64,
+    /// Sealed segments handed to a compactor and not yet merged by every table in them: the
+    /// compactors' backlog, in segments
+    #[serde(default)]
+    pub compacting_segments: u64,
+    /// Entries committed and not yet applied, over every copy the node hosts
+    #[serde(default)]
+    pub apply_lag: u64,
+    /// Bytes proposed through the node and not yet answered
+    #[serde(default)]
+    pub pending_bytes: u64,
 }
 
 /// How busy one group a node leads was over the last interval
@@ -353,6 +372,12 @@ impl NodeStats {
             memory_bytes: 0,
             memory_budget: 0,
             resident_bytes: 0,
+            wal_syncs_per_sec: 0.0,
+            wal_bytes_per_sec: 0.0,
+            wal_segments: 0,
+            compacting_segments: 0,
+            apply_lag: 0,
+            pending_bytes: 0,
         }
     }
 

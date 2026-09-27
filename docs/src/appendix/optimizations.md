@@ -3547,3 +3547,29 @@ the rest a poll each). On the lab, hyperion's storage delayed 50 ms again
 while each group's first wait ran out, and held at 107–253 ms for the rest of it, where it had
 been 1,022 ms throughout. Throughput was 50–79k operations a second, as before, and all 540,837
 acknowledged inserts were read back through each member.
+
+### O77. An abandoned proposal logs a warning when it applies
+
+| | |
+| --- | --- |
+| **Rank** | **done** — applied |
+| **Impact** | Observed — about 1,000 lines a second on titan during a load past what the cluster commits (192,332 in three minutes), each `ProgressResponder.complete_tx.send: is_ok: false` |
+| **Difficulty** | S |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | openraft's line is gone at the default levels. The proposer already answered the write `OutcomeUnknown` and counted it in `unknown_outcomes`, so nothing is lost. `RUST_LOG` brings it back |
+| **Benchmark** | none: a log volume, read from the journal (`journalctl -u shoal-tmdb \| grep -c WARN`) |
+
+Found by the [distributed cluster testing](../cluster-testing/correctness.md#13-round-12) chapter's
+#180 sweep, with the admission gate switched off on a lab build. openraft warns once for every
+entry whose proposer dropped the channel it would have been answered on. Shoal drops it for
+every write it stops waiting for: at `write_timeout`, when a silent partition's hop watch gives
+up ([#143](resolved/silent-partition-hops.md)), or when a leader falls quiet with the write
+already appended. A write piled up in openraft past its deadline is one line when it finally
+applies. Titan's storage shares its root device with the journal and `/var/log/syslog`, which
+is how openraft's debug tracing once filled it
+([round 8](../cluster-testing/correctness.md#8-an-unplaced-member-coordinates)).
+
+**Applied:** `openraft::raft::responder=error` joins the targets `server/trace.rs` holds down at
+any level that would show warnings, beside [O66](#o66-a-partitioned-peer-floods-the-log)'s and
+[O72](#o72-a-refused-snapshot-build-logs-four-lines-per-apply)'s.

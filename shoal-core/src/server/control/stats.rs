@@ -214,6 +214,8 @@ pub struct NodeStatsTracker {
     prev: HashMap<(usize, GroupId), WriteCounters>,
     /// The node's snapshot bytes sent and received as the last tick read them
     prev_stream: Option<(u64, u64)>,
+    /// The node's WAL syncs and synced bytes as the last tick read them
+    prev_wal: Option<(u64, u64)>,
     /// Every table's windows, by the name the schema spells it
     tables: BTreeMap<String, TableWindows>,
     /// The windows of every table together
@@ -328,6 +330,43 @@ impl NodeStatsTracker {
         if let Some(dt) = dt {
             stats.hot_groups = hot_groups(led_gains, dt);
         }
+        // what the WALs synced over the interval, and what they and the compactors hold now
+        // ([O64](../../../../docs/src/appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab))
+        let wal = shards.values().fold((0u64, 0u64), |(syncs, bytes), report| {
+            (
+                syncs.saturating_add(report.wal_syncs),
+                bytes.saturating_add(report.wal_bytes),
+            )
+        });
+        if let (Some(dt), Some((prev_syncs, prev_bytes))) = (dt, self.prev_wal) {
+            // a shard that started again counts from zero, which reads as its whole count
+            let syncs = wal.0.checked_sub(prev_syncs).unwrap_or(wal.0);
+            let bytes = wal.1.checked_sub(prev_bytes).unwrap_or(wal.1);
+            #[allow(clippy::cast_precision_loss)]
+            {
+                stats.wal_syncs_per_sec = syncs as f64 / dt;
+                stats.wal_bytes_per_sec = bytes as f64 / dt;
+            }
+        }
+        self.prev_wal = Some(wal);
+        stats.wal_segments = shards
+            .values()
+            .map(|report| u64::try_from(report.segments).unwrap_or(u64::MAX))
+            .sum();
+        stats.compacting_segments = shards
+            .values()
+            .map(|report| u64::try_from(report.compacting.len()).unwrap_or(u64::MAX))
+            .sum();
+        // every copy's committed entries not yet applied, which a copy behind its log shows
+        stats.apply_lag = shards
+            .values()
+            .flat_map(|report| report.groups.iter())
+            .map(|group| group.committed.saturating_sub(group.applied))
+            .sum();
+        stats.pending_bytes = shards
+            .values()
+            .map(|report| u64::try_from(report.pending_bytes).unwrap_or(u64::MAX))
+            .sum();
         stats.stream_sent = self.stream_sent.rates();
         stats.stream_received = self.stream_received.rates();
         stats.stream_sent_total = sent;

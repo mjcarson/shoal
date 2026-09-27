@@ -1017,6 +1017,15 @@ pub struct Cluster {
     /// ([F46](../../../../docs/src/features/capacity-rebalancing.md), Q8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<u32>,
+    /// This node's share of the groups' leads, against the other voters' lead weights
+    ///
+    /// Absent or zero is one, so a cluster that sets none spreads leads evenly and hands each
+    /// group back to its placement primary. A node that commits writes faster than its peers -
+    /// a faster disk, more cores - can say `lead_weight: 2` against their `1` and lead about
+    /// twice its share. This node's alone, recorded when it observes itself, so a change is a
+    /// restart ([F58](../../../../docs/src/features/weighted-leadership.md)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_weight: Option<u32>,
     /// How many slots this node claims, read once at the first claim of its directory
     ///
     /// A slot is the shard every peer records for this node: the shard in every address the
@@ -1083,6 +1092,7 @@ impl Default for Cluster {
             auto_remove_after: default_auto_remove_after(),
             admins: Vec::new(),
             weight: None,
+            lead_weight: None,
             slots: None,
             tls: None,
             transport: Transport::default(),
@@ -1200,6 +1210,16 @@ impl Cluster {
     /// * `weight` - The weight, or none for the shard count
     pub fn weight(mut self, weight: Option<u32>) -> Self {
         self.weight = weight;
+        self
+    }
+
+    /// Set this node's share of the groups' leads ([F58](../../../../docs/src/features/weighted-leadership.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `lead_weight` - The weight, or none for one
+    pub fn lead_weight(mut self, lead_weight: Option<u32>) -> Self {
+        self.lead_weight = lead_weight;
         self
     }
 

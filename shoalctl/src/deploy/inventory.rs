@@ -147,6 +147,12 @@ pub struct GroupSpec {
     /// ([O61](../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wal_commit_delay: Option<String>,
+    /// Its nodes' share of the groups' leads, against other nodes' (one if absent)
+    ///
+    /// A property of the machine, like the storage a group names: a group of faster hosts can
+    /// lead more than their share ([F58](../../../docs/src/features/weighted-leadership.md)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_weight: Option<u32>,
 }
 
 /// Where a resolved node keeps its data
@@ -223,6 +229,10 @@ pub struct NodeSpec {
     /// and the deployment's
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wal_commit_delay: Option<String>,
+    /// This node's share of the groups' leads, over its group's
+    /// ([F58](../../../docs/src/features/weighted-leadership.md))
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_weight: Option<u32>,
 }
 
 impl NodeSpec {
@@ -328,6 +338,8 @@ pub struct Node {
     pub storage: NodeStorage,
     /// Its WAL group commit delay, resolved over its group and the deployment, if any sets one
     pub wal_commit_delay: Option<String>,
+    /// Its share of the groups' leads, resolved over its group, if either sets one
+    pub lead_weight: Option<u32>,
 }
 
 impl Node {
@@ -700,6 +712,20 @@ impl Inventory {
             .or_else(|| self.wal_commit_delay.clone())
     }
 
+    /// Resolve a node's lead weight: its own or its group's
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The node
+    #[must_use]
+    pub fn resolve_lead_weight(&self, spec: &NodeSpec) -> Option<u32> {
+        // the node's own wins over its group's
+        spec.lead_weight.or_else(|| {
+            self.group_of(spec)
+                .and_then(|(_, group)| group.lead_weight)
+        })
+    }
+
     /// The names bootstrap forms the cluster from, in placement order
     #[must_use]
     pub fn bootstrap_names(&self) -> Vec<String> {
@@ -768,6 +794,7 @@ impl Inventory {
             resources,
             storage,
             wal_commit_delay: self.resolve_wal_commit_delay(spec),
+            lead_weight: self.resolve_lead_weight(spec),
         })
     }
 

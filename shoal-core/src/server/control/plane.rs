@@ -681,6 +681,7 @@ impl ControlPlane {
             physical,
             incarnation: identity.incarnation,
             weight: cluster.weight.unwrap_or(0),
+            lead_weight: cluster.lead_weight.unwrap_or(0),
             wire_min,
             wire_max,
             capabilities: CAPABILITIES,

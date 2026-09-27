@@ -114,11 +114,20 @@ fn directives_from(env: Option<String>, conf: &Tracing) -> String {
 /// machine refuses every time: 3,604 lines in five minutes on one lab node
 /// ([O72](../../../docs/src/appendix/optimizations.md#o72-a-refused-snapshot-build-logs-four-lines-per-apply)).
 ///
+/// And openraft warns once for every entry whose proposer stopped waiting for it
+/// (`ProgressResponder.complete_tx.send: is_ok: false`): a proposal abandoned at its deadline,
+/// or by the hop watch through a silent partition, each one a line when it applies. Under a load
+/// past what the cluster commits that was about a thousand lines a second on titan, whose
+/// storage shares the root device the journal writes to. The proposer already answered
+/// `OutcomeUnknown` and counted it, so the line says nothing new
+/// ([O77](../../../docs/src/appendix/optimizations.md#o77-an-abandoned-proposal-logs-a-warning-when-it-applies)).
+///
 /// `RUST_LOG` replaces the whole default, these included, so anyone who wants them back names
 /// them there.
 const QUIET_REPEATING: &str = "openraft::core::heartbeat=error,\
 openraft::engine::handler::replication_handler=error,openraft::replication=error,\
-openraft::core::sm::worker=warn,openraft::engine::handler::snapshot_handler=warn";
+openraft::core::sm::worker=warn,openraft::engine::handler::snapshot_handler=warn,\
+openraft::raft::responder=error";
 
 /// Setup local tracing to the console
 ///
@@ -763,6 +772,8 @@ mod tests {
         assert!(info.contains("openraft::core::heartbeat=error"), "{info}");
         // and the snapshot builds openraft asks for on every apply while compaction is behind (O72)
         assert!(info.contains("openraft::core::sm::worker=warn"), "{info}");
+        // and an abandoned proposal's warning as it applies (O77)
+        assert!(info.contains("openraft::raft::responder=error"), "{info}");
         // and every directive parses, or the filter would drop the whole string
         assert!(
             tracing_subscriber::EnvFilter::try_new(&info).is_ok(),

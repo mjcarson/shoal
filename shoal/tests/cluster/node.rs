@@ -267,6 +267,10 @@ pub struct StagedCluster {
     /// This node's placement weight, if the test set one
     #[serde(default)]
     pub weight: Option<u32>,
+    /// This node's share of the groups' leads, if the test set one
+    /// ([F58](../../../docs/src/features/weighted-leadership.md))
+    #[serde(default)]
+    pub lead_weight: Option<u32>,
     /// The bytes per second this node sends on snapshot streams, if the test bounded it
     #[serde(default)]
     pub stream_bytes_per_sec: Option<usize>,

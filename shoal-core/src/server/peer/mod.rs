@@ -116,6 +116,84 @@ pub fn set_unacked_timeout<S: std::os::fd::AsRawFd>(
     }
 }
 
+/// How long a connection's sent data must go unacknowledged before the kernel's word counts
+///
+/// A peer the network has cut off acknowledges nothing, and the kernel says so as soon as its
+/// retransmission timer has fired once: a few hundred milliseconds, against the second and a
+/// half the replication lane's silence takes at the default failover base. A peer that is only
+/// slow (a loaded host, a slow disk, a long queue in the process) still acknowledges every
+/// segment, because the kernel does that whatever the process is doing, so this never takes a
+/// busy leader for a cut one ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)).
+pub const KERNEL_SILENCE: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// What the kernel says about a TCP connection's sending side
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TcpSample {
+    /// Segments sent and not yet acknowledged
+    pub unacked: u32,
+    /// How many times the retransmission timer has backed off since the last acknowledgement
+    pub backoff: u8,
+    /// Retransmissions by timer not yet recovered
+    pub retransmits: u8,
+    /// Milliseconds since an acknowledgement was last received
+    pub last_ack_recv_ms: u32,
+    /// The smoothed round trip, in microseconds
+    pub rtt_us: u32,
+}
+
+impl TcpSample {
+    /// Read a connection's figures from the kernel
+    ///
+    /// # Arguments
+    ///
+    /// * `fd` - The connection's socket
+    ///
+    /// # Errors
+    ///
+    /// Fails as `getsockopt` does.
+    pub fn read(fd: std::os::fd::RawFd) -> std::io::Result<Self> {
+        // SAFETY: tcp_info is plain integers, so all zeroes is a valid value to be filled in
+        let mut info: libc::tcp_info = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
+        // SAFETY: the pointer and length describe `info`, which outlives the call, and a closed
+        // or reused descriptor fails or answers for another socket rather than writing past it
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_INFO,
+                std::ptr::from_mut(&mut info).cast(),
+                &raw mut len,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(TcpSample {
+            unacked: info.tcpi_unacked,
+            backoff: info.tcpi_backoff,
+            retransmits: info.tcpi_retransmits,
+            last_ack_recv_ms: info.tcpi_last_ack_recv,
+            rtt_us: info.tcpi_rtt,
+        })
+    }
+
+    /// Whether the kernel's figures say the peer is cut off rather than slow
+    ///
+    /// Data is outstanding, the retransmission timer has fired at least once without an
+    /// acknowledgement, and none has come for [`KERNEL_SILENCE`] or four round trips, whichever
+    /// is longer. Loss the network recovers from by fast retransmit never fires the timer, and a
+    /// slow peer's kernel keeps acknowledging, so neither is taken for a cut.
+    #[must_use]
+    pub fn cut_off(&self) -> bool {
+        let quiet = std::time::Duration::from_millis(u64::from(self.last_ack_recv_ms));
+        let round_trips = std::time::Duration::from_micros(u64::from(self.rtt_us) * 4);
+        self.unacked > 0
+            && (self.backoff > 0 || self.retransmits > 0)
+            && quiet >= KERNEL_SILENCE.max(round_trips)
+    }
+}
+
 pub use link::{Frame, FrameKey, Link, LinkEvent, LinkView};
 pub use listener::{peer_acceptor, ListenerContext, ReplicateReply};
 pub use peers::{Peers, Pending};

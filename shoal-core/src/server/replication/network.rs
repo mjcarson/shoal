@@ -155,12 +155,21 @@ impl ReplicationLink {
     /// # Arguments
     ///
     /// * `after` - How long silence has to last to count
+    ///
+    /// Or for less, once the kernel says the peer is cut off: a connection whose data has gone
+    /// unacknowledged past a fired retransmission timer is not a slow peer, whose kernel would
+    /// have acknowledged it. The kernel is asked only once requests have waited
+    /// [`peer::KERNEL_SILENCE`], so a link that answers never pays for the call
+    /// ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)).
     #[must_use]
     pub fn silent_for(&self, after: Duration) -> Option<Duration> {
-        self.waiting_since
-            .get()
-            .map(|since| since.elapsed())
-            .filter(|silent| *silent >= after)
+        let silent = self.waiting_since.get()?.elapsed();
+        // silence as long as asked for is silence, whatever the kernel says
+        if silent >= after {
+            return Some(silent);
+        }
+        // shorter silence counts only on the kernel's word that nothing is being acknowledged
+        (silent >= peer::KERNEL_SILENCE && self.link.cut_off()).then_some(silent)
     }
 
     /// Note that the pending set changed, keeping `waiting_since` in step with it

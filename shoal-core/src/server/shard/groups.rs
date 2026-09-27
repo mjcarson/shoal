@@ -3216,6 +3216,9 @@ where
             pending_bytes: groups.iter().map(|group| group.pending_bytes).sum(),
             volatile_bytes: replication.volatile.bytes(),
             segments: replication.wal.segments().len(),
+            // what the WAL has synced, for a node's sync and byte rates
+            wal_syncs: replication.wal.synced_batches(),
+            wal_bytes: replication.wal.synced_bytes(),
             compacting: replication
                 .compacting
                 .iter()
@@ -3350,7 +3353,10 @@ where
         }
     }
 
-    /// Hand one group this shard leads back to its placement primary, if one is due
+    /// Hand one group this shard leads to the voter its lead belongs with, if one is due
+    ///
+    /// That voter is the placement primary unless the members set lead weights
+    /// ([F58](../../../../docs/src/features/weighted-leadership.md)).
     ///
     /// The placement spreads primaries evenly over the members, and a group's lead starts there.
     /// An election, a crash or a planned stop moves it, and nothing moved it back, so after a
@@ -3422,8 +3428,10 @@ where
             {
                 continue;
             }
-            // the placement primary, when it is not this member
-            let Some(primary) = group.spec.voters.first().copied() else {
+            // the voter the lead belongs with - the placement primary unless the members'
+            // lead weights say otherwise - when it is not this member
+            // ([F58](../../../../docs/src/features/weighted-leadership.md))
+            let Some(primary) = map.preferred_leader(&group.spec) else {
                 continue;
             };
             if primary == metrics.id || !map.is_up(primary.node) || primary.node == node {
@@ -3463,7 +3471,7 @@ where
         replication
             .handed_back
             .retain(|_, tried| now.duration_since(*tried) < BALANCE_RETRY);
-        event!(Level::INFO, msg = "handing a group back to its placement primary", group = %group, to = %primary);
+        event!(Level::INFO, msg = "handing a group to the voter its lead belongs with", group = %group, to = %primary);
         let network = replication.network.clone();
         glommio::spawn_local(async move {
             // the primary is asked first: a transfer once started cannot be taken back, and one
@@ -3474,7 +3482,7 @@ where
                 .may_lead(group, MAY_LEAD_TIMEOUT)
                 .await;
             if asked == Ok(false) {
-                event!(Level::INFO, msg = "a placement primary may not lead now; its group stays here", group = %group, to = %primary);
+                event!(Level::INFO, msg = "the voter a lead belongs with may not lead now; its group stays here", group = %group, to = %primary);
                 return;
             }
             if let Err(error) = raft.trigger().transfer_leader(primary).await {
