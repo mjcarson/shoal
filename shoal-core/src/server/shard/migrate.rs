@@ -17,6 +17,7 @@
 //! arrived; `Activated` is committed only once the destination has answered that it applied
 //! past the uniform membership's index.
 
+use shoal_channel::KeptReceiver;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -208,8 +209,11 @@ impl<D: ShoalDatabase> MoveContext<D> {
                 .try_send(ControlRequest::Propose { command, reply })
                 .map_err(|_| "the control thread is not taking proposals".to_string())?;
             let remaining = PROGRESS_TIMEOUT.saturating_sub(started.elapsed());
+            // the answer's receive is kept, never raced bare: a timer that wins after the answer
+            // was handed over would drop it (Resolved #152)
+            let mut answer = KeptReceiver::new(rx.to_async());
             let answered =
-                glommio::timer::timeout(remaining, async { Ok(rx.as_async().recv().await) }).await;
+                glommio::timer::timeout(remaining, async { Ok(answer.next().await) }).await;
             last = match answered {
                 Ok(Ok(Ok(ControlResponse::Applied { .. }))) => {
                     crash_point::hit(&progress.phase, self.group);

@@ -17,6 +17,7 @@
 //! exactly what a restore installs: a version 2 file whose header names the cluster it was cut
 //! in, since a backup is refused until wire version 5 is activated.
 
+use shoal_channel::KeptReceiver;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -110,8 +111,11 @@ impl<D: ShoalDatabase> BackupContext<D> {
                 .try_send(ControlRequest::Propose { command, reply })
                 .map_err(|_| "the control thread is not taking proposals".to_string())?;
             let remaining = PROGRESS_TIMEOUT.saturating_sub(started.elapsed());
+            // the answer's receive is kept, never raced bare: a timer that wins after the answer
+            // was handed over would drop it (Resolved #152)
+            let mut answer = KeptReceiver::new(rx.to_async());
             let answered =
-                glommio::timer::timeout(remaining, async { Ok(rx.as_async().recv().await) }).await;
+                glommio::timer::timeout(remaining, async { Ok(answer.next().await) }).await;
             last = match answered {
                 Ok(Ok(Ok(ControlResponse::Applied { .. }))) => return Ok(()),
                 Ok(Ok(Ok(ControlResponse::Refused { reason, .. }))) => {

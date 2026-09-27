@@ -1195,3 +1195,21 @@ host configuration. The device's write cache was not lost: the power stayed on. 
 itself remains to be done by hand.
 
 **Verdict: pass**, with three findings, all fixed: #181, #182 and O76.
+
+## 13. Round 12
+
+Round 11 left five items on [what is left](todo.md): #180, the first second and a half of a
+silent partition (#143), #132 and #152, which had not recurred, O64's two modes, and weighted
+leadership. This round works through them on builds from `fe7d106` on. The runs are under
+`target/lab/r12/`.
+
+### A compactor job lost to a timer
+
+Reading the compactor for #152 found the cause without a lab run. Its wait for the next job
+raced a bare kanal receive against the earliest retry's timer, and kanal drops a value it has
+already handed to a waiting receive when that receive is dropped. The same race was in fourteen
+other places, the client's stream deadline among them. All fifteen now race a receive kept by
+its receiver, and a test fails on any bare receive raced in the workspace
+([Resolved #152](../appendix/resolved/kanal-receive-races.md)). The test that found it passed 36
+runs of 36 on the unfixed tree, which is the rate the item had, not evidence either way. The
+evidence is the reproduction of kanal's loss itself.

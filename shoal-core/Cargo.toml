@@ -38,6 +38,8 @@ glommio = { workspace = true }
 bytes = "1.5"
 futures = "0.3"
 kanal = { workspace = true }
+# a kanal receive that can be raced without losing what it was handed (Resolved #152)
+shoal-channel = { version = "0.1.0", path = "../shoal-channel" }
 uuid = { workspace = true }
 byte-unit = { version = "5.1", features = ["serde"] }
 deepsize2 = { workspace = true }

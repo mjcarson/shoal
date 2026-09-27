@@ -15,4 +15,7 @@
 
 pub mod client;
 
+// a kanal receive that can be raced without losing what it was handed (Resolved #152)
+pub use shoal_channel as channel;
+
 pub use client::Shoal;

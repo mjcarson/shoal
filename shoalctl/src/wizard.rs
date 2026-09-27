@@ -15,6 +15,7 @@ pub mod form;
 pub mod probe;
 pub mod view;
 
+use shoal::channel::KeptReceiver;
 use color_eyre::eyre::WrapErr;
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures::StreamExt;
@@ -180,6 +181,10 @@ async fn event_loop(
     let mut events = EventStream::new();
     let (probe_tx, probe_rx) = kanal::unbounded_async::<(String, ProbeState)>();
     let (resolve_tx, resolve_rx) = kanal::unbounded_async::<(String, Resolution)>();
+    // both answers are raced against the terminal, so their receives are kept: a bare kanal
+    // receive the select drops after an answer was handed to it drops the answer (#152)
+    let mut probes = KeptReceiver::new(probe_rx);
+    let mut resolutions = KeptReceiver::new(resolve_rx);
     loop {
         // every name bootstrap would resolve is looked up here too, once, off the loop
         spawn_resolutions(wizard, &resolve_tx);
@@ -212,10 +217,10 @@ async fn event_loop(
                     Outcome::Probe(index) => spawn_probe(wizard, index, probe_tx.clone()),
                 }
             }
-            Ok((name, state)) = probe_rx.recv() => {
+            Ok((name, state)) = probes.next() => {
                 wizard.probes.insert(name, state);
             }
-            Ok((name, resolution)) = resolve_rx.recv() => {
+            Ok((name, resolution)) = resolutions.next() => {
                 wizard.resolutions.insert(name, resolution);
             }
         }

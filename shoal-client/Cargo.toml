@@ -35,6 +35,8 @@ tokio = { workspace = true }
 rkyv = { workspace = true }
 uuid = { workspace = true }
 kanal = { workspace = true }
+# a kanal receive that can be raced without losing what it was handed (Resolved #152)
+shoal-channel = { version = "0.1.0", path = "../shoal-channel" }
 bb8 = "0.8"
 papaya = "0.2"
 async-trait = "0.1"

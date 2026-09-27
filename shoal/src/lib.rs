@@ -25,6 +25,8 @@
 #[cfg(feature = "server")]
 pub use shoal_core::{glommio, kanal, lru};
 pub use shoal_proto::{deepsize2, gxhash, rkyv, serde_json, tracing, uuid};
+// never race a bare kanal receive: race a kept one (Resolved #152)
+pub use shoal_client::channel;
 
 // The protocol: what both peers see. Present whether or not an engine is linked.
 pub use shoal_proto::shared::{self, traits};

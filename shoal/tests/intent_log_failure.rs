@@ -19,7 +19,8 @@ use rkyv::util::AlignedVec;
 use rkyv::{Archive, Deserialize, Serialize};
 use shoal::glommio::{Latency, LocalExecutorBuilder, Shares};
 use shoal::gxhash::GxHasher;
-use shoal::kanal::{self, AsyncReceiver, AsyncSender};
+use shoal::channel::LocalKeptReceiver;
+use shoal::kanal::{self, AsyncSender};
 use shoal::lru::LruCache;
 use shoal::server::conf::Conf;
 use shoal::server::messages::{Answer, QueryMetadata, ServerMsg};
@@ -129,7 +130,7 @@ struct Tables {
     /// The channel the writers and the compactors wake the shard on
     shard: (
         AsyncSender<ServerMsg<LogFailureDb>>,
-        AsyncReceiver<ServerMsg<LogFailureDb>>,
+        LocalKeptReceiver<ServerMsg<LogFailureDb>>,
     ),
 }
 
@@ -153,7 +154,9 @@ impl Tables {
         let lru: Arc<RefCell<Lru>> = Arc::new(RefCell::new(LruCache::unbounded_with_hasher(
             BuildHasherDefault::<GxHasher>::default(),
         )));
-        let shard = kanal::unbounded_async();
+        // the shard's receive is raced against a timeout, so it is kept rather than bare (#152)
+        let (shard_tx, shard_rx) = kanal::unbounded_async();
+        let shard = (shard_tx, LocalKeptReceiver::new(shard_rx));
         // build the tables, which replays any log already on disk
         let db = <LogFailureDb as ShoalDatabase>::new(
             SHARD_NAME,
@@ -171,10 +174,10 @@ impl Tables {
     }
 
     /// Wait for a writer to wake the shard, for at most ten seconds
-    async fn woken(&self) -> Outcome {
+    async fn woken(&mut self) -> Outcome {
         // glommio's own timeout, since this runs on no tokio runtime
         shoal::glommio::timer::timeout(Duration::from_secs(10), async {
-            Ok(self.shard.1.recv().await)
+            Ok(self.shard.1.next().await)
         })
         .await
         .map_err(|_| "timed out waiting for a writer to wake the shard".to_owned())?

@@ -10,6 +10,7 @@ pub mod repair;
 pub mod restore;
 mod snapshots;
 
+use shoal_channel::KeptReceiver;
 use bytes::Bytes;
 use futures::{
     io::{ReadHalf, WriteHalf},
@@ -1950,8 +1951,11 @@ where
             return;
         }
         glommio::spawn_local(async move {
+            // the answer's receive is kept, never raced bare: a timer that wins after the answer
+            // was handed over would drop it (Resolved #152)
+            let mut answer = KeptReceiver::new(rx.to_async());
             let answered =
-                glommio::timer::timeout(ADMIN_TIMEOUT, async { Ok(rx.as_async().recv().await) })
+                glommio::timer::timeout(ADMIN_TIMEOUT, async { Ok(answer.next().await) })
                     .await;
             let answer = match answered {
                 Ok(Ok(answer)) => answer,
