@@ -126,6 +126,9 @@ pub fn set_unacked_timeout<S: std::os::fd::AsRawFd>(
 /// busy leader for a cut one ([Resolved #143](../../../../docs/src/appendix/resolved/silent-partition-hops.md)).
 pub const KERNEL_SILENCE: std::time::Duration = std::time::Duration::from_millis(400);
 
+/// How many times in a row the retransmission timer must fire unanswered for a cut
+pub const KERNEL_BACKOFFS: u8 = 2;
+
 /// What the kernel says about a TCP connection's sending side
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TcpSample {
@@ -180,16 +183,20 @@ impl TcpSample {
 
     /// Whether the kernel's figures say the peer is cut off rather than slow
     ///
-    /// Data is outstanding, the retransmission timer has fired at least once without an
+    /// Data is outstanding, the retransmission timer has fired twice in a row without an
     /// acknowledgement, and none has come for [`KERNEL_SILENCE`] or four round trips, whichever
     /// is longer. Loss the network recovers from by fast retransmit never fires the timer, and a
-    /// slow peer's kernel keeps acknowledging, so neither is taken for a cut.
+    /// slow peer's kernel keeps acknowledging, so neither is taken for a cut. One firing is not
+    /// enough: at 5% loss a quiet link loses a segment and then its first retransmission several
+    /// times a second across a cluster, and the lab refused a few hundred writes a second on
+    /// that; losing two retransmissions in a row is a twentieth as likely again, and a cut
+    /// reaches it within about 600 ms of its last acknowledgement.
     #[must_use]
     pub fn cut_off(&self) -> bool {
         let quiet = std::time::Duration::from_millis(u64::from(self.last_ack_recv_ms));
         let round_trips = std::time::Duration::from_micros(u64::from(self.rtt_us) * 4);
         self.unacked > 0
-            && (self.backoff > 0 || self.retransmits > 0)
+            && (self.backoff >= KERNEL_BACKOFFS || self.retransmits >= KERNEL_BACKOFFS)
             && quiet >= KERNEL_SILENCE.max(round_trips)
     }
 }

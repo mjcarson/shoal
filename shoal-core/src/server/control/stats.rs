@@ -259,6 +259,8 @@ impl NodeStatsTracker {
         let mut seen: HashMap<(usize, GroupId), WriteCounters> = HashMap::new();
         // what every group this node leads gained, for the busiest of them
         let mut led_gains: Vec<(GroupId, String, WriteCounters)> = Vec::new();
+        // what every shard applied, over every copy it hosts
+        let mut shard_gains: BTreeMap<usize, u64> = BTreeMap::new();
         for (shard, report) in shards {
             for group in &report.groups {
                 // a group this tick has not seen before gained everything it counts, and so
@@ -269,6 +271,8 @@ impl NodeStatsTracker {
                     None => group.writes,
                 };
                 seen.insert(key, group.writes);
+                *shard_gains.entry(*shard).or_default() +=
+                    gained.inserts + gained.updates + gained.deletes;
                 let tick = ticks.entry(group.table_name.clone()).or_default();
                 // placement and size, over every copy and over the copies led
                 let tablets = u64::from(group.tablets);
@@ -329,6 +333,14 @@ impl NodeStatsTracker {
         // the busiest groups this node leads over the interval, once there is one to divide by
         if let Some(dt) = dt {
             stats.hot_groups = hot_groups(led_gains, dt);
+            // and each shard's applied rate, since one busy core can pace a node
+            #[allow(clippy::cast_precision_loss)]
+            {
+                stats.shard_writes_per_sec = shard_gains
+                    .values()
+                    .map(|gained| *gained as f64 / dt)
+                    .collect();
+            }
         }
         // what the WALs synced over the interval, and what they and the compactors hold now
         // ([O64](../../../../docs/src/appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab))

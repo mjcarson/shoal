@@ -136,6 +136,42 @@ then on the cluster served 120,000 operations a second with writes to hyperion's
 (about 22,000 a second). All 620,159 acknowledged inserts were read back through each member, and
 no node restarted.
 
+### The first second and a half, closed on the kernel's word
+
+What round 11 left was the threshold itself: a hop sent in the first second and a half waited for
+the silence to be judged, and judging it any sooner would refuse healthy leaders under load,
+whose answers queue behind their appends. The todo said to revisit it "only with a signal that is
+not silence". The kernel has one. A peer that is only slow still acknowledges every segment,
+because its kernel does that whatever its process is doing. A peer the network has cut off
+acknowledges nothing, and the sender's retransmission timer backs off.
+
+`ReplicationLink::silent_for` now asks the kernel (`peer::TcpSample`, `getsockopt(TCP_INFO)`) once
+requests have waited `KERNEL_SILENCE` (400 ms) unanswered. The link counts as silent then if its
+socket has data unacknowledged, the retransmission timer has fired `KERNEL_BACKOFFS` (two) times
+in a row without an acknowledgement, and none has arrived for 400 ms or four round trips. The link
+task records its socket's descriptor while it is up, and clears it before any other code on the
+executor can run after the socket closes. Everything that judged silence gets the kernel's
+verdict without a new path: the refusal before a hop, the watch on a hop in flight, and a
+leader's quorum check.
+
+**Measured on the lab**
+([round 12](../../cluster-testing/correctness.md#a-silent-partitions-first-second)). The first
+build fired on one timer backoff, and it failed the lab's loss test. Under 5% loss on hyperion's
+peer traffic it refused 125 to 323 writes in about half the seconds, where round 11 refused none:
+a quiet link that loses a segment and then its first retransmission is silent for about 600 ms
+several times a second across a cluster. Two backoffs in a row is a twentieth as likely again,
+and a cut reaches it within about 600 ms. Hyperion's peer ports dropped both ways under the
+mixed bench, against the load in the second before:
+
+| Second | Round 11 | One backoff | Two backoffs |
+| --- | --- | --- | --- |
+| cut | 36% | 68% | 76% |
+| +1 | 31% | 130%, hyperion's groups refused | 44% |
+| +2 | 169% | 145% | 191% |
+
+With two backoffs, 5% loss refused 80 writes in 20 seconds, 100 ms of delay refused none, 1% loss
+none, and every acknowledged insert was read back through every member after each run.
+
 ## Alternatives rejected
 
 - **Application-level pings on the replication lane.** The control thread already pings every
@@ -152,6 +188,11 @@ no node restarted.
   which the rest of the node already handles. But it fires only while data is unacknowledged, it
   closes the connection, which every lane then redials, and the judgement above was already
   there to use.
+- **Firing on one retransmission timeout.** Measured above: at 5% loss it takes a lossy link for a
+  cut several times a second.
+- **Reading another shard's sockets to corroborate a cut.** A real partition cuts every link to
+  the node at once, where loss hits one at a time. But a descriptor another executor owns can be
+  closed and reused between the check and the call, and the shard has no way to know.
 - **A short fixed deadline on hops.** A healthy leader under load commits in hundreds of
   milliseconds to seconds, and a deadline short enough to help here would fail writes to it.
   Silence while requests are outstanding is a property of the link, not of any one write.
@@ -172,6 +213,12 @@ no node restarted.
 - **`waiting_since` moves only with the pending set.** Starting it on the first outstanding
   request, never on an idle link, is what keeps a link that was merely quiet from reading as
   silent.
+- **The kernel's verdict needs two unanswered timer backoffs and a quiet past `KERNEL_SILENCE`.**
+  One backoff is what loss looks like on a quiet link. A slow peer is never cut off by it, because
+  its kernel acknowledges; do not add a signal a slow peer's process can cause.
+- **A link's descriptor is read only on the executor that owns it, and only while it is set.** The
+  link task clears it before any await after the connection ends, so no other code on that thread
+  can read a closed or reused descriptor.
 - **A peer is judged silent only after it was heard from once**, and only against ~~four~~ three of
   its own heartbeats, never under a second. A node never heard from, or one whose base is long,
   is hopped to as before.
@@ -179,8 +226,10 @@ no node restarted.
 ## Still open
 
 - ~~The first two seconds of a silent partition still hold hops to the cut-off node.~~ Closed by
-  the watch on a hop in flight and the second and a half threshold. What is left is that
-  threshold itself: hops sent in it wait until it passes.
+  the watch on a hop in flight and the second and a half threshold. ~~What is left is that
+  threshold itself: hops sent in it wait until it passes.~~ Closed in round 12 by the kernel's
+  verdict: hops sent before a cut now wait about 600 ms, the time two retransmission timeouts
+  take.
 - ~~A coordinator on the cut-off node itself still proposes locally to the groups it leads, which
   cannot commit, and waits `write_timeout` for each.~~ Closed: its leader refuses once no quorum
   of its members' nodes is in reach.
@@ -193,6 +242,7 @@ no node restarted.
 | --- | --- |
 | `a_write_to_a_silently_cut_leader_fails_fast` (`shoal/tests/cluster_fixture.rs`) | A write hopped to a leader cut off by dropped packets waits out its deadline and fails `OutcomeUnknown` |
 | `a_silent_partitions_first_seconds_hold_no_writes` (the same file) | A write hopped just before the cut, or sent through the cut-off node, waits out its deadline; a write through the quiet leader is appended |
+| `a_cut_connection_is_judged_cut_off`, `a_slow_or_lossy_peer_is_not_cut_off`, `a_socket_can_be_sampled` (`shoal-core/src/server/peer/tests.rs`) | The kernel's figures stop reading as a cut, a single backoff or an acknowledging peer is taken for one, or `TCP_INFO` cannot be read |
 | Partition one node ([cluster testing](../../cluster-testing/correctness.md#partition-one-node)) | One silently partitioned node takes the whole cluster's throughput to zero |
 
 ## Related

@@ -371,6 +371,14 @@ tests and reported no use-after-free, only gxhash reading past the end of a 13-b
 does on purpose within a page. So this stays open until it recurs on a tree with #133 fixed, or
 never does.
 
+**Looped under ASan in round 12, 169 runs, no abort.** The binary built with
+`-Zsanitizer=address -Zsanitizer-recover=address` on `f9254f5` (the tree with
+[Resolved #152](resolved/kanal-receive-races.md)) ran all fifteen tests 169 times at six threads
+on europa, beside lab loads (`target/lab/r12/132/loop.sh`). Every run reported exactly one error,
+at one address: gxhash's `get_partial_unsafe` reading past a short key. Nothing else, and no
+`tcache` abort. It has not recurred in any suite run since it was filed either, so it stays filed
+with that as its record.
+
 ### 142. Two fixture tests fail intermittently on an idle host
 
 `lost_response_retry_returns_original_result` stops at `group …'s checkpoint never reached 5:

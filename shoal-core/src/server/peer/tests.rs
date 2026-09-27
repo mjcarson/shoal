@@ -603,8 +603,8 @@ fn unacked_timeout_is_set_on_the_socket() {
 fn a_cut_connection_is_judged_cut_off() {
     let cut = super::TcpSample {
         unacked: 12,
-        backoff: 1,
-        retransmits: 1,
+        backoff: 2,
+        retransmits: 2,
         last_ack_recv_ms: 600,
         rtt_us: 150,
     };
@@ -617,11 +617,18 @@ fn a_slow_or_lossy_peer_is_not_cut_off() {
     use super::{TcpSample, KERNEL_SILENCE};
     let base = TcpSample {
         unacked: 12,
-        backoff: 1,
-        retransmits: 1,
+        backoff: 2,
+        retransmits: 2,
         last_ack_recv_ms: 600,
         rtt_us: 150,
     };
+    // a single unanswered retransmission is what a lossy link does, not a cut
+    assert!(!TcpSample {
+        backoff: 1,
+        retransmits: 1,
+        ..base
+    }
+    .cut_off());
     // nothing outstanding is nothing unanswered
     assert!(!TcpSample { unacked: 0, ..base }.cut_off());
     // loss recovered by fast retransmit never fires the timer
