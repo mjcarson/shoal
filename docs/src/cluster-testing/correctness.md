@@ -718,7 +718,7 @@ the placement does not name refusing every query `NotInitialized`. It cost 63,01
 seconds as a rebuilt hyperion started. It was fixed in the tree with a fixture test first, then
 proved here with the same scenario. Repeating it eight times found eight more defects,
 [#170](../appendix/resolved/uncached-log-reads.md) to
-[#177](../appendix/resolved/blocked-plan-retry.md) (#176 is filed, not fixed), and one optimization,
+[#177](../appendix/resolved/blocked-plan-retry.md) (#176 was filed here and fixed in [section 9](#9-a-voter-whose-log-has-a-hole)), and one optimization,
 [O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench).
 Runs 1, 2, 5 and 8 were on a cluster destroyed, bootstrapped on the build under test and loaded from
 the csv minutes before, so every group still held the load in its log; runs 3, 4, 6 and 7 followed
@@ -845,8 +845,8 @@ Run 7, on the build before that fix, then found two more:
   [#175](../appendix/resolved/stopped-group-log.md). A group stopped because the map no longer names
   it now has its log forgotten once its handle is down, and a learner copy that cannot be built is
   built again empty. A voter in the same state would still stop its node:
-  [#176](../appendix/known-issues.md#176-a-voter-whose-log-cannot-be-read-stops-its-node-at-every-start),
-  filed.
+  [#176](../appendix/resolved/unreadable-voter-log.md), filed then and fixed in
+  [section 9](#9-a-voter-whose-log-has-a-hole).
 - **A blocked plan nobody could retry.** The set failed twice and the plan was blocked by name.
   Asking for the removal again was accepted and changed nothing, so one set stayed short of its
   down voter: [#177](../appendix/resolved/blocked-plan-retry.md). Asking again now forgives the plan's

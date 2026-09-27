@@ -88,6 +88,12 @@ pub struct GroupReport {
     /// not counted as starting ([Resolved #160](../../../../docs/src/appendix/resolved/unreadable-partition-stalls-one-copy.md)).
     #[serde(default)]
     pub stalled: bool,
+    /// The floor this copy's vote is held to, if its log was lost and it has not been fed past it
+    ///
+    /// Such a copy grants no vote to a candidate behind what it held
+    /// ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor: Option<u64>,
     /// The term this shard's copy of the group is at
     ///
     /// Climbs by one per election; a copy standing for an election nobody grants climbs it
@@ -594,5 +600,14 @@ pub enum ReplicationVerb {
         fault: crate::storage::ArchiveFault,
         /// The partition
         key: u64,
+    },
+    /// Hand no sealed segment to the compactors until released, or release them
+    ///
+    /// What leaves entries past a copy's checkpoint in sealed segments, the way a compactor
+    /// hundreds of jobs behind does on the lab
+    /// ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md)).
+    HoldCompaction {
+        /// Whether to hold the handoffs, or release them
+        hold: bool,
     },
 }

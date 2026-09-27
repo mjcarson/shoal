@@ -506,19 +506,6 @@ wanted is to shed appends below a reserve with a retriable refusal, so that a ne
 keeps serving reads rather than stopping.
 
 
-### 176. A voter whose log cannot be read stops its node at every start
-
-`handle_group_up` (`shard/groups.rs`) turns a group that fails to build into a shard error, and a
-shard error ends the process, so a node with one durable voter copy whose log cannot be read never
-starts. [Resolved #175](resolved/stopped-group-log.md) builds a *learner* copy again with no log
-in that case, since a learner has no vote. A voter cannot be treated the same way yet: an emptied
-voter grants its vote to a candidate with any log, which is how [#109](resolved/volatile-majority-loss.md)
-lost committed entries, and #109's guard covers only volatile copies. What it needs: a voter
-whose log cannot be read stalls as that one copy, like an unreadable partition does since
-[#160](resolved/unreadable-partition-stalls-one-copy.md), and is repaired by its group, or is
-rebuilt empty under a guard that withholds its vote until it has caught up. Until then the node
-needs `cluster rebuild`. Found with #175 on the lab, where the copy was a learner. Established from
-the source; no voter has been seen in this state.
 ---
 
 ## Low — hygiene and documentation drift

@@ -68,7 +68,8 @@ changes: the retry ends `Moved`, with the rows on the destination.
   a failed move may never be asked again, and its segments would be held for ever.
 - **Rebuild any copy whose log cannot be read, voters included.** An emptied voter grants its vote
   to a candidate with any log, which is how [#109](volatile-majority-loss.md) lost a survivor's
-  committed entries. That needs #109's guard extended to durable copies first.
+  committed entries. That needs #109's guard extended to durable copies first. It was, as a floor
+  on the vote, by [#176](unreadable-voter-log.md), and a voter is now rebuilt too.
 
 ## Invariants to uphold
 
@@ -76,12 +77,17 @@ changes: the retry ends `Moved`, with the rows on the destination.
   forgets its log, whether a retirement or a stop.
 - **Nothing is forgotten under a live handle.** The forget waits for the shutdown, and a rebuild
   waits for the forget.
-- **Only a learner is ever built empty in place of a log it had.**
+- ~~**Only a learner is ever built empty in place of a log it had.**~~ Since
+  [#176](unreadable-voter-log.md), a durable voter is too, but only under a floor on its vote
+  written before its log is forgotten.
 
 ## Still open
 
-- **A voter whose log cannot be read still takes its node down at every start.** The node needs a
-  `rebuild`. It is filed as [#176](../known-issues.md#176-a-voter-whose-log-cannot-be-read-stops-its-node-at-every-start).
+- ~~**A voter whose log cannot be read still takes its node down at every start.** The node needs a
+  `rebuild`. It is filed as #176.~~ [Resolved #176](unreadable-voter-log.md): a durable voter is
+  built again empty through the same arm, under a floor on its vote until it is fed past what it
+  held. Reproducing it found that a hole inside one of openraft's read chunks did not stop the node
+  at all but was skipped in silence, which the same fix closes.
 
 ## Tests
 

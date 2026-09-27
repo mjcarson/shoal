@@ -290,10 +290,21 @@ fn rotation_preserves_pending_replication_requirements() {
                 assert_eq!(last.index, (round as u64 + 1) * 10 + at as u64);
             }
         }
-        // and every entry reads back whole, most of them from a sealed file
+        // and every entry reads back whole, most of them from a sealed file, each on its own:
+        // the indexes are sparse, and a read across a gap is refused as a hole
+        // ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md))
         for (at, store) in stores.iter_mut().enumerate() {
             use openraft::storage::RaftLogReader as _;
-            let entries = store.try_get_log_entries(..).await.expect("failed to read");
+            let mut entries = Vec::new();
+            for round in 0..4u64 {
+                let index = (round + 1) * 10 + at as u64;
+                entries.extend(
+                    store
+                        .try_get_log_entries(index..=index)
+                        .await
+                        .expect("failed to read"),
+                );
+            }
             assert_eq!(entries.len(), 4);
             for (round, entry) in entries.iter().enumerate() {
                 let index = (round as u64 + 1) * 10 + at as u64;
@@ -1322,5 +1333,76 @@ fn experiment_uncached_log_read_rate() {
             per_group as f64 / elapsed.as_secs_f64()
         );
         wal.close().await.expect("failed to close");
+    });
+}
+
+/// A lost segment in the middle of a group's log is a hole, found at open and refused on a read
+///
+/// A group writes three entries into each of three segments, and the middle segment is deleted
+/// as a lost file would be. Reopened, the log names the hole; a read across it fails rather than
+/// skipping the entries in it, which is how a replay over one applied the entries around it and
+/// not the ones in it; purged through the hole, the log is whole again, and a forgotten group
+/// whose vote was staged again keeps it across a reopen
+/// ([Resolved #176](../../../../docs/src/appendix/resolved/unreadable-voter-log.md)).
+#[test]
+fn a_lost_segment_is_a_hole_found_at_open() {
+    use openraft::storage::{RaftLogReader as _, RaftLogStorage as _};
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let path = dir.path().join("wal");
+        let group = GroupId(21);
+        let wal = ShardWal::open(&path, 1 << 30, 1 << 20)
+            .await
+            .expect("failed to open");
+        let mut store = wal.store(group);
+        // three entries in each of three segments
+        for first in [1u64, 4, 7] {
+            append_durably(
+                &mut store,
+                (first..first + 3).map(|index| normal(index, 32)).collect(),
+            )
+            .await;
+            wal.rotate();
+            wal.flush().await.expect("failed to flush after rotating");
+        }
+        assert_eq!(wal.hole_of(group), None, "a whole log has no hole");
+        let vote = openraft::Vote::new(4, ShardAddr::from(3));
+        store.save_vote(&vote).await.expect("failed to vote");
+        wal.close().await.expect("failed to close");
+        // the middle segment lost, as a deleted or missing file is
+        std::fs::remove_file(path.join(super::segment_name(2))).expect("failed to lose a segment");
+        let reopened = ShardWal::open(&path, 1 << 30, 1 << 20)
+            .await
+            .expect("failed to reopen");
+        assert_eq!(reopened.hole_of(group), Some((4, 6)));
+        let mut store = reopened.store(group);
+        let read = store.try_get_log_entries(1..10).await;
+        assert!(read.is_err(), "a read across the hole skipped it: {read:?}");
+        // a read that does not cross it is served
+        let tail = store
+            .try_get_log_entries(7..10)
+            .await
+            .expect("the entries past the hole are there");
+        assert_eq!(tail.len(), 3);
+        // purged through the hole, the log is whole again
+        reopened
+            .stage_purge(group, log_id(1, 6))
+            .expect("failed to stage the purge");
+        assert_eq!(reopened.hole_of(group), None);
+        // forgotten with its vote staged again, the vote outlives the log across a reopen
+        reopened.forget(group).expect("failed to forget");
+        reopened
+            .restore_vote(group, &vote)
+            .expect("failed to keep the vote");
+        reopened.flush().await.expect("failed to flush");
+        reopened.close().await.expect("failed to close");
+        let again = ShardWal::open(&path, 1 << 30, 1 << 20)
+            .await
+            .expect("failed to reopen again");
+        assert_eq!(again.vote_of(group), Some(vote), "the vote went with the log");
+        assert_eq!(again.last_log_id_of(group), None, "the log was not forgotten");
+        assert_eq!(again.hole_of(group), None);
+        again.close().await.expect("failed to close");
     });
 }
