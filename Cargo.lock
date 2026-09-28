@@ -5655,6 +5655,7 @@ dependencies = [
 name = "shoalctl"
 version = "0.1.0"
 dependencies = [
+ "byte-unit",
  "clap",
  "color-eyre",
  "crossterm",

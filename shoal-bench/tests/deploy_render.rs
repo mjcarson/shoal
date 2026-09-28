@@ -34,6 +34,7 @@ fn inventory(dir: &std::path::Path) -> Inventory {
     let server = std::env::current_exe().expect("the test binary");
     let yaml = format!(
         "name: render\nserver: {server}\nremote_dir: {dir}\nreplication_factor: 1\ncontrol_voters: 1\nretire_after: 15s\nfailover: 1500ms\n\
+         replication: {{retained_entries: 5000, retained_bytes: 32MiB, snapshot_timeout: 10m}}\n\
          ports: {{client: {CLIENT_PORT}, peer: {peer}, control: {control}}}\n\
          resources: {{cores: 1, memory: 512Mi, control_core_shared: true}}\n\
          nodes:\n  - {{name: a, address: 127.0.0.1}}\n  - {{name: b, address: 127.0.0.2}}\n\
@@ -107,6 +108,11 @@ fn a_rendered_node_claims_starts_and_initializes() {
         conf.cluster.as_ref().unwrap().primary_failover_after.duration(),
         std::time::Duration::from_millis(1500)
     );
+    // and the retention and snapshot deadline it names reach the replication block
+    let replication = &conf.cluster.as_ref().unwrap().replication;
+    assert_eq!(replication.retained_entries, 5_000);
+    assert_eq!(replication.retained_bytes, 32 * 1024 * 1024);
+    assert_eq!(replication.snapshot_timeout.duration(), Duration::from_secs(600));
     // a join file for the second node validates too, against the same authority
     let second = render::render(
         &inventory,

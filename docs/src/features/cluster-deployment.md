@@ -85,6 +85,13 @@ An inventory is YAML, one per cluster (`shoalctl/src/deploy/inventory.rs`). It n
   [cluster testing](../cluster-testing/performance.md#failover-time-against-primary_failover_after)
   chapter to measure failover against it. The wizard keeps an inventory's value when it edits one
   and has no field for it yet;
+- since round 13 of the cluster testing, a `replication:` block with `retained_entries`,
+  `retained_bytes` and `snapshot_timeout`, rendered into every node's `cluster.replication`. A
+  deployment whose sets are large sets these so that a move's step outlasts neither
+  ([round 13](../cluster-testing/correctness.md#14-round-13)). `validate` refuses a byte size the
+  engine's parser would not read, a deadline without a unit, and zero entries. The engine also
+  refuses a `retained_bytes` under two WAL segments (20 MiB by default), at the claim. The wizard
+  keeps the block when it edits an inventory, and has no fields for it;
 - the hosts, as a name, an ssh target and an address;
 - optionally, the bootstrap set.
 

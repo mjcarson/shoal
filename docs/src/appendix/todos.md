@@ -783,6 +783,12 @@ leader that commits weights, and hysteresis, since a member's latency rises with
 given. Not done until the lab shows static weights gain anything
 ([round 12](../cluster-testing/performance.md#weighted-leadership)).
 
+Round 13 measured the case it was for, a disk that degrades in service, and it does not need it.
+With hyperion's syncs four times slower (a 10 ms `dm-delay`), the cluster lost about 2%, and
+weights that moved hyperion's leads away gained nothing
+([cluster testing, round 13](../cluster-testing/correctness.md#a-slow-disk-again)). A slow copy
+falls behind, and its groups commit on the other members. So this stays unbuilt.
+
 #### ~~The inventory wizard has no field for `failover`~~
 
 **Done in [F57](../features/cluster-reconfigure.md)**: a `Failover base` field on the Shape page, validated as the inventory is. What follows is the todo as it was filed.
@@ -2391,3 +2397,19 @@ to finish, but not cheap. What it needs: when a move adds its destination, the l
 log the destination would be fed with the bytes its set holds, and if the log is the larger it
 purges through its last checkpoint, which every voter has already matched, so that openraft sends
 a snapshot. The purge has to wait for the other voters, never pass them.
+
+## Fewer WAL syncs per device
+
+Filed by [O64](optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)
+in round 13 of the cluster testing. Every shard has its own WAL and its own writer, so a node of
+six shards on one disk issues six streams of `fdatasync`. On a device that flushes its cache on
+every sync (the Zen1 hosts' 970 EVOs), a sync costs 7 to 11 ms whether it carries 16 KiB or
+256 KiB. The six writers saturate the device at 450 to 630 syncs a second in every whole load, and
+a longer commit delay only trades syncs for appends a sync, for a net loss (5 ms against 2 ms:
+45,600 rows a second against 52,500). What would move a write-only load is fewer syncs for the same
+appends: shards sharing a writer per device, or one WAL a node with a sync per batch across its
+shards. Both undo part of the thread-per-core split, where a shard's WAL is its own: a shared
+writer is a cross-core queue on the write path, and a crash matrix and a rehome that move a
+shard's WAL whole ([F47](../features/local-rehome.md)) would need rethinking. It pays only on
+devices whose sync is a cache flush. An Optane or a drive with power-loss protection syncs in a
+fraction of a millisecond, and six writers are what keep it busy.

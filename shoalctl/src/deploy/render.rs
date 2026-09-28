@@ -10,7 +10,7 @@ use serde::Serialize;
 use shoal::shared::auth::{StoredCredential, DEFAULT_ITERATIONS};
 use std::collections::BTreeMap;
 
-use super::inventory::{Inventory, Node};
+use super::inventory::{Inventory, Node, ReplicationSpec};
 
 /// The file a node's configuration is written to under its remote directory
 pub const CONF_FILE: &str = "shoal.yml";
@@ -161,11 +161,46 @@ pub struct ClusterConf {
 }
 
 /// `cluster.replication`, only the keys an inventory can set
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Default)]
 pub struct ReplicationConf {
     /// How long the WAL writer waits after a sync for more appends
     /// ([O61](../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page))
-    pub wal_commit_delay: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wal_commit_delay: Option<String>,
+    /// How many entries of its log a group keeps behind its checkpoint
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_entries: Option<u64>,
+    /// How many sealed WAL bytes a shard keeps for slow copies
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_bytes: Option<String>,
+    /// How long one snapshot transfer may take
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_timeout: Option<String>,
+}
+
+impl ReplicationConf {
+    /// The keys a node's inventory names, or none when it names none
+    ///
+    /// # Arguments
+    ///
+    /// * `wal_commit_delay` - The node's own, its group's or the deployment's WAL delay
+    /// * `spec` - The deployment's replication block
+    fn named(wal_commit_delay: Option<String>, spec: Option<&ReplicationSpec>) -> Option<Self> {
+        // every key the inventory names, each left out when it does not
+        let spec = spec.cloned().unwrap_or_default();
+        let conf = ReplicationConf {
+            wal_commit_delay,
+            retained_entries: spec.retained_entries,
+            retained_bytes: spec.retained_bytes,
+            snapshot_timeout: spec.snapshot_timeout,
+        };
+        // a block with nothing in it is not written at all
+        let empty = conf.wal_commit_delay.is_none()
+            && conf.retained_entries.is_none()
+            && conf.retained_bytes.is_none()
+            && conf.snapshot_timeout.is_none();
+        (!empty).then_some(conf)
+    }
 }
 
 /// `cluster.migration`, only the keys an inventory can set
@@ -325,11 +360,12 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
                 .clone()
                 .map(|retire_after| MigrationConf { retire_after }),
             primary_failover_after: inventory.failover.clone(),
-            // the node's own, its group's or the deployment's WAL delay (O61)
-            replication: node
-                .wal_commit_delay
-                .clone()
-                .map(|wal_commit_delay| ReplicationConf { wal_commit_delay }),
+            // the node's own, its group's or the deployment's WAL delay (O61), and the
+            // deployment's retention and snapshot deadline
+            replication: ReplicationConf::named(
+                node.wal_commit_delay.clone(),
+                inventory.replication.as_ref(),
+            ),
             // the node's own or its group's share of the leads (F58)
             lead_weight: node.lead_weight,
         },
@@ -399,6 +435,18 @@ mod tests {
         assert!(second.contains("- 10.0.0.1:12002"));
         // the password itself is on neither
         assert!(!first.contains("hunter2") && !second.contains("hunter2"));
+        // no replication block unless the inventory names one, and then only what it names
+        assert!(!first.contains("retained_"));
+        let mut kept = inventory.clone();
+        kept.replication = Some(ReplicationSpec {
+            retained_entries: Some(5_000),
+            retained_bytes: None,
+            snapshot_timeout: Some("10m".into()),
+        });
+        let shrunk = render(&kept, &a, &Entry::Bootstrap, "x").expect("a file");
+        assert!(shrunk.contains("retained_entries: 5000"), "{shrunk}");
+        assert!(shrunk.contains("snapshot_timeout: 10m"));
+        assert!(!shrunk.contains("retained_bytes") && !shrunk.contains("wal_commit_delay"));
         // a node's own resources are the ones written
         let mut small = b.clone();
         small.resources = Resources {

@@ -381,7 +381,9 @@ cluster destroyed, a fresh one bootstrapped, and the backup restored into it
 2. **`backup /optane/shoal-backup`:** 36 groups `Written` in 2 min 49 s. Each group's leader
    wrote its file to its own disk: 1.1 GB on each host, 3.2 GB in all.
 3. **Every host's files gathered and copied to every host** with `rsync`, since a restore reads
-   each group's file on that group's new leader. Nothing ships them, as the runbook says.
+   each group's file on that group's new leader. ~~Nothing ships them, as the runbook says.~~
+   Since round 13 `cluster ship-backup` does
+   ([F59](../features/backup-shipping.md), [round 13](#a-backup-shipped-and-restored)).
 4. **`cluster destroy`, `cluster bootstrap`, activate, `restore <dir>/<op>`.**
 
 **First run (t14): a group lost.** The command printed `done` and exited 0. A `verify` against the
@@ -1267,3 +1269,112 @@ the second before, where round 11's ran at 19% and 22%.
 
 **Verdict: pass.** No second of the partition runs below 44%, and nothing slow or lossy is taken
 for a cut.
+
+## 14. Round 13
+
+Round 12 left [what is left](todo.md) with #142's deadlines and its restore stall, O64's spread,
+two limitations that were never filed (a slow disk's cost and a get through an unplaced member),
+and four scenarios nobody had run. This round works through them on builds from `1578fe7` on,
+which added each member's WAL sync time, appends per sync and sync sizes to `cluster stats`
+([overview](overview.md#reading-a-nodes-figures)). The runs are under `target/lab/r13/`.
+
+### The restore stall, read from the source
+
+[#142](../appendix/known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host)'s
+restore stall left one group at `Pending`, with no driver and no attempts, for five minutes.
+Round 12 named two ways that could happen. Reading the driver found a third, and it is the one the
+record fits. A driver whose progress commit did not land failed the group, and then reported the
+group `Done` to its shard whether or not the `Failed` commit landed either. The shard never drives
+a group it believes done. Fixed as [#183](../appendix/resolved/restore-driver-uncommitted-done.md):
+a driver reports only a phase the control plane took, and a commit that did not land is a
+hand-back.
+
+The stall itself was not caught. `target/lab/r13/142/loop.sh` ran the restore test beside five
+other heavy fixture tests at six threads, with child logs on every child, on the unfixed tree. It
+passed in all six rounds, while the other five failed 16 times between them. Those are #142's
+deadlines: `did not commit the write within the deadline`, `elected no leader within the
+deadline`, and, twice, the lost-response test's `checkpoint never reached 5`.
+
+### A slow disk, again
+
+Round 11 measured a 10 ms delay on every request to hyperion's storage costing a quarter of the
+cluster's rate. It left the cause unfiled and suggested moving leads off the slow node. Before
+building that, this round measured whether it would help, and what the slow disk costs now
+(`target/lab/r13/slow/ab.sh`). Hyperion's storage was the `dm-delay` device over a loop file, the
+csv was loaded, and each arm rolled its lead weights onto the running cluster, waited 90 s, set
+the delay, and ran the mixed bench for 60 s. The `away` arm weighs europa 20, titan 10 and
+hyperion 1, which left hyperion leading 2 of the 36 groups instead of 7.
+
+| Arm | Delay | Operations a second | p99 get | p99 update | Hyperion's WAL: syncs/s, ms a sync |
+| --- | --- | --- | --- | --- | --- |
+| even | 10 ms | 78,197 | 18.9 ms | 199.0 ms | 62, 85.5 |
+| away | 10 ms | 67,527 | 14.0 ms | 213.1 ms | 68, 84.9 |
+| away | 10 ms | 75,225 | 13.0 ms | 204.6 ms | 46, 188.4 |
+| even | 10 ms | 70,043 | 14.4 ms | 204.1 ms | 70, 84.2 |
+| even | none | 78,407 | 27.1 ms | 166.3 ms | 282, 18.9 |
+| even | none | 73,233 | 25.8 ms | 178.8 ms | 222, 23.6 |
+| even | 50 ms | 73,959 | 18.6 ms | 170.0 ms | 20, 314.9 |
+
+The loop file alone makes hyperion's syncs take about 20 ms, three times titan's 7 ms. The 10 ms
+delay makes them 85 ms. That is four times slower again, and it cost about 2%: 74,100 operations a
+second on average against 75,800 with no delay. At 50 ms hyperion fell 341,381 entries behind and
+the other two members carried the writes, still at 74,000 a second. Moving the leads away gained
+nothing (71,400 on average). The load it took off hyperion went to europa, which also runs the
+clients.
+
+Round 11's quarter predates [O76](../appendix/optimizations.md#o76-a-write-through-a-lagging-copy-waits-its-whole-apply-bound),
+which stopped a write through a lagging copy from waiting out that copy's apply bound. With it, a
+member whose disk is slow simply falls behind. A group commits on the other two, as a factor of
+three allows, and the slow copy catches up afterwards.
+
+**Verdict: the limitation is closed by the tree as it is, and a slow-disk lead handoff is not
+built.** What a slow disk still costs is margin. While it lags, a failure of either fast member
+leaves its groups committing at the slow disk's pace, and `cluster stats` shows the lag as `apply
+lag`.
+
+### Longer partitions, and a flapping one
+
+[What is left](todo.md) listed partitions longer than a minute and links that flap, since #181 had
+been found at 60 s. All three ran on `4955733`, with the lab's inventory: `target/lab/r11/fault2.sh`
+for the two long cuts and `target/lab/r13/part/flap.sh` for the flapping one. Each cut hyperion's
+peer ports both ways (`partition.sh`) under the mixed bench, and every acknowledged insert was read
+back through each member alone afterwards.
+
+| Scenario | During the cut | After the heal | Acknowledged inserts, each member alone | Restarts |
+| --- | --- | --- | --- | --- |
+| 120 s | about 13,000 refusals a second, `NotLeader` from hyperion to the third of the workers it serves | refusals end in 1 s; 25–55% of the rate for 14 s while hyperion installs 12 snapshots, then the rate before; 4,795 gets refused `Unavailable` meanwhile (#184) | 1,764,524, 0 lost | none |
+| 300 s | about 17,000 refusals a second, the same | refusals end in 1 s; 30–60% of the rate for at least 40 s, the run's end, while hyperion installs 18 snapshots; 12,926 gets refused `Unavailable` meanwhile (#184) | 2,860,083, 0 lost | none |
+| 10 × (10 s cut, 10 s healed) | the same as a single cut, every time | after every heal: one second at 30–70% of the rate with a write p99 near 1 s, then the rate before, with no refusals | 2,694,444, 0 lost | none |
+
+No cycle of the flapping run recovered worse than the first. Link after link was cut and dialled
+again, ten times in 200 s, and nothing accumulated: no backoff that grew, no lead that stuck, no
+refusal after a heal. #181's `TCP_USER_TIMEOUT` is why a heal is a second here.
+
+Both long cuts outlasted the peers' retained log for some groups: hyperion installed 12 snapshots
+after the 120 s cut and 18 after the 300 s one, and the rest of its groups were fed entries. An
+install restarts its group's copy, and a read through hyperion for that group's tablets is refused
+until the install ends, although the two other members hold the tablet.
+That is [#184](../appendix/known-issues.md#184-a-read-through-a-copy-that-is-installing-a-snapshot-is-refused-not-sent-to-another-holder),
+filed from this run. A client that retries `Unavailable` rides it out. The bench does not retry,
+which is why it counts them.
+
+**Verdict: pass.** Nothing acknowledged was lost, no node restarted, and a heal is a second
+whatever came before it. The catch-up after a cut longer than the retention is the slow part,
+and #184 is its visible cost.
+
+### A backup shipped and restored
+
+[Section 4](#back-up-destroy-and-restore) copied a backup's files between hosts by hand, and
+[what is left](todo.md) listed it as a limitation. Round 13 made it a command,
+[F59](../features/backup-shipping.md)'s `cluster ship-backup`, and ran the whole cycle on the
+cluster the partition tests had loaded (`target/lab/r13/ship/run.sh`):
+
+| Step | Result |
+| --- | --- |
+| `backup /optane/shoal-backup` | 36 groups `Written`, 3.6 GB, in 25 s; europa held 22 files, titan 32, hyperion 18 |
+| `ship-backup /optane/shoal-backup/<op>` | 68 s; every host holds all 72 files, owned by `shoal` |
+| `ship-backup` again | 0 transfers |
+| `destroy`, `bootstrap`, activate, `restore` | every group `Restored` and verified, 179 s |
+| csv through each member alone at `One` | 1,187,691 movies and 58,418 keyword partitions, 0 missing, 0 different |
+
+**Verdict: pass.**

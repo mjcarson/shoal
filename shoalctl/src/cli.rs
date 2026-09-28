@@ -147,6 +147,18 @@ pub enum ClusterCommand {
         #[clap(required = true, trailing_var_arg = true)]
         line: Vec<String>,
     },
+    /// Copy every host's files of a backup to every host, so a restore finds each group's file
+    /// on whichever node leads it ([F59](../../docs/src/features/backup-shipping.md))
+    ShipBackup {
+        /// The inventory of the cluster whose hosts hold the backup
+        #[clap(flatten)]
+        inventory: InventoryArg,
+        /// The backup's directory, `<path>/<op>`, the same path on every host
+        dir: String,
+        /// The inventory whose hosts are to hold the whole backup, if not this one's
+        #[clap(long)]
+        to: Option<PathBuf>,
+    },
     /// Print every node, its unit, and the cluster as a member sees it
     Status {
         /// The inventory
@@ -391,6 +403,12 @@ where
             deployment
                 .admin(&shoal, &line.join(" "), std::time::Duration::from_secs(timeout_secs))
                 .await
+        }
+        ClusterCommand::ShipBackup { inventory, dir, to } => {
+            // only the hosts are needed, not a running cluster: the new one may not exist yet
+            let deployment = Deployment::attach(&inventory.inventory)?;
+            let to = to.map(|path| crate::deploy::Inventory::read(&path)).transpose()?;
+            deployment.ship_backup(&dir, to.as_ref())
         }
         ClusterCommand::Status { inventory } => {
             Deployment::open(&inventory.inventory)?.status::<S>().await

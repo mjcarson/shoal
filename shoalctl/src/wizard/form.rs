@@ -11,7 +11,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use crate::deploy::inventory::{
-    is_executable, GroupSpec, Inventory, NodeSpec, Ports, Resources, StorageSpec,
+    is_executable, GroupSpec, Inventory, NodeSpec, Ports, ReplicationSpec, Resources, StorageSpec,
 };
 
 /// The tracing levels a node can log at, in the order the wizard cycles them
@@ -547,6 +547,9 @@ pub struct Draft {
     /// The WAL commit delay an inventory being edited named for the deployment, kept as it was;
     /// the form has no field for it yet
     pub wal_commit_delay: Option<String>,
+    /// The replication block an inventory being edited named, kept as it was; the form has no
+    /// fields for it yet
+    pub replication: Option<ReplicationSpec>,
     /// The client port
     pub client_port: String,
     /// The peer port
@@ -584,6 +587,7 @@ impl Default for Draft {
             retire_after: String::new(),
             failover: String::new(),
             wal_commit_delay: None,
+            replication: None,
             client_port: ports.client.to_string(),
             peer_port: ports.peer.to_string(),
             control_port: ports.control.to_string(),
@@ -729,6 +733,7 @@ impl Draft {
             retire_after: inventory.retire_after.clone().unwrap_or_default(),
             failover: inventory.failover.clone().unwrap_or_default(),
             wal_commit_delay: inventory.wal_commit_delay.clone(),
+            replication: inventory.replication.clone(),
             client_port: inventory.ports.client.to_string(),
             peer_port: inventory.ports.peer.to_string(),
             control_port: inventory.ports.control.to_string(),
@@ -932,6 +937,7 @@ impl Draft {
             retire_after: text(&self.retire_after),
             failover: text(&self.failover),
             wal_commit_delay: self.wal_commit_delay.clone(),
+            replication: self.replication.clone(),
             bootstrap,
             nodes,
         };

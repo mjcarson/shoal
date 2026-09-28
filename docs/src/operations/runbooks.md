@@ -212,12 +212,16 @@ cuts the group's own snapshot at a committed boundary of its own and copies it t
 `<path>/<op>/<table>/<group>-<boundary>.snap` on **its own disk** with a JSON manifest beside
 it; follow `BackupStatus { op }` until every group is `Done`, and read each group's outcome:
 `Written`, `Skipped` (every ephemeral table), or `Failed` with a reason. Copy the `<path>/<op>`
-directory out of the failure domain yourself; nothing ships it. It is not one cross-tablet
+directory out of the failure domain yourself. ~~Nothing ships it.~~ A restore reads each group's
+file on that group's new leader, so every host of the cluster restored into needs every file:
+`shoalctl cluster ship-backup -i <inventory> <path>/<op> [--to <new inventory>]` copies each host
+the files it lacks and fails unless every host then holds them all
+([F59](../features/backup-shipping.md)). It is not one cross-tablet
 snapshot; the record says each group's boundary.
 
 **Restore.** Bootstrap, join and initialize a **fresh** cluster at the factor and size you want,
 with nothing written ([1](#1-bootstrap)). `Restore { path }` with the `<path>/<op>` directory
-reachable from every node's leader; it is refused naming a schema that is not this cluster's,
+on every node (`ship-backup`, above); it is refused naming a schema that is not this cluster's,
 a gap or overlap in the files' tablets, a populated table, a cluster that already restored, or
 the cluster the backup was cut in. Follow `RestoreStatus { op }` until every group is `Done`
 and `verified`. Verify by `DIGEST` against the source if you have it, then point clients at the
