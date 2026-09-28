@@ -599,6 +599,10 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) links_impaired: bool,
     /// Whether a segment sweep is wanted before the next message
     pub(super) sweep_due: bool,
+    /// The sealed segment the sweep last found unresolved, the group it waits on, since when,
+    /// and when that was last said: a checkpoint held for a minute by one group is otherwise
+    /// silent (item 142)
+    pub(super) unresolved: Option<(u64, GroupId, Instant, Instant)>,
     /// The shard's WAL directory, where quarantine markers live
     pub(super) wal_dir: PathBuf,
     /// The quarantines found at open, applied to their groups as they are built
@@ -765,6 +769,7 @@ where
             stands: true,
             links_impaired: false,
             sweep_due: false,
+            unresolved: None,
             wal_dir: dir.clone(),
             quarantines,
             driving: HashSet::new(),
@@ -2764,14 +2769,21 @@ where
                 continue;
             }
             // resolved: every group with frames in it applied past them, or is gone
-            let resolved = segment.last.iter().all(|(group, last)| {
+            let waiting = segment.last.iter().find(|(group, last)| {
                 replication
                     .groups
                     .get(group)
-                    .is_none_or(|slot| slot.state.borrow().applied_index() >= last.index)
+                    .is_some_and(|slot| slot.state.borrow().applied_index() < last.index)
             });
+            if let Some((group, last)) = waiting {
+                // one group holding the segment, and with it every later one and every
+                // checkpoint on the shard, is said every half minute while it holds
+                note_unresolved(replication, segment.generation, *group, last.index);
+                break;
+            }
+            replication.unresolved = None;
             // a hold keeps every sealed segment from the compactors, as a backlog would
-            if !resolved || replication.hold_handoffs {
+            if replication.hold_handoffs {
                 break;
             }
             handoffs.push(segment);
@@ -4265,6 +4277,57 @@ async fn write_volatile_snapshot(
 /// # Arguments
 ///
 /// * `memberships` - The candidates, oldest first
+/// Say which group holds a sealed WAL segment from the compactors, once it has for a while
+///
+/// A segment is handed on only once every group with frames in it applied past them, and every
+/// later segment and every group's checkpoint on the shard wait behind it. The fixture's
+/// lost-response test saw a restarted node's checkpoint stay at zero for a minute with nothing
+/// logged (item 142); this names the group, where it applied to and what it waits for.
+///
+/// # Arguments
+///
+/// * `replication` - The shard's replication state
+/// * `generation` - The segment
+/// * `group` - The group it waits on
+/// * `last` - The index of the group's last frame in it
+fn note_unresolved<D: ShoalDatabase>(
+    replication: &mut Replication<D>,
+    generation: u64,
+    group: GroupId,
+    last: u64,
+) {
+    let now = Instant::now();
+    // a new wait starts its clock; the same one keeps it
+    let (since, said) = match replication.unresolved {
+        Some((at, waiting, since, said)) if at == generation && waiting == group => (since, said),
+        _ => (now, now),
+    };
+    replication.unresolved = Some((generation, group, since, said));
+    if now.duration_since(since) < UNRESOLVED_AFTER || now.duration_since(said) < UNRESOLVED_AFTER
+    {
+        return;
+    }
+    replication.unresolved = Some((generation, group, since, now));
+    let (applied, committed, installing, core) = replication.groups.get(&group).map_or(
+        (0, None, false, None),
+        |slot| {
+            let state = slot.state.borrow();
+            (
+                state.applied_index(),
+                slot.raft
+                    .as_ref()
+                    .and_then(|raft| raft.metrics().borrow_watched().committed.as_ref().map(|id| id.index)),
+                state.installing,
+                slot.core_dead.clone(),
+            )
+        },
+    );
+    event!(Level::WARN, msg = "a sealed wal segment waits on a group that has not applied past it", generation, group = %group, applied, last, ?committed, installing, ?core, waited_secs = now.duration_since(since).as_secs());
+}
+
+/// How long a sealed segment waits on one group before the wait is said, and how often again
+const UNRESOLVED_AFTER: Duration = Duration::from_secs(30);
+
 /// * `boundary` - The cut's boundary
 #[must_use]
 pub fn membership_as_of(

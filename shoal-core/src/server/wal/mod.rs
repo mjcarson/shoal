@@ -1228,6 +1228,15 @@ async fn writer(inner: Rc<RefCell<WalInner>>) {
                 hook(sealed);
             }
         }
+        // a segment older than this batch that the writer never held - the one a restart
+        // recovered, when a rotation came before anything was appended to it - is sealed now,
+        // or the sweep stops at it for good (item 187)
+        if file.is_none() {
+            if let Err(error) = seal_unheld(&inner, &dir, batch.generation).await {
+                fail_batch(&inner, batch, error);
+                continue;
+            }
+        }
         // open the file for this generation if the writer does not hold it
         if file.is_none() {
             match open_segment(&dir.join(segment_name(batch.generation))).await {
@@ -1272,6 +1281,49 @@ async fn writer(inner: Rc<RefCell<WalInner>>) {
         let _ = handle.fdatasync().await;
         let _ = handle.close().await;
     }
+}
+
+/// Seal every segment older than a generation that is still unsealed, syncing each first
+///
+/// The writer seals the file it holds when a batch for a newer generation arrives. A segment it
+/// never held - the last one a restart recovered, which a rotation moved past before anything
+/// was appended to it - was never sealed. The sweep hands sealed segments to the compactors in
+/// order and stops at the first unsealed one, so nothing on the shard was compacted again and no
+/// group's checkpoint moved ([Resolved #187](../../../../docs/src/appendix/resolved/recovered-segment-never-sealed.md)).
+///
+/// # Arguments
+///
+/// * `inner` - The store
+/// * `dir` - The directory the segments are in
+/// * `before` - The generation the writer is about to write into
+async fn seal_unheld(inner: &Rc<RefCell<WalInner>>, dir: &Path, before: u64) -> io::Result<()> {
+    // every older segment still open, oldest first
+    let unsealed: Vec<u64> = inner
+        .borrow()
+        .segments
+        .values()
+        .filter(|segment| !segment.sealed && segment.generation < before)
+        .map(|segment| segment.generation)
+        .collect();
+    for generation in unsealed {
+        // what it holds is on disk before anything is judged by it
+        let file = open_segment(&dir.join(segment_name(generation))).await?;
+        let synced = file.fdatasync().await.map_err(io);
+        let _ = file.close().await;
+        synced?;
+        // sealed, and said so, the way the writer seals a file it held
+        let hook = {
+            let mut guard = inner.borrow_mut();
+            if let Some(segment) = guard.segments.get_mut(&generation) {
+                segment.sealed = true;
+            }
+            guard.on_sealed.clone()
+        };
+        if let Some(hook) = hook {
+            hook(generation);
+        }
+    }
+    Ok(())
 }
 
 /// Complete a batch that is durable: move the watermark, fire the callbacks, evict

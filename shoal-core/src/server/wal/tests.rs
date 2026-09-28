@@ -217,6 +217,75 @@ async fn append_durably(store: &mut GroupStore, entries: Vec<Entry>) {
         .expect("failed to append");
 }
 
+/// A segment recovered at a restart is sealed by the first rotation, whether or not anything
+/// was appended to it first (item 187)
+///
+/// The writer seals the segment it holds open when a batch for a newer generation arrives. After
+/// a restart it holds nothing, so a rotation before the first append opened the new generation and
+/// never sealed the recovered one. The sweep hands sealed segments to the compactors in order and
+/// stops at the first unsealed one, so nothing on the shard was ever compacted again, and every
+/// group's checkpoint stood still: the fixture's lost-response test waited a minute for a
+/// checkpoint of zero to move.
+#[test]
+fn a_recovered_segment_is_sealed_by_a_rotation_before_any_append() {
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let path = dir.path().join("wal");
+        // a run that wrote a frame into generation one and stopped
+        {
+            let wal = ShardWal::open(&path, 1 << 30, 2048)
+                .await
+                .expect("failed to open");
+            let mut store = wal.store(GroupId(1));
+            let (tx, rx) = DataConfig::oneshot::<Result<(), io::Error>>();
+            store
+                .append(
+                    vec![normal(1, 100)],
+                    openraft::storage::IOFlushed::<DataConfig>::signal(tx),
+                )
+                .await
+                .expect("failed to append");
+            rx.await.expect("dropped").expect("the flush failed");
+            wal.close().await.expect("failed to close");
+        }
+        // the restart: the recovered generation is the active one, and a rotation comes first
+        let wal = ShardWal::open(&path, 1 << 30, 2048)
+            .await
+            .expect("failed to reopen");
+        assert_eq!(wal.active_generation(), 1);
+        wal.rotate();
+        wal.flush().await.expect("failed to flush after rotating");
+        // and something lands in the new generation, which the writer opens
+        let mut store = wal.store(GroupId(1));
+        let (tx, rx) = DataConfig::oneshot::<Result<(), io::Error>>();
+        store
+            .append(
+                vec![normal(2, 100)],
+                openraft::storage::IOFlushed::<DataConfig>::signal(tx),
+            )
+            .await
+            .expect("failed to append");
+        rx.await.expect("dropped").expect("the flush failed");
+        wal.rotate();
+        wal.flush().await.expect("failed to flush after rotating again");
+        // the recovered segment is sealed, as is the one after it
+        let segments = wal.segments();
+        let first = segments
+            .iter()
+            .find(|segment| segment.generation == 1)
+            .expect("the recovered segment");
+        assert!(first.sealed, "the recovered segment was never sealed: {segments:?}");
+        let second = segments
+            .iter()
+            .find(|segment| segment.generation == 2)
+            .expect("the second segment");
+        assert!(second.sealed, "{segments:?}");
+        wal.close().await.expect("failed to close");
+    });
+}
+
+
 /// Several forced rotations never lose a completion, and every entry reads back from its segment
 ///
 /// Three groups append across four forced rotations. Every flush completion fires exactly once,
