@@ -2904,9 +2904,11 @@ where
         let spares_held = retention_spares_held(total, budget, hold);
         let holds = replication.network.snapshot_holds();
         let mut held = total;
-        // the oldest segments, until what is left fits the budget
+        // the oldest segments, until what is left fits the budget, and each group to force with
+        // the furthest entry any of them needs it purged through
         let mut forced = 0u64;
         let mut passed = 0u64;
+        let mut to_force: HashMap<GroupId, (u64, u64, u64, u64, bool)> = HashMap::new();
         for segment in &sealed {
             if held <= budget {
                 break;
@@ -2934,33 +2936,52 @@ where
                     passed += 1;
                     continue;
                 }
-                let Some(raft) = slot.raft.clone() else {
-                    continue;
-                };
-                forced += 1;
-                event!(
-                    Level::WARN,
-                    msg = "the retention budget is passed; forcing a group past a sealed segment",
-                    group = %group,
-                    generation = segment.generation,
-                    checkpoint,
-                    purged,
-                    through = last.index,
-                    lag = checkpoint.saturating_sub(purged),
-                    held_bytes = total,
-                    budget,
-                    taking,
-                );
-                // only as far as this segment needs: the entries after it stay for the members
-                // the budget does not have to drop
-                let through = last.index;
-                glommio::spawn_local(async move {
-                    // the snapshot first, so the purge has one to stop at
-                    let _ = raft.trigger().snapshot().await;
-                    let _ = raft.trigger().purge_log(through).await;
-                })
-                .detach();
+                // only as far as the segments dropped need: the entries after them stay for the
+                // members the budget does not have to drop
+                let entry = to_force
+                    .entry(*group)
+                    .or_insert((last.index, segment.generation, checkpoint, purged, taking));
+                if last.index > entry.0 {
+                    *entry = (last.index, segment.generation, checkpoint, purged, taking);
+                }
             }
+        }
+        // each group once a sweep, and not again while its last force is in flight: a sweep runs
+        // every few seconds, and asking every time for every segment was hundreds of triggers a
+        // second on the lab ([#192](../../../../docs/src/appendix/resolved/forced-build-deferred.md))
+        for (group, (through, generation, checkpoint, purged, taking)) in to_force {
+            let Some(raft) = replication.groups.get(&group).and_then(|slot| slot.raft.clone())
+            else {
+                continue;
+            };
+            if !holds.force(group) {
+                continue;
+            }
+            forced += 1;
+            event!(
+                Level::WARN,
+                msg = "the retention budget is passed; forcing a group past a sealed segment",
+                group = %group,
+                generation,
+                checkpoint,
+                purged,
+                through,
+                lag = checkpoint.saturating_sub(purged),
+                held_bytes = total,
+                budget,
+                taking,
+            );
+            let holds = holds.clone();
+            glommio::spawn_local(async move {
+                // the snapshot first, so the purge has one to stop at; the holds let it through
+                let _ = raft.trigger().snapshot().await;
+                let _ = raft.trigger().purge_log(through).await;
+                // the build and the purge are queued behind whatever the group is doing, so the
+                // force stays in flight for a moment after them before the sweep may ask again
+                glommio::timer::sleep(std::time::Duration::from_secs(1)).await;
+                holds.forced_done(group);
+            })
+            .detach();
         }
         replication.snapshots.forced += forced;
         replication.snapshots.forced_held += passed;

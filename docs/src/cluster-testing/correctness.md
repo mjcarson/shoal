@@ -1631,3 +1631,29 @@ and the fixed costs [F56](../features/cluster-rebuild.md#performance) measured (
 data moved in under three times the time.
 
 **Verdict: pass.**
+
+### Several steps onto one node
+
+[F56](../features/cluster-rebuild.md#performance) found six steps at once no faster than one at a
+few hundred MB a set, since the per-record work was the limit. The inventory can now name
+`moves_per_node` and `migration_timeout` in its `replication:` block. The ten copy cluster, grown
+by the benches since to 13.5 GiB a node, was reconfigured to six moves a node and hyperion rebuilt
+the same way (`rebuild.sh`, `moves6.yaml`), on the build with #191's fix:
+
+| | One step at a time | Six at a time |
+| --- | --- | --- |
+| Moved | 8.0 GiB, streamed 8.5 | 13.5 GiB, streamed 15.5 |
+| Rebuild | 478 s, 18 MiB/s | 306 s, 49 MiB/s |
+| Each step | 21 s | 60 s, six in flight |
+| Snapshot fed, stalled, failed, forced purges | 0 | 0 |
+| Acknowledged inserts, each member alone | 11,542,676, 0 lost | 6,951,849, 0 lost |
+| csv, each member alone | 0 missing, 0 different | 0 missing, 0 different |
+| Bench update p99 | 333 ms | 281 ms |
+
+At 450 to 750 MB a set the steps' fixed costs and the per-record work overlap, and six at once
+moved 2.7 times the bytes a second. Each step took three times as long, since the six shared the
+two sources' cut and stream and hyperion's installs. The bench's refusals were as before: the
+connections to hyperion while it was down, and `NotLeader` and `OutcomeUnknown` (1,080 and 984)
+while its leads moved.
+
+**Verdict: pass.** Several steps onto a node are worth taking at this size.
