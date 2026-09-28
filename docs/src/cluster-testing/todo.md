@@ -21,8 +21,9 @@ weight to the lab's inventory.
 
 Round 13 ([section 14](correctness.md#14-round-13)) found and fixed #183, one way #142's restore
 stall happens, and #184, reads refused through a node catching up by snapshot. It also found #185,
-a new copy sent snapshot after snapshot when its install outlasted the leader's retention, and
-#186, a rehome's executor count lost to a concurrent rewrite of the storage marker. It
+a new copy sent snapshot after snapshot when its install outlasted the leader's retention;
+#186, a rehome's executor count lost to a concurrent rewrite of the storage marker; and #187, a
+restarted node's WAL that never compacted again when a rotation came before its first write. It
 built backup shipping ([F59](../features/backup-shipping.md)) and an inventory's retention
 settings, closed two limitations by measuring them (a slow disk, an unplaced member), dropped
 O64's batching hypothesis, and ran the partition scenarios. What no round closed is below.
@@ -33,7 +34,7 @@ O64's batching hypothesis, and ran the partition scenarios. What no round closed
 | --- | --- | --- | --- |
 | [143](../appendix/resolved/silent-partition-hops.md#still-open), what is left | [Round 12](correctness.md#a-silent-partitions-first-second) | The second after a silent partition's cut runs at about 44% of the rate: the kernel's verdict needs two retransmission timeouts, about 600 ms | One timeout was measured and took 5% loss for a cut. Nothing further planned |
 | [132](../appendix/known-issues.md#132-ephemeral_sorted_table-aborted-once-in-glibcs-thread-cache-teardown) | Re-examined after [#133](../appendix/resolved/read-plan-rc-across-shards.md) | A one-off heap corruption abort. It has not recurred in any suite run since, nor in 169 ASan runs of the binary in round 12 | Leave filed until it recurs |
-| [142](../appendix/known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host) | The workspace suite run after each section's fixes | Fixture tests fail intermittently under the suite's load and pass alone. What is left are deadlines, the lost-response test's `checkpoint never reached 5` (twice in round 13's loaded loop), and the restore stall, one cause of which was [#183](../appendix/resolved/restore-driver-uncommitted-done.md). The rehome test's two shapes were [#186](../appendix/resolved/marker-lost-update.md), fixed | Catch the checkpoint wait with child logs: `target/lab/r13/142/loop.sh` keeps them when it fails that way |
+| [142](../appendix/known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host) | The workspace suite run after each section's fixes | Deadlines under the suite's load (a write not committed or a leader not elected in time), and the restore stall, one cause of which was [#183](../appendix/resolved/restore-driver-uncommitted-done.md). Round 13 found that two of its shapes were defects, not deadlines: the rehome test's ([#186](../appendix/resolved/marker-lost-update.md)) and the lost-response test's checkpoint wait ([#187](../appendix/resolved/recovered-segment-never-sealed.md)) | Leave filed while the deadlines recur; a new shape is caught with `target/lab/r13/142/loop.sh` |
 
 ## Optimizations
 

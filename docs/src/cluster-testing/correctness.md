@@ -1461,3 +1461,21 @@ with the lab's inventory:
 | Acknowledged inserts, each member alone | 687,372, 0 lost |
 
 **Verdict: pass.** The same shape as round 12's runs: 103,900 to 122,600 operations a second.
+
+### A restarted node that never compacted
+
+#142's oldest shape, the lost-response test's *"checkpoint never reached 5: [(0, Some(0))]"*, was
+caught twice by the loaded loop with child logs. Node zero, killed and restarted, sealed segment
+after segment (126 in one run) and handed none to a compactor, so no group on its shard ever moved
+its checkpoint. A diagnostic added to name the group holding a sealed segment never fired. It was
+not a group: the segment the node recovered at its restart had never been sealed. The writer seals
+the file it holds when the generation moves, and a `ROTATE` that reached the restarted node before
+any entry did moved the generation while the writer held nothing. The sweep stops at the first
+unsealed segment. That is [#187](../appendix/resolved/recovered-segment-never-sealed.md), fixed and
+reproduced in a unit test. On the fix, five logged rounds had no stall, where ten rounds before it
+had two, and eight rounds without logs passed every test.
+
+In service a segment rotates when appends fill it, and those appends open the recovered file
+first, so the ordinary path does not meet this. An explicit rotation does: a repair's or a backup's
+(`RepairRotate`) reaching a node before its first write after a restart would have left its WAL
+growing until the next restart.
