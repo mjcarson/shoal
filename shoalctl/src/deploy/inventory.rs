@@ -359,6 +359,18 @@ pub struct ReplicationSpec {
     /// ([cluster testing](../../../docs/src/cluster-testing/performance.md#o64-in-round-14-the-journal-not-the-flush)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub segment_bytes: Option<String>,
+    /// The smallest base record a merge writes fragments over rather than rewriting (`16KiB`)
+    ///
+    /// Rendered as `storage.default.filesystem.throughput_sensitive.fragment_min_bytes`
+    /// ([F61](../../../docs/src/features/fragmented-partitions.md)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment_min_bytes: Option<String>,
+    /// How many fragments a chain holds before a merge writes the partition whole, `0` for none
+    ///
+    /// Rendered as `storage.default.filesystem.throughput_sensitive.fragment_max_chain`
+    /// ([F61](../../../docs/src/features/fragmented-partitions.md)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment_max_chain: Option<usize>,
     /// How long one snapshot transfer may take (`5m`, `1h`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_timeout: Option<String>,
@@ -589,6 +601,7 @@ impl Inventory {
                 ("hold_bytes", &replication.hold_bytes),
                 ("stream_bytes_per_sec", &replication.stream_bytes_per_sec),
                 ("segment_bytes", &replication.segment_bytes),
+                ("fragment_min_bytes", &replication.fragment_min_bytes),
             ] {
                 if let Some(bytes) = bytes {
                     if byte_unit::Byte::parse_str(bytes, true).is_err() {
@@ -1138,9 +1151,14 @@ mod tests {
             hold_bytes: Some("64MiB".into()),
             stream_bytes_per_sec: Some("2MiB".into()),
             segment_bytes: Some("32MiB".into()),
+            fragment_min_bytes: Some("64KiB".into()),
+            fragment_max_chain: Some(4),
             snapshot_timeout: Some("10m".into()),
         });
         inventory.validate().expect("a shrunk retention");
+        let mut bad = inventory.clone();
+        bad.replication.as_mut().unwrap().fragment_min_bytes = Some("big".into());
+        assert!(bad.validate().unwrap_err().to_string().contains("fragment_min_bytes"));
         let mut bad = inventory.clone();
         bad.replication.as_mut().unwrap().retained_bytes = Some("lots".into());
         assert!(bad.validate().unwrap_err().to_string().contains("retained_bytes"));

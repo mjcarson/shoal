@@ -279,6 +279,7 @@ impl NodeStatsTracker {
                 tick.figures.groups += 1;
                 tick.figures.tablets += tablets;
                 tick.figures.partitions += group.partitions;
+                tick.figures.chained += group.chained;
                 tick.figures.bytes += group.bytes;
                 tick.figures.applied_total.absorb(&group.writes);
                 tick.applied.absorb(&gained);
@@ -818,6 +819,7 @@ mod tests {
             floor: None,
             term: 1,
             partitions: 10,
+            chained: 0,
             writes: WriteCounters {
                 inserts,
                 insert_bytes: inserts * 100,

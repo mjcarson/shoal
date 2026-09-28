@@ -89,7 +89,21 @@ pub struct LoadArgs {
     /// ([O64](../../../docs/src/appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)).
     #[clap(long, default_value_t = 10)]
     pub series: u64,
+    /// Load the dataset this many times, each copy under ids of its own
+    ///
+    /// Copy `c` offsets every movie's id by `c * COPY_ID_STRIDE`, and keeps its title and
+    /// keywords, so each copy adds as many movies again and grows every keyword's partition by
+    /// the movies that carry it: how the lab takes a node past the one dataset's size
+    /// ([cluster testing](../../../docs/src/cluster-testing/correctness.md#16-round-15)).
+    #[clap(long, default_value_t = 1)]
+    pub copies: u64,
+    /// The first copy to load, so a larger database can be grown a few copies at a time
+    #[clap(long, default_value_t = 0)]
+    pub first_copy: u64,
 }
+
+/// How far apart two copies' ids are: far above any TMDB id, and 20 digits hold any of them
+pub const COPY_ID_STRIDE: u64 = 1 << 40;
 
 impl LoadArgs {
     /// Check that these arguments describe a load that can make progress
@@ -712,16 +726,23 @@ fn read_dataset(
     counts: Arc<Counts>,
 ) -> color_eyre::Result<Vec<u64>> {
     // open the dataset, saying which path failed rather than just that one did
-    let mut reader = csv::Reader::from_path(&args.dataset)
-        .wrap_err_with(|| format!("failed to open {}", args.dataset.display()))?;
     let mut ids = Vec::new();
-    // read movies until the file runs out or we hit the limit we were given
-    for row in reader.deserialize::<Movie>() {
+    // every copy asked for, each read from the start of the file
+    for copy in args.first_copy..args.first_copy + args.copies.max(1) {
+        let mut reader = csv::Reader::from_path(&args.dataset)
+            .wrap_err_with(|| format!("failed to open {}", args.dataset.display()))?;
+        // the movies of this copy, which the limit counts
+        let mut read = 0usize;
+        // read movies until the file runs out or we hit the limit we were given
+        for row in reader.deserialize::<Movie>() {
         // a row we cannot read is one row of a million, so count it and carry on
-        let Ok(movie) = row else {
+        let Ok(mut movie) = row else {
             counts.skipped.fetch_add(1, Ordering::Relaxed);
             continue;
         };
+        // this copy's ids are its own
+        movie.id += copy * COPY_ID_STRIDE;
+        read += 1;
         ids.push(movie.id);
         // hand this movie to the next worker in turn
         //
@@ -733,15 +754,16 @@ fn read_dataset(
             .is_err()
         {
             // a worker stopped on a failed write, which the join reports, so stop reading
-            break;
+            return Ok(ids);
         }
         // say where we are, since a full load is minutes of silence otherwise
         if ids.len() % PROGRESS_EVERY == 0 {
             println!("  read {} movies", ids.len());
         }
-        // stop once we have queued as many movies as we were asked for
-        if Some(ids.len()) == args.limit {
+        // stop once we have queued as many movies of this copy as we were asked for
+        if Some(read) == args.limit {
             break;
+        }
         }
     }
     Ok(ids)

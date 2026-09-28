@@ -2911,3 +2911,112 @@ async fn a_compaction_that_meets_an_unreadable_archive_is_tried_again() -> Resul
     pool.exit()?;
     Ok(())
 }
+
+/// Read every row of some partitions and key them by partition and sort key
+///
+/// # Arguments
+///
+/// * `client` - The client to read through
+/// * `partitions` - The partitions to read
+async fn read_rows(
+    client: &shoal::client::Shoal<TestDbClient>,
+    partitions: &[&str],
+) -> Result<std::collections::BTreeMap<(String, String), String>, TestError> {
+    let mut rows = std::collections::BTreeMap::new();
+    for partition in partitions {
+        // one partition at a time, so each answer is one response; a partition with no rows
+        // answers as a get that found nothing
+        let response = match client
+            .send_one(TestRecordGet::new(vec![(*partition).to_owned()]))
+            .await
+        {
+            Ok(response) => response,
+            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(found) = response.access::<TestRecord>()? {
+            for access in found.iter() {
+                let row = TestRecord::deserialize(access).unwrap();
+                rows.insert((row.partition_key, row.sort_key), row.data);
+            }
+        }
+    }
+    Ok(rows)
+}
+
+/// A partition written as a base and fragments reads back every row a whole write would
+///
+/// Every session's writes are compacted by the next start, and with the smallest base a
+/// fragment is written over set to a byte, every partition that has a record is written as
+/// fragments until its chain is three long, when it is written whole again; an update in one
+/// session writes its partition whole on the spot. Each session reads every row back off disk
+/// - its partitions are not resident after two restarts - and checks them against a model
+/// ([F61](../../../docs/src/features/fragmented-partitions.md)).
+#[tokio::test]
+async fn a_partition_written_as_fragments_reads_back_whole() -> Result<(), TestError> {
+    let temp_dir = utils::test_dir();
+    // one shard, and a fragment over any base, three to a chain
+    let mut conf = utils::build_single_shard_config(&temp_dir);
+    conf.storage.default.filesystem.throughput_sensitive.fragment_min_bytes = 1;
+    conf.storage.default.filesystem.throughput_sensitive.fragment_max_chain = 3;
+    let partitions = ["p0", "p1"];
+    let mut model: std::collections::BTreeMap<(String, String), String> =
+        std::collections::BTreeMap::new();
+    for session in 0..8usize {
+        let (client, pool) = utils::start_with_conf::<TestDb>(conf.clone()).await?;
+        // what the sessions before wrote, read off disk
+        assert_eq!(read_rows(&client, &partitions).await?, model, "before session {session}");
+        // a dozen inserts over fifteen keys, so some overwrite a row an earlier session wrote
+        for at in 0..12usize {
+            let partition = partitions[at % 2];
+            let sort = format!("k{:02}", (session * 7 + at) % 15);
+            let data = format!("s{session}w{at}");
+            client
+                .send_one(TestRecord::new(partition, sort.as_str(), data.as_str()))
+                .await?;
+            model.insert((partition.to_owned(), sort), data);
+        }
+        // two deletes, of rows this session or an earlier one wrote
+        let held: Vec<String> = model
+            .keys()
+            .filter(|(partition, _)| partition == "p1")
+            .map(|(_, sort)| sort.clone())
+            .collect();
+        for sort in [held[(session * 3) % held.len()].clone(), held[(session * 5 + 1) % held.len()].clone()] {
+            if !model.contains_key(&("p1".to_owned(), sort.clone())) {
+                continue;
+            }
+            client
+                .send_one(TestRecordDelete::new("p1".to_owned(), sort.clone()))
+                .await?;
+            model.remove(&("p1".to_owned(), sort));
+        }
+        // and in one session an update, which writes its partition whole
+        if session == 4 {
+            let target = model
+                .keys()
+                .find(|(partition, _)| partition == "p0")
+                .cloned()
+                .expect("a row to update");
+            client
+                .send_one(TestRecordUpdate {
+                    partition_key: target.0.clone(),
+                    sort_key: target.1.clone(),
+                    data: Some("updated".into()),
+                })
+                .await?;
+            model.insert(target, "updated".to_owned());
+        }
+        pool.exit()?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        // the next start compacts this session's writes; the one after holds nothing resident
+        let (_client, pool) = utils::start_with_conf::<TestDb>(conf.clone()).await?;
+        pool.exit()?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    // and the last session's writes, read off disk the same way
+    let (client, pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    assert_eq!(read_rows(&client, &partitions).await?, model, "after every session");
+    pool.exit()?;
+    Ok(())
+}

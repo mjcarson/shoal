@@ -14,6 +14,7 @@ mod persistent;
 pub mod storage;
 
 pub use ephemeral::{EphemeralSortedTable, EphemeralUnsortedTable};
+pub use partitions::PartitionBytes;
 pub use persistent::{ApplyStep, PartitionLoad, PersistentSortedTable, PersistentUnsortedTable};
 
 /// Crate private internals, re-exported so the benches in `shoal/benches` can reach them

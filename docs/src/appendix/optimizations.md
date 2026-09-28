@@ -3130,9 +3130,15 @@ trace of titan's writes by file during a load found why: the node wrote 114 MB/s
 Every WAL sync flushes the device's cache with the compactor's writes in it. The merges rewrite
 each keyword partition whole every segment, which is
 [O79](#o79-a-merge-rewrites-every-partition-it-touches-whole), and 40 MiB segments halved the
-archive writes and made loads about 24% faster. **Status:** what paces a write-only load on these
-hosts is the merges' write amplification. What differs between one bootstrap and the next is
-still not named; the spread persists at every segment size and WAL mode tried. And the halving this entry was filed for is gone: six loads at
+archive writes and made loads about 24% faster. **Status:** ~~what paces a write-only load on these
+hosts is the merges' write amplification.~~ Round 15 removed most of the amplification
+([F61](../features/fragmented-partitions.md)): the keyword table's archive writes fell by four
+fifths and a node's by half, and the loads did not move (41,400 to 56,200 rows a second with and
+without fragments). So the archives' write volume is not what paces a load either, and round
+14's 40 MiB arms were faster by the spread between bootstraps
+([cluster testing](../cluster-testing/performance.md#o79-in-round-15-fragments)). What differs
+between one bootstrap and the next is still not named; the spread persists at every segment size,
+WAL mode and archive volume tried, and is set within a load's first five seconds. And the halving this entry was filed for is gone: six loads at
 a 1 s base ran at 42,600 to 55,000 rows a second, the same as at 5 s, with and without
 [#190](resolved/append-answer-thrown-away.md)'s floor on an append's wait.
 
@@ -3670,7 +3676,7 @@ through each member alone. **Kept.**
 
 | | |
 | --- | --- |
-| **Rank** | **B35** — measured on the lab; a setting's trade measured, the design unbuilt |
+| **Rank** | ~~**B35**~~ **done** — the design built as [F61](../features/fragmented-partitions.md) in round 15 and measured on the lab |
 | **Impact** | Measured on the lab — under a whole load titan wrote 114 MB/s to archives (MovieByKeyword 68, Movie 33, the maps' temp files 10) and 24.5 MB/s to its WAL while it applied about 15 MiB/s of rows, so about seven archive bytes for every byte inserted, and about sixty for the keyword table, whose rows are small and whose partitions hold thousands of them. Every WAL sync flushes the device's cache with those writes in it, which is what paces a write-only load on the 970 EVOs ([O64](#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)) |
 | **Difficulty** | S for the setting, L for the design |
 | **Depends on** | nothing |
@@ -3698,6 +3704,15 @@ on buffered WALs, each arm a fresh cluster:
 **Not applied as a default.** It trades the write tail for throughput, and a deployment that loads
 in bulk can set it. The fix that removes the amplification instead of spreading it out is a
 partition written as fragments, filed in [todos](todos.md#a-large-sorted-partition-written-as-fragments).
+
+**Acted on in round 15** as [F61](../features/fragmented-partitions.md): a merge writes a large
+sorted partition's inserts and deletes as a fragment chained after its base, and readers fold the
+chain. On the lab, at 10 MiB segments, the keyword table's archive writes during a load fell from
+55–80 MB/s to 15–19 MB/s and the node's from 98–136 MB/s to 55–66, with the mixed bench, its update
+p99 and cold keyword reads unchanged. Loads did not get faster, which is what moved
+[O64](#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)'s status. The benchmark is
+`target/lab/r15/seg.sh` with an inventory that sets `fragment_max_chain: 0` against one that does
+not.
 
 ### O80. Every query opens spans a collector may never read
 

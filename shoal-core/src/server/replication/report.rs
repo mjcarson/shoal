@@ -107,6 +107,10 @@ pub struct GroupReport {
     /// the compactor archives it ([F52](../../../../docs/src/features/cluster-stats.md)).
     #[serde(default)]
     pub partitions: u64,
+    /// How many of those partitions are chains, a base with fragments over it
+    /// ([F61](../../../../docs/src/features/fragmented-partitions.md))
+    #[serde(default)]
+    pub chained: u64,
     /// The rows and bytes this shard's copy has applied for the group since the shard started
     /// ([F52](../../../../docs/src/features/cluster-stats.md))
     #[serde(default)]

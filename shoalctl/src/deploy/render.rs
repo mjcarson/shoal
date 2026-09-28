@@ -102,7 +102,7 @@ pub struct FilesystemConf {
     /// Where the intent logs live
     pub latency_sensitive: PathConf,
     /// Where the archives live
-    pub throughput_sensitive: PathConf,
+    pub throughput_sensitive: ThroughputConf,
 }
 
 /// One storage path
@@ -110,6 +110,19 @@ pub struct FilesystemConf {
 pub struct PathConf {
     /// The directory
     pub path: String,
+}
+
+/// The archives' storage: a path, and the merge settings an inventory can name
+#[derive(Serialize, Debug)]
+pub struct ThroughputConf {
+    /// The directory
+    pub path: String,
+    /// The smallest base record a merge writes fragments over
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fragment_min_bytes: Option<String>,
+    /// How many fragments a chain holds before a merge writes the partition whole
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fragment_max_chain: Option<usize>,
 }
 
 /// The `tracing:` section
@@ -361,8 +374,16 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
                     latency_sensitive: PathConf {
                         path: node.storage.latency.clone(),
                     },
-                    throughput_sensitive: PathConf {
+                    throughput_sensitive: ThroughputConf {
                         path: node.storage.throughput.clone(),
+                        fragment_min_bytes: inventory
+                            .replication
+                            .as_ref()
+                            .and_then(|spec| spec.fragment_min_bytes.clone()),
+                        fragment_max_chain: inventory
+                            .replication
+                            .as_ref()
+                            .and_then(|spec| spec.fragment_max_chain),
                     },
                 },
             },
@@ -476,9 +497,15 @@ mod tests {
             hold_bytes: Some("2GiB".into()),
             stream_bytes_per_sec: Some("4MiB".into()),
             segment_bytes: Some("32MiB".into()),
+            fragment_min_bytes: None,
+            fragment_max_chain: Some(0),
             snapshot_timeout: Some("10m".into()),
         });
         let shrunk = render(&kept, &a, &Entry::Bootstrap, "x").expect("a file");
+        // the chain setting lands beside the archives' path, and the unnamed one nowhere
+        assert!(shrunk.contains("fragment_max_chain: 0"), "{shrunk}");
+        assert!(!shrunk.contains("fragment_min_bytes"), "{shrunk}");
+        assert!(!first.contains("fragment_"), "{first}");
         assert!(shrunk.contains("retained_entries: 5000"), "{shrunk}");
         assert!(shrunk.contains("snapshot_timeout: 10m"));
         assert!(shrunk.contains("hold_bytes: 2GiB"), "{shrunk}");

@@ -47,9 +47,12 @@ structure described here and is what makes a table ephemeral
 tens to hundreds of bytes. Rewriting the partition it belongs to would mean a read, a merge,
 and a much larger write. So writes go to the log and the merge is deferred.
 
-**A read must not scan a log.** A partition's current state lives in exactly one archive
-extent, found by one map lookup and read with one `read_at`. The log is never consulted at
-read time — only at startup.
+**A read must not scan a log.** ~~A partition's current state lives in exactly one archive
+extent, found by one map lookup and read with one `read_at`.~~ A partition's current state lives
+in one archive extent, or, for a large sorted partition, in a base extent and up to
+`fragment_max_chain` fragments merged over it since, found by one map lookup and folded as they
+are read ([F61](../features/fragmented-partitions.md)). The log is never consulted at read time
+— only at startup.
 
 **Compaction is where the two meet.** It converts a log of mutations into whole partitions,
 which is also when deletes actually free space and tombstones actually disappear

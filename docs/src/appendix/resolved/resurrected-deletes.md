@@ -210,7 +210,9 @@ nothing to sweep is a per-generation scan of the whole resident set.
 - **Generation `0` means "nothing compacted yet" and no partition may ever carry it.** Both the
   storage engine and the tables start at 1.
 - **Sorted archives never contain tombstones.** Compaction hard-removes deleted rows, so an
-  evicted sorted tombstone is unrecoverable. That is why the eviction gate is load-bearing
+  evicted sorted tombstone is unrecoverable. Since [F61](../../features/fragmented-partitions.md)
+  a fragment carries a delete as a tombstone, but only folded over its base, and a fold leaves
+  none: a whole partition as any reader sees it still holds no tombstone. That is why the eviction gate is load-bearing
   rather than an optimisation.
 - **A tombstone may only be dropped once the archive behind it no longer holds the row** — that
   is, under the generation gate, never on a timer, a size threshold, or an LRU decision.

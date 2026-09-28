@@ -1046,6 +1046,7 @@ fn busy_node_stats(tables: usize) -> shoal::shared::protocol::stats::NodeStats {
         tablets_led: 1365,
         partitions: 12_345_678,
         partitions_led: 4_115_226,
+        chained: 0,
         bytes: 123_456_789_012,
         bytes_led: 41_152_263_004,
         applied: write_rates,

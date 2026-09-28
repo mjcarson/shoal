@@ -123,6 +123,7 @@
   - [F58. Leads weighted by what each member can commit](features/weighted-leadership.md)
   - [F59. Shipping a backup to every host with `shoalctl cluster ship-backup`](features/backup-shipping.md)
   - [F60. WAL segments written directly, and one flush a device (withdrawn)](features/shared-wal-flush.md)
+  - [F61. A large sorted partition written as fragments](features/fragmented-partitions.md)
 
 # Direction
 

@@ -485,6 +485,44 @@ pub trait IntentReadSupport<T: RkyvSupport>: Sized + RkyvSupport + PartitionSupp
     /// * `key` - The partition key
     fn erased(key: u64) -> Self;
 
+    /// Validate and deserialize a partition archived whole
+    ///
+    /// What a folded chain is read back with where the caller holds no bounds for rkyv's
+    /// deserialize ([F61](../../../docs/src/features/fragmented-partitions.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The partition's archived bytes
+    fn decode(bytes: &[u8]) -> Result<Self, ServerError>;
+
+    /// Build a fragment of a partition from its intents alone, without reading the partition
+    ///
+    /// A fragment holds the rows the intents wrote and a tombstone for each row they deleted,
+    /// and is folded over the partition's base when it is read
+    /// ([F61](../../../docs/src/features/fragmented-partitions.md)). Intents a fragment cannot
+    /// carry - an update needs the row it changes - are handed back, and the partition is
+    /// merged whole. The default carries none: a partition of one row gains nothing from one.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition key
+    /// * `intents` - The intents to write, in the order they were committed
+    fn fragment(key: u64, intents: Vec<Self::Intent>) -> Result<Self, Vec<Self::Intent>> {
+        // nothing to write as a fragment for a partition of one row
+        let _ = key;
+        Err(intents)
+    }
+
+    /// Fold a fragment over this partition, the fragment being the newer
+    ///
+    /// # Arguments
+    ///
+    /// * `fragment` - The fragment, as `fragment` built it
+    fn fold(&mut self, fragment: Self) {
+        // a type that writes no fragments is replaced whole by a newer copy
+        *self = fragment;
+    }
+
     /// Get the partition key for a specific intent
     fn partition_key_and_intent(read: &ReadResult) -> Result<(u64, Self::Intent), ServerError>
     where
@@ -778,14 +816,29 @@ pub trait StorageSupport: Sized {
     /// * `group` - The group the file is written under, which a restore ignores
     /// * `schema_id` - The schema's fingerprint, for the header and the manifest
     #[allow(async_fn_in_trait)]
-    async fn export_archives<R: PartitionKeySupport + 'static>(
+    async fn export_archives<P: IntentReadSupport<R> + 'static, R: PartitionKeySupport + 'static>(
         shard_names: &[String],
         conf: &Conf,
         path: &std::path::Path,
         provenance: &crate::server::replication::snapshot::SnapshotProvenance,
         group: crate::shared::identity::GroupId,
         schema_id: u64,
-    ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError>;
+    ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError>
+    where
+        <P as Archive>::Archived: rkyv::Deserialize<P, Strategy<Pool, rkyv::rancor::Error>>,
+        <R as Archive>::Archived: rkyv::Deserialize<R, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <P as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+        for<'a> <P::Intent as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >;
 
     /// Commit an operation to this storages intent log
     ///
@@ -917,7 +970,7 @@ pub trait StorageSupport: Sized {
     async fn load_partition_direct(
         &self,
         partition_id: u64,
-    ) -> Result<Option<ReadResult>, ServerError>;
+    ) -> Result<Option<crate::server::tables::PartitionBytes>, ServerError>;
 
     /// Every partition key this engine holds an archived copy of
     ///

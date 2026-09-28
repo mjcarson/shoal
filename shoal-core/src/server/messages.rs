@@ -1,7 +1,6 @@
 //! The different messages that can be sent in shoal
 
 use bytes::Bytes;
-use glommio::io::ReadResult;
 use kanal::AsyncSender;
 use rkyv::util::AlignedVec;
 use tracing::Span;
@@ -1134,8 +1133,8 @@ where
 pub struct LoadedPartition {
     /// The partition that is being read from disk
     pub partition_id: u64,
-    /// The result for this read
-    pub data: ReadResult,
+    /// The whole partition's bytes, its one record or its chain folded
+    pub data: crate::server::tables::PartitionBytes,
     /// The span of the read that produced this
     ///
     /// A load releases every query parked on its partition, so the queries it unblocks are

@@ -34,7 +34,7 @@ mod stream_tests;
 mod tests;
 
 use compactor::FileSystemCompactor;
-pub use map::{ArchiveMap, TabletUsage};
+pub use map::{ArchiveMap, ChainEntry, FoldFn, TabletUsage};
 use reader::IntentLogReader;
 use stream::StreamWriter;
 
@@ -50,9 +50,8 @@ use crate::server::stage_profile::StageDurability;
 use crate::server::stage_profile::StageStamps;
 use crate::server::{Conf, ServerError};
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, TableNameSupport};
-use crate::storage::fs::map::ArchiveEntry;
 use crate::storage::{ArchiveMapKinds, FilteredFullArchiveMap, FullArchiveMap, LoaderMsg, Loaders};
-use crate::tables::partitions::{MaybeLoaded, PartitionSupport, ValidatedArchive};
+use crate::tables::partitions::{MaybeLoaded, PartitionBytes, PartitionSupport, ValidatedArchive};
 use loader::FsLoader;
 use uuid::Uuid;
 
@@ -299,6 +298,24 @@ impl<D: ShoalDatabase> FileSystem<D> {
             }
             // get this partitions data
             if let Some(partition_read) = self.load_partition_direct(partition_key).await? {
+                // a folded chain was deserialized to be folded, so it is held loaded, at
+                // generation zero since every row of it is on disk already
+                // ([F61](../../../../docs/src/features/fragmented-partitions.md))
+                let partition_read = match partition_read {
+                    PartitionBytes::Record(read) => read,
+                    PartitionBytes::Folded(folded) => {
+                        let partition = P::decode(&folded)?;
+                        *memory_usage.borrow_mut() += partition.size();
+                        partitions.insert(
+                            partition_key,
+                            MaybeLoaded::Loaded {
+                                partition: Box::new(partition),
+                                generation: 0,
+                            },
+                        );
+                        continue;
+                    }
+                };
                 // validate this archive once, here, instead of on every query that reads it
                 let archive = ValidatedArchive::new(partition_read)?;
                 // update the memory usage for this partition, only once it is known to be good
@@ -387,6 +404,8 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         let (intent_tx, intent_rx) = kanal::unbounded_async();
         // get this shards shared archive map
         let map = Arc::new(ArchiveMap::new(shard_name, R::name(), &table_conf).await?);
+        // a chained partition is folded with this table's partition type wherever it is read
+        map.set_folder(compactor::fold_chain::<P, R>);
         // wrap a clone of our archive map in the filesystem kind
         let wrapped = ArchiveMapKinds::FileSystem(map.clone());
         // add our wrapped map to our shards full map
@@ -483,6 +502,8 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         }
         // the shard's map for this table, and a compactor over it whose marks nothing reads
         let map = Arc::new(ArchiveMap::new(shard_name, R::name(), &table_conf).await?);
+        // a chained partition is folded with this table's partition type wherever it is read
+        map.set_folder(compactor::fold_chain::<P, R>);
         let (mark_tx, _mark_rx) = kanal::unbounded_async::<ServerMsg<D>>();
         let (_jobs_tx, jobs_rx) = kanal::unbounded_async::<CompactionJob>();
         let compactor = FileSystemCompactor::<P, R, D>::with_capacity(
@@ -517,14 +538,29 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     /// * `group` - The group the file is written under, which a restore ignores
     /// * `schema_id` - The schema's fingerprint, for the header and the manifest
     #[instrument(name = "FileSystem::export_archives", skip_all, err(Debug))]
-    async fn export_archives<R: PartitionKeySupport + 'static>(
+    async fn export_archives<P: IntentReadSupport<R> + 'static, R: PartitionKeySupport + 'static>(
         shard_names: &[String],
         conf: &Conf,
         path: &std::path::Path,
         provenance: &crate::server::replication::snapshot::SnapshotProvenance,
         group: crate::shared::identity::GroupId,
         schema_id: u64,
-    ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError> {
+    ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError>
+    where
+        <P as Archive>::Archived: rkyv::Deserialize<P, Strategy<Pool, rkyv::rancor::Error>>,
+        <R as Archive>::Archived: rkyv::Deserialize<R, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <P as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+        for<'a> <P::Intent as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > {
         use crate::server::replication::snapshot::{self, SnapshotManifest, SnapshotWriter};
         use openraft::vote::RaftLeaderId as _;
         // this table's settings, and so where its archives and maps are
@@ -532,13 +568,15 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         table_conf.setup_paths(R::name()).await?;
         // every shard's map, and every live entry in each, in key order across the shards
         let mut maps = Vec::with_capacity(shard_names.len());
-        let mut entries: Vec<(usize, ArchiveEntry)> = Vec::new();
+        let mut entries: Vec<(usize, u64)> = Vec::new();
         for (at, shard_name) in shard_names.iter().enumerate() {
             let map = ArchiveMap::new(shard_name, R::name(), &table_conf).await?;
-            entries.extend(map.to_archive.borrow().values().map(|entry| (at, *entry)));
+            // a chained partition is exported whole, folded
+            map.set_folder(compactor::fold_chain::<P, R>);
+            entries.extend(map.to_archive.borrow().keys().map(|key| (at, *key)));
             maps.push(map);
         }
-        entries.sort_by_key(|(_, entry)| entry.key);
+        entries.sort_by_key(|(_, key)| *key);
         // the header promises the count, so it is known before a record is written
         let table = crate::shared::identity::TableId::of(R::name());
         let header = provenance.header(table, group, 0, entries.len() as u64, schema_id);
@@ -546,10 +584,10 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
             std::fs::create_dir_all(dir)?;
         }
         let mut writer = SnapshotWriter::create(path, header).await?;
-        for (at, entry) in &entries {
-            // read this partition's archived bytes as they are, verified, and write them as they are
-            let read = maps[*at].read_record(entry).await?;
-            writer.record(entry.key, &read).await?;
+        for (at, key) in &entries {
+            // read this partition's archived bytes, verified, its chain folded, and write them
+            let read = maps[*at].read_partition(*key).await?;
+            writer.record(*key, &read).await?;
         }
         let (total, checksum) = writer.finish(&[]).await?;
         if let Some(dir) = path.parent() {
@@ -981,13 +1019,13 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     async fn load_partition_direct(
         &self,
         partition_id: u64,
-    ) -> Result<Option<ReadResult>, ServerError> {
+    ) -> Result<Option<crate::server::tables::PartitionBytes>, ServerError> {
         // check if this partition is in our archive map
-        match self.map.find_partition(partition_id) {
+        match self.map.chain_of(partition_id) {
             // this partition exists
-            Some(entry) => {
-                // read this partitions record from disk, verified against its checksum
-                let read = self.map.read_record(&entry).await?;
+            Some(chain) => {
+                // read this partition from disk, verified against its checksums, its chain folded
+                let read = self.map.read_chain(&chain).await?;
                 Ok(Some(read))
             }
             None => Ok(None),
@@ -1007,26 +1045,33 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     ) -> Result<ArchivedCut, ServerError> {
         // every entry of the tablets the map names that is not resident, in key order; the
         // borrow ends before any handle is opened
-        let mut entries: Vec<ArchiveEntry> = self
+        let mut keys: Vec<u64> = self
             .map
             .to_archive
             .borrow()
-            .iter()
-            .filter(|(key, _)| {
+            .keys()
+            .filter(|key| {
                 // truncation cannot happen: a tablet id is twelve bits
                 #[allow(clippy::cast_possible_truncation)]
                 let tablet = crate::server::ring::Ring::tablet_of(**key) as u16;
                 tablets.contains(&tablet) && !resident.contains(key)
             })
-            .map(|(_, entry)| *entry)
+            .copied()
             .collect();
-        entries.sort_unstable_by_key(|entry| entry.key);
+        keys.sort_unstable();
+        // each partition's base and any fragments over it
+        let entries: Vec<ChainEntry> = keys
+            .into_iter()
+            .filter_map(|key| self.map.chain_of(key))
+            .collect();
         // a duplicated handle per distinct archive, which outlives the archive's unlink
         let mut handles: HashMap<Uuid, DmaFile> = HashMap::new();
-        for entry in &entries {
-            if !handles.contains_key(&entry.archive) {
-                let handle = self.map.get_archive(&entry.archive).await?;
-                handles.insert(entry.archive, handle);
+        for chain in &entries {
+            for entry in std::iter::once(&chain.base).chain(chain.fragments.iter()) {
+                if !handles.contains_key(&entry.archive) {
+                    let handle = self.map.get_archive(&entry.archive).await?;
+                    handles.insert(entry.archive, handle);
+                }
             }
         }
         Ok(ArchivedCut::new(self.map.clone(), entries, handles))

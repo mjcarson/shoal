@@ -297,7 +297,9 @@ pub fn drop_tombstones(&mut self) -> usize {
 The count exists so that sweeping does not have to walk every row of every marked partition to
 discover there is nothing to sweep; `mark_evictable` can be handed a thousand keys at a time.
 It is never written to an archive (`#[rkyv(with = Skip)]`), because a partition read back from
-disk has no tombstones by construction.
+disk has no tombstones by construction. A fragment's tombstones are on disk, but a reader only
+ever sees a chain folded, and `fold_fragment` leaves none
+([F61](../features/fragmented-partitions.md)).
 
 Dropping one early is the whole of
 [Resolved Issues #5](../appendix/resolved/resurrected-deletes.md): the row it was hiding comes

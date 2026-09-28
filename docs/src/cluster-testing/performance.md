@@ -494,3 +494,58 @@ write tail for it. It is not the default. The fix that removes the amplification
 written as fragments, is filed in [todos](../appendix/todos.md#a-large-sorted-partition-written-as-fragments).
 What differs between one bootstrap and the next is still not named: the spread persisted in every
 mode and at every segment size.
+
+## O79 in round 15: fragments
+
+Round 14 filed a partition written as fragments as the fix that removes O79's amplification.
+Round 15 built it ([F61](../features/fragmented-partitions.md)) and measured it with round 14's
+script (`target/lab/r15/seg.sh`), each arm a fresh cluster of the lab's inventory at 10 MiB
+segments, a whole load and a 120 s mixed bench, traced by table on titan. `nofrag` is the same
+build with `fragment_max_chain: 0`, which writes every partition whole as before. The baseline is
+the build before F61 (`341d40c`), run the same morning.
+
+| Arm | Loads, rows a second | Archive writes during a load, all / keyword / maps | Mixed bench, ops a second | Update p99 |
+| --- | --- | --- | --- | --- |
+| before F61 | 39,047, 41,867 | 91, 95 MB/s | 37,884, 38,432 | 127, 133 ms |
+| `nofrag` | 42,141, 48,184, 47,875 | 98, 130, 136 MB/s / 55, 76, 80 / 11, 18, 18 | 39,700, 40,395, 41,011 | 124, 119, 106 ms |
+| F61's defaults, 16 KiB and chains of 8 | 52,640, 46,979, 53,158 | 93, 81, 101 MB/s / 37, 29, 40 / 15, 18, 17 | 40,702, 39,452, 41,145 | 118, 117, 108 ms |
+| 4 KiB and chains of 16 | 41,404, 44,299 | 55, 66 MB/s / 15, 19 / 12, 14 | 40,567, 38,715 | 110, 119 ms |
+
+**Fragments cut the keyword table's archive writes by half at the defaults and by four fifths at
+4 KiB and chains of 16**, and the node's archive writes with them, from about 120 MB/s to about 60.
+Nothing else moved. The mixed bench and its update p99 are where they were in every arm; the bench
+writes no keyword rows, so its archives were the Movie table's in every arm.
+
+**The loads did not get faster.** That contradicts round 14's reading, so the loads were repeated
+without the bench, six fresh clusters alternating (`loads.sh`), with each Zen1 node's cpu over
+15 s of the load and the groups each member led once it was done:
+
+| Arm | Rows a second | titan / hyperion cpu, % of a core | Groups europa led |
+| --- | --- | --- | --- |
+| 4 KiB, chains of 16 | 45,950, 51,308, 45,058 | 402/437, 451/473, 421/423 | 21, 19, 16 |
+| `nofrag` | 45,172, 56,193, 51,825 | 407/458, 453/502, 477/457 | 16, 21, 16 |
+
+A slow load was slow from its first five seconds, before a segment of any size had been merged:
+run 1 wrote 50,900 rows a second over its first five and 42,600 by its fifteenth, run 4 63,200
+and 59,200. Its cpu followed its rate. Neither the arm nor europa's share of the leads predicted
+it.
+
+**Verdict.** O79's amplification is gone for the partitions that had it, and the archive bytes a
+load writes halve. They were not what paces a load: round 14's 40 MiB arms were faster by the
+spread between bootstraps, which is larger than anything the archives do. O64's spread is set
+when a cluster is bootstrapped and is still not named; round 12's six candidates, round 13's
+batching and now the archives' write volume are ruled out.
+
+**Reading a chain.** The bench writes no keyword rows and reads none cold, so a chain's cost to a
+read was measured on its own (`kwread.sh`): a fresh cluster, a whole load, every node restarted so
+nothing is resident, then 60 s of keyword gets alone.
+
+| Arm | Keyword partitions chained | Keyword gets a second | p50 | p99 | Worst |
+| --- | --- | --- | --- | --- | --- |
+| 4 KiB, chains of 16 | 14,028 | 245,709 | 3.15 ms | 30.6 ms | 369 ms |
+| `nofrag` | 0 | 224,760 | 3.57 ms | 34.9 ms | 255 ms |
+| 4 KiB, chains of 16 | 14,002 | 245,537 | 3.14 ms | 32.1 ms | 347 ms |
+| `nofrag` | 0 | 248,220 | 2.98 ms | 27.5 ms | 269 ms |
+
+Nothing but the worst read moved, and that is the first read of a large chain folding it. **4 KiB
+and chains of 16 are F61's defaults.**

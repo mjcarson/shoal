@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use super::conf::FileSystemTableConf;
 use super::map::{
-    write_record, ArchiveEntry, ArchiveFormat, ArchiveMap, MapIntent, MapIntentKinds,
+    write_record, ArchiveEntry, ArchiveFormat, ArchiveMap, ChainEntry, MapIntent, MapIntentKinds,
     ARCHIVE_HEADER_LEN,
 };
 use super::IntentLogReader;
@@ -338,6 +338,42 @@ fn retry_backoff(attempts: u32) -> Duration {
         .min(COMPACTION_RETRY_MAX)
 }
 
+/// Fold a partition's base record and its fragments into one partition's archived bytes
+///
+/// What a table's archive map is given as its `FoldFn`, so a reader that holds no partition
+/// type - a get's load, a snapshot cut, a scrub, an export - is handed one whole partition
+/// ([F61](../../../../../../docs/src/features/fragmented-partitions.md)).
+///
+/// # Arguments
+///
+/// * `base` - The base record's payload
+/// * `fragments` - Each fragment's payload, oldest first
+pub fn fold_chain<T: IntentReadSupport<R>, R: PartitionKeySupport>(
+    base: &[u8],
+    fragments: &[&[u8]],
+) -> Result<rkyv::util::AlignedVec, ServerError>
+where
+    <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
+    for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+        Strategy<
+            rkyv::validation::Validator<
+                rkyv::validation::archive::ArchiveValidator<'a>,
+                rkyv::validation::shared::SharedValidator,
+            >,
+            rkyv::rancor::Error,
+        >,
+    >,
+{
+    // the base, deserialized
+    let mut partition = <T as RkyvSupport>::deserialize(<T as RkyvSupport>::access(base)?)?;
+    // each fragment folded over it, oldest first
+    for fragment in fragments {
+        partition.fold(<T as RkyvSupport>::deserialize(<T as RkyvSupport>::access(fragment)?)?);
+    }
+    // archived again as one partition
+    Ok(<T as RkyvSupport>::serialize(&partition)?)
+}
+
 /// What the loop does after a job
 enum AfterJob {
     /// Take the next job
@@ -373,6 +409,18 @@ pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport, 
     /// This is cleared once those partitions have been written, since anything left
     /// in it would be rewritten by every later job for no reason.
     loaded: HashMap<u64, T>,
+    /// The fragments of the job in progress, built from their intents alone
+    ///
+    /// A large sorted partition a job only inserts into or deletes from is written as the rows it
+    /// changed rather than read and rewritten whole
+    /// ([F61](../../../../../../docs/src/features/fragmented-partitions.md)).
+    fragments: HashMap<u64, T>,
+    /// The chains to set in our archive map after syncing writes
+    chains: Vec<ChainEntry>,
+    /// The smallest base record a merge writes fragments over
+    fragment_min_bytes: usize,
+    /// How many fragments a chain holds before a merge writes the partition whole
+    fragment_max_chain: usize,
     /// The entries to add to our archive map after syncing writes
     entries: Vec<(u64, ArchiveEntry)>,
     /// The partitions that were pruned and so must be dropped from our archive map
@@ -448,6 +496,10 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             installing_boundary: None,
             changes: HashMap::with_capacity(capacity),
             loaded: HashMap::with_capacity(capacity),
+            fragments: HashMap::new(),
+            chains: Vec::new(),
+            fragment_min_bytes: conf.throughput_sensitive.fragment_min_bytes,
+            fragment_max_chain: conf.throughput_sensitive.fragment_max_chain,
             entries: Vec::with_capacity(capacity),
             removals: Vec::with_capacity(capacity),
             staged: Vec::new(),
@@ -544,15 +596,15 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         >,
     {
         let started = Instant::now();
-        // the archive entry of every partition with intents that the map names, copied out so
-        // no borrow of the map is held across a read
-        let entries: Vec<ArchiveEntry> = {
-            let to_archive = self.map.to_archive.borrow();
-            self.changes
-                .keys()
-                .filter_map(|partition| to_archive.get(partition).copied())
-                .collect()
-        };
+        // the partitions this job can write as fragments leave the merge first
+        self.split_fragments();
+        // the chain of every partition with intents that the map names, copied out so no borrow
+        // of the map is held across a read
+        let entries: Vec<ChainEntry> = self
+            .changes
+            .keys()
+            .filter_map(|partition| self.map.chain_of(*partition))
+            .collect();
         self.phases.loaded += entries.len() as u64;
         // read a few at a time: one direct read at a random offset after another, each waiting
         // its turn on a busy shard, held a Zen1 node's merges five to twenty seconds each, and
@@ -560,23 +612,78 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         // ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
         let map = self.map.clone();
         let mut reads = futures::stream::iter(entries)
-            .map(|entry| {
+            .map(|chain| {
                 let map = map.clone();
-                async move { map.read_record(&entry).await.map(|read| (entry.key, read)) }
+                async move {
+                    // the base, then each fragment over it, oldest first
+                    let base = map.read_record(&chain.base).await?;
+                    let mut fragments = Vec::with_capacity(chain.fragments.len());
+                    for fragment in &chain.fragments {
+                        fragments.push(map.read_record(fragment).await?);
+                    }
+                    Ok::<_, ServerError>((chain.base.key, base, fragments))
+                }
             })
             .buffer_unordered(MERGE_READS_IN_FLIGHT);
         while let Some(read) = reads.next().await {
             // every record verified against its checksum as it is read
-            let (partition, read) = read?;
+            let (partition, base, fragments) = read?;
             // load this partitions data
-            let archived = <T as RkyvSupport>::access(&read)?;
+            let archived = <T as RkyvSupport>::access(&base)?;
             // deserialize this partition
-            let deserialized = <T as RkyvSupport>::deserialize(archived)?;
+            let mut deserialized = <T as RkyvSupport>::deserialize(archived)?;
+            // and fold its chain over it, so it is written whole and the chain ends
+            for fragment in &fragments {
+                let archived = <T as RkyvSupport>::access(fragment)?;
+                deserialized.fold(<T as RkyvSupport>::deserialize(archived)?);
+            }
             // add this deserialized partition to our loaded partition map
             self.loaded.insert(partition, deserialized);
         }
         self.phases.load += started.elapsed();
         Ok(())
+    }
+
+    /// Take the partitions this job can write as fragments out of its merge
+    ///
+    /// A partition is written as a fragment when its base record is at least
+    /// `fragment_min_bytes`, its chain is shorter than `fragment_max_chain`, its fragments so far
+    /// are under half its base, and its intents are ones a fragment carries. Everything else is
+    /// read, folded and written whole, which ends its chain
+    /// ([F61](../../../../../../docs/src/features/fragmented-partitions.md)).
+    fn split_fragments(&mut self) {
+        // no chain is ever started when chains are turned off
+        if self.fragment_max_chain == 0 {
+            return;
+        }
+        // the partitions whose chain has room for one more fragment
+        let eligible: Vec<u64> = self
+            .changes
+            .keys()
+            .filter(|key| {
+                self.map.chain_of(**key).is_some_and(|chain| {
+                    let fragment_bytes: usize =
+                        chain.fragments.iter().map(|fragment| fragment.size).sum();
+                    chain.base.size >= self.fragment_min_bytes
+                        && chain.fragments.len() < self.fragment_max_chain
+                        && fragment_bytes.saturating_mul(2) < chain.base.size
+                })
+            })
+            .copied()
+            .collect();
+        for key in eligible {
+            // a batch a fragment cannot carry goes back to the merge
+            if let Some(intents) = self.changes.remove(&key) {
+                match T::fragment(key, intents) {
+                    Ok(fragment) => {
+                        self.fragments.insert(key, fragment);
+                    }
+                    Err(intents) => {
+                        self.changes.insert(key, intents);
+                    }
+                }
+            }
+        }
     }
 
     /// Apply our intents to our loaded partitions
@@ -675,6 +782,36 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 );
             }
         }
+        // then the fragments, each a record of its own appended to its partition's chain
+        for (key, fragment) in &self.fragments {
+            self.phases.fragments += 1;
+            // the chain as the map has it now; the compactor is the only writer of this map
+            let Some(mut chain) = self.map.chain_of(*key) else {
+                // a partition the map lost since the split cannot take a fragment over nothing
+                return Err(ServerError::GlommioGeneric(format!(
+                    "partition {key} lost its archive entry between a merge's split and its write"
+                )));
+            };
+            let archived = rkyv::to_bytes::<_>(fragment)?;
+            let offset = write_record(
+                active_writer(&mut self.writer, &self.map).await?,
+                archived.as_slice(),
+            )
+            .await?;
+            chain.fragments.push(ArchiveEntry {
+                key: *key,
+                archive: active_id,
+                offset,
+                size: archived.len(),
+            });
+            // the whole chain is the intent, so a replay of it lands on the same chain
+            let intent = MapIntent::Chain(chain);
+            let chain = stage_map_intent!(self.staged, intent, Chain);
+            bound_staged(&mut self.writer, &mut self.map_writer, &mut self.staged).await?;
+            self.chains.push(chain);
+            to_mark.push(*key);
+        }
+        self.fragments.clear();
         // or here, every record written and nothing synced, if it never did
         crate::server::replication::install::crash_point::hit(
             crate::server::replication::install::CrashPoint::MidCompaction,
@@ -696,6 +833,10 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         for (id, entry) in self.entries.drain(..) {
             // add this entry to our shared map
             self.map.set_partition(id, entry);
+        }
+        // and the chains a fragment was appended to
+        for chain in self.chains.drain(..) {
+            self.map.set_chain(chain);
         }
         // drop the archive entries for the partitions we pruned
         for id in self.removals.drain(..) {
@@ -1137,6 +1278,13 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             })
             .map(|(_, entry)| *entry)
             .collect();
+        // a chained partition is folded and sent whole, so the file and its install know no
+        // chains; the rest are read a run at a time as before
+        // ([F61](../../../../../../docs/src/features/fragmented-partitions.md))
+        let (chained, mut entries): (Vec<ArchiveEntry>, Vec<ArchiveEntry>) = entries
+            .into_iter()
+            .partition(|entry| self.map.is_chained(entry.key));
+        let records = entries.len() + chained.len();
         entries.sort_by_key(|entry| (entry.archive, entry.offset));
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(snapshot::snapshot_name(group, boundary.index));
@@ -1147,11 +1295,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             table,
             group,
             boundary.index,
-            entries.len() as u64,
+            records as u64,
             schema_id,
         );
         let mut writer = SnapshotWriter::create(&path, header).await?;
-        event!(Level::INFO, msg = "cutting a snapshot", group = %group, boundary = boundary.index, records = entries.len());
+        event!(Level::INFO, msg = "cutting a snapshot", group = %group, boundary = boundary.index, records, chained = chained.len());
         // the records read a run at a time, several runs in flight, and written in the order
         // read: one read per record at a random offset took minutes for a group of 146,000
         // partitions on a loaded lab node (O70), and a read per record in any order took a Zen1
@@ -1191,6 +1339,22 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 writer.record(key, &read).await?;
             }
         }
+        // then every chained partition, folded into one
+        drop(reads);
+        for entry in &chained {
+            let read = match self.map.read_partition(entry.key).await {
+                Ok(read) => read,
+                Err(error) => {
+                    if let ServerError::Shoal(ShoalError::CorruptArchive { partition_id, .. }) =
+                        &error
+                    {
+                        self.report_corrupt(*partition_id, false).await;
+                    }
+                    return Err(error);
+                }
+            };
+            writer.record(entry.key, &read).await?;
+        }
         // the trailer: what was remembered at or below the boundary, oldest first
         let remembered: Vec<_> = retries
             .into_iter()
@@ -1207,7 +1371,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             boundary,
             membership,
             tablets,
-            records: entries.len() as u64,
+            records: records as u64,
             total,
             checksum,
             retries: u32::try_from(remembered.len()).unwrap_or(u32::MAX),
@@ -1601,7 +1765,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 // archive up front: the index is not changed until this pass ends
                 // ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index))
                 let entries = self.map.entries_of(old_id);
-                if !entries.is_empty() {
+                // and the chained partitions with any record here, which are folded and written
+                // whole rather than copied a record at a time
+                // ([F61](../../../../../../docs/src/features/fragmented-partitions.md))
+                let chained = self.map.chained_in(old_id);
+                if !entries.is_empty() || !chained.is_empty() {
                     // build the path to this archive file
                     let path = self.archive_path.join(old_id.to_string());
                     // get a handle to this archive
@@ -1651,6 +1819,30 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     let active_id = *self.map.active.borrow();
                     // whether a record here failed its checksum, which keeps the archive
                     let mut kept_corrupt = false;
+                    // every chain with a record here ends: folded, and written as one record
+                    for key in chained {
+                        let read = match self.map.read_partition(key).await {
+                            Ok(read) => read,
+                            Err(ServerError::Shoal(ShoalError::CorruptArchive { .. })) => {
+                                kept_corrupt = true;
+                                self.report_corrupt(key, false).await;
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        self.phases.loaded += 1;
+                        let start = write_record(
+                            active_writer(&mut self.writer, &self.map).await?,
+                            &read[..],
+                        )
+                        .await?;
+                        copied += read.len() as u64;
+                        let intent = MapIntent::entry(key, active_id, start, read.len());
+                        let entry = stage_map_intent!(self.staged, intent, Entry);
+                        bound_staged(&mut self.writer, &mut self.map_writer, &mut self.staged)
+                            .await?;
+                        self.entries.push((entry.key, entry));
+                    }
                     // read all of the still valid data from this archive, a few records at a
                     // time, as a snapshot cut does
                     // ([O74](../../../../../../docs/src/appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench))
@@ -2121,6 +2313,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     load_ms = phases.load.as_millis() as u64,
                     apply_ms = phases.apply.as_millis() as u64,
                     written = phases.written,
+                    fragments = phases.fragments,
                     write_ms = phases.write.as_millis() as u64,
                     sync_ms = phases.sync.as_millis() as u64,
                     fold_ms = phases.fold.as_millis() as u64,
@@ -2212,6 +2405,8 @@ struct JobPhases {
     apply: Duration,
     /// The partitions a merge wrote
     written: u64,
+    /// The fragments a merge wrote over partitions it did not read
+    fragments: u64,
     /// Serializing and writing them, with any early syncs of staged intents
     write: Duration,
     /// Syncing the archive and the map's intent log at the job's end
