@@ -244,6 +244,13 @@ Read-modify-write per partition. This is the expensive part of compaction and th
 runs on the medium-priority queue: a rotation touching a thousand partitions performs a
 thousand random reads.
 
+**Since [F61](../features/fragmented-partitions.md) a large sorted partition skips this step.**
+`split_fragments` runs first. A sorted partition whose base record is at least
+`fragment_min_bytes`, whose chain has room, and whose batch holds only inserts and deletes is
+written as a fragment built from its intents alone. It is never read. Every other partition is
+loaded as its base with its chain folded over it, and is written whole in step 4, which ends
+the chain.
+
 ### 3. Apply
 
 `apply_intents` (`.../fs/compactor.rs:204-216`) dispatches to the table type. For sorted
@@ -264,7 +271,10 @@ if entry.is_empty() { ShouldPrune::Yes } else { ShouldPrune::No }
 
 **This is where tombstones actually die.** At runtime a delete inserts `MaybeRow::Tombstone`
 so it can shadow data still on disk; at compaction the row is genuinely removed, because the
-rewritten archive simply will not contain it ([Partitions](../tables/partitions.md)).
+rewritten archive simply will not contain it ([Partitions](../tables/partitions.md)). A
+fragment is the one place a tombstone reaches disk ([F61](../features/fragmented-partitions.md)).
+It removes the base's row when the chain is folded, and no fold leaves one, so every whole
+partition a reader is handed still holds none.
 
 The unsorted version does the same job with one row instead of a map, and seeds from the
 partition's current archive copy so an update whose insert lives in an earlier, already
@@ -308,7 +318,9 @@ found it, loaded the stale partition, and resurrected deleted rows. See
 
 `write_partition` (`.../fs/compactor.rs:216-276`) serializes each partition into the active
 archive, logs a `MapIntent::Entry`, syncs both writers, and only *then* publishes entries to
-the shared map:
+the shared map. A fragment is written the same way. Its intent is `MapIntent::Chain`, naming the
+base and every fragment, oldest first, and it is published with `set_chain`
+([F61](../features/fragmented-partitions.md)):
 
 ```rust
 self.writer.sync().await?;

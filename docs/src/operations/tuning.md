@@ -90,6 +90,13 @@ Throughput, not service time, so read the `queries/s` column rather than the per
   disk meanwhile. The budget bounds how long one pass holds the compactor, and so how long a
   snapshot cut queued behind it waits. On the lab's Zen1 nodes under a rewrite-heavy bench,
   5 minutes against 1 minute moved throughput and p99 within the runs' noise.
+- **`throughput_sensitive.fragment_min_bytes` and `fragment_max_chain`** decide which sorted
+  partitions a merge writes as a fragment rather than rewriting
+  ([F61](../features/fragmented-partitions.md)). A longer chain rewrites a growing partition less
+  often and makes every cold read of it read and fold more records. A smaller minimum chains more
+  partitions, and the half-the-base rule consolidates a small one again after a fragment or two.
+  `fragment_max_chain: 0` writes every partition whole, as before F61. An inventory names both in
+  its `replication:` block.
 - **`networking.max_frame_bytes`** bounds one batch, and a frame length is used as an allocation size
   before the body arrives — so it is a bound on what one client can make a shard allocate as much as
   it is a bound on a batch. Lower it if you do not trust your clients; the sweep says what it costs

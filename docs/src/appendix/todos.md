@@ -2435,10 +2435,20 @@ fraction of a millisecond, and six writers are what keep it busy.
 directly into blocks written ahead doubled the syncs an idle titan could do, and under a load made
 no difference and the write p99 worse ([F60](../features/shared-wal-flush.md)): the device was
 busy with the compactor's archive writes, not the WAL's syncs
-([O79](optimizations.md#o79-a-merge-rewrites-every-partition-it-touches-whole)). This entry is not
-worth building until the archives' write volume is down.
+([O79](optimizations.md#o79-a-merge-rewrites-every-partition-it-touches-whole)). ~~This entry is not
+worth building until the archives' write volume is down.~~ Round 15 halved the archives' write
+volume ([F61](../features/fragmented-partitions.md)) and the loads did not move, so neither the
+syncs nor the archive bytes have been shown to pace them. Nothing here is worth building until
+something names what does.
 
-## A large sorted partition written as fragments
+## ~~A large sorted partition written as fragments~~
+
+**Built in round 15 as [F61](../features/fragmented-partitions.md).** What this entry said a chain
+would need held: every consumer of a map entry learned it, through one fold the map is given. It
+kept chains in a side map rather than in the entry, and the archive pass consolidates a chain it
+meets rather than copying its records. What it did not foresee is that removing the amplification
+would not make a load faster; see [O64](optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab).
+The entry as filed:
 
 Filed by [O79](optimizations.md#o79-a-merge-rewrites-every-partition-it-touches-whole) in round
 14 of the cluster testing. A segment merge writes every partition it touches whole, so a

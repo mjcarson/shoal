@@ -94,6 +94,8 @@ storage:
         archive_pass_bytes: "16MiB"  # what one archive pass copies before it yields (O74)
         archive_pass_interval: 1m    # least time between the starts of two archive passes
         archive_pass_live_percent: 50 # an archive at least this live is left alone by a pass; 1-99 (O74)
+        fragment_min_bytes: "4KiB"   # a sorted partition this large takes a merge as a fragment (F61)
+        fragment_max_chain: 16       # fragments before it is written whole again; 0 for never (F61)
   flush_interval: 1ms                # longest a busy shard leaves a staged write unwritten
   tables:                            # per-table overrides, keyed by table name
     movies:

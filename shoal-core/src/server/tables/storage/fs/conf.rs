@@ -205,22 +205,24 @@ fn default_archive_pass_live_percent() -> u8 {
     50
 }
 
-/// Set the smallest base record a merge writes fragments over rather than rewriting, 16 KiB
+/// Set the smallest base record a merge writes fragments over rather than rewriting, 4 KiB
 ///
 /// A merge rewrites a partition whole unless its record is at least this large; below it a
-/// rewrite costs about what a fragment does and leaves nothing to fold on a read
+/// rewrite costs about what a fragment does and leaves nothing to fold on a read. On the lab 4 KiB
+/// and chains of 16 cut the keyword table's archive writes by four fifths where 16 KiB and chains
+/// of 8 cut them by half, and cold reads of the table did not slow
 /// ([F61](../../../../../../docs/src/features/fragmented-partitions.md)).
 fn default_fragment_min_bytes() -> usize {
-    16 << 10
+    4 << 10
 }
 
-/// Set how many fragments a partition's chain holds before a merge writes it whole again, 8
+/// Set how many fragments a partition's chain holds before a merge writes it whole again, 16
 ///
 /// Zero writes every partition whole, as before F61. A read of a chained partition reads each
 /// record of its chain, so this bounds the reads a get pays for what a merge saves
 /// ([F61](../../../../../../docs/src/features/fragmented-partitions.md)).
 fn default_fragment_max_chain() -> usize {
-    8
+    16
 }
 
 /// The settings to use for a specific writer

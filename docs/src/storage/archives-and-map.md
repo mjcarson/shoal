@@ -101,6 +101,17 @@ pub struct ArchiveMap {
 
 `.../fs/map.rs:312-332`
 
+**Chains.** Since [F61](../features/fragmented-partitions.md) the map also holds
+`fragments: RefCell<HashMap<u64, Vec<ArchiveEntry>>>`, the fragments merged over a large sorted
+partition's base since it was last written whole, oldest first, and a `folder`, the table's
+`FoldFn`. `to_archive` still names every partition's base, so every walk of it still sees every
+partition once. The fragments are never read on their own: `read_partition`/`read_chain` read
+the base and each fragment, each verified, and fold them with the `FoldFn` into
+`PartitionBytes::Folded`; a partition with no chain comes back as `PartitionBytes::Record`, the
+read itself. `set_partition` ends a chain, `set_chain` sets one whole, `remove_partition` drops
+both, and `entries_of` leaves chained bases out so the archive pass never copies a base alone.
+`TabletUsage` counts fragments as bytes and each chain once in `chained`.
+
 `RefCell` throughout, and shared as `Arc<ArchiveMap>` between the table, the loader, and the
 compactor — all on the same thread. Same pattern as the shard's `memory_usage`
 ([Thread per Core](../architecture/thread-per-core.md#what-a-shard-owns)): `Arc` for sharing
@@ -180,14 +191,21 @@ three times in `compact_archives` and `shutdown` (`.../fs/compactor.rs:390-407`,
 `:502-519`) — the same fifteen lines repeated. A `DeleteArchive` variant call would collapse
 them.
 
-Two intent kinds:
+~~Two intent kinds~~ Four intent kinds, new ones appended:
 
 ```rust
 pub enum MapIntent {
     DeleteArchive(Uuid),
     Entry(ArchiveEntry),
+    Remove(u64),
+    Chain(ChainEntry),   // F61: the base and every fragment, oldest first
 }
 ```
+
+`Chain` names the whole chain rather than the fragment added, so replaying an intent log twice,
+which a crash between a map save and the log's deletion does, lands on the same chain. A chain
+any record of which lies past its archive's end is skipped as a torn `Entry` is
+([Resolved #159](../appendix/resolved/map-ahead-of-archive.md)).
 
 `.../fs/map.rs:47-53`
 

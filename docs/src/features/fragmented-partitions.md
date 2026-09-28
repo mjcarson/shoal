@@ -43,8 +43,8 @@ still holds for every whole partition. Only fragments carry tombstones on disk.
 **A merge decides per partition** (`FileSystemCompactor::split_fragments`, at the top of
 `load_partitions_for_intents`). A partition is written as a fragment when all of these hold:
 
-- its base is at least `throughput_sensitive.fragment_min_bytes` (16 KiB);
-- its chain is shorter than `fragment_max_chain` (8);
+- its base is at least `throughput_sensitive.fragment_min_bytes` (4 KiB);
+- its chain is shorter than `fragment_max_chain` (16);
 - its fragments so far are under half its base;
 - its batch holds only inserts and deletes.
 
@@ -83,7 +83,7 @@ shows a table's chained partitions over every copy. The compactor's long-job rep
 **The whole chain in every intent.** A fragment's intent names the base and every fragment, not
 just the one appended. Map intent logs are replayed over a saved map, and a fold whose log deletion
 a crash stopped replays the same log again. An intent that appended would put fragment one back
-after fragment two, and an older row over a newer one. A chain is at most eight entries of forty
+after fragment two, and an older row over a newer one. A chain is at most sixteen entries of forty
 bytes, so the whole chain costs little.
 
 **A side map, not a wider entry.** `ArchiveEntry` stays forty bytes and `Copy`, and `to_archive`
@@ -152,7 +152,23 @@ would put apply logic on the read path. The keyword table is written by inserts 
 
 ## Performance
 
-Measured on the lab in round 15 ([cluster testing](../cluster-testing/performance.md#o79-in-round-15-fragments)).
+Measured on the lab in round 15 ([cluster testing](../cluster-testing/performance.md#o79-in-round-15-fragments)),
+fresh clusters of the TMDB dataset, titan traced by table during a whole load:
+
+| Arm | Keyword archive writes | All archive writes | Loads, rows a second | Mixed bench update p99 |
+| --- | --- | --- | --- | --- |
+| Every partition whole (`fragment_max_chain: 0`) | 55–80 MB/s | 98–136 MB/s | 42,100–56,200 | 106–124 ms |
+| 16 KiB, chains of 8 | 29–40 MB/s | 81–101 MB/s | 47,000–53,200 | 108–118 ms |
+| 4 KiB, chains of 16, the defaults | 15–19 MB/s | 55–66 MB/s | 41,400–51,300 | 110–119 ms |
+
+The keyword table's archive writes fall by four fifths at the defaults, and a node's by half. The
+loads and the mixed bench do not move: a load's rate is set at its bootstrap by something the
+archives' bytes are not
+([O64](../appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)).
+Cold keyword reads after every node was restarted, 14,000 of the table's 58,000 partitions chained,
+ran 245,700 and 245,500 a second at a p99 of 31 and 32 ms, against 224,800 and 248,200 at 35 and
+27 ms with no chains. Only the worst read was slower, 347–369 ms against 255–269, which is the
+first fold of the largest chains.
 
 ## Tests
 

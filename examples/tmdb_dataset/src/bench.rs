@@ -1040,6 +1040,13 @@ pub struct VerifyArgs {
     /// so with `--read one` it is that member's own copy that is compared with the csv
     #[clap(long)]
     pub member: Option<usize>,
+    /// How many copies of the csv were loaded (`load --copies`), which every keyword partition holds
+    #[clap(long, default_value_t = 1)]
+    pub copies: u64,
+    /// Which copy's movies to check: every copy's keyword rows are checked, and one copy's movies
+    /// at a time bounds what the check holds in memory
+    #[clap(long, default_value_t = 0)]
+    pub movie_copy: u64,
 }
 
 /// A hash of one keyword row's sort key, so a partition's rows compare as a set of numbers
@@ -1073,12 +1080,20 @@ pub async fn verify(args: VerifyArgs) -> color_eyre::Result<()> {
     for row in reader.deserialize::<Movie>() {
         let Ok(movie) = row else { continue };
         read += 1;
-        for keyword_row in MovieByKeyword::rows(&movie) {
-            keywords
-                .entry(keyword_row.keyword)
-                .or_default()
-                .insert(order_hash(&keyword_row.order));
+        // every copy's keyword rows, each under that copy's ids (`load --copies`)
+        for copy in 0..args.copies.max(1) {
+            let mut copied = movie.clone();
+            copied.id += copy * crate::load::COPY_ID_STRIDE;
+            for keyword_row in MovieByKeyword::rows(&copied) {
+                keywords
+                    .entry(keyword_row.keyword)
+                    .or_default()
+                    .insert(order_hash(&keyword_row.order));
+            }
         }
+        // and one copy's movies
+        let mut movie = movie;
+        movie.id += args.movie_copy * crate::load::COPY_ID_STRIDE;
         expected.entry(movie.id).or_default().push(movie);
         if Some(read) == args.limit {
             break;

@@ -15,8 +15,19 @@ copy becomes garbage. `<throughput_sensitive.path>/<table>/archives/<uuid>`.
 
 **Archive map** — The per-shard, per-table index from partition key to `ArchiveEntry`
 (`{archive uuid, offset, size}`). Also the authority on whether a partition exists on disk at
-all. Persisted as a checksummed snapshot plus its own intent log. See
+all. Persisted as a checksummed snapshot plus its own intent log. Since F61 an entry can be the
+base of a *chain*, with fragments kept beside it. See
 [Archives and the Archive Map](../storage/archives-and-map.md).
+
+**Chain** (archive) — A large sorted partition as the archive map names it since
+[F61](../features/fragmented-partitions.md): a base record, a whole partition, and the
+*fragments* merged over it since it was last written whole, oldest first. Every reader is handed
+the chain folded into one partition. A whole record ends it: a merge that has to read the
+partition, an update, a chain at `fragment_max_chain`, or the archive pass.
+
+**Fragment** — A record holding only the rows one merge wrote into a large sorted partition and a
+tombstone for each row it deleted, appended to the partition's chain instead of rewriting the
+partition ([F61](../features/fragmented-partitions.md)). The one place a tombstone is on disk.
 
 **Active archive** — The one archive currently receiving newly compacted partitions. Rotated
 rather than compacted in place, to avoid invalidating entries written earlier in the same
