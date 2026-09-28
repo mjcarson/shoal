@@ -923,6 +923,26 @@ impl ArchiveMap {
         self.fragments.borrow().contains_key(&id)
     }
 
+    /// The bytes this map's index holds, estimated from its capacity: the entries and the chains
+    ///
+    /// Held for every partition the shard has ever archived, whether or not it is resident
+    /// ([cluster testing](../../../../../../docs/src/cluster-testing/performance.md#memory-at-ten-times-the-dataset)).
+    #[must_use]
+    pub fn index_bytes(&self) -> usize {
+        // a bucket is its key, its entry and a control byte, at hashbrown's load factor of 7/8
+        let bucket = std::mem::size_of::<(u64, ArchiveEntry)>() + 1;
+        let entries = self.to_archive.borrow().capacity().saturating_mul(bucket) / 7 * 8;
+        // and each chain's vector of fragments
+        let fragments = self.fragments.borrow();
+        let chain_bucket = std::mem::size_of::<(u64, Vec<ArchiveEntry>)>() + 1;
+        let chains = fragments.capacity().saturating_mul(chain_bucket) / 7 * 8
+            + fragments
+                .values()
+                .map(|chain| chain.capacity() * std::mem::size_of::<ArchiveEntry>())
+                .sum::<usize>();
+        entries + chains
+    }
+
     /// How many partitions have fragments over their base record
     #[must_use]
     pub fn chained_count(&self) -> usize {

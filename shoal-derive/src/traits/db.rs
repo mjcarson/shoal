@@ -78,6 +78,15 @@ pub fn add(
             stats.merge(self.#field_ident.recovery_stats());
         }
     });
+    // build our index size arms
+    let index_bytes_arms = fields.named.iter().map(|field| {
+        // get our field ident
+        let field_ident = field.ident.as_ref().unwrap();
+        quote! {
+            // add this tables partition index to the total
+            bytes += self.#field_ident.index_bytes();
+        }
+    });
     // build our handle query arms
     let handle_arms = fields
         .named
@@ -537,6 +546,15 @@ pub fn add(
                 // add in what each of our tables recovery discarded
                 #(#recovery_stats_arms)*
                 stats
+            }
+
+            /// The bytes every table's partition index holds, estimated from their capacities
+            fn index_bytes(&self) -> usize {
+                // start with nothing counted
+                let mut bytes = 0usize;
+                // add in each tables index
+                #(#index_bytes_arms)*
+                bytes
             }
 
             /// Turn one query of an already validated bundle back into one we can execute

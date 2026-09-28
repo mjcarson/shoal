@@ -120,6 +120,12 @@ where
     /// what this shards recovery lost by the time its startup summary is emitted.
     fn recovery_stats(&self) -> RecoveryStats;
 
+    /// The bytes every table's partition index holds, estimated from their capacities
+    fn index_bytes(&self) -> usize {
+        // a schema that does not say holds none it can count
+        0
+    }
+
     /// Build a default queries bundle
     #[must_use]
     fn queries() -> Queries<Self::ClientType> {

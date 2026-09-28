@@ -368,6 +368,18 @@ where
         self.recovery
     }
 
+    /// The bytes this table's partition index holds, estimated from its capacity
+    ///
+    /// The map is sized for the most partitions it ever held at once and never shrinks, so after
+    /// an eviction it still holds its peak's buckets, which no eviction budget counts
+    /// ([cluster testing](../../../../docs/src/cluster-testing/performance.md#memory-at-ten-times-the-dataset)).
+    #[must_use]
+    pub fn index_bytes(&self) -> usize {
+        // a bucket is its key, its value and a control byte, at hashbrown's load factor of 7/8
+        let bucket = std::mem::size_of::<(u64, MaybeLoaded<SortedPartition<R>>)>() + 1;
+        self.partitions.capacity().saturating_mul(bucket) / 7 * 8
+    }
+
     /// The channel this table's compactor takes jobs on, if it has one
     pub fn compaction_sink(&self) -> Option<AsyncSender<crate::storage::CompactionJob>> {
         self.storage.compaction_sink()

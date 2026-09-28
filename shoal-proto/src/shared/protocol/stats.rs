@@ -312,6 +312,12 @@ pub struct NodeStats {
     /// The shards' eviction budgets together
     #[serde(default)]
     pub memory_budget: u64,
+    /// Bytes the shards' archive maps' indexes hold, which no budget counts
+    #[serde(default)]
+    pub archive_map_bytes: u64,
+    /// Bytes the shards' tables' partition indexes hold, which no budget counts
+    #[serde(default)]
+    pub table_index_bytes: u64,
     /// The process's resident memory: the rows, and everything the eviction budget does not
     /// count - the archive maps, the logs' caches, the groups' state and every buffer
     #[serde(default)]
@@ -404,6 +410,8 @@ impl NodeStats {
             hot_groups: Vec::new(),
             memory_bytes: 0,
             memory_budget: 0,
+            archive_map_bytes: 0,
+            table_index_bytes: 0,
             resident_bytes: 0,
             wal_syncs_per_sec: 0.0,
             wal_bytes_per_sec: 0.0,

@@ -603,6 +603,19 @@ impl<N: TableNameSupport> FullArchiveMap<N> {
         fs_map.tablet_usage()
     }
 
+    /// The bytes every table's archive map index holds, estimated from their capacities
+    #[must_use]
+    pub fn index_bytes(&self) -> usize {
+        self.map
+            .borrow()
+            .values()
+            .map(|map| {
+                let ArchiveMapKinds::FileSystem(fs_map) = map;
+                fs_map.index_bytes()
+            })
+            .sum()
+    }
+
     /// Whether a table's archives hold any partition of some tablets
     ///
     /// What says a shard once held a group when its checkpoint is gone with its log
