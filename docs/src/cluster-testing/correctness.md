@@ -1433,3 +1433,31 @@ was the fastest on record here.
 scale is the `retained_bytes` half: a forced purge, which bounds a shard's disk, is not held, so a
 step whose transfer outlasts a shard's retained WAL bytes still loses its log. The inventory can
 now raise it.
+
+### A rehome that forgot its count
+
+The first workspace suite run on this round's fixes failed `local_rehome_recovers_after_each_crash_point`
+on *"node two never died at before_finalize"*, one of [#142](../appendix/known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host)'s
+recorded shapes. Alone, with child logs, it failed one run in seven. The armed node had started one
+executor and run no rehome at all, because the storage marker said one executor while the files were
+laid out for two. The control thread records every topology version it observes in the marker, and
+it runs while the pool rehomes the files. Its rewrite had read the marker before the previous
+start's rehome recorded two, and written one back after. That is
+[#186](../appendix/resolved/marker-lost-update.md), which also explains #142's *"No such file or
+directory"* from a child: both rewrites staged the marker under one temporary name. Every rewrite now
+holds one lock. On the fix, a unit test that races the two passes, and the rehome matrix passed ten
+runs of ten alone.
+
+### The final build
+
+`cluster destroy`, `bootstrap` and `target/lab/r11/abload.sh` on the round's last build (`cf266ec`),
+with the lab's inventory:
+
+| | |
+| --- | --- |
+| Whole load | 2,193,788 rows in 50.0 s, 43,908 rows a second |
+| csv, whole | 1,187,691 movies and 58,418 keyword partitions: 0 missing, 0 different |
+| Mixed bench, 120 s | 113,331 operations a second; p99 get 29.4 ms, update 192.7 ms |
+| Acknowledged inserts, each member alone | 687,372, 0 lost |
+
+**Verdict: pass.** The same shape as round 12's runs: 103,900 to 122,600 operations a second.

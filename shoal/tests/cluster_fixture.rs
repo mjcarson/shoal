@@ -8043,7 +8043,6 @@ async fn snapshot_install_is_atomic_at_every_crash_point() -> Result<(), Fixture
 #[tokio::test(flavor = "multi_thread")]
 async fn installing_tablet_never_serves_partial_state() -> Result<(), FixtureError> {
     use shoal::client::SendOptions;
-    use shoal::shared::protocol::error::ErrorCode;
     use shoal::shared::protocol::read::ReadLevel;
     let mut cluster = Cluster::builder()
         .cluster(3, CoreClaim::Count(1))
