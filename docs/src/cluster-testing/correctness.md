@@ -1566,3 +1566,19 @@ election timeout. On the lab it changes nothing, since its hosts answer in time:
 
 **Verdict: #142's deadlines were mostly #190.** The item stays open for the restore stall, which
 has not recurred, and for what the full suite run finds next.
+
+### The final build
+
+On the round's last build (`96ebbe5`), with the lab's inventory (`target/lab/r14/confirm.sh`):
+
+| | |
+| --- | --- |
+| Whole load | 2,193,788 rows in 45.2 s, 48,491 rows a second |
+| A quiet minute under the bench | 0 vote changes; 122,408 operations a second |
+| titan, leading the most groups, killed under the bench | writes it led refused `NotLeader` for 17 s (seconds 16 to 33), the rest served; 661,504 acknowledged inserts, 0 lost through each member alone |
+| hyperion's peer ports cut for 20 s under the bench | the second of the cut at 47% of the second before, the next at 119%; refusals end within two seconds of the heal; 852,612 acknowledged inserts, 0 lost through each member alone |
+
+**Verdict: pass.** The failover window is the one [C7](../distributed/failover.md#the-window-and-what-a-client-sees)
+states, three to four bases, and #190's floor on an append's wait did not lengthen it: a killed
+peer's calls end on the link's silence. A partition's worst second is where round 12 left it
+([#143](../appendix/resolved/silent-partition-hops.md#still-open)), 47% against 44%.
