@@ -1582,3 +1582,52 @@ On the round's last build (`96ebbe5`), with the lab's inventory (`target/lab/r14
 states, three to four bases, and #190's floor on an append's wait did not lengthen it: a killed
 peer's calls end on the link's silence. A partition's worst second is where round 12 left it
 ([#143](../appendix/resolved/silent-partition-hops.md#still-open)), 47% against 44%.
+
+## 16. Round 15
+
+Round 14 left [what is left](todo.md) with O79's amplification designed but unbuilt, the
+terabyte-scale rows that needed "hosts with the disk", and #142 open for whatever a full suite run
+finds next. This round built the fragments O79 filed as [F61](../features/fragmented-partitions.md)
+and measured them ([performance](performance.md#o79-in-round-15-fragments)), then took the lab's
+nodes an order of magnitude past the one dataset they had always held. Nothing in the lab's data
+was kept: F61 changed the archive map's format. The runs are under `target/lab/r15/`.
+
+### Ten times the dataset
+
+The lab's hosts have about 60 GB free each, not a terabyte, but enough for ten copies of the TMDB
+dataset. The loader gained `--copies` and `--first-copy`: copy `c` offsets every id by `c·2⁴⁰` and
+keeps titles and keywords, so every keyword partition grows by each copy's movies, and `verify
+--copies` expects every copy's keyword rows. One cluster of the lab's inventory at F61's defaults
+was grown to one, five and ten copies (`scale.sh`), each step read once the compactors drained:
+
+| Copies | Load | Movie partitions | Archived a node, Movie / keyword | On disk a node | Rows / resident a node |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 2,193,788 rows in 45.7 s, 48,041 a second | 1,134,767 | 633 MiB / 163 MiB | 2.1 GB | 1.1 / 3.4–3.6 GiB |
+| 5 | 8,775,152 more in 191.5 s, 45,818 | 5,900,163 | 3.2 GiB / 787 MiB | 7.3 GB | 1.8–2.0 / 7.5–7.7 GiB |
+| 10 | 10,968,940 more in 250.8 s, 43,729 | 11,835,067 | 6.4 GiB / 1.5 GiB | 13 GB | 0.4–0.5 / 8.0–8.2 GiB |
+
+Loads held their rate as the data grew tenfold. 74,946 keyword partitions were chains at ten copies,
+counted over the three copies of each. Memory did not hold: see [memory at ten times the dataset](performance.md#memory-at-ten-times-the-dataset).
+
+### Rebuilding a node at ten times the dataset
+
+hyperion rebuilt under the mixed bench on the ten copy cluster (`rebuild.sh`), with the lab's
+defaults otherwise, a step at a time (`moves_per_node: 1`):
+
+| | |
+| --- | --- |
+| Rebuild | 18 steps, 8.0 GiB moved and 8.5 GiB streamed in 478 s: 18 MiB/s, 21 s a step |
+| Round 14's, one copy | 878 MiB in 175 s: 5 MiB/s |
+| Installs on hyperion | 36 groups, once each |
+| Snapshot fed, stalled, failed, forced purges | 0, 0, 0, 0 on every node |
+| Bench over 2,400 s | 12,822 gets, 14,417 updates and 4,807 inserts a second; update p99 333 ms |
+| Acknowledged inserts, each member alone | 11,542,676, 0 lost |
+| csv, each member alone at `One` | copy 0's 1,187,691 movies and all ten copies' 58,418 keyword partitions: 0 missing, 0 different |
+
+The bench's errors were hyperion's own connections lost when it stopped (2,176), and 261
+`NotLeader` and 299 `OutcomeUnknown` answers for writes it led as it went, each a write the client
+may send again. A step moved a set of about 450 MB, where a lab step at one copy moved about 50,
+and the fixed costs [F56](../features/cluster-rebuild.md#performance) measured (about 35 s a step) are now the smaller share: nine times the
+data moved in under three times the time.
+
+**Verdict: pass.**

@@ -3732,3 +3732,43 @@ under it, and every query opens several (`Coordinator::route`, `Shard::handle_qu
 `PersistentTable::handle`). Not taken: 0.8% is inside the lab's run-to-run spread, and the only
 way to remove it without losing the traces is a sampled layer, which is a design of its own. It
 is worth revisiting if a profile of a faster node shows the slab as a larger share.
+
+### O81. A map save kept a copy of the map
+
+| | |
+| --- | --- |
+| **Rank** | ~~**B36**~~ **done** — found by a heap profile on the lab in round 15 and applied |
+| **Impact** | Measured on the lab — at ten copies of the dataset, rkyv's thread-local arenas held 768 MiB of a node at the end of a bench, each at the size of the largest archive map its shard had serialized, and every save cloned the map first |
+| **Difficulty** | S |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Every save allocates its scratch anew and frees it, where the thread's arena was reused. A save is at most one per quarter of the map written as intents ([O62](#o62-every-compaction-rewrites-the-shards-whole-archive-map)) |
+| **Benchmark** | the lab's memory arm, `target/lab/r15/mem.sh`, and a heap profile of the node (`jemalloc-prof`, `target/lab/r15/prof/heap.py`) |
+
+Found by the [distributed cluster testing](../cluster-testing/performance.md#memory-at-ten-times-the-dataset)
+beside [#191](resolved/raft-channels-preallocated.md). `SerializedMap::save` cloned `to_archive`,
+the fragments and the archive set into a `SerializedMap` and serialized that with
+`rkyv::to_bytes`, which borrows a thread-local `Arena` that keeps the capacity of the largest thing
+it has ever built. A map is by far the largest thing a shard serializes, so each shard kept a
+scratch arena the size of its map's hash table for good, and briefly held the map twice more
+during a save. **Applied:** the save serializes a `SerializedMapRef` that borrows the live index,
+archived as a `SerializedMap` is (same fields, same order), with an `Arena` of its own that is
+dropped when the save ends. The map tests read back what it writes.
+
+### O82. A table's partition index kept the capacity of its peak
+
+| | |
+| --- | --- |
+| **Rank** | ~~**B37**~~ **done** — found on the lab in round 15 and applied |
+| **Impact** | Measured on the lab — a table's `partitions` map held 480 to 576 MiB of a node's heap at ten copies of the dataset, sized for the most partitions it had held at once, which no budget counts ([#150](resolved/inline-partition-buckets.md) boxed the rows; the buckets stayed) |
+| **Difficulty** | S |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A rehash of the entries left when an eviction leaves the map under a quarter full, and a grow again if it fills |
+| **Benchmark** | `table_index_bytes` on `Stats`, the lab's memory arm (`target/lab/r15/mem.sh`) |
+
+A `HashMap` never gives back capacity on its own, so a table that once held every partition of a
+load kept the buckets for all of them after eviction. **Applied:** `shrink_if_sparse`
+(`tables/persistent.rs`) shrinks a table's index to twice what it holds once it holds under a
+quarter of its capacity and more than 4,096 buckets, after every eviction. `Stats` reports each
+node's `table_index_bytes` and `archive_map_bytes` beside its rows, and `cluster stats` shows them.

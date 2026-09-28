@@ -315,6 +315,7 @@
   - [188. A forced purge at `retained_bytes` passed the boundary a new copy was installing](appendix/resolved/forced-purge-outruns-snapshot.md)
   - [189. A move whose snapshot was still streaming was reported stalled](appendix/resolved/move-stall-ignores-snapshot-bytes.md)
   - [190. A leader threw away every append answer that took longer than a heartbeat interval](appendix/resolved/append-answer-thrown-away.md)
+  - [191. Every group's openraft channels were allocated to their bound](appendix/resolved/raft-channels-preallocated.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)
