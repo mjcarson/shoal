@@ -829,6 +829,11 @@ where
         slot.state.borrow_mut().installing = true;
         let table = slot.table;
         let tablets = manifest.tablets.clone();
+        // every shard on the node routes these tablets to another holder until the install ends
+        // ([#184](../../../../docs/src/appendix/resolved/installing-copy-reads-elsewhere.md))
+        if let Some(setup) = &self.peer_setup {
+            setup.installing.begin(&tablets);
+        }
         let volatile = slot.store.is_volatile();
         replication.active_installs.insert(
             group,
@@ -1110,6 +1115,10 @@ where
             state.pending_install = None;
             state.repair_pending = false;
         }
+        // the copy serves again, so the node's shards route its tablets here again
+        if let Some(setup) = &self.peer_setup {
+            setup.installing.end(&active.manifest.tablets);
+        }
         event!(Level::INFO, msg = "a snapshot is installed", group = %group, boundary = active.manifest.boundary.index, records = active.manifest.records, repair = active.repair);
         if let Some(done) = active.done.take() {
             let _ = done.send(Ok(()));
@@ -1156,6 +1165,10 @@ where
             slot.state.borrow_mut().installing = false;
         }
         if let Some(mut active) = replication.active_installs.remove(&group) {
+            // the copy is what it was before the install, and is routed to again
+            if let Some(setup) = &self.peer_setup {
+                setup.installing.end(&active.manifest.tablets);
+            }
             if let Some(done) = active.done.take() {
                 let _ = done.send(Err(error));
             }

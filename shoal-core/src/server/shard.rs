@@ -1567,6 +1567,12 @@ pub(super) struct Shard<D: ShoalDatabase> {
     /// it, which reads its own copy and proposes writes through the group's leader, and every
     /// other tablet at its primary ([F40](../../../docs/src/features/replication.md)).
     replica_ring: Ring,
+    /// `replica_ring` with every tablet whose copy on this node is installing a snapshot sent
+    /// to another holder, which is the ring a query is routed with
+    /// ([#184](../../../docs/src/appendix/resolved/installing-copy-reads-elsewhere.md))
+    route_ring: Ring,
+    /// The node's install generation `route_ring` was built under
+    routed_generation: u64,
     /// The tablet groups this shard hosts, their WAL and their network, on a cluster node
     ///
     /// `None` on a standalone node, which replicates nothing
@@ -1739,10 +1745,44 @@ where
             shed: 0,
             control,
             subscribed: HashSet::new(),
+            // nothing is installing yet, so the ring routed with is the replica ring
+            route_ring: replica_ring.clone(),
+            routed_generation: 0,
             replica_ring,
             replication: None,
         };
         Ok(shard)
+    }
+
+    /// Build the ring queries are routed with again, if an install on this node began or ended
+    ///
+    /// The replica ring, with every tablet whose copy here is installing a snapshot sent to
+    /// another holder that is up ([#184](../../../docs/src/appendix/resolved/installing-copy-reads-elsewhere.md)).
+    /// A load of one atomic when nothing changed, which is every bundle but the few after an
+    /// install's start or end.
+    ///
+    /// # Arguments
+    ///
+    /// * `force` - Build it whatever the generation, because the replica ring changed
+    fn refresh_routes(&mut self, force: bool) {
+        let Some(setup) = &self.peer_setup else {
+            return;
+        };
+        // nothing began or ended since the last build
+        let generation = setup.installing.generation();
+        if !force && generation == self.routed_generation {
+            return;
+        }
+        self.routed_generation = generation;
+        // the replica ring, with the installing tablets steered off this node
+        let mut ring = self.replica_ring.clone();
+        let tablets = setup.installing.tablets();
+        if !tablets.is_empty() {
+            self.map
+                .get()
+                .steer_installing(&mut ring, setup.local.node, &tablets);
+        }
+        self.route_ring = ring;
     }
 
     /// Install a newer map, rebuilding the ring this shard routes with
@@ -1782,6 +1822,9 @@ where
         }
         // whether it hosts groups follows whether the placement names it
         self.placed = map.places(setup.local.node);
+        // and the tablets installing here steered off the new ring as off the old
+        // ([#184](../../../docs/src/appendix/resolved/installing-copy-reads-elsewhere.md))
+        self.refresh_routes(true);
         event!(
             Level::INFO,
             msg = "installed a tablet map",
@@ -2254,6 +2297,9 @@ where
                     .await?;
             }
         }
+        // route around any copy on this node that began installing a snapshot since the last
+        // bundle ([#184](../../../docs/src/appendix/resolved/installing-copy-reads-elsewhere.md))
+        self.refresh_routes(false);
         // initialize a vec to store the per shard shares we find
         let mut found = Vec::with_capacity(3);
         // the reads refused by name while routing, answered once the ring borrow is over
@@ -2302,7 +2348,7 @@ where
             // ([F40](../../../docs/src/features/replication.md))
             <<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::route_archived(
                 kind,
-                &self.replica_ring,
+                &self.route_ring,
                 &mut found,
             );
             // record that this query is leaving us for the shards that own its partitions
@@ -3094,10 +3140,16 @@ where
             // is the old generation and what is on disk is half the new one
             // ([F43](../../../docs/src/features/node-recovery.md))
             if let Some(group) = self.installing_group(&query) {
-                let error = crate::shared::responses::ResponseError::new(
-                    ErrorCode::Unavailable,
-                    format!("group {group} is installing a snapshot; its tablets are not readable until it is installed"),
-                );
+                let msg = format!("group {group} is installing a snapshot; its tablets are not readable until it is installed");
+                // a peer's read is handed back for another holder, which can answer it now
+                // ([#184](../../../docs/src/appendix/resolved/installing-copy-reads-elsewhere.md))
+                if meta.from_peer {
+                    return self
+                        .answer_elsewhere(meta, query, span, gathered_meta, msg)
+                        .await;
+                }
+                let error =
+                    crate::shared::responses::ResponseError::new(ErrorCode::Unavailable, msg);
                 return self
                     .answer_read_failure(meta, query, span, gathered_meta, error)
                     .await;

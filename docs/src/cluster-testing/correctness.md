@@ -1354,13 +1354,14 @@ Both long cuts outlasted the peers' retained log for some groups: hyperion insta
 after the 120 s cut and 18 after the 300 s one, and the rest of its groups were fed entries. An
 install restarts its group's copy, and a read through hyperion for that group's tablets is refused
 until the install ends, although the two other members hold the tablet.
-That is [#184](../appendix/known-issues.md#184-a-read-through-a-copy-that-is-installing-a-snapshot-is-refused-not-sent-to-another-holder),
-filed from this run. A client that retries `Unavailable` rides it out. The bench does not retry,
-which is why it counts them.
+That was [#184](../appendix/resolved/installing-copy-reads-elsewhere.md), found in this run and
+fixed: the node's shards now route a tablet whose copy is installing to another holder that is up.
+Rerun on the fix, the same 300 s cut left no get refused through 18 installs, and the rate was back
+17 s after the heal.
 
 **Verdict: pass.** Nothing acknowledged was lost, no node restarted, and a heal is a second
-whatever came before it. The catch-up after a cut longer than the retention is the slow part,
-and #184 is its visible cost.
+whatever came before it. The catch-up after a cut longer than the retention is the slow part, and
+since #184 it refuses nothing.
 
 ### A backup shipped and restored
 
@@ -1378,3 +1379,27 @@ cluster the partition tests had loaded (`target/lab/r13/ship/run.sh`):
 | csv through each member alone at `One` | 1,187,691 movies and 58,418 keyword partitions, 0 missing, 0 different |
 
 **Verdict: pass.**
+
+### A get through an unplaced member
+
+[Section 8](#a-member-added-with-no-rebalance) measured a get through a member with no placement
+slot at about four times a placed member's latency, 2 ms at the median, and the limitation was
+never filed. Round 13 asked whether that is the hop or something on it. The setup was the same:
+europa and titan at a factor of two, the csv loaded, and hyperion added with no rebalance. Gets
+alone at `One` ran for 30 s through each member (`target/lab/r13/unplaced/run.sh`), first with one
+query in flight and then at the bench's defaults. The clients run on europa.
+
+| Through | Placed | One in flight: gets a second, p50, p99 | Loaded: gets a second, p50, p99 |
+| --- | --- | --- | --- |
+| europa | yes, and the clients' own host | 13,560, 0.067 ms, 0.105 ms | 155,338, 0.63 ms, 27 ms |
+| titan | yes | 3,285, 0.301 ms, 0.422 ms | 58,782, 0.93 ms, 164 ms |
+| hyperion | no | 1,509, 0.644 ms, 0.842 ms | 47,286, 2.67 ms, 210 ms |
+
+Titan and hyperion are the same hardware at the same distance from the clients, so the gap
+between them is the forward: 0.34 ms idle, which is one more round trip on the data lane and TLS
+both ways on each end. Loaded, hyperion does that for every share on a Zen1 host, and its queues
+make up the rest of the median.
+
+**Verdict: the cost of the hop, and nothing on it to remove.** A member that holds nothing has to
+ask a member that does. It is a limitation of coordinating through an unplaced member, filed as
+such on [what is left](todo.md), and a client that can reach the placed members should use them.
