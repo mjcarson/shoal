@@ -1522,3 +1522,24 @@ fixed: the bytes sent count as progress.
 
 **Verdict: pass on the fix.** Nothing was lost in any run. What a terabyte step still meets is
 `retained_bytes + hold_bytes` and `migration.timeout`, both the operator's to raise.
+
+### A cut in disk order
+
+Pricing [O52](../appendix/optimizations.md#o52-a-snapshot-copies-every-record-of-the-archives-into-one-file),
+a cut streamed rather than written first, found that on titan under the bench a Movie set's cut
+took 5.5 to 8.4 s and its send and install 1.4 s (`target/lab/r14/tb/cuts.py`). The cut read one
+record at a time in key order, about 80,000 records of 700 bytes each at random offsets on a busy
+device. It now reads them in disk order, in runs of up to a mebibyte
+([O78](../appendix/optimizations.md#o78-a-snapshot-cut-read-one-record-at-a-time-in-key-order)).
+The same rebuild under load as [section 10](#10-the-compactors-backlog-and-four-rebuilds), on the
+lab's inventory:
+
+| | |
+| --- | --- |
+| titan's cut of a set | 0.55 s, from 5.5–8.4 s |
+| europa's | 0.16 s, from 0.5 s |
+| Rebuild | 175 s, streamed 877.5 MiB for 878.1 MiB moved |
+| Acknowledged inserts, each member alone | 3,465,326, 0 lost |
+| csv, each member alone | 0 missing, 0 different |
+
+**Verdict: pass**, and the fastest rebuild on the lab so far.
