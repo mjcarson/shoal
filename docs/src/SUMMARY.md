@@ -313,6 +313,7 @@
   - [187. A WAL segment recovered at a restart was never sealed when a rotation came first](appendix/resolved/recovered-segment-never-sealed.md)
   - [188. A forced purge at `retained_bytes` passed the boundary a new copy was installing](appendix/resolved/forced-purge-outruns-snapshot.md)
   - [189. A move whose snapshot was still streaming was reported stalled](appendix/resolved/move-stall-ignores-snapshot-bytes.md)
+  - [190. A leader threw away every append answer that took longer than a heartbeat interval](appendix/resolved/append-answer-thrown-away.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

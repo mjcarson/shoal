@@ -567,6 +567,15 @@ struct Shared {
     /// How long a peer may be silent before a write is not hopped to it: four heartbeats at the
     /// failover base the map carries, and never under `HOP_SILENCE`
     hop_silence: Cell<Duration>,
+    /// The least an append or a heartbeat waits for its answer: the groups' election timeout
+    ///
+    /// openraft gives each append a heartbeat interval, a tenth of the failover base. A peer on
+    /// a loaded host that answered in more than that had every answer thrown away: its leader
+    /// never learned what it matched, committed nothing and let its lease lapse, and every
+    /// retry added to the load (cluster testing, round 14). An answer inside the election
+    /// timeout is still worth having, and a peer that answers nothing is given up on by the
+    /// link's silence rather than by this.
+    append_floor: Cell<Duration>,
     /// One bulk link per peer node, opened on the first snapshot sent to it, each with the
     /// number it was opened under ([F43](../../../../docs/src/features/node-recovery.md))
     bulk: RefCell<HashMap<NodeId, (u64, Rc<peer::Link>)>>,
@@ -776,6 +785,7 @@ impl ShardNetwork {
                 links: RefCell::new(HashMap::new()),
                 heard: RefCell::new(HashMap::new()),
                 hop_silence: Cell::new(HOP_SILENCE),
+                append_floor: Cell::new(DEFAULT_APPEND_FLOOR),
                 bulk: RefCell::new(HashMap::new()),
                 next_bulk: Cell::new(1),
                 builder,
@@ -1055,6 +1065,16 @@ impl ShardNetwork {
         let heartbeats =
             Duration::from_millis(failover_ms.saturating_mul(HOP_SILENCE_HEARTBEATS) / 10);
         self.shared.hop_silence.set(heartbeats.max(HOP_SILENCE));
+        // an append waits at least the election timeout's lower bound, the base itself
+        self.shared
+            .append_floor
+            .set(Duration::from_millis(failover_ms.max(100)));
+    }
+
+    /// The least an append or a heartbeat waits for its answer
+    #[must_use]
+    pub fn append_floor(&self) -> Duration {
+        self.shared.append_floor.get()
     }
 
     /// The silence after which a write is not hopped to a peer
@@ -1193,6 +1213,9 @@ const HOP_SILENCE_HEARTBEATS: u64 = 3;
 
 /// How often a request waiting on a peer asks whether the peer has fallen silent
 const SILENCE_POLL: Duration = Duration::from_millis(100);
+
+/// The least an append waits for its answer before the failover base is known
+const DEFAULT_APPEND_FLOOR: Duration = Duration::from_secs(1);
 
 /// The most a forwarded proposal holds back from the leader's budget for its answer's trip home
 const HOP_MARGIN: Duration = Duration::from_millis(250);
@@ -1877,14 +1900,12 @@ impl GroupPeer {
                 "encoding append_entries: {error}"
             )))
         })?;
+        // openraft's budget is a heartbeat interval; a late answer is still the member's
+        // matched index, so it is waited on for at least the election timeout (item 190)
+        let deadline = option.hard_ttl().max(self.peer.network.append_floor());
         let answer = self
             .peer
-            .rpc(
-                ReplicateKind::AppendEntries,
-                self.group,
-                payload,
-                option.hard_ttl(),
-            )
+            .rpc(ReplicateKind::AppendEntries, self.group, payload, deadline)
             .await
             .map_err(ShardPeer::unreachable)?;
         postcard::from_bytes(&answer).map_err(|error| {
