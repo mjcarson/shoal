@@ -944,21 +944,77 @@ impl ArchiveMap {
         }
         // read the checksum ahead of the payload and the payload in one read
         let read = archive.read_at(entry.offset - 8, entry.size + 8).await?;
-        // a short read is a torn record, which is corruption of a different shape
-        if read.len() < entry.size + 8 {
-            self.integrity
-                .checksum_failures
-                .set(self.integrity.checksum_failures.get() + 1);
-            return Err(ServerError::Shoal(ShoalError::CorruptArchive {
-                archive: entry.archive,
-                partition_id: entry.key,
-                expected: 0,
-                found: 0,
-            }));
+        self.verify_record(entry, &read, 0)
+    }
+
+    /// Read a run of records that sit near each other in one archive with one read
+    ///
+    /// The run is read from the first record's start to the last one's end, the bytes of other
+    /// partitions between them included, and each record is verified against its checksum and
+    /// sliced out of the one buffer. A snapshot cut reads a group's records this way: one
+    /// direct read per record, at the lab's 700 bytes a record, took a Zen1 host 5 to 8 s a
+    /// set on a device busy flushing its WAL
+    /// ([O78](../../../../../../docs/src/appendix/optimizations.md#o78-a-snapshot-cut-read-one-record-at-a-time-in-key-order)).
+    ///
+    /// # Arguments
+    ///
+    /// * `archive` - The open archive
+    /// * `run` - The records, in offset order, all in `archive`
+    pub async fn read_run_from(
+        &self,
+        archive: &DmaFile,
+        run: &[ArchiveEntry],
+    ) -> Result<Vec<(u64, ReadResult)>, ServerError> {
+        // nothing to read for no records
+        let (Some(first), Some(last)) = (run.first(), run.last()) else {
+            return Ok(Vec::new());
+        };
+        // a format 1 archive has no checksums ahead of its records, so its run starts at the
+        // first record itself
+        let verified = self.format_of(&first.archive) != ArchiveFormat::Unverified;
+        let lead = if verified { 8 } else { 0 };
+        let start = first.offset - lead;
+        let end = last.offset + last.size as u64;
+        // truncation cannot happen: a run is bounded far below usize by its caller
+        #[allow(clippy::cast_possible_truncation)]
+        let read = archive.read_at(start, (end - start) as usize).await?;
+        let mut records = Vec::with_capacity(run.len());
+        for entry in run {
+            // where this record's checksum (or payload) sits inside the run's buffer
+            #[allow(clippy::cast_possible_truncation)]
+            let at = (entry.offset - lead - start) as usize;
+            let payload = if verified {
+                self.verify_record(entry, &read, at)?
+            } else {
+                // counted the way a single unverified read is
+                self.integrity
+                    .unverified_reads
+                    .set(self.integrity.unverified_reads.get() + 1);
+                self.short_record(entry, &read, at, entry.size)?
+            };
+            records.push((entry.key, payload));
         }
+        Ok(records)
+    }
+
+    /// Verify one record's checksum inside a buffer and slice its payload out
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - Where the partition's record is
+    /// * `read` - A buffer holding the record's checksum and payload
+    /// * `at` - Where in `read` the record's checksum starts
+    fn verify_record(
+        &self,
+        entry: &ArchiveEntry,
+        read: &ReadResult,
+        at: usize,
+    ) -> Result<ReadResult, ServerError> {
+        // the checksum and the payload together, or a torn record
+        let record = self.short_record(entry, read, at, entry.size + 8)?;
         // the payload has to hash to the checksum written beside it
-        let expected = u64::from_le_bytes(read[..8].try_into()?);
-        let found = record_checksum(&read[8..]);
+        let expected = u64::from_le_bytes(record[..8].try_into()?);
+        let found = record_checksum(&record[8..]);
         if expected != found {
             self.integrity
                 .checksum_failures
@@ -971,13 +1027,38 @@ impl ArchiveMap {
             }));
         }
         // hand back the payload alone, which is what the map entry describes
-        match ReadResult::slice(&read, 8, entry.size) {
-            Some(payload) => Ok(payload),
-            // the slice is inside a read we just measured, so this cannot happen
-            None => Err(ServerError::GlommioGeneric(format!(
-                "the record of partition {:016x} in archive {} could not be sliced",
-                entry.key, entry.archive
-            ))),
+        self.short_record(entry, &record, 8, entry.size)
+    }
+
+    /// Slice a record's bytes out of a buffer, or name it torn when the buffer is short
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - Where the partition's record is
+    /// * `read` - The buffer
+    /// * `at` - Where in `read` the bytes start
+    /// * `len` - How many bytes
+    fn short_record(
+        &self,
+        entry: &ArchiveEntry,
+        read: &ReadResult,
+        at: usize,
+        len: usize,
+    ) -> Result<ReadResult, ServerError> {
+        // a short read is a torn record, which is corruption of a different shape
+        match ReadResult::slice(read, at, len) {
+            Some(slice) if slice.len() == len => Ok(slice),
+            _ => {
+                self.integrity
+                    .checksum_failures
+                    .set(self.integrity.checksum_failures.get() + 1);
+                Err(ServerError::Shoal(ShoalError::CorruptArchive {
+                    archive: entry.archive,
+                    partition_id: entry.key,
+                    expected: 0,
+                    found: 0,
+                }))
+            }
         }
     }
 

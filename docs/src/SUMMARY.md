@@ -122,6 +122,7 @@
   - [F57. Rendering a deployed cluster's files again with `shoalctl cluster reconfigure`](features/cluster-reconfigure.md)
   - [F58. Leads weighted by what each member can commit](features/weighted-leadership.md)
   - [F59. Shipping a backup to every host with `shoalctl cluster ship-backup`](features/backup-shipping.md)
+  - [F60. WAL segments written directly, and one flush a device (withdrawn)](features/shared-wal-flush.md)
 
 # Direction
 
@@ -310,6 +311,8 @@
   - [185. A new copy was sent snapshot after snapshot while its leader purged past each one](appendix/resolved/snapshot-outrun-by-purge.md)
   - [186. A topology observed during a rehome could write the marker back to the old executor count](appendix/resolved/marker-lost-update.md)
   - [187. A WAL segment recovered at a restart was never sealed when a rotation came first](appendix/resolved/recovered-segment-never-sealed.md)
+  - [188. A forced purge at `retained_bytes` passed the boundary a new copy was installing](appendix/resolved/forced-purge-outruns-snapshot.md)
+  - [189. A move whose snapshot was still streaming was reported stalled](appendix/resolved/move-stall-ignores-snapshot-bytes.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

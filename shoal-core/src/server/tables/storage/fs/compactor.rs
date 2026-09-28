@@ -220,11 +220,56 @@ fn written_to(writer: Option<&DmaStreamWriter>) -> u64 {
     writer.map_or(0, DmaStreamWriter::current_pos)
 }
 
-/// How many archived records a snapshot cut reads at once
+/// How many runs of archived records a snapshot cut reads at once
 ///
-/// Enough to keep a device queue busy under a node's own load; the records are still written
-/// in key order ([O70](../../../../../../docs/src/appendix/optimizations.md#o70-a-snapshot-cut-reads-its-records-one-at-a-time)).
-const CUT_READS_IN_FLIGHT: usize = 32;
+/// Enough to keep a device queue busy under a node's own load
+/// ([O70](../../../../../../docs/src/appendix/optimizations.md#o70-a-snapshot-cut-reads-its-records-one-at-a-time)),
+/// and at most this many [`CUT_RUN_BYTES`] buffers held at once.
+const CUT_READS_IN_FLIGHT: usize = 8;
+
+/// The most bytes one read of a snapshot cut spans, other partitions' records between included
+///
+/// A group's records sit among its shard's other groups' records in the same archives, so a cut
+/// in offset order reads through the ones between rather than issue a read per record
+/// ([O78](../../../../../../docs/src/appendix/optimizations.md#o78-a-snapshot-cut-read-one-record-at-a-time-in-key-order)).
+const CUT_RUN_BYTES: u64 = 1024 * 1024;
+
+/// The widest gap of other records a cut's run reads through rather than start a new read
+///
+/// Past it the bytes between are worth more than the request saved.
+const CUT_RUN_GAP: u64 = 128 * 1024;
+
+/// Split a cut's records, in archive and offset order, into runs each read with one read
+///
+/// A run is records of one archive whose span, from the first's checksum to the last's end, is
+/// at most [`CUT_RUN_BYTES`] and whose gaps are at most [`CUT_RUN_GAP`]; a record larger than
+/// the span is a run of its own.
+///
+/// # Arguments
+///
+/// * `entries` - The records, sorted by archive and then offset
+#[must_use]
+pub fn cut_runs(entries: &[ArchiveEntry]) -> Vec<&[ArchiveEntry]> {
+    let mut runs = Vec::new();
+    let mut start = 0;
+    for index in 1..=entries.len() {
+        // the run ends at the last record, or where the next one would not fit in it
+        let ends = entries.get(index).is_none_or(|next| {
+            let first = &entries[start];
+            let previous = &entries[index - 1];
+            let previous_end = previous.offset + previous.size as u64;
+            next.archive != first.archive
+                || next.offset < previous_end
+                || next.offset.saturating_sub(8).saturating_sub(previous_end) > CUT_RUN_GAP
+                || next.offset + next.size as u64 - first.offset.saturating_sub(8) > CUT_RUN_BYTES
+        });
+        if ends {
+            runs.push(&entries[start..index]);
+            start = index;
+        }
+    }
+    runs
+}
 
 /// How many partition reads a segment merge keeps in flight
 ///
@@ -1076,8 +1121,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 )));
             }
         };
-        // every partition of the group's tablets the map names, in key order so two cuts of
-        // one state are one file
+        // every partition of the group's tablets the map names, in the order they sit on disk so
+        // neighbouring records are read together; two cuts of one state are one file while the
+        // archives do not move between them (O78)
         let mut entries: Vec<ArchiveEntry> = self
             .map
             .to_archive
@@ -1091,7 +1137,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             })
             .map(|(_, entry)| *entry)
             .collect();
-        entries.sort_by_key(|entry| entry.key);
+        entries.sort_by_key(|entry| (entry.archive, entry.offset));
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(snapshot::snapshot_name(group, boundary.index));
         let table = self.table_name.table_id();
@@ -1106,25 +1152,32 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         );
         let mut writer = SnapshotWriter::create(&path, header).await?;
         event!(Level::INFO, msg = "cutting a snapshot", group = %group, boundary = boundary.index, records = entries.len());
-        // the records read a few at a time and written in key order: one read at a time, each a
-        // direct read at a random offset, took minutes for a group of 146,000 partitions on a
-        // loaded lab node, and a repair or a new replica waited on it
-        // ([O70](../../../../../../docs/src/appendix/optimizations.md#o70-a-snapshot-cut-reads-its-records-one-at-a-time))
+        // the records read a run at a time, several runs in flight, and written in the order
+        // read: one read per record at a random offset took minutes for a group of 146,000
+        // partitions on a loaded lab node (O70), and a read per record in any order took a Zen1
+        // host 5 to 8 s a set on a device busy flushing (O78)
         let map = self.map.clone();
-        let mut reads = futures::stream::iter(entries.iter().copied())
-            .map(|entry| {
+        let runs = cut_runs(&entries);
+        let mut reads = futures::stream::iter(runs)
+            .map(|run| {
                 let map = map.clone();
-                async move { map.read_record(&entry).await.map(|read| (entry.key, read)) }
+                async move {
+                    // a handle to the run's archive, closed whether or not the read worked
+                    let archive = map.get_archive(&run[0].archive).await?;
+                    let read = map.read_run_from(&archive, run).await;
+                    archive.close().await?;
+                    read
+                }
             })
             .buffered(CUT_READS_IN_FLIGHT);
         while let Some(read) = reads.next().await {
-            // every record verified against its checksum as it is read, in the order asked; a
-            // corrupt one fails the cut, since a copy's corruption is never a source, and
-            // quarantines the copy as a read that met it would. A backup's cut on the lab found
-            // four such records nothing had read, and nothing said so
+            // every record verified against its checksum as it is read; a corrupt one fails the
+            // cut, since a copy's corruption is never a source, and quarantines the copy as a
+            // read that met it would. A backup's cut on the lab found four such records nothing
+            // had read, and nothing said so
             // ([Resolved #165](../../../../../../docs/src/appendix/resolved/corrupt-record-compaction-loop.md))
-            let (key, read) = match read {
-                Ok(read) => read,
+            let records = match read {
+                Ok(records) => records,
                 Err(error) => {
                     if let ServerError::Shoal(ShoalError::CorruptArchive { partition_id, .. }) =
                         &error
@@ -1134,7 +1187,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     return Err(error);
                 }
             };
-            writer.record(key, &read).await?;
+            for (key, read) in records {
+                writer.record(key, &read).await?;
+            }
         }
         // the trailer: what was remembered at or below the boundary, oldest first
         let remembered: Vec<_> = retries
@@ -2311,5 +2366,66 @@ mod order_tests {
         assert_eq!(pass_wait(Some(now - interval), interval, now), None);
         // no interval: always at once
         assert_eq!(pass_wait(Some(now), Duration::ZERO, now), None);
+    }
+}
+
+#[cfg(test)]
+mod cut_run_tests {
+    use super::*;
+
+    /// A record of a partition in an archive at an offset
+    ///
+    /// # Arguments
+    ///
+    /// * `archive` - The archive
+    /// * `offset` - Where its payload starts, past its checksum
+    /// * `size` - Its payload's length
+    fn at(archive: Uuid, offset: u64, size: usize) -> ArchiveEntry {
+        ArchiveEntry {
+            key: offset,
+            archive,
+            offset,
+            size,
+        }
+    }
+
+    /// Neighbouring records are one run; an archive change, a wide gap, a full span or an
+    /// oversized record ends one; and every record is in exactly one run, in order (O78)
+    #[test]
+    fn cut_runs_coalesce_neighbours_and_split_at_the_bounds() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let entries = vec![
+            // three records back to back, each behind its checksum
+            at(a, 8, 100),
+            at(a, 116, 100),
+            at(a, 224, 100),
+            // a gap of other partitions under the bound, read through
+            at(a, 324 + 8 + 1000, 100),
+            // a gap past it starts a new run
+            at(a, 400_000, 100),
+            // another archive starts a new run
+            at(b, 8, 100),
+            // a record larger than a run's span is a run of its own
+            at(b, 116, 2 * 1024 * 1024),
+            at(b, 116 + 2 * 1024 * 1024 + 8, 100),
+        ];
+        let runs = cut_runs(&entries);
+        let lens: Vec<usize> = runs.iter().map(|run| run.len()).collect();
+        assert_eq!(lens, vec![4, 1, 1, 1, 1]);
+        // every record once, in the order given
+        let flat: Vec<u64> = runs.iter().flat_map(|run| run.iter().map(|e| e.key)).collect();
+        assert_eq!(flat, entries.iter().map(|e| e.key).collect::<Vec<_>>());
+        // a span of many small records stops at the run's bytes
+        let many: Vec<ArchiveEntry> = (0..2_000u64).map(|i| at(a, 8 + i * 1_008, 1_000)).collect();
+        for run in cut_runs(&many) {
+            let span = run.last().unwrap().offset + 1_000 - (run[0].offset - 8);
+            assert!(span <= CUT_RUN_BYTES, "{span}");
+        }
+        // an unverified archive's records touch with no checksum between and do not underflow
+        let bare = vec![at(a, 0, 100), at(a, 100, 100)];
+        assert_eq!(cut_runs(&bare).len(), 1);
+        // no records, no runs
+        assert!(cut_runs(&[]).is_empty());
     }
 }

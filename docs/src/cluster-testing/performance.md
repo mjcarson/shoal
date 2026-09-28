@@ -425,3 +425,72 @@ dropped. The 2 ms delay stays on the lab's inventory. What would make a write-on
 on these devices is fewer syncs per device, filed in
 [todos](../appendix/todos.md#fewer-wal-syncs-per-device). What differs between one bootstrap and
 the next is still not named.
+
+## O64 in round 14: the journal, not the flush
+
+Round 13 ended with a design change filed, fewer WAL syncs per device, on the reading that a Zen1
+sync was the 970 EVO's cache flush and cost the same whatever it carried. Round 14 measured a sync
+before building anything (`target/lab/r14/o64/`).
+
+**On idle titan the sync was mostly the journal.** Six writers of 16 KiB each, 10 s a mode
+(`flushprobe.py`):
+
+| How each writer writes and syncs | Commits a second | p50 |
+| --- | --- | --- |
+| Appends through the page cache, its own `fdatasync`, as the WAL does | 951, 956 | 6.1 ms |
+| Overwrites a file written ahead with `O_DIRECT`, its own `fdatasync` | 2,286, 1,875 | 2.9 ms |
+| The same, one flusher's `fdatasync` covering every writer | 2,407, 2,071, 2,145, 1,854 | 2.2–2.9 ms |
+
+A sync of a file that has grown commits ext4's journal for its size. A file written ahead needs
+only the device flush. That was built as [F60](../features/shared-wal-flush.md): WAL segments
+zero filled ahead and written directly, with an option to share one flush between a device's
+shards.
+
+**Under a load it changed nothing.** Nine fresh clusters, interleaved (`modes.sh`):
+
+| WAL mode | Rows a second | Titan's device flushes a second |
+| --- | --- | --- |
+| buffered | 50,600, 47,201, 48,440 | 345–347 |
+| direct | 54,848, 55,939, 46,559 | 1,492–1,604 |
+| shared | 46,822, 53,936, 46,014 | 756–810 |
+
+**Where the device's time goes.** Traces of titan during a load (`flush.bt`, `files15.bt`,
+`tables15.bt`, 15 s each) found three things. The device wrote about 112 MB/s in either mode. In
+buffered mode ext4 turned 404 WAL syncs a second into 170 journal commits, where direct turned each
+sync into a flush. And by file, the node wrote:
+
+| File | MB a second |
+| --- | --- |
+| MovieByKeyword archives | 67.6 |
+| Movie archives | 32.5 |
+| The archive maps' temporary files | 10.4 |
+| The WAL, six shards | 24.5 |
+| The archives' intent logs | 4.8 |
+
+It applied about 15 MiB/s of rows. The compactor's merges write about seven archive bytes for
+every byte inserted, sixty for the keyword table: a merge rewrites every partition a segment
+touches whole, and a keyword partition holds thousands of titles
+([O79](../appendix/optimizations.md#o79-a-merge-rewrites-every-partition-it-touches-whole)). A WAL
+sync flushes the device's cache with all of that in it.
+
+**Larger segments rewrite a partition less often** (`seg.sh`, each arm a fresh cluster, a whole
+load and a 120 s mixed bench, traced by table on titan):
+
+| Arm | Loads, rows a second | Archive writes during a load | Mixed bench, ops a second | Update p99 | WAL writes, load / bench |
+| --- | --- | --- | --- | --- | --- |
+| 10 MiB segments (the default) | 43,975, 42,411 | 108, 93 MB/s | 39,433, 40,079 | 118, 115 ms | 23, 14 MB/s |
+| 20 MiB | 51,796, 44,513 | 99, 94 MB/s | 42,679, 42,193 | 123, 131 ms | 27, 15 MB/s |
+| 40 MiB | 52,328, 54,486 | 50, 60 MB/s | 43,165, 43,407 | 138, 144 ms | 25, 14 MB/s |
+| 40 MiB, direct WAL | 43,386, 47,205 | 47, 57 MB/s | 43,558, 47,565 | 150, 172 ms | 67–87, 50 MB/s |
+
+At 40 MiB the archive writes halve and loads run about 24% faster. The mixed bench gains about 8%
+and its update p99 rises about 20%, since each merge job is four times the size. A direct WAL
+tripled the WAL's bytes, because every batch of a few kilobytes is written as whole blocks and
+every segment is written twice, once as zeros. That is why it lost under load, and F60 was removed.
+
+**Verdict.** A write-only load on these hosts is paced by the merges' write amplification, not by
+the WAL. `segment_bytes` is now an inventory key, and a deployment that loads in bulk can trade the
+write tail for it. It is not the default. The fix that removes the amplification, a partition
+written as fragments, is filed in [todos](../appendix/todos.md#a-large-sorted-partition-written-as-fragments).
+What differs between one bootstrap and the next is still not named: the spread persisted in every
+mode and at every segment size.

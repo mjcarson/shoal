@@ -481,6 +481,7 @@ cluster:
     snapshot_timeout: "5m"        # after this a snapshot transfer is given up and tried again; no shorter than write_timeout
     install_bytes: "2GiB"         # partial snapshots a shard holds on disk before it refuses a new stream
     retained_bytes: "1GiB"        # sealed WAL a shard keeps for slow members before it forces a snapshot and a purge; at least two segments
+    hold_bytes: "1GiB"            # sealed WAL past retained_bytes a shard keeps while members take snapshots of its groups, so none is purged under an install (#188); 0 holds nothing
     retry_window: "5m"            # how long after a write's identity was minted a retry is still answered its first result (F45); no shorter than write_timeout
     wal_commit_delay: "0ms"       # how long the WAL writer waits after a sync before taking the next batch, so a fast device syncs fewer, larger batches (O61); at most 10ms, per node
     append_reserve: "512MiB"      # free bytes below which this node leads nothing and takes no entries into a durable log, serving reads until there is space again (#156); 0 is off

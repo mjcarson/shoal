@@ -2701,6 +2701,13 @@ group, off the foreground, and a snapshot is taken only when a member is behind 
 point or the retention budget forces one. Filed rather than gated because a cut that is one
 file was the smaller thing to get right first.
 
+**Priced in round 14.** On titan under the mixed bench a Movie set's cut took 5.5 to 8.4 s and
+its send and install 1.4 s, so streaming the cut could have overlapped at most the smaller part.
+The cut's time was its reads, one per record, which
+[O78](#o78-a-snapshot-cut-read-one-record-at-a-time-in-key-order) addressed instead. The disk a cut
+holds on the sender is still this entry's, and matters at a terabyte a node, not at the lab's
+scale.
+
 ### O53. The assembler keeps a map of received chunks and forgets them on a restart
 
 | | |
@@ -3111,6 +3118,21 @@ but it is not the WAL's batching. A Zen1 sync costs the same from 16 KiB to 256 
 move a write-only load on these devices is fewer syncs per device: fewer WAL writers than shards on
 one disk, or one WAL a node. That is a design change, filed in
 [todos](todos.md#fewer-wal-syncs-per-device).
+
+**Round 14: the device is busy with archives, not the WAL.** Round 13's *a sync costs the same
+from 16 KiB to 256 KiB* was half wrong. On idle titan a buffered append's sync was mostly ext4's
+journal commit for the file's new size: six writers overwriting files written ahead with
+`O_DIRECT` committed twice as often as six appending ([F60](../features/shared-wal-flush.md)).
+That was built, as a direct WAL and as one flush shared by a device's shards, and under a load it
+made no difference (46,600 to 55,900 rows a second in every mode) and the write p99 worse. A
+trace of titan's writes by file during a load found why: the node wrote 114 MB/s to archives,
+68 of them MovieByKeyword's, against 24.5 MB/s to the WAL, while it applied 15 MiB/s of rows.
+Every WAL sync flushes the device's cache with the compactor's writes in it. The merges rewrite
+each keyword partition whole every segment, which is
+[O79](#o79-a-merge-rewrites-every-partition-it-touches-whole), and 40 MiB segments halved the
+archive writes and made loads about 24% faster. **Status:** what paces a write-only load on these
+hosts is the merges' write amplification. What differs between one bootstrap and the next is
+still not named; the spread persists at every segment size and WAL mode tried.
 
 ### O65. Heartbeats to followers that just acknowledged replication
 
@@ -3604,3 +3626,92 @@ is how openraft's debug tracing once filled it
 **Applied:** `openraft::raft::responder=error` joins the targets `server/trace.rs` holds down at
 any level that would show warnings, beside [O66](#o66-a-partitioned-peer-floods-the-log)'s and
 [O72](#o72-a-refused-snapshot-build-logs-four-lines-per-apply)'s.
+
+### O78. A snapshot cut read one record at a time in key order
+
+| | |
+| --- | --- |
+| **Rank** | **done** — applied |
+| **Impact** | Measured on the lab — under the mixed bench titan cut a Movie set of 52 to 55 MB in 5.5 to 8.4 s, and 0.55 s after, where europa cut the same shape in 0.5 s; the cut was 73 to 85% of each step titan sent, the send and install the rest (`target/lab/r14/tb/cuts.py` over round 13's and round 14's journals). A set is about 80,000 records of about 700 bytes, each a direct read at its own offset, in key order, which is random order on disk, on a device whose queue is full of the WAL's flushes |
+| **Difficulty** | S |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A cut's file is in disk order, not key order, so two cuts of one state are one file only while the archives do not move between them; a stream resumed across a compaction starts over. The installer never read the order. Up to eight runs of a mebibyte held at once, where 32 records were |
+| **Benchmark** | the lab: a rebuild under `bench --mix get:40,update:45,insert:15`, each cut timed from the compactor's `cutting a snapshot` to its `cut a snapshot` (`cuts.py`) |
+
+Found by the [distributed cluster testing](../cluster-testing/correctness.md#15-round-14) chapter
+while pricing [O52](#o52-a-snapshot-copies-every-record-of-the-archives-into-one-file), which
+would stream a cut instead of writing it first. On titan that could overlap at most the 1.4 s a
+set's send and install took, against a cut of 5 to 8 s, so the cut's reads were the larger cost.
+[O70](#o70-a-snapshot-cut-reads-its-records-one-at-a-time) had put 32 reads in flight and kept the
+file in key order.
+
+**Applied:** the cut sorts the group's records by archive and offset and splits them into runs
+(`cut_runs`, `shoal-core/src/server/tables/storage/fs/compactor.rs`): records of one archive
+whose span is at most 1 MiB and whose gaps of other groups' records are at most 128 KiB. Each run
+is one read (`ArchiveMap::read_run_from`), every record in it verified against its checksum as a
+single read verifies it, and eight runs are in flight. The file is written in the order read.
+
+Measured on the lab with the same rebuild under the mixed bench as before
+(`target/lab/r14/tb/o78`), the cuts timed by `cuts.py`:
+
+| Sender | A Movie set's cut, before | After |
+| --- | --- | --- |
+| titan | 5.5–8.4 s (52–55 MB) | 0.55 s (50 MB) |
+| europa | 0.5 s | 0.16 s |
+
+The rebuild took 175 s, the fastest on the lab so far (187 s in round 13 on the same inventory),
+and streamed 877.5 MiB for 878.1 MiB moved. Every acknowledged insert and the whole csv read back
+through each member alone. **Kept.**
+
+### O79. A merge rewrites every partition it touches whole
+
+| | |
+| --- | --- |
+| **Rank** | **B35** — measured on the lab; a setting's trade measured, the design unbuilt |
+| **Impact** | Measured on the lab — under a whole load titan wrote 114 MB/s to archives (MovieByKeyword 68, Movie 33, the maps' temp files 10) and 24.5 MB/s to its WAL while it applied about 15 MiB/s of rows, so about seven archive bytes for every byte inserted, and about sixty for the keyword table, whose rows are small and whose partitions hold thousands of them. Every WAL sync flushes the device's cache with those writes in it, which is what paces a write-only load on the 970 EVOs ([O64](#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)) |
+| **Difficulty** | S for the setting, L for the design |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A larger `segment_bytes` rewrites a busy partition less often and makes each merge job larger: at 40 MiB loads ran about 24% faster and the mixed bench about 8%, while its update p99 rose from about 116 ms to about 141 ms |
+| **Benchmark** | the lab: `target/lab/r14/o64/seg.sh`, a fresh cluster per arm, a whole load and a 120 s mixed bench, each traced by table on titan (`tables15.bt`) |
+
+Found by the [distributed cluster testing](../cluster-testing/performance.md#o64-in-round-14-the-journal-not-the-flush)
+chapter while measuring F60, whose shared flush made no difference under load. A segment merge
+(`FileSystemCompactor`, `load_partitions`, `apply_intents`, `write_partition`) reads every
+partition the segment's frames touch, applies them, and writes each partition as one new record.
+A keyword partition is a sorted list of every title carrying the keyword, so a popular one is
+rewritten whole each time a segment holds one more title for it. A segment is sealed every
+`segment_bytes` of a shard's WAL, about every 2.5 s per shard under a load at the default 10 MiB.
+
+The inventory can now set `segment_bytes` (`replication.segment_bytes`), and round 14 measured it
+on buffered WALs, each arm a fresh cluster:
+
+| `segment_bytes` | Loads, rows a second | Archive writes during a load | Mixed bench, ops a second | Update p99 |
+| --- | --- | --- | --- | --- |
+| 10 MiB (the default) | 43,975, 42,411 | 108, 93 MB/s | 39,433, 40,079 | 118, 115 ms |
+| 20 MiB | 51,796, 44,513 | 99, 94 MB/s | 42,679, 42,193 | 123, 131 ms |
+| 40 MiB | 52,328, 54,486 | 50, 60 MB/s | 43,165, 43,407 | 138, 144 ms |
+
+**Not applied as a default.** It trades the write tail for throughput, and a deployment that loads
+in bulk can set it. The fix that removes the amplification instead of spreading it out is a
+partition written as fragments, filed in [todos](todos.md#a-large-sorted-partition-written-as-fragments).
+
+### O80. Every query opens spans a collector may never read
+
+| | |
+| --- | --- |
+| **Rank** | **not taken** — measured, and smaller than what removing it would cost |
+| **Impact** | Measured on the lab — `sharded_slab`'s pool, a slot for every open span, was 0.8% of titan's samples under the mixed bench after [O75](#o75-every-query-formatted-its-metadata-into-a-tracing-span) stopped the spans formatting their fields |
+| **Difficulty** | M — a sampling layer that decides per trace whether its spans are opened, below the per-query spans and above the console and the collector |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Dropping the per-query spans below `Info` would remove the cost and every trace a collector gets at `Info` ([F35](../features/wire-trace-context.md)), which is the one way to see where a slow query spent its time across nodes |
+| **Benchmark** | a `perf` profile of a Zen1 node under the lab's bench (`target/lab/r11/profab.sh`), `sharded_slab` symbols |
+
+Filed from what O75 left, which [what is left](../cluster-testing/todo.md) carried as not filed.
+A span is a slot in the subscriber's slab from the moment it opens, whether or not anything records
+under it, and every query opens several (`Coordinator::route`, `Shard::handle_query`,
+`PersistentTable::handle`). Not taken: 0.8% is inside the lab's run-to-run spread, and the only
+way to remove it without losing the traces is a sampled layer, which is a design of its own. It
+is worth revisiting if a profile of a faster node shows the slab as a larger share.

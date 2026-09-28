@@ -570,6 +570,8 @@ async fn catch_up<D: ShoalDatabase>(
     let started = Instant::now();
     // the destination's last position and when it moved, and when the stall was last reported
     let mut last_matched = None;
+    // and the bytes sent it, since a snapshot streaming moves no index until it is installed
+    let mut last_bytes = 0;
     let mut progressed = Instant::now();
     let mut reported = Instant::now();
     loop {
@@ -589,9 +591,12 @@ async fn catch_up<D: ShoalDatabase>(
         progress.stats.bytes = context.network.bytes_sent_to(context.group, context.to);
         // a destination that has not moved for a while is reported with what its appends came
         // to, which is the only account of a stall openraft gives nothing about at info
-        // ([Resolved #174](../../../../docs/src/appendix/resolved/snapshot-cut-queue.md))
-        if matched != last_matched {
+        // ([Resolved #174](../../../../docs/src/appendix/resolved/snapshot-cut-queue.md)); a
+        // snapshot still streaming to it is progress, or every step of a large set is reported
+        // stalled while its bytes arrive (cluster testing, round 14)
+        if matched != last_matched || progress.stats.bytes != last_bytes {
             last_matched = matched;
+            last_bytes = progress.stats.bytes;
             progressed = Instant::now();
         } else if progressed.elapsed() >= STALL_REPORT && reported.elapsed() >= STALL_REPORT {
             reported = Instant::now();

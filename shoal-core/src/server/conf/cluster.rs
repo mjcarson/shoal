@@ -524,6 +524,14 @@ fn default_retained_bytes() -> u64 {
     1024 * 1024 * 1024
 }
 
+/// The default allowance of sealed WAL bytes past `retained_bytes` kept for snapshots in flight
+///
+/// As large as the budget itself, so a shard's WAL is bounded at twice `retained_bytes` while
+/// members take snapshots, and at `retained_bytes` otherwise.
+fn default_hold_bytes() -> u64 {
+    1024 * 1024 * 1024
+}
+
 /// The default window a write's identity may be retried within
 /// The longest WAL group commit delay a configuration may ask for
 const MAX_WAL_COMMIT_DELAY: Duration = Duration::from_millis(10);
@@ -607,6 +615,18 @@ pub struct Replication {
         deserialize_with = "utils::deserialize_byte_size_u64"
     )]
     pub retained_bytes: u64,
+    /// The most sealed WAL bytes past `retained_bytes` a shard keeps while members are taking
+    /// snapshots of its groups
+    ///
+    /// Within it the retention budget forces no purge of a group a member is taking a snapshot
+    /// of, so the entries after the snapshot's boundary are still there when its install ends;
+    /// past it every group is forced alike, and a member that loses its entries is sent another
+    /// snapshot. Zero holds nothing ([cluster testing, round 14](../../../../docs/src/cluster-testing/correctness.md#15-round-14)).
+    #[serde(
+        default = "default_hold_bytes",
+        deserialize_with = "utils::deserialize_byte_size_u64"
+    )]
+    pub hold_bytes: u64,
     /// How long after a write's identity was minted a retry of it is still answered its first result
     ///
     /// A time-ordered identity older than this is refused `IdentityExpired` before it is
@@ -651,6 +671,7 @@ impl Default for Replication {
             snapshot_timeout: default_snapshot_timeout(),
             install_bytes: default_install_bytes(),
             retained_bytes: default_retained_bytes(),
+            hold_bytes: default_hold_bytes(),
             wal_commit_delay: default_wal_commit_delay(),
             retry_window: default_retry_window(),
             append_reserve: default_append_reserve(),

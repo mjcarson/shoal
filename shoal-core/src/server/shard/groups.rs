@@ -48,6 +48,7 @@ use crate::server::peer::{LinkEvent, ReplicateReply};
 use crate::server::replication::machine::{identity_ms, FRESH_AT_RECEIPT_MS};
 use crate::server::replication::admission::{ProposalGate, ProposalPermit};
 use crate::server::replication::install::{crash_point, CrashPoint};
+use crate::server::replication::network::retention_spares_held;
 use crate::server::replication::snapshot::{
     self, BuiltSnapshot, SnapshotManifest, SnapshotProvenance, SnapshotWriter, SNAPSHOTS_DIR,
 };
@@ -2870,15 +2871,22 @@ where
     /// The entries budget is a preference and the bytes budget is a bound
     /// ([Q9](../../../../docs/src/distributed/protocol.md)): when the sealed segments still on
     /// disk hold more than `retained_bytes`, every group with frames in the oldest of them is
-    /// asked to snapshot at its checkpoint and purge through it, so the next sweep can delete
+    /// asked to snapshot and purge through its last entry there, so the next sweep can delete
     /// them. A member behind the forced purge point falls to the snapshot path; nothing pins
     /// the leader's log for a follower ([F43](../../../../docs/src/features/node-recovery.md)).
+    ///
+    /// A group a member is taking a snapshot of is passed over while the sealed bytes are within
+    /// `retained_bytes` and `hold_bytes` together: purging it would take the entries after the
+    /// snapshot's boundary, and the member would be sent another snapshot when its install ended
+    /// ([cluster testing, round 14](../../../../docs/src/cluster-testing/correctness.md#15-round-14)).
     fn enforce_retention(&mut self) {
-        let budget = self
-            .conf
-            .cluster
-            .as_ref()
-            .map_or(u64::MAX, |cluster| cluster.replication.retained_bytes);
+        // the budget and the allowance past it for snapshots in flight
+        let (budget, hold) = self.conf.cluster.as_ref().map_or((u64::MAX, 0), |cluster| {
+            (
+                cluster.replication.retained_bytes,
+                cluster.replication.hold_bytes,
+            )
+        });
         let Some(replication) = self.replication.as_mut() else {
             return;
         };
@@ -2888,12 +2896,17 @@ where
             .into_iter()
             .filter(|segment| segment.sealed)
             .collect();
-        let mut held: u64 = sealed.iter().map(|segment| segment.bytes).sum();
-        if held <= budget {
+        let total: u64 = sealed.iter().map(|segment| segment.bytes).sum();
+        if total <= budget {
             return;
         }
+        // a held group is forced too once the allowance is spent
+        let spares_held = retention_spares_held(total, budget, hold);
+        let holds = replication.network.snapshot_holds();
+        let mut held = total;
         // the oldest segments, until what is left fits the budget
         let mut forced = 0u64;
+        let mut passed = 0u64;
         for segment in &sealed {
             if held <= budget {
                 break;
@@ -2915,6 +2928,12 @@ where
                 if checkpoint < last.index || purged >= last.index {
                     continue;
                 }
+                // a member taking a snapshot of this group needs the entries past its boundary
+                let taking = holds.held(*group);
+                if taking && spares_held {
+                    passed += 1;
+                    continue;
+                }
                 let Some(raft) = slot.raft.clone() else {
                     continue;
                 };
@@ -2926,19 +2945,25 @@ where
                     generation = segment.generation,
                     checkpoint,
                     purged,
+                    through = last.index,
                     lag = checkpoint.saturating_sub(purged),
-                    held_bytes = held,
+                    held_bytes = total,
                     budget,
+                    taking,
                 );
+                // only as far as this segment needs: the entries after it stay for the members
+                // the budget does not have to drop
+                let through = last.index;
                 glommio::spawn_local(async move {
                     // the snapshot first, so the purge has one to stop at
                     let _ = raft.trigger().snapshot().await;
-                    let _ = raft.trigger().purge_log(checkpoint).await;
+                    let _ = raft.trigger().purge_log(through).await;
                 })
                 .detach();
             }
         }
         replication.snapshots.forced += forced;
+        replication.snapshots.forced_held += passed;
     }
 
     /// Note that a table's compactor finished a segment
