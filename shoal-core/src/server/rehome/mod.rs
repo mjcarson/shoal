@@ -56,7 +56,9 @@ use super::map::TabletMap;
 use super::meta::{Identity, StorageMeta};
 use super::ring::Ring;
 use super::tables::storage::fs::conf::FileSystemTableConf;
-use super::tables::storage::fs::map::{write_record, ArchiveEntry, ArchiveMap, SerializedMap};
+use super::tables::storage::fs::map::{
+    write_record, ArchiveEntry, ArchiveMap, ChainEntry, SerializedMap,
+};
 use super::wal::{Checkpoint, Retries, ShardWal, WAL_DIR};
 use super::{Conf, ServerError};
 use crate::shared::identity::{GroupId, NodeId, TableId};
@@ -676,20 +678,32 @@ async fn archives_step(
     let mut records = 0u64;
     let mut bytes = 0u64;
     for entry in &moving {
-        // read the record verified, write it as a fresh record, and point the map at it
-        let payload = src.read_record(entry).await?;
-        let offset = write_record(&mut writer, &payload[..]).await?;
-        dst.set_partition(
-            entry.key,
-            ArchiveEntry {
+        // every record of the partition's chain, its base first: each read verified, written as
+        // a fresh record, and named in the destination's chain in the same order
+        // ([F61](../../../docs/src/features/fragmented-partitions.md))
+        let fragments = src
+            .chain_of(entry.key)
+            .map(|chain| chain.fragments)
+            .unwrap_or_default();
+        let mut copied = Vec::with_capacity(1 + fragments.len());
+        for record in std::iter::once(entry).chain(fragments.iter()) {
+            let payload = src.read_record(record).await?;
+            let offset = write_record(&mut writer, &payload[..]).await?;
+            copied.push(ArchiveEntry {
                 key: entry.key,
                 archive: active,
                 offset,
-                size: entry.size,
-            },
-        );
-        records += 1;
-        bytes += u64::try_from(entry.size).unwrap_or(u64::MAX);
+                size: record.size,
+            });
+            records += 1;
+            bytes += u64::try_from(record.size).unwrap_or(u64::MAX);
+        }
+        // the base, then the fragments over it
+        let base = copied.remove(0);
+        dst.set_chain(ChainEntry {
+            base,
+            fragments: copied,
+        });
     }
     // the records durable before the map that names them
     writer.sync().await?;

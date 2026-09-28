@@ -30,7 +30,8 @@ use uuid::Uuid;
 
 use crate::server::ServerError;
 use crate::server::ShoalError;
-use crate::storage::fs::map::ArchiveEntry;
+use crate::server::tables::PartitionBytes;
+use crate::storage::fs::map::{ArchiveEntry, ChainEntry};
 use crate::storage::fs::ArchiveMap;
 
 /// The seed every canonical hash is taken under, frozen like every other persisted hash
@@ -180,8 +181,9 @@ pub enum DigestAnswer {
 /// Collected on the shard loop while the map is what it is at the boundary; the handles are
 /// duplicates the archive map handed out, so they outlive the archives' later unlink.
 pub struct ArchivedCut {
-    /// Where every non-resident partition's record is, in key order
-    entries: Vec<ArchiveEntry>,
+    /// Where every non-resident partition's records are, in key order: its base and any
+    /// fragments over it ([F61](../../../docs/src/features/fragmented-partitions.md))
+    entries: Vec<ChainEntry>,
     /// An open handle per distinct archive
     handles: HashMap<Uuid, DmaFile>,
     /// The map the records belong to, which verifies and counts the reads
@@ -209,7 +211,7 @@ impl ArchivedCut {
     #[must_use]
     pub fn new(
         map: Arc<ArchiveMap>,
-        entries: Vec<ArchiveEntry>,
+        entries: Vec<ChainEntry>,
         handles: HashMap<Uuid, DmaFile>,
     ) -> Self {
         ArchivedCut {
@@ -230,6 +232,41 @@ impl ArchivedCut {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
+
+/// Read one partition of a cut through the handles it holds, its chain folded
+///
+/// A partition is hashed as the rows it holds, so a copy that wrote it as a chain and a copy
+/// that wrote it whole digest the same ([F61](../../../docs/src/features/fragmented-partitions.md)).
+///
+/// # Arguments
+///
+/// * `map` - The map the records belong to
+/// * `handles` - The cut's handle per archive
+/// * `chain` - The partition's base and fragments
+async fn read_cut_chain(
+    map: &ArchiveMap,
+    handles: &HashMap<Uuid, DmaFile>,
+    chain: &ChainEntry,
+) -> Result<PartitionBytes, ServerError> {
+    // one record through the handle of its archive
+    let handle_of = |entry: &ArchiveEntry| {
+        handles.get(&entry.archive).ok_or_else(|| {
+            ServerError::GlommioGeneric(format!(
+                "the cut holds no handle for archive {}",
+                entry.archive
+            ))
+        })
+    };
+    let base = map.read_record_from(handle_of(&chain.base)?, &chain.base).await?;
+    if chain.fragments.is_empty() {
+        return Ok(PartitionBytes::Record(base));
+    }
+    let mut fragments = Vec::with_capacity(chain.fragments.len());
+    for fragment in &chain.fragments {
+        fragments.push(map.read_record_from(handle_of(fragment)?, fragment).await?);
+    }
+    map.fold_records(chain.base.key, &base, &fragments)
 }
 
 /// How a table hashes one archived partition's bytes
@@ -278,22 +315,16 @@ impl PendingDigest {
             .map
             .as_ref()
             .map_or(0, |map| map.integrity.unverified_reads.get());
-        // every archived record, through the handle collected for its archive
-        for entry in &archived.entries {
+        // every archived partition, each record through the handle collected for its archive
+        for chain in &archived.entries {
             let Some(map) = archived.map.as_ref() else {
                 break;
             };
-            let Some(handle) = archived.handles.get(&entry.archive) else {
-                return Err(ServerError::GlommioGeneric(format!(
-                    "the cut holds no handle for archive {}",
-                    entry.archive
-                )));
-            };
-            match map.read_record_from(handle, entry).await {
+            match read_cut_chain(map, &archived.handles, chain).await {
                 Ok(read) => {
                     bytes += read.len() as u64;
-                    if let Some(digest) = hasher(entry.key, &read)? {
-                        resident.insert(entry.key, digest);
+                    if let Some(digest) = hasher(chain.base.key, &read)? {
+                        resident.insert(chain.base.key, digest);
                     }
                 }
                 // a corrupt record is what the scrub exists to find: counted, and the

@@ -205,6 +205,8 @@ pub struct TableStats {
     pub partitions: u64,
     /// Partitions the archives of the groups it leads hold
     pub partitions_led: u64,
+    /// Partitions the node's archives hold as a base with fragments over it
+    pub chained: u64,
     /// Bytes the node's archives hold
     pub bytes: u64,
     /// Bytes the archives of the groups it leads hold
@@ -237,6 +239,7 @@ impl TableStats {
         self.tablets_led += other.tablets_led;
         self.partitions += other.partitions;
         self.partitions_led += other.partitions_led;
+        self.chained += other.chained;
         self.bytes += other.bytes;
         self.bytes_led += other.bytes_led;
         // and so are rates and counters

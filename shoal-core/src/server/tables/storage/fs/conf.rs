@@ -205,6 +205,24 @@ fn default_archive_pass_live_percent() -> u8 {
     50
 }
 
+/// Set the smallest base record a merge writes fragments over rather than rewriting, 16 KiB
+///
+/// A merge rewrites a partition whole unless its record is at least this large; below it a
+/// rewrite costs about what a fragment does and leaves nothing to fold on a read
+/// ([F61](../../../../../../docs/src/features/fragmented-partitions.md)).
+fn default_fragment_min_bytes() -> usize {
+    16 << 10
+}
+
+/// Set how many fragments a partition's chain holds before a merge writes it whole again, 8
+///
+/// Zero writes every partition whole, as before F61. A read of a chained partition reads each
+/// record of its chain, so this bounds the reads a get pays for what a merge saves
+/// ([F61](../../../../../../docs/src/features/fragmented-partitions.md)).
+fn default_fragment_max_chain() -> usize {
+    8
+}
+
 /// The settings to use for a specific writer
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FileSystemThroughputWriterConf {
@@ -229,6 +247,13 @@ pub struct FileSystemThroughputWriterConf {
     /// The percent of an archive that has to be live for a pass to leave it alone, 1 to 99
     #[serde(default = "default_archive_pass_live_percent")]
     pub archive_pass_live_percent: u8,
+    /// The smallest base record of a sorted partition a merge writes fragments over
+    #[serde(default = "default_fragment_min_bytes")]
+    #[serde(deserialize_with = "utils::deserialize_byte_size")]
+    pub fragment_min_bytes: usize,
+    /// How many fragments a chain holds before a merge writes the partition whole, zero for none
+    #[serde(default = "default_fragment_max_chain")]
+    pub fragment_max_chain: usize,
 }
 
 impl Default for FileSystemThroughputWriterConf {
@@ -241,6 +266,8 @@ impl Default for FileSystemThroughputWriterConf {
             archive_pass_bytes: default_archive_pass_bytes(),
             archive_pass_interval: default_archive_pass_interval(),
             archive_pass_live_percent: default_archive_pass_live_percent(),
+            fragment_min_bytes: default_fragment_min_bytes(),
+            fragment_max_chain: default_fragment_max_chain(),
         }
     }
 }
@@ -296,6 +323,26 @@ impl FileSystemThroughputWriterConf {
     /// * `percent` - The share, from 1 to 99
     pub fn archive_pass_live_percent(mut self, percent: u8) -> Self {
         self.archive_pass_live_percent = percent;
+        self
+    }
+
+    /// Set the smallest base record a merge writes fragments over
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The size of the base record
+    pub fn fragment_min_bytes(mut self, bytes: usize) -> Self {
+        self.fragment_min_bytes = bytes;
+        self
+    }
+
+    /// Set how many fragments a chain holds before a merge writes the partition whole
+    ///
+    /// # Arguments
+    ///
+    /// * `fragments` - The longest chain, zero to write every partition whole
+    pub fn fragment_max_chain(mut self, fragments: usize) -> Self {
+        self.fragment_max_chain = fragments;
         self
     }
 }

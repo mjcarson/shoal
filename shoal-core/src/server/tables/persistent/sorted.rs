@@ -29,6 +29,7 @@ use crate::server::replication::digest::{hash_partition, PartitionDigest, Pendin
 use crate::server::replication::{CommandResult, ResultKind};
 use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::SortedPartition;
+use crate::server::tables::PartitionBytes;
 use crate::server::tables::persistent::{
     adjust_memory_usage, apply_failure, corrupt_archive, eviction_totals, settle_resident_read,
     ParkKey, PartitionLoad, PendingGets,
@@ -277,8 +278,8 @@ where
         group: crate::shared::identity::GroupId,
         schema_id: u64,
     ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError> {
-        // the engine does the export; this only names the row type
-        S::export_archives::<R>(shard_names, conf, path, provenance, group, schema_id).await
+        // the engine does the export; this only names the partition and row types
+        S::export_archives::<SortedPartition<R>, R>(shard_names, conf, path, provenance, group, schema_id).await
     }
 
     /// Create a persistent shoal table
@@ -482,9 +483,52 @@ where
             },
             // this partition does not have any already loaded data
             hash_map::Entry::Vacant(entry) => {
+                // a chain folded into one partition was deserialized to be folded, so it is
+                // held loaded rather than read in place; generation zero, since every row of it
+                // is on disk already and it can be evicted as soon as nothing waits on it
+                // ([F61](../../../../docs/src/features/fragmented-partitions.md))
+                let read = match loaded.data {
+                    PartitionBytes::Record(read) => read,
+                    PartitionBytes::Folded(folded) => {
+                        let decoded = SortedPartition::<R>::access(&folded)
+                            .and_then(|accessed| SortedPartition::<R>::deserialize(&accessed));
+                        let mut partition = match decoded {
+                            Ok(partition) => partition,
+                            Err(error) => {
+                                event!(
+                                    Level::ERROR,
+                                    msg = "A folded partition could not be read back",
+                                    table = %self.table_name,
+                                    partition_id,
+                                    error = ?error,
+                                );
+                                return Ok(PartitionLoad::Failed(
+                                    self.fail_partition(
+                                        partition_id,
+                                        &read_span,
+                                        Some(&corrupt_archive(self.table_name, partition_id)),
+                                    )
+                                    .unwrap_or_default(),
+                                ));
+                            }
+                        };
+                        // the whole partition is here, so there is nothing more on disk to load
+                        partition.check_disk = false;
+                        let size = partition.size();
+                        entry.insert(MaybeLoaded::Loaded {
+                            partition: Box::new(partition),
+                            generation: 0,
+                        });
+                        *self.memory_usage.borrow_mut() += size;
+                        self.lru
+                            .borrow_mut()
+                            .pop(&(self.table_name, loaded.partition_id));
+                        return Ok(self.release_loaded(partition_id, &read_span));
+                    }
+                };
                 // validate this archive once, here, instead of on every query that reads it
                 let validated = hotpath::measure_block!("ValidatedArchive::new", {
-                    ValidatedArchive::new(loaded.data)
+                    ValidatedArchive::new(read)
                 });
                 // a corrupt archive releases the queries parked on it rather than propagating
                 //
@@ -526,14 +570,25 @@ where
             }
         }
         // get the queries that were blocked on this partition
-        Ok(match self.blocked.take(&partition_id) {
+        Ok(self.release_loaded(partition_id, &read_span))
+    }
+
+    /// Release the queries parked on a partition whose read has landed
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_id` - The partition that was read
+    /// * `read_span` - The span of the read, which the released queries are linked to
+    fn release_loaded(&mut self, partition_id: u64, read_span: &Span) -> PartitionLoad<SortedQuery<R>> {
+        // get the queries that were blocked on this partition
+        match self.blocked.take(&partition_id) {
             Some(unblocked) => {
                 // put every query this read released in the same trace as the read
-                link_released(&unblocked, &read_span);
+                link_released(&unblocked, read_span);
                 PartitionLoad::Loaded(unblocked, self.flushed_generation)
             }
             None => PartitionLoad::Idle,
-        })
+        }
     }
 
     /// Release the queries parked on a partition that could not be read
@@ -2438,6 +2493,54 @@ where
     /// A partition with no rows at all
     fn erased(key: u64) -> Self {
         SortedPartition::new(key)
+    }
+
+    /// Validate and deserialize a partition archived whole
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The partition's archived bytes
+    fn decode(bytes: &[u8]) -> Result<Self, ServerError> {
+        Ok(<Self as RkyvSupport>::deserialize(<Self as RkyvSupport>::access(bytes)?)?)
+    }
+
+    /// Build a fragment from inserts and deletes, handing back a batch holding an update
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition key
+    /// * `intents` - The intents to write, in the order they were committed
+    fn fragment(key: u64, intents: Vec<Self::Intent>) -> Result<Self, Vec<Self::Intent>> {
+        // an update changes a row the fragment does not have, so the partition is merged whole
+        if intents
+            .iter()
+            .any(|intent| matches!(intent, SortedIntents::Update(_)))
+        {
+            return Err(intents);
+        }
+        // the rows the batch wrote, and a tombstone for each it deleted, in commit order
+        let mut fragment = SortedPartition::new(key);
+        for intent in intents {
+            match intent {
+                SortedIntents::Insert(row) => {
+                    fragment.insert(row);
+                }
+                SortedIntents::Delete { sort_key, .. } => {
+                    fragment.tombstone(&sort_key);
+                }
+                SortedIntents::Update(_) => unreachable!("a batch with an update was handed back"),
+            }
+        }
+        Ok(fragment)
+    }
+
+    /// Fold a fragment over this partition
+    ///
+    /// # Arguments
+    ///
+    /// * `fragment` - The fragment
+    fn fold(&mut self, fragment: Self) {
+        self.fold_fragment(fragment);
     }
 
     /// The intent type to use

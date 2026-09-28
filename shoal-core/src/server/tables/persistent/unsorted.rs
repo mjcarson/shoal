@@ -29,6 +29,7 @@ use crate::server::replication::digest::{hash_partition, PartitionDigest, Pendin
 use crate::server::replication::{CommandResult, ResultKind};
 use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::UnsortedPartition;
+use crate::server::tables::PartitionBytes;
 use crate::server::tables::persistent::{
     adjust_memory_usage, open, read_not_asked, refuse, shed, storage_write, unreadable, ApplyStep,
     ParkedQueries, Parking, RowSink,
@@ -210,9 +211,23 @@ where
         provenance: &crate::server::replication::snapshot::SnapshotProvenance,
         group: crate::shared::identity::GroupId,
         schema_id: u64,
-    ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError> {
-        // the engine does the export; this only names the row type
-        S::export_archives::<R>(shard_names, conf, path, provenance, group, schema_id).await
+    ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError>
+    where
+        <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: rkyv::Deserialize<
+            <R as ShoalTableSupport>::UpdateData,
+            Strategy<Pool, rkyv::rancor::Error>,
+        >,
+        <R as Archive>::Archived: rkyv::Deserialize<R, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <<UnsortedPartition<R> as IntentReadSupport<R>>::Intent as Archive>::Archived:
+            CheckBytes<
+                Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+            >,
+        for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >,
+    {
+        // the engine does the export; this only names the partition and row types
+        S::export_archives::<UnsortedPartition<R>, R>(shard_names, conf, path, provenance, group, schema_id).await
     }
 
     /// Create a persistent shoal table
@@ -397,9 +412,28 @@ where
             },
             // this partition does not have any already loaded data
             hash_map::Entry::Vacant(entry) => {
+                // an unsorted partition is one row and is never written as fragments, so a
+                // folded chain here is a map that is not this table's
+                // ([F61](../../../../docs/src/features/fragmented-partitions.md))
+                let PartitionBytes::Record(read) = loaded.data else {
+                    event!(
+                        Level::ERROR,
+                        msg = "An unsorted partition was read as a chain",
+                        table = %self.table_name,
+                        partition_id,
+                    );
+                    return Ok(PartitionLoad::Failed(
+                        self.fail_partition(
+                            partition_id,
+                            &read_span,
+                            Some(&corrupt_archive(self.table_name, partition_id)),
+                        )
+                        .unwrap_or_default(),
+                    ));
+                };
                 // validate this archive once, here, instead of on every query that reads it
                 let validated = hotpath::measure_block!("ValidatedArchive::new", {
-                    ValidatedArchive::new(loaded.data)
+                    ValidatedArchive::new(read)
                 });
                 // a corrupt archive releases the queries parked on it rather than propagating,
                 // for the same reason the merge path above does
@@ -1988,6 +2022,15 @@ where
     /// A tombstone: a partition whose one row was deleted
     fn erased(key: u64) -> Self {
         UnsortedPartition::tombstone(key)
+    }
+
+    /// Validate and deserialize a partition archived whole
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The partition's archived bytes
+    fn decode(bytes: &[u8]) -> Result<Self, ServerError> {
+        Ok(<Self as RkyvSupport>::deserialize(<Self as RkyvSupport>::access(bytes)?)?)
     }
 
     /// The intent type to use

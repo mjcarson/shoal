@@ -56,6 +56,46 @@ unsafe impl StableBytes for ReadResult {}
 // how a test or a benchmark builds a partition archive, since a `ReadResult` needs a reactor.
 unsafe impl StableBytes for AlignedVec {}
 
+/// A whole partition's archived bytes, as read from its archive or folded from its chain
+///
+/// Almost every partition is one record, and its bytes are the read that fetched them. A
+/// partition written as fragments ([F61](../../../../docs/src/features/fragmented-partitions.md))
+/// is its base record with each fragment folded over it and archived again, so every reader
+/// that wants a partition - a get's load, a snapshot cut, a scrub, an export - is handed the
+/// bytes of one whole partition either way and never learns the chain.
+#[derive(Debug)]
+pub enum PartitionBytes {
+    /// One record, read where it lies
+    Record(ReadResult),
+    /// A chain folded into one partition and archived again
+    Folded(AlignedVec),
+}
+
+impl Deref for PartitionBytes {
+    type Target = [u8];
+
+    /// The archived bytes of the whole partition
+    fn deref(&self) -> &[u8] {
+        match self {
+            PartitionBytes::Record(read) => read,
+            PartitionBytes::Folded(folded) => folded,
+        }
+    }
+}
+
+impl Clone for PartitionBytes {
+    /// Another handle to the same bytes for a record, or a copy of a folded partition's
+    fn clone(&self) -> Self {
+        match self {
+            PartitionBytes::Record(read) => PartitionBytes::Record(read.clone()),
+            PartitionBytes::Folded(folded) => PartitionBytes::Folded(folded.clone()),
+        }
+    }
+}
+
+// SAFETY: both arms are `StableBytes`, and which arm a value is never changes
+unsafe impl StableBytes for PartitionBytes {}
+
 /// An archive whose bytes were validated when they were read, and are not validated again
 ///
 /// `rkyv::access` is the checked entry point: it runs `bytecheck` over the whole buffer
@@ -921,6 +961,42 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         self.check_disk = false;
     }
 
+    /// Fold a fragment of this partition over it, the fragment being the newer
+    ///
+    /// A fragment's rows replace ours and its tombstones remove ours outright, so what is left
+    /// is a partition as an archive holds it: no tombstone survives a fold, and a folded base
+    /// can be written whole or merged as one read from disk
+    /// ([F61](../../../../docs/src/features/fragmented-partitions.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `fragment` - The fragment, as `IntentReadSupport::fragment` built it
+    pub fn fold_fragment(&mut self, fragment: Self) {
+        // every row the fragment wrote replaces ours and every delete removes ours
+        for (sort, row) in fragment.rows {
+            match row {
+                MaybeRow::Row(row) => {
+                    self.rows.insert(sort, MaybeRow::Row(row));
+                }
+                MaybeRow::Tombstone => {
+                    self.rows.remove(&sort);
+                }
+            }
+        }
+        // a base from disk holds no tombstones and a fold leaves none
+        self.rows.retain(|_, row| matches!(row, MaybeRow::Row(_)));
+        self.tombstones = 0;
+        // the size is the live rows', recomputed as a merge from disk does
+        self.size = self
+            .rows
+            .values()
+            .filter_map(|row| match row {
+                MaybeRow::Row(row) => Some(row.deep_size_of()),
+                MaybeRow::Tombstone => None,
+            })
+            .sum();
+    }
+
     /// Drop every tombstone in this partition and return how many were dropped
     ///
     /// A tombstone shadows a row that may still be in an archive, so this may only
@@ -1421,7 +1497,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{MaybeLoaded, MaybeRow, SortedPartition, UnsortedPartition, ValidatedArchive};
-    use crate::server::tables::persistent::sorted::replay_update;
+    use crate::server::tables::persistent::sorted::{replay_update, SortedIntents};
     use crate::server::tables::persistent::unsorted::UnsortedIntents;
     use crate::server::tables::persistent::RowSink;
     use crate::shared::queries::parser::{FieldRole, TypeValidator};
@@ -1969,6 +2045,171 @@ mod tests {
             panic!("our row was replaced by a tombstone");
         };
         assert_eq!(row.data, "updated");
+    }
+
+    /// A row of the fold tests, with a payload that says which write put it there
+    ///
+    /// # Arguments
+    ///
+    /// * `sort_key` - The row's sort key
+    /// * `data` - Its payload
+    fn written(sort_key: &str, data: &str) -> TestRow {
+        TestRow {
+            partition_key: "partition".to_owned(),
+            sort_key: sort_key.to_owned(),
+            data: data.to_owned(),
+        }
+    }
+
+    /// A partition's live rows as `(sort key, payload)`, in order
+    ///
+    /// # Arguments
+    ///
+    /// * `partition` - The partition
+    fn live(partition: &SortedPartition<TestRow>) -> Vec<(String, String)> {
+        partition
+            .live_rows()
+            .map(|(sort, row)| (sort.clone(), row.data.clone()))
+            .collect()
+    }
+
+    /// Archive a partition and read it back, as a record on disk is
+    ///
+    /// # Arguments
+    ///
+    /// * `partition` - The partition
+    fn round_trip(partition: &SortedPartition<TestRow>) -> SortedPartition<TestRow> {
+        let bytes = RkyvSupport::serialize(partition).expect("archived");
+        SortedPartition::<TestRow>::decode(&bytes).expect("read back")
+    }
+
+    /// A batch of inserts and deletes, made up from a seed
+    ///
+    /// # Arguments
+    ///
+    /// * `seed` - Where the made up sequence starts
+    /// * `batch` - Which batch this is, which each payload names
+    fn made_up_batch(seed: &mut u64, batch: usize) -> Vec<SortedIntents<TestRow>> {
+        // a small generator is enough: the point is many orders of the same few keys
+        let mut next = || {
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            *seed
+        };
+        let len = 1 + (next() % 12) as usize;
+        (0..len)
+            .map(|at| {
+                let key = format!("k{}", next() % 10);
+                if next() % 3 == 0 {
+                    SortedIntents::delete(0, key)
+                } else {
+                    SortedIntents::insert(written(&key, &format!("b{batch}w{at}")))
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    /// A chain folded over its base holds exactly what merging every batch whole would
+    ///
+    /// Every batch after the first is written as a fragment, archived and read back as a record
+    /// is, and folded over the base; the same batches applied whole to one partition are the
+    /// oracle. Rows overwritten, deleted, deleted and written again, and deleted from a
+    /// partition that never had them all occur across the seeds
+    /// ([F61](../../../../docs/src/features/fragmented-partitions.md)).
+    fn a_folded_chain_holds_what_a_whole_merge_does() {
+        for seed in 1..200u64 {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            // the oracle: every batch applied whole, as a merge without fragments does
+            let mut whole: HashMap<u64, SortedPartition<TestRow>> = HashMap::new();
+            let mut stats = RecoveryStats::default();
+            // the base is the first batch, merged whole
+            let first = made_up_batch(&mut state, 0);
+            let mut base_map: HashMap<u64, SortedPartition<TestRow>> = HashMap::new();
+            SortedPartition::<TestRow>::apply_intents(&mut base_map, 0, clone_batch(&first), &mut stats);
+            SortedPartition::<TestRow>::apply_intents(&mut whole, 0, first, &mut stats);
+            let mut chained = round_trip(base_map.get(&0).expect("a base"));
+            // then up to eight fragments, each archived, read back and folded in turn
+            for batch in 1..9 {
+                let intents = made_up_batch(&mut state, batch);
+                let fragment = match SortedPartition::<TestRow>::fragment(0, clone_batch(&intents)) {
+                    Ok(fragment) => fragment,
+                    Err(_) => panic!("a batch of inserts and deletes was handed back"),
+                };
+                SortedPartition::<TestRow>::apply_intents(&mut whole, 0, intents, &mut stats);
+                IntentReadSupport::fold(&mut chained, round_trip(&fragment));
+                let expected = whole.get(&0).map(live).unwrap_or_default();
+                assert_eq!(live(&chained), expected, "seed {seed}, batch {batch}");
+                // what a fold leaves is what an archive holds: no tombstones, and the live rows' size
+                assert_eq!(chained.tombstones, 0);
+                assert!(chained.rows.values().all(|row| matches!(row, MaybeRow::Row(_))));
+                let size: usize = chained.live_row_values().map(DeepSizeOf::deep_size_of).sum();
+                assert_eq!(chained.size, size, "seed {seed}, batch {batch}");
+                // and archiving the fold changes none of it
+                assert_eq!(live(&round_trip(&chained)), expected);
+            }
+        }
+    }
+
+    /// A copy of a batch of intents, since applying one consumes it
+    ///
+    /// # Arguments
+    ///
+    /// * `batch` - The intents
+    fn clone_batch(batch: &[SortedIntents<TestRow>]) -> Vec<SortedIntents<TestRow>> {
+        batch
+            .iter()
+            .map(|intent| match intent {
+                SortedIntents::Insert(row) => SortedIntents::insert(row.clone()),
+                SortedIntents::Delete { sort_key, .. } => SortedIntents::delete(0, sort_key.clone()),
+                SortedIntents::Update(update) => SortedIntents::update(update.clone()),
+            })
+            .collect()
+    }
+
+    #[test]
+    /// A batch holding an update is handed back whole, since a fragment has no row to change
+    fn a_batch_with_an_update_is_not_a_fragment() {
+        let batch = vec![
+            SortedIntents::insert(written("a", "one")),
+            SortedIntents::update(SortedUpdate {
+                partition_key: 0,
+                sort_key: "b".to_owned(),
+                update: "two".to_owned(),
+            }),
+        ];
+        let Err(back) = SortedPartition::<TestRow>::fragment(0, batch) else {
+            panic!("a batch with an update became a fragment");
+        };
+        // every intent comes back, in order, for the merge to apply whole
+        assert_eq!(back.len(), 2);
+        assert!(matches!(back[0], SortedIntents::Insert(_)));
+        assert!(matches!(back[1], SortedIntents::Update(_)));
+    }
+
+    #[test]
+    /// A fragment carries a delete as a tombstone, which the fold removes the base's row with
+    fn a_fragment_deletes_a_base_row_by_tombstone() {
+        let mut base = SortedPartition::<TestRow>::new(0);
+        base.insert(written("a", "base"));
+        base.insert(written("b", "base"));
+        let base = round_trip(&base);
+        let Ok(fragment) = SortedPartition::<TestRow>::fragment(
+            0,
+            vec![SortedIntents::delete(0, "a".to_owned()), SortedIntents::insert(written("c", "new"))],
+        ) else {
+            panic!("inserts and deletes were handed back");
+        };
+        // the tombstone survives archiving, which is what the fold reads
+        let fragment = round_trip(&fragment);
+        assert!(matches!(fragment.rows.get("a"), Some(MaybeRow::Tombstone)));
+        let mut folded = base;
+        IntentReadSupport::fold(&mut folded, fragment);
+        assert_eq!(
+            live(&folded),
+            vec![("b".to_owned(), "base".to_owned()), ("c".to_owned(), "new".to_owned())]
+        );
     }
 
     #[test]

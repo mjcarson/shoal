@@ -3197,6 +3197,9 @@ where
                 let partitions = usage.map_or(0, |usage| {
                     over_tablets(&usage.partitions, &slot.spec.tablets)
                 });
+                let chained = usage.map_or(0, |usage| {
+                    over_tablets(&usage.chained, &slot.spec.tablets)
+                });
                 let metrics = slot
                     .raft
                     .as_ref()
@@ -3252,6 +3255,7 @@ where
                         .map(|metrics| metrics.current_term)
                         .unwrap_or(0),
                     partitions,
+                    chained,
                     writes: replication
                         .writes
                         .get(&slot.spec.id)

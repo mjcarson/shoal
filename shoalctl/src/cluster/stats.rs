@@ -240,15 +240,17 @@ impl StatsModel {
         if tables.len() > 1 || self.view.table.is_some() {
             lines.push(String::new());
             lines.push(format!(
-                "{:<20} {:>14} {:>10} {:>22} {:>22} {:>22}",
-                "table", "partitions", "archived", "insert/s", "update/s", "delete/s"
+                "{:<20} {:>14} {:>10} {:>9} {:>22} {:>22} {:>22}",
+                "table", "partitions", "archived", "chained", "insert/s", "update/s", "delete/s"
             ));
             for table in &tables {
+                // chained is over every copy: each member writes its own chains (F61)
                 lines.push(format!(
-                    "{:<20} {:>14} {:>10} {:>22} {:>22} {:>22}",
+                    "{:<20} {:>14} {:>10} {:>9} {:>22} {:>22} {:>22}",
                     table.table,
                     table.partitions_led,
                     bytes(table.bytes_led),
+                    table.chained,
                     rates(&table.led.inserts),
                     rates(&table.led.updates),
                     rates(&table.led.deletes),

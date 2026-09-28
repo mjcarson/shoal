@@ -220,14 +220,29 @@ impl<D: ShoalDatabase> StorageSupport for NoStorage<D> {
     /// * `provenance` - Where the export is made
     /// * `group` - The group the file is written under
     /// * `schema_id` - The schema's fingerprint
-    async fn export_archives<R: PartitionKeySupport + 'static>(
+    async fn export_archives<P: IntentReadSupport<R> + 'static, R: PartitionKeySupport + 'static>(
         _shard_names: &[String],
         _conf: &Conf,
         _path: &std::path::Path,
         _provenance: &crate::server::replication::snapshot::SnapshotProvenance,
         _group: crate::shared::identity::GroupId,
         _schema_id: u64,
-    ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError> {
+    ) -> Result<crate::server::replication::snapshot::SnapshotManifest, ServerError>
+    where
+        <P as Archive>::Archived: rkyv::Deserialize<P, Strategy<Pool, rkyv::rancor::Error>>,
+        <R as Archive>::Archived: rkyv::Deserialize<R, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <P as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+        for<'a> <P::Intent as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > {
         // an ephemeral table's rows are memory, and an export is of what is on disk
         Err(ServerError::GlommioGeneric(format!(
             "table {} is ephemeral; nothing of it is on disk to export",
@@ -390,7 +405,7 @@ impl<D: ShoalDatabase> StorageSupport for NoStorage<D> {
     async fn load_partition_direct(
         &self,
         _partition_id: u64,
-    ) -> Result<Option<ReadResult>, ServerError> {
+    ) -> Result<Option<crate::server::tables::PartitionBytes>, ServerError> {
         // there is nothing on disk to hand back
         Ok(None)
     }

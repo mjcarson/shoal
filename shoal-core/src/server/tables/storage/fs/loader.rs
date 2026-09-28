@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use futures::select;
 use futures::stream::{FuturesUnordered, StreamExt};
-use glommio::io::ReadResult;
 use glommio::{Task, TaskQueueHandle};
 use kanal::{AsyncReceiver, AsyncSender};
 use tracing::{event, instrument, Level, Span};
 
 use crate::server::database::ShoalDatabase;
 use crate::server::messages::{LoadedPartition, LoadedPartitionKinds, ServerMsg};
+use crate::server::tables::PartitionBytes;
 use crate::server::{ServerError, ShoalError};
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::responses::ResponseError;
@@ -134,7 +134,7 @@ pub(super) fn client_error<T: std::fmt::Display>(
 async fn read_with_retries(
     table_map: &Arc<ArchiveMap>,
     partition_id: u64,
-) -> Result<ReadResult, ServerError> {
+) -> Result<PartitionBytes, ServerError> {
     // remember the last failure so it can be reported if every attempt fails
     let mut last = None;
     // try this read until it succeeds or we run out of attempts
@@ -180,17 +180,10 @@ async fn read_with_retries(
 async fn read_partition_once(
     table_map: &Arc<ArchiveMap>,
     partition_id: u64,
-) -> Result<ReadResult, ServerError> {
-    // find which archive holds this partitions data
-    let Some(entry) = table_map.find_partition(partition_id) else {
-        // this partition is in no archive, so there is nothing to read
-        return Err(ServerError::Shoal(ShoalError::PartitionNotFound {
-            partition_id,
-        }));
-    };
-    // read this partition's record out of its archive, verified against its checksum
-    let read = table_map.read_record(&entry).await?;
-    Ok(read)
+) -> Result<PartitionBytes, ServerError> {
+    // read this partition's record, or its chain folded, each record verified against its
+    // checksum; a partition in no archive is `PartitionNotFound`
+    table_map.read_partition(partition_id).await
 }
 
 /// Read a partition from disk and tell our shard how it went
