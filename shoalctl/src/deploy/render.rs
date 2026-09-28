@@ -176,9 +176,9 @@ pub struct ReplicationConf {
     /// How many sealed WAL bytes past `retained_bytes` a shard keeps for snapshots in flight
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold_bytes: Option<String>,
-    /// How the node's WALs write and sync
+    /// How large a WAL segment grows before it is sealed
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub wal_mode: Option<String>,
+    pub segment_bytes: Option<String>,
     /// How long one snapshot transfer may take
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot_timeout: Option<String>,
@@ -199,7 +199,7 @@ impl ReplicationConf {
             retained_entries: spec.retained_entries,
             retained_bytes: spec.retained_bytes,
             hold_bytes: spec.hold_bytes,
-            wal_mode: spec.wal_mode,
+            segment_bytes: spec.segment_bytes,
             snapshot_timeout: spec.snapshot_timeout,
         };
         // a block with nothing in it is not written at all
@@ -207,7 +207,7 @@ impl ReplicationConf {
             && conf.retained_entries.is_none()
             && conf.retained_bytes.is_none()
             && conf.hold_bytes.is_none()
-            && conf.wal_mode.is_none()
+            && conf.segment_bytes.is_none()
             && conf.snapshot_timeout.is_none();
         (!empty).then_some(conf)
     }
@@ -475,14 +475,14 @@ mod tests {
             retained_bytes: None,
             hold_bytes: Some("2GiB".into()),
             stream_bytes_per_sec: Some("4MiB".into()),
-            wal_mode: Some("shared".into()),
+            segment_bytes: Some("32MiB".into()),
             snapshot_timeout: Some("10m".into()),
         });
         let shrunk = render(&kept, &a, &Entry::Bootstrap, "x").expect("a file");
         assert!(shrunk.contains("retained_entries: 5000"), "{shrunk}");
         assert!(shrunk.contains("snapshot_timeout: 10m"));
         assert!(shrunk.contains("hold_bytes: 2GiB"), "{shrunk}");
-        assert!(shrunk.contains("wal_mode: shared"), "{shrunk}");
+        assert!(shrunk.contains("segment_bytes: 32MiB"), "{shrunk}");
         assert!(shrunk.contains("migration:\n    stream_bytes_per_sec: 4MiB"), "{shrunk}");
         assert!(!shrunk.contains("retained_bytes") && !shrunk.contains("wal_commit_delay"));
         // a node's own resources are the ones written

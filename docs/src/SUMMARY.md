@@ -122,7 +122,7 @@
   - [F57. Rendering a deployed cluster's files again with `shoalctl cluster reconfigure`](features/cluster-reconfigure.md)
   - [F58. Leads weighted by what each member can commit](features/weighted-leadership.md)
   - [F59. Shipping a backup to every host with `shoalctl cluster ship-backup`](features/backup-shipping.md)
-  - [F60. WAL segments written directly, and one flush a device](features/shared-wal-flush.md)
+  - [F60. WAL segments written directly, and one flush a device (withdrawn)](features/shared-wal-flush.md)
 
 # Direction
 

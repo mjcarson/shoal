@@ -92,8 +92,9 @@ An inventory is YAML, one per cluster (`shoalctl/src/deploy/inventory.rs`). It n
   engine's parser would not read, a deadline without a unit, and zero entries. The engine also
   refuses a `retained_bytes` under two WAL segments (20 MiB by default), at the claim. The wizard
   keeps the block when it edits an inventory, and has no fields for it. Round 14 added
-  `hold_bytes` ([#188](../appendix/resolved/forced-purge-outruns-snapshot.md)), `wal_mode`
-  ([F60](shared-wal-flush.md)), both rendered into `cluster.replication`, and
+  `hold_bytes` ([#188](../appendix/resolved/forced-purge-outruns-snapshot.md)) and
+  `segment_bytes` ([O79](../appendix/optimizations.md#o79-a-merge-rewrites-every-partition-it-touches-whole)),
+  both rendered into `cluster.replication`, and
   `stream_bytes_per_sec`, rendered into `cluster.migration`, which is how the lab stages a step
   too large to send within the retention;
 - the hosts, as a name, an ssh target and an address;

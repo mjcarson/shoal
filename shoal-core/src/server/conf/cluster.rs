@@ -642,15 +642,6 @@ pub struct Replication {
     /// straight away ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page)).
     #[serde(default = "default_wal_commit_delay")]
     pub wal_commit_delay: DurationSpec,
-    /// How the shards' WALs write their segments and make them durable
-    ///
-    /// `buffered` appends through the page cache and syncs each batch, and every sync that
-    /// grows a file commits the filesystem's journal with it; `direct` writes batches into
-    /// segments zero filled ahead, so a sync is the device flush alone; `shared` does the same
-    /// and has every shard on a device share one flush
-    /// ([F60](../../../../docs/src/features/shared-wal-flush.md)).
-    #[serde(default)]
-    pub wal_mode: crate::server::wal::WalMode,
     /// The bytes this node keeps free on its storage below which it takes no new write
     ///
     /// Below it a write proposed through this node is refused `Shedding`, the groups it leads
@@ -682,7 +673,6 @@ impl Default for Replication {
             retained_bytes: default_retained_bytes(),
             hold_bytes: default_hold_bytes(),
             wal_commit_delay: default_wal_commit_delay(),
-            wal_mode: crate::server::wal::WalMode::default(),
             retry_window: default_retry_window(),
             append_reserve: default_append_reserve(),
         }

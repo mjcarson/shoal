@@ -484,7 +484,6 @@ cluster:
     hold_bytes: "1GiB"            # sealed WAL past retained_bytes a shard keeps while members take snapshots of its groups, so none is purged under an install (#188); 0 holds nothing
     retry_window: "5m"            # how long after a write's identity was minted a retry is still answered its first result (F45); no shorter than write_timeout
     wal_commit_delay: "0ms"       # how long the WAL writer waits after a sync before taking the next batch, so a fast device syncs fewer, larger batches (O61); at most 10ms, per node
-    wal_mode: buffered            # buffered, direct or shared: how segments are written and synced (F60); direct writes into segments zero filled ahead so a sync commits no journal, shared also shares one device flush between a node's shards
     append_reserve: "512MiB"      # free bytes below which this node leads nothing and takes no entries into a durable log, serving reads until there is space again (#156); 0 is off
   repair:                         # scrubs and repairs (F44), node-local
     scrub_interval: null          # how often every group this node leads is verified on its own; absent or null is never, and a pass never installs

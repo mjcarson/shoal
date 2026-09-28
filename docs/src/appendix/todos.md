@@ -2393,8 +2393,15 @@ not fail. It looped: the leader went on purging while the member installed, and 
 46 snapshots. That was [#185](resolved/snapshot-outrun-by-purge.md), and since its fix a member
 taking a snapshot holds the leader's unforced purges, so ~~retention that outlasts a step~~ the
 entry retention no longer has to outlast a step. The byte retention still does: a forced purge at
-`retained_bytes` is not held, and at a terabyte a node a step's transfer can outlast a shard's
-retained WAL. The other two needs are unchanged.
+~~`retained_bytes` is not held, and at a terabyte a node a step's transfer can outlast a shard's
+retained WAL.~~ Round 14 reproduced that with the streams throttled and fixed it as
+[#188](resolved/forced-purge-outruns-snapshot.md): a held group is passed over for up to
+`hold_bytes` past the budget. A step that outlasts both still loses its log, and a step is bounded
+by `migration.timeout` as a whole. Of the other two needs, the cut's reads were made cheaper
+([O78](optimizations.md#o78-a-snapshot-cut-read-one-record-at-a-time-in-key-order)) and a cut
+streamed from the archives was priced and left
+([O52](optimizations.md#o52-a-snapshot-copies-every-record-of-the-archives-into-one-file)); several
+steps in flight onto a node is unchanged.
 
 ## Feed a new copy a snapshot when its log is larger
 
@@ -2423,3 +2430,23 @@ writer is a cross-core queue on the write path, and a crash matrix and a rehome 
 shard's WAL whole ([F47](../features/local-rehome.md)) would need rethinking. It pays only on
 devices whose sync is a cache flush. An Optane or a drive with power-loss protection syncs in a
 fraction of a millisecond, and six writers are what keep it busy.
+
+**Round 14 built the cheaper half and removed it.** Sharing the flush and writing segments
+directly into blocks written ahead doubled the syncs an idle titan could do, and under a load made
+no difference and the write p99 worse ([F60](../features/shared-wal-flush.md)): the device was
+busy with the compactor's archive writes, not the WAL's syncs
+([O79](optimizations.md#o79-a-merge-rewrites-every-partition-it-touches-whole)). This entry is not
+worth building until the archives' write volume is down.
+
+## A large sorted partition written as fragments
+
+Filed by [O79](optimizations.md#o79-a-merge-rewrites-every-partition-it-touches-whole) in round
+14 of the cluster testing. A segment merge writes every partition it touches whole, so a
+partition that grows by a few rows a segment is rewritten in full every few seconds. On the lab
+that is sixty archive bytes for each keyword byte inserted. The shape that removes it: a merge
+writes only a partition's new rows as a fragment, the map entry names a chain of fragments rather
+than one record, a read folds the chain, and an archive pass consolidates a chain once it is long
+or its fragments are a small share of the whole. Every consumer of a map entry would have to learn
+the chain: the loader, a snapshot cut, the scrub's canonical digest, the rehome and the archive
+pass. It is the storage format's largest change since checksummed records, and it pays only for
+partitions that grow by small amounts, which on this schema is the keyword table.

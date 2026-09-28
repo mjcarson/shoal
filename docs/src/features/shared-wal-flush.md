@@ -1,139 +1,112 @@
-# F60. WAL segments written directly, and one flush a device
+# F60. WAL segments written directly, and one flush a device (withdrawn)
+
+**Built, measured on the lab, and removed in round 14.** It made a whole load no faster and the
+mixed bench's write tail worse, because under load the lab's devices were not bound by the WAL's
+syncs. The page is kept because the measurements that led to it, and away from it, correct what
+round 13 believed about a sync. The code is in `14c1297` and was removed in the change after it.
 
 ## Context
 
 [O64](../appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)
-left a write-only load on the lab bound by the Zen1 hosts' WAL syncs. Each of a node's six shards
-has its own WAL and its own writer, and round 13 of the cluster testing measured each sync at 7 to
-11 ms on the 970 EVOs, with six writers saturating the device at 450 to 630 syncs a second
+left a write-only load on the lab bound, it seemed, by the Zen1 hosts' WAL syncs. Each of a
+node's six shards has its own WAL and writer, and round 13 measured each sync at 7 to 11 ms on the
+970 EVOs, with six writers saturating the device at 450 to 630 syncs a second
 ([O64 in round 13](../cluster-testing/performance.md#o64-in-round-13-the-batches-seen)). It read
 that as the device's cache flush, costing the same whatever a sync carried, and filed
-[fewer WAL syncs per device](../appendix/todos.md#fewer-wal-syncs-per-device) as the design
-change that would move it.
+[fewer WAL syncs per device](../appendix/todos.md#fewer-wal-syncs-per-device).
 
-Round 14 measured what a sync costs on titan before building anything
-(`target/lab/r14/o64/flushprobe.py`, six writers of 16 KiB each, 10 s a mode):
+Round 14 measured a sync on idle titan first (`target/lab/r14/o64/flushprobe.py`, six writers of
+16 KiB, 10 s a mode):
 
-| How each writer writes and syncs | Commits a second | p50 | p99 |
-| --- | --- | --- | --- |
-| Appends through the page cache, its own `fdatasync` (the WAL as it was) | 951, 956 | 6.1 ms | 11.7 ms |
-| Overwrites a file written ahead, with `O_DIRECT`, its own `fdatasync` | 2,286, 1,875 | 2.9 ms | 6.9–8.6 ms |
-| The same, and one flusher's `fdatasync` covers every writer | 2,407, 2,071, 2,145, 1,854 | 2.2–2.9 ms | 7.7–10.8 ms |
+| How each writer writes and syncs | Commits a second | p50 |
+| --- | --- | --- |
+| Appends through the page cache, its own `fdatasync` (the WAL) | 951, 956 | 6.1 ms |
+| Overwrites a file written ahead, with `O_DIRECT`, its own `fdatasync` | 2,286, 1,875 | 2.9 ms |
+| The same, and one flusher's `fdatasync` covers every writer | 2,407, 2,071, 2,145, 1,854 | 2.2–2.9 ms |
 
-At 64 KiB a write, the shared flush committed 1,264 a second and the own syncs 902.
+At 64 KiB a write, the shared flush committed 1,264 a second and the own syncs 902. So most of an
+idle sync's cost was not the device flush but ext4's journal: a sync of a file that has grown
+commits the journal too, since the size is metadata the data cannot be found without.
 
-So round 13's reading was half wrong. Most of a sync's cost was not the device flush but the
-filesystem journal: every sync of a file that has grown commits ext4's journal as well, since the
-file's size is metadata the data cannot be found without. A file whose blocks were written before
-it is appended to needs no journal commit. That alone was worth 2 to 2.4 times on the lab's
-device. Sharing one flush between writers was worth more only for larger writes.
+## What it did
 
-## What it does
+`cluster.replication.wal_mode` chose one of three ways a shard's WAL wrote:
 
-`cluster.replication.wal_mode` chooses one of three ways a shard's WAL writes its segments
-(`WalMode`, `shoal-core/src/server/wal/mod.rs`):
+- `buffered`, as before;
+- `direct`: each segment created and filled with zeros up to `segment_bytes` plus 1 MiB, synced,
+  before its first batch, the next one prepared in the background; each batch written with one
+  `O_DIRECT` write of the whole blocks it touched, starting with the block the last batch ended
+  in, and synced on its own file; a sealed segment cut to its last frame;
+- `shared`: `direct`, with one device flush shared by every shard whose WAL was on the device
+  (`FlushGroup`). A writer waited for a flush that started after its write completed, and issued
+  one on its own file when none was in flight.
 
-- **`buffered`**, the default: as before. Batches are appended through the page cache and each is
-  synced on its own file.
-- **`direct`**: each segment is created and filled with zeros up to `segment_bytes` plus 1 MiB,
-  and synced, before its first batch (`direct::prepare`). The writer prepares the next generation
-  in the background while the current one fills. A batch is written with one `O_DIRECT` write of
-  the whole blocks it touches, starting with the block the last batch ended in, and synced on its
-  own file (`DirectSegment::append`). A sealed segment is cut to its last frame.
-- **`shared`**: `direct`, and the sync is one flush of the device shared by every shard whose
-  WAL is on it (`FlushGroup`, `shoal-core/src/server/wal/flush.rs`). A writer whose write completed
-  waits for a flush that started after it; if none is in flight it issues one, `fdatasync` on its
-  own file, and every writer waiting when it ends is covered.
+openraft's storage suite passed over both direct modes, and so did the new tests.
 
-A batch that would write past its segment's prepared blocks is synced on its own file in either
-direct mode, since a file that grows commits the journal and a flush of another file does not.
+## Why it was withdrawn
 
-Turning a direct mode on over a WAL whose last segment holds frames moves appends to a new
-generation (`ShardWal::set_mode`). A recovered segment was written through the page cache and
-may end in a torn tail, so it is never appended to directly. Recovery reads zeros past a
-segment's last frame as the end of it, which is where it already stopped at a torn tail, and
-cuts them away at `DEBUG` rather than warning about a tear.
+Nine fresh clusters on the lab, whole loads interleaved (`target/lab/r14/o64/modes.sh`):
 
-## Design choices
+| Mode | Rows a second | Titan's device flushes a second |
+| --- | --- | --- |
+| `buffered` | 50,600, 47,201, 48,440 | 345–347 |
+| `direct` | 54,848, 55,939, 46,559 | 1,492–1,604 |
+| `shared` | 46,822, 53,936, 46,014 | 756–810 |
 
-- **Zeros, not `fallocate`.** A preallocated extent on ext4 or XFS is unwritten until it is
-  written, and converting it is a metadata change the journal has to commit, the cost this
-  exists to avoid. Writing zeros once, off the write path, costs a segment's bytes of write
-  bandwidth and one sync, and leaves blocks a later write only overwrites.
-- **Never reuse a segment.** Recycling sealed segments would avoid the zeros. But a recycled
-  file holds an older incarnation's frames, and a crash after a batch that overwrote only part of
-  one would leave frames recovery could not tell from the current ones. The frame format has no
-  generation to tell them apart by.
-- **The block a batch starts in is written again.** A direct write covers whole blocks, and a
-  batch rarely ends on one. Padding every batch to a block would waste half a block a sync. Writing
-  the partial block again carries the bytes it already held unchanged, so a torn write of it
-  cannot damage a frame already acknowledged: every sector of it holds either the old bytes or
-  the same bytes.
-- **Flushes shared by device, not by filesystem or node.** A device flush empties the device's
-  whole cache, whatever file it was issued through. The key is the device of the filesystem a
-  segment is on (`dev_major`, `dev_minor`), so shards whose WALs are on two devices share with
-  their own device's shards only.
-- **A failed shared flush fails every writer from then on.** Linux reports a writeback error
-  once, so a later flush that succeeds says nothing about the writes the failed one covered. A
-  failed sync stops the WAL either way ([#156](../appendix/resolved/wal-failure-stops-the-node.md)).
-- **A mode, not a bool.** `direct` is most of the gain with nothing shared between shards, and
-  `shared` is the rest. They are separate so a deployment can have one without the other.
+Within the loads' own spread. And with 40 MiB segments against the same buffered arm
+(`seg.sh`):
+
+| Arm | Load | Mixed bench | Update p99 | Titan's WAL writes, load / bench |
+| --- | --- | --- | --- | --- |
+| `buffered`, 40 MiB | 52,328, 54,486 | 43,165, 43,407 | 138, 144 ms | 25, 14 MB/s |
+| `direct`, 40 MiB | 43,386, 47,205 | 43,558, 47,565 | 150, 172 ms | 67–87, 50 MB/s |
+
+Three things the probe did not see:
+
+- **The device was busy with archives, not the WAL.** Under a load titan's node wrote 114 MB/s
+  to archives and 24.5 MB/s to the WAL. A flush empties the device's whole cache, so a WAL sync
+  paid for the compactor's writes whatever mode it was in. The bound is
+  [O79](../appendix/optimizations.md#o79-a-merge-rewrites-every-partition-it-touches-whole).
+- **ext4 was already batching the syncs.** In `buffered` mode 404 syncs a second became 170
+  journal commits and about 350 device flushes. In `direct`, every sync was a flush of its own.
+- **Direct writes multiplied the WAL's bytes.** A batch is a few kilobytes and a direct write is
+  whole blocks, so every batch wrote its partial block again, and every segment was written twice,
+  once as zeros. Titan's WAL went from 25 to 67–87 MB/s, onto the device that was already the
+  bound.
 
 ## Alternatives rejected
 
-- **One WAL a node, or a writer a device across shards.** The todo's shape. It moves every batch
-  across cores, and it changes what a shard's WAL is for a rehome ([F47](local-rehome.md)) and for
-  the crash matrix. Sharing the flush and nothing else keeps each shard's segments its own.
-- **`sync_file_range` and a shared flush over buffered writes.** It writes a file's dirty pages
-  without the journal. But a buffered append still grows the file, and growth is the metadata a
-  flush of another file does not commit.
-- **A longer commit delay.** Round 13 measured 5 ms against 2 ms: fewer syncs, and fewer rows
-  a second.
+- **Keeping `shared` for devices with a volatile cache.** It was no faster on the one such device
+  the lab has, and it adds a cross-core lock to the write path.
+- **Recycling segments instead of writing zeros.** It saves the zeros, but a recycled segment
+  holds an older incarnation's frames, and the frame has no generation to tell them apart by.
 
 ## Limitations
 
-- **Default `buffered`** until the lab measures the modes on whole loads (below).
-- **Disk space.** A segment is its full prepared size while it fills, plus the next one prepared
-  ahead: about 22 MiB a shard at the default `segment_bytes`, against the 10 MiB a buffered
-  segment grows to.
-- **Write bandwidth.** Every segment is written twice, once as zeros. On the lab that is the WAL's
-  bytes again, off the path a write waits on.
-- **Readers go through the page cache.** A segment is read back for a lagging member through a
-  buffered handle, after direct writes to it. Linux invalidates the cached pages a direct write
-  covers. If that fails, which it can only for pages mapped into memory, and nothing maps a
-  segment, a reader could see a stale block, fail the frame's checksum and report it.
+None: the feature is not in the tree.
 
 ## Invariants to uphold
 
-- **A write is durable only through a flush that started after it completed.** The flush in
-  flight when a writer asked covers nothing it wrote (`FlushGroup::sync_with`).
-- **A segment written directly was filled with zeros and synced before its first batch**, and
-  a batch that would write past those blocks is synced on its own file.
-- **A prepared segment is created empty.** Whatever was at its path is discarded.
-- **A recovered segment with frames is never appended to directly.**
-- **No lock is held across an `.await`** in the flush group, whose state every executor on the
-  node shares.
+For anything like it again:
+
+- **A write is durable only through a flush that started after it completed.**
+- **A file whose size or allocation changed needs its own sync**; a flush of another file does not
+  commit its metadata.
+- **Measure the device under the load the feature is for.** An idle probe measured the sync, and
+  under load the sync was not what the device was doing.
 
 ## Performance
 
-Measured on the lab in round 14; see
-[the cluster testing's O64 section](../cluster-testing/performance.md#o64-in-round-14-the-journal-not-the-flush).
+Above. No capture: the lab's figures are the reason it was removed.
 
 ## Tests
 
-| Test | What breaks if the feature is reverted |
-| --- | --- |
-| `shoal-core` `server::wal::flush::tests::waiters_share_the_next_flush_and_never_the_one_in_flight` | A writer is counted durable by a flush that started before its write, or waiters do not share the next flush |
-| `shoal-core` `server::wal::flush::tests::a_failed_flush_poisons_the_group` | A flush after a failed one reports a write durable |
-| `shoal-core` `server::wal::flush::tests::executors_on_other_threads_share_flushes` | Executors on other threads are not woken, or each flushes alone |
-| `shoal-core` `server::wal::tests::data_store_passes_the_openraft_storage_suite` | openraft's log storage suite fails over a WAL in the `direct` or `shared` mode |
-| `shoal-core` `server::wal::tests::direct_segments_share_flushes_and_recover_whole` | Direct segments lose a completion across rotations, are not cut to their frames when sealed, do not replay whole after a reopen, or a recovered segment with frames is appended to directly |
-| `shoalctl` `deploy::inventory` and `deploy::render` tests | An inventory's `wal_mode` is not validated or not rendered |
+None in the tree. `14c1297` has them: the flush group's three tests, openraft's storage suite
+over both modes, and `direct_segments_share_flushes_and_recover_whole`.
 
 ## Related
 
-- [O64](../appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab),
-  the load rate this was for.
-- [O61](../appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page),
-  the commit delay.
+- [O64 in round 14](../cluster-testing/performance.md#o64-in-round-14-the-journal-not-the-flush).
+- [O79](../appendix/optimizations.md#o79-a-merge-rewrites-every-partition-it-touches-whole), the
+  bound it found.
 - [Fewer WAL syncs per device](../appendix/todos.md#fewer-wal-syncs-per-device).
