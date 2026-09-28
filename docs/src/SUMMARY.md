@@ -307,6 +307,7 @@
   - [182. A node whose links were slow went on leading a third of the groups](appendix/resolved/slow-link-leadership.md)
   - [183. A restore driver told its loop a group was done when the control plane never recorded it](appendix/resolved/restore-driver-uncommitted-done.md)
   - [184. A read through a copy that is installing a snapshot was refused, not sent to another holder](appendix/resolved/installing-copy-reads-elsewhere.md)
+  - [185. A new copy was sent snapshot after snapshot while its leader purged past each one](appendix/resolved/snapshot-outrun-by-purge.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

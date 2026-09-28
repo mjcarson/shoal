@@ -2386,6 +2386,16 @@ step, or a catch-up that tolerates a purge by re-cutting only what moved; a cut 
 archives instead of written to a file first; and several steps in flight onto a node. Proving it
 needs hosts with the disk for it, or retention shrunk on the lab until a step outlasts it.
 
+Round 13 did the second
+([cluster testing](../cluster-testing/correctness.md#a-step-that-outlasts-the-log)), with the
+inventory's new `replication:` block. At 2,000 retained entries a step that outlasted the log did
+not fail. It looped: the leader went on purging while the member installed, and one group was sent
+46 snapshots. That was [#185](resolved/snapshot-outrun-by-purge.md), and since its fix a member
+taking a snapshot holds the leader's unforced purges, so ~~retention that outlasts a step~~ the
+entry retention no longer has to outlast a step. The byte retention still does: a forced purge at
+`retained_bytes` is not held, and at a terabyte a node a step's transfer can outlast a shard's
+retained WAL. The other two needs are unchanged.
+
 ## Feed a new copy a snapshot when its log is larger
 
 Filed by [Resolved #170](resolved/uncached-log-reads.md). openraft feeds a new copy from the log

@@ -1025,7 +1025,12 @@ where
                 machine_state.quarantined = Some(quarantine);
             }
             let state = Rc::new(RefCell::new(machine_state));
-            let machine = GroupMachine::new(spec.id, state.clone(), tx.clone());
+            let machine = GroupMachine::new(
+                spec.id,
+                state.clone(),
+                tx.clone(),
+                replication.network.snapshot_holds(),
+            );
             // a volatile group this shard held in a run that is over starts empty because
             // its memory went, which is not how a new group starts
             let held_before = store.is_volatile() && held_volatile.contains(&spec.id);
@@ -1180,7 +1185,12 @@ where
             group,
             network: replication.network.clone(),
         };
-        let machine = GroupMachine::new(group, state, tx.clone());
+        let machine = GroupMachine::new(
+            group,
+            state,
+            tx.clone(),
+            replication.network.snapshot_holds(),
+        );
         spawn_group_start(
             tx,
             me,
@@ -1255,7 +1265,12 @@ where
             group,
             network: replication.network.clone(),
         };
-        let machine = GroupMachine::new(group, state, tx.clone());
+        let machine = GroupMachine::new(
+            group,
+            state,
+            tx.clone(),
+            replication.network.snapshot_holds(),
+        );
         spawn_group_start(
             tx,
             me,
@@ -3351,6 +3366,36 @@ where
                 let (led, handed) = hand_off_leadership(&rafts).await;
                 if led > 0 {
                     event!(Level::WARN, msg = "handed on the leads of a shard under the append reserve", shard, led, handed);
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// Build the snapshots a member's hold deferred, for every group whose holds are over
+    ///
+    /// openraft asks for a build only as entries apply, so a group that went quiet while a
+    /// member held its builds would otherwise build nothing, and purge nothing, until its next
+    /// write ([#185](../../../../docs/src/appendix/resolved/snapshot-outrun-by-purge.md)).
+    pub(super) fn build_deferred_snapshots(&mut self) {
+        let Some(replication) = self.replication.as_ref() else {
+            return;
+        };
+        // a member that has gone silent holds nothing
+        replication.network.release_silent_holds();
+        // each group whose deferred build is due, on a task of its own: the trigger waits on
+        // the group's core, which the loop never does
+        for group in replication.network.snapshot_holds().due() {
+            let Some(raft) = replication
+                .groups
+                .get(&group)
+                .and_then(|slot| slot.raft.clone())
+            else {
+                continue;
+            };
+            glommio::spawn_local(async move {
+                if let Err(error) = raft.trigger().snapshot().await {
+                    event!(Level::WARN, msg = "a snapshot a hold deferred could not be built", group = %group, %error);
                 }
             })
             .detach();

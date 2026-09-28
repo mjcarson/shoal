@@ -552,6 +552,9 @@ impl RateLimiter {
 
 /// The state every `ShardPeer` shares
 struct Shared {
+    /// The holds this shard's leaders put on their snapshot builds while a member takes a
+    /// snapshot of their group ([#185](../../../../docs/src/appendix/resolved/snapshot-outrun-by-purge.md))
+    holds: Rc<SnapshotHolds>,
     /// One link per peer node, opened on first use
     links: RefCell<HashMap<NodeId, Rc<ReplicationLink>>>,
     /// When this shard last heard anything from each peer node over the replication lane,
@@ -605,6 +608,123 @@ pub struct ShardNetwork {
     shared: Rc<Shared>,
 }
 
+/// How long a group's snapshot builds stay held after a member installed a snapshot of it
+///
+/// Long enough for the member to be fed the entries after the snapshot's boundary from the
+/// log, which under the bench is a few seconds of writes; short enough that a member that
+/// never asks for them does not keep the leader's log from being purged for long.
+pub const CATCH_UP_HOLD: Duration = Duration::from_secs(30);
+
+/// The holds a shard's group leaders put on their snapshot builds while members take snapshots
+///
+/// A leader purges its log up to its latest snapshot less `retained_entries`, and each snapshot
+/// build moves that point on. A member being sent a snapshot does not hold it back: openraft
+/// counts a log range sent as in use, and a snapshot sent as not. So a member whose cut, transfer
+/// and install took longer than the retention's span of writes finished the install behind the
+/// purge point, and was sent another snapshot. On the lab one group was sent 16 in a row
+/// ([#185](../../../../docs/src/appendix/resolved/snapshot-outrun-by-purge.md)). A hold defers
+/// every unforced build of its group until it expires, so the purge stops where it was while a
+/// member takes a snapshot, and for [`CATCH_UP_HOLD`] after it installs one. A forced build,
+/// which is how `retained_bytes` bounds the disk, is never held.
+#[derive(Debug, Default)]
+pub struct SnapshotHolds {
+    /// Each held group's holds, by the member taking the snapshot, until when each lasts
+    holds: RefCell<HashMap<GroupId, HashMap<ShardAddr, Instant>>>,
+    /// The groups a hold deferred a build of, which are built once the hold ends
+    ///
+    /// openraft asks for a build only as entries apply, so a group that went quiet during a
+    /// hold would otherwise never build, and never purge, again until its next write.
+    deferred: RefCell<std::collections::HashSet<GroupId>>,
+}
+
+impl SnapshotHolds {
+    /// Hold a group's builds for a member until a moment, replacing the member's last hold
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `member` - The member taking the snapshot
+    /// * `until` - When the hold lapses
+    pub fn hold(&self, group: GroupId, member: ShardAddr, until: Instant) {
+        self.holds
+            .borrow_mut()
+            .entry(group)
+            .or_default()
+            .insert(member, until);
+    }
+
+    /// Lift a member's hold on a group's builds
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `member` - The member
+    pub fn release(&self, group: GroupId, member: ShardAddr) {
+        let mut holds = self.holds.borrow_mut();
+        if let Some(members) = holds.get_mut(&group) {
+            members.remove(&member);
+            if members.is_empty() {
+                holds.remove(&group);
+            }
+        }
+    }
+
+    /// Every hold, as the group and the member holding it
+    #[must_use]
+    pub fn members(&self) -> Vec<(GroupId, ShardAddr)> {
+        self.holds
+            .borrow()
+            .iter()
+            .flat_map(|(group, members)| members.keys().map(|member| (*group, *member)))
+            .collect()
+    }
+
+    /// Note that a hold deferred a build of a group
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    pub fn defer(&self, group: GroupId) {
+        self.deferred.borrow_mut().insert(group);
+    }
+
+    /// Every group a hold deferred a build of whose holds have all ended, forgotten as it is named
+    #[must_use]
+    pub fn due(&self) -> Vec<GroupId> {
+        // the deferred groups no longer held
+        let deferred: Vec<GroupId> = self.deferred.borrow().iter().copied().collect();
+        let due: Vec<GroupId> = deferred
+            .into_iter()
+            .filter(|group| !self.held(*group))
+            .collect();
+        let mut deferred = self.deferred.borrow_mut();
+        for group in &due {
+            deferred.remove(group);
+        }
+        due
+    }
+
+    /// Whether any member holds a group's builds now, forgetting the holds that lapsed
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    #[must_use]
+    pub fn held(&self, group: GroupId) -> bool {
+        let now = Instant::now();
+        let mut holds = self.holds.borrow_mut();
+        let Some(members) = holds.get_mut(&group) else {
+            return false;
+        };
+        members.retain(|_, until| *until > now);
+        if members.is_empty() {
+            holds.remove(&group);
+            return false;
+        }
+        true
+    }
+}
+
 impl ShardNetwork {
     /// Build the network for a shard
     ///
@@ -634,6 +754,7 @@ impl ShardNetwork {
     ) -> Self {
         ShardNetwork {
             shared: Rc::new(Shared {
+                holds: Rc::new(SnapshotHolds::default()),
                 links: RefCell::new(HashMap::new()),
                 heard: RefCell::new(HashMap::new()),
                 hop_silence: Cell::new(HOP_SILENCE),
@@ -652,6 +773,35 @@ impl ShardNetwork {
                 transport,
                 on_event,
             }),
+        }
+    }
+
+    /// The holds on this shard's groups' snapshot builds, which every group's machine reads
+    #[must_use]
+    pub fn snapshot_holds(&self) -> Rc<SnapshotHolds> {
+        self.shared.holds.clone()
+    }
+
+    /// Lift every hold whose member has been silent past the hop silence
+    ///
+    /// A member that answers nothing is not taking a snapshot, whatever the transfer that held
+    /// for it is still waiting on: a send to a node killed mid-stream can wait out the whole
+    /// transfer budget, minutes of a leader's log kept for nobody
+    /// ([#185](../../../../docs/src/appendix/resolved/snapshot-outrun-by-purge.md)).
+    pub fn release_silent_holds(&self) {
+        let silence = self.hop_silence();
+        for (group, member) in self.shared.holds.members() {
+            // the same judgement a snapshot send makes before it cuts anything
+            let silent = self.link(member.node).map_or_else(
+                || self.silent_for(member.node, silence),
+                |link| {
+                    link.silent_for(silence)
+                        .or_else(|| self.silent_for(member.node, silence))
+                },
+            );
+            if silent.is_some() {
+                self.shared.holds.release(group, member);
+            }
         }
     }
 
@@ -1634,22 +1784,39 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
                 "{target} has answered nothing on the replication lane for {silent:?}; no snapshot is cut for it"
             )));
         }
+        // the leader builds no snapshot, and so purges nothing more, from before the cut until
+        // the member has taken it and been fed from its boundary: a build between the cut and
+        // the hold could purge past the boundary before anything held it
+        // ([#185](../../../../docs/src/appendix/resolved/snapshot-outrun-by-purge.md))
+        let holds = network.snapshot_holds();
+        let member = self.peer.target;
+        holds.hold(group, member, Instant::now() + option.hard_ttl());
         // the file: the loop's cut for this group's own snapshot, or a received one as it is
         let held;
         let (path, manifest): (PathBuf, SnapshotManifest) = match snapshot.snapshot {
             SnapshotData::Own { .. } => {
-                held = network
-                    .build(group, 0)
-                    .await
-                    .map_err(|msg| unreachable(format!("cutting a snapshot: {msg}")))?;
+                held = match network.build(group, 0).await {
+                    Ok(held) => held,
+                    Err(msg) => {
+                        // nothing was cut, so nothing waits on the log
+                        holds.release(group, member);
+                        return Err(unreachable(format!("cutting a snapshot: {msg}")));
+                    }
+                };
                 (held.path.clone(), held.manifest.clone())
             }
             SnapshotData::Received { path, manifest } => (path, manifest),
         };
-        match self
+        let sent = self
             .send_snapshot(vote, path, manifest, None, cancel, option.hard_ttl())
-            .await
-        {
+            .await;
+        // installed: the hold lasts while the member is fed the entries past the boundary; not
+        // installed: nothing is waiting on the log, and the next try holds again
+        match &sent {
+            Ok(_) => holds.hold(group, member, Instant::now() + CATCH_UP_HOLD),
+            Err(_) => holds.release(group, member),
+        }
+        match sent {
             Ok(response) => Ok(response),
             Err(SendError::Streaming(error)) => Err(error),
             // a stream that is not a repair's is never judged against a checkpoint
@@ -2072,8 +2239,44 @@ impl std::error::Error for LinkFailed {}
 
 #[cfg(test)]
 mod tests {
-    use super::{hop_budget, RateLimiter, HOP_MARGIN};
+    use super::{hop_budget, RateLimiter, SnapshotHolds, HOP_MARGIN};
     use std::time::{Duration, Instant};
+
+    /// A hold lasts until it lapses or is lifted, per member, another member's hold keeps the
+    /// group held, and a build it deferred is due once it is over (#185)
+    #[test]
+    fn snapshot_holds_lapse_and_lift() {
+        use crate::shared::identity::{GroupId, NodeId, ShardAddr};
+        let holds = SnapshotHolds::default();
+        let group = GroupId(1);
+        let a = ShardAddr {
+            node: NodeId(uuid::Uuid::new_v4()),
+            shard: 0,
+        };
+        let b = ShardAddr {
+            node: NodeId(uuid::Uuid::new_v4()),
+            shard: 0,
+        };
+        assert!(!holds.held(group));
+        // two members hold; lifting one leaves the other's
+        holds.hold(group, a, Instant::now() + Duration::from_secs(60));
+        holds.hold(group, b, Instant::now() + Duration::from_secs(60));
+        holds.release(group, a);
+        assert!(holds.held(group));
+        holds.release(group, b);
+        assert!(!holds.held(group));
+        // a hold that lapsed holds nothing, and another group is never held by it
+        holds.hold(group, a, Instant::now() - Duration::from_millis(1));
+        assert!(!holds.held(group));
+        holds.hold(group, a, Instant::now() + Duration::from_secs(60));
+        assert!(!holds.held(GroupId(2)));
+        // a build deferred under a hold is due once the hold is over, and named once
+        holds.defer(group);
+        assert!(holds.due().is_empty());
+        holds.release(group, a);
+        assert_eq!(holds.due(), vec![group]);
+        assert!(holds.due().is_empty());
+    }
 
     /// The bucket admits a second's worth at once, then paces at the rate; zero is unlimited
     /// ([F46](../../../../docs/src/features/capacity-rebalancing.md))

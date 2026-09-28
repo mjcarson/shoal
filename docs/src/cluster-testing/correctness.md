@@ -1403,3 +1403,33 @@ make up the rest of the median.
 **Verdict: the cost of the hop, and nothing on it to remove.** A member that holds nothing has to
 ask a member that does. It is a limitation of coordinating through an unplaced member, filed as
 such on [what is left](todo.md), and a client that can reach the placed members should use them.
+
+### A step that outlasts the log
+
+[What is left](todo.md) carried moves at terabyte scale as extrapolated, with two defaults
+expected to keep a step from finishing under writes: `snapshot_timeout` and the log retention.
+Nobody had hosts with the disk, so round 13 staged the retention half. The inventory's new
+`replication:` block ([F51](../features/cluster-deployment.md)) shrank `retained_entries` from
+100,000 to 2,000, about a second of a busy group's writes, and hyperion was rebuilt under the
+mixed bench as in [section 10](#10-the-compactors-backlog-and-four-rebuilds)
+(`target/lab/r13/tb/run.sh`, each member's installs counted from its journal).
+
+| Run | Retention | Rebuild | Streamed for moved | Installs per group on hyperion | Lost |
+| --- | --- | --- | --- | --- | --- |
+| shrunk1 | 2,000 entries, 24 MiB | 452 s | 3.2 GiB for 879 MiB | 28 once, 6 twice, one 14 and one 16 times | 0 |
+| before #185 | 2,000 entries | 991 s | 8.3 GiB for 878 MiB | 31 once, 4 twice, one 46 times; its step failed and was retried | 0 |
+| #185 fixed | 2,000 entries | 187 s | 1.0 GiB for 876 MiB | 36 once | 0 |
+
+A step that outlasted the log did finish, which was the question, but not for the reason hoped.
+A group's leader went on building snapshots, and so purging its log, while a member took a
+snapshot of the group. When the install finished, the entries after its boundary were gone, and
+the leader cut another. One group went round that loop every 6 to 7 s for over ten minutes, and
+its step finished only on a retry near the end of the bench's writes. That is [#185](../appendix/resolved/snapshot-outrun-by-purge.md),
+fixed in round 13: a member taking a snapshot holds its leader's unforced snapshot builds until it
+has been fed past the boundary. On the fix, every group installed one snapshot, and the rebuild
+was the fastest on record here.
+
+**Verdict: pass on the fix.** Nothing was lost in any run. What is still unproved at terabyte
+scale is the `retained_bytes` half: a forced purge, which bounds a shard's disk, is not held, so a
+step whose transfer outlasts a shard's retained WAL bytes still loses its log. The inventory can
+now raise it.
