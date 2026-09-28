@@ -27,6 +27,9 @@ path = "src/bin/loader.rs"
 # run the node on the system allocator instead of mimalloc, for an AddressSanitizer build
 # (`RUSTFLAGS=-Zsanitizer=address`), which cannot see into mimalloc's heap
 system-allocator = []
+# run the node on jemalloc with heap profiling built in, sampled and dumped as `_RJEM_MALLOC_CONF`
+# says, for finding what a node's memory holds (round 15 of the cluster testing)
+jemalloc-prof = ["dep:tikv-jemallocator"]
 
 [dependencies]
 # the engine, for the node. the loader links it too, as `shoal-benchctl` does beside `shoal-node`,
@@ -39,6 +42,7 @@ rkyv = { workspace = true }
 deepsize2 = { workspace = true }
 # the allocator every Shoal server program in this workspace runs with
 mimalloc = { workspace = true }
+tikv-jemallocator = { version = "0.6", features = ["profiling"], optional = true }
 # the dataset is a csv, deserialized straight into the table struct. the sync reader: the loader
 # runs it on a blocking thread, and it is the faster of the two on a half gigabyte file
 csv = "1"

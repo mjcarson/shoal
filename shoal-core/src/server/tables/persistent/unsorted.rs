@@ -1923,6 +1923,8 @@ where
                 removed += size;
             }
         }
+        // and the index's buckets, once most of them are empty
+        super::shrink_if_sparse(&mut self.partitions);
         // get our post eviction memory usage
         let post = *self.memory_usage.borrow();
         // summarize this pass without assuming our counter is consistent

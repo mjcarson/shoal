@@ -45,6 +45,19 @@ impl<T> Shared<T> {
         }
     }
 
+    /// Take the oldest value, giving the queue's memory back once it drains past a burst
+    ///
+    /// The queue grows as values arrive rather than being allocated to its bound up front, and a
+    /// drained queue that grew past `KEPT_SLOTS` is shrunk back to them, so a channel holds what
+    /// is queued and not the most it ever held.
+    fn pop(&mut self) -> Option<T> {
+        let value = self.queue.pop_front();
+        if self.queue.is_empty() && self.queue.capacity() > KEPT_SLOTS {
+            self.queue.shrink_to(KEPT_SLOTS);
+        }
+        value
+    }
+
     /// Wake every sender waiting for room
     ///
     /// All of them rather than one, since a woken sender that finds the queue still full simply
@@ -55,6 +68,15 @@ impl<T> Shared<T> {
         }
     }
 }
+
+/// How many slots a drained queue keeps
+///
+/// openraft bounds its channels in the thousands of values a group, and some of its values are
+/// hundreds of bytes. Allocated to their bound, as this channel once did, a node's groups held
+/// about 2 GiB of queues that were almost always empty, touched a little more as each ring was
+/// written round, so a node's memory grew under load until it met its budget and pushed its rows
+/// out ([cluster testing](../../../../../docs/src/cluster-testing/performance.md#memory-at-ten-times-the-dataset)).
+const KEPT_SLOTS: usize = 16;
 
 /// The channel type, which is only a namespace for the trait
 pub struct GlommioMpsc;
@@ -71,7 +93,8 @@ impl Mpsc for GlommioMpsc {
     /// * `buffer` - The capacity
     fn channel<T: OptionalSend>(buffer: usize) -> (Self::Sender<T>, Self::Receiver<T>) {
         let shared = Rc::new(RefCell::new(Shared {
-            queue: VecDeque::with_capacity(buffer),
+            // grown as values arrive: the bound is how many may wait, not what is allocated
+            queue: VecDeque::new(),
             // a zero capacity channel would never accept a value; tokio panics, this rounds up
             capacity: buffer.max(1),
             senders: 1,
@@ -227,7 +250,7 @@ impl<T: OptionalSend> MpscReceiver<T> for Receiver<T> {
     /// The next value now, or why there is none
     fn try_recv(&mut self) -> Result<T, TryRecvError> {
         let mut shared = self.shared.borrow_mut();
-        match shared.queue.pop_front() {
+        match shared.pop() {
             // a value, and now there is room for another
             Some(value) => {
                 shared.wake_senders();
@@ -255,7 +278,7 @@ impl<T> Future for Recv<T> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut shared = self.shared.borrow_mut();
         // a value, and now there is room for another
-        if let Some(value) = shared.queue.pop_front() {
+        if let Some(value) = shared.pop() {
             shared.wake_senders();
             return Poll::Ready(Some(value));
         }
@@ -266,5 +289,35 @@ impl<T> Future for Recv<T> {
         // wait for a send
         shared.receiver_waker = Some(cx.waker().clone());
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GlommioMpsc, KEPT_SLOTS};
+    use openraft_rt::{Mpsc, MpscReceiver, MpscSender};
+
+    /// A channel's bound is how many values may wait, not what it allocates
+    ///
+    /// Allocated to its bound, a group's channels held hundreds of kilobytes each that were
+    /// almost always empty, and a node's memory grew as each ring was written round
+    /// ([cluster testing](../../../../../docs/src/cluster-testing/performance.md#memory-at-ten-times-the-dataset)).
+    #[test]
+    fn a_channel_allocates_what_is_queued_and_gives_a_burst_back() {
+        glommio::LocalExecutor::default().run(async {
+            let (tx, mut rx) = GlommioMpsc::channel::<[u8; 1024]>(100_000);
+            // nothing is allocated for a channel nothing was sent on
+            assert_eq!(rx.shared.borrow().queue.capacity(), 0);
+            // a burst queues what it sends
+            for _ in 0..5_000 {
+                tx.send([0u8; 1024]).await.expect("room");
+            }
+            assert!(rx.shared.borrow().queue.capacity() >= 5_000);
+            // and drained, the queue gives it back
+            for _ in 0..5_000 {
+                assert!(rx.recv().await.is_some());
+            }
+            assert!(rx.shared.borrow().queue.capacity() <= KEPT_SLOTS);
+        });
     }
 }

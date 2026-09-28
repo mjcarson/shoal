@@ -14,9 +14,18 @@
 ///
 /// Left out by the `system-allocator` feature, which a sanitizer build needs: AddressSanitizer
 /// watches the system allocator, and mimalloc's own heap is invisible to it.
-#[cfg(not(feature = "system-allocator"))]
+#[cfg(not(any(feature = "system-allocator", feature = "jemalloc-prof")))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// jemalloc with heap profiling, for finding what a node's memory holds
+///
+/// Profiling is off until `_RJEM_MALLOC_CONF` turns it on, for example
+/// `prof:true,lg_prof_sample:19,lg_prof_interval:30,prof_prefix:/tmp/jeprof`, which samples an
+/// allocation every 512 KiB on average and dumps the live samples every gibibyte allocated.
+#[cfg(feature = "jemalloc-prof")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 /// Serve or claim a node of the TMDB dataset schema
 fn main() -> Result<(), shoal::server::ServerError> {
