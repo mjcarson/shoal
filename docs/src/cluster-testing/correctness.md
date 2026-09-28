@@ -1657,3 +1657,61 @@ connections to hyperion while it was down, and `NotLeader` and `OutcomeUnknown` 
 while its leads moved.
 
 **Verdict: pass.** Several steps onto a node are worth taking at this size.
+
+### A step that outlasts both retentions
+
+Round 14 left "a step that outlasts `retained_bytes + hold_bytes`" as what a terabyte step still
+meets, and said a step that outlasts both loses its log and is sent another snapshot. Round 15
+staged it on the ten copy cluster (`outlast.yaml`): every node's streams throttled to 4 MiB/s,
+`retained_bytes: 20MiB` and `hold_bytes: 64MiB`, so a step of about 900 MB took about four
+minutes and the bench's writes passed both allowances within seconds. hyperion rebuilt under the
+mixed bench (`rebuild.sh`), every node on the `jemalloc-prof` build.
+
+It did not do what round 14 said. The forced purge never happened: every sweep logged the same
+`purged` for segment after segment while the sealed WAL stayed at 262 MB, three times the bound,
+and europa wrote about 580 journal lines a second for 17 minutes, 117,722 of them the retention
+warning and 182,599 openraft `purge_log` commands. For eight minutes the cluster served a tenth of
+its rate, with updates at 400 to 500 ms at the median, and 298,252 writes were refused
+`NotLeader`. After 30 minutes three of eight steps had moved, four had failed, 18.9 GiB had streamed
+for 2.6 GiB moved, and `cluster rebuild` gave up with the plan blocked on tablet 1. Nothing was
+lost: 10,819,412 acknowledged inserts through each member alone, and the csv's copies, 0 missing
+and 0 different.
+
+That was [#192](../appendix/resolved/forced-build-deferred.md): #188's force relied on a flag
+openraft never sets, so the forced build was held like any other and the sweep asked again every
+few seconds for every segment. Fixed: the force reaches the machine through the holds, once a
+group. The same plan, left blocked, was taken up by the fixed build installed on all three nodes
+at once (a rolling upgrade refuses a cluster with sets under the factor, rightly):
+
+| | Before the fix | On the fix |
+| --- | --- | --- |
+| Retention warnings | about 115 a second on europa | 19 in its first minutes |
+| Steps moved | 3 in 30 min | 14 more in 68 min, one at a time at 4 MiB/s |
+| Streamed for moved | 18.9 GiB for 2.6 | 15.4 GiB for 14.9 |
+
+The last set, blocked after the two failures under the old build, moved once the removal was sent
+again (`cluster admin remove <old> <new>`, which forgives a plan's failures,
+[#177](../appendix/resolved/blocked-plan-retry.md)): 18 sets, 20.0 GB, and the plan done. Then,
+through each member alone at `One`, 10,819,412 acknowledged inserts, 0 lost, and the csv's copies,
+0 missing and 0 different.
+
+**Verdict: fail before the fix, fixed.** A step that outlasts both allowances no longer livelocks
+the sweep. What it still does is below.
+
+**On the fix, under the bench.** hyperion rebuilt once more the same way on #192's build
+(`target/lab/r15/rb4/`). The sweep was quiet: 4,522 and 4,501 retention warnings on europa and
+titan over 30 minutes, one a force, against 117,722 on europa in 17 before. A step still could
+not finish, as round 14 said it would not: each forced purge took the entries after the member's
+snapshot, which needed another. After 49 minutes no set had moved, three moves had failed on their
+catch-up deadline, the plan was blocked on two tablets, and the bench had been refused `NotLeader`
+34,270 times (a tenth of the unfixed run's). Nothing was lost: 7,059,401 acknowledged inserts and
+the csv's copies through each member alone, 0 lost, 0 missing, 0 different.
+
+It found one more defect. hyperion refused every Movie set's snapshot from minute 20 on, 820
+times, because a failed move's partial of 1.17 GB was still counted against its 2 GiB bound for
+partials: [#194](../appendix/resolved/abandoned-partial-snapshots.md), fixed, a partial nothing
+came for past `snapshot_timeout` is dropped when the next stream begins.
+
+**Verdict:** a step that outlasts `retained_bytes + hold_bytes` under writes does not finish, and
+now fails by name without harming the rest of the cluster. `hold_bytes` has to cover a step's
+transfer at the write rate its groups see; at a terabyte a node that is the operator's to size.

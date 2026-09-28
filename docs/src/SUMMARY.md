@@ -317,6 +317,7 @@
   - [190. A leader threw away every append answer that took longer than a heartbeat interval](appendix/resolved/append-answer-thrown-away.md)
   - [191. Every group's openraft channels were allocated to their bound](appendix/resolved/raft-channels-preallocated.md)
   - [192. Past `hold_bytes` the retention sweep could not force a held group](appendix/resolved/forced-build-deferred.md)
+  - [194. A partial snapshot its sender gave up on was held for good](appendix/resolved/abandoned-partial-snapshots.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)
