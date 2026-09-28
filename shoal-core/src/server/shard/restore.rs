@@ -42,6 +42,13 @@ use super::repair::{scrub_group, NOT_LEADER};
 /// ([Resolved #155](../../../../docs/src/appendix/resolved/restore-retries-unreachable.md)).
 pub const TRANSIENT: &str = "a member could not be reached: ";
 
+/// What an error begins with when the control plane did not take a driver's progress
+///
+/// Nothing about the group changed in the record, so the group is driven again from the phase
+/// committed last rather than failed, which the control plane would not take either
+/// ([Resolved #183](../../../../docs/src/appendix/resolved/restore-driver-uncommitted-done.md)).
+pub const UNCOMMITTED: &str = "the progress was not committed: ";
+
 /// How many times a group's restore is driven again for want of a member before it fails
 const RESTORE_ATTEMPTS: u32 = 12;
 
@@ -136,10 +143,6 @@ impl<D: ShoalDatabase> RestoreContext<D> {
     ///
     /// * `progress` - Where it stands
     async fn commit(&self, progress: GroupRestore) -> Result<(), String> {
-        // the phase a hand-back resumes from is the one committed last, never the one started at
-        if progress.phase != RestorePhase::Done {
-            *self.reached.borrow_mut() = progress.phase.clone();
-        }
         let started = Instant::now();
         let mut last = String::new();
         while started.elapsed() < PROGRESS_TIMEOUT {
@@ -153,7 +156,7 @@ impl<D: ShoalDatabase> RestoreContext<D> {
             };
             self.control
                 .try_send(ControlRequest::Propose { command, reply })
-                .map_err(|_| "the control thread is not taking proposals".to_string())?;
+                .map_err(|_| format!("{UNCOMMITTED}the control thread is not taking proposals"))?;
             let remaining = PROGRESS_TIMEOUT.saturating_sub(started.elapsed());
             // the answer's receive is kept, never raced bare: a timer that wins after the answer
             // was handed over would drop it (Resolved #152)
@@ -161,7 +164,15 @@ impl<D: ShoalDatabase> RestoreContext<D> {
             let answered =
                 glommio::timer::timeout(remaining, async { Ok(answer.next().await) }).await;
             last = match answered {
-                Ok(Ok(Ok(ControlResponse::Applied { .. }))) => return Ok(()),
+                Ok(Ok(Ok(ControlResponse::Applied { .. }))) => {
+                    // the phase a hand-back resumes from is the one committed last, never one
+                    // only asked for: a phase the control plane never took is not where the
+                    // group stands
+                    if progress.phase != RestorePhase::Done {
+                        *self.reached.borrow_mut() = progress.phase.clone();
+                    }
+                    return Ok(());
+                }
                 Ok(Ok(Ok(ControlResponse::Refused { reason, .. }))) => {
                     return Err(format!("the progress was refused: {reason}"))
                 }
@@ -172,9 +183,7 @@ impl<D: ShoalDatabase> RestoreContext<D> {
             };
             glommio::timer::sleep(Duration::from_millis(500)).await;
         }
-        Err(format!(
-            "the progress was not committed within {PROGRESS_TIMEOUT:?}: {last}"
-        ))
+        Err(format!("{UNCOMMITTED}not within {PROGRESS_TIMEOUT:?}: {last}"))
     }
 
     /// A progress at a phase, driven here, with the files and no outcome
@@ -298,6 +307,14 @@ pub async fn drive_group_restore<D: ShoalDatabase>(context: RestoreContext<D>) {
                 .await;
             reached
         }
+        // progress the control plane did not take changed nothing in the record: the group is
+        // left at the phase committed last, and driven again from it, which is what the loop
+        // does with the phase this answers
+        Err(error) if error.starts_with(UNCOMMITTED) => {
+            event!(Level::WARN, msg = "a group's restore progress was not committed; it will be driven again", op = %context.op, group = %context.group, error);
+            glommio::timer::sleep(RESTORE_RETRY_PAUSE).await;
+            context.reached.borrow().clone()
+        }
         // a member that could not be reached - restarting, cut off - is waited for and the
         // group driven again from where it got to, a bounded number of times, rather than
         // failed: on the lab one member's restart failed a group, and a restore cannot be run
@@ -319,15 +336,15 @@ pub async fn drive_group_restore<D: ShoalDatabase>(context: RestoreContext<D>) {
             event!(Level::ERROR, msg = "a group's restore failed", op = %context.op, group = %context.group, error);
             // the phase it failed in is kept, which is where a retry drives it from
             let failed_in = context.reached.borrow().clone();
-            let _ = context
+            let committed = context
                 .commit(GroupRestore {
                     phase: RestorePhase::Done,
                     outcome: Some(RestoreOutcome::Failed { reason: error }),
-                    failed_in: Some(failed_in),
+                    failed_in: Some(failed_in.clone()),
                     ..context.at(RestorePhase::Done)
                 })
                 .await;
-            RestorePhase::Done
+            settled_phase(committed, failed_in, context.op, context.group)
         }
     };
     let _ = context
@@ -339,6 +356,34 @@ pub async fn drive_group_restore<D: ShoalDatabase>(context: RestoreContext<D>) {
             phase,
         })
         .await;
+}
+
+/// The phase a finished driver tells its loop the group stands at, once it tried to commit it done
+///
+/// The loop remembers this phase and drives the group from it, or not at all once it is done.
+/// Only a done the control plane took may say done: a failure it never recorded leaves the
+/// record where it stood, and a loop that believed it done would never drive the group again
+/// ([Resolved #183](../../../../docs/src/appendix/resolved/restore-driver-uncommitted-done.md)).
+///
+/// # Arguments
+///
+/// * `committed` - Whether the done was committed
+/// * `reached` - The phase the driver committed last
+/// * `op` - The restore, for the log line
+/// * `group` - The group, for the log line
+fn settled_phase(
+    committed: Result<(), String>,
+    reached: RestorePhase,
+    op: Uuid,
+    group: GroupId,
+) -> RestorePhase {
+    match committed {
+        Ok(()) => RestorePhase::Done,
+        Err(error) => {
+            event!(Level::WARN, msg = "a group's failed restore could not be recorded; it will be driven again", %op, %group, phase = ?reached, error);
+            reached
+        }
+    }
 }
 
 /// The phases, from where the record stands, each committed before the next
@@ -798,5 +843,35 @@ where
                 glommio::spawn_local(drive_group_restore(context)).detach();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A failed group's done is only reported to the loop when the control plane took it
+    ///
+    /// The loop remembers the reported phase and never drives a group it believes done, so a
+    /// done reported for a failure nobody recorded left the group at its phase for good
+    /// (item 183).
+    #[test]
+    fn an_unrecorded_failure_is_not_reported_done() {
+        let (op, group) = (Uuid::new_v4(), GroupId(7));
+        // recorded: done, and nothing more to drive
+        assert_eq!(
+            settled_phase(Ok(()), RestorePhase::Loading, op, group),
+            RestorePhase::Done
+        );
+        // not recorded: the phase committed last, which the loop drives again from
+        assert_eq!(
+            settled_phase(
+                Err(format!("{UNCOMMITTED}not within 30s")),
+                RestorePhase::Pending,
+                op,
+                group
+            ),
+            RestorePhase::Pending
+        );
     }
 }

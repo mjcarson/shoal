@@ -214,8 +214,8 @@ pub struct NodeStatsTracker {
     prev: HashMap<(usize, GroupId), WriteCounters>,
     /// The node's snapshot bytes sent and received as the last tick read them
     prev_stream: Option<(u64, u64)>,
-    /// The node's WAL syncs and synced bytes as the last tick read them
-    prev_wal: Option<(u64, u64)>,
+    /// The node's WAL counters as the last tick read them
+    prev_wal: Option<WalTotals>,
     /// Every table's windows, by the name the schema spells it
     tables: BTreeMap<String, TableWindows>,
     /// The windows of every table together
@@ -344,20 +344,28 @@ impl NodeStatsTracker {
         }
         // what the WALs synced over the interval, and what they and the compactors hold now
         // ([O64](../../../../docs/src/appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab))
-        let wal = shards.values().fold((0u64, 0u64), |(syncs, bytes), report| {
-            (
-                syncs.saturating_add(report.wal_syncs),
-                bytes.saturating_add(report.wal_bytes),
-            )
+        let wal = shards.values().fold(WalTotals::default(), |mut totals, report| {
+            totals.add(report);
+            totals
         });
-        if let (Some(dt), Some((prev_syncs, prev_bytes))) = (dt, self.prev_wal) {
+        if let (Some(dt), Some(prev)) = (dt, self.prev_wal.as_ref()) {
             // a shard that started again counts from zero, which reads as its whole count
-            let syncs = wal.0.checked_sub(prev_syncs).unwrap_or(wal.0);
-            let bytes = wal.1.checked_sub(prev_bytes).unwrap_or(wal.1);
+            let gained = wal.since(prev);
             #[allow(clippy::cast_precision_loss)]
             {
-                stats.wal_syncs_per_sec = syncs as f64 / dt;
-                stats.wal_bytes_per_sec = bytes as f64 / dt;
+                stats.wal_syncs_per_sec = gained.syncs as f64 / dt;
+                stats.wal_bytes_per_sec = gained.bytes as f64 / dt;
+                // what one sync cost and carried over the interval, and how big they were
+                if gained.syncs > 0 {
+                    let syncs = gained.syncs as f64;
+                    stats.wal_sync_ms = gained.micros as f64 / syncs / 1000.0;
+                    stats.wal_appends_per_sync = gained.appends as f64 / syncs;
+                    stats.wal_sync_sizes = gained
+                        .sizes
+                        .iter()
+                        .map(|count| *count as f64 / syncs)
+                        .collect();
+                }
             }
         }
         self.prev_wal = Some(wal);
@@ -465,6 +473,65 @@ const HOT_GROUPS: usize = 8;
 /// # Arguments
 ///
 /// * `gains` - What each group the node leads gained over the interval
+
+/// A node's WAL counters summed over its shards, as one tick read them
+#[derive(Debug, Clone, Default)]
+struct WalTotals {
+    /// Batches synced
+    syncs: u64,
+    /// Bytes they held
+    bytes: u64,
+    /// Appends they carried
+    appends: u64,
+    /// Microseconds spent writing and syncing them
+    micros: u64,
+    /// How many fell in each size bucket
+    sizes: Vec<u64>,
+}
+
+impl WalTotals {
+    /// Add one shard's counters
+    ///
+    /// # Arguments
+    ///
+    /// * `report` - The shard's report
+    fn add(&mut self, report: &ShardReplication) {
+        self.syncs = self.syncs.saturating_add(report.wal_syncs);
+        self.bytes = self.bytes.saturating_add(report.wal_bytes);
+        self.appends = self.appends.saturating_add(report.wal_appends);
+        self.micros = self.micros.saturating_add(report.wal_sync_micros);
+        // the buckets grow to the longest a shard reports
+        if self.sizes.len() < report.wal_sync_sizes.len() {
+            self.sizes.resize(report.wal_sync_sizes.len(), 0);
+        }
+        for (total, count) in self.sizes.iter_mut().zip(&report.wal_sync_sizes) {
+            *total = total.saturating_add(*count);
+        }
+    }
+
+    /// What was gained since an earlier read, each counter that went backwards read whole
+    ///
+    /// # Arguments
+    ///
+    /// * `prev` - The earlier read
+    fn since(&self, prev: &WalTotals) -> WalTotals {
+        // a counter that went backwards belongs to a shard that started again
+        let gained = |now: u64, then: u64| now.checked_sub(then).unwrap_or(now);
+        WalTotals {
+            syncs: gained(self.syncs, prev.syncs),
+            bytes: gained(self.bytes, prev.bytes),
+            appends: gained(self.appends, prev.appends),
+            micros: gained(self.micros, prev.micros),
+            sizes: self
+                .sizes
+                .iter()
+                .enumerate()
+                .map(|(bucket, now)| gained(*now, prev.sizes.get(bucket).copied().unwrap_or(0)))
+                .collect(),
+        }
+    }
+}
+
 /// * `dt` - The interval, in seconds
 #[allow(clippy::cast_precision_loss)]
 fn hot_groups(gains: Vec<(GroupId, String, WriteCounters)>, dt: f64) -> Vec<GroupRate> {
@@ -796,6 +863,47 @@ mod tests {
         assert!(hot.windows(2).all(|pair| pair[0].writes_per_sec >= pair[1].writes_per_sec));
         // the idle group is never named
         assert!(hot.iter().all(|rate| rate.group != 0));
+    }
+
+    /// A node's WAL figures are its shards' counters summed, and each sync's cost, load and
+    /// size bucket follow from what the interval gained
+    #[test]
+    fn wal_totals_sum_shards_and_read_resets_whole() {
+        // two shards, one of which counts one more bucket than the other
+        let report = |syncs: u64, micros: u64, sizes: Vec<u64>| ShardReplication {
+            wal_syncs: syncs,
+            wal_bytes: syncs * 1000,
+            wal_appends: syncs * 3,
+            wal_sync_micros: micros,
+            wal_sync_sizes: sizes,
+            ..ShardReplication::default()
+        };
+        let mut before = WalTotals::default();
+        before.add(&report(10, 20_000, vec![10, 0]));
+        before.add(&report(5, 10_000, vec![5, 0, 0]));
+        assert_eq!(before.syncs, 15);
+        assert_eq!(before.sizes, vec![15, 0, 0]);
+        // the next tick: one shard went on, the other started again from zero
+        let mut after = WalTotals::default();
+        after.add(&report(30, 80_000, vec![20, 10]));
+        after.add(&report(2, 4_000, vec![0, 0, 2]));
+        let gained = after.since(&before);
+        // the reset shard's counters went backwards, so its whole count is read
+        assert_eq!(gained.syncs, 32 - 15);
+        assert_eq!(gained.micros, 84_000 - 30_000);
+        assert_eq!(gained.sizes, vec![20 - 15, 10, 2]);
+    }
+
+    /// A batch's bytes land in the bucket whose bound is the first above them
+    #[test]
+    fn sync_sizes_fall_in_their_buckets() {
+        use crate::server::wal::{sync_size_bucket, SYNC_SIZE_BUCKETS};
+        assert_eq!(sync_size_bucket(0), 0);
+        assert_eq!(sync_size_bucket(4095), 0);
+        assert_eq!(sync_size_bucket(4096), 1);
+        assert_eq!(sync_size_bucket(64 * 4096), 4);
+        assert_eq!(sync_size_bucket(1024 * 1024), SYNC_SIZE_BUCKETS - 1);
+        assert_eq!(sync_size_bucket(usize::MAX), SYNC_SIZE_BUCKETS - 1);
     }
 
     /// The first sample of a debiased average is the sample, and a constant rate converges

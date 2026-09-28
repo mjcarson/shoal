@@ -110,7 +110,12 @@ its resident memory, and the cluster's ten busiest groups with the member leadin
 round 12 it also prints each member's storage pipeline: WAL syncs and bytes a second, the WAL's
 segments, the sealed segments waiting on a compactor, entries committed and not yet applied, and
 bytes proposed and not yet answered, with each shard's applied writes a second (quietest to busiest)
-and the groups each shard leads. `load --series <secs>` prints the load's rate over each
+and the groups each shard leads. Since round 13 the storage table also has each member's mean WAL
+sync (`sync ms`, a batch's write and `fdatasync` together), the appends one sync carries
+(`per sync`), and the share of the interval's syncs in each size bucket (under 4 KiB, 16 KiB,
+64 KiB, 256 KiB and 1 MiB, then the rest). These tell a slow device from small batches: a failing
+disk shows as `sync ms`, and a group commit settled on small batches shows as the first buckets
+filling. `load --series <secs>` prints the load's rate over each
 interval, so a load that changes pace partway through shows where. A node
 that judges its own links slow says so in its journal (`this node's links are slow, and it hands
 its leads on`), as does one under its append reserve (`under the append reserve`).

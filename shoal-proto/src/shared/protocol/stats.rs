@@ -346,6 +346,22 @@ pub struct NodeStats {
     /// counted (O64).
     #[serde(default)]
     pub shard_groups_led: Vec<u32>,
+    /// The mean time one WAL batch took to write and sync over the last interval, in
+    /// milliseconds
+    ///
+    /// A device that flushes its cache on every sync shows here, and so does one that is
+    /// failing (O64).
+    #[serde(default)]
+    pub wal_sync_ms: f64,
+    /// The mean appends one WAL sync carried over the last interval
+    #[serde(default)]
+    pub wal_appends_per_sync: f64,
+    /// The share of the last interval's WAL syncs in each size bucket: under 4 KiB, 16 KiB,
+    /// 64 KiB, 256 KiB and 1 MiB, and the rest
+    ///
+    /// A group commit that settles on small batches shows as the first buckets filling (O64).
+    #[serde(default)]
+    pub wal_sync_sizes: Vec<f64>,
 }
 
 /// How busy one group a node leads was over the last interval
@@ -394,6 +410,9 @@ impl NodeStats {
             pending_bytes: 0,
             shard_writes_per_sec: Vec::new(),
             shard_groups_led: Vec::new(),
+            wal_sync_ms: 0.0,
+            wal_appends_per_sync: 0.0,
+            wal_sync_sizes: Vec::new(),
         }
     }
 

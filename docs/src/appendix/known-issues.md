@@ -484,6 +484,15 @@ phase with no driver is a driver that lost its lead handing the group back for t
 member led the group for five minutes, or its leader's shard believed it was already driving a
 restore (`driving_restores` is one at a time per shard, and cleared only by `RestoreDone`). The
 next failure should be caught with `SHOAL_CHILD_LOG` to tell which.
+Round 13 found a third way, and it is the one the record fits: the leader's shard believed the group
+was **done**. A driver whose first progress commit failed also failed the group, and it reported
+`Done` to its loop whether or not that `Failed` commit landed. When neither landed, the record
+stayed at `Pending`, with no driver and no attempts, and the loop never drove the group again.
+That is fixed as [Resolved #183](resolved/restore-driver-uncommitted-done.md), established by
+reading the source. The stall itself was not caught: a loop of the test beside five other heavy
+fixture tests at six threads, with child logs (`target/lab/r13/142/loop.sh`), passed it in every
+round on the unfixed tree. It stays filed here until it is either caught or has gone a round of
+suite runs without recurring.
 
 ---
 
