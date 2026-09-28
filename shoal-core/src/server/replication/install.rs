@@ -152,6 +152,11 @@ pub struct Partial {
     /// The repair operation this stream serves, if it is one
     /// ([F44](../../../../docs/src/features/repair.md))
     pub repair: Option<uuid::Uuid>,
+    /// When the stream last began or brought a chunk
+    ///
+    /// A partial its sender gave up on is dropped once it is older than a transfer may take
+    /// ([#194](../../../../docs/src/appendix/resolved/abandoned-partial-snapshots.md)).
+    pub touched: std::time::Instant,
 }
 
 impl Partial {
@@ -181,7 +186,19 @@ impl Partial {
             resumed: false,
             lane_lost: false,
             repair: None,
+            touched: std::time::Instant::now(),
         }
+    }
+
+    /// Whether the stream has brought nothing for longer than a transfer may take
+    ///
+    /// # Arguments
+    ///
+    /// * `now` - The moment it is judged at
+    /// * `idle` - How long a transfer may take, `replication.snapshot_timeout`
+    #[must_use]
+    pub fn is_abandoned(&self, now: std::time::Instant, idle: std::time::Duration) -> bool {
+        !self.writing && now.saturating_duration_since(self.touched) > idle
     }
 
     /// Whether the stream is still being assembled: short of its bytes and not failed
@@ -354,6 +371,53 @@ pub mod crash_point {
 mod tests {
     use super::{Assembler, CrashPoint, Offer};
     use crate::server::replication::snapshot::FileHasher;
+
+    /// A partial is abandoned once nothing has come for longer than a transfer may take
+    ///
+    /// A failed move's partial was held for good, counting against the install bound, and on
+    /// the lab refused the next set's snapshot
+    /// ([#194](../../../../docs/src/appendix/resolved/abandoned-partial-snapshots.md)).
+    #[test]
+    fn a_partial_nothing_came_for_is_abandoned() {
+        use openraft::vote::RaftLeaderId as _;
+        use std::time::{Duration, Instant};
+        let manifest = crate::server::replication::snapshot::SnapshotManifest {
+            group: crate::shared::identity::GroupId(1),
+            table: crate::shared::identity::TableId::of("Note"),
+            schema_id: 0,
+            boundary: openraft::LogId::new(
+                crate::server::wal::LeaderId::new(1, crate::shared::identity::ShardAddr::from(1)),
+                7,
+            ),
+            membership: openraft::StoredMembership::default(),
+            tablets: vec![1],
+            records: 1,
+            total: 1 << 30,
+            checksum: 0,
+            retries: 0,
+            expired_before: 0,
+            cluster: crate::shared::identity::ClusterId::default(),
+            origin: crate::shared::identity::NodeId::default(),
+            created_ms: 0,
+        };
+        let mut partial = super::Partial::new(
+            crate::shared::identity::NodeId::default(),
+            [0; 16],
+            crate::server::wal::Vote::new(1, crate::shared::identity::ShardAddr::from(1)),
+            manifest,
+        );
+        let idle = Duration::from_secs(300);
+        let now = Instant::now();
+        // a stream that just began is not abandoned, however short of its bytes
+        assert!(!partial.is_abandoned(now, idle));
+        // nor while its writer drains what it brought
+        partial.touched = now - Duration::from_secs(301);
+        partial.writing = true;
+        assert!(!partial.is_abandoned(now, idle));
+        // one that brought nothing for longer than a transfer may take is
+        partial.writing = false;
+        assert!(partial.is_abandoned(now, idle));
+    }
 
     /// Repeated and reordered chunks are counted and never written twice, the resume offset
     /// is the contiguous prefix, and the checksum over the prefix matches the file's

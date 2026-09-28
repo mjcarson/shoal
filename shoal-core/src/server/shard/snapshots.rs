@@ -486,6 +486,31 @@ where
                 ));
             }
         }
+        // the partials whose senders gave up hold no stream anyone will finish, so they go before
+        // the bound is judged: a failed move's partial held its set's bytes against every later
+        // stream, and on the lab refused the next set's snapshot for good
+        // ([#194](../../../../docs/src/appendix/resolved/abandoned-partial-snapshots.md))
+        let idle = self.conf.cluster.as_ref().map_or(Duration::from_secs(300), |cluster| {
+            cluster.replication.snapshot_timeout.duration()
+        });
+        let now = Instant::now();
+        let abandoned: Vec<GroupId> = replication
+            .installs
+            .partials
+            .iter()
+            .filter(|(other, partial)| {
+                **other != group
+                    && !replication.active_installs.contains_key(*other)
+                    && partial.borrow().is_abandoned(now, idle)
+            })
+            .map(|(other, _)| *other)
+            .collect();
+        for other in abandoned {
+            event!(Level::WARN, msg = "dropped a partial snapshot its sender gave up on", group = %other, idle_secs = idle.as_secs());
+            let _ = std::fs::remove_file(replication.installs.part_path(other));
+            replication.installs.retire(other);
+            replication.installs.stats.abandoned += 1;
+        }
         // the bound on partial bytes, over every other group's partial and this one
         let held: u64 = replication
             .installs
@@ -556,6 +581,7 @@ where
                 return;
             }
             partial.queued_bytes += bytes.len();
+            partial.touched = Instant::now();
             partial.queue.push_back((offset, bytes));
             partial.lane_lost = false;
             !partial.writing

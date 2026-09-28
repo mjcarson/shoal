@@ -583,10 +583,10 @@ impl<D: ShoalDatabase> RaftStateMachine<DataConfig> for GroupMachine<D> {
     async fn try_create_snapshot_builder(&mut self, force: bool) -> Option<Self::SnapshotBuilder> {
         // a member taking a snapshot of this group holds the builds that would purge the
         // entries it needs next; a forced build, the disk's bound, is never held
-        // ([#185](../../../../docs/src/appendix/resolved/snapshot-outrun-by-purge.md))
-        if !force && self.holds.held(self.group) {
-            // built once the hold ends, whether or not anything applies after it
-            self.holds.defer(self.group);
+        // ([#185](../../../../docs/src/appendix/resolved/snapshot-outrun-by-purge.md)). openraft
+        // passes `force` false for every build it asks for, so the retention sweep's force
+        // arrives through the holds ([#192](../../../../docs/src/appendix/resolved/forced-build-deferred.md))
+        if !self.holds.allow_build(self.group, force) {
             return None;
         }
         let state = self.state.borrow();

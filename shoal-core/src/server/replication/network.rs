@@ -662,6 +662,15 @@ pub struct SnapshotHolds {
     /// openraft asks for a build only as entries apply, so a group that went quiet during a
     /// hold would otherwise never build, and never purge, again until its next write.
     deferred: RefCell<std::collections::HashSet<GroupId>>,
+    /// The groups the retention sweep forced a build of, until the machine takes the build
+    ///
+    /// openraft asks the state machine for a builder with `force` false even for a snapshot
+    /// triggered by hand, so a force has to reach the machine some other way than that flag
+    /// ([#192](../../../../docs/src/appendix/resolved/forced-build-deferred.md)).
+    forced: RefCell<std::collections::HashSet<GroupId>>,
+    /// The groups whose forced snapshot and purge are still in flight, which the sweep does not
+    /// force again until they end
+    forcing: RefCell<std::collections::HashSet<GroupId>>,
 }
 
 impl SnapshotHolds {
@@ -713,6 +722,57 @@ impl SnapshotHolds {
     /// * `group` - The group
     pub fn defer(&self, group: GroupId) {
         self.deferred.borrow_mut().insert(group);
+    }
+
+    /// Mark a group's next build as forced, unless a force of it is already in flight
+    ///
+    /// Returns whether the caller should trigger the build: false while the last force of the
+    /// group has not ended, so a sweep that runs every few seconds asks once and not every time.
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    pub fn force(&self, group: GroupId) -> bool {
+        // one force in flight a group
+        if !self.forcing.borrow_mut().insert(group) {
+            return false;
+        }
+        self.forced.borrow_mut().insert(group);
+        true
+    }
+
+    /// Note that a group's forced snapshot and purge have ended, whether or not the build ran
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    pub fn forced_done(&self, group: GroupId) {
+        self.forcing.borrow_mut().remove(&group);
+        self.forced.borrow_mut().remove(&group);
+    }
+
+    /// Whether a group's snapshot may be built now, deferring it if a hold says not
+    ///
+    /// A forced build, by openraft's flag or by the retention sweep's [`Self::force`], is never
+    /// held: that is how `retained_bytes` and `hold_bytes` bound the disk. Any other build of a
+    /// held group is deferred, and built once the hold ends ([`Self::due`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `force` - Whether openraft asked for the build forced
+    pub fn allow_build(&self, group: GroupId, force: bool) -> bool {
+        // the sweep's force is taken by the build it was for
+        let swept = self.forced.borrow_mut().remove(&group);
+        if force || swept {
+            return true;
+        }
+        // held: built once the hold ends, whether or not anything applies after it
+        if self.held(group) {
+            self.defer(group);
+            return false;
+        }
+        true
     }
 
     /// Every group a hold deferred a build of whose holds have all ended, forgotten as it is named
@@ -2300,6 +2360,37 @@ mod tests {
 
     /// A hold lasts until it lapses or is lifted, per member, another member's hold keeps the
     /// group held, and a build it deferred is due once it is over (#185)
+    #[test]
+    /// A build the retention sweep forced goes through a hold, once, and a force is asked once
+    ///
+    /// openraft asks the state machine for a builder with `force` false for every build, so a
+    /// sweep's force that relied on the flag was deferred like any other build of a held group,
+    /// and the sweep asked again every few seconds for every segment
+    /// ([#192](../../../../docs/src/appendix/resolved/forced-build-deferred.md)).
+    #[test]
+    fn a_forced_build_goes_through_a_hold() {
+        use crate::shared::identity::{GroupId, NodeId, ShardAddr};
+        let holds = SnapshotHolds::default();
+        let group = GroupId(1);
+        let member = ShardAddr {
+            node: NodeId(uuid::Uuid::new_v4()),
+            shard: 0,
+        };
+        holds.hold(group, member, Instant::now() + Duration::from_secs(60));
+        // a build of a held group as openraft asks for it is deferred
+        assert!(!holds.allow_build(group, false));
+        // the sweep forces it: the next build goes through, and only that one
+        assert!(holds.force(group));
+        assert!(holds.allow_build(group, false));
+        assert!(!holds.allow_build(group, false));
+        // a second force while the first is in flight is not asked for
+        assert!(!holds.force(group));
+        holds.forced_done(group);
+        assert!(holds.force(group));
+        // openraft's own flag was always enough, had it ever been set
+        assert!(holds.allow_build(GroupId(2), true));
+    }
+
     #[test]
     fn snapshot_holds_lapse_and_lift() {
         use crate::shared::identity::{GroupId, NodeId, ShardAddr};

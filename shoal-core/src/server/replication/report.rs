@@ -166,6 +166,10 @@ pub struct SnapshotStats {
     /// Begins refused because the storage was short of the disk reserve
     #[serde(default)]
     pub refused_reserve: u64,
+    /// Partial snapshots dropped because their senders gave up on them
+    /// ([#194](../../../../docs/src/appendix/resolved/abandoned-partial-snapshots.md))
+    #[serde(default)]
+    pub abandoned: u64,
     /// The most streams the shard was assembling at once since it started
     ///
     /// Folded over a node as the largest of its shards', not their sum
@@ -199,6 +203,7 @@ impl SnapshotStats {
         self.entries_installed += other.entries_installed;
         self.refused_budget += other.refused_budget;
         self.refused_reserve += other.refused_reserve;
+        self.abandoned += other.abandoned;
         self.peak_streams = self.peak_streams.max(other.peak_streams);
         self.budget_wait_ns += other.budget_wait_ns;
     }
