@@ -6086,20 +6086,29 @@ async fn returning_node_catches_up_by_log_or_snapshot() -> Result<(), FixtureErr
         .await
         .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    // setup writes retry: on a loaded host a commit can outlast the write timeout before
+    // anything the test is about has happened (item 142)
+    let seed = || SendOptions::new().retry(Duration::from_secs(30));
     // a base every node holds
     for key in 8000..8010u64 {
         client
-            .send_one(Note {
-                key,
-                text: format!("base-{key}"),
-            })
+            .send_one_with(
+                Note {
+                    key,
+                    text: format!("base-{key}"),
+                },
+                &seed(),
+            )
             .await
             .map_err(ok)?;
         client
-            .send_one(Row {
-                key,
-                data: format!("base-{key}"),
-            })
+            .send_one_with(
+                Row {
+                    key,
+                    data: format!("base-{key}"),
+                },
+                &seed(),
+            )
             .await
             .map_err(ok)?;
     }
@@ -6134,10 +6143,13 @@ async fn returning_node_catches_up_by_log_or_snapshot() -> Result<(), FixtureErr
     }
     for key in 8100..8200u64 {
         client
-            .send_one(Row {
-                key,
-                data: format!("snap-{key}"),
-            })
+            .send_one_with(
+                Row {
+                    key,
+                    data: format!("snap-{key}"),
+                },
+                &seed(),
+            )
             .await
             .map_err(ok)?;
     }
@@ -7279,6 +7291,9 @@ async fn scheduled_scrub_quarantines_without_an_operator() -> Result<(), Fixture
         .start()
         .await?;
     let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    // setup writes retry: on a loaded host a commit can outlast the write timeout before
+    // anything the test is about has happened (item 142)
+    let seed = || shoal::client::SendOptions::new().retry(Duration::from_secs(30));
     let addr0 = cluster.node(0).endpoints.client.to_string();
     let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
     let hashed = |key: u64| {
@@ -7286,10 +7301,13 @@ async fn scheduled_scrub_quarantines_without_an_operator() -> Result<(), Fixture
     };
     for key in 27_000..27_040u64 {
         client
-            .send_one(Note {
-                key,
-                text: format!("note-{key}"),
-            })
+            .send_one_with(
+                Note {
+                    key,
+                    text: format!("note-{key}"),
+                },
+                &seed(),
+            )
             .await
             .map_err(ok)?;
     }
@@ -11161,9 +11179,14 @@ async fn lost_response_retry_returns_original_result() -> Result<(), FixtureErro
             .deadline(Duration::from_secs(1)),
     )
     .await;
-    assert_eq!(
-        failure_code(&lost),
-        Some(ErrorCode::Timeout),
+    // the client does not know: its own deadline passed with the reply dropped, or, on a loaded
+    // host, the commit outlasted the second and the server said so first (item 142). Either way
+    // the delete goes on to commit, and what follows is the same
+    assert!(
+        matches!(
+            failure_code(&lost),
+            Some(ErrorCode::Timeout | ErrorCode::OutcomeUnknown)
+        ),
         "the dropped reply was answered {lost:?}"
     );
     assert!(
@@ -12918,7 +12941,9 @@ async fn migration_resumes_after_each_phase_failure() -> Result<(), FixtureError
             .lock()
             .unwrap()
             .invoke(attempt, tablet_id(*key), op, invoke);
-        write_note(&addrs[0], *key, "0").await?;
+        // retried: on a loaded host a commit can outlast the write timeout before anything
+        // concurrent has started, and a note written twice with one value is one note (item 142)
+        write_note_eventually(&addrs[0], *key, "0", Duration::from_secs(30)).await?;
         let complete = clock.fetch_add(1, Ordering::SeqCst);
         ledger
             .lock()
@@ -15590,22 +15615,36 @@ async fn local_rehome_recovers_after_each_crash_point() -> Result<(), FixtureErr
     let hosting = cluster.node_mut(2).command("HOSTING")?["ok"].clone();
     assert_eq!(hosting["slots"], 4, "{hosting}");
     assert_eq!(hosting["physical"], 2, "{hosting}");
-    // rows in every set: a base archived on node two, and a tail left in its WAL
+    // rows in every set: a base archived on node two, and a tail left in its WAL. Each seed
+    // write carries an identity and retries: the cluster is up when its members answer, and on
+    // a loaded host a group can still be electing its first leader past a write's deadline
+    // (item 142)
     let client = Shoal::<TestDbClient>::new(&addrs[0]).await.map_err(ok)?;
+    let seeded = || {
+        SendOptions::new()
+            .identity(uuid::Uuid::new_v4())
+            .retry(Duration::from_secs(30))
+    };
     let fixed: Vec<u64> = (47_000..47_060u64).collect();
     for key in &fixed[..40] {
         client
-            .send_one(Note {
-                key: *key,
-                text: format!("note-{key}"),
-            })
+            .send_one_with(
+                Note {
+                    key: *key,
+                    text: format!("note-{key}"),
+                },
+                &seeded(),
+            )
             .await
             .map_err(ok)?;
         client
-            .send_one(Row {
-                key: *key,
-                data: format!("row-{key}"),
-            })
+            .send_one_with(
+                Row {
+                    key: *key,
+                    data: format!("row-{key}"),
+                },
+                &seeded(),
+            )
             .await
             .map_err(ok)?;
     }
@@ -15617,10 +15656,13 @@ async fn local_rehome_recovers_after_each_crash_point() -> Result<(), FixtureErr
     wait_checkpointed(&mut cluster, 2, "Note", Duration::from_secs(60))?;
     for key in &fixed[40..] {
         client
-            .send_one(Note {
-                key: *key,
-                text: format!("note-{key}"),
-            })
+            .send_one_with(
+                Note {
+                    key: *key,
+                    text: format!("note-{key}"),
+                },
+                &seeded(),
+            )
             .await
             .map_err(ok)?;
     }

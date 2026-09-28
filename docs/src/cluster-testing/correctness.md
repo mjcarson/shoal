@@ -1543,3 +1543,42 @@ lab's inventory:
 | csv, each member alone | 0 missing, 0 different |
 
 **Verdict: pass**, and the fastest rebuild on the lab so far.
+
+### #142 under load
+
+[#142](../appendix/known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host)
+has tracked the suite's failures under load as deadlines since round 9. Round 14 ran round 13's
+loop, the six heaviest fixture tests together at six threads (`target/lab/r14/142/loop.sh`,
+`loop-rehome.sh`), on this round's build with the lab cluster stopped:
+
+| Build | Rounds | Tests failed | Shapes |
+| --- | --- | --- | --- |
+| This round's, before #190 | 7 | 11 of 42 | a write not committed in time, a group with no leader in time, a lease lapsed for 30 s |
+| With #190 | 5 | 0 of 30 | none |
+
+The kept child logs showed the last shape plainly: node two led a group whose followers each
+handled about 5,400 of its appends, while node two logged 76 `the replication rpc timed out` for
+it. openraft gives an append a heartbeat interval, 100 ms at the fixture's base, and the answers
+that came later were thrown away, so nothing committed and the lease lapsed. That is
+[#190](../appendix/resolved/append-answer-thrown-away.md), fixed: an append waits at least the
+election timeout. On the lab it changes nothing, since its hosts answer in time: six loads at a
+1 s base ran at 42,600 to 55,000 rows a second either side of the fix, and no append timed out.
+
+**Verdict: #142's deadlines were mostly #190.** The item stays open for the restore stall, which
+has not recurred, and for what the full suite run finds next.
+
+### Round 14's final build
+
+On the round's last build (`96ebbe5`), with the lab's inventory (`target/lab/r14/confirm.sh`):
+
+| | |
+| --- | --- |
+| Whole load | 2,193,788 rows in 45.2 s, 48,491 rows a second |
+| A quiet minute under the bench | 0 vote changes; 122,408 operations a second |
+| titan, leading the most groups, killed under the bench | writes it led refused `NotLeader` for 17 s (seconds 16 to 33), the rest served; 661,504 acknowledged inserts, 0 lost through each member alone |
+| hyperion's peer ports cut for 20 s under the bench | the second of the cut at 47% of the second before, the next at 119%; refusals end within two seconds of the heal; 852,612 acknowledged inserts, 0 lost through each member alone |
+
+**Verdict: pass.** The failover window is the one [C7](../distributed/failover.md#the-window-and-what-a-client-sees)
+states, three to four bases, and #190's floor on an append's wait did not lengthen it: a killed
+peer's calls end on the link's silence. A partition's worst second is where round 12 left it
+([#143](../appendix/resolved/silent-partition-hops.md#still-open)), 47% against 44%.

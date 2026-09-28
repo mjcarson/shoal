@@ -93,6 +93,9 @@ pub struct NodeSpec {
 /// How long a cluster waits for every child to report ready
 pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// The most a start waits for its groups' first leaders before handing the cluster to a test
+pub const SETTLE_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Describes a cluster before it is started
 #[derive(Debug, Clone)]
 pub struct ClusterBuilder {
@@ -910,6 +913,8 @@ impl ClusterBuilder {
             cluster.wait_joined(&started)?;
             if self.initialize {
                 cluster.initialize(&started)?;
+                // the placed groups' first elections, before a test's first write
+                cluster.settle_leaders(&started, SETTLE_TIMEOUT);
             }
         }
         Ok(cluster)
@@ -1703,6 +1708,43 @@ impl Cluster {
             }
         }
         Ok(())
+    }
+
+    /// Wait, for at most a bound, until every group these nodes host reports a leader
+    ///
+    /// Best effort, and never a failure: a start is ready when its members answer, and a test
+    /// that meant to start a group without a quorum still starts. On a loaded host a group's
+    /// first election could outlast a write's deadline, and a test's first write was refused
+    /// `NotLeader` or `OutcomeUnknown` before anything it tested had happened (item 142, round
+    /// 14 of the [cluster testing](../../../docs/src/cluster-testing/correctness.md#15-round-14)).
+    ///
+    /// # Arguments
+    ///
+    /// * `ids` - The nodes
+    /// * `bound` - How long to wait at most
+    pub fn settle_leaders(&mut self, ids: &[usize], bound: Duration) {
+        let deadline = Instant::now() + bound;
+        loop {
+            // every group on every node named, and whether it has a leader
+            let mut leaderless = 0;
+            for id in ids {
+                let Ok(view) = self.node_mut(*id).command("GROUPS") else {
+                    leaderless += 1;
+                    continue;
+                };
+                for shard in view["ok"]["shards"].as_array().into_iter().flatten() {
+                    for group in shard["groups"].as_array().into_iter().flatten() {
+                        if group["leader"]["node"].as_str().is_none() {
+                            leaderless += 1;
+                        }
+                    }
+                }
+            }
+            if leaderless == 0 || Instant::now() > deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     /// Place the tablets over these nodes, in this order, and wait until every one holds the map

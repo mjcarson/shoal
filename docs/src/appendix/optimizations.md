@@ -3132,7 +3132,9 @@ each keyword partition whole every segment, which is
 [O79](#o79-a-merge-rewrites-every-partition-it-touches-whole), and 40 MiB segments halved the
 archive writes and made loads about 24% faster. **Status:** what paces a write-only load on these
 hosts is the merges' write amplification. What differs between one bootstrap and the next is
-still not named; the spread persists at every segment size and WAL mode tried.
+still not named; the spread persists at every segment size and WAL mode tried. And the halving this entry was filed for is gone: six loads at
+a 1 s base ran at 42,600 to 55,000 rows a second, the same as at 5 s, with and without
+[#190](resolved/append-answer-thrown-away.md)'s floor on an append's wait.
 
 ### O65. Heartbeats to followers that just acknowledged replication
 
