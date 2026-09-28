@@ -1567,7 +1567,7 @@ election timeout. On the lab it changes nothing, since its hosts answer in time:
 **Verdict: #142's deadlines were mostly #190.** The item stays open for the restore stall, which
 has not recurred, and for what the full suite run finds next.
 
-### The final build
+### Round 14's final build
 
 On the round's last build (`96ebbe5`), with the lab's inventory (`target/lab/r14/confirm.sh`):
 
