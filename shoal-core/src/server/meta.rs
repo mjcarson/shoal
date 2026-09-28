@@ -564,6 +564,8 @@ impl StorageMeta {
         slots: Option<usize>,
         intent: ClusterIntent,
     ) -> Result<Identity, ServerError> {
+        // the whole claim is one read-modify-write of the marker
+        let _marker = marker_lock();
         // read whatever metadata this directory already carries, format settled first
         match Self::read(root)? {
             // this directory has been written before, so it has a shard count and an identity
@@ -769,6 +771,8 @@ impl StorageMeta {
     /// Fails if there is no marker, or if the file cannot be written.
     #[instrument(name = "StorageMeta::finish_rehome", skip_all, err(Debug))]
     pub fn finish_rehome(root: &Path, physical: usize) -> Result<(), ServerError> {
+        // one read-modify-write of the marker, never interleaved with another
+        let _marker = marker_lock();
         // the marker has to exist already: a rehome is something a claimed node does
         let Some(mut found) = Self::read(root)? else {
             return Err(ServerError::IO(std::io::Error::new(
@@ -803,6 +807,8 @@ impl StorageMeta {
     /// cannot be read or written.
     #[instrument(name = "StorageMeta::mirror", skip_all, fields(root = %root.display()), err(Debug))]
     pub fn mirror(root: &Path, primary: &StorageMeta) -> Result<(), ServerError> {
+        // one read-modify-write of the mirror, never interleaved with another
+        let _marker = marker_lock();
         // whatever this root already says about itself
         if let Some(found) = Self::read(root)? {
             // the same node, slots and layout, and the same cluster unless the mirror was
@@ -849,6 +855,8 @@ impl StorageMeta {
     /// written.
     #[instrument(name = "StorageMeta::adopt_cluster", skip_all, err(Debug))]
     pub fn adopt_cluster(root: &Path, cluster: ClusterId) -> Result<(), ServerError> {
+        // one read-modify-write of the marker, never interleaved with another
+        let _marker = marker_lock();
         // the marker has to exist already: adopting a cluster is something a claimed node does
         let Some(mut found) = Self::read(root)? else {
             return Err(ServerError::IO(std::io::Error::new(
@@ -887,6 +895,8 @@ impl StorageMeta {
     /// backwards, or if the file cannot be written.
     #[instrument(name = "StorageMeta::observe_topology", skip_all, err(Debug))]
     pub fn observe_topology(root: &Path, version: u64) -> Result<(), ServerError> {
+        // one read-modify-write of the marker, never interleaved with another
+        let _marker = marker_lock();
         // the marker has to exist already: observing a topology is something a claimed node does
         let Some(mut found) = Self::read(root)? else {
             return Err(ServerError::IO(std::io::Error::new(
@@ -909,6 +919,27 @@ impl StorageMeta {
         found.topology = version;
         found.write(root)
     }
+}
+
+/// Serializes every read-modify-write of a storage marker in this process
+///
+/// The marker is rewritten by the claim, by a rehome's end, by the control thread whenever it
+/// observes a topology version or adopts a cluster, and by a mirror. The control thread runs while
+/// the pool rehomes the files, and two rewrites on two threads each read the file, change a field
+/// and write it back: the one that read first and wrote last put back the field the other changed,
+/// and both staged the file under one temporary name, so one could rename the other's away. A
+/// finished rehome's executor count was lost that way, and the next start at the old count saw no
+/// rehome to run ([Resolved #186](../../../docs/src/appendix/resolved/marker-lost-update.md)).
+static MARKER_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Hold the marker's write lock for one read-modify-write
+///
+/// A panic while it was held leaves the file as the last completed write left it, so a poisoned
+/// lock is taken as it is.
+fn marker_lock() -> std::sync::MutexGuard<'static, ()> {
+    MARKER_WRITES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The one field read before a marker's format is trusted
@@ -1603,5 +1634,36 @@ mod tests {
             StorageMeta::mirror(cluster_root.path(), &narrower),
             Err(ServerError::Shoal(ShoalError::StorageRootMismatch { .. }))
         ));
+    }
+
+    /// A topology observed while a rehome finishes keeps the rehome's executor count, and the
+    /// rehome keeps the topology (item 186)
+    ///
+    /// The control thread records every topology version it observes in the marker, and it is
+    /// running while the pool rehomes the files: two read-modify-writes of one file on two
+    /// threads. The one that read first and wrote last put back what the other had changed, so a
+    /// finished rehome's count was lost and the next start saw no change of count.
+    #[test]
+    fn a_topology_observed_during_a_rehome_keeps_its_count() {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let root = dir.path().to_path_buf();
+        StorageMeta::claim(&root, 4, None, ClusterIntent::Standalone).expect("a claim");
+        for round in 1..=200u64 {
+            // the rehome's end and a topology version, at once, from two threads
+            let physical = if round % 2 == 0 { 4 } else { 2 };
+            let rehome = {
+                let root = root.clone();
+                std::thread::spawn(move || StorageMeta::finish_rehome(&root, physical))
+            };
+            let observe = {
+                let root = root.clone();
+                std::thread::spawn(move || StorageMeta::observe_topology(&root, round))
+            };
+            rehome.join().expect("the rehome thread").expect("a rehome");
+            observe.join().expect("the observer").expect("an observation");
+            let found = StorageMeta::read(&root).expect("a marker").expect("a marker");
+            assert_eq!(found.physical(), physical, "round {round} lost the rehome's count");
+            assert_eq!(found.topology, round, "round {round} lost the topology");
+        }
     }
 }
