@@ -292,6 +292,12 @@ pub struct ShardReplication {
     /// The shard's eviction budget
     #[serde(default)]
     pub memory_budget: u64,
+    /// Bytes the shard's archive maps' indexes hold, estimated from their capacities
+    #[serde(default)]
+    pub archive_map_bytes: u64,
+    /// Bytes the shard's tables' partition indexes hold, estimated from their capacities
+    #[serde(default)]
+    pub table_index_bytes: u64,
     /// WAL batches written and synced since the shard started, one `fdatasync` each
     #[serde(default)]
     pub wal_syncs: u64,

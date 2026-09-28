@@ -161,6 +161,9 @@ pub struct ClusterConf {
     /// The move settings the inventory names, if any
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migration: Option<MigrationConf>,
+    /// The plan settings the inventory names, if any
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebalance: Option<RebalanceConf>,
     /// The failover base the inventory names, if any
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_failover_after: Option<String>,
@@ -235,6 +238,16 @@ pub struct MigrationConf {
     /// How many bytes a second the node sends on snapshot streams
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_bytes_per_sec: Option<String>,
+    /// How long one move may take, snapshot and catch-up together
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+}
+
+/// `cluster.rebalance`, only the keys an inventory can set
+#[derive(Serialize, Debug)]
+pub struct RebalanceConf {
+    /// How many moves one member may be the source of, and the destination of, at once
+    pub moves_per_node: u32,
 }
 
 impl MigrationConf {
@@ -247,11 +260,16 @@ impl MigrationConf {
     fn named(retire_after: Option<String>, spec: Option<&ReplicationSpec>) -> Option<Self> {
         // the stream budget lives in the replication block and renders here
         let stream_bytes_per_sec = spec.and_then(|spec| spec.stream_bytes_per_sec.clone());
+        // and so does a move's deadline
+        let timeout = spec.and_then(|spec| spec.migration_timeout.clone());
         // a block with nothing in it is not written at all
-        (retire_after.is_some() || stream_bytes_per_sec.is_some()).then_some(MigrationConf {
-            retire_after,
-            stream_bytes_per_sec,
-        })
+        (retire_after.is_some() || stream_bytes_per_sec.is_some() || timeout.is_some()).then_some(
+            MigrationConf {
+                retire_after,
+                stream_bytes_per_sec,
+                timeout,
+            },
+        )
     }
 }
 
@@ -412,6 +430,12 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
                 inventory.retire_after.clone(),
                 inventory.replication.as_ref(),
             ),
+            // the moves one member takes part in at once, when the inventory names it
+            rebalance: inventory
+                .replication
+                .as_ref()
+                .and_then(|spec| spec.moves_per_node)
+                .map(|moves_per_node| RebalanceConf { moves_per_node }),
             primary_failover_after: inventory.failover.clone(),
             // the node's own, its group's or the deployment's WAL delay (O61), and the
             // deployment's retention and snapshot deadline
@@ -499,6 +523,8 @@ mod tests {
             segment_bytes: Some("32MiB".into()),
             fragment_min_bytes: None,
             fragment_max_chain: Some(0),
+            moves_per_node: Some(6),
+            migration_timeout: Some("1h".into()),
             snapshot_timeout: Some("10m".into()),
         });
         let shrunk = render(&kept, &a, &Entry::Bootstrap, "x").expect("a file");
@@ -506,6 +532,9 @@ mod tests {
         assert!(shrunk.contains("fragment_max_chain: 0"), "{shrunk}");
         assert!(!shrunk.contains("fragment_min_bytes"), "{shrunk}");
         assert!(!first.contains("fragment_"), "{first}");
+        assert!(shrunk.contains("rebalance:\n    moves_per_node: 6"), "{shrunk}");
+        assert!(shrunk.contains("timeout: 1h"), "{shrunk}");
+        assert!(!first.contains("rebalance:"), "{first}");
         assert!(shrunk.contains("retained_entries: 5000"), "{shrunk}");
         assert!(shrunk.contains("snapshot_timeout: 10m"));
         assert!(shrunk.contains("hold_bytes: 2GiB"), "{shrunk}");

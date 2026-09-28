@@ -261,6 +261,29 @@ pub struct SerializedMap {
     fragments: std::collections::HashMap<u64, Vec<ArchiveEntry>>,
 }
 
+/// A serialized archive map's fields borrowed from the live map, archived as a `SerializedMap`
+///
+/// A save used to clone the whole index into a `SerializedMap` before serializing it: a transient
+/// copy of every entry, per shard, on every fold, which at ten times the lab's dataset was hundreds
+/// of megabytes a shard held twice over
+/// ([cluster testing](../../../../../../docs/src/cluster-testing/performance.md#memory-at-ten-times-the-dataset)).
+///
+/// Its fields are `SerializedMap`'s, in its order and archived as its are, so the bytes are a
+/// `SerializedMap`'s and are read back as one; `a_chain_is_counted_gathered_and_saved` and the
+/// fold tests read back what this wrote.
+#[derive(Archive, Serialize)]
+struct SerializedMapRef<'a> {
+    /// All archives this shard knows about
+    #[rkyv(with = rkyv::with::Inline)]
+    all_archives: &'a HashSet<Uuid>,
+    /// The map of partitions keys to archive entries
+    #[rkyv(with = rkyv::with::Inline)]
+    to_archive: &'a std::collections::HashMap<u64, ArchiveEntry>,
+    /// The fragments written over a partition's base record, for the few that have any
+    #[rkyv(with = rkyv::with::Inline)]
+    fragments: &'a std::collections::HashMap<u64, Vec<ArchiveEntry>>,
+}
+
 /// Whether an entry's record lies inside its archive, as the archive is on disk
 ///
 /// An archive that is not there is kept: that is another failure, reported loudly where the
@@ -463,14 +486,29 @@ impl SerializedMap {
 
     #[instrument(name = "SerializableMap::save", skip_all, err(Debug))]
     pub async fn save(map: &ArchiveMap) -> Result<(), ServerError> {
-        // load our current committed map data from disk
-        let serializable = SerializedMap {
-            all_archives: map.all_archives.borrow().clone(),
-            to_archive: map.to_archive.borrow().clone(),
-            fragments: map.fragments.borrow().clone(),
+        // serialize the map straight from its live index, the borrows ending before any await
+        let archived = {
+            let (all_archives, to_archive, fragments) = (
+                map.all_archives.borrow(),
+                map.to_archive.borrow(),
+                map.fragments.borrow(),
+            );
+            let borrowed = SerializedMapRef {
+                all_archives: &all_archives,
+                to_archive: &to_archive,
+                fragments: &fragments,
+            };
+            // with an arena of its own, dropped when the save ends: `rkyv::to_bytes` keeps a thread's
+            // arena at the largest thing it ever serialized, and a map is the largest by far, so
+            // every shard kept its map's scratch for good, about 128 MB a shard at ten times the
+            // lab's dataset ([cluster testing](../../../../../../docs/src/cluster-testing/performance.md#memory-at-ten-times-the-dataset))
+            let mut arena = rkyv::ser::allocator::Arena::new();
+            rkyv::api::high::to_bytes_in_with_alloc::<_, _, Error>(
+                &borrowed,
+                rkyv::util::AlignedVec::<16>::new(),
+                arena.acquire(),
+            )?
         };
-        // serialized this data
-        let archived = rkyv::to_bytes::<Error>(&serializable)?;
         // hash our map
         let mut hasher = GxHasher::default();
         // hash our archive map
@@ -921,6 +959,26 @@ impl ArchiveMap {
     #[must_use]
     pub fn is_chained(&self, id: u64) -> bool {
         self.fragments.borrow().contains_key(&id)
+    }
+
+    /// The bytes this map's index holds, estimated from its capacity: the entries and the chains
+    ///
+    /// Held for every partition the shard has ever archived, whether or not it is resident
+    /// ([cluster testing](../../../../../../docs/src/cluster-testing/performance.md#memory-at-ten-times-the-dataset)).
+    #[must_use]
+    pub fn index_bytes(&self) -> usize {
+        // a bucket is its key, its entry and a control byte, at hashbrown's load factor of 7/8
+        let bucket = std::mem::size_of::<(u64, ArchiveEntry)>() + 1;
+        let entries = self.to_archive.borrow().capacity().saturating_mul(bucket) / 7 * 8;
+        // and each chain's vector of fragments
+        let fragments = self.fragments.borrow();
+        let chain_bucket = std::mem::size_of::<(u64, Vec<ArchiveEntry>)>() + 1;
+        let chains = fragments.capacity().saturating_mul(chain_bucket) / 7 * 8
+            + fragments
+                .values()
+                .map(|chain| chain.capacity() * std::mem::size_of::<ArchiveEntry>())
+                .sum::<usize>();
+        entries + chains
     }
 
     /// How many partitions have fragments over their base record

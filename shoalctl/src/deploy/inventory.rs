@@ -371,6 +371,17 @@ pub struct ReplicationSpec {
     /// ([F61](../../../docs/src/features/fragmented-partitions.md)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment_max_chain: Option<usize>,
+    /// How many moves one member may be the source of, and the destination of, at once (`1`)
+    ///
+    /// Rendered as `cluster.rebalance.moves_per_node`: a rebuild onto a node takes this many of
+    /// its sets at a time ([F56](../../../docs/src/features/cluster-rebuild.md)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moves_per_node: Option<u32>,
+    /// How long one move may take, its snapshot and catch-up together (`30m`, `2h`)
+    ///
+    /// Rendered as `cluster.migration.timeout`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_timeout: Option<String>,
     /// How long one snapshot transfer may take (`5m`, `1h`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_timeout: Option<String>,
@@ -586,13 +597,21 @@ impl Inventory {
         }
         // the replication settings: a snapshot deadline the engine can read, and a byte size
         if let Some(replication) = &self.replication {
-            if let Some(timeout) = &replication.snapshot_timeout {
-                let split = timeout
-                    .find(|c: char| !c.is_ascii_digit())
-                    .unwrap_or(timeout.len());
-                let (number, unit) = timeout.split_at(split);
-                if number.is_empty() || !matches!(unit, "ms" | "s" | "m" | "h") {
-                    bail!("replication.snapshot_timeout is {timeout:?}; write it as 90s, 5m or 1h");
+            if replication.moves_per_node == Some(0) {
+                bail!("replication.moves_per_node is 0; a plan needs at least one move per member at a time");
+            }
+            for (key, timeout) in [
+                ("snapshot_timeout", &replication.snapshot_timeout),
+                ("migration_timeout", &replication.migration_timeout),
+            ] {
+                if let Some(timeout) = timeout {
+                    let split = timeout
+                        .find(|c: char| !c.is_ascii_digit())
+                        .unwrap_or(timeout.len());
+                    let (number, unit) = timeout.split_at(split);
+                    if number.is_empty() || !matches!(unit, "ms" | "s" | "m" | "h") {
+                        bail!("replication.{key} is {timeout:?}; write it as 90s, 5m or 1h");
+                    }
                 }
             }
             // both byte sizes the same way the engine parses them
@@ -1153,6 +1172,8 @@ mod tests {
             segment_bytes: Some("32MiB".into()),
             fragment_min_bytes: Some("64KiB".into()),
             fragment_max_chain: Some(4),
+            moves_per_node: Some(2),
+            migration_timeout: Some("2h".into()),
             snapshot_timeout: Some("10m".into()),
         });
         inventory.validate().expect("a shrunk retention");

@@ -331,6 +331,9 @@ impl NodeStatsTracker {
         // the rows the shards hold in memory against their budgets
         stats.memory_bytes = shards.values().map(|report| report.memory_bytes).sum();
         stats.memory_budget = shards.values().map(|report| report.memory_budget).sum();
+        // and the indexes beside them, which no budget counts
+        stats.archive_map_bytes = shards.values().map(|report| report.archive_map_bytes).sum();
+        stats.table_index_bytes = shards.values().map(|report| report.table_index_bytes).sum();
         // the busiest groups this node leads over the interval, once there is one to divide by
         if let Some(dt) = dt {
             stats.hot_groups = hot_groups(led_gains, dt);

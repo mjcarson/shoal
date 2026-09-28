@@ -2331,6 +2331,15 @@ node at 31 million partitions. [#149](resolved/node-memory-budget.md) bounds the
 that outgrows the budget now empties the row cache instead of killing the node. Keeping the
 index on disk, or paging it, would make the budget the rows' again.
 
+Round 15 of the cluster testing measured it at ten copies of the lab's dataset
+([memory at ten times the dataset](../cluster-testing/performance.md#memory-at-ten-times-the-dataset)):
+1.2 GiB a node for 11.8 million Movie partitions, 2.3 GiB for 23 million, about 100 bytes a
+partition with the table's growth, and `Stats` now reports it as `archive_map_bytes`. It was not
+what squeezed the rows out that round: that was openraft's channels
+([#191](resolved/raft-channels-preallocated.md)). With them fixed a Zen1 node at 23 million
+partitions keeps 1.2 GiB of rows under an 8 GiB budget. At a terabyte a node, about fifty times
+that, the map alone would be the budget.
+
 ## ~~Re-render a deployment's node files~~
 
 **Done as [F57](../features/cluster-reconfigure.md)**, `cluster reconfigure`. The credential it was thought to need is the one bootstrap keeps in the deployment's state directory. What follows is the todo as it was filed.

@@ -82,6 +82,29 @@ pub(crate) fn apply_failure<P>(
     }
 }
 
+/// The fewest buckets a partition index is shrunk to, below which shrinking frees nothing worth a rehash
+const SHRINK_FLOOR: usize = 4096;
+
+/// Shrink a table's partition index once it holds under a quarter of what it has room for
+///
+/// A `HashMap` keeps the capacity of the most entries it ever held. A table's index grows to hold
+/// every partition a load or a scan made resident, and after eviction keeps those buckets, which no
+/// eviction budget counts: at ten times the lab's dataset they were gigabytes of a node
+/// ([cluster testing](../../../docs/src/cluster-testing/performance.md#memory-at-ten-times-the-dataset)).
+/// Shrinking to twice what is held costs one rehash of the entries left and leaves room to grow
+/// back by half again before the next resize.
+///
+/// # Arguments
+///
+/// * `partitions` - The table's partition index
+pub(crate) fn shrink_if_sparse<V>(partitions: &mut HashMap<u64, V>) {
+    // a map at a quarter of its room, and large enough that its buckets matter
+    let held = partitions.len();
+    if partitions.capacity() > SHRINK_FLOOR && held.saturating_mul(4) < partitions.capacity() {
+        partitions.shrink_to(held.saturating_mul(2).max(SHRINK_FLOOR));
+    }
+}
+
 /// Build the failure a client is told when an archive could not be read back
 ///
 /// What the client is told names the table and the partition and nothing else. The path, the
@@ -1046,6 +1069,27 @@ mod tests {
     use crate::shared::protocol::error::ErrorCode;
     use std::cell::RefCell;
     use uuid::Uuid;
+
+    #[test]
+    /// A partition index emptied by eviction gives its buckets back, and a full one keeps them
+    fn a_sparse_partition_index_is_shrunk() {
+        let mut partitions: std::collections::HashMap<u64, u64> =
+            (0..100_000u64).map(|key| (key, key)).collect();
+        let peak = partitions.capacity();
+        // a full index is left alone
+        super::shrink_if_sparse(&mut partitions);
+        assert_eq!(partitions.capacity(), peak);
+        // evict nine in ten and it shrinks to about twice what is left
+        partitions.retain(|key, _| key % 10 == 0);
+        super::shrink_if_sparse(&mut partitions);
+        assert!(partitions.capacity() < peak / 3, "{} of {peak}", partitions.capacity());
+        assert!(partitions.capacity() >= 2 * partitions.len());
+        assert_eq!(partitions.len(), 10_000);
+        // and a small index is never shrunk below the floor
+        partitions.retain(|key, _| *key < 10);
+        super::shrink_if_sparse(&mut partitions);
+        assert!(partitions.capacity() >= super::SHRINK_FLOOR);
+    }
 
     #[test]
     /// A get resumed with another projection than the one parked under its key is refused,

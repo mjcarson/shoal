@@ -549,3 +549,43 @@ nothing is resident, then 60 s of keyword gets alone.
 
 Nothing but the worst read moved, and that is the first read of a large chain folding it. **4 KiB
 and chains of 16 are F61's defaults.**
+
+## Memory at ten times the dataset
+
+At ten copies of the dataset ([correctness, round 15](correctness.md#ten-times-the-dataset)) the
+nodes sat at their 8 GiB budget with next to no rows: the rows were evicted to keep the process
+under it ([#149](../appendix/resolved/node-memory-budget.md)), and the gets read from disk. `Stats`
+now reports each node's archive map and table index bytes beside its rows
+(`archive_map_bytes`, `table_index_bytes`, and two columns in `cluster stats`), estimated from their
+capacities, so what was left over could be named. Twenty minutes of the mixed bench after every
+node was started again (`mem.sh`), each member's figures every minute:
+
+| Build | Resident a node | Rows | Archive maps | Table maps | Not counted by any figure |
+| --- | --- | --- | --- | --- | --- |
+| `bbeb814`, restarted after the ten copy load | 2.7–2.9 GiB | 40–46 MiB | 1.2 GiB | 6–8 MiB | 1.4–1.7 GiB |
+| `bbeb814`, 20 min in | 8.0–8.4 GiB | 11–24 MiB | 2.3 GiB | 55–200 MiB | 5.6–5.9 GiB |
+| a sparse table map shrunk, a map saved without a clone, 20 min in | 7.9–8.3 GiB | 18–590 MiB | 2.3 GiB | 14–212 MiB | 4.8–6.0 GiB |
+
+The first row is the ten copy cluster as loaded, 11.8 million Movie partitions a node; the others
+are after the rebuild's bench had inserted 11.5 million more, which is why the maps doubled. The
+left over grew for about ten minutes and stopped only where the process met its budget. A
+jemalloc heap profile of europa's node (the `jemalloc-prof` feature of `tmdb-dataset`, sampled
+every 512 KiB and dumped every gibibyte allocated, symbolized by `target/lab/r15/prof/heap.py`)
+named it:
+
+| Live at the end of a 15 minute bench | What |
+| --- | --- |
+| 2.7 GiB | the archive maps, which `Stats` counts |
+| 2.1 GiB | openraft's per-group channels: `InstallFullSnapshotRequest` 1.15 GiB, `Notification` 0.50, `RaftMsg` 0.43 |
+| 2.4 GiB | rows: Movie partitions applied and deserialized, and the table maps |
+| 0.77 GiB | rkyv's thread-local arena, at the size of the largest map it serialized |
+| 0.53 GiB | the WAL's index of its entries |
+| 0.25 GiB | the eviction LRU |
+
+The glommio runtime's channel for openraft allocated its queue to its bound up front, and a ring
+is written round, so its pages became resident a little more with every message until all of them
+were: [#191](../appendix/resolved/raft-channels-preallocated.md), fixed. A map save serialized
+through rkyv's thread-local arena, which keeps the size of the largest thing it ever held, and
+cloned the map first; both went ([O81](../appendix/optimizations.md#o81-a-map-save-kept-a-copy-of-the-map)).
+And a table's partition index kept the capacity of its peak after eviction
+([O82](../appendix/optimizations.md#o82-a-tables-partition-index-kept-the-capacity-of-its-peak)).
