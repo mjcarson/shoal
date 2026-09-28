@@ -43,6 +43,8 @@
 //! **Nothing here holds a `RefCell` borrow across an `.await`.** The writer task, openraft's
 //! core, its state machine worker and the shard loop all share one executor and this one cell.
 
+pub mod direct;
+pub mod flush;
 pub mod frame;
 pub mod memory;
 #[cfg(test)]
@@ -306,6 +308,24 @@ pub fn sync_size_bucket(bytes: usize) -> usize {
         .unwrap_or(SYNC_SIZE_BUCKETS - 1)
 }
 
+/// How a shard's WAL writes its segments and makes them durable
+///
+/// ([F60](../../../../docs/src/features/shared-wal-flush.md))
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WalMode {
+    /// Appended through the page cache, each batch synced on its own file: every sync that grows
+    /// the file commits the filesystem's journal too
+    #[default]
+    Buffered,
+    /// Written directly into segments zero filled ahead, each batch synced on its own file:
+    /// a sync carries the device flush and no journal commit
+    Direct,
+    /// Written directly into segments zero filled ahead, every shard on a device sharing one
+    /// device flush between them
+    Shared,
+}
+
 /// The store's state, shared by every handle on this shard
 struct WalInner {
     /// The directory the segments are in
@@ -313,6 +333,8 @@ struct WalInner {
     /// How long the writer waits after a sync before it takes the next batch
     /// ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page))
     commit_delay: Duration,
+    /// How segments are written and synced ([F60](../../../../docs/src/features/shared-wal-flush.md))
+    mode: WalMode,
     /// How many batches have been written and synced
     synced_batches: u64,
     /// How many bytes those batches held
@@ -1191,6 +1213,103 @@ impl Future for NextBatch {
     }
 }
 
+/// The file the writer appends to
+enum Held {
+    /// A segment written through the page cache and synced on its own
+    Buffered(BufferedFile),
+    /// A prepared segment written directly, synced through its device's shared flush
+    Direct(direct::DirectSegment),
+}
+
+impl Held {
+    /// Write a batch at its base and make it durable
+    ///
+    /// # Arguments
+    ///
+    /// * `batch` - The batch
+    async fn append(&mut self, batch: &Batch) -> io::Result<()> {
+        match self {
+            Held::Buffered(file) => {
+                // the write, and the sync that makes it durable
+                if !batch.bytes.is_empty() {
+                    file.write_at(batch.bytes.clone(), batch.base)
+                        .await
+                        .map_err(io)?;
+                }
+                file.fdatasync().await.map_err(io)
+            }
+            Held::Direct(segment) => segment.append(batch.base, &batch.bytes).await,
+        }
+    }
+
+    /// Seal the file: durable, cut to what was written, and closed
+    async fn seal(self) -> io::Result<()> {
+        match self {
+            Held::Buffered(file) => {
+                let synced = file.fdatasync().await.map_err(io);
+                let _ = file.close().await;
+                synced
+            }
+            Held::Direct(segment) => segment.seal().await,
+        }
+    }
+
+    /// Sync and close the file, for a store that is closing
+    async fn close(self) {
+        match self {
+            Held::Buffered(file) => {
+                let _ = file.fdatasync().await;
+                let _ = file.close().await;
+            }
+            Held::Direct(segment) => {
+                let _ = segment.close().await;
+            }
+        }
+    }
+}
+
+/// Open the file a batch is written into: a prepared direct segment, or a buffered one
+///
+/// A direct segment is prepared before it is opened, by the task the writer started when it
+/// opened the one before, or here; a batch that does not start a segment is written buffered,
+/// since the blocks before it were not written directly.
+///
+/// # Arguments
+///
+/// * `inner` - The store
+/// * `dir` - The directory the segments are in
+/// * `batch` - The first batch the file takes
+/// * `prepared` - The task preparing the next generation, if one was started
+async fn open_held(
+    inner: &Rc<RefCell<WalInner>>,
+    dir: &Path,
+    batch: &Batch,
+    prepared: &mut Option<(u64, glommio::Task<io::Result<()>>)>,
+) -> io::Result<Held> {
+    let path = dir.join(segment_name(batch.generation));
+    let (mode, capacity) = {
+        let guard = inner.borrow();
+        (guard.mode, guard.segment_bytes + direct::SEGMENT_SLACK)
+    };
+    if mode == WalMode::Buffered || batch.base != 0 {
+        return Ok(Held::Buffered(open_segment(&path).await?));
+    }
+    // the preparation started for this generation, or one now
+    match prepared.take() {
+        Some((generation, task)) if generation == batch.generation => task.await?,
+        _ => direct::prepare(&path, capacity).await?,
+    }
+    let segment = direct::DirectSegment::open(&path, capacity, mode == WalMode::Shared).await?;
+    // the next generation prepared while this one fills
+    let next = batch.generation + 1;
+    let next_path = dir.join(segment_name(next));
+    *prepared = Some((
+        next,
+        glommio::spawn_local(async move { direct::prepare(&next_path, capacity).await }),
+    ));
+    Ok(Held::Direct(segment))
+}
+
 /// The writer task: write and sync one batch at a time, sealing segments as it crosses them
 ///
 /// # Arguments
@@ -1198,7 +1317,9 @@ impl Future for NextBatch {
 /// * `inner` - The store
 async fn writer(inner: Rc<RefCell<WalInner>>) {
     // the file the writer holds, and which generation it is
-    let mut file: Option<(u64, BufferedFile)> = None;
+    let mut file: Option<(u64, Held)> = None;
+    // the next generation's preparation, when segments are written directly
+    let mut prepared: Option<(u64, glommio::Task<io::Result<()>>)> = None;
     while let Some(batch) = (NextBatch {
         inner: inner.clone(),
     })
@@ -1211,9 +1332,7 @@ async fn writer(inner: Rc<RefCell<WalInner>>) {
             .is_some_and(|(generation, _)| *generation != batch.generation)
         {
             let (sealed, old) = file.take().expect("checked above");
-            let synced = old.fdatasync().await.map_err(io);
-            let _ = old.close().await;
-            if let Err(error) = synced {
+            if let Err(error) = old.seal().await {
                 fail_batch(&inner, batch, error);
                 continue;
             }
@@ -1239,7 +1358,7 @@ async fn writer(inner: Rc<RefCell<WalInner>>) {
         }
         // open the file for this generation if the writer does not hold it
         if file.is_none() {
-            match open_segment(&dir.join(segment_name(batch.generation))).await {
+            match open_held(&inner, &dir, &batch, &mut prepared).await {
                 Ok(opened) => file = Some((batch.generation, opened)),
                 Err(error) => {
                     fail_batch(&inner, batch, error);
@@ -1247,23 +1366,10 @@ async fn writer(inner: Rc<RefCell<WalInner>>) {
                 }
             }
         }
-        let (_, handle) = file.as_ref().expect("opened above");
+        let (_, handle) = file.as_mut().expect("opened above");
         // the write, at the batch's base, and the sync that makes it durable, timed together
         let started = Instant::now();
-        let written = if batch.bytes.is_empty() {
-            Ok(())
-        } else {
-            handle
-                .write_at(batch.bytes.clone(), batch.base)
-                .await
-                .map(|_| ())
-                .map_err(io)
-        };
-        let synced = match written {
-            Ok(()) => handle.fdatasync().await.map_err(io),
-            Err(error) => Err(error),
-        };
-        match synced {
+        match handle.append(&batch).await {
             Ok(()) => complete_batch(&inner, batch, started.elapsed()),
             Err(error) => fail_batch(&inner, batch, error),
         }
@@ -1278,8 +1384,11 @@ async fn writer(inner: Rc<RefCell<WalInner>>) {
     }
     // closing: sync whatever file is open and let it go
     if let Some((_, handle)) = file.take() {
-        let _ = handle.fdatasync().await;
-        let _ = handle.close().await;
+        handle.close().await;
+    }
+    // a preparation still running is left to finish; its file is an empty segment
+    if let Some((_, task)) = prepared.take() {
+        let _ = task.await;
     }
 }
 
@@ -1477,6 +1586,7 @@ impl ShardWal {
         let mut inner = WalInner {
             dir: dir.to_path_buf(),
             commit_delay: Duration::ZERO,
+            mode: WalMode::Buffered,
             synced_batches: 0,
             synced_bytes: 0,
             synced_appends: 0,
@@ -1532,13 +1642,28 @@ impl ShardWal {
                 );
             }
             if whole < bytes.len() as u64 {
-                event!(
-                    Level::WARN,
-                    msg = "truncating a torn tail off a wal segment",
-                    generation,
-                    torn_from = whole,
-                    length = bytes.len()
-                );
+                // zeros past the last frame are a prepared segment's unused blocks, not a
+                // write that tore ([F60](../../../../docs/src/features/shared-wal-flush.md))
+                // truncation cannot happen: `whole` is at most the file's length
+                #[allow(clippy::cast_possible_truncation)]
+                let zeros = bytes[whole as usize..].iter().all(|byte| *byte == 0);
+                if zeros {
+                    event!(
+                        Level::DEBUG,
+                        msg = "cutting a prepared segment's unused blocks",
+                        generation,
+                        from = whole,
+                        length = bytes.len()
+                    );
+                } else {
+                    event!(
+                        Level::WARN,
+                        msg = "truncating a torn tail off a wal segment",
+                        generation,
+                        torn_from = whole,
+                        length = bytes.len()
+                    );
+                }
                 let file = open_segment(&path).await?;
                 file.truncate(whole).await.map_err(io)?;
                 file.fdatasync().await.map_err(io)?;
@@ -1794,6 +1919,24 @@ impl ShardWal {
     /// * `delay` - The wait
     pub fn set_commit_delay(&self, delay: Duration) {
         self.inner.borrow_mut().commit_delay = delay;
+    }
+
+    /// Choose how segments are written and made durable
+    ///
+    /// A segment recovered with frames in it was written through the page cache and may end in
+    /// a torn tail, so a direct mode moves appends to a new generation, which is prepared before
+    /// its first batch ([F60](../../../../docs/src/features/shared-wal-flush.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `mode` - The mode
+    pub fn set_mode(&self, mode: WalMode) {
+        let mut inner = self.inner.borrow_mut();
+        inner.mode = mode;
+        // a recovered segment is never appended to directly
+        if mode != WalMode::Buffered && inner.next_offset > 0 {
+            inner.rotate();
+        }
     }
 
     /// Why a write or sync of this WAL failed, if one has

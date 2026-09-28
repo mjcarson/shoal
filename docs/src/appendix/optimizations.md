@@ -3604,3 +3604,28 @@ is how openraft's debug tracing once filled it
 **Applied:** `openraft::raft::responder=error` joins the targets `server/trace.rs` holds down at
 any level that would show warnings, beside [O66](#o66-a-partitioned-peer-floods-the-log)'s and
 [O72](#o72-a-refused-snapshot-build-logs-four-lines-per-apply)'s.
+
+### O78. A snapshot cut read one record at a time in key order
+
+| | |
+| --- | --- |
+| **Rank** | **done** — applied |
+| **Impact** | Measured on the lab — under the mixed bench titan cut a Movie set of 52 to 55 MB in 5.5 to 8.4 s, where europa cut the same shape in 0.5 s; the cut was 73 to 85% of each step titan sent, the send and install the rest (`target/lab/r14/tb/cuts.py` over round 13's and round 14's journals). A set is about 80,000 records of about 700 bytes, each a direct read at its own offset, in key order, which is random order on disk, on a device whose queue is full of the WAL's flushes |
+| **Difficulty** | S |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | A cut's file is in disk order, not key order, so two cuts of one state are one file only while the archives do not move between them; a stream resumed across a compaction starts over. The installer never read the order. Up to eight runs of a mebibyte held at once, where 32 records were |
+| **Benchmark** | the lab: a rebuild under `bench --mix get:40,update:45,insert:15`, each cut timed from the compactor's `cutting a snapshot` to its `cut a snapshot` (`cuts.py`) |
+
+Found by the [distributed cluster testing](../cluster-testing/correctness.md#15-round-14) chapter
+while pricing [O52](#o52-a-snapshot-copies-every-record-of-the-archives-into-one-file), which
+would stream a cut instead of writing it first. On titan that could overlap at most the 1.4 s a
+set's send and install took, against a cut of 5 to 8 s, so the cut's reads were the larger cost.
+[O70](#o70-a-snapshot-cut-reads-its-records-one-at-a-time) had put 32 reads in flight and kept the
+file in key order.
+
+**Applied:** the cut sorts the group's records by archive and offset and splits them into runs
+(`cut_runs`, `shoal-core/src/server/tables/storage/fs/compactor.rs`): records of one archive
+whose span is at most 1 MiB and whose gaps of other groups' records are at most 128 KiB. Each run
+is one read (`ArchiveMap::read_run_from`), every record in it verified against its checksum as a
+single read verifies it, and eight runs are in flight. The file is written in the order read.

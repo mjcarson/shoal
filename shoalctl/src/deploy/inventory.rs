@@ -340,6 +340,24 @@ pub struct ReplicationSpec {
     /// a purge (`64MiB`, `1GiB`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retained_bytes: Option<String>,
+    /// How many sealed WAL bytes past `retained_bytes` a shard keeps while members take
+    /// snapshots of its groups (`1GiB`, `0`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_bytes: Option<String>,
+    /// How many bytes a second each node sends on snapshot streams, across every stream
+    /// (`64MiB`, `0` for no limit)
+    ///
+    /// Rendered as `cluster.migration.stream_bytes_per_sec`. Throttling it is how the lab stages
+    /// a set too large to send within the retention
+    /// ([cluster testing](../../../docs/src/cluster-testing/correctness.md#15-round-14)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_bytes_per_sec: Option<String>,
+    /// How every node's WALs write and sync: `buffered`, `direct` or `shared`
+    ///
+    /// Rendered as `cluster.replication.wal_mode`
+    /// ([F60](../../../docs/src/features/shared-wal-flush.md)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_mode: Option<String>,
     /// How long one snapshot transfer may take (`5m`, `1h`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_timeout: Option<String>,
@@ -564,9 +582,22 @@ impl Inventory {
                     bail!("replication.snapshot_timeout is {timeout:?}; write it as 90s, 5m or 1h");
                 }
             }
-            if let Some(bytes) = &replication.retained_bytes {
-                if byte_unit::Byte::parse_str(bytes, true).is_err() {
-                    bail!("replication.retained_bytes is {bytes:?}; write it as 64MiB or 1GiB");
+            // both byte sizes the same way the engine parses them
+            for (key, bytes) in [
+                ("retained_bytes", &replication.retained_bytes),
+                ("hold_bytes", &replication.hold_bytes),
+                ("stream_bytes_per_sec", &replication.stream_bytes_per_sec),
+            ] {
+                if let Some(bytes) = bytes {
+                    if byte_unit::Byte::parse_str(bytes, true).is_err() {
+                        bail!("replication.{key} is {bytes:?}; write it as 64MiB or 1GiB");
+                    }
+                }
+            }
+            // the WAL mode, one the engine knows
+            if let Some(mode) = &replication.wal_mode {
+                if !matches!(mode.as_str(), "buffered" | "direct" | "shared") {
+                    bail!("replication.wal_mode is {mode:?}; write buffered, direct or shared");
                 }
             }
             if replication.retained_entries == Some(0) {
@@ -1108,12 +1139,21 @@ mod tests {
         inventory.replication = Some(ReplicationSpec {
             retained_entries: Some(5_000),
             retained_bytes: Some("16MiB".into()),
+            hold_bytes: Some("64MiB".into()),
+            stream_bytes_per_sec: Some("2MiB".into()),
+            wal_mode: Some("shared".into()),
             snapshot_timeout: Some("10m".into()),
         });
         inventory.validate().expect("a shrunk retention");
         let mut bad = inventory.clone();
         bad.replication.as_mut().unwrap().retained_bytes = Some("lots".into());
         assert!(bad.validate().unwrap_err().to_string().contains("retained_bytes"));
+        let mut bad = inventory.clone();
+        bad.replication.as_mut().unwrap().wal_mode = Some("fast".into());
+        assert!(bad.validate().unwrap_err().to_string().contains("wal_mode"));
+        let mut bad = inventory.clone();
+        bad.replication.as_mut().unwrap().hold_bytes = Some("lots".into());
+        assert!(bad.validate().unwrap_err().to_string().contains("hold_bytes"));
         let mut bad = inventory.clone();
         bad.replication.as_mut().unwrap().snapshot_timeout = Some("10".into());
         assert!(bad.validate().unwrap_err().to_string().contains("snapshot_timeout"));

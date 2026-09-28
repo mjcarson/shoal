@@ -173,6 +173,12 @@ pub struct ReplicationConf {
     /// How many sealed WAL bytes a shard keeps for slow copies
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retained_bytes: Option<String>,
+    /// How many sealed WAL bytes past `retained_bytes` a shard keeps for snapshots in flight
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold_bytes: Option<String>,
+    /// How the node's WALs write and sync
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wal_mode: Option<String>,
     /// How long one snapshot transfer may take
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot_timeout: Option<String>,
@@ -192,12 +198,16 @@ impl ReplicationConf {
             wal_commit_delay,
             retained_entries: spec.retained_entries,
             retained_bytes: spec.retained_bytes,
+            hold_bytes: spec.hold_bytes,
+            wal_mode: spec.wal_mode,
             snapshot_timeout: spec.snapshot_timeout,
         };
         // a block with nothing in it is not written at all
         let empty = conf.wal_commit_delay.is_none()
             && conf.retained_entries.is_none()
             && conf.retained_bytes.is_none()
+            && conf.hold_bytes.is_none()
+            && conf.wal_mode.is_none()
             && conf.snapshot_timeout.is_none();
         (!empty).then_some(conf)
     }
@@ -207,7 +217,29 @@ impl ReplicationConf {
 #[derive(Serialize, Debug)]
 pub struct MigrationConf {
     /// How long a retired copy is kept before it is reclaimed
-    pub retire_after: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retire_after: Option<String>,
+    /// How many bytes a second the node sends on snapshot streams
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_bytes_per_sec: Option<String>,
+}
+
+impl MigrationConf {
+    /// The keys an inventory names, or none when it names none
+    ///
+    /// # Arguments
+    ///
+    /// * `retire_after` - The deployment's retirement grace
+    /// * `spec` - The deployment's replication block
+    fn named(retire_after: Option<String>, spec: Option<&ReplicationSpec>) -> Option<Self> {
+        // the stream budget lives in the replication block and renders here
+        let stream_bytes_per_sec = spec.and_then(|spec| spec.stream_bytes_per_sec.clone());
+        // a block with nothing in it is not written at all
+        (retire_after.is_some() || stream_bytes_per_sec.is_some()).then_some(MigrationConf {
+            retire_after,
+            stream_bytes_per_sec,
+        })
+    }
 }
 
 /// `cluster.tls`
@@ -355,10 +387,10 @@ pub fn node_conf(inventory: &Inventory, node: &Node, entry: &Entry, password: &s
                 ca: layout.ca(),
                 bind_identity: true,
             },
-            migration: inventory
-                .retire_after
-                .clone()
-                .map(|retire_after| MigrationConf { retire_after }),
+            migration: MigrationConf::named(
+                inventory.retire_after.clone(),
+                inventory.replication.as_ref(),
+            ),
             primary_failover_after: inventory.failover.clone(),
             // the node's own, its group's or the deployment's WAL delay (O61), and the
             // deployment's retention and snapshot deadline
@@ -441,11 +473,17 @@ mod tests {
         kept.replication = Some(ReplicationSpec {
             retained_entries: Some(5_000),
             retained_bytes: None,
+            hold_bytes: Some("2GiB".into()),
+            stream_bytes_per_sec: Some("4MiB".into()),
+            wal_mode: Some("shared".into()),
             snapshot_timeout: Some("10m".into()),
         });
         let shrunk = render(&kept, &a, &Entry::Bootstrap, "x").expect("a file");
         assert!(shrunk.contains("retained_entries: 5000"), "{shrunk}");
         assert!(shrunk.contains("snapshot_timeout: 10m"));
+        assert!(shrunk.contains("hold_bytes: 2GiB"), "{shrunk}");
+        assert!(shrunk.contains("wal_mode: shared"), "{shrunk}");
+        assert!(shrunk.contains("migration:\n    stream_bytes_per_sec: 4MiB"), "{shrunk}");
         assert!(!shrunk.contains("retained_bytes") && !shrunk.contains("wal_commit_delay"));
         // a node's own resources are the ones written
         let mut small = b.clone();

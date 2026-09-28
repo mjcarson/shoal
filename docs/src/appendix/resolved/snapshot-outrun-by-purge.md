@@ -118,9 +118,11 @@ insert (4,715,571 and 4,912,274) and the csv through each member alone, with not
 
 ## Still open
 
-- **A step whose cut and transfer outlast `retained_bytes`** still loses its log to the forced
+- ~~**A step whose cut and transfer outlast `retained_bytes`** still loses its log to the forced
   purge. At a terabyte a node that is the next limit, and it is the operator's to raise, with the
-  inventory's `replication:` block ([F51](../../features/cluster-deployment.md)).
+  inventory's `replication:` block ([F51](../../features/cluster-deployment.md)).~~ Reproduced
+  and fixed as [#188](forced-purge-outruns-snapshot.md): the sweep passes over a held group for
+  up to `hold_bytes` past the budget. A step that outlasts both still loses its log.
 - The rest of the terabyte todo: a cut streamed from the archives rather than written first, and
   several steps in flight onto a node.
 

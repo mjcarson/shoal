@@ -524,6 +524,14 @@ fn default_retained_bytes() -> u64 {
     1024 * 1024 * 1024
 }
 
+/// The default allowance of sealed WAL bytes past `retained_bytes` kept for snapshots in flight
+///
+/// As large as the budget itself, so a shard's WAL is bounded at twice `retained_bytes` while
+/// members take snapshots, and at `retained_bytes` otherwise.
+fn default_hold_bytes() -> u64 {
+    1024 * 1024 * 1024
+}
+
 /// The default window a write's identity may be retried within
 /// The longest WAL group commit delay a configuration may ask for
 const MAX_WAL_COMMIT_DELAY: Duration = Duration::from_millis(10);
@@ -607,6 +615,18 @@ pub struct Replication {
         deserialize_with = "utils::deserialize_byte_size_u64"
     )]
     pub retained_bytes: u64,
+    /// The most sealed WAL bytes past `retained_bytes` a shard keeps while members are taking
+    /// snapshots of its groups
+    ///
+    /// Within it the retention budget forces no purge of a group a member is taking a snapshot
+    /// of, so the entries after the snapshot's boundary are still there when its install ends;
+    /// past it every group is forced alike, and a member that loses its entries is sent another
+    /// snapshot. Zero holds nothing ([cluster testing, round 14](../../../../docs/src/cluster-testing/correctness.md#15-round-14)).
+    #[serde(
+        default = "default_hold_bytes",
+        deserialize_with = "utils::deserialize_byte_size_u64"
+    )]
+    pub hold_bytes: u64,
     /// How long after a write's identity was minted a retry of it is still answered its first result
     ///
     /// A time-ordered identity older than this is refused `IdentityExpired` before it is
@@ -622,6 +642,15 @@ pub struct Replication {
     /// straight away ([O61](../../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page)).
     #[serde(default = "default_wal_commit_delay")]
     pub wal_commit_delay: DurationSpec,
+    /// How the shards' WALs write their segments and make them durable
+    ///
+    /// `buffered` appends through the page cache and syncs each batch, and every sync that
+    /// grows a file commits the filesystem's journal with it; `direct` writes batches into
+    /// segments zero filled ahead, so a sync is the device flush alone; `shared` does the same
+    /// and has every shard on a device share one flush
+    /// ([F60](../../../../docs/src/features/shared-wal-flush.md)).
+    #[serde(default)]
+    pub wal_mode: crate::server::wal::WalMode,
     /// The bytes this node keeps free on its storage below which it takes no new write
     ///
     /// Below it a write proposed through this node is refused `Shedding`, the groups it leads
@@ -651,7 +680,9 @@ impl Default for Replication {
             snapshot_timeout: default_snapshot_timeout(),
             install_bytes: default_install_bytes(),
             retained_bytes: default_retained_bytes(),
+            hold_bytes: default_hold_bytes(),
             wal_commit_delay: default_wal_commit_delay(),
+            wal_mode: crate::server::wal::WalMode::default(),
             retry_window: default_retry_window(),
             append_reserve: default_append_reserve(),
         }

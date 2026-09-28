@@ -1482,3 +1482,43 @@ In service a segment rotates when appends fill it, and those appends open the re
 first, so the ordinary path does not meet this. An explicit rotation does: a repair's or a backup's
 (`RepairRotate`) reaching a node before its first write after a restart would have left its WAL
 growing until the next restart.
+
+## 15. Round 14
+
+Round 13 left [what is left](todo.md) with the byte half of a step that outlasts the log, a cut
+written whole before it is sent, O64's spread, #142's deadlines and a handful of rows to confirm.
+This round works through them on builds from `0d24968` on. Its runs are under `target/lab/r14/`.
+Two things were added to the inventory's `replication:` block to stage them:
+`stream_bytes_per_sec`, which throttles every node's snapshot streams, and `hold_bytes` (below).
+
+### The byte retention
+
+[#185](../appendix/resolved/snapshot-outrun-by-purge.md) held a group's snapshot builds while a
+member took a snapshot of it, and said the forced purge that bounds a shard's WAL at
+`retained_bytes` was still not held. Round 14 staged it (`target/lab/r14/tb/`): hyperion rebuilt
+under the mixed bench as in round 13, once at `retained_bytes: 40MiB` with the streams as they
+are, and then as an A/B at the floor of 20 MiB with every node's streams throttled to 2 MiB/s.
+That makes a step take about 50 s, against a retention of about 10 s of a busy group's writes.
+
+| Run | Rebuild | Streamed for moved | Installs per group on hyperion | Lost |
+| --- | --- | --- | --- | --- |
+| 40 MiB, before the fix | 200 s | 1.0 GiB for 876 MiB | 36 once | 0 |
+| 20 MiB and 2 MiB/s, before the fix | 1,068 s | 1.7 GiB for 878 MiB | 35 once, 1 twice | 0 |
+| 20 MiB and 2 MiB/s, the fix | 1,042 s | 1.6 GiB for 878 MiB | 36 once | 0 |
+
+At 40 MiB nothing looped. The byte budget there holds about 19,000 of a busy group's entries,
+19 s of its writes, and a step took 5 s. Throttled, one group installed a snapshot at boundary
+105,068 and another at 137,034 22 s later: its leader had been forced to purge past the first.
+That is [#188](../appendix/resolved/forced-purge-outruns-snapshot.md), fixed: the retention sweep
+passes over a group a member is taking a snapshot of while the shard's sealed WAL is within the
+new `hold_bytes` (1 GiB by default) past its budget, and a forced purge stops at the dropped
+segment's last frame instead of the group's checkpoint.
+
+The throttled arms streamed about twice what they moved in both builds. That is the log: a step
+that takes 50 s feeds its new copy the set's 50 s of writes after the snapshot. And both logged
+`a move's destination has made no progress` every 30 s of a slow transfer (6 and 18 times), while
+the snapshot was still arriving. That was [#189](../appendix/resolved/move-stall-ignores-snapshot-bytes.md),
+fixed: the bytes sent count as progress.
+
+**Verdict: pass on the fix.** Nothing was lost in any run. What a terabyte step still meets is
+`retained_bytes + hold_bytes` and `migration.timeout`, both the operator's to raise.

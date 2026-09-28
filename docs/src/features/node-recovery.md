@@ -183,7 +183,11 @@ fits and, for each group with frames in them that is compacted past the segment 
 purged past it, asks openraft to snapshot at its checkpoint and purge through it
 (`enforce_retention`, `SnapshotStats::forced`, a `WARN` with the lag each time). The entries
 budget is a preference and the bytes budget is a bound. A member behind the forced purge point
-falls to the snapshot path; nothing pins the leader's log for a follower. A hot stream that
+falls to the snapshot path; nothing pins the leader's log for a follower. ~~A group a member is
+taking a snapshot of is forced like any other~~ Since [#188](../appendix/resolved/forced-purge-outruns-snapshot.md)
+a group a member is taking a snapshot of is passed over while the sealed bytes are within
+`hold_bytes` past the budget, and a forced purge stops at the dropped segment's last frame for the
+group rather than at its checkpoint. A hot stream that
 cannot catch up inside its budget installs a snapshot at S, needs S+1 onward, may find those
 purged by then and be sent the next snapshot; every such round is counted and logged, and the
 report's lag is what an operator reads - a backlog that grows is visible as one rather than

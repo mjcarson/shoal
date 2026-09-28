@@ -615,6 +615,22 @@ pub struct ShardNetwork {
 /// never asks for them does not keep the leader's log from being purged for long.
 pub const CATCH_UP_HOLD: Duration = Duration::from_secs(30);
 
+/// Whether the retention budget passes over a group a member is taking a snapshot of
+///
+/// Within `retained_bytes` nothing is forced at all; between it and `retained_bytes` plus
+/// `hold_bytes` every group is forced except a held one; past both, every group is forced
+/// alike, so a snapshot that never ends cannot keep a shard's WAL from being bounded.
+///
+/// # Arguments
+///
+/// * `sealed` - The sealed WAL bytes the shard holds
+/// * `budget` - `retained_bytes`
+/// * `hold` - `hold_bytes`
+#[must_use]
+pub fn retention_spares_held(sealed: u64, budget: u64, hold: u64) -> bool {
+    sealed <= budget.saturating_add(hold)
+}
+
 /// The holds a shard's group leaders put on their snapshot builds while members take snapshots
 ///
 /// A leader purges its log up to its latest snapshot less `retained_entries`, and each snapshot
@@ -625,7 +641,9 @@ pub const CATCH_UP_HOLD: Duration = Duration::from_secs(30);
 /// ([#185](../../../../docs/src/appendix/resolved/snapshot-outrun-by-purge.md)). A hold defers
 /// every unforced build of its group until it expires, so the purge stops where it was while a
 /// member takes a snapshot, and for [`CATCH_UP_HOLD`] after it installs one. A forced build,
-/// which is how `retained_bytes` bounds the disk, is never held.
+/// which is how `retained_bytes` bounds the disk, is never held; the retention sweep passes a
+/// held group over instead while the WAL is within `hold_bytes` of its budget
+/// ([`retention_spares_held`]).
 #[derive(Debug, Default)]
 pub struct SnapshotHolds {
     /// Each held group's holds, by the member taking the snapshot, until when each lasts
@@ -2239,8 +2257,25 @@ impl std::error::Error for LinkFailed {}
 
 #[cfg(test)]
 mod tests {
-    use super::{hop_budget, RateLimiter, SnapshotHolds, HOP_MARGIN};
+    use super::{hop_budget, retention_spares_held, RateLimiter, SnapshotHolds, HOP_MARGIN};
     use std::time::{Duration, Instant};
+
+    /// The retention sweep spares a held group within the allowance and forces it past it
+    ///
+    /// A snapshot in flight keeps its group's entries while the WAL is within `hold_bytes` of
+    /// the budget, and never past it, so a transfer that never ends cannot unbound the disk.
+    #[test]
+    fn retention_spares_held_groups_within_the_allowance() {
+        // within the budget, and within the allowance past it
+        assert!(retention_spares_held(40, 40, 60));
+        assert!(retention_spares_held(100, 40, 60));
+        // past both
+        assert!(!retention_spares_held(101, 40, 60));
+        // no allowance spares nothing past the budget
+        assert!(!retention_spares_held(41, 40, 0));
+        // an allowance that would overflow saturates rather than wrapping
+        assert!(retention_spares_held(u64::MAX, 40, u64::MAX));
+    }
 
     /// A hold lasts until it lapses or is lifted, per member, another member's hold keeps the
     /// group held, and a build it deferred is due once it is over (#185)
