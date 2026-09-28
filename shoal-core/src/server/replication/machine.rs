@@ -31,6 +31,8 @@ use std::rc::Rc;
 use futures::{Stream, StreamExt as _};
 use futures_channel::oneshot;
 use kanal::AsyncSender;
+
+use super::network::SnapshotHolds;
 use lru::LruCache;
 use openraft::storage::{EntryResponder, RaftSnapshotBuilder, RaftStateMachine};
 use openraft::type_config::alias::{SnapshotMetaOf, SnapshotOf, StoredMembershipOf};
@@ -445,6 +447,9 @@ pub struct GroupMachine<D: ShoalDatabase> {
     state: Rc<RefCell<MachineState>>,
     /// The loop's channel
     tx: AsyncSender<ServerMsg<D>>,
+    /// The holds on this shard's groups' snapshot builds while members take snapshots
+    /// ([#185](../../../../docs/src/appendix/resolved/snapshot-outrun-by-purge.md))
+    holds: Rc<SnapshotHolds>,
 }
 
 impl<D: ShoalDatabase> Clone for GroupMachine<D> {
@@ -454,6 +459,7 @@ impl<D: ShoalDatabase> Clone for GroupMachine<D> {
             group: self.group,
             state: self.state.clone(),
             tx: self.tx.clone(),
+            holds: self.holds.clone(),
         }
     }
 }
@@ -466,13 +472,20 @@ impl<D: ShoalDatabase> GroupMachine<D> {
     /// * `group` - The group
     /// * `state` - The state the loop shares
     /// * `tx` - The loop's channel
+    /// * `holds` - The holds on the shard's groups' snapshot builds
     #[must_use]
     pub fn new(
         group: GroupId,
         state: Rc<RefCell<MachineState>>,
         tx: AsyncSender<ServerMsg<D>>,
+        holds: Rc<SnapshotHolds>,
     ) -> Self {
-        GroupMachine { group, state, tx }
+        GroupMachine {
+            group,
+            state,
+            tx,
+            holds,
+        }
     }
 
     /// The state the loop shares
@@ -568,6 +581,12 @@ impl<D: ShoalDatabase> RaftStateMachine<DataConfig> for GroupMachine<D> {
     /// Refusing here is what a checkpoint that is not on disk yet does: a refusal is a snapshot
     /// deferred, where a builder that failed would be a storage error the group stops on.
     async fn try_create_snapshot_builder(&mut self, force: bool) -> Option<Self::SnapshotBuilder> {
+        // a member taking a snapshot of this group holds the builds that would purge the
+        // entries it needs next; a forced build, the disk's bound, is never held
+        // ([#185](../../../../docs/src/appendix/resolved/snapshot-outrun-by-purge.md))
+        if !force && self.holds.held(self.group) {
+            return None;
+        }
         let state = self.state.borrow();
         let moved = state.checkpoint.is_some() && state.checkpoint != state.snapshot_at;
         (force || (moved && state.checkpoint_durable)).then(|| self.clone())

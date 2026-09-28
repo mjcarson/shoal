@@ -53,6 +53,7 @@ $L cluster destroy -i tmdb_cluster.yaml --yes  # between tests that need an empt
 $L cluster rebuild -i tmdb_cluster.yaml hyperion --yes   # a node from its peers, as a new identity (F56)
 $L cluster admin -i tmdb_cluster.yaml "restore-retry <op>"  # a restore's failed groups, again (#155)
 $L cluster admin -i tmdb_cluster.yaml "remove <node> <replacement>"  # again: retries a blocked plan (#177)
+$L cluster ship-backup -i tmdb_cluster.yaml /optane/shoal-backup/<op>  # every file to every host (F59)
 $L cluster add -i target/lab/tmdb-add.yaml hyperion   # a member with no placement slot (section 8)
 $L bench -i target/lab/tmdb-add.yaml --addr 172.16.2.5:12000 …   # through that one member, as the admin
 ```
@@ -91,6 +92,16 @@ the node, with the admission gate switched off by a lab-only environment variabl
 committed), `o64.sh` (fresh clusters loaded whole, the page cache dropped on every host first or
 not), `leadab.sh` (lead weights rolled onto one cluster with `cluster reconfigure`, then the mixed
 bench), and `132/loop.sh` (an ASan build of one test binary run until it aborts).
+
+Round 13's are under `target/lab/r13/`: `142/loop.sh` (the restore test beside five other heavy
+fixture tests at six threads, with child logs, round after round), `slow/ab.sh` (lead weights
+rolled onto a cluster whose hyperion is on the `dm-delay` device, then the bench under a delay),
+`o64/o64.sh` and `o64/batches.py` (fresh loads with the storage figures sampled, and each Zen1
+node's sync sizes averaged per load), `part/flap.sh` (a partition cut and healed on a cycle),
+`unplaced/run.sh` (gets through placed and unplaced members, one in flight and loaded),
+`ship/run.sh` (a backup shipped with `cluster ship-backup`, the cluster destroyed and the backup
+restored), and `tb/run.sh` (a rebuild under load at a shrunk retention, with each member's snapshot
+installs counted from its journal).
 
 The runs that compare builds use `abload.sh` (a fresh cluster, the csv, `verify`, the bench, every
 acknowledged insert back through each member), `fresh-sweep.sh` (the loader past what the cluster

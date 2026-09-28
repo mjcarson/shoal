@@ -1025,7 +1025,12 @@ where
                 machine_state.quarantined = Some(quarantine);
             }
             let state = Rc::new(RefCell::new(machine_state));
-            let machine = GroupMachine::new(spec.id, state.clone(), tx.clone());
+            let machine = GroupMachine::new(
+                spec.id,
+                state.clone(),
+                tx.clone(),
+                replication.network.snapshot_holds(),
+            );
             // a volatile group this shard held in a run that is over starts empty because
             // its memory went, which is not how a new group starts
             let held_before = store.is_volatile() && held_volatile.contains(&spec.id);
@@ -1180,7 +1185,12 @@ where
             group,
             network: replication.network.clone(),
         };
-        let machine = GroupMachine::new(group, state, tx.clone());
+        let machine = GroupMachine::new(
+            group,
+            state,
+            tx.clone(),
+            replication.network.snapshot_holds(),
+        );
         spawn_group_start(
             tx,
             me,
@@ -1255,7 +1265,12 @@ where
             group,
             network: replication.network.clone(),
         };
-        let machine = GroupMachine::new(group, state, tx.clone());
+        let machine = GroupMachine::new(
+            group,
+            state,
+            tx.clone(),
+            replication.network.snapshot_holds(),
+        );
         spawn_group_start(
             tx,
             me,
