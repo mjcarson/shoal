@@ -1707,7 +1707,7 @@ catch-up deadline, the plan was blocked on two tablets, and the bench had been r
 34,270 times (a tenth of the unfixed run's). Nothing was lost: 7,059,401 acknowledged inserts and
 the csv's copies through each member alone, 0 lost, 0 missing, 0 different.
 
-It found one more defect. hyperion refused every Movie set's snapshot from minute 20 on, 820
+It found one more defect. hyperion refused every Movie set's snapshot from 23 minutes in to the end, 820
 times, because a failed move's partial of 1.17 GB was still counted against its 2 GiB bound for
 partials: [#194](../appendix/resolved/abandoned-partial-snapshots.md), fixed, a partial nothing
 came for past `snapshot_timeout` is dropped when the next stream begins.
