@@ -148,9 +148,9 @@ impl StatsModel {
         // cause apart (O64)
         lines.push(String::new());
         lines.push(format!(
-            "{:<12} {:>10} {:>12} {:>9} {:>11} {:>10} {:>12} {:>18} {:>14}",
-            "storage", "syncs/s", "wal/s", "segments", "compacting", "apply lag", "pending",
-            "shard writes/s", "led by shard"
+            "{:<12} {:>10} {:>12} {:>9} {:>8} {:>22} {:>9} {:>11} {:>10} {:>12} {:>18} {:>14}",
+            "storage", "syncs/s", "wal/s", "sync ms", "per sync", "sizes <4K..>1M %", "segments",
+            "compacting", "apply lag", "pending", "shard writes/s", "led by shard"
         ));
         for member in &self.view.members {
             let Some(stats) = live(member) else {
@@ -176,11 +176,25 @@ impl StatsModel {
                 .map(u32::to_string)
                 .collect::<Vec<_>>()
                 .join(",");
+            // the share of the interval's syncs in each size bucket, in percent
+            let sizes = if stats.wal_sync_sizes.is_empty() {
+                "-".to_string()
+            } else {
+                stats
+                    .wal_sync_sizes
+                    .iter()
+                    .map(|share| format!("{:.0}", share * 100.0))
+                    .collect::<Vec<_>>()
+                    .join("/")
+            };
             lines.push(format!(
-                "{:<12} {:>10} {:>12} {:>9} {:>11} {:>10} {:>12} {:>18} {:>14}",
+                "{:<12} {:>10} {:>12} {:>9.2} {:>8.1} {:>22} {:>9} {:>11} {:>10} {:>12} {:>18} {:>14}",
                 short(&member.node.0.to_string()),
                 rate(stats.wal_syncs_per_sec),
                 byte_rate(stats.wal_bytes_per_sec),
+                stats.wal_sync_ms,
+                stats.wal_appends_per_sync,
+                sizes,
                 stats.wal_segments,
                 stats.compacting_segments,
                 stats.apply_lag,

@@ -3219,6 +3219,10 @@ where
             // what the WAL has synced, for a node's sync and byte rates
             wal_syncs: replication.wal.synced_batches(),
             wal_bytes: replication.wal.synced_bytes(),
+            // and what each sync carried and cost, which tell a slow device from small batches
+            wal_appends: replication.wal.synced_appends(),
+            wal_sync_micros: replication.wal.sync_micros(),
+            wal_sync_sizes: replication.wal.sync_sizes().to_vec(),
             compacting: replication
                 .compacting
                 .iter()

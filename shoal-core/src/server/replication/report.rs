@@ -289,6 +289,15 @@ pub struct ShardReplication {
     /// Bytes those batches held
     #[serde(default)]
     pub wal_bytes: u64,
+    /// Appends those batches carried, one per flush a group asked for
+    #[serde(default)]
+    pub wal_appends: u64,
+    /// Microseconds the WAL spent writing and syncing those batches
+    #[serde(default)]
+    pub wal_sync_micros: u64,
+    /// How many of those batches fell in each size bucket (`wal::SYNC_SIZE_BOUNDS`)
+    #[serde(default)]
+    pub wal_sync_sizes: Vec<u64>,
 }
 
 /// What a shard's reads have cost and dropped since it started

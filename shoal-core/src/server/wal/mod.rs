@@ -58,7 +58,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_channel::oneshot;
 use glommio::io::{BufferedFile, Directory, OpenOptions};
@@ -282,6 +282,30 @@ impl Batch {
     }
 }
 
+/// How many size buckets a batch's sync is counted in
+pub const SYNC_SIZE_BUCKETS: usize = 6;
+
+/// The upper bound, exclusive, of every size bucket but the last, in bytes
+///
+/// A batch under a page, under four, sixteen and sixty-four pages, under a megabyte, and the
+/// rest: enough to see whether a WAL syncs batches that stay small or ones that grow
+/// ([O64](../../../../docs/src/appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)).
+pub const SYNC_SIZE_BOUNDS: [usize; SYNC_SIZE_BUCKETS - 1] =
+    [4096, 4 * 4096, 16 * 4096, 64 * 4096, 1024 * 1024];
+
+/// The size bucket a batch of this many bytes is counted in
+///
+/// # Arguments
+///
+/// * `bytes` - The batch's bytes
+#[must_use]
+pub fn sync_size_bucket(bytes: usize) -> usize {
+    SYNC_SIZE_BOUNDS
+        .iter()
+        .position(|bound| bytes < *bound)
+        .unwrap_or(SYNC_SIZE_BUCKETS - 1)
+}
+
 /// The store's state, shared by every handle on this shard
 struct WalInner {
     /// The directory the segments are in
@@ -293,6 +317,12 @@ struct WalInner {
     synced_batches: u64,
     /// How many bytes those batches held
     synced_bytes: u64,
+    /// How many appends those batches carried, one per flush a group asked for
+    synced_appends: u64,
+    /// Microseconds the writer spent writing and syncing those batches
+    sync_micros: u64,
+    /// How many of those batches fell in each size bucket ([`SYNC_SIZE_BOUNDS`])
+    sync_sizes: [u64; SYNC_SIZE_BUCKETS],
     /// Every group's logical log
     groups: HashMap<GroupId, GroupLog>,
     /// The generation appends go to
@@ -1209,7 +1239,8 @@ async fn writer(inner: Rc<RefCell<WalInner>>) {
             }
         }
         let (_, handle) = file.as_ref().expect("opened above");
-        // the write, at the batch's base, and the sync that makes it durable
+        // the write, at the batch's base, and the sync that makes it durable, timed together
+        let started = Instant::now();
         let written = if batch.bytes.is_empty() {
             Ok(())
         } else {
@@ -1224,7 +1255,7 @@ async fn writer(inner: Rc<RefCell<WalInner>>) {
             Err(error) => Err(error),
         };
         match synced {
-            Ok(()) => complete_batch(&inner, batch),
+            Ok(()) => complete_batch(&inner, batch, started.elapsed()),
             Err(error) => fail_batch(&inner, batch, error),
         }
         // a group commit: after a sync, let the appends that arrive for a moment join the next
@@ -1249,7 +1280,8 @@ async fn writer(inner: Rc<RefCell<WalInner>>) {
 ///
 /// * `inner` - The store
 /// * `batch` - The batch
-fn complete_batch(inner: &Rc<RefCell<WalInner>>, batch: Batch) {
+/// * `took` - How long its write and sync took
+fn complete_batch(inner: &Rc<RefCell<WalInner>>, batch: Batch, took: Duration) {
     let mut fire = Vec::new();
     let mut drain = false;
     {
@@ -1273,6 +1305,11 @@ fn complete_batch(inner: &Rc<RefCell<WalInner>>, batch: Batch) {
         }
         guard.synced_batches += 1;
         guard.synced_bytes += batch.bytes.len() as u64;
+        // what the sync carried and what it cost, which tell a slow device from small batches
+        // ([O64](../../../../docs/src/appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab))
+        guard.synced_appends += batch.callbacks.len() as u64 + batch.waiters.len() as u64;
+        guard.sync_micros += u64::try_from(took.as_micros()).unwrap_or(u64::MAX);
+        guard.sync_sizes[sync_size_bucket(batch.bytes.len())] += 1;
         // a stalled group's completions are held, a slowed group's wait their turn, and
         // everybody else's fire now
         for (group, callback) in batch.callbacks {
@@ -1390,6 +1427,9 @@ impl ShardWal {
             commit_delay: Duration::ZERO,
             synced_batches: 0,
             synced_bytes: 0,
+            synced_appends: 0,
+            sync_micros: 0,
+            sync_sizes: [0; SYNC_SIZE_BUCKETS],
             groups: HashMap::new(),
             generation: 1,
             next_offset: 0,
@@ -1725,6 +1765,24 @@ impl ShardWal {
     #[must_use]
     pub fn synced_bytes(&self) -> u64 {
         self.inner.borrow().synced_bytes
+    }
+
+    /// How many appends the synced batches carried
+    #[must_use]
+    pub fn synced_appends(&self) -> u64 {
+        self.inner.borrow().synced_appends
+    }
+
+    /// Microseconds spent writing and syncing the synced batches
+    #[must_use]
+    pub fn sync_micros(&self) -> u64 {
+        self.inner.borrow().sync_micros
+    }
+
+    /// How many synced batches fell in each size bucket ([`SYNC_SIZE_BOUNDS`])
+    #[must_use]
+    pub fn sync_sizes(&self) -> [u64; SYNC_SIZE_BUCKETS] {
+        self.inner.borrow().sync_sizes
     }
 
     /// Wait until every queued batch is durable
