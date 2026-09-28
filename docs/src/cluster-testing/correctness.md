@@ -1267,3 +1267,65 @@ the second before, where round 11's ran at 19% and 22%.
 
 **Verdict: pass.** No second of the partition runs below 44%, and nothing slow or lossy is taken
 for a cut.
+
+## 14. Round 13
+
+Round 12 left [what is left](todo.md) with #142's deadlines and its restore stall, O64's spread,
+two limitations that were never filed (a slow disk's cost and a get through an unplaced member),
+and four scenarios nobody had run. This round works through them on builds from `1578fe7` on,
+which added each member's WAL sync time, appends per sync and sync sizes to `cluster stats`
+([overview](overview.md#reading-a-nodes-figures)). The runs are under `target/lab/r13/`.
+
+### The restore stall, read from the source
+
+[#142](../appendix/known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host)'s
+restore stall left one group at `Pending`, with no driver and no attempts, for five minutes.
+Round 12 named two ways that could happen. Reading the driver found a third, and it is the one the
+record fits. A driver whose progress commit did not land failed the group, and then reported the
+group `Done` to its shard whether or not the `Failed` commit landed either. The shard never drives
+a group it believes done. Fixed as [#183](../appendix/resolved/restore-driver-uncommitted-done.md):
+a driver reports only a phase the control plane took, and a commit that did not land is a
+hand-back.
+
+The stall itself was not caught. `target/lab/r13/142/loop.sh` ran the restore test beside five
+other heavy fixture tests at six threads, with child logs on every child, on the unfixed tree. It
+passed in all six rounds, while the other five failed 16 times between them. Those are #142's
+deadlines: `did not commit the write within the deadline`, `elected no leader within the
+deadline`, and, twice, the lost-response test's `checkpoint never reached 5`.
+
+### A slow disk, again
+
+Round 11 measured a 10 ms delay on every request to hyperion's storage costing a quarter of the
+cluster's rate. It left the cause unfiled and suggested moving leads off the slow node. Before
+building that, this round measured whether it would help, and what the slow disk costs now
+(`target/lab/r13/slow/ab.sh`). Hyperion's storage was the `dm-delay` device over a loop file, the
+csv was loaded, and each arm rolled its lead weights onto the running cluster, waited 90 s, set
+the delay, and ran the mixed bench for 60 s. The `away` arm weighs europa 20, titan 10 and
+hyperion 1, which left hyperion leading 2 of the 36 groups instead of 7.
+
+| Arm | Delay | Operations a second | p99 get | p99 update | Hyperion's WAL: syncs/s, ms a sync |
+| --- | --- | --- | --- | --- | --- |
+| even | 10 ms | 78,197 | 18.9 ms | 199.0 ms | 62, 85.5 |
+| away | 10 ms | 67,527 | 14.0 ms | 213.1 ms | 68, 84.9 |
+| away | 10 ms | 75,225 | 13.0 ms | 204.6 ms | 46, 188.4 |
+| even | 10 ms | 70,043 | 14.4 ms | 204.1 ms | 70, 84.2 |
+| even | none | 78,407 | 27.1 ms | 166.3 ms | 282, 18.9 |
+| even | none | 73,233 | 25.8 ms | 178.8 ms | 222, 23.6 |
+| even | 50 ms | 73,959 | 18.6 ms | 170.0 ms | 20, 314.9 |
+
+The loop file alone makes hyperion's syncs take about 20 ms, three times titan's 7 ms. The 10 ms
+delay makes them 85 ms. That is four times slower again, and it cost about 2%: 74,100 operations a
+second on average against 75,800 with no delay. At 50 ms hyperion fell 341,381 entries behind and
+the other two members carried the writes, still at 74,000 a second. Moving the leads away gained
+nothing (71,400 on average). The load it took off hyperion went to europa, which also runs the
+clients.
+
+Round 11's quarter predates [O76](../appendix/optimizations.md#o76-a-write-through-a-lagging-copy-waits-its-whole-apply-bound),
+which stopped a write through a lagging copy from waiting out that copy's apply bound. With it, a
+member whose disk is slow simply falls behind. A group commits on the other two, as a factor of
+three allows, and the slow copy catches up afterwards.
+
+**Verdict: the limitation is closed by the tree as it is, and a slow-disk lead handoff is not
+built.** What a slow disk still costs is margin. While it lags, a failure of either fast member
+leaves its groups committing at the slow disk's pace, and `cluster stats` shows the lag as `apply
+lag`.

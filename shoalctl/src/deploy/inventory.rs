@@ -311,6 +311,15 @@ pub struct Inventory {
     /// ([O61](../../../docs/src/appendix/optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-small-to-fill-a-page)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wal_commit_delay: Option<String>,
+    /// How much log every group keeps for a slow copy, and how long a snapshot transfer may take;
+    /// the engine's defaults for whatever is absent
+    ///
+    /// Rendered into `cluster.replication`. A move or a rebuild whose step outlasts the
+    /// retention is fed a snapshot the leader has already purged past, so a deployment whose
+    /// sets are large sets these to outlast a step
+    /// ([cluster testing](../../../docs/src/cluster-testing/correctness.md#14-round-13)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replication: Option<ReplicationSpec>,
     /// The nodes `bootstrap` forms the cluster from, in placement order; every node if absent
     ///
     /// The first is the node that mints the cluster. A node listed in `nodes` but not here is
@@ -319,6 +328,21 @@ pub struct Inventory {
     pub bootstrap: Option<Vec<String>>,
     /// Every host this deployment may place a node on
     pub nodes: Vec<NodeSpec>,
+}
+
+/// The replication settings an inventory can name for every node, each as `shoal.yml` writes it
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReplicationSpec {
+    /// How many entries of its log a group keeps behind its checkpoint for a slow copy
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_entries: Option<u64>,
+    /// How many sealed WAL bytes a shard keeps for slow copies before it forces a snapshot and
+    /// a purge (`64MiB`, `1GiB`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_bytes: Option<String>,
+    /// How long one snapshot transfer may take (`5m`, `1h`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_timeout: Option<String>,
 }
 
 /// A node of an inventory with everything the deployment needs resolved
@@ -527,6 +551,26 @@ impl Inventory {
             let (number, unit) = retire_after.split_at(split);
             if number.is_empty() || !matches!(unit, "ms" | "s" | "m" | "h") {
                 bail!("retire_after is {retire_after:?}; write it as 500ms, 15s, 5m or 1h");
+            }
+        }
+        // the replication settings: a snapshot deadline the engine can read, and a byte size
+        if let Some(replication) = &self.replication {
+            if let Some(timeout) = &replication.snapshot_timeout {
+                let split = timeout
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(timeout.len());
+                let (number, unit) = timeout.split_at(split);
+                if number.is_empty() || !matches!(unit, "ms" | "s" | "m" | "h") {
+                    bail!("replication.snapshot_timeout is {timeout:?}; write it as 90s, 5m or 1h");
+                }
+            }
+            if let Some(bytes) = &replication.retained_bytes {
+                if byte_unit::Byte::parse_str(bytes, true).is_err() {
+                    bail!("replication.retained_bytes is {bytes:?}; write it as 64MiB or 1GiB");
+                }
+            }
+            if replication.retained_entries == Some(0) {
+                bail!("replication.retained_entries is 0; a group has to keep some log");
             }
         }
         // the failover base the same way, and at least the 100ms the engine requires
@@ -1059,6 +1103,23 @@ mod tests {
         // at a factor that fits, the same bootstrap set is fine and c is left for add
         inventory.replication_factor = 2;
         inventory.validate().expect("a two node bootstrap at factor two");
+        // the replication block: a byte size and a duration the engine reads, and some log
+        let mut inventory = parse(THREE);
+        inventory.replication = Some(ReplicationSpec {
+            retained_entries: Some(5_000),
+            retained_bytes: Some("16MiB".into()),
+            snapshot_timeout: Some("10m".into()),
+        });
+        inventory.validate().expect("a shrunk retention");
+        let mut bad = inventory.clone();
+        bad.replication.as_mut().unwrap().retained_bytes = Some("lots".into());
+        assert!(bad.validate().unwrap_err().to_string().contains("retained_bytes"));
+        let mut bad = inventory.clone();
+        bad.replication.as_mut().unwrap().snapshot_timeout = Some("10".into());
+        assert!(bad.validate().unwrap_err().to_string().contains("snapshot_timeout"));
+        let mut bad = inventory;
+        bad.replication.as_mut().unwrap().retained_entries = Some(0);
+        assert!(bad.validate().unwrap_err().to_string().contains("retained_entries"));
         // a failover base is a duration of at least the engine's hundred milliseconds
         let mut inventory = parse(THREE);
         inventory.failover = Some("2s".into());
