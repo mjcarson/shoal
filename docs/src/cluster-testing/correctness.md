@@ -1461,6 +1461,9 @@ with the lab's inventory:
 | Acknowledged inserts, each member alone | 687,372, 0 lost |
 
 **Verdict: pass.** The same shape as round 12's runs: 103,900 to 122,600 operations a second.
+The build with #187 (`c7c4474`) was then rolled onto the same cluster with `cluster upgrade`, one
+node at a time, and hyperion alone read back the whole csv (0 missing, 0 different) and all
+687,372 acknowledged inserts.
 
 ### A restarted node that never compacted
 
