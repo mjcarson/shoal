@@ -8034,10 +8034,12 @@ async fn snapshot_install_is_atomic_at_every_crash_point() -> Result<(), Fixture
 /// An installing tablet serves no read, and the rest of the node does (C7 M7)
 ///
 /// Node two is left behind the purge point and comes back with every install paused after its
-/// first record. While a persistent group installs, a `One` read of one of its keys through
-/// node two is `Unavailable`, `GROUPS` shows the group installing and readiness counts it; a
-/// read of the ephemeral table, whose groups installed in memory at once, is served. Once the
-/// pause is over every read is the new value ([F43](../../docs/src/features/node-recovery.md)).
+/// first record. While a persistent group installs, `GROUPS` shows the group installing and
+/// readiness counts it, and a `One` read of one of its keys through node two is ~~`Unavailable`~~
+/// answered by another holder with the value the cluster holds, never node two's old one
+/// ([#184](../../docs/src/appendix/resolved/installing-copy-reads-elsewhere.md)); a read of the
+/// ephemeral table, whose groups installed in memory at once, is served. Once the pause is over
+/// every read is the new value ([F43](../../docs/src/features/node-recovery.md)).
 #[tokio::test(flavor = "multi_thread")]
 async fn installing_tablet_never_serves_partial_state() -> Result<(), FixtureError> {
     use shoal::client::SendOptions;
@@ -8124,17 +8126,24 @@ async fn installing_tablet_never_serves_partial_state() -> Result<(), FixtureErr
         );
         std::thread::sleep(Duration::from_millis(20));
     };
-    // a One read of its key through node two is refused, never the old value
-    let refused = read_note_with(
+    // a One read of its key through node two is sent to a holder that is not installing, and
+    // answers what the cluster holds: never node two's old value, and never refused while
+    // another holder is up ([#184](../../docs/src/appendix/resolved/installing-copy-reads-elsewhere.md))
+    let answered = read_note_with(
         &addr2,
         installing_key,
         &SendOptions::new().read(ReadLevel::One),
     )
     .await;
-    assert_eq!(
-        failure_code(&refused),
-        Some(ErrorCode::Unavailable),
-        "an installing tablet answered: {refused:?}"
+    let expected = read_note(&addr0, installing_key).await.map_err(ok)?;
+    assert!(
+        matches!(&answered, Ok(value) if *value == expected),
+        "an installing tablet's read through its node answered {answered:?}, not {expected:?}"
+    );
+    assert_ne!(
+        expected.as_deref(),
+        Some(format!("old-{installing_key}").as_str()),
+        "the cluster itself still holds the old value"
     );
     // and the ephemeral table, whose groups install in memory and are not held, is served:
     // answered from what node two holds, which is nothing until its own snapshot lands and

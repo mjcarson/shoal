@@ -163,6 +163,18 @@ node, after a strong read's barrier - and every other tablet on the shard is ser
 proposes as ever: the log is not what installs. `GroupReport::installing`, the `Replication`
 admin read's `installing` count and readiness's `data.replication.installing` all say so.
 
+~~A client of the node reading an installing tablet is refused.~~ Since
+[#184](../appendix/resolved/installing-copy-reads-elsewhere.md), the node's shards count the
+tablets installing on it (`InstallingTablets`) and route them to another holder that is up, so a
+client of the node catching up is answered by a member that can. A read a peer forwarded to the
+installing copy is answered `StaleTopology` for its origin to send to another holder. The copy
+itself still refuses what reaches it.
+
+Since [#185](../appendix/resolved/snapshot-outrun-by-purge.md), a leader sending a member a
+snapshot holds its group's unforced snapshot builds from before the cut until 30 s after the
+install (`SnapshotHolds`). Without the hold, a member whose install outlasted the leader's
+`retained_entries` finished behind the purge point and was sent another snapshot.
+
 ### Retention in bytes
 
 `replication.retained_bytes` (a gibibyte, validated at two segments or more) bounds the sealed

@@ -585,6 +585,8 @@ impl<D: ShoalDatabase> RaftStateMachine<DataConfig> for GroupMachine<D> {
         // entries it needs next; a forced build, the disk's bound, is never held
         // ([#185](../../../../docs/src/appendix/resolved/snapshot-outrun-by-purge.md))
         if !force && self.holds.held(self.group) {
+            // built once the hold ends, whether or not anything applies after it
+            self.holds.defer(self.group);
             return None;
         }
         let state = self.state.borrow();

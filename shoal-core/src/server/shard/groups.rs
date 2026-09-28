@@ -3372,6 +3372,36 @@ where
         }
     }
 
+    /// Build the snapshots a member's hold deferred, for every group whose holds are over
+    ///
+    /// openraft asks for a build only as entries apply, so a group that went quiet while a
+    /// member held its builds would otherwise build nothing, and purge nothing, until its next
+    /// write ([#185](../../../../docs/src/appendix/resolved/snapshot-outrun-by-purge.md)).
+    pub(super) fn build_deferred_snapshots(&mut self) {
+        let Some(replication) = self.replication.as_ref() else {
+            return;
+        };
+        // a member that has gone silent holds nothing
+        replication.network.release_silent_holds();
+        // each group whose deferred build is due, on a task of its own: the trigger waits on
+        // the group's core, which the loop never does
+        for group in replication.network.snapshot_holds().due() {
+            let Some(raft) = replication
+                .groups
+                .get(&group)
+                .and_then(|slot| slot.raft.clone())
+            else {
+                continue;
+            };
+            glommio::spawn_local(async move {
+                if let Err(error) = raft.trigger().snapshot().await {
+                    event!(Level::WARN, msg = "a snapshot a hold deferred could not be built", group = %group, %error);
+                }
+            })
+            .detach();
+        }
+    }
+
     /// Hand one group this shard leads to the voter its lead belongs with, if one is due
     ///
     /// That voter is the placement primary unless the members set lead weights

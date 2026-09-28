@@ -68,6 +68,18 @@ installing.
 A forced build is never held. That is how `retained_bytes` bounds a shard's sealed WAL: past it,
 every group in the oldest segment is made to snapshot at its checkpoint and purge through it.
 
+Two more pieces came from the fixture suite, which failed two snapshot tests on the first version:
+
+- **A deferred build is built when its hold ends.** openraft asks for a build only as entries
+  apply, so a group that went quiet during a hold built nothing, and purged nothing, until its next
+  write. The tests stop writing and wait for the purge. `SnapshotHolds::defer` records every build
+  a hold refused, and the shard's tick triggers a build (`build_deferred_snapshots`) for each
+  group whose holds have all ended.
+- **A member that has gone silent holds nothing.** A send to a node killed mid-stream could wait
+  out the whole transfer budget with its hold in place. On every tick the shard lifts the hold of
+  any member whose link has been silent past the hop silence (`release_silent_holds`), which is
+  the judgement a send already makes before it cuts anything.
+
 On the fix, the same run: every one of the 36 groups installed exactly one snapshot, and the
 rebuild took 187 s and streamed 1.0 GiB to move 876 MiB. Both arms read back every acknowledged
 insert (4,715,571 and 4,912,274) and the csv through each member alone, with nothing lost.
@@ -95,8 +107,10 @@ insert (4,715,571 and 4,912,274) and the csv through each member alone, with not
 ## Invariants to uphold
 
 - **A hold defers only unforced builds, and always lapses.** `retained_bytes` must stay a bound
-  on a shard's sealed WAL whatever members are doing, and a hold's end is either an expiry or a
-  lift. Never an event that may not come.
+  on a shard's sealed WAL whatever members are doing, and a hold's end is an expiry, a lift, or
+  its member's silence. Never an event that may not come.
+- **A build a hold deferred is built when the hold ends**, by the shard's tick and not by the
+  next write. A quiet group is otherwise left with a log nothing purges.
 - **A hold is taken before the cut is sent.** A build between the cut and the hold would move the
   purge point past the cut's boundary before anything held it.
 - **The snapshot a leader offers may be older while a hold lasts.** That is safe: every transfer
@@ -114,7 +128,8 @@ insert (4,715,571 and 4,912,274) and the csv through each member alone, with not
 
 | Test | What breaks if the fix is reverted |
 | --- | --- |
-| `shoal-core` `server::replication::network::tests::snapshot_holds_lapse_and_lift` | A hold does not lapse, a lifted member's hold still holds, or another group is held by it |
+| `shoal-core` `server::replication::network::tests::snapshot_holds_lapse_and_lift` | A hold does not lapse, a lifted member's hold still holds, another group is held by it, or a deferred build is not named once its hold is over |
+| `shoal` `cluster_fixture::snapshot_install_is_atomic_at_every_crash_point`, `snapshot_duplicates_and_resume_are_safe` | Without the deferred build or the silent release, a leader holds its log for a node the test killed, and never purges past what that node saw |
 | The lab A/B (`target/lab/r13/tb/ab.sh`) | A group installs snapshot after snapshot during a rebuild at a shrunk retention |
 
 ## Related

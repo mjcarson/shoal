@@ -630,6 +630,11 @@ pub const CATCH_UP_HOLD: Duration = Duration::from_secs(30);
 pub struct SnapshotHolds {
     /// Each held group's holds, by the member taking the snapshot, until when each lasts
     holds: RefCell<HashMap<GroupId, HashMap<ShardAddr, Instant>>>,
+    /// The groups a hold deferred a build of, which are built once the hold ends
+    ///
+    /// openraft asks for a build only as entries apply, so a group that went quiet during a
+    /// hold would otherwise never build, and never purge, again until its next write.
+    deferred: RefCell<std::collections::HashSet<GroupId>>,
 }
 
 impl SnapshotHolds {
@@ -662,6 +667,41 @@ impl SnapshotHolds {
                 holds.remove(&group);
             }
         }
+    }
+
+    /// Every hold, as the group and the member holding it
+    #[must_use]
+    pub fn members(&self) -> Vec<(GroupId, ShardAddr)> {
+        self.holds
+            .borrow()
+            .iter()
+            .flat_map(|(group, members)| members.keys().map(|member| (*group, *member)))
+            .collect()
+    }
+
+    /// Note that a hold deferred a build of a group
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    pub fn defer(&self, group: GroupId) {
+        self.deferred.borrow_mut().insert(group);
+    }
+
+    /// Every group a hold deferred a build of whose holds have all ended, forgotten as it is named
+    #[must_use]
+    pub fn due(&self) -> Vec<GroupId> {
+        // the deferred groups no longer held
+        let deferred: Vec<GroupId> = self.deferred.borrow().iter().copied().collect();
+        let due: Vec<GroupId> = deferred
+            .into_iter()
+            .filter(|group| !self.held(*group))
+            .collect();
+        let mut deferred = self.deferred.borrow_mut();
+        for group in &due {
+            deferred.remove(group);
+        }
+        due
     }
 
     /// Whether any member holds a group's builds now, forgetting the holds that lapsed
@@ -740,6 +780,29 @@ impl ShardNetwork {
     #[must_use]
     pub fn snapshot_holds(&self) -> Rc<SnapshotHolds> {
         self.shared.holds.clone()
+    }
+
+    /// Lift every hold whose member has been silent past the hop silence
+    ///
+    /// A member that answers nothing is not taking a snapshot, whatever the transfer that held
+    /// for it is still waiting on: a send to a node killed mid-stream can wait out the whole
+    /// transfer budget, minutes of a leader's log kept for nobody
+    /// ([#185](../../../../docs/src/appendix/resolved/snapshot-outrun-by-purge.md)).
+    pub fn release_silent_holds(&self) {
+        let silence = self.hop_silence();
+        for (group, member) in self.shared.holds.members() {
+            // the same judgement a snapshot send makes before it cuts anything
+            let silent = self.link(member.node).map_or_else(
+                || self.silent_for(member.node, silence),
+                |link| {
+                    link.silent_for(silence)
+                        .or_else(|| self.silent_for(member.node, silence))
+                },
+            );
+            if silent.is_some() {
+                self.shared.holds.release(group, member);
+            }
+        }
     }
 
     /// The snapshot bytes this shard has sent one member of a group
@@ -2179,8 +2242,8 @@ mod tests {
     use super::{hop_budget, RateLimiter, SnapshotHolds, HOP_MARGIN};
     use std::time::{Duration, Instant};
 
-    /// A hold lasts until it lapses or is lifted, per member, and another member's hold keeps
-    /// the group held (#185)
+    /// A hold lasts until it lapses or is lifted, per member, another member's hold keeps the
+    /// group held, and a build it deferred is due once it is over (#185)
     #[test]
     fn snapshot_holds_lapse_and_lift() {
         use crate::shared::identity::{GroupId, NodeId, ShardAddr};
@@ -2207,6 +2270,12 @@ mod tests {
         assert!(!holds.held(group));
         holds.hold(group, a, Instant::now() + Duration::from_secs(60));
         assert!(!holds.held(GroupId(2)));
+        // a build deferred under a hold is due once the hold is over, and named once
+        holds.defer(group);
+        assert!(holds.due().is_empty());
+        holds.release(group, a);
+        assert_eq!(holds.due(), vec![group]);
+        assert!(holds.due().is_empty());
     }
 
     /// The bucket admits a second's worth at once, then paces at the rate; zero is unlimited

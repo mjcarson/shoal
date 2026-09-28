@@ -3557,6 +3557,9 @@ where
                 self.check_disk();
                 // a lead an election or a stop moved off its placement primary goes back
                 self.balance_leadership();
+                // a snapshot build a member's hold deferred is built once the hold is over
+                // ([#185](../../../docs/src/appendix/resolved/snapshot-outrun-by-purge.md))
+                self.build_deferred_snapshots();
                 // a repair or a move a group this shard now leads is waiting on, and a scrub
                 // that is due; a backup or a restore the same
                 self.drive_repairs();
