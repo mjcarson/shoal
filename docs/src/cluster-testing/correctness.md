@@ -381,7 +381,9 @@ cluster destroyed, a fresh one bootstrapped, and the backup restored into it
 2. **`backup /optane/shoal-backup`:** 36 groups `Written` in 2 min 49 s. Each group's leader
    wrote its file to its own disk: 1.1 GB on each host, 3.2 GB in all.
 3. **Every host's files gathered and copied to every host** with `rsync`, since a restore reads
-   each group's file on that group's new leader. Nothing ships them, as the runbook says.
+   each group's file on that group's new leader. ~~Nothing ships them, as the runbook says.~~
+   Since round 13 `cluster ship-backup` does
+   ([F59](../features/backup-shipping.md), [round 13](#a-backup-shipped-and-restored)).
 4. **`cluster destroy`, `cluster bootstrap`, activate, `restore <dir>/<op>`.**
 
 **First run (t14): a group lost.** The command printed `done` and exited 0. A `verify` against the
@@ -1329,3 +1331,50 @@ three allows, and the slow copy catches up afterwards.
 built.** What a slow disk still costs is margin. While it lags, a failure of either fast member
 leaves its groups committing at the slow disk's pace, and `cluster stats` shows the lag as `apply
 lag`.
+
+### Longer partitions, and a flapping one
+
+[What is left](todo.md) listed partitions longer than a minute and links that flap, since #181 had
+been found at 60 s. All three ran on `4955733`, with the lab's inventory: `target/lab/r11/fault2.sh`
+for the two long cuts and `target/lab/r13/part/flap.sh` for the flapping one. Each cut hyperion's
+peer ports both ways (`partition.sh`) under the mixed bench, and every acknowledged insert was read
+back through each member alone afterwards.
+
+| Scenario | During the cut | After the heal | Acknowledged inserts, each member alone | Restarts |
+| --- | --- | --- | --- | --- |
+| 120 s | about 13,000 refusals a second, `NotLeader` from hyperion to the third of the workers it serves | refusals end in 1 s; 25–55% of the rate for 14 s while hyperion installs 12 snapshots, then the rate before; 4,795 gets refused `Unavailable` meanwhile (#184) | 1,764,524, 0 lost | none |
+| 300 s | about 17,000 refusals a second, the same | refusals end in 1 s; 30–60% of the rate for at least 40 s, the run's end, while hyperion installs 18 snapshots; 12,926 gets refused `Unavailable` meanwhile (#184) | 2,860,083, 0 lost | none |
+| 10 × (10 s cut, 10 s healed) | the same as a single cut, every time | after every heal: one second at 30–70% of the rate with a write p99 near 1 s, then the rate before, with no refusals | 2,694,444, 0 lost | none |
+
+No cycle of the flapping run recovered worse than the first. Link after link was cut and dialled
+again, ten times in 200 s, and nothing accumulated: no backoff that grew, no lead that stuck, no
+refusal after a heal. #181's `TCP_USER_TIMEOUT` is why a heal is a second here.
+
+Both long cuts outlasted the peers' retained log for some groups: hyperion installed 12 snapshots
+after the 120 s cut and 18 after the 300 s one, and the rest of its groups were fed entries. An
+install restarts its group's copy, and a read through hyperion for that group's tablets is refused
+until the install ends, although the two other members hold the tablet.
+That is [#184](../appendix/known-issues.md#184-a-read-through-a-copy-that-is-installing-a-snapshot-is-refused-not-sent-to-another-holder),
+filed from this run. A client that retries `Unavailable` rides it out. The bench does not retry,
+which is why it counts them.
+
+**Verdict: pass.** Nothing acknowledged was lost, no node restarted, and a heal is a second
+whatever came before it. The catch-up after a cut longer than the retention is the slow part,
+and #184 is its visible cost.
+
+### A backup shipped and restored
+
+[Section 4](#back-up-destroy-and-restore) copied a backup's files between hosts by hand, and
+[what is left](todo.md) listed it as a limitation. Round 13 made it a command,
+[F59](../features/backup-shipping.md)'s `cluster ship-backup`, and ran the whole cycle on the
+cluster the partition tests had loaded (`target/lab/r13/ship/run.sh`):
+
+| Step | Result |
+| --- | --- |
+| `backup /optane/shoal-backup` | 36 groups `Written`, 3.6 GB, in 25 s; europa held 22 files, titan 32, hyperion 18 |
+| `ship-backup /optane/shoal-backup/<op>` | 68 s; every host holds all 72 files, owned by `shoal` |
+| `ship-backup` again | 0 transfers |
+| `destroy`, `bootstrap`, activate, `restore` | every group `Restored` and verified, 179 s |
+| csv through each member alone at `One` | 1,187,691 movies and 58,418 keyword partitions, 0 missing, 0 different |
+
+**Verdict: pass.**

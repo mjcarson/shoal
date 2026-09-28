@@ -3091,9 +3091,26 @@ flush their cache on every `fdatasync` (3 ms for one writer, about 900 synced wr
 six). A 2 ms `wal_commit_delay` on those hosts made the slow mode rarer (1 of 8 loads under 42,000
 against 9 of 15), which is what a group commit with two equilibria would show. The mixed bench under it showed no
 latency cost and about 8% more throughput, so it is **applied to the lab's inventory** (a
-deployment setting, not a default). **Status:** the cause of the mode is still not established;
+deployment setting, not a default). ~~**Status:** the cause of the mode is still not established;
 the next step is a batch-size distribution per sync on the Zen1 WALs, to see the two equilibria
-directly.
+directly.~~
+
+**Round 13: there are no two equilibria.** `Stats` now carries each member's WAL sync time,
+appends per sync and a distribution of sync sizes (`NodeStats::wal_sync_ms`,
+`wal_appends_per_sync`, `wal_sync_sizes`). Twelve fresh loads at the 2 ms delay ran at 44,100 to
+58,600 rows a second
+([cluster testing, round 13](../cluster-testing/performance.md#o64-in-round-13-the-batches-seen)).
+In every one of them each Zen1 node's six WAL writers synced 450 to 630 times a second at 7 to
+11 ms a sync, which is the device's limit with six writers and the delay, and the batches were
+mostly 16 to 64 KiB. A slow load and a fast one had the same distribution. The group commit does
+not settle on small batches. It is saturated in every load, and a load's pace is how many appends
+each sync happens to carry. A longer delay does not make that more: 5 ms gave batches of 9 to 13
+appends and 350 to 450 syncs a second, 45,600 rows a second on average against 52,500 for the
+interleaved 2 ms loads. So 2 ms stays. **Status:** the spread between bootstraps is not explained,
+but it is not the WAL's batching. A Zen1 sync costs the same from 16 KiB to 256 KiB, so what would
+move a write-only load on these devices is fewer syncs per device: fewer WAL writers than shards on
+one disk, or one WAL a node. That is a design change, filed in
+[todos](todos.md#fewer-wal-syncs-per-device).
 
 ### O65. Heartbeats to followers that just acknowledged replication
 

@@ -13,7 +13,9 @@
 //! - [`ops`] puts them together and waits on the cluster's own admin frames between steps;
 //! - [`upgrade`] replaces every node's program one node at a time, runbook
 //!   [7](../../docs/src/operations/runbooks.md#7-rolling-upgrade)
-//!   ([F55](../../docs/src/features/cluster-upgrade.md)).
+//!   ([F55](../../docs/src/features/cluster-upgrade.md));
+//! - [`ship`] copies a backup's files to every host, so a restore finds each group's file on its
+//!   new leader ([F59](../../docs/src/features/backup-shipping.md)).
 //!
 //! Nothing here links the engine: the server program is a build of `shoal::server::node::main`
 //! for the same schema this program's client was built for, and it is copied, not compiled.
@@ -26,6 +28,7 @@ pub mod render;
 pub mod state;
 pub mod unit;
 pub mod rebuild;
+pub mod ship;
 pub mod upgrade;
 
 pub use inventory::Inventory;

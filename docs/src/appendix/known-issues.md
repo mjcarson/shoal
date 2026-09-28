@@ -33,7 +33,7 @@ carrying the reasoning and the invariants the fix depends on. Item numbers are s
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at ~~15~~ ~~16~~ 19 and skips 25, 26, 27, 30, 31, 32, 33, 34, 36, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
 76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 120, 121, 122, 123 and 124, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ ~~item 132 is the newest entry and the newest number~~ item 180 is the newest entry, with 182 the newest number, on the resolved page, and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ ~~item 132 is the newest entry and the newest number~~ ~~item 180 is the newest entry, with 182 the newest number, on the resolved page,~~ item 184 is the newest entry and the newest number, with 183 on the resolved page, and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120, 121, 122, 123, 124, 125, 126, 127 and 128 are on the resolved page, with 27, 32 and 36 beside them. **126 never appeared here**:
 it was filed and fixed in one change, from a user's run of `tmdb_dataset` on a host without
 `/opt/shoal` ([Resolved #126](resolved/storage-directory-unusable.md)). **127 never appeared here**
@@ -493,6 +493,29 @@ reading the source. The stall itself was not caught: a loop of the test beside f
 fixture tests at six threads, with child logs (`target/lab/r13/142/loop.sh`), passed it in every
 round on the unfixed tree. It stays filed here until it is either caught or has gone a round of
 suite runs without recurring.
+
+### 184. A read through a copy that is installing a snapshot is refused, not sent to another holder
+
+A member catching up after a partition longer than its peers' log retention is fed snapshots, and
+each install takes its group's copy out of service until it ends (`installing_group`,
+`shoal-core/src/server/shard.rs`, in `execute_query`). A read served on that member is refused
+`Unavailable` for the whole install: *"group … is installing a snapshot; its tablets are not
+readable until it is installed"*. Two other members hold the tablet and could answer it at `One`.
+
+**Established by running it**, in round 13 of the lab testing
+([a longer partition, again](../cluster-testing/correctness.md#longer-partitions-and-a-flapping-one)).
+After hyperion was cut off for 300 s, it installed 18 snapshots, and in the 30 s after the heal
+the bench's gets through it were refused 12,926 times, every one with that message. After a 120 s
+cut it installed 12, and 4,795 gets were refused. No write was refused for it.
+
+A read the origin forwarded to a peer that no longer serves the tablet is already sent once more
+to another holder (`reroute_pending`, [F45](../features/replica-migration.md)). The installing
+refusal is answered straight to the client whether the read came from a peer or from a shard on
+the same node, and the read ring (`TabletMap::read_ring_for`) routes a tablet this node holds to
+its own copy whatever that copy's state, since the ring is built from the map and an install is
+the shard's own state. The fix is to hand such a share back to its coordinator for another
+holder, the way a stale share is. A client that retries `Unavailable` rides it out as things
+stand.
 
 ---
 

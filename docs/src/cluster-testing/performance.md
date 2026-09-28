@@ -386,3 +386,42 @@ Whole loads did not move (four at 2:1:1: 38,300–46,900 rows a second), for the
 `lead_weight: 2` on europa's group and `wal_commit_delay: 2ms` on the Zen1 group. Every figure in
 this chapter before that point ran with even leads and no Zen1 delay, and a comparison with them
 has to say so. A deployment of unequal hosts should set weights.
+
+## O64 in round 13: the batches seen
+
+Round 12 left [O64](../appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)
+with one hypothesis: a group commit with two equilibria, where a batch that starts small stays
+small. `cluster stats` now shows each member's mean sync time, appends per sync and the share of
+syncs in each size bucket, so round 13 loaded fresh clusters and looked
+(`target/lab/r13/o64/o64.sh`, analysed by `batches.py`). The table is each Zen1 node's figures,
+averaged over the stats read every 10 s while the load ran. The first eight loads are
+`tmdb_cluster.yaml` as it stands, with its 2 ms commit delay on the Zen1 group. The second eight
+interleave a 5 ms delay (`d5`) with it.
+
+| Load | Delay | Rows a second | Zen1 syncs a second | ms a sync | Appends a sync | Syncs under 4K / 16K / 64K / 256K / 1M, % |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 2 ms | 49,867 | 511, 492 | 7.4, 8.7 | 5.5, 8.6 | 23/23/37/15/2, 9/18/48/23/2 |
+| 4 | 2 ms | 44,126 | 562, 578 | 7.6, 7.2 | 6.7, 7.3 | 16/21/49/12/1, 12/25/48/14/1 |
+| 5 | 2 ms | 44,859 | 576, 520 | 7.3, 9.1 | 7.0, 8.3 | 16/22/49/12/0, 10/22/48/18/0 |
+| 7 | 2 ms | 52,871 | 615, 469 | 7.2, 11.0 | 8.6, 10.9 | 6/20/59/14/1, 4/16/51/28/2 |
+| d5-1 | 5 ms | 40,834 | 350, 416 | 11.9, 8.3 | 11.5, 8.2 | 8/17/51/22/1, 10/17/52/21/1 |
+| d5-4 | 2 ms | 58,569 | 447, 509 | 10.3, 8.7 | 8.5, 6.1 | 8/17/43/28/4, 12/16/42/28/2 |
+| d5-7 | 5 ms | 47,497 | 386, 386 | 10.0, 10.2 | 13.0, 12.7 | 1/10/59/28/2, 2/11/56/30/1 |
+
+Every load is in the table's shape: the two slowest 2 ms loads and the two fastest have the same
+size distribution, and the syncs are neither fewer nor smaller in a slow one. The 2 ms loads ran
+at 44,100 to 58,600 rows a second (twelve loads, 49,600 on average), and the 5 ms loads at 40,800
+to 48,900 (four, 45,600).
+
+What the figures do show is that the Zen1 WALs are saturated in every load. Six writers syncing
+back to back at 7 to 11 ms, each followed by the 2 ms delay, make 550 to 650 syncs a second at
+most, and the loads ran at 450 to 630. A sync costs the same from 16 KiB to 256 KiB, because it is
+the 970 EVO's cache flush. A longer delay packed more appends into each sync (9 to 13 instead of 6
+to 11) and made fewer syncs, and the product was lower. Europa's Optane, beside them, ran 1,400 to
+1,500 syncs a second at under a millisecond, a third of them under 4 KiB.
+
+**Verdict.** O64's spread is not the WAL's batching, and the two-equilibria hypothesis is
+dropped. The 2 ms delay stays on the lab's inventory. What would make a write-only load faster
+on these devices is fewer syncs per device, filed in
+[todos](../appendix/todos.md#fewer-wal-syncs-per-device). What differs between one bootstrap and
+the next is still not named.
