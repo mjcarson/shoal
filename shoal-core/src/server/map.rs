@@ -1064,6 +1064,45 @@ impl TabletMap {
         Ok(Some(ring))
     }
 
+    /// Point every tablet whose copy on this node is installing at another holder that is up
+    ///
+    /// A copy installing a snapshot answers nothing until the install ends, and two other
+    /// members of its group usually could. A tablet the ring sends to one of this node's own
+    /// shards goes to the holder [`TabletMap::preferred_holder`] names without this node
+    /// instead, as a tablet this node holds no copy of does; with no other holder up, it
+    /// stays, and the copy's refusal says why
+    /// ([#184](../../../docs/src/appendix/resolved/installing-copy-reads-elsewhere.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `ring` - The read ring to change
+    /// * `me` - This node
+    /// * `tablets` - The tablets whose copy here is installing
+    pub fn steer_installing(&self, ring: &mut Ring, me: NodeId, tablets: &[usize]) {
+        for tablet in tablets {
+            // only a tablet served here moves: one already sent elsewhere is where it belongs
+            let owner = usize::from(ring.owner(*tablet));
+            let local = ring
+                .shards
+                .get(owner)
+                .is_some_and(|info| matches!(info.contact, ShardContact::Local(_)));
+            if !local {
+                continue;
+            }
+            // another holder that is up, never this node
+            let Some(holder) = self.preferred_holder(*tablet, Some(me)) else {
+                continue;
+            };
+            let contact = ShardContact::Remote {
+                node: holder.node,
+                shard: holder.shard,
+            };
+            if let Some(index) = ring.index_of(&contact) {
+                ring.set_owner(*tablet, index);
+            }
+        }
+    }
+
     /// The frame a client is handed
     #[must_use]
     pub fn frame(&self) -> TopologyFrame {
@@ -1530,6 +1569,41 @@ mod tests {
         assert!(groups.iter().all(|spec| usize::from(spec.mine) < 4));
         // a hosting for another slot count is refused
         assert!(map.ring_for(me, &Hosting::identity(2)).is_err());
+    }
+
+    /// A tablet whose copy on this node is installing is routed to another holder that is up,
+    /// a tablet not installing stays local, and with no other holder up the installing one
+    /// stays local too, where the copy's refusal names the install (#184)
+    #[test]
+    fn installing_tablets_are_steered_to_another_holder() {
+        let (mut map, nodes) = placed(&[1, 1, 1], 3);
+        let me = nodes[0];
+        // two tablets this node holds, and the keys that hash to them
+        let held: Vec<usize> = (0..TABLET_COUNT).filter(|tablet| map.holds(me, *tablet)).take(2).collect();
+        let key = |tablet: usize| (tablet as u64) << (u64::BITS - super::super::ring::TABLET_BITS);
+        let ring = map
+            .read_ring_for(me, &Hosting::identity(1))
+            .expect("a ring")
+            .expect("placed");
+        assert!(matches!(ring.find_shard(key(held[0])).contact, ShardContact::Local(_)));
+        // the first installing: it goes to the first other holder that is up
+        let mut steered = ring.clone();
+        map.steer_installing(&mut steered, me, &[held[0]]);
+        let other = map.preferred_holder(held[0], Some(me)).expect("another holder");
+        assert_ne!(other.node, me);
+        assert_eq!(
+            steered.find_shard(key(held[0])).contact,
+            ShardContact::Remote { node: other.node, shard: other.shard }
+        );
+        // the second, not installing, is still read here
+        assert!(matches!(steered.find_shard(key(held[1])).contact, ShardContact::Local(_)));
+        // with every other holder down, the installing tablet stays here
+        for node in &nodes[1..] {
+            map.members.get_mut(node).expect("a member").health = MemberHealth::Down;
+        }
+        let mut alone = ring.clone();
+        map.steer_installing(&mut alone, me, &[held[0]]);
+        assert!(matches!(alone.find_shard(key(held[0])).contact, ShardContact::Local(_)));
     }
 
     /// A node holding no copy sends to a holder that is up, a never-sent share finds another

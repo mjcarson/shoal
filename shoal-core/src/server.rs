@@ -22,6 +22,7 @@ pub mod database;
 pub mod errors;
 pub mod export;
 pub mod hosting;
+pub mod installing;
 pub mod map;
 pub mod messages;
 pub mod meta;
@@ -318,6 +319,7 @@ where
                     tls: peer_tls.clone(),
                     transport: cluster.transport.clone(),
                     bind,
+                    installing: std::sync::Arc::default(),
                 })
             }
             _ => None,

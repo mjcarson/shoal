@@ -227,6 +227,10 @@ pub struct PeerSetup {
     pub transport: Transport,
     /// The address the peer listeners bind, `advertise:port`
     pub bind: std::net::SocketAddr,
+    /// The tablets whose copy on this node is installing a snapshot, which every shard of the
+    /// node counts into and routes around
+    /// ([#184](../../../../docs/src/appendix/resolved/installing-copy-reads-elsewhere.md))
+    pub installing: std::sync::Arc<crate::server::installing::InstallingTablets>,
 }
 
 /// What one shard's peer links look like

@@ -1249,13 +1249,12 @@ where
     /// * `tablet` - The tablet nobody here serves
     pub(super) async fn answer_stale(
         &mut self,
-        mut meta: crate::server::messages::QueryMetadata,
+        meta: crate::server::messages::QueryMetadata,
         query: <D::ClientType as QuerySupport>::QueryKinds,
         span: tracing::Span,
         gathered_meta: Option<crate::server::messages::QueryMetadata>,
         tablet: u16,
     ) -> Result<(), ServerError> {
-        use crate::shared::protocol::error::ErrorCode;
         self.read_stats.stale_served += 1;
         let version = self.map.get().version;
         let table = D::ClientType::query_table_name(&query);
@@ -1263,6 +1262,35 @@ where
         let msg = format!(
             "tablet {tablet} of {table} is not served on this node at map version {version}: its copy retired here or was never here"
         );
+        self.answer_elsewhere(meta, query, span, gathered_meta, msg)
+            .await
+    }
+
+    /// Refuse a query this node's copy cannot serve, so a peer that forwarded it asks another holder
+    ///
+    /// A peer's query is refused `StaleTopology` on a frame of its own, which its origin sends
+    /// once to another holder under the same attempt and slot (`reroute_pending`); a client's
+    /// is answered in the query's own variant. A retired copy's tablet is refused this way
+    /// ([F45](../../../../docs/src/features/replica-migration.md)), and so is a tablet whose copy
+    /// here is installing a snapshot, which another holder can answer now
+    /// ([#184](../../../../docs/src/appendix/resolved/installing-copy-reads-elsewhere.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The query's metadata
+    /// * `query` - The query
+    /// * `span` - The span to reply under
+    /// * `gathered_meta` - The metadata to answer with, if this is a share
+    /// * `msg` - Why this node's copy cannot serve it
+    pub(super) async fn answer_elsewhere(
+        &mut self,
+        mut meta: crate::server::messages::QueryMetadata,
+        query: <D::ClientType as QuerySupport>::QueryKinds,
+        span: tracing::Span,
+        gathered_meta: Option<crate::server::messages::QueryMetadata>,
+        msg: String,
+    ) -> Result<(), ServerError> {
+        use crate::shared::protocol::error::ErrorCode;
         if meta.from_peer {
             let payload = crate::shared::protocol::peer::encode_error_payload(
                 ErrorCode::StaleTopology.as_u16(),
