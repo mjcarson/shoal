@@ -101,6 +101,12 @@ pub struct ArchiveMap {
 
 `.../fs/map.rs:312-332`
 
+**The index is compact.** Since [O83](../appendix/optimizations.md#o83-the-partition-index-held-forty-eight-bytes-a-partition)
+`to_archive` is a `PartitionIndex`: each partition's `Slot`, 16 bytes beside its 8 byte key (the
+archive as a number into the index's table of archive ids, a `u32` size, a `u64` offset), where it
+was a 40 byte `ArchiveEntry` repeating the key. Readers are handed an `ArchiveEntry` built from
+the slot, and the saved map holds the slots and the table.
+
 **Chains.** Since [F61](../features/fragmented-partitions.md) the map also holds
 `fragments: RefCell<HashMap<u64, Vec<ArchiveEntry>>>`, the fragments merged over a large sorted
 partition's base since it was last written whole, oldest first, and a `folder`, the table's

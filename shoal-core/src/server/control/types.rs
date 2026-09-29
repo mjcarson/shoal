@@ -1017,6 +1017,12 @@ pub enum RefusalKind {
     Other,
 }
 
+/// The version a verify scrub the scheduler asks for is proposed at: judged against no version
+///
+/// Honoured only by a `Repair` in `Verify` mode, which changes no placement and derives its groups
+/// from the state it applies to ([#195](../../../../docs/src/appendix/resolved/scheduled-scrub-starved.md)).
+pub const ANY_VERSION: u64 = u64::MAX;
+
 /// What applying a command produced
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlResponse {
@@ -1537,8 +1543,16 @@ impl ControlState {
                         );
                     }
                 }
-                if let Some(refusal) = self.check_version(*expected_version) {
-                    return refusal;
+                // a scheduled verify scrub is judged against the state it applies to: it derives its
+                // groups here and changes no placement, so the version guards nothing for it, and
+                // under three leaders' scrubs the version moved faster than a lagging node's map,
+                // which was refused every time ([#195](../../../../docs/src/appendix/resolved/scheduled-scrub-starved.md))
+                let unconditional =
+                    *mode == RepairMode::Verify && *expected_version == ANY_VERSION;
+                if !unconditional {
+                    if let Some(refusal) = self.check_version(*expected_version) {
+                        return refusal;
+                    }
                 }
                 // the groups the placement derives for the table, or the one holding the tablet;
                 // a group whose set is under a move not yet done waits behind it
@@ -3405,6 +3419,7 @@ impl ControlState {
     ///
     /// * `expected` - The version the request was written against
     fn check_version(&self, expected: u64) -> Option<ControlResponse> {
+        // an optimistic check against the view the caller wrote the request from
         if expected == self.topology_version {
             None
         } else {
@@ -4548,6 +4563,62 @@ mod tests {
         assert!(matches!(
             state.apply(&moving(op, state.topology_version, 0, c, d)),
             ControlResponse::Repeated { .. }
+        ));
+    }
+
+    /// A scheduled verify scrub applies whatever the version, and nothing else does
+    ///
+    /// Under three leaders' scheduled scrubs every record and progress report moved the
+    /// version, and a node whose map lagged proposed a stale one every time: its groups were
+    /// never scrubbed ([#195](../../../../docs/src/appendix/resolved/scheduled-scrub-starved.md)).
+    #[test]
+    fn a_scheduled_verify_scrub_is_judged_against_no_version() {
+        use crate::server::control::repair::RepairMode;
+        use super::ANY_VERSION;
+        let (mut state, _, node) = bootstrapped();
+        let (b, c) = (NodeId::mint(), NodeId::mint());
+        for (other, name) in [(b, "b"), (c, "c")] {
+            state.apply(&ControlCommand::Admit(member(other, name)));
+            state.apply(&ControlCommand::ObserveMember(member(other, name)));
+        }
+        let tables = vec![("Row".to_string(), TableId::of("Row"))];
+        let version = state.topology_version;
+        state.apply(&ControlCommand::Initialize {
+            op: Uuid::new_v4(),
+            principal: "alice".to_string(),
+            expected_version: version,
+            nodes: vec![node, b, c],
+            tables: tables.clone(),
+        });
+        let scrub = |mode, expected_version| ControlCommand::Repair {
+            op: Uuid::new_v4(),
+            principal: "scheduler".to_string(),
+            expected_version,
+            table: TableId::of("Row"),
+            tablet: Some(0),
+            mode,
+            source: None,
+            release: false,
+        };
+        // an operator's scrub at a version the cluster has moved past is refused
+        let stale = state.topology_version.saturating_sub(1);
+        assert!(matches!(
+            state.apply(&scrub(RepairMode::Verify, stale)),
+            ControlResponse::Refused { kind: RefusalKind::StaleVersion, .. }
+        ));
+        // the scheduler's, at no version, applies however far the version has moved
+        assert!(matches!(
+            state.apply(&scrub(RepairMode::Verify, ANY_VERSION)),
+            ControlResponse::Applied { .. }
+        ));
+        assert!(matches!(
+            state.apply(&scrub(RepairMode::Verify, ANY_VERSION)),
+            ControlResponse::Applied { .. }
+        ));
+        // a repair, which installs, is still judged against the version it was written from
+        assert!(matches!(
+            state.apply(&scrub(RepairMode::Repair, ANY_VERSION)),
+            ControlResponse::Refused { kind: RefusalKind::StaleVersion, .. }
         ));
     }
 

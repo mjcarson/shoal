@@ -33,7 +33,7 @@ carrying the reasoning and the invariants the fix depends on. Item numbers are s
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at ~~15~~ ~~16~~ 19 and skips 25, 26, 27, 30, 31, 32, 33, 34, 36, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
 76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 120, 121, 122, 123 and 124, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ ~~item 132 is the newest entry and the newest number~~ ~~item 180 is the newest entry, with 182 the newest number, on the resolved page,~~ ~~item 142 is the newest open entry, with 187 the newest number, on the resolved page,~~ item 193 is the newest entry, with 194 the newest number, and 191, 192 and 194 filed and fixed in one change on the resolved page, and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ ~~item 132 is the newest entry and the newest number~~ ~~item 180 is the newest entry, with 182 the newest number, on the resolved page,~~ ~~item 142 is the newest open entry, with 187 the newest number, on the resolved page,~~ item 193 is the newest entry, with 195 the newest number, and 191, 192, 194 and 195 filed and fixed in one change on the resolved page, and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120, 121, 122, 123, 124, 125, 126, 127 and 128 are on the resolved page, with 27, 32 and 36 beside them. **126 never appeared here**:
 it was filed and fixed in one change, from a user's run of `tmdb_dataset` on a host without
 `/opt/shoal` ([Resolved #126](resolved/storage-directory-unusable.md)). **127 never appeared here**
@@ -402,6 +402,14 @@ decides a restarted member's checkpoint is that a sealed WAL segment is handed t
 only once every group on the shard has applied past it. A group on node zero that has not applied
 past a segment would hold every other group's checkpoint on that shard. Filed with its rates so
 that the next change to that path, or the next run, can say more.
+
+**Round 15** ([#142 in round 15](../cluster-testing/correctness.md#142-in-round-15)): the whole
+workspace at six threads passed 1,740 of 1,740, and the loop of the six heaviest tests found two
+shapes in 66 runs. One was [#195](resolved/scheduled-scrub-starved.md), a node's scheduled scrubs
+starved by version churn, fixed; 60 runs on the fix passed. The other, once:
+`migration_resumes_after_each_phase_failure` with one group's move left at `Configured` for 240 s
+after its driver was killed at that phase, its `activate` never answered. Its logs were not kept;
+the loop now keeps them.
 
 The suite run for [Resolved #144](resolved/post-heal-elections.md) at six threads failed
 `lost_response_retry_returns_original_result` again, and also `scheduled_scrub_quarantines_without_an_operator`,

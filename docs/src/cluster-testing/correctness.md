@@ -1719,3 +1719,21 @@ while its set streamed at the throttle.
 **Verdict:** a step that outlasts `retained_bytes + hold_bytes` under writes does not finish, and
 now fails by name without harming the rest of the cluster. `hold_bytes` has to cover a step's
 transfer at the write rate its groups see; at a terabyte a node that is the operator's to size.
+
+### #142 in round 15
+
+[#142](../appendix/known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host) stays
+open "while a full suite run still finds something". Round 15 ran the whole workspace at six
+threads with the lab stopped, on the round's build before O83: **1,740 of 1,740 passed, eight
+ignored**, the first full run to find nothing. Round 14's loop of the six heaviest fixture tests
+(`target/lab/r15/142/`) then found two shapes in 66 runs:
+
+| Loop | Runs | Failed | Shape |
+| --- | --- | --- | --- |
+| `loop.sh`, 5 rounds | 30 | 1 | `migration_resumes_after_each_phase_failure`: after its driver was killed at `configured`, one group's move stayed `Configured` for 240 s while the other reached `Activated`. The logs were not kept |
+| `loop-keep.sh`, until a failure | 36 | 1 | `scheduled_scrub_quarantines_without_an_operator`: one group's scheduled scrubs were refused for a stale version every time, silently: [#195](../appendix/resolved/scheduled-scrub-starved.md), fixed |
+| `loop-keep2.sh`, 10 rounds, on #195's fix | 60 | 0 | |
+
+**Verdict:** #142 stays open for the stuck move, which has not recurred and is not explained; the
+loop now keeps every failing round's child logs (`loop-keep.sh`), so the next one can be read.
+

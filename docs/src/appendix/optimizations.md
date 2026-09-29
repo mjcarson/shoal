@@ -3772,3 +3772,26 @@ load kept the buckets for all of them after eviction. **Applied:** `shrink_if_sp
 (`tables/persistent.rs`) shrinks a table's index to twice what it holds once it holds under a
 quarter of its capacity and more than 4,096 buckets, after every eviction. `Stats` reports each
 node's `table_index_bytes` and `archive_map_bytes` beside its rows, and `cluster stats` shows them.
+
+### O83. The partition index held forty-eight bytes a partition
+
+| | |
+| --- | --- |
+| **Rank** | ~~**B38**~~ **done** — found on the lab in round 15 and applied |
+| **Impact** | Measured on the lab — the archive map was the largest structure a node held at scale: 1.2 GiB for 11.8 million partitions, 4.6 GiB for about 48 million, of an 8 GiB budget it is not counted against |
+| **Difficulty** | M |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | An entry is built from its slot on every lookup, one index into a small table; archive ids are kept in a table that grows by one per archive a map has ever written to, 16 bytes each |
+| **Benchmark** | `archive_map_bytes` on `Stats` at ten copies of the dataset, `target/lab/r15/scale.sh` |
+
+Found by the [distributed cluster testing](../cluster-testing/performance.md#memory-at-ten-times-the-dataset).
+`to_archive` was a `HashMap<u64, ArchiveEntry>`: the key, then an entry that repeated the key,
+named its archive by a 16 byte `Uuid`, and its size as a `usize`, 48 bytes a bucket and a control
+byte, at hashbrown's load factor and its doubling. **Applied:** the map holds a `PartitionIndex`,
+a `HashMap<u64, Slot>` of 16 byte slots (the archive as a `u32` number into the index's own table
+of ids, a `u32` size, a `u64` offset) with the table beside it, in memory and in the saved map, so
+a start loads the compact form and a fold writes it. rkyv's relative pointers bound a record
+below 4 GiB, so the size fits. Every reader still sees an `ArchiveEntry`, built from the slot. A
+loaded map is also taken as rkyv deserialized it, where it used to be copied entry by entry into a
+second map that grew by doubling from a thousand.
