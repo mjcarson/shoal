@@ -318,6 +318,9 @@ pub struct NodeStats {
     /// Bytes the shards' tables' partition indexes hold, which no budget counts
     #[serde(default)]
     pub table_index_bytes: u64,
+    /// Bytes the shards' WAL indexes of their retained entries hold, which no budget counts
+    #[serde(default)]
+    pub wal_index_bytes: u64,
     /// The process's resident memory: the rows, and everything the eviction budget does not
     /// count - the archive maps, the logs' caches, the groups' state and every buffer
     #[serde(default)]
@@ -412,6 +415,7 @@ impl NodeStats {
             memory_budget: 0,
             archive_map_bytes: 0,
             table_index_bytes: 0,
+            wal_index_bytes: 0,
             resident_bytes: 0,
             wal_syncs_per_sec: 0.0,
             wal_bytes_per_sec: 0.0,

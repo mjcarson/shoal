@@ -131,9 +131,9 @@ interval, so a load that changes pace partway through shows where. A node
 that judges its own links slow says so in its journal (`this node's links are slow, and it hands
 its leads on`), as does one under its append reserve (`under the append reserve`).
 
-Since round 15 the memory table also has each member's `archive maps` and `table maps`, the bytes
-the shards' archive map indexes and tables' partition indexes hold, estimated from their
-capacities; neither counts against a budget. What is left of `resident` past the rows and the two
+Since round 15 the memory table also has each member's `archive maps`, `table maps` and `wal
+index`, the bytes the shards' archive map indexes, tables' partition indexes and WAL entry indexes
+hold, estimated from their sizes; none counts against a budget. What is left of `resident` past the rows and the two
 is counted by nothing, and a node whose left over grows under load wants a heap profile:
 
 ```bash

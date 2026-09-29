@@ -47,6 +47,7 @@ whose group it leads.
 | Tablet groups | `groups` | `groups_led` |
 | Tablets | `tablets` | `tablets_led` |
 | Archived partitions | `partitions` | `partitions_led` |
+| Partitions held as a base with fragments ([F61](fragmented-partitions.md)), since round 15 | `chained` | |
 | Archived bytes | `bytes` | `bytes_led` |
 | Write rates (rows and bytes of insert, update and delete, plus misses), 10s/1m/5m | `applied` | `led` |
 | Write counters since the shard started | `applied_total` | `led_total` |
@@ -132,7 +133,12 @@ few bytes it holds. A plan of small sets is paced by that wait, not by its bytes
     partitions as hosted/led, archived bytes and free bytes;
   - an applied-rate table: rows per second of each kind and bytes in, all over 10s/1m/5m, plus
     stream out;
-  - a table summary, when there is more than one table or one was asked for;
+  - each member's memory: its rows against its eviction budget, and since round 15 of the cluster
+    testing its archive maps', tables' and WAL's index bytes (`archive_map_bytes`,
+    `table_index_bytes`, `wal_index_bytes`, estimated from their sizes), which no budget counts,
+    and its resident memory;
+  - a table summary, when there is more than one table or one was asked for, with each table's
+    `chained` partitions over every copy since round 15;
   - the open plans, then the last three finished ones.
 
   `--watch` redraws every two seconds or every N. `--json` prints the leader's answer as it

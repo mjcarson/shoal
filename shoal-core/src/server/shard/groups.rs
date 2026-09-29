@@ -3293,6 +3293,7 @@ where
             memory_bytes: u64::try_from(*self.memory_usage.borrow()).unwrap_or(u64::MAX),
                 archive_map_bytes: u64::try_from(self.table_map.index_bytes()).unwrap_or(u64::MAX),
                 table_index_bytes: u64::try_from(self.tables.index_bytes()).unwrap_or(u64::MAX),
+            wal_index_bytes: u64::try_from(replication.wal.index_bytes()).unwrap_or(u64::MAX),
             memory_budget: u64::try_from(self.memory_budget).unwrap_or(u64::MAX),
             pending_bytes: groups.iter().map(|group| group.pending_bytes).sum(),
             volatile_bytes: replication.volatile.bytes(),

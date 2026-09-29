@@ -96,7 +96,11 @@ An inventory is YAML, one per cluster (`shoalctl/src/deploy/inventory.rs`). It n
   `segment_bytes` ([O79](../appendix/optimizations.md#o79-a-merge-rewrites-every-partition-it-touches-whole)),
   both rendered into `cluster.replication`, and
   `stream_bytes_per_sec`, rendered into `cluster.migration`, which is how the lab stages a step
-  too large to send within the retention;
+  too large to send within the retention. Round 15 added `fragment_min_bytes` and `fragment_max_chain`
+  ([F61](fragmented-partitions.md)), rendered beside the archives' path in
+  `storage.default.filesystem.throughput_sensitive`, and `moves_per_node` and `migration_timeout`,
+  rendered as `cluster.rebalance.moves_per_node` and `cluster.migration.timeout`, which is how the
+  lab rebuilt a node six steps at a time;
 - the hosts, as a name, an ssh target and an address;
 - optionally, the bootstrap set.
 

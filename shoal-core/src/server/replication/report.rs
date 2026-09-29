@@ -303,6 +303,9 @@ pub struct ShardReplication {
     /// Bytes the shard's tables' partition indexes hold, estimated from their capacities
     #[serde(default)]
     pub table_index_bytes: u64,
+    /// Bytes the shard's WAL index of its retained entries holds, estimated
+    #[serde(default)]
+    pub wal_index_bytes: u64,
     /// WAL batches written and synced since the shard started, one `fdatasync` each
     #[serde(default)]
     pub wal_syncs: u64,

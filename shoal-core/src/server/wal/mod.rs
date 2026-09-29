@@ -1602,6 +1602,25 @@ impl ShardWal {
             .map(|slot| slot.loc.generation)
     }
 
+    /// The bytes every group's index of its retained entries holds, estimated
+    ///
+    /// An entry costs its key and slot in a B-tree node, which is about two thirds full, so the
+    /// estimate is half as much again as the pairs. Nothing else counts it, and on a loaded lab node
+    /// a heap profile found 0.54 GiB of it
+    /// ([#196](../../../../docs/src/appendix/known-issues.md#196-the-eviction-budget-undercounts-what-a-node-holds)).
+    #[must_use]
+    pub fn index_bytes(&self) -> usize {
+        let entry = std::mem::size_of::<(u64, Slot)>();
+        let entries: usize = self
+            .inner
+            .borrow()
+            .groups
+            .values()
+            .map(|log| log.index.len())
+            .sum();
+        entries.saturating_mul(entry) / 2 * 3
+    }
+
     /// Every segment, in generation order
     #[must_use]
     pub fn segments(&self) -> Vec<SegmentView> {

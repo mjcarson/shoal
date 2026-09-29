@@ -546,10 +546,12 @@ which nothing counts. [#149](resolved/node-memory-budget.md)'s process bound cat
 evicting rows once the process passes the node's memory, so nothing runs out; but the rows a node
 keeps are fewer than its budget suggests, and the figures do not add up to what it holds.
 
-**Established by the heap profile**, not by a test. What it needs: the row charge to count what a
-row's allocations take (the deserialized struct's heap parts and the allocator's rounding, not
-only `deep_size_of`'s field sizes), the table and LRU entries a row costs, and the WAL index
-reported beside the maps on `Stats`.
+**Established by the heap profile**, not by a test. **Partly done in round 15:** the WAL index is
+reported on `Stats` as `wal_index_bytes` beside the maps, and in a `wal index` column of `cluster
+stats` (`ShardWal::index_bytes`, tested by `the_entry_index_is_counted_as_it_grows`). What is left
+is the row charge: counting what a row's allocations take (the deserialized struct's heap parts
+and the allocator's rounding, not only `deep_size_of`'s field sizes), and the table and LRU entries
+a row costs. That changes what every eviction decides, and wants its own measurement.
 
 ### 193. A rebuild dials the old identity's address twenty times a second
 
