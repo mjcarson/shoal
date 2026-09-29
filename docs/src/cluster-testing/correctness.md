@@ -1755,3 +1755,20 @@ ignored**, the first full run to find nothing. Round 14's loop of the six heavie
 **Verdict:** #142 stays open for the stuck move, which has not recurred and is not explained; the
 loop now keeps every failing round's child logs (`loop-keep.sh`), so the next one can be read.
 
+### Round 15's final build
+
+On the round's last code (`d320328`), with the lab's inventory (`target/lab/r15/confirm.sh`),
+beside [round 14's](#round-14s-final-build):
+
+| | Round 15 | Round 14 |
+| --- | --- | --- |
+| Whole load | 2,193,788 rows in 53.0 s, 41,397 rows a second | 48,491 |
+| A quiet minute under the bench | 0 vote changes; 111,819 operations a second | 0; 122,408 |
+| europa, leading the most groups, killed under the bench | writes it led refused `NotLeader` for 16 s (seconds 16 to 31), the rest served; 577,535 acknowledged inserts, 0 lost through each member alone | titan killed: 17 s; 0 lost |
+| hyperion's peer ports cut for 20 s under the bench | the cut's first second at 53% of the second before; refusals end within two seconds of the heal; 944,577 acknowledged inserts, 0 lost through each member alone | 47%; 0 lost |
+
+**Verdict: pass.** The load's rate is inside the bootstrap-to-bootstrap spread
+[O64](performance.md#o79-in-round-15-fragments) records (41,000 to 56,000 rows a second), and the
+bench's within the lab's run-to-run spread. The failover window and a partition's worst second are
+where round 14 left them.
+
