@@ -3795,3 +3795,8 @@ a start loads the compact form and a fold writes it. rkyv's relative pointers bo
 below 4 GiB, so the size fits. Every reader still sees an `ArchiveEntry`, built from the slot. A
 loaded map is also taken as rkyv deserialized it, where it used to be copied entry by entry into a
 second map that grew by doubling from a thousand.
+
+**Measured on the lab** (`target/lab/r15/scale2/`), a fresh cluster grown to ten copies of the
+dataset, 11.8 million Movie partitions a node: the archive maps held 615 MiB a node, where the same
+data held 1.2 GiB before, and a node started again on it was 1.4 GiB resident, where it was 2.7 to
+2.9 GiB.

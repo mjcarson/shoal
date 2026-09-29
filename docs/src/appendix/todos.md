@@ -2333,12 +2333,16 @@ index on disk, or paging it, would make the budget the rows' again.
 
 Round 15 of the cluster testing measured it at ten copies of the lab's dataset
 ([memory at ten times the dataset](../cluster-testing/performance.md#memory-at-ten-times-the-dataset)):
-1.2 GiB a node for 11.8 million Movie partitions, 2.3 GiB for 23 million, about 100 bytes a
-partition with the table's growth, and `Stats` now reports it as `archive_map_bytes`. It was not
+~~1.2 GiB a node for 11.8 million Movie partitions, 2.3 GiB for 23 million, about 100 bytes a
+partition with the table's growth~~ 615 MiB a node for 11.8 million Movie partitions since
+[O83](optimizations.md#o83-the-partition-index-held-forty-eight-bytes-a-partition) halved an
+entry, about 50 bytes a partition with the table's growth, and `Stats` reports it as
+`archive_map_bytes`. It was not
 what squeezed the rows out that round: that was openraft's channels
 ([#191](resolved/raft-channels-preallocated.md)). With them fixed a Zen1 node at 23 million
-partitions keeps 1.2 GiB of rows under an 8 GiB budget. At a terabyte a node, about fifty times
-that, the map alone would be the budget.
+partitions keeps 1.2 GiB of rows under an 8 GiB budget. At a terabyte a node of this dataset,
+about 75 times the 13 GB those nodes held, the map would be about 45 GiB even at O83's size: the
+map, not the rows, is what an in-memory index cannot keep up with.
 
 ## ~~Re-render a deployment's node files~~
 

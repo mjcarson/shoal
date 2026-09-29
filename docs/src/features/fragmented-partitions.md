@@ -128,8 +128,10 @@ would put apply logic on the read path. The keyword table is written by inserts 
 - A batch with one update rewrites its partition whole, however large.
 - The half-the-base rule consolidates a small base early. A partition just over
   `fragment_min_bytes` gets one or two fragments before it is written whole again.
-- Map files and intent logs from before F61 do not load: the serialized map gained a field. No
-  compatibility was kept (round 15 of the cluster testing destroyed its data first).
+- Map files and intent logs from before F61 do not load: the serialized map gained a field, and
+  [O83](../appendix/optimizations.md#o83-the-partition-index-held-forty-eight-bytes-a-partition)
+  changed its index to compact slots in the same round. No compatibility was kept (round 15 of the
+  cluster testing destroyed its data first).
 
 ## Invariants to uphold
 
