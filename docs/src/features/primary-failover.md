@@ -221,11 +221,15 @@ the case a retry within the budget was filed for; a share that was written and n
 is a timeout, and re-sending it after the deadline would be a second read for a caller that
 already got an error.
 
-**A shorter lease.** `election_timeout_max` is the lease, and it is twice the base: a follower
+~~**A shorter lease.** `election_timeout_max` is the lease, and it is twice the base: a follower
 refuses every vote until the leader it last heard from has been silent that long, so a failover
 at a base of five seconds completes between ten and fifteen. A lease of the base alone would
 elect faster and flap under a slow heartbeat. The base is the operator's knob and the fixture
-runs at one second; the arm runs at the default and shows what the default costs.
+runs at one second; the arm runs at the default and shows what the default costs.~~ Round 16 of
+the cluster testing took the shorter lease ([F62](failover-window.md)): the arithmetic here was
+wrong (the lab measured three to four bases, not two to three), and a lease of the base is ten
+heartbeats, which is Raft's own margin; what the lab and the loaded fixture loop showed at it is
+on F62's page.
 
 **Refusing to queue on a link in backoff.** It would answer a hop at once, and it would also mean
 a link nobody could queue on never redialled, since a dial is what a queued frame asks for. The
@@ -236,10 +240,12 @@ driver is in process with node zero, as every cluster arm's is, and the record s
 
 ## Limitations
 
-- **Failover takes two to three times the base.** The follower lease is `election_timeout_max`,
+- ~~**Failover takes two to three times the base.** The follower lease is `election_timeout_max`,
   twice the base, and a randomized election follows it; the fixture at one second fails over in
-  two to three, the default of five in ten to fifteen. The arm's outage number is the policy's
-  before it is the code's.
+  two to three, the default of five in ten to fifteen.~~ It took three to four, since the
+  randomized timeout runs after the lease and not beside it; since [F62](failover-window.md) the
+  lease is the base and the window one and a half to two bases. The arm's outage number is the
+  policy's before it is the code's.
 - **A returning leader waits out its own lease.** A killed leader restarted before its lease
   lapses ~~asks for its old term back and is refused by the followers' lease of it~~ does not
   stand for one lease length, since the followers' lease of it would refuse it; its groups are

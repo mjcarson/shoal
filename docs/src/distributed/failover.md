@@ -53,21 +53,27 @@ that a write may be attempted; no read is ever served on it.
 flowchart LR
     t0["t = 0<br/>leader A killed<br/>(heartbeats were every base/10)"]
     t1["t under 100 ms<br/>writes routed to A: link down,<br/>NotSent -> NotLeader; A's third refused,<br/>the rest served"]
-    t2["t = 2 x base<br/>the follower lease ends:<br/>B and C refused every vote until now"]
-    t3["t = 2 x base + [base, 2 x base)<br/>a randomized timeout elects B or C"]
-    t4["every write served through the new leader;<br/>A returning before 2 x base is refused its old term"]
+    t2["t = base<br/>the follower lease ends:<br/>B and C refused every vote until now"]
+    t3["t = base + [base/2, base)<br/>a randomized timeout elects B or C"]
+    t4["every write served through the new leader;<br/>A returning before the base is refused its old term"]
     t0 --> t1 --> t2 --> t3 --> t4
 ```
 
 A follower refuses every vote for `election_timeout_max` after it last heard from its leader,
-then a randomized timeout between the base and twice it follows, so a dead leader is replaced
-between two and three times the base later: two to three seconds at the fixture's one second,
-ten to fifteen at the default five. A killed leader that returns inside that lease would be
-refused its own term by the same rule, so it waits the lease out without standing, and a write
-that hops to it meanwhile is refused `NotLeader` at once
+and stands itself only once that lease *and* a randomized timeout drawn from
+`[election_timeout_min, election_timeout_max)` have both passed, so a dead leader is replaced
+within `[max + min, 2 × max)` of its last heartbeat. ~~The pair was the base and twice it, so
+between two and three times the base later~~ - the lease added to the timeout's lower bound
+only; the lab measured three to four, 15 to 20 seconds at the default. Since
+[F62](../features/failover-window.md) the lease is the base itself and the timeout half a base
+to a whole one: one and a half to two bases, one and a half to two seconds at the fixture's
+second, seven and a half to ten at the default five. A killed leader that returns inside that
+lease would be refused its own term by the same rule, so it waits the lease out without
+standing, and a write that hops to it meanwhile is refused `NotLeader` at once
 ([Resolved #103](../appendix/resolved/returning-leader.md)).
 Tuning the base moves detection and contention, never safety. The design's objective of "base
-plus two seconds" is not met as set, and the milestones page says so.
+plus two seconds" is withdrawn rather than met: with the lease tied to `max` the window is at
+least `max + min`, and a lease of ten heartbeats is what F62 keeps instead.
 
 A write refused at a lapsed lease, or whose hop the link never wrote, is `NotLeader`; one the
 link wrote and never answered, or that a leader could not commit within its deadline, is
@@ -196,21 +202,22 @@ node; a hinted handoff store; an external failover service.
 
 ## What it costs
 
-An election pauses the affected tablets for two to three times the base. A snapshot copies
+An election pauses the affected tablets for ~~two to three~~ one and a half to two times the base
+([F62](../features/failover-window.md)). A snapshot copies
 the archives into one file ([O52](../appendix/optimizations.md#o52-a-snapshot-copies-every-record-of-the-archives-into-one-file)),
 and a transfer costs disk on both sides and bulk-lane bytes under the node's token bucket.
 Recovery time is never attributed to one timer alone.
 
 ## Limitations
 
-A failover completes in ~~two to three times~~ three to four times the base, not base plus two seconds: on the physical lab at 1, 2 and 5 seconds, writes to a killed leader's groups were refused for about 4, 8 and 16 seconds ([cluster testing](../cluster-testing/performance.md#failover-time-against-primary_failover_after)). A returning
+A failover completes in ~~two to three times~~ ~~three to four times~~ one and a half to two times the base since [F62](../features/failover-window.md), not base plus two seconds: on the physical lab at 1, 2 and 5 seconds, writes to a killed leader's groups were refused for about 4, 8 and 16 seconds before it ([cluster testing](../cluster-testing/performance.md#failover-time-against-primary_failover_after)), and for what [round 16](../cluster-testing/correctness.md#the-failover-window) measured after. A returning
 leader waits out its old lease. ~~Leadership is never moved.~~ A lead is handed back to its group's placement primary once that member is up and every voter is caught up ([O63](../appendix/optimizations.md#o63-leadership-never-returns-to-a-groups-placement-primary)), and a planned stop hands its leads off first ([Resolved #139](../appendix/resolved/leadership-handoff-on-stop.md)). A snapshot is per group, so a
 returning node installs every tablet its replica set shares. A dead leader's stream may still
 be installed beside a new leader's (two generations in flight). A resume survives a lane cut,
 not a receiver restart. Installs run concurrently through one compactor. ~~The kill arm's client
 fails a steady share of its operations for as long as node one is dead~~ - it fails every
-write to a dead leader's group `NotLeader` at once until the lease and an election, three to
-four times the base, which the arm's records now say by code
+write to a dead leader's group `NotLeader` at once until the lease and an election, ~~three to
+four~~ one and a half to two times the base, which the arm's records now say by code
 ([Resolved #110](../appendix/resolved/dead-primary-write-failures.md)). See [C15](open-issues.md).
 
 ## Invariants to uphold

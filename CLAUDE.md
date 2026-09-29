@@ -44,6 +44,11 @@ cargo test -p shoal --features otel --test trace_propagation
 # and the same property on a program somebody runs
 cargo build -p shoalctl
 
+# the TMDB node on jemalloc with sampled heap profiling built in (round 15 of the cluster testing):
+# built by nobody else, and what names a node's memory when `cluster stats` cannot. Dumps land in
+# /var/tmp/shoal-heap.*; target/lab/r15/prof/heap.py reads them against the binary
+cargo check -p tmdb-dataset --features jemalloc-prof
+
 # the two feature-gated shoal-bench binaries are built by nobody else, and the one test behind a
 # feature that starts a server runs against a scratch copy of shoal.yml (item 97)
 cargo check -p shoal-bench --features stage-profile,hotpath --all-targets

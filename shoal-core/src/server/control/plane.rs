@@ -51,7 +51,7 @@ use super::backup::BackupRecord;
 use super::cores::ControlPlacement;
 use super::detector::Detector;
 use super::listener::{control_acceptor, err, ok, Inbound};
-use super::network::{PeerNetwork, RpcFailure};
+use super::network::{ControlLinksView, PeerNetwork, RpcFailure};
 use super::plan::{PlanOutcome, PlanPhase, PlanRecord, PlanUpdate, StepState};
 use super::planner::{self, NodeInput, PlanInput, SetInput};
 use super::repair::{QuarantinedCopy, RepairMode};
@@ -241,6 +241,8 @@ pub enum ControlRequest {
         /// Where to send how long it took
         reply: mpsc::Sender<Result<Duration, String>>,
     },
+    /// Every control link this node holds, as seen from outside
+    Links(mpsc::Sender<ControlLinksView>),
     /// Send a peer a vote for a low term and report its answer
     VoteProbe {
         /// The peer
@@ -867,6 +869,15 @@ impl ControlHandle {
     /// Fails if the control thread is gone.
     pub fn topology(&self) -> Result<TopologyView, ServerError> {
         self.ask(ControlRequest::Topology, "a topology request")
+    }
+
+    /// Every control link this node holds
+    ///
+    /// # Errors
+    ///
+    /// Fails if the control thread is gone.
+    pub fn links(&self) -> Result<ControlLinksView, ServerError> {
+        self.ask(ControlRequest::Links, "a link view request")
     }
 
     /// Where this node stands
@@ -1834,6 +1845,9 @@ impl Core {
         match request {
             ControlRequest::Topology(reply) => {
                 let _ = reply.send(self.topology());
+            }
+            ControlRequest::Links(reply) => {
+                let _ = reply.send(self.network.views());
             }
             ControlRequest::Readiness(reply) => {
                 let _ = reply.send(self.readiness());
@@ -3489,10 +3503,12 @@ impl Core {
         for (node, member) in &state.members {
             // a removed member is gone, and so is a tombstoned one still draining: an identity
             // refused at every door is never going to answer
-            if *node == self.node
-                || member.phase == MemberPhase::Removed
-                || state.tombstones.contains_key(node)
-            {
+            if *node == self.node {
+                continue;
+            }
+            if member.phase == MemberPhase::Removed || state.tombstones.contains_key(node) {
+                // and its links are let go, so nothing is kept for an identity nothing dials
+                self.network.forget_node(*node);
                 continue;
             }
             let record = member.record.clone();

@@ -465,7 +465,7 @@ cluster:
     inflight_bytes: "64MiB"       # forwarded bytes one accepted connection may hold unanswered
     forward_timeout: "5s"         # after this a forwarded query is answered OutcomeUnknown
     reconnect_min: "100ms"        # the first backoff after a lost link, with a quarter of jitter; a link a frame wants never waits longer than this to redial (F42)
-    reconnect_max: "5s"           # the longest
+    reconnect_max: "5s"           # the longest, except after a verdict on who the peer is, which backs off to a minute (#172, #193)
     handshake_timeout: "10s"      # to dial and finish the hello
     unacked_timeout: "5s"         # sent data unacknowledged this long aborts a peer connection, which is dialled again (TCP_USER_TIMEOUT, #181); 0 is the kernel's default
     ping_interval: "1s"           # how often a node pings each member over its control lane
@@ -569,12 +569,15 @@ since the strong read level is `Quorum` and nothing waits on every replica. A ta
 is versioned control state set by the `SetTableReadPolicy` admin operation - `one`, `quorum`,
 or nothing to clear it - and never a YAML setting, so every coordinator resolves a table the
 same way. `primary_failover_after` is the base the
-groups' timers derive from: a heartbeat every tenth of it, an election between one and two of
-it, and under 100 ms it is refused. Since [F42](../features/primary-failover.md) every node's
+groups' timers derive from: a heartbeat every tenth of it, a follower's lease of its leader of
+the base itself, an election between half of it and the whole, and under 100 ms it is refused.
+Since [F42](../features/primary-failover.md) every node's
 groups read it from the map rather than from their own file, and what it makes the failover
-window is worth knowing before tuning it: a follower refuses every vote for twice the base
-after it last heard from its leader, so a dead leader is replaced between two and three times
-the base later - ten to fifteen seconds at the default - and a leader that returns sooner is
+window is worth knowing before tuning it: a follower refuses every vote for the base after it
+last heard from its leader, and stands itself after the lease and a randomized timeout, so a
+dead leader is replaced between one and a half and two times the base later - seven and a half
+to ten seconds at the default, where it was ~~two to three~~ three to four times the base before
+[F62](../features/failover-window.md) - and a leader that returns sooner is
 refused its old term until then ([C7](../distributed/failover.md#the-window-and-what-a-client-sees)).
 `admins` names the principals an
 authenticated client connection may change the cluster as; a mutation from anybody else is

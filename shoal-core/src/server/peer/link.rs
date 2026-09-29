@@ -598,6 +598,14 @@ impl Future for Wanted {
     }
 }
 
+/// The longest a link waits between dials that ended in a verdict on who the peer is
+///
+/// `reconnect_max` bounds the wait for a peer that may come back; a verdict is the peer's word
+/// that it is somebody else, which the next dial hears again. It is not unbounded, since a
+/// certificate can be rotated and a member can be added back where another was
+/// ([Resolved #193](../../../../docs/src/appendix/resolved/rebuild-redial-thrash.md)).
+pub const VERDICT_BACKOFF_MAX: Duration = Duration::from_secs(60);
+
 /// Whether a dial failed on a verdict about who the peer is, which no queued frame changes
 ///
 /// The certificate named another node, the hello named another identity, or the peer refused
@@ -696,8 +704,19 @@ async fn run<F: Fn(LinkEvent) + 'static>(
                 // ([Resolved #172](../../../../docs/src/appendix/resolved/identity-refusal-redials.md))
                 let wait = jittered(backoff, attempt, settings.local.borrow().incarnation);
                 attempt = attempt.wrapping_add(1);
-                backoff = (backoff * 2).min(settings.reconnect_max);
-                let floor = if is_identity_verdict(&error) {
+                // a verdict is not going to change, so its backoff grows well past the
+                // ceiling a peer that may come back is dialled at: a rebuilt node's old
+                // identity is a member for the whole of its rebuild, and every shard of every
+                // peer dialled it every `reconnect_max` for the length of it
+                // ([Resolved #193](../../../../docs/src/appendix/resolved/rebuild-redial-thrash.md))
+                let verdict = is_identity_verdict(&error);
+                let ceiling = if verdict {
+                    settings.reconnect_max.max(VERDICT_BACKOFF_MAX)
+                } else {
+                    settings.reconnect_max
+                };
+                backoff = (backoff * 2).min(ceiling);
+                let floor = if verdict {
                     wait
                 } else {
                     wait.min(settings.reconnect_min)

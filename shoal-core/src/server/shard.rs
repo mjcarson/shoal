@@ -4066,6 +4066,20 @@ where
         Ok(())
     }
 
+    /// What this shard's eviction list holds, estimated from its length
+    ///
+    /// An entry is a boxed node of the key, the size and two links, in the allocator's 48 byte
+    /// class, and a bucket of the key's reference and the node's pointer in a table seven
+    /// eighths full. Held beside the rows, counted by no budget, and reported so a node's
+    /// figures add up ([Resolved #196](../../../docs/src/appendix/resolved/row-charge-undercount.md)).
+    pub(super) fn lru_bytes(&self) -> usize {
+        // the boxed entry, rounded to its size class
+        let node = 48;
+        // the bucket and its control byte, at the table's load factor
+        let bucket = (std::mem::size_of::<(&(D::TableNames, u64), usize)>() + 1) * 8 / 7;
+        self.lru.borrow().len() * (node + bucket)
+    }
+
     /// Whether this shard should evict: its rows past its own budget, or the process past the node's
     ///
     /// The shard's counter is an estimate of its rows alone, and on the lab it was a hundred

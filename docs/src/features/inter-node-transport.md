@@ -29,7 +29,8 @@ and pings and is owned by the control thread. A lane is a socket of its own beca
 one stream cannot preempt bytes already written to it, which is C2's reason and the one a stalled
 snapshot proves below. A link is owned by one task on one executor and is `Rc`, never `Send`; it
 dials lazily on its first frame, backs off from `reconnect_min` to `reconnect_max` with a quarter
-of jitter, and reports itself as `idle`, `connecting`, `up` or `backoff` with its counters -
+of jitter (to a minute after a verdict on who the peer is, since [Resolved #193](../appendix/resolved/rebuild-redial-thrash.md)),
+and reports itself as `idle`, `connecting`, `up` or `backoff` with its counters -
 frames and bytes sent, frames shed at the bound, frames dropped when it went down, dials, bytes
 queued - through `ShoalPool::transport()`.
 

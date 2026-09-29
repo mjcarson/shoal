@@ -2094,12 +2094,13 @@ where
             ArchivedUnsortedIntents::Insert(archived) => {
                 // deserialize this row
                 let row: T = RkyvSupport::deserialize(archived)?;
-                // get the size of our row
-                let size = row.deep_size_of();
                 // get the partition key for this row
                 let key = row.get_partition_key();
                 // build a new partition for this row
                 let partition = UnsortedPartition::new(key, row);
+                // charge what the partition holds, which is what an eviction releases: the
+                // row and the partition's own fields, never the row alone (item 196)
+                let size = partition.size;
                 // insert this new partition
                 match partitions.insert(
                     key,

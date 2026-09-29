@@ -127,8 +127,8 @@ impl StatsModel {
         // every member's memory: the rows against the eviction budget, and the whole process
         lines.push(String::new());
         lines.push(format!(
-            "{:<12} {:>12} {:>12} {:>12} {:>12} {:>12}",
-            "memory", "rows", "budget", "archive maps", "table maps", "resident"
+            "{:<12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
+            "memory", "rows", "budget", "archive maps", "table maps", "wal index", "lru", "resident"
         ));
         for member in &self.view.members {
             let Some(stats) = live(member) else {
@@ -137,12 +137,14 @@ impl StatsModel {
             };
             // the indexes are held beside the rows, and no budget counts them
             lines.push(format!(
-                "{:<12} {:>12} {:>12} {:>12} {:>12} {:>12}",
+                "{:<12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
                 short(&member.node.0.to_string()),
                 bytes(stats.memory_bytes),
                 bytes(stats.memory_budget),
                 bytes(stats.archive_map_bytes),
                 bytes(stats.table_index_bytes),
+                bytes(stats.wal_index_bytes),
+                bytes(stats.lru_bytes),
                 bytes(stats.resident_bytes),
             ));
         }

@@ -1429,6 +1429,52 @@ impl Cluster {
         self.restart_with(id, NodeKind::Server, Some(staged))
     }
 
+    /// Kill a node, wipe its directory and start it again as a new identity at the same ports
+    ///
+    /// What `cluster rebuild` does to a host ([F56](../../../docs/src/features/cluster-rebuild.md)):
+    /// the old identity stays a member, down, until an operator removes it with the new one as
+    /// its replacement, and every peer dials the old identity's address, where the new one now
+    /// answers. Returns the new identity. The cluster's `node_ids` keep naming the old one, so a
+    /// test that needs the new one keeps what this returns.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Its id
+    pub fn rebuild_identity(&mut self, id: usize) -> Result<String, FixtureError> {
+        use shoal::server::StorageMeta;
+        use shoal::shared::identity::NodeId;
+        if let Some(node) = self.nodes[id].as_mut() {
+            node.kill()?;
+        }
+        // the directory emptied, as the rebuild empties a host's storage root
+        let dir = self._dirs[id].path().to_path_buf();
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path)?;
+            } else {
+                std::fs::remove_file(&path)?;
+            }
+        }
+        // a joining marker naming the new identity, with the old one's shard count
+        let minted = NodeId::mint();
+        let shards = self.staged[id]
+            .slots
+            .unwrap_or_else(|| self.plan.nodes[id].1.data.len().max(1));
+        std::fs::write(
+            StorageMeta::path(&dir),
+            serde_json::to_vec_pretty(&StorageMeta::joining(shards, minted))
+                .expect("a marker serializes"),
+        )?;
+        // staged as a joiner through node zero, at the ports the old identity bound
+        let mut staged = self.staged[id].clone();
+        staged.node = minted.to_string();
+        staged.bootstrap = false;
+        staged.seeds = vec![format!("127.0.0.1:{}", self.staged[0].control_port)];
+        self.restart_with(id, NodeKind::Server, Some(staged))?;
+        Ok(minted.to_string())
+    }
+
     /// Start a node the builder deferred
     ///
     /// # Arguments

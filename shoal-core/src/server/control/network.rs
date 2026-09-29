@@ -256,10 +256,31 @@ impl ControlLink {
     }
 }
 
+/// A node's control links from outside: the ones it holds, and how many it has made in all
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ControlLinksView {
+    /// Links made since the node started, replaced ones included
+    pub made: u64,
+    /// The links held now
+    pub links: Vec<peer::LinkView>,
+}
+
 /// The state every `ControlPeer` shares
 struct Shared {
-    /// One link per peer, opened on first use, keyed by where it dials
-    links: RefCell<HashMap<String, Rc<ControlLink>>>,
+    /// One link per peer, opened on first use, keyed by where it dials and who it expects
+    ///
+    /// Keyed by the identity as well as the address: a rebuilt node answers its old identity's
+    /// address, and the old identity is a member until its removal commits, so both are dialled
+    /// there. Keyed by the address alone, each heartbeat to one replaced the link to the other
+    /// with a fresh one whose backoff started over, twenty dials a second to each
+    /// ([Resolved #193](../../../../docs/src/appendix/resolved/rebuild-redial-thrash.md)).
+    links: RefCell<HashMap<(String, NodeId), Rc<ControlLink>>>,
+    /// How many links have been made since the node started, replaced ones included
+    ///
+    /// A link that is replaced takes its counters with it, so this is the one figure that
+    /// shows a link being thrown away and made again
+    /// ([Resolved #193](../../../../docs/src/appendix/resolved/rebuild-redial-thrash.md)).
+    made: Cell<u64>,
     /// What this node says about itself
     local: Rc<RefCell<Local>>,
     /// Where particular members are dialled instead of where they advertise
@@ -309,6 +330,7 @@ impl PeerNetwork {
         PeerNetwork {
             shared: Rc::new(Shared {
                 links: RefCell::new(HashMap::new()),
+                made: Cell::new(0),
                 local,
                 dial,
                 tls,
@@ -418,8 +440,9 @@ impl PeerNetwork {
     ///
     /// * `entry` - Where to dial and who to expect
     fn link(&self, entry: &PeerAddr) -> Rc<ControlLink> {
-        if let Some(link) = self.shared.links.borrow().get(&entry.control) {
-            // the same address dialled for another node is a member that was replaced there
+        let key = (entry.control.clone(), entry.node_or_nil());
+        if let Some(link) = self.shared.links.borrow().get(&key) {
+            // the same identity at the same control address, unless its data address moved
             if *link.link.target() == *entry {
                 return link.clone();
             }
@@ -432,10 +455,8 @@ impl PeerNetwork {
             self.shared.wires.clone(),
             self.shared.removed.clone(),
         ));
-        self.shared
-            .links
-            .borrow_mut()
-            .insert(entry.control.clone(), link.clone());
+        self.shared.links.borrow_mut().insert(key, link.clone());
+        self.shared.made.set(self.shared.made.get() + 1);
         link
     }
 
@@ -459,13 +480,35 @@ impl PeerNetwork {
         self.shared.local.borrow().node
     }
 
-    /// Drop the link to an address, so the next RPC dials afresh
+    /// Drop every link to an identity that is gone, so nothing is held for it
+    ///
+    /// A removed or tombstoned member is dialled by nobody again: its links would otherwise
+    /// sit in the map, backed off, for the rest of this node's run
+    /// ([Resolved #193](../../../../docs/src/appendix/resolved/rebuild-redial-thrash.md)).
     ///
     /// # Arguments
     ///
-    /// * `control` - The address
-    pub fn forget(&self, control: &str) {
-        self.shared.links.borrow_mut().remove(control);
+    /// * `node` - The identity
+    pub fn forget_node(&self, node: NodeId) {
+        self.shared
+            .links
+            .borrow_mut()
+            .retain(|(_, held), _| *held != node);
+    }
+
+    /// What every control link looks like from outside, and how many have been made in all
+    #[must_use]
+    pub fn views(&self) -> ControlLinksView {
+        ControlLinksView {
+            made: self.shared.made.get(),
+            links: self
+                .shared
+                .links
+                .borrow()
+                .values()
+                .map(|link| link.link.view())
+                .collect(),
+        }
     }
 
     /// How many links are open

@@ -1772,3 +1772,145 @@ beside [round 14's](#round-14s-final-build):
 bench's within the lab's run-to-run spread. The failover window and a partition's worst second are
 where round 14 left them.
 
+## 17. Round 16
+
+Round 15 left [what is left](todo.md) with two open defects of its own (#193, the rebuild's dial
+noise, and #196, the row charge), the failover window as the first limitation on the page, O64
+with "nothing planned", and #142 waiting for its stuck move to recur. This round fixed the two
+defects and measured both on the lab, narrowed the failover window from three to four bases to
+one and a half to two ([F62](../features/failover-window.md)), ruled the hosts' frequency
+governor out of O64 ([performance](performance.md#o64-in-round-16-not-the-governor-either)), and
+ran the loop for #142 again. Nothing in the lab's data was kept: #196 changed what a sorted
+partition's archived size means, and every run here starts from a fresh bootstrap. The runs are
+under `target/lab/r16/`.
+
+### The frequency governor
+
+The first run of the round was O64's, since it changes how every later number reads if it
+names the mode. It did not: ten fresh loads under `schedutil` and `performance` on the Zen1
+hosts spread the same way, with the cores at 3.1 to 3.3 GHz under either
+([performance](performance.md#o64-in-round-16-not-the-governor-either)). The lab stays on
+`schedutil`.
+
+**Verdict: not it.** One more candidate struck.
+
+### A rebuild without the dial noise
+
+Round 15's rebuilds each left about twenty failed dials a second in every journal
+([#193](../appendix/resolved/rebuild-redial-thrash.md)). Read by lane over europa's journal for
+those rebuilds, 22,938 of the 36,479 were on the control lane at exactly one a second per old
+identity between the benches and twenty a second under them, and 13,541 on the replication lane
+at about one a second, all of them `CertificateIdentity` verdicts that
+[#172](../appendix/resolved/identity-refusal-redials.md) already made wait their whole backoff.
+The control lane's links were keyed by address, so each heartbeat to one of the rebuilt node's two
+identities threw the link to the other away, backoff and all - and the link to the live new
+identity with it, twenty times a second. The replication lane's verdicts stopped growing at
+`reconnect_max`, five seconds, and six shards a node made that a dial a second. The fixture test
+written for it made 402 control links in twelve seconds on the unfixed tree and none on the fix.
+
+On the fixed build, a fresh cluster of the lab's inventory loaded whole (53,126 rows a second)
+and hyperion rebuilt under the mixed bench (`target/lab/r16/193/run.sh`, 25 minutes of bench):
+
+| | |
+| --- | --- |
+| Rebuild | 18 sets, 883 MiB moved and 901 MiB streamed in 178 s: 4.9 MiB/s, 7.5 s a step |
+| Snapshot fed, stalled, failed, forced purges | 0, 0, 0, 0 on every node; 18 groups installed once each |
+| Failed dials in europa's journal | 474: 433 refused connections in the minute hyperion was stopped and wiped, at `reconnect_min` as a node that may come back is dialled; 40 verdicts over the rebuild, 7 on the control lane and 33 on the replication lane, 9, 19, 6, 5 and 1 a minute as the backoffs doubled |
+| In titan's | 238: 207 refused connections and 31 verdicts |
+| In hyperion's | 12 verdicts, and 25 refused control handshakes where round 15 counted 9,349 |
+| Bench over 1,500 s | 14,274 gets, 16,052 updates and 5,352 inserts a second; update p99 137 ms; 1,333 `NotLeader` and 8 `Unavailable` for writes hyperion led as it went, 384 connections lost when it stopped |
+| Acknowledged inserts, each member alone | 8,033,268, 0 lost |
+| csv, each member alone at `One` | 1,187,691 movies and 58,418 keyword partitions: 0 missing, 0 different |
+
+**Verdict: fixed.** A three minute rebuild leaves about forty verdict dials in a peer's journal
+where an eight minute one left 9,374, and the control link to the rebuilt node stays up through
+it.
+
+### The failover window
+
+Every round since the first measured a killed leader's groups refusing writes for about sixteen
+seconds at the default base, and the pages called the window two to three bases while the lab said
+three to four. Round 16 read where the sum comes from: openraft's follower lease is
+`election_timeout_max`, which `group_config` set to twice the base, and the randomized timeout of
+one to two bases runs *after* the lease, so a candidate stood between three and four bases after
+the last heartbeat. [F62](../features/failover-window.md) makes the lease the base itself and the
+timeout half a base to a whole one. Measured the way every round measured it
+(`target/lab/failover-test.sh`: a fresh cluster loaded whole, a quiet minute under the mixed bench
+with `vote is changing` counted in every journal, then the node leading the most groups killed
+under the bench; `target/lab/r16/failover/`):
+
+| Base | Writes refused after the kill | Round 15's final build | Vote changes in the quiet loaded minute | Load | Bench in the quiet minute | Acknowledged inserts, each member alone |
+| --- | --- | --- | --- | --- | --- | --- |
+| 5 s (default) | about 10 s (t=16–25), the last hundred at t=25 | 16 s (t=16–31) | 0 | 45,916 rows/s | 113,353 ops/s | 568,221, 0 lost |
+| 1 s | about 2 s (t=16–17) | about 4 s (round 11's 1 s arm) | 0 | 41,680 rows/s | 133,100 ops/s | 656,669, 0 lost |
+
+Europa led the most groups in both runs and was the node killed; the refusals were `NotLeader` at
+once, never a timeout, and the first second after the kill carried a write p99 of a second as the
+writes queued on europa's groups were refused.
+
+The fixture's nineteen tests that set the failover base, judge a lease or dial an identity were
+run together at six threads on the change (`target/lab/r16/fixture/`). Eighteen passed and one
+found what the arithmetic had moved without meaning to: the grace an empty volatile copy grants
+no vote for ([#142](../appendix/resolved/volatile-amnesiac-vote.md)) was "two election
+timeouts", `election_timeout_max × 2`, four bases with the old `max` and two with the new - the
+two seconds `a_restarted_volatile_leader_elects_nobody_missing_its_commits` holds an empty
+leader and a lagging follower alone, so the copy that had forgotten its commits granted its vote
+at the end of them and the follower that kept them hit openraft's `log_state_reader.rs:25`
+assertion. The grace and the head start a non-primary gives its primary are four leases now,
+the same four bases as before; the test passed four of four after it.
+
+**Verdict: pass.** The window is what the arithmetic says, and a loaded minute at a lease of the
+base elected nobody at either base. Every wait derived from the lease was read against the
+window it has to outlast, and one had to be restated.
+
+### What a row is charged
+
+Round 15's heap profile of titan at the end of a load counted 2.3 GiB of rows where the heap
+held 3.4 ([#196](../appendix/resolved/row-charge-undercount.md)). The fix charges a sorted
+partition's B-tree nodes and its keys' heap beside its rows, makes the unsorted replay and the
+resident-archive insert charge what eviction releases, and reports the eviction list. It was
+measured twice (`target/lab/r16/196/run.sh`): a fresh cluster on the `jemalloc-prof` build,
+the whole csv, a minute for the compactors, then 150 s of gets alone - which change no row and
+allocate enough for jemalloc to dump again while the rows stand still - with `cluster stats`
+read and titan's last dump taken inside that bench, symbolized against the binary it came from
+(`heap.py`, depth 3). The first run charged each sorted entry a fixed share of a node; the
+profile showed why that is not enough, and the second charges the nodes themselves.
+
+| | Round 15 (one copy, `d320328`) | A share of a node per entry | A node per eight entries (final) |
+| --- | --- | --- | --- |
+| Rows the profile holds, titan | 3.0 GiB of a 3.4 GiB "rows" figure that counted the table map and the LRU too | 1,497 MiB: Movie 581 deserialized + 571 partition boxes; keyword 252 of B-tree nodes + 82 of row heap + 10 | 1,549 MiB: Movie 607 + 589; keyword 257 of nodes + 87 of row heap + 10 |
+| `rows` counted by `Stats` | 2.3 GiB (77% of the rows) | 1,229 MiB (82%) | 1,319 MiB (85%) |
+| Eviction list, profile / `lru` | 0.16 GiB / not reported | 82 MiB / 75.5 | 86 MiB / 75.6 |
+| Table maps, profile / `table maps` | 0.29 GiB / 6–8 MiB after eviction | 144 MiB / 129.1 | 144 MiB / 129.1 |
+| Resident | 3.4–3.6 GiB | 2.7 GiB | 2.7 GiB |
+
+The keyword table's B-tree nodes are the figure that set the model: 252 MiB for about a million
+rows in 58,418 partitions, 250 bytes a row where a full slot is 112, because most keyword
+partitions hold a few titles in a node of eleven slots. A share of a node per entry counts a
+three-row partition at a third of its node; a node per eight entries counts it whole. What is
+left, about 230 MiB or 15% of the rows, is the allocator's rounding of a Movie row's thirty-odd
+String and Vec blocks, filed on the todo page
+([what a row's allocations take](../appendix/todos.md#what-a-rows-allocations-take)) with this
+number to be judged against.
+
+**Verdict: fixed, with the rounding filed.** The memory table now names 2,020 MiB of a 2,729 MiB
+node - rows, the two maps, the WAL index and the eviction list - where round 15's left 1.4 to
+1.7 GiB unnamed on a restart.
+
+### Round 16's final build
+
+On the round's last code, with the lab's inventory (`target/lab/r16/confirm/run.sh`), beside
+[round 15's](#round-15s-final-build):
+
+| | Round 16 | Round 15 |
+| --- | --- | --- |
+| Whole load | 2,193,788 rows in 51.6 s, 42,517 rows a second | 41,397 |
+| A quiet minute under the bench | 0 vote changes; 140,502 operations a second | 0; 111,819 |
+| europa, leading the most groups, killed under the bench | writes it led refused `NotLeader` for about 10 s (seconds 16 to 25), the rest served; 633,995 acknowledged inserts, 0 lost through each member alone | 16 s (seconds 16 to 31); 0 lost |
+| hyperion's peer ports cut for 20 s under the bench | the cut's first second at 40% of the second before; refusals end within a second of the heal; 1,013,465 acknowledged inserts, 0 lost through each member alone | 53%; 0 lost |
+
+**Verdict: pass.** The load's rate is inside O64's spread, the bench's inside the lab's, the
+failover window is [F62](../features/failover-window.md)'s, and a partition's worst second is
+where [#143](../appendix/resolved/silent-partition-hops.md#still-open)'s remainder left it
+(40%, 53% and 47% over three rounds: the kernel's two retransmission timeouts).
+

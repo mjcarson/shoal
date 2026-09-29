@@ -89,7 +89,9 @@ replication lane before openraft sees a vote or pre-vote. It applies to a volati
 the group before (item 109's `volatile/` marker) and holds no log past the bootstrap entry. Such a
 copy now:
 
-- **grants nothing for the grace** (two election timeouts from the copy's `up_since`), so it counts
+- **grants nothing for the grace** (~~two election timeouts~~ four leases from the copy's `up_since`,
+  four bases either way: two of the old double leases, and since [F62](../../features/failover-window.md)
+  twice the window a failover takes), so it counts
   as a member that is down. The members that kept their memory elect among themselves, and a
   majority of them can do that alone. One node restarting therefore never makes a leader of a copy
   that is missing what the node acknowledged;

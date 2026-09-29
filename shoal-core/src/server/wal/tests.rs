@@ -217,6 +217,30 @@ async fn append_durably(store: &mut GroupStore, entries: Vec<Entry>) {
         .expect("failed to append");
 }
 
+/// The index of retained entries is counted, and grows with what the groups hold (item 196)
+///
+/// Nothing counted it, and a heap profile of a loaded lab node found half a gibibyte of it.
+#[test]
+fn the_entry_index_is_counted_as_it_grows() {
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let wal = ShardWal::open(&dir.path().join("wal"), 1 << 30, 2048)
+            .await
+            .expect("failed to open");
+        assert_eq!(wal.index_bytes(), 0);
+        // two groups' entries, and each is counted
+        let mut first = wal.store(GroupId(1));
+        append_durably(&mut first, (1..=10).map(|index| normal(index, 50)).collect()).await;
+        let ten = wal.index_bytes();
+        assert!(ten > 0);
+        let mut second = wal.store(GroupId(2));
+        append_durably(&mut second, (1..=10).map(|index| normal(index, 50)).collect()).await;
+        assert_eq!(wal.index_bytes(), 2 * ten);
+        wal.close().await.expect("failed to close");
+    });
+}
+
 /// A segment recovered at a restart is sealed by the first rotation, whether or not anything
 /// was appended to it first (item 187)
 ///

@@ -291,8 +291,9 @@ let strong = SendOptions::new().read(ReadLevel::Quorum);
 A write refused `Shedding`, `NotLeader` or `QuorumUnavailable` recorded nothing; one answered
 `OutcomeUnknown` may have committed and is retried only under the same identity, which the
 retry table answers with the first attempt's result ([C5](replication.md#what-the-client-is-promised)).
-An in-flight request on a node that dies fails; the failover completes in two to three times
-`primary_failover_after` ([C7](failover.md#the-window-and-what-a-client-sees)).
+An in-flight request on a node that dies fails; the failover completes in ~~two to three~~ one
+and a half to two times `primary_failover_after` ([C7](failover.md#the-window-and-what-a-client-sees),
+[F62](../features/failover-window.md)).
 
 ## shoalctl
 

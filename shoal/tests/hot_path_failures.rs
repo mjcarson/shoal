@@ -142,6 +142,8 @@ struct Tables {
         AsyncSender<ServerMsg<HotPathDb>>,
         LocalKeptReceiver<ServerMsg<HotPathDb>>,
     ),
+    /// The shard's counter of what its tables' rows take
+    memory: Arc<RefCell<usize>>,
 }
 
 impl Tables {
@@ -203,6 +205,18 @@ impl Tables {
                     archived += 1;
                 }
             }
+            // the seed deleted its second sorted row, so the replayed partition held a
+            // tombstone the marking swept: what the shard counts has to be what the resident
+            // partitions say they hold, the swept key released from both
+            // ([Resolved #196](../../docs/src/appendix/resolved/row-charge-undercount.md))
+            let sorted_resident: usize = db.sorted.partitions.values().map(|p| p.size()).sum();
+            let unsorted_resident: usize = db.unsorted.partitions.values().map(|p| p.size()).sum();
+            let resident = sorted_resident + unsorted_resident;
+            check!(
+                *memory.borrow() == resident,
+                "the shard counted {} for partitions holding {resident} after the sweep",
+                *memory.borrow()
+            );
             // drop both partitions from memory, so each is on disk and nowhere else
             let (sorted, unsorted) = rows("");
             db.sorted.evict(vec![sorted.get_partition_key()]);
@@ -211,11 +225,13 @@ impl Tables {
                 db.sorted.partitions.is_empty() && db.unsorted.partitions.is_empty(),
                 "a partition was still resident after eviction"
             );
+            check!(*memory.borrow() == 0, "eviction left {} charged", *memory.borrow());
         }
         Ok(Tables {
             db,
             loader,
             _shard: shard,
+            memory,
         })
     }
 }
@@ -312,6 +328,20 @@ fn seed_rows(conf: Conf) {
             .send_one(unsorted)
             .await
             .expect("failed to seed an unsorted row");
+        // and a second sorted row, deleted again, so the replay holds a tombstone for the
+        // marking to sweep ([Resolved #196](../../docs/src/appendix/resolved/row-charge-undercount.md))
+        client
+            .send_one(SortedRow {
+                partition_key: PARTITION.to_owned(),
+                sort_key: "swept".to_owned(),
+                data: "seeded".to_owned(),
+            })
+            .await
+            .expect("failed to seed the sorted row to delete");
+        client
+            .send_one(SortedRowDelete::new(PARTITION.to_owned(), "swept".to_owned()))
+            .await
+            .expect("failed to delete the seeded sorted row");
         // stop the server, leaving its intent logs on disk
         pool.exit().expect("the seed server failed");
     });

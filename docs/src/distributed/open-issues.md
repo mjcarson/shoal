@@ -68,9 +68,11 @@ built: `groups/{idle,active}` (the spike stands in), `overhead/nodes/2`, `scaleo
 `writes/{insert,update,delete,conditional,retry}`, a failover by pause or by partition, a
 catch-up at several mutation rates, a rehome that grows, a write background under the read arms,
 an open-loop schedule, and a restore's cost. The failover objective of base plus two seconds is
-not met as set: two to three times the base ([C7](failover.md#the-window-and-what-a-client-sees)),
-and measured at four on the development host at base one - the lease of twice the base, then a
-timeout ([Resolved #110](../appendix/resolved/dead-primary-write-failures.md)).
+not met as set: ~~two to three times the base~~ three to four times the base
+([C7](failover.md#the-window-and-what-a-client-sees)), measured at four on the development host
+at base one - the lease of twice the base, then a timeout
+([Resolved #110](../appendix/resolved/dead-primary-write-failures.md)) - and one and a half to
+two since [F62](../features/failover-window.md).
 ~~A physical capture on unequal hardware has a launcher and a record and no run.~~ The
 [cluster testing](../cluster-testing/performance.md) chapter ran on unequal hardware (a Zen4 host
 with an Optane beside two Zen1 hosts with consumer NVMe). Its numbers are lab runs, not captures.
