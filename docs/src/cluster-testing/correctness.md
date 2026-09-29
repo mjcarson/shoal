@@ -1897,3 +1897,20 @@ number to be judged against.
 node - rows, the two maps, the WAL index and the eviction list - where round 15's left 1.4 to
 1.7 GiB unnamed on a restart.
 
+### Round 16's final build
+
+On the round's last code, with the lab's inventory (`target/lab/r16/confirm/run.sh`), beside
+[round 15's](#round-15s-final-build):
+
+| | Round 16 | Round 15 |
+| --- | --- | --- |
+| Whole load | 2,193,788 rows in 51.6 s, 42,517 rows a second | 41,397 |
+| A quiet minute under the bench | 0 vote changes; 140,502 operations a second | 0; 111,819 |
+| europa, leading the most groups, killed under the bench | writes it led refused `NotLeader` for about 10 s (seconds 16 to 25), the rest served; 633,995 acknowledged inserts, 0 lost through each member alone | 16 s (seconds 16 to 31); 0 lost |
+| hyperion's peer ports cut for 20 s under the bench | the cut's first second at 40% of the second before; refusals end within a second of the heal; 1,013,465 acknowledged inserts, 0 lost through each member alone | 53%; 0 lost |
+
+**Verdict: pass.** The load's rate is inside O64's spread, the bench's inside the lab's, the
+failover window is [F62](../features/failover-window.md)'s, and a partition's worst second is
+where [#143](../appendix/resolved/silent-partition-hops.md#still-open)'s remainder left it
+(40%, 53% and 47% over three rounds: the kernel's two retransmission timeouts).
+

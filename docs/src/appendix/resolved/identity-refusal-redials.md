@@ -48,7 +48,8 @@ the rebuild's first twelve minutes. The classification the fix adds is pinned by
 hello named another node (`CertificateIdentity`, `PeerIdentity`), or because the peer refused us
 as mismatched, removed or of another cluster. Such a failure waits its whole grown backoff, with
 no early wake for a queued frame, so a link to an identity that is gone settles at one dial every
-five seconds. Every other failure keeps the early wake:
+~~five seconds~~ minute ([Resolved #193](rebuild-redial-thrash.md) raised a verdict's ceiling
+past `reconnect_max`). Every other failure keeps the early wake:
 
 - a refused connection or a timeout;
 - `UnknownNode`, which a joiner meets until the map reaches its peer;

@@ -50,7 +50,18 @@ the retention sweep ([#192](../appendix/resolved/forced-build-deferred.md)) and 
 snapshot against the install bound ([#194](../appendix/resolved/abandoned-partial-snapshots.md)),
 both fixed. The fixture loop found a node's scheduled scrubs starved by version churn
 ([#195](../appendix/resolved/scheduled-scrub-starved.md)), fixed, and every rebuild's redial noise
-is filed as #193. What no round closed is below.
+is filed as #193.
+
+Round 16 ([section 17](correctness.md#17-round-16)) closed both of round 15's open defects:
+[#193](../appendix/resolved/rebuild-redial-thrash.md), whose cause was the control lane's links
+keyed by address and thrown away at every heartbeat to the other of a rebuilt node's two
+identities (a rebuild now leaves about forty verdict dials in a journal where it left 9,400), and
+[#196](../appendix/resolved/row-charge-undercount.md), whose sorted rows are charged with their
+B-tree nodes and keys (85% of what the heap holds for rows, from 77%, the allocator's rounding
+filed). It narrowed the failover window from three to four bases to one and a half to two
+([F62](../features/failover-window.md): about 10 s at the default and 2 s at 1 s, no election
+in a loaded minute at either), ruled the Zen1 hosts' frequency governor out of O64 (nine
+candidates), and ran the #142 loop again. What no round closed is below.
 
 ## Bugs
 

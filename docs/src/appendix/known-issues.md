@@ -411,6 +411,14 @@ starved by version churn, fixed; 60 runs on the fix passed. The other, once:
 after its driver was killed at that phase, its `activate` never answered. Its logs were not kept;
 the loop now keeps them.
 
+**Round 16** ([#142 in round 16](../cluster-testing/correctness.md#142-in-round-16)): the whole
+workspace at six threads passed 1,745 of 1,745 on the round's last code, and the loop ran again
+with every failing round's logs kept (`target/lab/r16/142/loop-keep.sh`). One panic in the round
+was not this item and is not to be filed here: `a_restarted_volatile_leader_elects_nobody_missing_its_commits`
+hit openraft's `log_state_reader.rs:25` assertion once, on the first run of the fixture's
+failover tests on [F62](../features/failover-window.md), because the amnesiac grace had halved
+with the lease; the grace is four bases again and the test passed four of four after it.
+
 The suite run for [Resolved #144](resolved/post-heal-elections.md) at six threads failed
 `lost_response_retry_returns_original_result` again, and also `scheduled_scrub_quarantines_without_an_operator`,
 which had not failed before. Both passed alone afterwards: two and six runs out of two and six.

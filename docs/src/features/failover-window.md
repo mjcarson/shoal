@@ -114,6 +114,11 @@ so only a crash pays the window, and it had paid twice what the design needs.
   objective as written is withdrawn rather than met.
 - **A base under 100 ms is refused as before**, and the election timeout's lower bound has a
   floor of 50 ms, so at the smallest base the ratio is what it is at every other.
+- **A cluster mid-upgrade fails over at the old build's window.** A follower on this build
+  stands at one and a half to two bases; one on the build before refuses every vote until two
+  bases have passed, so while both are voters a leader lost is replaced no sooner than the old
+  window allows, and pre-vote keeps the new build's earlier candidates from raising the term
+  meanwhile. Once the upgrade completes the window is this page's.
 
 ## Invariants to uphold
 
