@@ -61,7 +61,10 @@ B-tree nodes and keys (85% of what the heap holds for rows, from 77%, the alloca
 filed). It narrowed the failover window from three to four bases to one and a half to two
 ([F62](../features/failover-window.md): about 10 s at the default and 2 s at 1 s, no election
 in a loaded minute at either), ruled the Zen1 hosts' frequency governor out of O64 (nine
-candidates), and ran the #142 loop again. What no round closed is below.
+candidates), and ran the #142 loop again, whose first round caught round 15's stuck move with its
+logs: [#197](../appendix/resolved/retired-driver-holds-slot.md), a move's source resuming the
+drive and reconfiguring itself out, then holding its shard's one driver slot for the migration
+timeout on a copy retired under it. What no round closed is below.
 
 ## Bugs
 
@@ -69,7 +72,7 @@ candidates), and ran the #142 loop again. What no round closed is below.
 | --- | --- | --- | --- |
 | [143](../appendix/resolved/silent-partition-hops.md#still-open), what is left | [Round 12](correctness.md#a-silent-partitions-first-second) | The second of a silent partition's cut runs at about 45% of the rate: the kernel's verdict needs two retransmission timeouts, about 600 ms. Round 14 measured it again on the final build, 47% ([round 14's final build](correctness.md#round-14s-final-build)) | One timeout was measured and took 5% loss for a cut. Nothing further planned |
 | [132](../appendix/known-issues.md#132-ephemeral_sorted_table-aborted-once-in-glibcs-thread-cache-teardown) | Re-examined after [#133](../appendix/resolved/read-plan-rc-across-shards.md) | A one-off heap corruption abort. It has not recurred in any suite run since, nor in 169 ASan runs of the binary in round 12 | Leave filed until it recurs |
-| [142](../appendix/known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host) | The workspace suite run after each section's fixes | ~~Deadlines under the suite's load (a write not committed or a leader not elected in time)~~ Round 14 found most of them were [#190](../appendix/resolved/append-answer-thrown-away.md). ~~What is left is the restore stall~~ Round 15's full run passed 1,740 of 1,740; its loop found [#195](../appendix/resolved/scheduled-scrub-starved.md), fixed, and once a move left at `Configured` after its driver was killed, not explained ([round 15](correctness.md#142-in-round-15)) | Read the next stuck move's logs: `target/lab/r15/142/loop-keep.sh` keeps them |
+| [142](../appendix/known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host) | The workspace suite run after each section's fixes | ~~Deadlines under the suite's load (a write not committed or a leader not elected in time)~~ Round 14 found most of them were [#190](../appendix/resolved/append-answer-thrown-away.md). ~~What is left is the restore stall~~ Round 15's full run passed 1,740 of 1,740; its loop found [#195](../appendix/resolved/scheduled-scrub-starved.md), fixed, and once a move left at `Configured` after its driver was killed, not explained ([round 15](correctness.md#142-in-round-15)). Round 16's loop caught that move with its logs and it is [#197](../appendix/resolved/retired-driver-holds-slot.md), fixed ([round 16](correctness.md#142-in-round-16)); every shape on record is now explained or fixed | Run the loop again after the next change to the move, restore or scrub drivers; `target/lab/r16/142/loop-keep.sh` keeps a failing round's logs and goes on |
 | ~~[193](../appendix/resolved/rebuild-redial-thrash.md)~~ | [Round 15's rebuilds](correctness.md#a-step-that-outlasts-both-retentions) | ~~Peers dial a rebuilt node's old identity at `reconnect_min` until its removal commits, about twenty warnings a second each side, 55,000 in a 45 minute rebuild~~ **Fixed in round 16** ([a rebuild without the dial noise](correctness.md#a-rebuild-without-the-dial-noise)): the control links were keyed by address and thrown away at every heartbeat to the other identity; keyed by identity, and a verdict's backoff grown to a minute, a rebuild leaves about forty verdict dials in a journal where it left 9,400 | None |
 
 ## Optimizations

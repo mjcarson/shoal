@@ -3300,6 +3300,7 @@ where
                 table_index_bytes: u64::try_from(self.tables.index_bytes()).unwrap_or(u64::MAX),
             wal_index_bytes: u64::try_from(replication.wal.index_bytes()).unwrap_or(u64::MAX),
             lru_bytes: u64::try_from(self.lru_bytes()).unwrap_or(u64::MAX),
+            driving_moves: u32::try_from(replication.driving_moves.len()).unwrap_or(u32::MAX),
             memory_budget: u64::try_from(self.memory_budget).unwrap_or(u64::MAX),
             pending_bytes: groups.iter().map(|group| group.pending_bytes).sum(),
             volatile_bytes: replication.volatile.bytes(),
