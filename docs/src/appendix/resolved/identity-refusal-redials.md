@@ -74,6 +74,11 @@ five seconds. Every other failure keeps the early wake:
 - Nothing stops the groups that still name a removed identity from queuing frames for it, which
   costs a frame's encoding and a dropped queue per heartbeat. A move removes the identity from
   each group, so this lasts only for a rebuild's window.
+- ~~The backoff settles at one dial every `reconnect_max`, five seconds, a link.~~ Round 15's
+  rebuilds still logged twenty failed dials a second: the control lane's links were keyed by
+  address and thrown away at every heartbeat to the other identity, and six shards a node at the
+  five second ceiling were a dial a second. Both are
+  [Resolved #193](rebuild-redial-thrash.md), which grows a verdict's backoff to a minute.
 
 ## Tests
 

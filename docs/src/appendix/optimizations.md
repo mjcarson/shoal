@@ -3142,6 +3142,14 @@ WAL mode and archive volume tried, and is set within a load's first five seconds
 a 1 s base ran at 42,600 to 55,000 rows a second, the same as at 5 s, with and without
 [#190](resolved/append-answer-thrown-away.md)'s floor on an append's wait.
 
+**Round 16: not the hosts' frequency governor.** The one candidate outside Shoal nobody had
+varied: the Zen1 hosts run `schedutil` from 1.6 GHz. Ten fresh loads, six under `schedutil` and
+four with both hosts on `performance`, with every Zen1 cpu's frequency sampled through each
+([cluster testing](../cluster-testing/performance.md#o64-in-round-16-not-the-governor-either)):
+under a load the cores run at 3.1 to 3.3 GHz on average whichever governor is set, the slow
+load's cores 80 MHz below the fast ones', and the spread was the same under both (43,100–55,500
+against 48,400–55,900). Nine candidates are ruled out, and the lab stays on `schedutil`.
+
 ### O65. Heartbeats to followers that just acknowledged replication
 
 | | |

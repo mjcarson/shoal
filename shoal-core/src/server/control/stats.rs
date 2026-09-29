@@ -335,6 +335,7 @@ impl NodeStatsTracker {
         stats.archive_map_bytes = shards.values().map(|report| report.archive_map_bytes).sum();
         stats.table_index_bytes = shards.values().map(|report| report.table_index_bytes).sum();
         stats.wal_index_bytes = shards.values().map(|report| report.wal_index_bytes).sum();
+        stats.lru_bytes = shards.values().map(|report| report.lru_bytes).sum();
         // the busiest groups this node leads over the interval, once there is one to divide by
         if let Some(dt) = dt {
             stats.hot_groups = hot_groups(led_gains, dt);

@@ -1844,12 +1844,16 @@ where
                             }
                         };
                         partition.check_disk = false;
-                        let outcome = partition.insert(row);
+                        let (_, action) = partition.insert(row);
+                        // the archive's bytes were charged; the deserialized partition's size
+                        // is what an eviction releases, so the counter moves by the difference
+                        // between the two rather than by the row alone (item 196)
+                        let before = entry.size();
                         *entry = MaybeLoaded::Loaded {
                             partition: Box::new(partition),
                             generation,
                         };
-                        outcome
+                        (entry.size().cast_signed() - before.cast_signed(), action)
                     }
                 };
                 adjust_memory_usage(&self.memory_usage, size_diff);
@@ -2336,6 +2340,7 @@ where
     pub fn mark_evictable(&mut self, generation: u64, partitions: Vec<u64>) {
         let mut marked = 0;
         let mut swept = 0;
+        let mut released = 0;
         // track how far our data has been compacted
         self.flushed_generation = self.flushed_generation.max(generation);
         // check each partition that we find might be evictable now
@@ -2345,9 +2350,13 @@ where
                 // check if this partition is now evictable
                 if maybe_loaded.is_evictable(generation) {
                     // this partitions deletes have been applied to its archive copy, so
-                    // any tombstones it still holds have nothing left to shadow
+                    // any tombstones it still holds have nothing left to shadow; the keys
+                    // they held are released from the partition and, below, from the shard
+                    // ([Resolved #196](../../../../../docs/src/appendix/resolved/row-charge-undercount.md))
                     if let MaybeLoaded::Loaded { partition, .. } = maybe_loaded {
+                        let before = partition.size();
                         swept += partition.drop_tombstones();
+                        released += before.saturating_sub(partition.size());
                     }
                     // get this partitions size
                     let size = maybe_loaded.size();
@@ -2359,12 +2368,15 @@ where
                 }
             }
         }
+        // the swept tombstones' keys leave the shard's counter as they left the partitions
+        adjust_memory_usage(&self.memory_usage, -released.cast_signed());
         // once per flush per shard, so it is detail rather than news
         // ([O66](../../../../../docs/src/appendix/optimizations.md#o66-a-partitioned-peer-floods-the-log))
         event!(
             Level::DEBUG,
             marked,
             swept,
+            released,
             flushed_generation = self.flushed_generation
         );
     }

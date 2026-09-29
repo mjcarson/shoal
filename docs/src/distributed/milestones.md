@@ -330,10 +330,12 @@ do not require it to equal three healthy nodes. Without safe retries and reads t
 included; a rejected outcome and an unknown one are distinct at the lease, on the lane and in
 the client's retry list; established groups commit without a control quorum and metadata stops;
 `Down` is not an election prerequisite (`shard_stall_with_live_control_plane_can_fail_over`).
-*Not met as written:* the outage objective. The follower lease is `election_timeout_max`, twice
-the base, and a randomized election follows it, so a failover completes between two and three
+*Not met as written:* the outage objective. The follower lease is `election_timeout_max`, ~~twice
+the base~~ and a randomized election follows it, so a failover ~~completes between two and three
 times the base - two to three seconds at the fixture's second, ten to fifteen at the default
-five - and the [F42 page](../features/primary-failover.md#performance) records the arm's shape
+five~~ completed between three and four times the base until
+[F62](../features/failover-window.md) made the lease the base itself, one and a half to two
+bases since - and the [F42 page](../features/primary-failover.md#performance) records the arm's shape
 at the default rather than a number against the objective; the throughput after the kill is
 on the same record, not required to equal three nodes.
 

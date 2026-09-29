@@ -124,6 +124,7 @@
   - [F59. Shipping a backup to every host with `shoalctl cluster ship-backup`](features/backup-shipping.md)
   - [F60. WAL segments written directly, and one flush a device (withdrawn)](features/shared-wal-flush.md)
   - [F61. A large sorted partition written as fragments](features/fragmented-partitions.md)
+  - [F62. A failover window of one and a half to two bases](features/failover-window.md)
 
 # Direction
 
@@ -319,6 +320,8 @@
   - [192. Past `hold_bytes` the retention sweep could not force a held group](appendix/resolved/forced-build-deferred.md)
   - [194. A partial snapshot its sender gave up on was held for good](appendix/resolved/abandoned-partial-snapshots.md)
   - [195. A node's scheduled scrubs were refused for a stale version](appendix/resolved/scheduled-scrub-starved.md)
+  - [193. A rebuild dialled the old identity's address twenty times a second](appendix/resolved/rebuild-redial-thrash.md)
+  - [196. The eviction budget undercounted what a node holds](appendix/resolved/row-charge-undercount.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

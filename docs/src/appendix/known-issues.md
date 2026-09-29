@@ -33,7 +33,7 @@ carrying the reasoning and the invariants the fix depends on. Item numbers are s
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at ~~15~~ ~~16~~ 19 and skips 25, 26, 27, 30, 31, 32, 33, 34, 36, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
 76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 120, 121, 122, 123 and 124, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ ~~item 132 is the newest entry and the newest number~~ ~~item 180 is the newest entry, with 182 the newest number, on the resolved page,~~ ~~item 142 is the newest open entry, with 187 the newest number, on the resolved page,~~ item 196 is the newest entry and the newest number, with 191, 192, 194 and 195 filed and fixed in one change on the resolved page, and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ ~~item 132 is the newest entry and the newest number~~ ~~item 180 is the newest entry, with 182 the newest number, on the resolved page,~~ ~~item 142 is the newest open entry, with 187 the newest number, on the resolved page,~~ ~~item 196 is the newest entry and the newest number, with 191, 192, 194 and 195 filed and fixed in one change on the resolved page,~~ item 142 is the newest open entry, with 196 the newest number, on the resolved page beside 193 (both fixed in round 16 of the cluster testing), and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120, 121, 122, 123, 124, 125, 126, 127 and 128 are on the resolved page, with 27, 32 and 36 beside them. **126 never appeared here**:
 it was filed and fixed in one change, from a user's run of `tmdb_dataset` on a host without
 `/opt/shoal` ([Resolved #126](resolved/storage-directory-unusable.md)). **127 never appeared here**
@@ -533,44 +533,6 @@ moves no lead while they are ([#182](resolved/slow-link-leadership.md)).
 ---
 
 ## Low — hygiene and documentation drift
-
-### 196. The eviction budget undercounts what a node holds
-
-Found in round 15 of the lab testing by a heap profile of a loaded node
-([memory at ten times the dataset](../cluster-testing/performance.md#memory-at-ten-times-the-dataset)).
-A shard evicts against the rows it counts: each row's `deep_size_of`, charged as it is applied or
-loaded. On titan at the end of a load the heap held 3.4 GiB for rows (Movie rows applied and
-deserialized 2.4 GiB, keyword rows 0.6, the table map 0.29, the LRU 0.16) where `Stats` counted
-2.3 GiB, and 0.54 GiB for the WAL's index of its retained entries (`index_entry`, in the log store),
-which nothing counts. [#149](resolved/node-memory-budget.md)'s process bound catches the total, by
-evicting rows once the process passes the node's memory, so nothing runs out; but the rows a node
-keeps are fewer than its budget suggests, and the figures do not add up to what it holds.
-
-**Established by the heap profile**, not by a test. **Partly done in round 15:** the WAL index is
-reported on `Stats` as `wal_index_bytes` beside the maps, and in a `wal index` column of `cluster
-stats` (`ShardWal::index_bytes`, tested by `the_entry_index_is_counted_as_it_grows`). What is left
-is the row charge: counting what a row's allocations take (the deserialized struct's heap parts
-and the allocator's rounding, not only `deep_size_of`'s field sizes), and the table and LRU entries
-a row costs. That changes what every eviction decides, and wants its own measurement.
-
-### 193. A rebuild dials the old identity's address twenty times a second
-
-Found in round 15 of the lab testing, in every rebuild's journals
-([cluster testing](../cluster-testing/correctness.md#a-step-that-outlasts-both-retentions)). While
-a rebuilt node's old identity is still a member being removed, its peers' links to it are wanted
-(heartbeats and appends go to every member) and dial its address, where the rebuilt node now
-answers. Each failed dial is a `WARN`, and the redial waits only `reconnect_min`
-(`peer/link.rs`, `run`): the dial is refused (`ConnectionRefused`) or dropped during the TLS
-handshake, which is not an identity verdict, so [#172](resolved/identity-refusal-redials.md)'s
-full backoff does not apply. The rebuilt node logs each dropped control handshake as `refused a
-control peer at tls` (`UlpUnavailable`, `ENOTCONN`). On the lab that was 9,374 and 9,349 lines in
-an eight minute rebuild and 53,588 and 55,423 in a forty-five minute one, about twenty a second
-each side, until the removal committed.
-
-**Established by the lab's journals**, not reproduced in the fixture. Nothing is lost and nothing
-waits on it; it is noise that grows with a rebuild's length. What it needs: a dial to a member in
-phase `removing` that fails without a verdict backing off as a verdict does, or the removal's
-tombstone ending the links as soon as the plan starts rather than when it ends.
 
 ### 19. `memory` has no serde default
 

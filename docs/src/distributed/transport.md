@@ -102,7 +102,10 @@ of `Idle`, `Connecting`, `Up` or `Backoff`. `Link::enqueue` sheds synchronously 
 byte bound, before anything is recorded: a forward past it is answered `Shedding`, an append
 past it is refused and retried by openraft. A lost link backs off from `reconnect_min` to
 `reconnect_max` with jitter, but a link a frame *wants* redials at the floor, so a refusal
-takes `reconnect_min` and not the backoff. When a link goes down it reports the frames it never
+takes `reconnect_min` and not the backoff. A dial that ended in a verdict on who the peer is
+waits its whole backoff, which grows to a minute rather than to `reconnect_max`
+([Resolved #172](../appendix/resolved/identity-refusal-redials.md),
+[#193](../appendix/resolved/rebuild-redial-thrash.md)). When a link goes down it reports the frames it never
 wrote (`LinkEvent::Down { unsent }`), and that list is the line between a definite and an
 unknown outcome: a forward never written is sent once more to another holder that is up, under
 the same attempt and slot; a proposal or barrier never written is `RpcFailure::NotSent`,

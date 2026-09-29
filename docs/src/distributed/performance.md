@@ -138,7 +138,7 @@ benchmark host's, on a clean tree, after the change that claims an effect is com
 | A loopback hop under 100 µs at p50 | Unmeasured at scale; the three hop arms exist |
 | Durable replication reported as curves and lag | Smoke numbers only |
 | Fixed-resource reads at 0.8× the matched single node | Unmeasured |
-| Failover at base plus two seconds with healthy survivors | Not met as set: two to three times the base ([C7](failover.md#the-window-and-what-a-client-sees)) |
+| Failover at base plus two seconds with healthy survivors | Not met as set: ~~two to three~~ three to four times the base, one and a half to two since [F62](../features/failover-window.md) ([C7](failover.md#the-window-and-what-a-client-sees)) |
 | A healthy rebalance with zero final errors and p99 inflation under 2× | `p99_ratio_permille` is on every rebalance record; judged at smoke scale |
 | Bounded recovery bytes, memory and disk | `retention_and_recovery_memory_are_bounded`; the catch-up arms record convergence or `none` |
 

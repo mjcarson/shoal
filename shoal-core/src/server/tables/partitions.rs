@@ -559,6 +559,21 @@ pub struct SortedPartition<T: ShoalSortedTable> {
 }
 
 impl<T: ShoalSortedTable> SortedPartition<T> {
+    /// What one entry of the tree costs beyond the row and the key it holds
+    ///
+    /// A B-tree node holds up to eleven `(key, row)` slots and a header, and its nodes run
+    /// about eight elevenths full, so every entry pays its share of the slots nobody fills
+    /// and of the header. The row's own inline bytes and the key's are counted by
+    /// `deep_size_of`, so what is left here is the slack
+    /// ([Resolved #196](../../../../docs/src/appendix/resolved/row-charge-undercount.md)).
+    const ENTRY_OVERHEAD: usize = {
+        // a leaf's slots and header, spread over the entries an average node holds
+        let slot = std::mem::size_of::<(T::Sort, MaybeRow<T>)>();
+        let node = slot * 11 + 16;
+        // eight entries a node, less the slot the row and key already paid for
+        node / 8 - slot
+    };
+
     /// Create a new partition
     ///
     /// # Arguments
@@ -574,6 +589,47 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         }
     }
 
+    /// What a sort key costs in the tree: the key itself and the entry's share of its node
+    ///
+    /// Charged once when a key enters the tree, as a row or as a tombstone, and released when
+    /// it leaves; a row that becomes a tombstone keeps its key, so only the row goes
+    /// ([Resolved #196](../../../../docs/src/appendix/resolved/row-charge-undercount.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `sort` - The sort key
+    #[must_use]
+    pub fn key_size(sort: &T::Sort) -> usize {
+        sort.deep_size_of() + Self::ENTRY_OVERHEAD
+    }
+
+    /// What a live row costs in the tree: its own bytes, its key and its share of a node
+    ///
+    /// # Arguments
+    ///
+    /// * `sort` - The sort key the row is filed under
+    /// * `row` - The row
+    #[must_use]
+    pub fn entry_size(sort: &T::Sort, row: &T) -> usize {
+        row.deep_size_of() + Self::key_size(sort)
+    }
+
+    /// Recount this partition's size from the rows it holds
+    ///
+    /// Every live row costs its entry, and every tombstone the key it shadows with. The one
+    /// way a size is derived rather than maintained by delta, used where the tree was rebuilt
+    /// from two copies.
+    fn recount(&mut self) {
+        self.size = self
+            .rows
+            .iter()
+            .map(|(sort, row)| match row {
+                MaybeRow::Row(row) => Self::entry_size(sort, row),
+                MaybeRow::Tombstone => Self::key_size(sort),
+            })
+            .sum();
+    }
+
     /// add a new row to this partition
     ///
     /// # Arguments
@@ -583,24 +639,26 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         hotpath::measure_block!("SortedPartition::insert", {
             // get this rows sort key
             let sort_key = row.get_sort();
-            // calculate the size of our new row
+            // calculate the size of our new row, and of the key if it is new to the tree
             let row_size = row.deep_size_of();
+            let key_size = Self::key_size(&sort_key);
             // add this row wrapped in MaybeRow::Row
             let diff = match self.rows.insert(sort_key, MaybeRow::Row(row)) {
-                // we replaced an existing row so find the delta in size
+                // we replaced an existing row so find the delta in size; the key was there
                 Some(MaybeRow::Row(replaced)) => {
                     // calculate our old rows size
                     let old_size = replaced.deep_size_of();
                     // calculate the diff in sizes
                     row_size.cast_signed() - old_size.cast_signed()
                 }
-                // this row was deleted and is now back, so it is no longer a tombstone
+                // this row was deleted and is now back, so it is no longer a tombstone; the
+                // key stayed in the tree with the tombstone and is charged already
                 Some(MaybeRow::Tombstone) => {
                     self.tombstones -= 1;
                     row_size.cast_signed()
                 }
-                // this is a brand new row
-                None => row_size.cast_signed(),
+                // this is a brand new row, and a new key in the tree
+                None => (row_size + key_size).cast_signed(),
             };
             // adjust this partitions size correctly
             self.size = self.size.saturating_add_signed(diff);
@@ -916,10 +974,13 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
                 self.tombstones += 1;
                 -(row_size as isize)
             }
-            // this key had nothing in memory, so our tombstone is shadowing disk
+            // this key had nothing in memory, so our tombstone is shadowing disk, and its key
+            // is new to the tree
             None => {
                 self.tombstones += 1;
-                0
+                let key_size = Self::key_size(sort);
+                self.size = self.size.saturating_add(key_size);
+                key_size.cast_signed()
             }
             // this key was already tombstoned
             Some(MaybeRow::Tombstone) => 0,
@@ -947,16 +1008,9 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         self.rows.extend(memory.rows.into_iter());
         // archives never contain tombstones so only our in memory ones survived
         self.tombstones = memory.tombstones;
-        // the union of both copies is what we hold now, so recompute our size from
-        // the rows we ended up with, counting only the live ones like our other paths
-        self.size = self
-            .rows
-            .values()
-            .filter_map(|row| match row {
-                MaybeRow::Row(row) => Some(row.deep_size_of()),
-                MaybeRow::Tombstone => None,
-            })
-            .sum();
+        // the union of both copies is what we hold now, so recount our size from the
+        // entries we ended up with, as every other path charges them
+        self.recount();
         // we just merged in the full disk copy so there is nothing left to load
         self.check_disk = false;
     }
@@ -986,15 +1040,8 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         // a base from disk holds no tombstones and a fold leaves none
         self.rows.retain(|_, row| matches!(row, MaybeRow::Row(_)));
         self.tombstones = 0;
-        // the size is the live rows', recomputed as a merge from disk does
-        self.size = self
-            .rows
-            .values()
-            .filter_map(|row| match row {
-                MaybeRow::Row(row) => Some(row.deep_size_of()),
-                MaybeRow::Tombstone => None,
-            })
-            .sum();
+        // the size is the live entries', recounted as a merge from disk does
+        self.recount();
     }
 
     /// Drop every tombstone in this partition and return how many were dropped
@@ -1008,8 +1055,16 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         if self.tombstones == 0 {
             return 0;
         }
-        // only keep rows that still hold data
-        self.rows.retain(|_, row| matches!(row, MaybeRow::Row(_)));
+        // only keep rows that still hold data, releasing the keys the tombstones held
+        let mut released = 0;
+        self.rows.retain(|sort, row| {
+            let live = matches!(row, MaybeRow::Row(_));
+            if !live {
+                released += Self::key_size(sort);
+            }
+            live
+        });
+        self.size = self.size.saturating_sub(released);
         // our tombstones are all gone now
         std::mem::take(&mut self.tombstones)
     }
@@ -2141,10 +2196,18 @@ mod tests {
                 IntentReadSupport::fold(&mut chained, round_trip(&fragment));
                 let expected = whole.get(&0).map(live).unwrap_or_default();
                 assert_eq!(live(&chained), expected, "seed {seed}, batch {batch}");
-                // what a fold leaves is what an archive holds: no tombstones, and the live rows' size
+                // what a fold leaves is what an archive holds: no tombstones, and the live
+                // entries' size, each row with its key and its share of a node (item 196)
                 assert_eq!(chained.tombstones, 0);
                 assert!(chained.rows.values().all(|row| matches!(row, MaybeRow::Row(_))));
-                let size: usize = chained.live_row_values().map(DeepSizeOf::deep_size_of).sum();
+                let size: usize = chained
+                    .rows
+                    .iter()
+                    .filter_map(|(sort, row)| match row {
+                        MaybeRow::Row(row) => Some(SortedPartition::<TestRow>::entry_size(sort, row)),
+                        MaybeRow::Tombstone => None,
+                    })
+                    .sum();
                 assert_eq!(chained.size, size, "seed {seed}, batch {batch}");
                 // and archiving the fold changes none of it
                 assert_eq!(live(&round_trip(&chained)), expected);
@@ -2982,12 +3045,12 @@ mod tests {
         assert!(disk.size < memory_size);
         // merge the disk copy in
         memory.merge_from_disk(disk);
-        // our size has to be the sum of every live row we ended up holding
+        // our size has to be the sum of every live entry we ended up holding
         let expected = memory
             .rows
-            .values()
-            .filter_map(|row| match row {
-                MaybeRow::Row(row) => Some(row.deep_size_of()),
+            .iter()
+            .filter_map(|(sort, row)| match row {
+                MaybeRow::Row(row) => Some(SortedPartition::<TestRow>::entry_size(sort, row)),
                 MaybeRow::Tombstone => None,
             })
             .sum::<usize>();
@@ -3009,12 +3072,47 @@ mod tests {
         memory.remove(&"a".to_owned());
         // merge the disk copy in
         memory.merge_from_disk(disk);
-        // only the archived row our tombstone is not shadowing counts towards our size
+        // only the archived row our tombstone is not shadowing counts towards our size as a
+        // row; the tombstone counts the key it shadows with
         let live = match memory.rows.get(&"b".to_owned()) {
-            Some(MaybeRow::Row(row)) => row.deep_size_of(),
+            Some(MaybeRow::Row(row)) => SortedPartition::<TestRow>::entry_size(&"b".to_owned(), row),
             _ => panic!("the archived row we never touched should have survived"),
         };
-        assert_eq!(memory.size, live);
+        assert_eq!(
+            memory.size,
+            live + SortedPartition::<TestRow>::key_size(&"a".to_owned())
+        );
+    }
+
+    #[test]
+    /// A sorted row is charged with its key and its share of a node, and the charge is released
+    /// as it leaves the tree the same way it came (item 196)
+    fn a_sorted_row_is_charged_with_its_key_and_node() {
+        let mut partition = SortedPartition::<TestRow>::new(0);
+        let row = TestRow::new("a");
+        let (diff, _) = partition.insert(row.clone());
+        // more than the row alone: the key's bytes and the node's slack are in it
+        assert!(
+            partition.size > row.deep_size_of(),
+            "a row was charged {} for {} of row",
+            partition.size,
+            row.deep_size_of()
+        );
+        assert_eq!(partition.size, SortedPartition::<TestRow>::entry_size(&"a".to_owned(), &row));
+        assert_eq!(diff, partition.size.cast_signed());
+        // replacing the row under the same key charges the rows' difference alone
+        let (diff, _) = partition.insert(TestRow::new("a"));
+        assert_eq!(diff, 0);
+        // a tombstone keeps the key and releases the row
+        let (released, _) = partition.remove(&"a".to_owned()).expect("the row was there");
+        assert_eq!(released, row.deep_size_of());
+        assert_eq!(partition.size, SortedPartition::<TestRow>::key_size(&"a".to_owned()));
+        // a tombstone for a key the tree never held charges the key
+        let charged = partition.tombstone(&"z".to_owned());
+        assert_eq!(charged, SortedPartition::<TestRow>::key_size(&"z".to_owned()).cast_signed());
+        // and sweeping the tombstones releases both keys, back to nothing
+        assert_eq!(partition.drop_tombstones(), 2);
+        assert_eq!(partition.size, 0);
     }
 
     #[test]

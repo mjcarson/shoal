@@ -626,3 +626,37 @@ what fills a node**: the growth is the same on both, and the profile names it. j
 0.3 GiB less and ran slower in its one bench arm, which ran second on a larger dataset. mimalloc
 stays.
 
+
+## O64 in round 16: not the governor either
+
+Every round had varied something Shoal does. Nobody had varied what the hosts do: titan and
+hyperion run `acpi-cpufreq` under `schedutil`, 1.6 to 3.25 GHz with a boost to 3.59, and idle at
+1.6 GHz; and round 15's fast loads had shown more Zen1 cpu than its slow ones (451/473% against
+402/437%). A governor that follows utilization is a candidate for a mode that is set in a load's
+first seconds and kept. So round 16 loaded ten fresh clusters of the lab's inventory
+(`target/lab/r16/o64/freq.sh`), six under `schedutil` and four with both Zen1 hosts set to
+`performance` (`cpupower frequency-set -g performance`), interleaved, with every Zen1 cpu's
+`scaling_cur_freq` sampled once a second through each load (`freq.py`):
+
+| Load | Governor | Rows a second | titan, mean of 8 cpus, first 5 s / whole load | hyperion |
+| --- | --- | --- | --- | --- |
+| 1 | `schedutil` | 54,760 | 3,292 / 3,209 MHz | 3,358 / 3,244 |
+| 2 | `schedutil` | 54,076 | 3,262 / 3,199 | 3,333 / 3,258 |
+| 3 | `schedutil` | **43,095** | 3,200 / 3,131 | 3,294 / 3,191 |
+| 4 | `schedutil` | 55,529 | 3,135 / 3,213 | 3,227 / 3,215 |
+| 5 | `performance` | 53,527 | 3,304 / 3,271 | 3,369 / 3,308 |
+| 6 | `performance` | 48,433 | 3,352 / 3,261 | 3,342 / 3,287 |
+| 7 | `schedutil` | 52,127 | 3,257 / 3,181 | 3,236 / 3,237 |
+| 8 | `performance` | 55,890 | 3,334 / 3,276 | 3,362 / 3,295 |
+| 9 | `schedutil` | 50,033 | 3,197 / 3,203 | 3,247 / 3,228 |
+| 10 | `performance` | 50,098 | 3,349 / 3,277 | 3,354 / 3,292 |
+
+Under a load `schedutil` runs the Zen1 cores at 3.1 to 3.3 GHz on average, the busiest of them
+at the 3.59 GHz boost throughout, and `performance` at 3.26 to 3.31: within 3% of each other,
+and the slow load (3, at 43,100) ran its cores 80 MHz below the fast ones, not a mode's worth. The
+spread was the same under both governors (43,100–55,500 against 48,400–55,900), and the load
+that was slow was slow from its first five seconds, as every slow load has been.
+
+**Verdict.** The frequency governor is not what picks the mode: under a load the Zen1 cores run
+near their ceiling whichever governor is set. The lab's hosts stay on `schedutil`, and the
+numbers on these pages stay comparable with rounds 11 to 15. Nine candidates are now ruled out.

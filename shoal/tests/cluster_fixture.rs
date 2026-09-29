@@ -1748,6 +1748,11 @@ fn handle_command(
                 .map_err(|error| format!("{error:?}")),
             None => Err("VOTE_PROBE needs a node index".to_string()),
         },
+        // this node's control links, for a test counting a link's dials (item 193)
+        "CONTROL_LINKS" => pool
+            .control_links()
+            .map(|views| serde_json::to_value(views).expect("views serialize"))
+            .map_err(|error| format!("{error:?}")),
         // this node's peer links, for the bounded-lanes test
         "TRANSPORT" => pool
             .transport()
@@ -5054,7 +5059,8 @@ fn key_led_by(
 /// led is written through node zero without a retry, every second, until the write succeeds.
 /// Every failure on the way is `NotLeader` or `Unavailable` and never a timeout - the hop to
 /// the dead leader is refused at once - and the first success comes within the lease and an
-/// election, four times the failover base; after it a hundred writes across the groups fail
+/// election, ~~four times~~ twice the failover base ([F62](../../docs/src/features/failover-window.md));
+/// after it a hundred writes across the groups fail
 /// none. Node zero holds a replica of the group throughout; a follower cannot commit, which is
 /// why nothing but the election ends the refusals.
 #[tokio::test(flavor = "multi_thread")]
@@ -5103,8 +5109,8 @@ async fn a_dead_primary_fails_writes_only_until_its_election() -> Result<(), Fix
             Err(other) => panic!("a write to a dead leader's group failed off the wire: {other:?}"),
         }
         assert!(
-            killed.elapsed() < base * 4 + Duration::from_secs(2),
-            "the group node one led elected nobody within four failover bases; {} refusals",
+            killed.elapsed() < base * 2 + Duration::from_secs(2),
+            "the group node one led elected nobody within two failover bases; {} refusals",
             refusals.len()
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -17695,6 +17701,99 @@ async fn single_node_data_has_a_verified_cluster_migration_path() -> Result<(), 
     }
     assert_eq!(source.node(0).failure(), None, "the source died");
     Ok(())
+}
+
+/// A rebuilt node's old identity is dialled at a verdict's backoff, not twenty times a second
+/// (item 193)
+///
+/// Node two is wiped and started again as a new identity at its old ports, as `cluster rebuild`
+/// does to a host. Its old identity stays a member, down, so node zero's control group
+/// heartbeats both identities at one control address. The link to the old one is answered with
+/// a hello naming the new one, a verdict that waits its whole backoff (item 172); the link to
+/// the new one is up. On the lab, both were dialled twenty times a second for the length of a
+/// rebuild, because the control links were keyed by address and each heartbeat to one identity
+/// replaced the link to the other with a fresh one, whose backoff started over.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rebuilt_identity_is_dialled_at_its_backoff() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let old = cluster.node_ids()[2].clone();
+    let new = cluster.rebuild_identity(2)?;
+    // the new identity joined, and the control leader among the survivors heartbeats both
+    // identities: the old one as a voter that is down, the new one as the member it is
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let leader = loop {
+        let members = cluster.members(0)?;
+        let joined = members["members"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|member| member["record"]["node"].as_str() == Some(new.as_str()));
+        let leader = members["leader"]
+            .as_str()
+            .and_then(|leader| cluster.node_ids().iter().position(|id| id == leader))
+            .filter(|leader| *leader < 2);
+        if let (true, Some(leader)) = (joined, leader) {
+            break leader;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the new identity {new} never joined, or no survivor led the control group: {members}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    // twelve seconds of both identities dialled at one address, counted from here so the
+    // dials while node two was down and starting are not in the count
+    let (made_before, before) = control_dials(&mut cluster, leader)?;
+    std::thread::sleep(Duration::from_secs(12));
+    let (made_after, after) = control_dials(&mut cluster, leader)?;
+    // a link that is replaced takes its dials with it, so the links made is what shows a
+    // link thrown away for every heartbeat: keyed by address, the leader made a link for the
+    // old identity and one for the new about twenty times a second each
+    let made = made_after - made_before;
+    assert!(
+        made <= 2,
+        "the control leader made {made} links in 12 s to reach two identities at one address (before {before:?}, after {after:?})"
+    );
+    // and with a link an identity, a verdict's backoff doubles from 100 ms, so twelve seconds
+    // hold about seven dials of the old identity, and the new one's link stays up
+    let dials = |id: &str| after.get(id).copied().unwrap_or(0) - before.get(id).copied().unwrap_or(0);
+    let (to_old, to_new) = (dials(&old), dials(&new));
+    assert!(
+        to_old <= 10,
+        "the old identity {old} was dialled {to_old} times in 12 s (before {before:?}, after {after:?})"
+    );
+    assert!(
+        to_new <= 2,
+        "the new identity {new} was dialled {to_new} times in 12 s while its link was up (before {before:?}, after {after:?})"
+    );
+    for id in [0, 1] {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// How many control links one node has made in all, and how many times it has dialled each
+/// identity over the links it holds
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `from` - The node whose links are read
+fn control_dials(
+    cluster: &mut Cluster,
+    from: usize,
+) -> Result<(u64, std::collections::BTreeMap<String, u64>), FixtureError> {
+    let view = cluster.node_mut(from).command("CONTROL_LINKS")?;
+    let mut dials = std::collections::BTreeMap::new();
+    for link in view["ok"]["links"].as_array().into_iter().flatten() {
+        let node = link["node"].as_str().unwrap_or_default().to_string();
+        *dials.entry(node).or_insert(0) += link["dials"].as_u64().unwrap_or(0);
+    }
+    Ok((view["ok"]["made"].as_u64().unwrap_or(0), dials))
 }
 
 /// Every link of one node to another, as the transport view shows it: lane, state and the

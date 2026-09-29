@@ -1772,3 +1772,57 @@ beside [round 14's](#round-14s-final-build):
 bench's within the lab's run-to-run spread. The failover window and a partition's worst second are
 where round 14 left them.
 
+## 17. Round 16
+
+Round 15 left [what is left](todo.md) with two open defects of its own (#193, the rebuild's dial
+noise, and #196, the row charge), the failover window as the first limitation on the page, O64
+with "nothing planned", and #142 waiting for its stuck move to recur. This round fixed the two
+defects and measured both on the lab, narrowed the failover window from three to four bases to
+one and a half to two ([F62](../features/failover-window.md)), ruled the hosts' frequency
+governor out of O64 ([performance](performance.md#o64-in-round-16-not-the-governor-either)), and
+ran the loop for #142 again. Nothing in the lab's data was kept: #196 changed what a sorted
+partition's archived size means, and every run here starts from a fresh bootstrap. The runs are
+under `target/lab/r16/`.
+
+### The frequency governor
+
+The first run of the round was O64's, since it changes how every later number reads if it
+names the mode. It did not: ten fresh loads under `schedutil` and `performance` on the Zen1
+hosts spread the same way, with the cores at 3.1 to 3.3 GHz under either
+([performance](performance.md#o64-in-round-16-not-the-governor-either)). The lab stays on
+`schedutil`.
+
+**Verdict: not it.** One more candidate struck.
+
+### A rebuild without the dial noise
+
+Round 15's rebuilds each left about twenty failed dials a second in every journal
+([#193](../appendix/resolved/rebuild-redial-thrash.md)). Read by lane over europa's journal for
+those rebuilds, 22,938 of the 36,479 were on the control lane at exactly one a second per old
+identity between the benches and twenty a second under them, and 13,541 on the replication lane
+at about one a second, all of them `CertificateIdentity` verdicts that
+[#172](../appendix/resolved/identity-refusal-redials.md) already made wait their whole backoff.
+The control lane's links were keyed by address, so each heartbeat to one of the rebuilt node's two
+identities threw the link to the other away, backoff and all - and the link to the live new
+identity with it, twenty times a second. The replication lane's verdicts stopped growing at
+`reconnect_max`, five seconds, and six shards a node made that a dial a second. The fixture test
+written for it made 402 control links in twelve seconds on the unfixed tree and none on the fix.
+
+On the fixed build, a fresh cluster of the lab's inventory loaded whole (53,126 rows a second)
+and hyperion rebuilt under the mixed bench (`target/lab/r16/193/run.sh`, 25 minutes of bench):
+
+| | |
+| --- | --- |
+| Rebuild | 18 sets, 883 MiB moved and 901 MiB streamed in 178 s: 4.9 MiB/s, 7.5 s a step |
+| Snapshot fed, stalled, failed, forced purges | 0, 0, 0, 0 on every node; 18 groups installed once each |
+| Failed dials in europa's journal | 474: 433 refused connections in the minute hyperion was stopped and wiped, at `reconnect_min` as a node that may come back is dialled; 40 verdicts over the rebuild, 7 on the control lane and 33 on the replication lane, 9, 19, 6, 5 and 1 a minute as the backoffs doubled |
+| In titan's | 238: 207 refused connections and 31 verdicts |
+| In hyperion's | 12 verdicts, and 25 refused control handshakes where round 15 counted 9,349 |
+| Bench over 1,500 s | 14,274 gets, 16,052 updates and 5,352 inserts a second; update p99 137 ms; 1,333 `NotLeader` and 8 `Unavailable` for writes hyperion led as it went, 384 connections lost when it stopped |
+| Acknowledged inserts, each member alone | 8,033,268, 0 lost |
+| csv, each member alone at `One` | 1,187,691 movies and 58,418 keyword partitions: 0 missing, 0 different |
+
+**Verdict: fixed.** A three minute rebuild leaves about forty verdict dials in a peer's journal
+where an eight minute one left 9,374, and the control link to the rebuilt node stays up through
+it.
+

@@ -572,13 +572,14 @@ list rather than from the diff:
   the caller already saw. The single-bundle retry covers `send_one_with` and `exec_with`.
 - **A coverage list on the response frame.** Still the slot on the coordinator; still nothing
   reconciles across shares.
-- **A shorter failover window.** The follower lease is `election_timeout_max`, twice the
-  base, so a failover takes two to three times the base. openraft ~~has no pre-vote and~~ has
+- ~~**A shorter failover window.** The follower lease is `election_timeout_max`, twice the
+  base, so a failover takes two to three times the base.~~ **Built as [F62](../features/failover-window.md)**
+  in round 16 of the cluster testing: the lease is the base and the window one and a half to two
+  bases. What stands of this entry: openraft ~~has no pre-vote and~~ has
   pre-vote, now on ([Resolved #144](resolved/post-heal-elections.md)), which protects a leader
   rather than replacing one faster, and has no way
   to expire a follower's lease early; a link that dropped could be a hint to elect, but the
-  other followers would still refuse the vote inside their lease. The window is the base's to
-  tune.
+  other followers would still refuse the vote inside their lease.
 - ~~**A returning leader's own re-election.** Refused by the same lease until it lapses;
   a hop that lands on a member that is `Electing` could be answered `NotLeader` at once rather
   than waiting the election out, which would make the returning node's window a burst of
@@ -2322,6 +2323,22 @@ Filed by [O61](optimizations.md#o61-a-fast-device-syncs-the-wal-in-batches-too-s
 deployment says which nodes have which storage. A deployment cannot set it at all yet: the lab's
 experiment edited europa's `shoal.yml` by hand. A group-level key the renderer writes would let a
 mixed cluster set it on its fast nodes alone.
+
+## What a row's allocations take
+
+Filed by [Resolved #196](resolved/row-charge-undercount.md), which charged a sorted row with its
+key and its share of a B-tree node, made the two bases agree and reported the eviction list, and
+left this. A row's charge is `deep_size_of`: the bytes its fields ask for, with every String and
+Vec block counted at its capacity. The allocator rounds each block up to a size class, and a
+Movie row holds about thirty of them - eleven Strings and five `Vec<String>`s of a few short
+strings each - so what the heap holds for a row is more than what the row asked for. What it
+needs: either a walk over a row's heap blocks that rounds each to the allocator's class (a size
+trait of shoal's own, since deepsize2 sums capacities and offers no hook per block), or a
+counting allocator whose per-thread live counter is read before and after a row is deserialized
+and inserted, which counts the rounding exactly and costs an increment on every allocation the
+node makes. Round 16 measured the gap that is left on the lab
+([cluster testing](../cluster-testing/correctness.md#what-a-row-is-charged)); it is the number
+this entry is judged against.
 
 ## A node's archive map is bounded by nothing
 

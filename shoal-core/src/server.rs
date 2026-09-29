@@ -833,6 +833,18 @@ where
         }
     }
 
+    /// Every control link this node holds, for a test or an operator reading its dials
+    ///
+    /// # Errors
+    ///
+    /// Fails on a node with no cluster block, or whose control thread is gone.
+    pub fn control_links(&self) -> Result<control::network::ControlLinksView, ServerError> {
+        match &self.control {
+            Some(control) => control.links(),
+            None => Err(ServerError::Shoal(ShoalError::NotClustered)),
+        }
+    }
+
     /// Wait until every shard is answering, or report the first one that is not
     ///
     /// Returns the bound address once each shard has reported ready. A shard that failed - to

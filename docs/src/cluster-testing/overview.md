@@ -110,6 +110,14 @@ and `profab.sh` (the same, with a titan profile). **Interleave arms and reverse 
 this lab the first arm after an upgrade wins by 2–6% whichever build it is
 ([performance](performance.md#the-admission-gate-and-the-bench)).
 
+Round 16's are under `target/lab/r16/`: `o64/freq.sh` and `freq.py` (fresh loads under either
+cpu frequency governor on the Zen1 hosts, with every cpu's frequency sampled through each),
+`193/run.sh` and `rebuild.sh` (round 15's rebuild under the bench, with the failed dials and
+refused handshakes counted by lane and kind from every journal), `failover/run.sh`
+(`failover-test.sh` at the default base and at 1 s), `196/run.sh` (a fresh cluster on the
+`jemalloc-prof` build loaded whole, its memory table and titan's heap dump kept together), and
+`142/loop-keep.sh` (round 15's loop, keeping every failing round's logs and going on).
+
 Each run is recorded by `target/lab/record.sh`, which runs `vmstat 1` on every host beside it. Disk
 writes are counted per device from `/proc/diskstats` before and after (`target/lab/diskstats.sh`).
 These scripts are scratch and are not committed. What they measured is on these pages.
@@ -133,7 +141,9 @@ its leads on`), as does one under its append reserve (`under the append reserve`
 
 Since round 15 the memory table also has each member's `archive maps`, `table maps` and `wal
 index`, the bytes the shards' archive map indexes, tables' partition indexes and WAL entry indexes
-hold, estimated from their sizes; none counts against a budget. What is left of `resident` past the rows and the two
+hold, estimated from their sizes, and since round 16 `lru`, the eviction lists' entries
+([#196](../appendix/resolved/row-charge-undercount.md)); none counts against a budget. What is
+left of `resident` past the rows and the four
 is counted by nothing, and a node whose left over grows under load wants a heap profile:
 
 ```bash
