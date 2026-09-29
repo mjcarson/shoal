@@ -425,8 +425,13 @@ panic in the round was not this item and is not to be filed here:
 `a_restarted_volatile_leader_elects_nobody_missing_its_commits` hit openraft's
 `log_state_reader.rs:25` assertion once, on the first run of the fixture's failover tests on
 [F62](../features/failover-window.md), because the amnesiac grace had halved with the lease;
-the grace is four bases again and the test passed four of four after it. What is left here is
-whatever the next loaded run finds; the shapes on record are all explained or fixed.
+the grace is four bases again and the test passed four of four after it. The workspace run on
+the round's last code passed 1,744 of 1,746, with two deadlines under load that passed alone
+twice each and are this item's: `single_node_data_has_a_verified_cluster_migration_path` judged
+its restore before the records landed (*the groups restored other records than the export holds:
+0 against 400*), and `unplaced_member_forwards_every_query` read a node's readiness before the
+placement was initialized (*initialized: false* with every member up). Six rounds of the loop on
+#197's fix passed 36 of 36.
 
 The suite run for [Resolved #144](resolved/post-heal-elections.md) at six threads failed
 `lost_response_retry_returns_original_result` again, and also `scheduled_scrub_quarantines_without_an_operator`,
