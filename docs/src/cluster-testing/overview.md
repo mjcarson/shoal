@@ -131,6 +131,26 @@ interval, so a load that changes pace partway through shows where. A node
 that judges its own links slow says so in its journal (`this node's links are slow, and it hands
 its leads on`), as does one under its append reserve (`under the append reserve`).
 
+Since round 15 the memory table also has each member's `archive maps` and `table maps`, the bytes
+the shards' archive map indexes and tables' partition indexes hold, estimated from their
+capacities; neither counts against a budget. What is left of `resident` past the rows and the two
+is counted by nothing, and a node whose left over grows under load wants a heap profile:
+
+```bash
+# the node program with jemalloc and sampled heap profiling built in: an allocation sampled every
+# 512 KiB on average, the live samples dumped every 2 GiB allocated to /var/tmp/shoal-heap.*
+CARGO_TARGET_DIR=target/prof RUSTFLAGS="-C target-cpu=znver1 -C force-frame-pointers=yes" \
+    cargo build --release -p tmdb-dataset --bin tmdb-dataset-node --features jemalloc-prof
+# an inventory whose `server:` names target/prof/release/tmdb-dataset-node, rolled on with
+# `cluster upgrade`; then a dump's live bytes by allocation site, symbolized against the binary
+python3 target/lab/r15/prof/heap.py /var/tmp/shoal-heap.<pid>.<n>.i<n>.heap \
+    target/prof/release/tmdb-dataset-node 3
+```
+
+That is what named [#191](../appendix/resolved/raft-channels-preallocated.md). A cluster grows past
+the one dataset with `load --copies <n> --first-copy <c>`, each copy under ids of its own, and
+`verify --copies <n>` expects every copy's keyword rows.
+
 ## When a move is slow
 
 A move that makes no progress says so itself, every 30 s, on the node leading the group:

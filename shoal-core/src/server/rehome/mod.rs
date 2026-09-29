@@ -638,7 +638,6 @@ async fn archives_step(
         .borrow()
         .values()
         .filter(|entry| record_target(manifest, slots, source, entry.key) == Some(dest))
-        .copied()
         .collect();
     moving.sort_by_key(|entry| (entry.archive, entry.offset));
     let total_bytes: u64 = moving

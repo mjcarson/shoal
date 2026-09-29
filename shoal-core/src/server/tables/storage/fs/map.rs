@@ -250,13 +250,211 @@ impl MapIntent {
     }
 }
 
+/// Where a partition's base record is, as the index holds it beside its key
+///
+/// Sixteen bytes where an [`ArchiveEntry`] is forty: the key is the map's, the archive is a number
+/// into the index's table of archives, and the size fits 32 bits, since rkyv's relative pointers
+/// bound a record below 4 GiB ([O83](../../../../../../docs/src/appendix/optimizations.md#o83-the-partition-index-held-forty-eight-bytes-a-partition)).
+#[derive(Debug, Archive, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+pub struct Slot {
+    /// The archive the record is in, by its number in the index's table
+    pub archive: u32,
+    /// The payload's length
+    pub size: u32,
+    /// Where the payload starts
+    pub offset: u64,
+}
+
+/// Every partition's base record, by key: the one structure a shard holds per partition it has
+///
+/// At ten times the lab's dataset this was most of a node's memory, and it is bounded by nothing
+/// ([cluster testing](../../../../../../docs/src/cluster-testing/performance.md#memory-at-ten-times-the-dataset)),
+/// so it holds as little as it can: a [`Slot`] a partition, and each archive's id once.
+#[derive(Debug, Archive, Deserialize, Serialize, Clone, Default)]
+pub struct PartitionIndex {
+    /// Each archive a slot has named, by its number; one is added per archive ever written to
+    archives: Vec<Uuid>,
+    /// Each partition's slot
+    slots: std::collections::HashMap<u64, Slot>,
+    /// Each archive's number, rebuilt from `archives` when the index is loaded
+    #[rkyv(with = rkyv::with::Skip)]
+    numbers: std::collections::HashMap<Uuid, u32>,
+}
+
+impl PartitionIndex {
+    /// An empty index with room for some partitions
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - How many partitions to make room for
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        PartitionIndex {
+            archives: Vec::new(),
+            slots: std::collections::HashMap::with_capacity(capacity),
+            numbers: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Rebuild each archive's number from the table, which a loaded index does not carry
+    fn renumber(&mut self) {
+        self.numbers = self
+            .archives
+            .iter()
+            .enumerate()
+            .map(|(number, archive)| (*archive, u32::try_from(number).unwrap_or(u32::MAX)))
+            .collect();
+    }
+
+    /// An archive's number, adding it to the table if it has none
+    ///
+    /// # Arguments
+    ///
+    /// * `archive` - The archive
+    fn number(&mut self, archive: Uuid) -> u32 {
+        if let Some(number) = self.numbers.get(&archive) {
+            return *number;
+        }
+        let number = u32::try_from(self.archives.len()).unwrap_or(u32::MAX);
+        self.archives.push(archive);
+        self.numbers.insert(archive, number);
+        number
+    }
+
+    /// An archive's number if it has one, which no slot names otherwise
+    ///
+    /// # Arguments
+    ///
+    /// * `archive` - The archive
+    #[must_use]
+    pub fn number_of(&self, archive: &Uuid) -> Option<u32> {
+        self.numbers.get(archive).copied()
+    }
+
+    /// The entry a slot is, under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition key
+    /// * `slot` - Its slot
+    fn entry(&self, key: u64, slot: &Slot) -> ArchiveEntry {
+        ArchiveEntry {
+            key,
+            archive: self
+                .archives
+                .get(slot.archive as usize)
+                .copied()
+                .unwrap_or_default(),
+            offset: slot.offset,
+            size: slot.size as usize,
+        }
+    }
+
+    /// A partition's entry
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition key
+    #[must_use]
+    pub fn get(&self, key: &u64) -> Option<ArchiveEntry> {
+        self.slots.get(key).map(|slot| self.entry(*key, slot))
+    }
+
+    /// Set a partition's entry, returning the one it replaced
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The entry, which names its partition
+    pub fn insert(&mut self, entry: ArchiveEntry) -> Option<ArchiveEntry> {
+        let slot = Slot {
+            archive: self.number(entry.archive),
+            // rkyv's relative pointers bound a record below 4 GiB, so this never saturates; if it
+            // did, the read would come back short and be refused as a torn record
+            size: u32::try_from(entry.size).unwrap_or(u32::MAX),
+            offset: entry.offset,
+        };
+        let old = self.slots.insert(entry.key, slot)?;
+        Some(self.entry(entry.key, &old))
+    }
+
+    /// Drop a partition's entry, returning it
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition key
+    pub fn remove(&mut self, key: &u64) -> Option<ArchiveEntry> {
+        let old = self.slots.remove(key)?;
+        Some(self.entry(*key, &old))
+    }
+
+    /// Whether a partition has an entry
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition key
+    #[must_use]
+    pub fn contains_key(&self, key: &u64) -> bool {
+        self.slots.contains_key(key)
+    }
+
+    /// How many partitions have an entry
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Whether no partition has an entry
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    /// How many partitions the index has room for before it grows
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.slots.capacity()
+    }
+
+    /// Every partition key
+    pub fn keys(&self) -> impl Iterator<Item = &u64> {
+        self.slots.keys()
+    }
+
+    /// Every partition's entry
+    pub fn values(&self) -> impl Iterator<Item = ArchiveEntry> + '_ {
+        self.slots.iter().map(|(key, slot)| self.entry(*key, slot))
+    }
+
+    /// Every partition's key and entry
+    pub fn iter(&self) -> impl Iterator<Item = (u64, ArchiveEntry)> + '_ {
+        self.slots
+            .iter()
+            .map(|(key, slot)| (*key, self.entry(*key, slot)))
+    }
+
+    /// Every partition key and slot, as held
+    pub fn slots(&self) -> impl Iterator<Item = (&u64, &Slot)> {
+        self.slots.iter()
+    }
+
+    /// The archive a number names
+    ///
+    /// # Arguments
+    ///
+    /// * `number` - The archive's number
+    #[must_use]
+    pub fn archive(&self, number: u32) -> Option<Uuid> {
+        self.archives.get(number as usize).copied()
+    }
+}
+
 /// A serialized archive map
 #[derive(Debug, Archive, Deserialize, Serialize, Clone)]
 pub struct SerializedMap {
     /// All archives this shard knows about
     all_archives: HashSet<Uuid>,
-    /// The map of partitions keys to archive entries
-    to_archive: std::collections::HashMap<u64, ArchiveEntry>,
+    /// The map of partitions keys to where their records are
+    to_archive: PartitionIndex,
     /// The fragments written over a partition's base record, oldest first, for the few that have any
     fragments: std::collections::HashMap<u64, Vec<ArchiveEntry>>,
 }
@@ -276,9 +474,9 @@ struct SerializedMapRef<'a> {
     /// All archives this shard knows about
     #[rkyv(with = rkyv::with::Inline)]
     all_archives: &'a HashSet<Uuid>,
-    /// The map of partitions keys to archive entries
+    /// The map of partitions keys to where their records are
     #[rkyv(with = rkyv::with::Inline)]
-    to_archive: &'a std::collections::HashMap<u64, ArchiveEntry>,
+    to_archive: &'a PartitionIndex,
     /// The fragments written over a partition's base record, for the few that have any
     #[rkyv(with = rkyv::with::Inline)]
     fragments: &'a std::collections::HashMap<u64, Vec<ArchiveEntry>>,
@@ -369,7 +567,7 @@ impl SerializedMap {
                             continue;
                         }
                     }
-                    self.to_archive.insert(entry.key, entry);
+                    self.to_archive.insert(entry);
                     // a whole record replaces whatever chain the partition had
                     self.fragments.remove(&entry.key);
                 }
@@ -391,7 +589,7 @@ impl SerializedMap {
                             continue;
                         }
                     }
-                    self.to_archive.insert(chain.base.key, chain.base);
+                    self.to_archive.insert(chain.base);
                     if chain.fragments.is_empty() {
                         self.fragments.remove(&chain.base.key);
                     } else {
@@ -468,6 +666,8 @@ impl SerializedMap {
             let archived = rkyv::access::<ArchivedSerializedMap, rkyv::rancor::Error>(&read[8..])?;
             // deserialize this map
             let mut map = rkyv::deserialize::<SerializedMap, rkyv::rancor::Error>(archived)?;
+            // the archives' numbers are not carried, so they are rebuilt before a slot is added
+            map.to_archive.renumber();
             // load our intent log
             map.load_intent_log(intent_path, archive_dir).await?;
             Ok(map)
@@ -477,7 +677,7 @@ impl SerializedMap {
             // build a default serializable map
             let map = SerializedMap {
                 all_archives: HashSet::with_capacity(1000),
-                to_archive: std::collections::HashMap::with_capacity(1000),
+                to_archive: PartitionIndex::with_capacity(1000),
                 fragments: std::collections::HashMap::new(),
             };
             Ok(map)
@@ -746,7 +946,7 @@ pub struct ArchiveMap {
     /// A shard local map of what archives contain what data
     ///
     /// Changed only through `set_partition` and `remove_partition`, which keep `usage` in step.
-    pub to_archive: RefCell<HashMap<u64, ArchiveEntry>>,
+    pub to_archive: RefCell<PartitionIndex>,
     /// The fragments merged over a partition's record in `to_archive` since it was last written
     /// whole, oldest first, for the partitions that have any
     ///
@@ -809,15 +1009,13 @@ impl ArchiveMap {
         // how large the map on disk is, which the intent log is folded against
         let saved_bytes = std::fs::metadata(&map_path).map_or(0, |meta| meta.len());
         // start out with an empty hash map with room for 1k partitions
-        let to_archive = RefCell::new(HashMap::with_capacity(1000));
-        // and what they hold per tablet, counted as they are loaded
+        // what the partitions hold per tablet, counted from the index as it was loaded; the index
+        // itself is taken as it is, never copied entry by entry into another
         let mut usage = TabletUsage::empty();
-        // load all of this shards keys into this map
-        for (key, entry) in serializable.to_archive {
-            // add this entry from our map
+        for (key, entry) in serializable.to_archive.iter() {
             usage.add(key, &entry);
-            to_archive.borrow_mut().insert(key, entry);
         }
+        let to_archive = RefCell::new(serializable.to_archive);
         // and the fragments of the partitions that have a chain, counted as their bytes
         for (key, fragments) in &serializable.fragments {
             usage.add_fragments(*key, fragments);
@@ -904,7 +1102,8 @@ impl ArchiveMap {
     pub fn set_partition(&self, id: u64, entry: ArchiveEntry) {
         // insert or update this partitions entry, and move its tablet's figures by the change
         let mut usage = self.usage.borrow_mut();
-        if let Some(old) = self.to_archive.borrow_mut().insert(id, entry) {
+        debug_assert_eq!(id, entry.key, "an entry is set under its own key");
+        if let Some(old) = self.to_archive.borrow_mut().insert(entry) {
             usage.remove(id, &old);
         }
         usage.add(id, &entry);
@@ -940,7 +1139,7 @@ impl ArchiveMap {
     #[must_use]
     pub fn chain_of(&self, id: u64) -> Option<ChainEntry> {
         // no base, no partition
-        let base = *self.to_archive.borrow().get(&id)?;
+        let base = self.to_archive.borrow().get(&id)?;
         // and whatever was written over it
         let fragments = self
             .fragments
@@ -968,7 +1167,7 @@ impl ArchiveMap {
     #[must_use]
     pub fn index_bytes(&self) -> usize {
         // a bucket is its key, its entry and a control byte, at hashbrown's load factor of 7/8
-        let bucket = std::mem::size_of::<(u64, ArchiveEntry)>() + 1;
+        let bucket = std::mem::size_of::<(u64, Slot)>() + 1;
         let entries = self.to_archive.borrow().capacity().saturating_mul(bucket) / 7 * 8;
         // and each chain's vector of fragments
         let fragments = self.fragments.borrow();
@@ -1107,7 +1306,7 @@ impl ArchiveMap {
         let mut usage = TabletUsage::empty();
         // every partition the map names lands on the tablet its key hashes into
         for (key, entry) in self.to_archive.borrow().iter() {
-            usage.add(*key, entry);
+            usage.add(key, &entry);
         }
         // and the bytes of every chain's fragments
         for (key, fragments) in self.fragments.borrow().iter() {
@@ -1386,10 +1585,7 @@ impl ArchiveMap {
     /// Find the location for a partition
     pub fn find_partition(&self, id: u64) -> Option<ArchiveEntry> {
         // get the entry for this partition if it exists
-        match self.to_archive.borrow().get(&id) {
-            Some(entry) => Some(*entry),
-            None => None,
-        }
+        self.to_archive.borrow().get(&id)
     }
 
     /// Add a new archive to our map
@@ -1437,11 +1633,15 @@ impl ArchiveMap {
         // every partition of one record whose entry names this archive: a chained partition's
         // base is never moved alone, since a whole record in its place would end its chain
         let fragments = self.fragments.borrow();
-        self.to_archive
-            .borrow()
-            .values()
-            .filter(|entry| entry.archive == *archive && !fragments.contains_key(&entry.key))
-            .copied()
+        let index = self.to_archive.borrow();
+        // an archive the index has no number for holds no partition's record
+        let Some(number) = index.number_of(archive) else {
+            return Vec::new();
+        };
+        index
+            .slots()
+            .filter(|(key, slot)| slot.archive == number && !fragments.contains_key(key))
+            .filter_map(|(key, _)| index.get(key))
             .collect()
     }
 
@@ -1459,12 +1659,28 @@ impl ArchiveMap {
         // one pass over the index, counting and copying nothing else: copying every entry here
         // was a copy of the whole index on every compaction
         // ([O68](../../../../../../docs/src/appendix/optimizations.md#o68-every-archive-compaction-copies-the-shards-whole-partition-index))
-        for (_, archive_entry) in self.to_archive.borrow().iter() {
-            // a record's footprint in its archive is its prefix and its payload: counted as the
-            // payload alone, a fully live archive of short records read as under half live and
-            // every pass copied it ([Resolved #179](../../../../../../docs/src/appendix/resolved/archive-usage-prefix.md))
-            *used_by.entry(archive_entry.archive).or_default() +=
-                archive_entry.size + RECORD_PREFIX_LEN as usize;
+        {
+            let index = self.to_archive.borrow();
+            // counted by the archive's number, and each number named once at the end
+            let mut by_number: Vec<usize> = Vec::new();
+            for (_, slot) in index.slots() {
+                let at = slot.archive as usize;
+                if by_number.len() <= at {
+                    by_number.resize(at + 1, 0);
+                }
+                // a record's footprint in its archive is its prefix and its payload: counted as
+                // the payload alone, a fully live archive of short records read as under half
+                // live and every pass copied it ([Resolved #179](../../../../../../docs/src/appendix/resolved/archive-usage-prefix.md))
+                by_number[at] += slot.size as usize + RECORD_PREFIX_LEN as usize;
+            }
+            for (number, used) in by_number.into_iter().enumerate() {
+                if used == 0 {
+                    continue;
+                }
+                if let Some(archive) = index.archive(u32::try_from(number).unwrap_or(u32::MAX)) {
+                    *used_by.entry(archive).or_default() += used;
+                }
+            }
         }
         // and every fragment, where it lies
         for fragments in self.fragments.borrow().values() {
@@ -1624,10 +1840,10 @@ mod tests {
             };
             let mut snapshot_map = SerializedMap {
                 all_archives: HashSet::default(),
-                to_archive: std::collections::HashMap::default(),
+                to_archive: super::PartitionIndex::default(),
                 fragments: std::collections::HashMap::default(),
             };
-            snapshot_map.to_archive.insert(before.key, before);
+            snapshot_map.to_archive.insert(before);
             std::fs::write(&map_path, snapshot(&snapshot_map)).unwrap();
             // the log repoints 1 past the active archive's end, logs 2 there too, logs 3
             // inside it, and logs 4 in an archive that is not there at all
@@ -1645,7 +1861,7 @@ mod tests {
             .await
             .expect("the map loads");
             // the entry before the torn one stands
-            assert_eq!(loaded.to_archive.get(&1), Some(&before));
+            assert_eq!(loaded.to_archive.get(&1), Some(before));
             // a torn entry with nothing before it names nothing
             assert_eq!(loaded.to_archive.get(&2), None);
             // one inside its archive, up to its last byte, is kept
@@ -1679,10 +1895,10 @@ mod tests {
             // build a snapshot that already knows about that partition
             let mut snapshot_map = SerializedMap {
                 all_archives: HashSet::default(),
-                to_archive: std::collections::HashMap::default(),
+                to_archive: super::PartitionIndex::default(),
                 fragments: std::collections::HashMap::default(),
             };
-            snapshot_map.to_archive.insert(stale.key, stale);
+            snapshot_map.to_archive.insert(stale);
             // write our snapshot to disk
             std::fs::write(&map_path, snapshot(&snapshot_map)).unwrap();
             // log an entry for a second partition and the removal of the first
@@ -1705,6 +1921,51 @@ mod tests {
         });
     }
 
+    /// A partition's slot is sixteen bytes beside its key, and reads back as the entry set
+    ///
+    /// The index is the one structure a shard holds for every partition it has, and at ten
+    /// times the lab's dataset it was most of a node's memory at 48 bytes a partition
+    /// ([O83](../../../../../../docs/src/appendix/optimizations.md#o83-the-partition-index-held-forty-eight-bytes-a-partition)).
+    #[test]
+    fn a_partition_slot_is_sixteen_bytes_and_reads_back_whole() {
+        use super::{PartitionIndex, Slot};
+        assert_eq!(std::mem::size_of::<Slot>(), 16);
+        assert_eq!(std::mem::size_of::<(u64, Slot)>(), 24);
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut index = PartitionIndex::default();
+        let entry = |key: u64, archive: Uuid, offset: u64| ArchiveEntry {
+            key,
+            archive,
+            offset,
+            size: 700,
+        };
+        // each archive is numbered once, however many partitions name it
+        assert_eq!(index.insert(entry(1, a, 16)), None);
+        assert_eq!(index.insert(entry(2, a, 732)), None);
+        assert_eq!(index.insert(entry(3, b, 16)), None);
+        assert_eq!(index.number_of(&a), Some(0));
+        assert_eq!(index.number_of(&b), Some(1));
+        // an entry reads back as it was set, and a replaced one is handed back
+        assert_eq!(index.get(&2), Some(entry(2, a, 732)));
+        assert_eq!(index.insert(entry(2, b, 748)), Some(entry(2, a, 732)));
+        assert_eq!(index.get(&2), Some(entry(2, b, 748)));
+        assert_eq!(index.remove(&1), Some(entry(1, a, 16)));
+        assert_eq!(index.get(&1), None);
+        assert_eq!(index.len(), 2);
+        // archived and read back, the numbers are rebuilt from the table and new ones follow on
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&index).unwrap();
+        let archived =
+            rkyv::access::<super::ArchivedPartitionIndex, rkyv::rancor::Error>(&bytes).unwrap();
+        let mut loaded =
+            rkyv::deserialize::<PartitionIndex, rkyv::rancor::Error>(archived).unwrap();
+        loaded.renumber();
+        assert_eq!(loaded.get(&3), Some(entry(3, b, 16)));
+        let c = Uuid::new_v4();
+        loaded.insert(entry(4, c, 16));
+        assert_eq!(loaded.number_of(&c), Some(2));
+        assert_eq!(loaded.get(&4), Some(entry(4, c, 16)));
+    }
+
     /// A chain's intent replayed twice lands on the same chain, and a whole record ends it
     ///
     /// A map intent names the whole chain, not the fragment appended, so a log replayed over a
@@ -1722,7 +1983,7 @@ mod tests {
             // a map is saved before its first intent is logged, so one is on disk, empty
             let empty = SerializedMap {
                 all_archives: HashSet::default(),
-                to_archive: std::collections::HashMap::default(),
+                to_archive: super::PartitionIndex::default(),
                 fragments: std::collections::HashMap::default(),
             };
             std::fs::write(&map_path, snapshot(&empty)).unwrap();
@@ -1754,10 +2015,10 @@ mod tests {
             let loaded = SerializedMap::new(&map_path, &intent_path, Some(&archive_dir), "test")
                 .await
                 .expect("the map loads");
-            assert_eq!(loaded.to_archive.get(&1), Some(&at(1, 16)));
+            assert_eq!(loaded.to_archive.get(&1), Some(at(1, 16)));
             assert_eq!(loaded.fragments.get(&1), Some(&vec![at(1, 200), at(1, 400)]));
             // a whole record ended partition 2's chain
-            assert_eq!(loaded.to_archive.get(&2), Some(&at(2, 1000)));
+            assert_eq!(loaded.to_archive.get(&2), Some(at(2, 1000)));
             assert_eq!(loaded.fragments.get(&2), None);
             // and a removal took partition 3 and its chain
             assert_eq!(loaded.to_archive.get(&3), None);
@@ -1778,7 +2039,7 @@ mod tests {
             // a map is saved before its first intent is logged, so one is on disk, empty
             let empty = SerializedMap {
                 all_archives: HashSet::default(),
-                to_archive: std::collections::HashMap::default(),
+                to_archive: super::PartitionIndex::default(),
                 fragments: std::collections::HashMap::default(),
             };
             std::fs::write(&map_path, snapshot(&empty)).unwrap();
@@ -2090,11 +2351,11 @@ mod tests {
             // every intent before it is applied, and the shard opens
             let mut map = SerializedMap {
                 all_archives: HashSet::default(),
-                to_archive: std::collections::HashMap::default(),
+                to_archive: super::PartitionIndex::default(),
                 fragments: std::collections::HashMap::default(),
             };
             for key in 0..4u64 {
-                map.to_archive.insert(key, entry_for(key));
+                map.to_archive.insert(entry_for(key));
             }
             map.load_intent_log(&path, None)
                 .await

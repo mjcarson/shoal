@@ -1710,7 +1710,11 @@ the csv's copies through each member alone, 0 lost, 0 missing, 0 different.
 It found one more defect. hyperion refused every Movie set's snapshot from 23 minutes in to the end, 820
 times, because a failed move's partial of 1.17 GB was still counted against its 2 GiB bound for
 partials: [#194](../appendix/resolved/abandoned-partial-snapshots.md), fixed, a partial nothing
-came for past `snapshot_timeout` is dropped when the next stream begins.
+came for past `snapshot_timeout` is dropped when the next stream begins. The same plan, taken up on that
+build by a restart of all three nodes (which also emptied the stranded partial) and a removal
+sent again with the bench stopped, moved 7 sets in 57 minutes, one every seven at 4 MiB/s, with no
+bound refusal; one more move failed, a learner not caught up within `migration.timeout`'s 600 s
+while its set streamed at the throttle.
 
 **Verdict:** a step that outlasts `retained_bytes + hold_bytes` under writes does not finish, and
 now fails by name without harming the rest of the cluster. `hold_bytes` has to cover a step's
