@@ -1780,7 +1780,10 @@ with "nothing planned", and #142 waiting for its stuck move to recur. This round
 defects and measured both on the lab, narrowed the failover window from three to four bases to
 one and a half to two ([F62](../features/failover-window.md)), ruled the hosts' frequency
 governor out of O64 ([performance](performance.md#o64-in-round-16-not-the-governor-either)), and
-ran the loop for #142 again. Nothing in the lab's data was kept: #196 changed what a sorted
+ran the loop for #142 again, whose first round caught round 15's stuck move with its logs:
+[#197](../appendix/resolved/retired-driver-holds-slot.md), a move's source resuming the drive
+and reconfiguring itself out, then holding its shard's one driver slot on a copy retired under
+it, fixed. Nothing in the lab's data was kept: #196 changed what a sorted
 partition's archived size means, and every run here starts from a fresh bootstrap. The runs are
 under `target/lab/r16/`.
 
@@ -1899,8 +1902,9 @@ node - rows, the two maps, the WAL index and the eviction list - where round 15'
 
 ### Round 16's final build
 
-On the round's last code, with the lab's inventory (`target/lab/r16/confirm/run.sh`), beside
-[round 15's](#round-15s-final-build):
+On the round's last lab build (`3d6312e`, with #193, #196 and F62; #197 followed it and changed
+the move driver alone, which a load, a kill and a partition never exercise), with the lab's
+inventory (`target/lab/r16/confirm/run.sh`), beside [round 15's](#round-15s-final-build):
 
 | | Round 16 | Round 15 |
 | --- | --- | --- |
@@ -1912,7 +1916,11 @@ On the round's last code, with the lab's inventory (`target/lab/r16/confirm/run.
 **Verdict: pass.** The load's rate is inside O64's spread, the bench's inside the lab's, the
 failover window is [F62](../features/failover-window.md)'s, and a partition's worst second is
 where [#143](../appendix/resolved/silent-partition-hops.md#still-open)'s remainder left it
-(40%, 53% and 47% over three rounds: the kernel's two retransmission timeouts).
+(40%, 53% and 47% over three rounds: the kernel's two retransmission timeouts). The round's last
+code (`296fffa`, #197 in it) was then rolled onto the same cluster with `cluster upgrade`, one
+node at a time: 3 of 3 upgraded, 3 of 3 copies, writes admitted. A rolling upgrade moves no set,
+so that is a smoke of the binary and not of #197, whose test is the fixture's; the lab is left on
+it.
 
 ### #142 in round 16
 
@@ -1944,8 +1952,9 @@ rounds before the fix), every one asked for by the six tests' kills, restarts, i
 partitions under [F62](../features/failover-window.md)'s lease; the count is the baseline a later
 round compares against, not a pass or fail - a round where it jumps is the one to read.
 
-The workspace run on the round's last code, #197 in it, passed 1,744 of 1,746: two fixture tests
-failed under the suite's load and passed alone twice each. `single_node_data_has_a_verified_cluster_migration_path`
+The workspace run on the round's last code, #197 in it, passed 1,744 of 1,746, where the run on
+the code just before #197, on the same host at the same six threads, had passed 1,745 of 1,745:
+two fixture tests failed under the suite's load and passed alone twice each. `single_node_data_has_a_verified_cluster_migration_path`
 judged its restore before the records landed (*the groups restored other records than the export
 holds: 0 against 400*), and `unplaced_member_forwards_every_query` read a node's readiness before
 the placement was initialized (*initialized: false* with every member up). Neither is in the move
