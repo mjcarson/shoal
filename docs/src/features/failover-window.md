@@ -36,16 +36,30 @@ base `b` as:
 | Heartbeats a leader may miss before a follower votes for another | 20 | 10 | | |
 | Heartbeats before a follower stands itself | 30–40 | 15–20 | | |
 
-Everything derived from `election_timeout_max` moves with it and keeps its meaning: a returning
-leader waits out one lease before standing (`b` now, [Resolved #103](../appendix/resolved/returning-leader.md));
-the head start a non-primary gives its primary to initialize a group, and the grace an empty
-volatile copy grants no vote for ([Resolved #142](../appendix/resolved/volatile-amnesiac-vote.md)),
-are two leases (`2b`), which is the whole window and one base to spare. [Resolved #190](../appendix/resolved/append-answer-thrown-away.md)'s
+What is derived from `election_timeout_max` was read one wait at a time. A returning leader
+waits out one lease before standing, `b` now ([Resolved #103](../appendix/resolved/returning-leader.md)):
+that wait *is* the followers' lease and has to move with it. The head start a non-primary gives
+its primary to initialize a group, and the grace an empty volatile copy grants no vote for
+([Resolved #142](../appendix/resolved/volatile-amnesiac-vote.md)), are waits *past* a window,
+and keep their time: four leases now, `4b`, where they were two of the old double leases. The
+first run of the fixture's failover tests on the change found the second one out - the grace had
+halved to the two seconds `a_restarted_volatile_leader_elects_nobody_missing_its_commits` holds
+an empty leader and a lagging follower alone, and the copy that had forgotten its commits granted
+the vote at the end of them, openraft's `log_state_reader.rs:25` assertion on the follower that
+had kept them. [Resolved #190](../appendix/resolved/append-answer-thrown-away.md)'s
 floor on an append's wait is set from the base itself (`set_failover_base`), not from
 `election_timeout_min`, so a loaded follower's late answer is waited for as long as before.
 
-Measured on the lab (`target/lab/failover-test.sh`, the node leading the most groups killed under
-the mixed bench): TBD-LAB.
+Measured on the lab (`target/lab/failover-test.sh`, a fresh cluster loaded whole, a quiet minute
+under the mixed bench with elections counted from every journal, then the node leading the most
+groups killed under the bench), beside round 15's final build:
+
+| Base | Writes refused after the kill | Before F62 | Vote changes in the quiet loaded minute | Load | Acknowledged inserts, each member alone |
+| --- | --- | --- | --- | --- | --- |
+| 5 s (default) | about 10 s (t=16–25) | 16 s (t=16–31, round 15) | 0 | 45,916 rows/s | 568,221, 0 lost |
+| 1 s | about 2 s (t=16–17) | about 4 s (round 11) | 0 | 41,680 rows/s | 656,669, 0 lost |
+
+Both inside the window the arithmetic gives, `[1.5b, 2b)`, and the loads inside O64's spread.
 
 ## Design choices
 
@@ -103,9 +117,10 @@ so only a crash pays the window, and it had paid twice what the design needs.
 
 ## Invariants to uphold
 
-- `election_timeout_max` is the follower lease and every wait a group derives from it - a
-  returning leader's, the head start, the amnesiac grace - is stated in leases, not in bases.
-  Change the ratio here and those move with it, on purpose.
+- `election_timeout_max` is the follower lease. A wait that *is* the lease (a returning leader's)
+  is one of it and moves with it; a wait that has to outlast a whole failover (the head start,
+  the amnesiac grace) is four of it, twice the window, and its time is what matters. Change the
+  ratio here and check each against the window, not against its old multiple.
 - `set_failover_base` sets #190's append floor from the base, never from
   `election_timeout_min`: a loaded follower's answer must be waited for at least a base.
 - openraft's own constraint holds: heartbeat + `heartbeat_min_interval` + a tick stays under
@@ -115,8 +130,14 @@ so only a crash pays the window, and it had paid twice what the design needs.
 
 ## Performance
 
-Round 16 on the lab, beside round 15's 16 s: TBD-LAB. The load and the bench under the new
-timers are in the same table.
+[Round 16](../cluster-testing/correctness.md#the-failover-window) on the lab, beside round 15's
+16 s: about 10 s at the default base and about 2 s at 1 s, with no election in a loaded minute at
+either and nothing lost. The loads under the new timers ran at 45,900 and 41,700 rows a second,
+inside the bootstrap-to-bootstrap spread O64 records, and the quiet minutes' benches at 113,000
+and 133,000 operations a second, inside the lab's run-to-run spread. The fixture's loaded loop
+of six heavy tests at six threads is what the change is judged against under load in the
+fixture, and its rounds count every child's vote changes since this round
+(`target/lab/r16/142/loop-keep.sh`).
 
 ## Tests
 

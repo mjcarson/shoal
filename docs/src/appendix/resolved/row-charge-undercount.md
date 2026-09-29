@@ -20,10 +20,13 @@ not count:
 
 - **A sorted row was charged its own bytes alone.** `SortedPartition::insert` charged
   `row.deep_size_of()`, which is the row's inline size and its heap. The row is filed in a
-  `BTreeMap` under a clone of its sort key, and the tree's node holds the key, the row and the
-  slots nobody has filled yet: for a keyword row of about 145 bytes, another 120 or so a row,
-  uncounted. Every recount (`merge_from_disk`, `fold_fragment`) summed rows the same way, so the
-  base was consistent and low everywhere.
+  `BTreeMap` under a clone of its sort key, and the tree's nodes hold the keys, the rows and the
+  slots nobody has filled: a node is eleven slots of `(key, row)`, 1.2 KB for a keyword row, and
+  a partition of three titles holds one. On the lab the keyword table's nodes were 252 MiB for
+  about a million rows in 58,418 partitions - 250 bytes a row where a full slot is 112 - and the
+  cloned keys' heap another 25 or so a row, none of it counted. Every recount
+  (`merge_from_disk`, `fold_fragment`) summed rows the same way, so the base was consistent and
+  low everywhere.
 - **The unsorted replay charged a different base than eviction released.** `replay` charged
   `row.deep_size_of()` and eviction released `partition.size`, the row plus the partition's own
   seventeen bytes ([known issue 22](../known-issues.md#22-size-accounting-inconsistencies)'s
@@ -48,23 +51,35 @@ the tables are opened, so the replay holds a tombstone for the marking to sweep,
 shard's counter against the resident partitions after the sweep and against zero after eviction;
 with the sweep's release left out it fails *the shard counted 304 for partitions holding 237*.
 
-**On the lab**, round 16 compared `cluster stats` with a heap profile of the same node on the
-fixed build ([round 16](../../cluster-testing/correctness.md#what-a-row-is-charged)): TBD-LAB.
+**On the lab**, round 16 compared `cluster stats` with a heap profile of the same node, taken
+inside a read-only bench so the two describe the same rows
+([round 16](../../cluster-testing/correctness.md#what-a-row-is-charged)): titan counted
+1,319 MiB of rows where the profile held 1,549 (Movie rows 1,196 MiB, keyword rows 344 of which
+257 were B-tree nodes), 85% against round 15's 77%; a first cut that charged each entry a share
+of a node counted 82%, and the profile's 250 bytes of node a keyword row is what set the final
+model. The eviction list is reported at 75.6 MiB where the profile held 86.
 
 ## The fix
 
-- **A sorted entry is charged whole.** `SortedPartition::entry_size(sort, row)` is the row's
-  deep size plus `key_size(sort)`: the key's deep size and `ENTRY_OVERHEAD`, an entry's share of
-  a B-tree node with eleven slots and a header at eight entries a node. A row new to the tree
-  charges the entry; a row replacing a row charges the difference; a row over a tombstone
-  charges the row, since the tombstone kept the key; a tombstone over a row releases the row and
-  keeps the key; a tombstone for a key the tree never held charges the key; `drop_tombstones`
-  releases the keys it drops, and `mark_evictable`, which sweeps a partition's tombstones once
+- **A sorted partition is charged its heap and its nodes.** Its size is every live row's heap
+  (`row_heap`, the row's deep size less its inline part, which the node's slot holds), every
+  key's heap (`key_heap`), and `nodes(len) × NODE_BYTES`: a node of eleven slots and a header
+  for every eight entries the tree holds, and one for a tree with any. A row new to the tree
+  charges its heap, its key's, and a node when the count crosses eight; a row replacing a row
+  charges the heaps' difference; a row over a tombstone charges the row, since the tombstone
+  kept the key and the slot; a tombstone over a row releases the row's heap and keeps the key; a
+  tombstone for a key the tree never held charges the key and perhaps a node; `drop_tombstones`
+  releases the keys it drops and the nodes the shorter tree no longer needs, and
+  `mark_evictable`, which sweeps a partition's tombstones once
   its deletes are archived, releases what the sweep took from the shard's counter too - the one
   place a partition's size moved without the counter, found by the reviewer of this change
   before it was committed: the seeded harness counted 304 bytes for partitions holding 237.
   `merge_from_disk` and `fold_fragment` recount by the same rule
-  (`recount`). The archived `size` a compactor writes is the new formula's from here on.
+  (`recounted`), which the tests pin every delta against. The archived `size` a compactor writes
+  is the new formula's from here on. A first cut charged each entry a fixed share of a node,
+  and the lab's profile showed why that is not enough: most keyword partitions are a few rows in
+  a node of eleven slots, so the nodes cost the table twice what a share at eight entries a node
+  gives.
 - **The unsorted replay charges `partition.size`**, what eviction releases.
 - **A replicated sorted insert into a resident archive** moves the counter by the deserialized
   partition's size less the archive's bytes, as the delete and update on that path did.
@@ -93,8 +108,11 @@ fixed build ([round 16](../../cluster-testing/correctness.md#what-a-row-is-charg
 ## Invariants to uphold
 
 - Whatever a sorted partition charges when an entry enters the tree, it releases when the entry
-  leaves, through the same `key_size`/`entry_size`: `resident_reads.rs` asserts the counter is
-  exactly zero once everything is evicted.
+  leaves, and `recounted()` is the one statement of what a tree costs; every delta path has to
+  agree with it (`a_sorted_row_is_charged_with_its_key_and_node` checks each), and
+  `resident_reads.rs` asserts the shard's counter is exactly zero once everything is evicted.
+- `nodes(len)` is an estimate (a node for every eight entries) and `NODE_BYTES` a leaf's size.
+  Change the map or how it is filled and revisit both against a profile.
 - A key's charge lives with the key, not the row: a row that becomes a tombstone releases the row
   only, and a sweep of tombstones releases the keys.
 - Every path that turns a resident archive into a loaded partition moves the counter by
@@ -105,9 +123,12 @@ fixed build ([round 16](../../cluster-testing/correctness.md#what-a-row-is-charg
 ## Still open
 
 - **The allocator's rounding is still not counted.** Every String and Vec block a deserialized
-  row holds is rounded up to a size class, and a Movie row holds about thirty of them. What that
-  costs on the lab is the gap the round's measurement leaves, on the todo page under
-  [the row charge](../todos.md#what-a-rows-allocations-take).
+  row holds is rounded up to a size class, and a Movie row holds about thirty of them. On the lab
+  that is the 230 MiB the counter is under the profile by, 15% of the rows and about 200 bytes a
+  Movie row; on the todo page under [the row charge](../todos.md#what-a-rows-allocations-take).
+- The eviction list's estimate is 12% under the profile (75.6 MiB against 86), and the table
+  maps' 10% (129 against 144): both are a constant times a length and the constants are
+  jemalloc's classes read once.
 - Known issue 22's other mismatches stand as filed.
 
 ## Tests

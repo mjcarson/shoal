@@ -139,7 +139,10 @@ mixed bench.
 | 5 s (default) | about 16 s (t=15–31) | 0 | 41,100 rows/s | 118,000 ops/s |
 
 Failover is three to four times the base, as the lease-plus-election arithmetic says: the objective
-of base + 2 s in [C7](../distributed/failover.md) does not hold at any base. No base caused an
+of base + 2 s in [C7](../distributed/failover.md) does not hold at any base. **Round 16 changed
+the arithmetic** ([F62](../features/failover-window.md)): the lease is the base and the election
+timeout half of it to the whole, and the same test gave about 10 s at the default and 2 s at 1 s
+([the failover window](correctness.md#the-failover-window)). No base caused an
 unwanted election under this load. But a shorter base cost write throughput: repeated loads at 1 s
 ran at 19,800–24,200 rows a second against 40,200–46,500 at 5 s, with titan syncing and writing
 half as much. The cause is not isolated. It is filed as
@@ -660,3 +663,15 @@ that was slow was slow from its first five seconds, as every slow load has been.
 **Verdict.** The frequency governor is not what picks the mode: under a load the Zen1 cores run
 near their ceiling whichever governor is set. The lab's hosts stay on `schedutil`, and the
 numbers on these pages stay comparable with rounds 11 to 15. Nine candidates are now ruled out.
+
+## Memory in round 16: what a row is charged
+
+Round 15 left the row charge at about two thirds of what the heap held for rows. Round 16
+charged a sorted partition's B-tree nodes and keys and made the two bases agree
+([#196](../appendix/resolved/row-charge-undercount.md)), and measured it against a heap profile
+taken inside a read-only bench, so the dump and `cluster stats` describe the same rows
+([correctness](correctness.md#what-a-row-is-charged)): titan counts 1,319 MiB where the profile
+holds 1,549, 85% against 77%, and the memory table names 2,020 MiB of a 2,729 MiB node with the
+eviction list (`lru`, 75.6 MiB where the profile holds 86) beside the maps and the WAL index.
+The 15% left is the allocator's rounding of a Movie row's thirty-odd heap blocks, filed with
+that number.

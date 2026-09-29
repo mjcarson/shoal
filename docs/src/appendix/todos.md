@@ -2337,8 +2337,9 @@ trait of shoal's own, since deepsize2 sums capacities and offers no hook per blo
 counting allocator whose per-thread live counter is read before and after a row is deserialized
 and inserted, which counts the rounding exactly and costs an increment on every allocation the
 node makes. Round 16 measured the gap that is left on the lab
-([cluster testing](../cluster-testing/correctness.md#what-a-row-is-charged)); it is the number
-this entry is judged against.
+([cluster testing](../cluster-testing/correctness.md#what-a-row-is-charged)): titan counted
+1,319 MiB of rows where the profile held 1,549, so about 230 MiB, 15% of the rows and about 200
+bytes a Movie row, is the number this entry is judged against.
 
 ## A node's archive map is bounded by nothing
 

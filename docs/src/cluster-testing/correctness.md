@@ -1826,3 +1826,74 @@ and hyperion rebuilt under the mixed bench (`target/lab/r16/193/run.sh`, 25 minu
 where an eight minute one left 9,374, and the control link to the rebuilt node stays up through
 it.
 
+### The failover window
+
+Every round since the first measured a killed leader's groups refusing writes for about sixteen
+seconds at the default base, and the pages called the window two to three bases while the lab said
+three to four. Round 16 read where the sum comes from: openraft's follower lease is
+`election_timeout_max`, which `group_config` set to twice the base, and the randomized timeout of
+one to two bases runs *after* the lease, so a candidate stood between three and four bases after
+the last heartbeat. [F62](../features/failover-window.md) makes the lease the base itself and the
+timeout half a base to a whole one. Measured the way every round measured it
+(`target/lab/failover-test.sh`: a fresh cluster loaded whole, a quiet minute under the mixed bench
+with `vote is changing` counted in every journal, then the node leading the most groups killed
+under the bench; `target/lab/r16/failover/`):
+
+| Base | Writes refused after the kill | Round 15's final build | Vote changes in the quiet loaded minute | Load | Bench in the quiet minute | Acknowledged inserts, each member alone |
+| --- | --- | --- | --- | --- | --- | --- |
+| 5 s (default) | about 10 s (t=16–25), the last hundred at t=25 | 16 s (t=16–31) | 0 | 45,916 rows/s | 113,353 ops/s | 568,221, 0 lost |
+| 1 s | about 2 s (t=16–17) | about 4 s (round 11's 1 s arm) | 0 | 41,680 rows/s | 133,100 ops/s | 656,669, 0 lost |
+
+Europa led the most groups in both runs and was the node killed; the refusals were `NotLeader` at
+once, never a timeout, and the first second after the kill carried a write p99 of a second as the
+writes queued on europa's groups were refused.
+
+The fixture's nineteen tests that set the failover base, judge a lease or dial an identity were
+run together at six threads on the change (`target/lab/r16/fixture/`). Eighteen passed and one
+found what the arithmetic had moved without meaning to: the grace an empty volatile copy grants
+no vote for ([#142](../appendix/resolved/volatile-amnesiac-vote.md)) was "two election
+timeouts", `election_timeout_max × 2`, four bases with the old `max` and two with the new - the
+two seconds `a_restarted_volatile_leader_elects_nobody_missing_its_commits` holds an empty
+leader and a lagging follower alone, so the copy that had forgotten its commits granted its vote
+at the end of them and the follower that kept them hit openraft's `log_state_reader.rs:25`
+assertion. The grace and the head start a non-primary gives its primary are four leases now,
+the same four bases as before; the test passed four of four after it.
+
+**Verdict: pass.** The window is what the arithmetic says, and a loaded minute at a lease of the
+base elected nobody at either base. Every wait derived from the lease was read against the
+window it has to outlast, and one had to be restated.
+
+### What a row is charged
+
+Round 15's heap profile of titan at the end of a load counted 2.3 GiB of rows where the heap
+held 3.4 ([#196](../appendix/resolved/row-charge-undercount.md)). The fix charges a sorted
+partition's B-tree nodes and its keys' heap beside its rows, makes the unsorted replay and the
+resident-archive insert charge what eviction releases, and reports the eviction list. It was
+measured twice (`target/lab/r16/196/run.sh`): a fresh cluster on the `jemalloc-prof` build,
+the whole csv, a minute for the compactors, then 150 s of gets alone - which change no row and
+allocate enough for jemalloc to dump again while the rows stand still - with `cluster stats`
+read and titan's last dump taken inside that bench, symbolized against the binary it came from
+(`heap.py`, depth 3). The first run charged each sorted entry a fixed share of a node; the
+profile showed why that is not enough, and the second charges the nodes themselves.
+
+| | Round 15 (one copy, `d320328`) | A share of a node per entry | A node per eight entries (final) |
+| --- | --- | --- | --- |
+| Rows the profile holds, titan | 3.0 GiB of a 3.4 GiB "rows" figure that counted the table map and the LRU too | 1,497 MiB: Movie 581 deserialized + 571 partition boxes; keyword 252 of B-tree nodes + 82 of row heap + 10 | 1,549 MiB: Movie 607 + 589; keyword 257 of nodes + 87 of row heap + 10 |
+| `rows` counted by `Stats` | 2.3 GiB (77% of the rows) | 1,229 MiB (82%) | 1,319 MiB (85%) |
+| Eviction list, profile / `lru` | 0.16 GiB / not reported | 82 MiB / 75.5 | 86 MiB / 75.6 |
+| Table maps, profile / `table maps` | 0.29 GiB / 6–8 MiB after eviction | 144 MiB / 129.1 | 144 MiB / 129.1 |
+| Resident | 3.4–3.6 GiB | 2.7 GiB | 2.7 GiB |
+
+The keyword table's B-tree nodes are the figure that set the model: 252 MiB for about a million
+rows in 58,418 partitions, 250 bytes a row where a full slot is 112, because most keyword
+partitions hold a few titles in a node of eleven slots. A share of a node per entry counts a
+three-row partition at a third of its node; a node per eight entries counts it whole. What is
+left, about 230 MiB or 15% of the rows, is the allocator's rounding of a Movie row's thirty-odd
+String and Vec blocks, filed on the todo page
+([what a row's allocations take](../appendix/todos.md#what-a-rows-allocations-take)) with this
+number to be judged against.
+
+**Verdict: fixed, with the rounding filed.** The memory table now names 2,020 MiB of a 2,729 MiB
+node - rows, the two maps, the WAL index and the eviction list - where round 15's left 1.4 to
+1.7 GiB unnamed on a restart.
+

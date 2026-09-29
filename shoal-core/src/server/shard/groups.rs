@@ -2537,14 +2537,18 @@ where
                         // and nothing to a candidate as empty as itself for longer, so two
                         // members that lost their memory at once cannot elect each other over
                         // a survivor that kept it
-                        // ([Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md))
+                        // ([Resolved #109](../../../../docs/src/appendix/resolved/volatile-majority-loss.md)).
+                        // the grace is four leases, twice the window a failover takes, so the
+                        // members that kept their memory have elected among themselves before
+                        // this copy grants anything; it was two of the old double leases, the
+                        // same four bases ([F62](../../../../docs/src/features/failover-window.md))
                         let (own_last, own_vote, grace) = {
                             let metrics = raft.metrics();
                             let metrics = metrics.borrow_watched();
                             (
                                 metrics.last_log_index,
                                 metrics.vote.clone(),
-                                Duration::from_millis(raft.config().election_timeout_max * 2),
+                                Duration::from_millis(raft.config().election_timeout_max * 4),
                             )
                         };
                         let candidate_last = rpc.last_log_id.as_ref().map(|log_id| log_id.index);
@@ -4642,7 +4646,10 @@ async fn start_group<D: ShoalDatabase>(
     }
     if spec.voters.len() > 1 && (!primary || lost_memory) && !returning_leader {
         raft.runtime_config().elect(false);
-        let head_start = Duration::from_millis(raft.config().election_timeout_max * 2);
+        // four leases, twice a failover's window: the primary has had every chance to
+        // initialize the group and lead it before anybody else stands. two of the old double
+        // leases, the same four bases ([F62](../../../../docs/src/features/failover-window.md))
+        let head_start = Duration::from_millis(raft.config().election_timeout_max * 4);
         let handle = raft.clone();
         glommio::spawn_local(async move {
             glommio::timer::sleep(head_start).await;

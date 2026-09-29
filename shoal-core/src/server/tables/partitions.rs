@@ -559,20 +559,14 @@ pub struct SortedPartition<T: ShoalSortedTable> {
 }
 
 impl<T: ShoalSortedTable> SortedPartition<T> {
-    /// What one entry of the tree costs beyond the row and the key it holds
+    /// A B-tree node's bytes: eleven slots of a key and a row, and a header
     ///
-    /// A B-tree node holds up to eleven `(key, row)` slots and a header, and its nodes run
-    /// about eight elevenths full, so every entry pays its share of the slots nobody fills
-    /// and of the header. The row's own inline bytes and the key's are counted by
-    /// `deep_size_of`, so what is left here is the slack
+    /// A `BTreeMap` keeps its entries inline in nodes of eleven slots. What a partition's
+    /// tree holds beyond its rows' and keys' heap blocks is its nodes, whole, and a small
+    /// partition's one node is mostly empty: on the lab 58,418 keyword partitions held about
+    /// a million rows in 252 MiB of nodes, 250 bytes a row where a full slot is 112
     /// ([Resolved #196](../../../../docs/src/appendix/resolved/row-charge-undercount.md)).
-    const ENTRY_OVERHEAD: usize = {
-        // a leaf's slots and header, spread over the entries an average node holds
-        let slot = std::mem::size_of::<(T::Sort, MaybeRow<T>)>();
-        let node = slot * 11 + 16;
-        // eight entries a node, less the slot the row and key already paid for
-        node / 8 - slot
-    };
+    const NODE_BYTES: usize = std::mem::size_of::<(T::Sort, MaybeRow<T>)>() * 11 + 16;
 
     /// Create a new partition
     ///
@@ -589,7 +583,20 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         }
     }
 
-    /// What a sort key costs in the tree: the key itself and the entry's share of its node
+    /// About how many nodes a tree of this many entries holds
+    ///
+    /// One node for any entries at all, and one more for every eight after: a node is eleven
+    /// slots, and a tree grown by inserts in no particular order runs about two thirds full.
+    ///
+    /// # Arguments
+    ///
+    /// * `len` - How many entries the tree holds, tombstones included
+    #[must_use]
+    pub fn nodes(len: usize) -> usize {
+        len.div_ceil(8)
+    }
+
+    /// What a sort key's heap costs beyond the slot its node gives it
     ///
     /// Charged once when a key enters the tree, as a row or as a tombstone, and released when
     /// it leaves; a row that becomes a tombstone keeps its key, so only the row goes
@@ -599,35 +606,53 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     ///
     /// * `sort` - The sort key
     #[must_use]
-    pub fn key_size(sort: &T::Sort) -> usize {
-        sort.deep_size_of() + Self::ENTRY_OVERHEAD
+    pub fn key_heap(sort: &T::Sort) -> usize {
+        sort.deep_size_of()
+            .saturating_sub(std::mem::size_of::<T::Sort>())
     }
 
-    /// What a live row costs in the tree: its own bytes, its key and its share of a node
+    /// What a live row's heap costs beyond the slot its node gives it
     ///
     /// # Arguments
     ///
-    /// * `sort` - The sort key the row is filed under
     /// * `row` - The row
     #[must_use]
-    pub fn entry_size(sort: &T::Sort, row: &T) -> usize {
-        row.deep_size_of() + Self::key_size(sort)
+    pub fn row_heap(row: &T) -> usize {
+        row.deep_size_of().saturating_sub(std::mem::size_of::<T>())
     }
 
-    /// Recount this partition's size from the rows it holds
+    /// What this partition's rows, keys and nodes take, counted from what it holds
     ///
-    /// Every live row costs its entry, and every tombstone the key it shadows with. The one
-    /// way a size is derived rather than maintained by delta, used where the tree was rebuilt
-    /// from two copies.
-    fn recount(&mut self) {
-        self.size = self
+    /// Every live row costs its heap, every tombstone the heap of the key it shadows with, and
+    /// the tree its nodes. The one way a size is derived rather than maintained by delta, used
+    /// where the tree was rebuilt from two copies and by the tests that pin the deltas.
+    #[must_use]
+    pub fn recounted(&self) -> usize {
+        let heap: usize = self
             .rows
             .iter()
             .map(|(sort, row)| match row {
-                MaybeRow::Row(row) => Self::entry_size(sort, row),
-                MaybeRow::Tombstone => Self::key_size(sort),
+                MaybeRow::Row(row) => Self::row_heap(row) + Self::key_heap(sort),
+                MaybeRow::Tombstone => Self::key_heap(sort),
             })
             .sum();
+        heap + Self::nodes(self.rows.len()) * Self::NODE_BYTES
+    }
+
+    /// Recount this partition's size from the rows it holds
+    fn recount(&mut self) {
+        self.size = self.recounted();
+    }
+
+    /// What the tree's nodes cost after an entry is added or removed
+    ///
+    /// # Arguments
+    ///
+    /// * `before` - How many entries the tree held
+    /// * `after` - How many it holds now
+    fn node_diff(before: usize, after: usize) -> isize {
+        (Self::nodes(after) * Self::NODE_BYTES).cast_signed()
+            - (Self::nodes(before) * Self::NODE_BYTES).cast_signed()
     }
 
     /// add a new row to this partition
@@ -639,15 +664,16 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         hotpath::measure_block!("SortedPartition::insert", {
             // get this rows sort key
             let sort_key = row.get_sort();
-            // calculate the size of our new row, and of the key if it is new to the tree
-            let row_size = row.deep_size_of();
-            let key_size = Self::key_size(&sort_key);
+            // calculate the heap our new row takes, and its key's if it is new to the tree
+            let row_size = Self::row_heap(&row);
+            let key_size = Self::key_heap(&sort_key);
+            let len = self.rows.len();
             // add this row wrapped in MaybeRow::Row
             let diff = match self.rows.insert(sort_key, MaybeRow::Row(row)) {
                 // we replaced an existing row so find the delta in size; the key was there
                 Some(MaybeRow::Row(replaced)) => {
                     // calculate our old rows size
-                    let old_size = replaced.deep_size_of();
+                    let old_size = Self::row_heap(&replaced);
                     // calculate the diff in sizes
                     row_size.cast_signed() - old_size.cast_signed()
                 }
@@ -657,8 +683,8 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
                     self.tombstones -= 1;
                     row_size.cast_signed()
                 }
-                // this is a brand new row, and a new key in the tree
-                None => (row_size + key_size).cast_signed(),
+                // this is a brand new row, a new key in the tree, and perhaps a new node
+                None => (row_size + key_size).cast_signed() + Self::node_diff(len, len + 1),
             };
             // adjust this partitions size correctly
             self.size = self.size.saturating_add_signed(diff);
@@ -880,8 +906,8 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         // replace the row with a tombstone
         match self.rows.insert(sort.clone(), MaybeRow::Tombstone) {
             Some(MaybeRow::Row(removed)) => {
-                // calculate the size of the row we removed
-                let row_size = removed.deep_size_of();
+                // calculate the heap of the row we removed; its key and slot stay
+                let row_size = Self::row_heap(&removed);
                 // decrement our partitions size with this estimate
                 self.size = self.size.saturating_sub(row_size);
                 // track that we are now shadowing a row with a tombstone
@@ -939,12 +965,12 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     /// * `row` - The row to update
     /// * `update` - The update to apply
     pub fn update_row(row: &mut T, update: &SortedUpdate<T>) -> isize {
-        // measure old size
-        let old_size = row.deep_size_of();
+        // measure old size; the inline part is the slot's and does not move
+        let old_size = Self::row_heap(row);
         // update our row
         row.update(update);
         // measure new size and compute diff
-        let new_size = row.deep_size_of();
+        let new_size = Self::row_heap(row);
         new_size.cast_signed() - old_size.cast_signed()
     }
 
@@ -966,21 +992,22 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     ///
     /// * `sort` - The sort key to tombstone
     pub fn tombstone(&mut self, sort: &T::Sort) -> isize {
+        let len = self.rows.len();
         match self.rows.insert(sort.clone(), MaybeRow::Tombstone) {
             Some(MaybeRow::Row(removed)) => {
-                let row_size = removed.deep_size_of();
+                let row_size = Self::row_heap(&removed);
                 self.size = self.size.saturating_sub(row_size);
                 // track that we are now shadowing a row with a tombstone
                 self.tombstones += 1;
                 -(row_size as isize)
             }
             // this key had nothing in memory, so our tombstone is shadowing disk, and its key
-            // is new to the tree
+            // is new to the tree, and perhaps a node with it
             None => {
                 self.tombstones += 1;
-                let key_size = Self::key_size(sort);
-                self.size = self.size.saturating_add(key_size);
-                key_size.cast_signed()
+                let diff = Self::key_heap(sort).cast_signed() + Self::node_diff(len, len + 1);
+                self.size = self.size.saturating_add_signed(diff);
+                diff
             }
             // this key was already tombstoned
             Some(MaybeRow::Tombstone) => 0,
@@ -1055,16 +1082,19 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         if self.tombstones == 0 {
             return 0;
         }
-        // only keep rows that still hold data, releasing the keys the tombstones held
+        // only keep rows that still hold data, releasing the keys the tombstones held and
+        // the nodes the tree no longer needs
+        let len = self.rows.len();
         let mut released = 0;
         self.rows.retain(|sort, row| {
             let live = matches!(row, MaybeRow::Row(_));
             if !live {
-                released += Self::key_size(sort);
+                released += Self::key_heap(sort);
             }
             live
         });
-        self.size = self.size.saturating_sub(released);
+        let diff = Self::node_diff(len, self.rows.len()) - released.cast_signed();
+        self.size = self.size.saturating_add_signed(diff);
         // our tombstones are all gone now
         std::mem::take(&mut self.tombstones)
     }
@@ -2200,15 +2230,7 @@ mod tests {
                 // entries' size, each row with its key and its share of a node (item 196)
                 assert_eq!(chained.tombstones, 0);
                 assert!(chained.rows.values().all(|row| matches!(row, MaybeRow::Row(_))));
-                let size: usize = chained
-                    .rows
-                    .iter()
-                    .filter_map(|(sort, row)| match row {
-                        MaybeRow::Row(row) => Some(SortedPartition::<TestRow>::entry_size(sort, row)),
-                        MaybeRow::Tombstone => None,
-                    })
-                    .sum();
-                assert_eq!(chained.size, size, "seed {seed}, batch {batch}");
+                assert_eq!(chained.size, chained.recounted(), "seed {seed}, batch {batch}");
                 // and archiving the fold changes none of it
                 assert_eq!(live(&round_trip(&chained)), expected);
             }
@@ -3045,16 +3067,8 @@ mod tests {
         assert!(disk.size < memory_size);
         // merge the disk copy in
         memory.merge_from_disk(disk);
-        // our size has to be the sum of every live entry we ended up holding
-        let expected = memory
-            .rows
-            .iter()
-            .filter_map(|(sort, row)| match row {
-                MaybeRow::Row(row) => Some(SortedPartition::<TestRow>::entry_size(sort, row)),
-                MaybeRow::Tombstone => None,
-            })
-            .sum::<usize>();
-        assert_eq!(memory.size, expected);
+        // our size has to be what every live entry we ended up holding takes, nodes included
+        assert_eq!(memory.size, memory.recounted());
         // a merge is a union so it can never leave us smaller than we already were
         assert!(memory.size > memory_size);
     }
@@ -3073,15 +3087,18 @@ mod tests {
         // merge the disk copy in
         memory.merge_from_disk(disk);
         // only the archived row our tombstone is not shadowing counts towards our size as a
-        // row; the tombstone counts the key it shadows with
+        // row; the tombstone counts the key it shadows with, and the tree its one node
         let live = match memory.rows.get(&"b".to_owned()) {
-            Some(MaybeRow::Row(row)) => SortedPartition::<TestRow>::entry_size(&"b".to_owned(), row),
+            Some(MaybeRow::Row(row)) => SortedPartition::<TestRow>::row_heap(row),
             _ => panic!("the archived row we never touched should have survived"),
         };
         assert_eq!(
             memory.size,
-            live + SortedPartition::<TestRow>::key_size(&"a".to_owned())
+            live + SortedPartition::<TestRow>::key_heap(&"b".to_owned())
+                + SortedPartition::<TestRow>::key_heap(&"a".to_owned())
+                + SortedPartition::<TestRow>::NODE_BYTES
         );
+        assert_eq!(memory.size, memory.recounted());
     }
 
     #[test]
@@ -3091,27 +3108,51 @@ mod tests {
         let mut partition = SortedPartition::<TestRow>::new(0);
         let row = TestRow::new("a");
         let (diff, _) = partition.insert(row.clone());
-        // more than the row alone: the key's bytes and the node's slack are in it
+        // more than the row alone: the key's heap and the tree's first node are in it
         assert!(
             partition.size > row.deep_size_of(),
             "a row was charged {} for {} of row",
             partition.size,
             row.deep_size_of()
         );
-        assert_eq!(partition.size, SortedPartition::<TestRow>::entry_size(&"a".to_owned(), &row));
+        let one_node = SortedPartition::<TestRow>::NODE_BYTES;
+        assert_eq!(
+            partition.size,
+            SortedPartition::<TestRow>::row_heap(&row)
+                + SortedPartition::<TestRow>::key_heap(&"a".to_owned())
+                + one_node
+        );
         assert_eq!(diff, partition.size.cast_signed());
+        assert_eq!(partition.size, partition.recounted());
         // replacing the row under the same key charges the rows' difference alone
         let (diff, _) = partition.insert(TestRow::new("a"));
         assert_eq!(diff, 0);
-        // a tombstone keeps the key and releases the row
+        // seven more rows fit the node; the ninth needs another
+        for sort in ["b", "c", "d", "e", "f", "g", "h"] {
+            partition.insert(TestRow::new(sort));
+        }
+        assert_eq!(partition.size, partition.recounted());
+        let before = partition.size;
+        let (diff, _) = partition.insert(TestRow::new("i"));
+        assert!(diff > one_node.cast_signed(), "the ninth row charged no node: {diff}");
+        assert_eq!(partition.size, before.saturating_add_signed(diff));
+        assert_eq!(partition.size, partition.recounted());
+        // a tombstone keeps the key and its slot and releases the row's heap
         let (released, _) = partition.remove(&"a".to_owned()).expect("the row was there");
-        assert_eq!(released, row.deep_size_of());
-        assert_eq!(partition.size, SortedPartition::<TestRow>::key_size(&"a".to_owned()));
+        assert_eq!(released, SortedPartition::<TestRow>::row_heap(&row));
+        assert_eq!(partition.size, partition.recounted());
         // a tombstone for a key the tree never held charges the key
         let charged = partition.tombstone(&"z".to_owned());
-        assert_eq!(charged, SortedPartition::<TestRow>::key_size(&"z".to_owned()).cast_signed());
-        // and sweeping the tombstones releases both keys, back to nothing
+        assert_eq!(charged, SortedPartition::<TestRow>::key_heap(&"z".to_owned()).cast_signed());
+        assert_eq!(partition.size, partition.recounted());
+        // and sweeping the tombstones releases the keys and what the tree no longer needs
         assert_eq!(partition.drop_tombstones(), 2);
+        assert_eq!(partition.size, partition.recounted());
+        // down to nothing once every row is gone
+        for sort in ["b", "c", "d", "e", "f", "g", "h", "i"] {
+            partition.remove(&sort.to_owned());
+        }
+        assert_eq!(partition.drop_tombstones(), 8);
         assert_eq!(partition.size, 0);
     }
 
