@@ -1273,10 +1273,10 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             .filter(|(key, _)| {
                 // truncation cannot happen: a tablet id is twelve bits
                 #[allow(clippy::cast_possible_truncation)]
-                let tablet = Ring::tablet_of(**key) as u16;
+                let tablet = Ring::tablet_of(*key) as u16;
                 tablets.contains(&tablet)
             })
-            .map(|(_, entry)| *entry)
+            .map(|(_, entry)| entry)
             .collect();
         // a chained partition is folded and sent whole, so the file and its install know no
         // chains; the rest are read a run at a time as before

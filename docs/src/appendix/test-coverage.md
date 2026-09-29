@@ -18,6 +18,24 @@ cargo check -p shoal-bench --features stage-profile,hotpath --all-targets
 cargo test -p shoal-bench --features stage-profile --test stage_join
 ```
 
+**Round 15 of the [distributed cluster testing](../cluster-testing/overview.md) chapter added 13**,
+1,728 → 1,741 with eight ignored. In `shoal-core` (12): the fold's three
+(`a_folded_chain_holds_what_a_whole_merge_does`, `a_batch_with_an_update_is_not_a_fragment`,
+`a_fragment_deletes_a_base_row_by_tombstone`) and the map's three
+(`a_chain_replayed_twice_is_the_same_chain`, `a_chain_past_its_archive_keeps_the_chain_before`,
+`a_chain_is_counted_gathered_and_saved`) for [F61](../features/fragmented-partitions.md);
+`a_partition_slot_is_sixteen_bytes_and_reads_back_whole`
+([O83](optimizations.md#o83-the-partition-index-held-forty-eight-bytes-a-partition));
+`a_sparse_partition_index_is_shrunk` ([O82](optimizations.md#o82-a-tables-partition-index-kept-the-capacity-of-its-peak));
+`a_channel_allocates_what_is_queued_and_gives_a_burst_back` ([#191](resolved/raft-channels-preallocated.md));
+`a_forced_build_goes_through_a_hold` ([#192](resolved/forced-build-deferred.md));
+`a_partial_nothing_came_for_is_abandoned` ([#194](resolved/abandoned-partial-snapshots.md)). In
+`persistent_sorted_table` (1): `a_partition_written_as_fragments_reads_back_whole`. `shoalctl`'s
+inventory and render tests were extended for `fragment_min_bytes`, `fragment_max_chain`,
+`moves_per_node` and `migration_timeout`. The workspace run at six threads on the round's build
+before O83 passed **1,740 of 1,740, eight ignored**: the first full run in which
+[#142](known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host) found nothing.
+
 **Round 14 of the [distributed cluster testing](../cluster-testing/overview.md) chapter added 2**,
 1,726 → 1,728 with eight ignored, both unit tests in `shoal-core`:
 `retention_spares_held_groups_within_the_allowance` ([#188](resolved/forced-purge-outruns-snapshot.md))
