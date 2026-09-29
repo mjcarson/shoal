@@ -81,6 +81,7 @@ What is still open, across all three kinds, is collected on [What is left](todo.
 | [193](../appendix/known-issues.md#193-a-rebuild-dials-the-old-identitys-address-twenty-times-a-second) | Every rebuild's journals in round 15 | Peers dial a rebuilt node's old identity at `reconnect_min` until its removal commits: about twenty warnings a second each side | **Open.** Noise, not harm |
 | [194](../appendix/resolved/abandoned-partial-snapshots.md) | A step that outlasts both retentions, on #192's fix | A failed move's partial snapshot counted against the install bound for good: 1.17 GB stranded refused every later Movie set, 820 times | **Fixed.** A partial nothing came for past `snapshot_timeout` is dropped at the next begin |
 | [195](../appendix/resolved/scheduled-scrub-starved.md) | [#142 in round 15](correctness.md#142-in-round-15), the fixture loop | A node's scheduled scrubs were written against a map version that three leaders' scrubs moved faster than its map, and refused every time, silently: its groups were never verified | **Fixed.** A scheduled verify scrub is judged against no version, and refusals are logged; 60 of 60 loop runs on the fix |
+| [196](../appendix/known-issues.md#196-the-eviction-budget-undercounts-what-a-node-holds) | A heap profile of a loaded node | The eviction budget counts about two thirds of what rows take, and nothing counts the WAL's entry index: 2.3 GiB counted of 3.4, and 0.54 GiB beside it on titan | **Open.** The process bound (#149) catches the total |
 
 ## Deployment and lab findings
 
