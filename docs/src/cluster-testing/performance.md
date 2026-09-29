@@ -589,3 +589,40 @@ through rkyv's thread-local arena, which keeps the size of the largest thing it 
 cloned the map first; both went ([O81](../appendix/optimizations.md#o81-a-map-save-kept-a-copy-of-the-map)).
 And a table's partition index kept the capacity of its peak after eviction
 ([O82](../appendix/optimizations.md#o82-a-tables-partition-index-kept-the-capacity-of-its-peak)).
+
+After [#191](../appendix/resolved/raft-channels-preallocated.md), [O81](../appendix/optimizations.md#o81-a-map-save-kept-a-copy-of-the-map),
+[O82](../appendix/optimizations.md#o82-a-tables-partition-index-kept-the-capacity-of-its-peak) and
+[O83](../appendix/optimizations.md#o83-the-partition-index-held-forty-eight-bytes-a-partition), a
+fresh cluster grown to the same ten copies (`target/lab/r15/scale2/`):
+
+| | Before | After |
+| --- | --- | --- |
+| Archive maps a node, 11.8 million partitions | 1.2 GiB | 615 MiB |
+| A node started again on the ten copies | 2.7–2.9 GiB | 1.4–1.6 GiB |
+| Rows a node keeps after 20 min of the bench | 11–24 MiB | 2.1–2.9 GiB |
+
+A heap profile of titan at the end of a load on the fixed build names everything it holds:
+rows 3.4 GiB (Movie rows applied and deserialized 2.4, keyword rows 0.6, the table map 0.29, the
+eviction LRU 0.16), the archive map 0.56 GiB, and the WAL's index of its retained entries 0.54 GiB.
+What `Stats` counts as rows was 2.3 GiB of that 3.4: a row's accounting (`deep_size_of`) misses
+about a third of what its allocations take.
+
+### The allocators
+
+The node runs on mimalloc. Its huge pages (4.8–6 GB of a node's anonymous memory, on hosts whose
+transparent huge pages are `madvise`) raised the question whether the memory no figure counts
+was the allocator's. The node program gained a `jemalloc` build (`jemalloc-prof`, run with
+profiling off by `_RJEM_MALLOC_CONF=prof:false`), and one cluster at fourteen copies ran the
+mixed bench for 20 minutes on each, restarted before each (`mem.sh`):
+
+| Allocator | Counted by nothing, start → end | Rows kept | Operations a second | Update p99 |
+| --- | --- | --- | --- | --- |
+| mimalloc | 0.9 → 3.0–3.9 GiB | 2.1–2.9 GiB | 35,601 | 163 ms |
+| jemalloc | 0.8 → 2.7–3.6 GiB | 2.0–3.1 GiB | 30,119 | 266 ms |
+
+Two copies loaded on each held within 0.3 GiB of each other a minute after the load (5.4–5.5 GiB
+on jemalloc, 5.5–5.7 on mimalloc), at 43,122 and 44,171 rows a second. **The allocator is not
+what fills a node**: the growth is the same on both, and the profile names it. jemalloc held about
+0.3 GiB less and ran slower in its one bench arm, which ran second on a larger dataset. mimalloc
+stays.
+

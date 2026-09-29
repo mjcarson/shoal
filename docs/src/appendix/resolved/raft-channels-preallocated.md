@@ -99,9 +99,13 @@ group.
 - A lab node at ten copies still holds 2.3 GiB of archive map for 23 million partitions, which no
   budget counts and which only moving the index to disk would bound
   ([todos](../todos.md#a-nodes-archive-map-is-bounded-by-nothing)).
-- europa's node on mimalloc showed 5.5 GiB counted by nothing in the fixed arm, where titan's and
-  hyperion's showed 2.6 to 3.6; profiled on jemalloc the same node held no such thing. Recorded in
-  [what is left](../../cluster-testing/todo.md), not explained.
+- ~~europa's node on mimalloc showed 5.5 GiB counted by nothing in the fixed arm, where titan's and
+  hyperion's showed 2.6 to 3.6; profiled on jemalloc the same node held no such thing.~~ That was
+  one sample a minute after a restart, not a like-for-like comparison. Measured later on one
+  cluster, 20 minutes of the bench each, the memory no figure counts grew from about 0.9 GiB to
+  3.0–3.9 GiB on mimalloc and to 2.7–3.6 GiB on jemalloc
+  ([the allocators](../../cluster-testing/performance.md#the-allocators)): it is held, mostly by
+  the WAL's index of its entries and rows the budget undercounts, and not the allocator's.
 
 ## Tests
 

@@ -1516,11 +1516,13 @@ where
         }
         for (group, table, tablet) in due {
             replication.next_scrub.insert(group, now + interval);
-            let (reply, _rx) = kanal::bounded(1);
+            let (reply, answer) = kanal::bounded(1);
             let command = ControlCommand::Repair {
                 op: Uuid::new_v4(),
                 principal: "scheduler".to_string(),
-                expected_version: map.version,
+                // judged against no version: the scrub derives its groups where it applies
+                // ([#195](../../../../docs/src/appendix/resolved/scheduled-scrub-starved.md))
+                expected_version: crate::server::control::types::ANY_VERSION,
                 table,
                 tablet: Some(tablet),
                 mode: RepairMode::Verify,
@@ -1528,7 +1530,23 @@ where
                 release: false,
             };
             event!(Level::INFO, msg = "proposing a scheduled scrub", group = %group, table = %table);
-            let _ = control.try_send(ControlRequest::Propose { command, reply });
+            if control.try_send(ControlRequest::Propose { command, reply }).is_err() {
+                continue;
+            }
+            // a refusal is said, where it used to be dropped unread and a starved group was silent
+            let answer = answer.to_async();
+            glommio::spawn_local(async move {
+                match answer.recv().await {
+                    Ok(Ok(ControlResponse::Refused { reason, .. })) => {
+                        event!(Level::WARN, msg = "a scheduled scrub was refused", group = %group, %reason);
+                    }
+                    Ok(Err(error)) => {
+                        event!(Level::WARN, msg = "a scheduled scrub was not proposed", group = %group, %error);
+                    }
+                    _ => {}
+                }
+            })
+            .detach();
         }
     }
 }

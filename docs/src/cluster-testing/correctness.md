@@ -1719,3 +1719,56 @@ while its set streamed at the throttle.
 **Verdict:** a step that outlasts `retained_bytes + hold_bytes` under writes does not finish, and
 now fails by name without harming the rest of the cluster. `hold_bytes` has to cover a step's
 transfer at the write rate its groups see; at a terabyte a node that is the operator's to size.
+
+### Rebuilding at fourteen copies on the final build
+
+The rebuilds above ran on builds with #191 unfixed or #192 unfixed, and memory samples from the
+second and third (taken by a sampler that outlived its run, untimestamped) showed titan at 12.9 to
+13 GiB resident against its 8 GiB budget, on a 14 GiB host, with nothing left to evict. Which run
+they came from cannot be told. So hyperion was rebuilt once more under the bench on the final build
+(`rbmem.sh`, fourteen copies and the benches' inserts, each member's memory stamped every 30 s):
+
+| | |
+| --- | --- |
+| Rebuild | 18 steps, 13.3 GiB moved and 13.6 GiB streamed in 596 s: 23.7 MiB/s, 30 s a step |
+| Snapshot fed, stalled, failed, forced purges | 0, 0, 0, 0 on every node; 36 groups installed once each |
+| Acknowledged inserts, each member alone | 7,827,707, 0 lost |
+| csv, each member alone at `One` | copy 0's movies and all fourteen copies' keyword partitions: 0 missing, 0 different |
+| Memory, every member | peaked at 8.0 GiB, its budget, keeping 2.0 to 2.5 GiB of rows; never above |
+
+**Verdict: pass.** The budget holds through a rebuild on the final build.
+
+### #142 in round 15
+
+[#142](../appendix/known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host) stays
+open "while a full suite run still finds something". Round 15 ran the whole workspace at six
+threads with the lab stopped, on the round's build before O83: **1,740 of 1,740 passed, eight
+ignored**, the first full run to find nothing. Round 14's loop of the six heaviest fixture tests
+(`target/lab/r15/142/`) then found two shapes in 66 runs:
+
+| Loop | Runs | Failed | Shape |
+| --- | --- | --- | --- |
+| `loop.sh`, 5 rounds | 30 | 1 | `migration_resumes_after_each_phase_failure`: after its driver was killed at `configured`, one group's move stayed `Configured` for 240 s while the other reached `Activated`. The logs were not kept |
+| `loop-keep.sh`, until a failure | 36 | 1 | `scheduled_scrub_quarantines_without_an_operator`: one group's scheduled scrubs were refused for a stale version every time, silently: [#195](../appendix/resolved/scheduled-scrub-starved.md), fixed |
+| `loop-keep2.sh`, 10 rounds, on #195's fix | 60 | 0 | |
+
+**Verdict:** #142 stays open for the stuck move, which has not recurred and is not explained; the
+loop now keeps every failing round's child logs (`loop-keep.sh`), so the next one can be read.
+
+### Round 15's final build
+
+On the round's last code (`d320328`), with the lab's inventory (`target/lab/r15/confirm.sh`),
+beside [round 14's](#round-14s-final-build):
+
+| | Round 15 | Round 14 |
+| --- | --- | --- |
+| Whole load | 2,193,788 rows in 53.0 s, 41,397 rows a second | 48,491 |
+| A quiet minute under the bench | 0 vote changes; 111,819 operations a second | 0; 122,408 |
+| europa, leading the most groups, killed under the bench | writes it led refused `NotLeader` for 16 s (seconds 16 to 31), the rest served; 577,535 acknowledged inserts, 0 lost through each member alone | titan killed: 17 s; 0 lost |
+| hyperion's peer ports cut for 20 s under the bench | the cut's first second at 53% of the second before; refusals end within two seconds of the heal; 944,577 acknowledged inserts, 0 lost through each member alone | 47%; 0 lost |
+
+**Verdict: pass.** The load's rate is inside the bootstrap-to-bootstrap spread
+[O64](performance.md#o79-in-round-15-fragments) records (41,000 to 56,000 rows a second), and the
+bench's within the lab's run-to-run spread. The failover window and a partition's worst second are
+where round 14 left them.
+
