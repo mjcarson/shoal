@@ -33,7 +33,7 @@ carrying the reasoning and the invariants the fix depends on. Item numbers are s
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at ~~15~~ ~~16~~ 19 and skips 25, 26, 27, 30, 31, 32, 33, 34, 36, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
 76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 120, 121, 122, 123 and 124, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ ~~item 132 is the newest entry and the newest number~~ ~~item 180 is the newest entry, with 182 the newest number, on the resolved page,~~ ~~item 142 is the newest open entry, with 187 the newest number, on the resolved page,~~ ~~item 196 is the newest entry and the newest number, with 191, 192, 194 and 195 filed and fixed in one change on the resolved page,~~ item 142 is the newest open entry, with 196 the newest number, on the resolved page beside 193 (both fixed in round 16 of the cluster testing), and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ ~~item 132 is the newest entry and the newest number~~ ~~item 180 is the newest entry, with 182 the newest number, on the resolved page,~~ ~~item 142 is the newest open entry, with 187 the newest number, on the resolved page,~~ ~~item 196 is the newest entry and the newest number, with 191, 192, 194 and 195 filed and fixed in one change on the resolved page,~~ item 142 is the newest open entry, with 197 the newest number, on the resolved page beside 193 and 196 (all three from round 16 of the cluster testing, 197 filed and fixed in one change), and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120, 121, 122, 123, 124, 125, 126, 127 and 128 are on the resolved page, with 27, 32 and 36 beside them. **126 never appeared here**:
 it was filed and fixed in one change, from a user's run of `tmdb_dataset` on a host without
 `/opt/shoal` ([Resolved #126](resolved/storage-directory-unusable.md)). **127 never appeared here**
@@ -412,12 +412,26 @@ after its driver was killed at that phase, its `activate` never answered. Its lo
 the loop now keeps them.
 
 **Round 16** ([#142 in round 16](../cluster-testing/correctness.md#142-in-round-16)): the whole
-workspace at six threads passed 1,745 of 1,745 on the round's last code, and the loop ran again
-with every failing round's logs kept (`target/lab/r16/142/loop-keep.sh`). One panic in the round
-was not this item and is not to be filed here: `a_restarted_volatile_leader_elects_nobody_missing_its_commits`
-hit openraft's `log_state_reader.rs:25` assertion once, on the first run of the fixture's
-failover tests on [F62](../features/failover-window.md), because the amnesiac grace had halved
-with the lease; the grace is four bases again and the test passed four of four after it.
+workspace at six threads passed 1,745 of 1,745, and the loop ran again with every failing round's
+logs kept (`target/lab/r16/142/loop-keep.sh`). Its first round caught the stuck move round 15
+saw once, with its logs: **[Resolved #197](resolved/retired-driver-holds-slot.md)**. A move's
+source that won the election a killed driver left resumed at `reconfiguring`, skipped the
+hand-off that keeps a source from driving its own removal, and reconfigured itself out; the
+published map then retired its copy under the running driver, whose lead check read the
+shut-down handle's frozen metrics, so it polled a dead group for the migration timeout holding
+the shard's one driver slot - and the next move the shard led, at `Retiring` after *its* driver
+was killed, was never driven. Fixed, with a fixture test that fails on the unfixed tree. One
+panic in the round was not this item and is not to be filed here:
+`a_restarted_volatile_leader_elects_nobody_missing_its_commits` hit openraft's
+`log_state_reader.rs:25` assertion once, on the first run of the fixture's failover tests on
+[F62](../features/failover-window.md), because the amnesiac grace had halved with the lease;
+the grace is four bases again and the test passed four of four after it. The workspace run on
+the round's last code passed 1,744 of 1,746, with two deadlines under load that passed alone
+twice each and are this item's: `single_node_data_has_a_verified_cluster_migration_path` judged
+its restore before the records landed (*the groups restored other records than the export holds:
+0 against 400*), and `unplaced_member_forwards_every_query` read a node's readiness before the
+placement was initialized (*initialized: false* with every member up). Six rounds of the loop on
+#197's fix passed 36 of 36.
 
 The suite run for [Resolved #144](resolved/post-heal-elections.md) at six threads failed
 `lost_response_retry_returns_original_result` again, and also `scheduled_scrub_quarantines_without_an_operator`,

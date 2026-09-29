@@ -309,6 +309,10 @@ pub struct ShardReplication {
     /// Bytes the shard's eviction list holds, an entry per evictable partition, estimated
     #[serde(default)]
     pub lru_bytes: u64,
+    /// Move drivers running on this shard, which its concurrency counts
+    /// ([Resolved #197](../../../../docs/src/appendix/resolved/retired-driver-holds-slot.md))
+    #[serde(default)]
+    pub driving_moves: u32,
     /// WAL batches written and synced since the shard started, one `fdatasync` each
     #[serde(default)]
     pub wal_syncs: u64,

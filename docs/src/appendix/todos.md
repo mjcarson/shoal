@@ -2434,6 +2434,18 @@ streamed from the archives was priced and left
 ([O52](optimizations.md#o52-a-snapshot-copies-every-record-of-the-archives-into-one-file)); several
 steps in flight onto a node is unchanged.
 
+Round 16 named the design that would finish a step outlasting both retentions, and deferred it
+with the user as a multi-day feature: **the WAL fold**. What pins a shard's segments during a slow
+step is not the held group's own entries but every group's, since the shared segment goes only
+once every group purged past it. The fold would copy the held group's live entries out of the
+segments it pins into the active segment - the copy [F47](../features/local-rehome.md)'s rehome
+already does for a moving group through `GroupStore`, done live, with the WAL's entry index and
+sidecars moved with them - and let the old segments go. A step's transfer would then be bounded
+by its own group's write volume, and the forced purge that ends a step today would have nothing
+left to force. It touches the WAL, the compactor's hand-off of sealed segments and the retention
+sweep, and wants the throttled-stream staging of
+[round 15](../cluster-testing/correctness.md#a-step-that-outlasts-both-retentions) to prove it.
+
 ## Feed a new copy a snapshot when its log is larger
 
 Filed by [Resolved #170](resolved/uncached-log-reads.md). openraft feeds a new copy from the log

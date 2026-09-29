@@ -100,7 +100,9 @@ outcome and the reason.
    If this leader is the source, it hands the lead to a member of the target that is up - the
    library's transfer, which now rides the replication lane as `ReplicateKind::TransferLeader`
    so the member named elects at once - commits the record with no driver and steps aside. The
-   source never drives its own removal.
+   source never drives its own removal, whatever phase it resumed at: a source that won the
+   election a killed driver left and resumed at `reconfiguring` hands the lead on the same way
+   ([Resolved #197](../appendix/resolved/retired-driver-holds-slot.md)).
 4. **`Reconfiguring`.** `change_membership(ReplaceAllVoters(target), retain: false)`: the
    library writes the joint configuration `[expected, target]`, waits for it to commit under
    both majorities, writes the uniform `target`, and drops the source from the group's nodes. A
@@ -320,7 +322,12 @@ request is recorded and runs when it can, and the record says what it waits behi
 - **Every phase is committed before the step it names, and the committed membership wins.**
   `drive_group_inner` reconciles first and never proposes a membership other than the target.
 - **The source never drives past `CatchingUp`.** The transfer to a target member comes before
-  `Reconfiguring`.
+  `Reconfiguring`, judged by the phase the transition has not reached and not by the phase the
+  driver started at ([Resolved #197](../appendix/resolved/retired-driver-holds-slot.md)).
+- **A driver's lead check is false on a handle that was shut down.** `retire_group` may shut a
+  group's handle under a driver running on the same shard; the driver's next `leads()` ends it
+  through `MoveDone`, which is what frees the shard's concurrency slot
+  ([Resolved #197](../appendix/resolved/retired-driver-holds-slot.md)).
 - **A configuration never rolls a group's uniform index backward.** `apply_move_progress` keeps
   the newer.
 - **A retired copy serves nothing and is reclaimed only after the grace.** The gate refuses by

@@ -139,10 +139,13 @@ so only a crash pays the window, and it had paid twice what the design needs.
 16 s: about 10 s at the default base and about 2 s at 1 s, with no election in a loaded minute at
 either and nothing lost. The loads under the new timers ran at 45,900 and 41,700 rows a second,
 inside the bootstrap-to-bootstrap spread O64 records, and the quiet minutes' benches at 113,000
-and 133,000 operations a second, inside the lab's run-to-run spread. The fixture's loaded loop
-of six heavy tests at six threads is what the change is judged against under load in the
-fixture, and its rounds count every child's vote changes since this round
-(`target/lab/r16/142/loop-keep.sh`).
+and 133,000 operations a second, inside the lab's run-to-run spread. Under load in the fixture,
+the loop of six heavy tests at six threads (`target/lab/r16/142/loop-keep.sh`) ran eight rounds
+on the new lease, 48 runs, with one failure that was [#197](../appendix/resolved/retired-driver-holds-slot.md)
+and none in the six rounds after its fix; each round's children ran 1,087 to 1,575 elections
+between them, all of them asked for by the tests' kills, restarts, isolations and partitions.
+That count is the baseline a later round compares against: a round where it jumps is the one to
+read, since the loop counts every election and not only the ones nobody asked for.
 
 ## Tests
 
@@ -150,7 +153,7 @@ fixture, and its rounds count every child's vote changes since this round
 | --- | --- |
 | `a_group_config_keeps_the_timers_its_base_derives` (`shoal-core/src/server/shard/groups.rs`) | The timeouts are not half the base and the base |
 | `a_dead_primary_fails_writes_only_until_its_election` (`shoal/tests/cluster_fixture.rs`) | A dead leader's group elects nobody within two failover bases and two seconds, where it was allowed four |
-| The loaded loop of six fixture tests at six threads (`target/lab/r16/142/loop-keep.sh`) | A spurious election under load at the fixture's base |
+| The loaded loop of six fixture tests at six threads (`target/lab/r16/142/loop-keep.sh`) | A spurious election under load at the fixture's base, as a round's vote changes far above the 1,087–1,575 the tests themselves ask for |
 
 ## Related
 

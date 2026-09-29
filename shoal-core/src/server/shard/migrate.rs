@@ -236,7 +236,12 @@ impl<D: ShoalDatabase> MoveContext<D> {
 
     /// Whether this shard still leads the group
     fn leads(&self) -> bool {
-        self.raft.metrics().borrow_watched().current_leader == Some(self.me)
+        let watch = self.raft.metrics();
+        let metrics = watch.borrow_watched();
+        // a handle that was shut down keeps the metrics it last published, its lead among
+        // them: a copy retired under a running driver stopped leading when it stopped
+        // ([Resolved #197](../../../../docs/src/appendix/resolved/retired-driver-holds-slot.md))
+        metrics.running_state.is_ok() && metrics.current_leader == Some(self.me)
     }
 
     /// Every member the committed configuration names, voter or learner
@@ -375,29 +380,36 @@ async fn drive_group_inner<D: ShoalDatabase>(
     // the catch-up: the destination within the lag, its bytes and entries charged to the record
     if progress.phase.rank() < MovePhase::Reconfiguring.rank() {
         catch_up(context, progress).await?;
-        // the source never drives its own removal: hand the lead to a member of the target
-        if me == context.from.node {
-            let successor = target
-                .iter()
-                .find(|member| {
-                    **member != context.to && **member != context.me && !context.is_down(**member)
-                })
-                .copied()
-                .ok_or_else(|| "no member of the target is up to take the lead".to_string())?;
-            event!(Level::INFO, msg = "this leader is the move's source; transferring the lead before reconfiguring", op = %context.op, group = %context.group, to = %successor);
-            progress.driver = None;
-            context.commit(progress).await?;
-            context
-                .raft
-                .trigger()
-                .transfer_leader(successor)
-                .await
-                .map_err(|error| format!("transferring the lead to {successor}: {error}"))?;
-            return Err(format!(
-                "{NOT_LEADER}group {}: the lead was handed to {successor}",
-                context.group
-            ));
-        }
+    }
+    // the source never drives its own removal: hand the lead to a member of the target. Judged
+    // by the phase the transition has not reached rather than by the phase this driver
+    // started at, since a driver resumed at reconfiguring on the source - the source having
+    // won the election a killed driver left - reconfigured itself out of the group and went on
+    // driving a copy the published map then retired under it
+    // ([Resolved #197](../../../../docs/src/appendix/resolved/retired-driver-holds-slot.md))
+    if progress.phase.rank() < MovePhase::Configured.rank() && me == context.from.node {
+        let successor = target
+            .iter()
+            .find(|member| {
+                **member != context.to && **member != context.me && !context.is_down(**member)
+            })
+            .copied()
+            .ok_or_else(|| "no member of the target is up to take the lead".to_string())?;
+        event!(Level::INFO, msg = "this leader is the move's source; transferring the lead before reconfiguring", op = %context.op, group = %context.group, phase = progress.phase.name(), to = %successor);
+        progress.driver = None;
+        context.commit(progress).await?;
+        context
+            .raft
+            .trigger()
+            .transfer_leader(successor)
+            .await
+            .map_err(|error| format!("transferring the lead to {successor}: {error}"))?;
+        return Err(format!(
+            "{NOT_LEADER}group {}: the lead was handed to {successor}",
+            context.group
+        ));
+    }
+    if progress.phase.rank() < MovePhase::Reconfiguring.rank() {
         step(progress, MovePhase::Reconfiguring);
         context.commit(progress).await?;
     }

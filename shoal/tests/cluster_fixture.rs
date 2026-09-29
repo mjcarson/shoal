@@ -12770,6 +12770,120 @@ async fn learner_never_counts_before_configuration_commit() -> Result<(), Fixtur
     Ok(())
 }
 
+/// A move's source that resumes the drive at `reconfiguring` hands the lead on, and a driver
+/// whose copy was retired under it frees its shard's slot (item 197)
+///
+/// Round 16's loop caught #142's stuck move with its logs: the driver of a set's group died
+/// right after committing `Reconfiguring`, the group's *source* won the election it left and
+/// resumed the drive, and the hand-off "the source never drives its own removal" sat inside
+/// the catch-up branch a resumed driver skips, so the source reconfigured itself out of the
+/// group and went on driving. The published map then retired its copy, which shut the group's
+/// handle under the driver; the metrics froze with the lead in them, so the driver polled a
+/// dead group for the whole migration timeout and held the shard's one driver slot, and no
+/// move the shard later led was driven for as long. Here the set's leader is armed to die at
+/// `reconfiguring`, and the third member is paused from before the move starts until after the
+/// death - the leader and the source are a quorum of the old configuration, so the move goes
+/// on without it - so that the source's vote request is the first thing it answers when it
+/// resumes and the source wins the election: the move completes well inside the migration
+/// timeout, and no shard is left with a driver running once it is done.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_source_resuming_a_move_hands_the_lead_on_and_frees_its_driver() -> Result<(), FixtureError> {
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .migration_timeout(Duration::from_secs(300))
+            .detector_interval_ms(200),
+    )
+    .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    // a set node zero leads, moved off node one: node zero drives, node one is the source
+    let (key, group) = key_led_by(&mut cluster, "Note", 0, 9700)?;
+    let keys = note_keys_in_group(&mut cluster, &group, 9700, 4)?;
+    for key in &keys {
+        write_note(&addr0, *key, &format!("base-{key}")).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // the driver dies right after committing `Reconfiguring`; node two is paused for the whole
+    // of it, so the source is the one voter awake when the driver dies, and its vote request is
+    // waiting in node two's socket, answered first, when node two resumes. The point is armed
+    // on the driver alone: the source's hand-off commits the same phase, and would die at it
+    let _ = cluster
+        .node_mut(0)
+        .command(&format!("MOVE_CRASH_AT reconfiguring {group}"))?;
+    cluster.node(2).pause()?;
+    let op = move_as_process(&mut cluster, 0, key, 1, 3)?;
+    let dead = wait_any_dead(&cluster, Duration::from_secs(90))?;
+    assert_eq!(dead, vec![0], "another node than the driver died: {dead:?}");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    cluster.node(2).resume()?;
+    let (_, leader) = wait_group_leader_change(&mut cluster, 1, "Note", key, 0)?;
+    eprintln!("after the driver died, node {leader} leads group {group} (the source is node 1)");
+    assert_eq!(leader, 1, "the source did not win the election the driver's death left");
+    // the dead driver comes back, and the move finishes forward: the source, if it led, hands
+    // the lead on rather than driving its own removal; before the fix the record sat at
+    // `Configured` or `Retiring` for the migration timeout
+    restart_all(&mut cluster, &dead)?;
+    // the record sampled through the rest of the move: the source hands the lead on rather than
+    // driving its own removal, so it never commits `Configured` or anything past it under its
+    // own name. On the unfixed tree the source reconfigured itself out of the group and drove
+    // it to `Activated`
+    let decimal = u64::from_str_radix(&group, 16)
+        .map_err(|error| FixtureError::ChildFailed(format!("group {group}: {error}")))?
+        .to_string();
+    let source = cluster.node_ids()[1].clone();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let record = loop {
+        let record = move_record_via(&mut cluster, 2, op)?;
+        let progress = &record["groups"][&decimal];
+        if progress["driver"].as_str() == Some(source.as_str())
+            && move_phase_rank(&progress["phase"]) >= 5
+        {
+            panic!("the source drove its own removal: {progress}");
+        }
+        if record["phase"] == "Done" {
+            break record;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "move {op} did not finish within 120 s: {record}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(record["outcome"], serde_json::json!("Moved"), "{record}");
+    let voters = voters_of(&mut cluster, 3, &group)?;
+    assert_eq!(voters, vec![0, 2, 3], "the group's voters after the move");
+    // and no shard is left running a driver for it: a retired copy's driver ends, and frees
+    // the slot the shard's next move needs
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut running = Vec::new();
+        for node in 0..4 {
+            let view = groups_of(&mut cluster, node)?;
+            for shard in view["shards"].as_array().into_iter().flatten() {
+                let driving = shard["driving_moves"].as_u64().unwrap_or(0);
+                if driving > 0 {
+                    running.push((node, driving));
+                }
+            }
+        }
+        if running.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "move drivers still running after the move was done: {running:?}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
 /// A committed data configuration outlives the stale placement the map still carries (C4 M9a)
 ///
 /// The driver of the set node one leads is armed to die right after committing `Configured`,

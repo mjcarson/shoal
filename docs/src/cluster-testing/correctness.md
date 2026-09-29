@@ -1780,7 +1780,10 @@ with "nothing planned", and #142 waiting for its stuck move to recur. This round
 defects and measured both on the lab, narrowed the failover window from three to four bases to
 one and a half to two ([F62](../features/failover-window.md)), ruled the hosts' frequency
 governor out of O64 ([performance](performance.md#o64-in-round-16-not-the-governor-either)), and
-ran the loop for #142 again. Nothing in the lab's data was kept: #196 changed what a sorted
+ran the loop for #142 again, whose first round caught round 15's stuck move with its logs:
+[#197](../appendix/resolved/retired-driver-holds-slot.md), a move's source resuming the drive
+and reconfiguring itself out, then holding its shard's one driver slot on a copy retired under
+it, fixed. Nothing in the lab's data was kept: #196 changed what a sorted
 partition's archived size means, and every run here starts from a fresh bootstrap. The runs are
 under `target/lab/r16/`.
 
@@ -1899,8 +1902,9 @@ node - rows, the two maps, the WAL index and the eviction list - where round 15'
 
 ### Round 16's final build
 
-On the round's last code, with the lab's inventory (`target/lab/r16/confirm/run.sh`), beside
-[round 15's](#round-15s-final-build):
+On the round's last lab build (`3d6312e`, with #193, #196 and F62; #197 followed it and changed
+the move driver alone, which a load, a kill and a partition never exercise), with the lab's
+inventory (`target/lab/r16/confirm/run.sh`), beside [round 15's](#round-15s-final-build):
 
 | | Round 16 | Round 15 |
 | --- | --- | --- |
@@ -1912,5 +1916,51 @@ On the round's last code, with the lab's inventory (`target/lab/r16/confirm/run.
 **Verdict: pass.** The load's rate is inside O64's spread, the bench's inside the lab's, the
 failover window is [F62](../features/failover-window.md)'s, and a partition's worst second is
 where [#143](../appendix/resolved/silent-partition-hops.md#still-open)'s remainder left it
-(40%, 53% and 47% over three rounds: the kernel's two retransmission timeouts).
+(40%, 53% and 47% over three rounds: the kernel's two retransmission timeouts). The round's last
+code (`296fffa`, #197 in it) was then rolled onto the same cluster with `cluster upgrade`, one
+node at a time: 3 of 3 upgraded, 3 of 3 copies, writes admitted. A rolling upgrade moves no set,
+so that is a smoke of the binary and not of #197, whose test is the fixture's; the lab is left on
+it.
+
+### #142 in round 16
+
+[#142](../appendix/known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host)
+stayed open for the stuck move round 15 saw once without logs. Round 16 ran the whole workspace
+at six threads with the lab stopped, on the round's last code before #197: **1,745 of 1,745
+passed, eight ignored**. Then round 15's loop of the six heaviest tests, changed to keep every
+failing round's logs and go on (`target/lab/r16/142/loop-keep.sh`), caught the move in its first
+round:
+
+| Loop | Runs | Failed | Shape |
+| --- | --- | --- | --- |
+| `loop-keep.sh`, on the round's code before #197 | 12 | 1 | `migration_resumes_after_each_phase_failure`: the driver killed at `Retiring`, the group's destination elected and leading, and nobody driving the retirement for 240 s, while the other group reached `Done`. The child logs named it ([#197](../appendix/resolved/retired-driver-holds-slot.md)) |
+| `loop-keep.sh`, on #197's fix, six rounds | 36 | 0 | |
+
+The logs said what round 15 could not: the shard that led the stuck group had, three rounds
+earlier, been the *source* of the same group's move, had won the election a killed driver left,
+and had resumed the drive at `reconfiguring` - past the hand-off that keeps a source from driving
+its own removal - so it reconfigured itself out of the group. The published map retired its copy
+under the running driver, whose lead check read the shut-down handle's frozen metrics; it polled
+a dead group for the migration timeout, holding the shard's one driver slot, so when the shard
+led the next move's group after that move's driver was killed, `drive_moves` returned at the
+concurrency cap on every tick. A fixture test written for it fails on the unfixed tree with the
+source as the driver of `Configured` after six or seven seconds reconfiguring itself out, and
+passes on the fix.
+
+Each round's children ran 1,376 to 1,575 elections between them (1,087 and 1,535 in the two
+rounds before the fix), every one asked for by the six tests' kills, restarts, isolations and
+partitions under [F62](../features/failover-window.md)'s lease; the count is the baseline a later
+round compares against, not a pass or fail - a round where it jumps is the one to read.
+
+The workspace run on the round's last code, #197 in it, passed 1,744 of 1,746, where the run on
+the code just before #197, on the same host at the same six threads, had passed 1,745 of 1,745:
+two fixture tests failed under the suite's load and passed alone twice each. `single_node_data_has_a_verified_cluster_migration_path`
+judged its restore before the records landed (*the groups restored other records than the export
+holds: 0 against 400*), and `unplaced_member_forwards_every_query` read a node's readiness before
+the placement was initialized (*initialized: false* with every member up). Neither is in the move
+driver, and both are the deadline shape #142 tracks.
+
+**Verdict:** the stuck move is [#197](../appendix/resolved/retired-driver-holds-slot.md), fixed.
+Every shape #142 had on record is explained or fixed; it stays filed for the two deadlines the
+final run added and whatever the next loaded run finds, and the loop keeps its logs.
 

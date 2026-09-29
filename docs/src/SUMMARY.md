@@ -322,6 +322,7 @@
   - [194. A partial snapshot its sender gave up on was held for good](appendix/resolved/abandoned-partial-snapshots.md)
   - [195. A node's scheduled scrubs were refused for a stale version](appendix/resolved/scheduled-scrub-starved.md)
   - [196. The eviction budget undercounted what a node holds](appendix/resolved/row-charge-undercount.md)
+  - [197. A move's source resumed the drive and reconfigured itself out, and a retired copy's driver held its slot](appendix/resolved/retired-driver-holds-slot.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)
