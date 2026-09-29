@@ -1720,6 +1720,24 @@ while its set streamed at the throttle.
 now fails by name without harming the rest of the cluster. `hold_bytes` has to cover a step's
 transfer at the write rate its groups see; at a terabyte a node that is the operator's to size.
 
+### Rebuilding at fourteen copies on the final build
+
+The rebuilds above ran on builds with #191 unfixed or #192 unfixed, and memory samples from the
+second and third (taken by a sampler that outlived its run, untimestamped) showed titan at 12.9 to
+13 GiB resident against its 8 GiB budget, on a 14 GiB host, with nothing left to evict. Which run
+they came from cannot be told. So hyperion was rebuilt once more under the bench on the final build
+(`rbmem.sh`, fourteen copies and the benches' inserts, each member's memory stamped every 30 s):
+
+| | |
+| --- | --- |
+| Rebuild | 18 steps, 13.3 GiB moved and 13.6 GiB streamed in 596 s: 23.7 MiB/s, 30 s a step |
+| Snapshot fed, stalled, failed, forced purges | 0, 0, 0, 0 on every node; 36 groups installed once each |
+| Acknowledged inserts, each member alone | 7,827,707, 0 lost |
+| csv, each member alone at `One` | copy 0's movies and all fourteen copies' keyword partitions: 0 missing, 0 different |
+| Memory, every member | peaked at 8.0 GiB, its budget, keeping 2.0 to 2.5 GiB of rows; never above |
+
+**Verdict: pass.** The budget holds through a rebuild on the final build.
+
 ### #142 in round 15
 
 [#142](../appendix/known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host) stays
