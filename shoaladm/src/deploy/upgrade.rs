@@ -253,6 +253,15 @@ impl Deployment {
         // the order, with the leader last
         let order =
             upgrade_order(&record, only, model.leader.as_deref()).map_err(|error| eyre!(error))?;
+        // every node's program ready before any host is touched; a rollback swaps back what
+        // each host kept and builds nothing
+        if !rollback {
+            let nodes = order
+                .iter()
+                .map(|name| self.inventory.node(name))
+                .collect::<color_eyre::Result<Vec<_>>>()?;
+            self.prepare(&nodes)?;
+        }
         // every recorded node has to be back, with the voters bootstrap asked for
         let ids = record
             .nodes
@@ -435,19 +444,17 @@ impl Deployment {
             target: node.target.clone(),
         };
         let binary = self.layout_binary()?;
+        let program = self.program(name)?;
         // a node already on this program is done, which is what lets a rerun resume
         let installed = self.installed(&host, &binary)?;
-        let local = digest(&self.inventory.server)?;
+        let local = digest(&program)?;
         let same = installed.digest == local;
         if same && !force {
             step(Some(name), "already runs this program");
             return Ok(false);
         }
         // the program beside the node's, owned by the user it runs as
-        step(
-            Some(name),
-            &format!("pushing {}", self.inventory.server.display()),
-        );
+        step(Some(name), &format!("pushing {}", program.display()));
         let partial = self.push_binary(&host, name)?;
         let candidate = format!("{binary}.candidate");
         install_binary(&host, &partial, &candidate, &installed.user)?;
@@ -465,15 +472,15 @@ impl Deployment {
             host.run(&format!("sudo -n rm -f {}", quote(&candidate)))?;
             if output.status == Some(SIGILL_STATUS) {
                 bail!(
-                    "{} died of an illegal instruction on {name}: it was built for another cpu. build it \
-                     with RUSTFLAGS=\"-C target-cpu=<the oldest host's cpu>\" rather than native. \
+                    "{} died of an illegal instruction on {name}: it was built for another cpu. {}. \
                      no node was changed by this step",
-                    self.inventory.server.display()
+                    program.display(),
+                    super::ops::cpu_advice(&self.inventory)
                 );
             }
             bail!(
                 "{} --version failed on {name} with status {:?}: {}",
-                self.inventory.server.display(),
+                program.display(),
                 output.status,
                 output.stderr.trim()
             );
@@ -957,7 +964,7 @@ impl Deployment {
         let layout = Layout {
             dir: self.inventory.remote_dir(),
         };
-        Ok(layout.binary(&self.inventory.server_name()?))
+        Ok(layout.binary(&self.server_name()?))
     }
 
     /// The end of a node's journal, as a suffix for an error, or nothing if it cannot be read

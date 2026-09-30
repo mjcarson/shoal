@@ -105,3 +105,37 @@ where
     }
     Ok(model)
 }
+
+/// Read a followed operation's record once
+///
+/// # Arguments
+///
+/// * `shoal` - The client to read through
+/// * `op` - The operation
+/// * `follow` - How its record is read
+pub async fn follow_once<S>(
+    shoal: &Arc<Shoal<S>>,
+    op: Uuid,
+    follow: Follow,
+) -> Result<(Vec<String>, bool), String>
+where
+    S: QuerySupport + Send + Sync + 'static,
+{
+    use shoal::shared::protocol::admin::{AdminOutcome, AdminRequest};
+    let Some(kind) = follow.status(op) else {
+        return Ok((Vec::new(), true));
+    };
+    let response = shoal
+        .admin(&AdminRequest {
+            op: Uuid::new_v4(),
+            expected_version: 0,
+            kind,
+        })
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+    match response.outcome {
+        Ok(AdminOutcome::Read(record)) => Ok((follow.render(op, &record), follow.is_done(&record))),
+        Ok(other) => Err(format!("the record read answered {other:?}")),
+        Err(error) => Err(format!("{} ({:?})", error.msg, error.code())),
+    }
+}

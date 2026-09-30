@@ -139,6 +139,8 @@ impl Deployment {
             bail!("{name} cannot be rebuilt now: {refusal}");
         }
         let seeds: Vec<String> = control_addresses(&shoal).await?;
+        // its program, built for its cpu if it has to be, before anything is stopped
+        self.prepare(std::slice::from_ref(&node))?;
         // 1. stopped, and kept stopped: a unit that restarts on failure would come back mid-wipe
         let host = Host {
             target: node.target.clone(),

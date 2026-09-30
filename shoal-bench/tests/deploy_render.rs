@@ -1,6 +1,6 @@
-//! What `shoalctl cluster` writes is a configuration the engine starts from
+//! What `shoaladm` writes is a configuration the engine starts from
 //!
-//! shoalctl links the client half alone, so the `shoal.yml` it renders is a mirror of `Conf`
+//! shoaladm links the client half alone, so the `shoal.yml` it renders is a mirror of `Conf`
 //! rather than a `Conf` ([F51](../../docs/src/features/cluster-deployment.md)). This is the test
 //! that keeps the mirror honest: a bootstrap file and a join file rendered by the deployment are
 //! parsed by the engine's own loader and validated by its own cluster check, the node program's
@@ -12,9 +12,9 @@ use shoal::shared::identity::NodeId;
 use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest};
 use shoal::Conf;
 use shoal_bench::workloads::schema::{Bench, BenchClient};
-use shoalctl::deploy::inventory::Inventory;
-use shoalctl::deploy::pki::Authority;
-use shoalctl::deploy::render::{self, Entry, Layout};
+use shoaladm::deploy::inventory::Inventory;
+use shoaladm::deploy::pki::Authority;
+use shoaladm::deploy::render::{self, Entry, Layout};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -155,8 +155,8 @@ async fn initialize(node: NodeId) {
     // the member up and voting, as the deployment waits for it
     let deadline = Instant::now() + Duration::from_secs(60);
     let model = loop {
-        let model = shoalctl::cluster::poll(&shoal).await.expect("a poll");
-        if shoalctl::deploy::ops::members_ready(&model, &[node], 1) {
+        let model = shoaladm::cluster::poll(&shoal).await.expect("a poll");
+        if shoaladm::deploy::ops::members_ready(&model, &[node], 1) {
             break model;
         }
         assert!(Instant::now() < deadline, "the node never came up: {model:?}");
@@ -178,7 +178,7 @@ async fn initialize(node: NodeId) {
     );
     // and default writes admitted afterwards
     loop {
-        let model = shoalctl::cluster::poll(&shoal).await.expect("a poll");
+        let model = shoaladm::cluster::poll(&shoal).await.expect("a poll");
         if model.default_writes == "admitted" {
             break;
         }
@@ -207,9 +207,9 @@ fn a_group_split_renders_the_roots_the_engine_claims() {
     let mut inventory = base.clone();
     inventory.groups.insert(
         "split".to_string(),
-        shoalctl::deploy::inventory::GroupSpec {
+        shoaladm::deploy::inventory::GroupSpec {
             resources: None,
-            storage: Some(shoalctl::deploy::inventory::StorageSpec {
+            storage: Some(shoaladm::deploy::inventory::StorageSpec {
                 latency: Some(fast.display().to_string()),
                 throughput: Some(format!("{}/", bulk.display())),
             }),
@@ -217,6 +217,8 @@ fn a_group_split_renders_the_roots_the_engine_claims() {
             wal_commit_delay: Some("3ms".to_string()),
             // and so does a share of the leads, which is what the machine can commit (F58)
             lead_weight: Some(2),
+            // and the cpu its program is built for (F63)
+            target_cpu: None,
         },
     );
     inventory.nodes[0].group = Some("split".to_string());

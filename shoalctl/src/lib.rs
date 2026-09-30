@@ -56,10 +56,10 @@
 
 pub mod app;
 pub mod cli;
-pub mod cluster;
 pub mod components;
-pub mod deploy;
-pub mod wizard;
+
+/// The result type the UI returns, so a schema's program needs no dependency for it
+pub type Result<T, E = color_eyre::Report> = std::result::Result<T, E>;
 
 use std::sync::Arc;
 
@@ -90,7 +90,7 @@ pub enum AppEvent<S: QuerySupport> {
         /// The tab
         tab_id: Uuid,
         /// The model built from the frames
-        model: Result<cluster::ClusterModel, String>,
+        model: Result<shoaladm::cluster::ClusterModel, String>,
     },
     /// What an operation a cluster tab submitted came to
     AdminOutcome {
@@ -99,7 +99,7 @@ pub enum AppEvent<S: QuerySupport> {
         /// The lines to show, and whether they are an error
         outcome: Result<Vec<String>, String>,
         /// The operation to follow, if the request was applied and its record can be read
-        follow: Option<(Uuid, cluster::Follow)>,
+        follow: Option<(Uuid, shoaladm::cluster::Follow)>,
     },
 }
 

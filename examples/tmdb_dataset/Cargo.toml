@@ -17,8 +17,8 @@ path = "src/lib.rs"
 name = "tmdb-dataset-node"
 path = "src/bin/node.rs"
 
-# The loader, and every `shoalctl` command for this schema: `cluster new`, `bootstrap`, `status`,
-# the terminal UI. One program deploys the cluster and fills it
+# The loader, and every `shoaladm` command for this schema: `new`, `deploy`, `status`, and the
+# terminal UI as `tui`. One program deploys the cluster and fills it
 [[bin]]
 name = "tmdb-dataset-loader"
 path = "src/bin/loader.rs"
@@ -35,7 +35,9 @@ jemalloc-prof = ["dep:tikv-jemallocator"]
 # the engine, for the node. the loader links it too, as `shoal-benchctl` does beside `shoal-node`,
 # because one package has one feature set and the node needs it
 shoal = { version = "0.1.0", path = "../../shoal" }
-# `cluster new`, `bootstrap` and the rest, and the deployment state the loader connects with
+# `new`, `deploy` and the rest, and the deployment state the loader connects with; the
+# terminal UI beside them
+shoaladm = { version = "0.1.0", path = "../../shoaladm" }
 shoalctl = { version = "0.1.0", path = "../../shoalctl" }
 tokio = { workspace = true }
 rkyv = { workspace = true }

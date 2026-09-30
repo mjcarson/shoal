@@ -26,16 +26,15 @@ use form::{Draft, Outcome, ProbeState, Resolution, Wizard};
 
 /// The note every written inventory opens with
 const HEADER: &str = "\
-# Written by `shoalctl cluster new`. Edit it by hand, or again with `cluster new --from <this file>`.
+# Written by `shoaladm new`. Edit it by hand, or again with `shoaladm new --from <this file>`.
 #
-# Build the server program for the oldest cpu among the hosts, never native - a build for a newer
-# one dies of SIGILL at its claim:
+# Deploy it from the project that defines the schema, which builds the node program for every
+# host's cpu and ships each host its own:
 #
-#   RUSTFLAGS=\"-C target-cpu=<oldest host's cpu>\" cargo build --release --bin <your node program>
+#   shoaladm deploy -i <this file>
 #
-# then deploy it with:
-#
-#   <your shoalctl program> cluster bootstrap -i <this file>
+# A `server:` line names a node program you built yourself instead; build that one for the
+# oldest cpu among the hosts, never native, or it dies of SIGILL at its claim.
 ";
 
 /// Write an inventory as the file the wizard saves
@@ -81,15 +80,17 @@ pub fn save(path: &Path, inventory: &Inventory) -> color_eyre::Result<()> {
     Ok(())
 }
 
-/// Keep a relative server path pointing at the same program from another inventory's directory
+/// Keep a relative server or project path pointing at the same thing from another inventory's
+/// directory
 ///
-/// `Inventory::load` reads a relative `server` against the inventory's own directory. Written to
-/// the same directory it was read from, the path is kept as it was written; written anywhere
-/// else, it is made absolute rather than silently naming another file.
+/// `Inventory::load` reads a relative `server` or `project` against the inventory's own
+/// directory. Written to the same directory it was read from, the path is kept as it was
+/// written; written anywhere else, it is made absolute rather than silently naming another
+/// file.
 ///
 /// # Arguments
 ///
-/// * `server` - The server path as the source inventory wrote it
+/// * `server` - The path as the source inventory wrote it
 /// * `from` - The inventory it was read from
 /// * `out` - The inventory it will be written to
 #[must_use]
@@ -143,9 +144,16 @@ pub async fn run(out: PathBuf, from: Option<PathBuf>) -> color_eyre::Result<()> 
                 .wrap_err_with(|| format!("failed to read {}", path.display()))?;
             let mut inventory: Inventory = serde_yaml::from_str(&raw)
                 .wrap_err_with(|| format!("{} is not an inventory", path.display()))?;
-            // a relative program is relative to the file it was read from, so one written
-            // elsewhere names it by where it is
-            inventory.server = rebase(&inventory.server, path, &out);
+            // a relative program or project is relative to the file it was read from, so one
+            // written elsewhere names it by where it is
+            inventory.server = inventory
+                .server
+                .as_deref()
+                .map(|server| rebase(server, path, &out));
+            inventory.project = inventory
+                .project
+                .as_deref()
+                .map(|project| rebase(project, path, &out));
             Draft::from_inventory(&inventory)
         }
         None => Draft::default(),
@@ -159,8 +167,10 @@ pub async fn run(out: PathBuf, from: Option<PathBuf>) -> color_eyre::Result<()> 
     match result? {
         true => {
             println!("wrote {}", out.display());
-            println!("next: build the server program it names, then");
-            println!("  <this program> cluster bootstrap -i {}", out.display());
+            println!("next, from the project that defines the schema:");
+            println!("  shoaladm deploy -i {}", out.display());
+            println!("and to make it the inventory every command reads when given none:");
+            println!("  shoaladm config default-inventory {}", out.display());
         }
         false => println!("left without writing {}", out.display()),
     }

@@ -117,7 +117,7 @@ pub fn render(frame: &mut Frame, wizard: &Wizard) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                " shoalctl cluster new ",
+                " shoaladm new ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!("→ {}", wizard.out.display())),
