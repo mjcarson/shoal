@@ -219,7 +219,11 @@ pub enum Command {
         #[clap(flatten)]
         inventory: InventoryArg,
     },
-    /// Print every member's standing, partitions, bytes and write rates, and every plan's progress
+    /// Chart every member's standing, partitions, bytes and write rates, and every plan's
+    /// progress, full screen; or print them with --basic
+    ///
+    /// Members are named by hostname ([F64](../../docs/src/features/stats-tui.md)). The full
+    /// screen view is drawn only when stdout is a terminal, so a pipe or a script gets lines.
     Stats {
         /// The inventory
         #[clap(flatten)]
@@ -227,12 +231,17 @@ pub enum Command {
         /// Narrow the figures to one table, by the name the schema spells it
         #[clap(long)]
         table: Option<String>,
-        /// Print again every so many seconds, two if none is given, until interrupted
+        /// Read the figures every so many seconds, two if none is given: the full screen view's
+        /// interval, or with --basic print again until interrupted
         #[clap(long, num_args = 0..=1, default_missing_value = "2")]
         watch: Option<u64>,
         /// Print the leader's answer as json rather than as lines
         #[clap(long)]
         json: bool,
+        /// Print the figures as lines instead of the full screen view; implied by --json and
+        /// when stdout is not a terminal
+        #[clap(long)]
+        basic: bool,
     },
     /// Start a node's unit, or every node's
     Start {
@@ -466,9 +475,10 @@ where
             table,
             watch,
             json,
+            basic,
         } => {
             open(&inventory)?
-                .stats::<S>(table.as_deref(), watch, json)
+                .stats::<S>(table.as_deref(), watch, json, basic)
                 .await
         }
         Command::Upgrade {
@@ -661,6 +671,28 @@ mod tests {
         assert!(parse(&["upgrade", "-i", "lab.yml", "--rollback", "--activate"]).is_err());
         assert!(parse(&["upgrade", "-i", "lab.yml", "--rollback", "--force"]).is_err());
         assert!(parse(&["upgrade", "-i", "lab.yml", "--rollback"]).is_ok());
+    }
+
+    /// Stats takes --basic beside --watch and --json, and a bare --watch reads every two seconds
+    #[test]
+    fn stats_takes_basic() {
+        // the full screen view is the default
+        let cli = parse(&["stats", "-i", "lab.yml"]).unwrap();
+        let Command::Stats { basic, watch, json, .. } = cli.command else {
+            panic!("not stats");
+        };
+        assert!(!basic && !json);
+        assert_eq!(watch, None);
+        // --basic asks for lines, with or without a watch
+        let cli = parse(&["stats", "--basic", "--watch", "--table", "Movie"]).unwrap();
+        let Command::Stats { basic, watch, table, .. } = cli.command else {
+            panic!("not stats");
+        };
+        assert!(basic);
+        assert_eq!(watch, Some(2));
+        assert_eq!(table.as_deref(), Some("Movie"));
+        // and it still needs the schema's program
+        assert!(parse(&["stats", "--basic"]).unwrap().command.needs_schema());
     }
 
     /// The project and the database are taken anywhere on the line, the inventory is optional,

@@ -1293,7 +1293,10 @@ Nothing a monitoring system can read exists — no metrics endpoint, ~~no counte
 ([Observability](../operations/observability.md#what-is-missing)). Since
 [F52](../features/cluster-stats.md) a cluster node does count its writes, per group, and keeps
 them with its tablets, archived partitions and bytes as trailing rates the `Stats` admin read
-answers; that is a surface an exporter could read, and nothing exports it yet. Two pieces of this were
+answers; that is a surface an exporter could read, and nothing exports it yet. Since
+[F64](../features/stats-tui.md) `shoaladm stats` charts those figures over half an hour, but the
+history is the view's own and ends when it exits: a monitoring system's retention is still
+what this item asks for. Two pieces of this were
 carved off by [item 9](resolved/orphaned-update-intents.md) and are worth naming separately,
 because that item deliberately stopped short of both.
 

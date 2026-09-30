@@ -345,7 +345,9 @@ figures and the open plans' pace under the model.
 groups, tablets, archived partitions and bytes, each over every copy it hosts and over the
 copies it leads, its trailing insert, update and delete rates in rows and bytes over ten
 seconds, a minute and five minutes, and every plan's progress and estimate. Counted per shard,
-combined per node and held by the control leader ([F52](../features/cluster-stats.md)).
+combined per node and held by the control leader ([F52](../features/cluster-stats.md)). Since
+[F64](../features/stats-tui.md) a member's figures carry its machine's hostname, which the admin
+tools name it by, and `shoaladm stats` charts them full screen on a terminal.
 
 **Environment** (node) — What the process that became a node read of its own machine at its
 ready line - host, CPU, governor, kernel, memory, SMT, NUMA, the filesystem under its storage,
@@ -436,7 +438,7 @@ than mistaking it for the end of the log. See
 | Executor | A thread | One shard thread pinned to one core, owning the `Shard-N` files; the count is `resources.cores`, and changing it is a rehome of the vanished executors' files onto the live ones before any shard starts ([C8](../distributed/rebalancing.md#slots-executors-and-the-rehome)) |
 | Activated wire | A protocol version | The wire version the control group committed as the boundary past which no member rolls back: `Activate { wire }` is refused until every member's running build reports it, and a hello or a start below it is refused ([C9](../distributed/operations.md#rolling-upgrade), [F48](../features/rolling-compatibility.md)) |
 | Node | A machine or process in a cluster | ~~Unbuilt.~~ One Shoal process with a `NodeId` and a storage directory ([C1](../distributed/node-identity.md)); since [F37](../features/node-identity-control-plane.md) every process has one, minted the first time its directory is claimed |
-| Node id | A hostname or an index | A random uuid minted once per storage directory, kept in the marker, never derived from an address ([F37](../features/node-identity-control-plane.md)) |
+| Node id | A hostname or an index | A random uuid minted once per storage directory, kept in the marker, never derived from an address ([F37](../features/node-identity-control-plane.md)). The hostname a node reports is a display name only, and two nodes on one machine share it ([F64](../features/stats-tui.md)) |
 | Cluster id | A cluster name | A random uuid minted once, at the one explicit bootstrap, and adopted by every joiner; a directory naming another one is refused ([F37](../features/node-identity-control-plane.md)) |
 | Marker | A lock file | `shoal-meta.json`: format, shard count - a cluster node's slots since [F47](../features/local-rehome.md), beside an optional `physical` for the executors the files are on - node id, cluster id, shard layout, last observed topology version, and since [F39](../features/membership.md) a `mode` - `standalone`, `cluster` or `joining` - and an `incarnation`, at format 3; format 2 is read and rewritten. ~~Only the last field is ever rewritten~~ The topology, the incarnation and a joiner's one-time cluster are the fields that move ([Resolved #45](resolved/storage-marker-format.md), [F37](../features/node-identity-control-plane.md)) |
 | Replica set | The copies of a piece of data | ~~Unbuilt.~~ The `min(RF, N)` shards on distinct nodes holding a tablet - `placement[(t + k) % N]`, each on shard `(t / N) % shards` - derived from the map by one rule rather than stored per tablet ([C4](../distributed/tablet-map.md), [F40](../features/replication.md)) |

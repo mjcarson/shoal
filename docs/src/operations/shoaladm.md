@@ -136,7 +136,7 @@ where the resolution above does not name the inventory.
 | `admin <operation...> [--timeout-secs]` | Send any operation the cluster tab's command line takes (`repair <table> [verify\|repair]`, `backup [table] <dir>`, `restore <dir>`, `restore-retry <op>`, `decommission <node>`, `status <op>`, ...) without the tab's preview, and follow its record until it is done |
 | `ship-backup <path>/<op> [--to <inv>]` | Copy every host's files of a backup to every host, or to another inventory's hosts ([F59](../features/backup-shipping.md)) |
 | `status` | Every node's id, address and unit, then the cluster tab's lines |
-| `stats [--table <t>] [--watch [s]] [--json]` | Every member's standing, groups, tablets, bytes and rates, and every plan's progress, from the control leader ([F52](../features/cluster-stats.md)) |
+| `stats [--table <t>] [--watch [s]] [--json] [--basic]` | Every member's standing, groups, tablets, bytes and rates, and every plan's progress, from the control leader ([F52](../features/cluster-stats.md)). Members are named by hostname. On a terminal it charts the figures full screen, with a help page on `?`; `--basic`, `--json` and a pipe print them ([F64](../features/stats-tui.md)) |
 | `start`/`stop`/`restart [node]` | systemctl on one node or every deployed node |
 | `upgrade [node...] [--force] [--activate] [--rollback]` | Replace every node's program with this build, one node at a time and the leader last ([F55](../features/cluster-upgrade.md)) |
 | `reconfigure [node...] [--force]` | Render every node's `shoal.yml` again and restart the ones whose file changed ([F57](../features/cluster-reconfigure.md)) |

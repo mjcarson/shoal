@@ -18477,6 +18477,18 @@ async fn stats_count_writes_partitions_and_status() -> Result<(), FixtureError> 
     // the spare holds and does nothing, and still has a row with its standing
     let spare = member_total(&view, &ids[3], &["groups"]).and_then(|groups| groups.as_u64());
     assert_eq!(spare, Some(0), "{view}");
+    // every member's figures name the machine it runs on, which for the fixture's children is
+    // this one, so the admin tools tell them apart by id beside the name (F64)
+    let host = std::fs::read_to_string("/proc/sys/kernel/hostname").expect("the host's name");
+    for node in &ids {
+        let member = view["members"]
+            .as_array()
+            .expect("members")
+            .iter()
+            .find(|member| member["node"] == *node)
+            .expect("every node is a member");
+        assert_eq!(member["stats"]["hostname"], host.trim(), "{view}");
+    }
     // a follower answers its own figures and names the leader
     let follower = (0..3).find(|node| *node != leader).expect("a follower");
     let local = stats_via(&mut cluster, follower, None)?;

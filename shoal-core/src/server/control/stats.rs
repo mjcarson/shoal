@@ -63,6 +63,28 @@ pub fn now_ms() -> u64 {
         })
 }
 
+/// The name this node's machine gives itself, which the admin tools name the member by
+///
+/// Read with `gethostname` on every figures tick rather than once, so a host renamed while the
+/// node runs is named by its new name from the next tick
+/// ([F64](../../../../docs/src/features/stats-tui.md)). `None` when the call fails or the
+/// name is empty, and the figures then carry none.
+#[must_use]
+pub fn hostname() -> Option<String> {
+    // a buffer longer than any name the kernel holds (HOST_NAME_MAX is 64 on linux)
+    let mut buf = [0u8; 256];
+    // SAFETY: the pointer and length describe `buf`, which outlives the call
+    let result = unsafe { libc::gethostname(buf.as_mut_ptr().cast::<libc::c_char>(), buf.len()) };
+    if result != 0 {
+        return None;
+    }
+    // the name ends at its NUL, or fills the buffer when the kernel truncated it
+    let end = buf.iter().position(|byte| *byte == 0).unwrap_or(buf.len());
+    let name = String::from_utf8_lossy(&buf[..end]).trim().to_string();
+    // an empty name says nothing, so it is reported as none
+    if name.is_empty() { None } else { Some(name) }
+}
+
 /// One exponentially weighted moving average of a rate
 ///
 /// Debiased by the weight its samples have accumulated, so the average of the first sample is
@@ -911,6 +933,21 @@ mod tests {
         assert_eq!(sync_size_bucket(64 * 4096), 4);
         assert_eq!(sync_size_bucket(1024 * 1024), SYNC_SIZE_BUCKETS - 1);
         assert_eq!(sync_size_bucket(usize::MAX), SYNC_SIZE_BUCKETS - 1);
+    }
+
+    /// The hostname a node reports is the one the kernel holds for its machine
+    #[test]
+    fn hostname_matches_the_kernel() {
+        // the kernel's own copy of the name, which gethostname reads
+        let kernel = std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .expect("the kernel's hostname is readable");
+        let kernel = kernel.trim();
+        // a machine with a name reports it whole, and one without reports none
+        if kernel.is_empty() {
+            assert_eq!(hostname(), None);
+        } else {
+            assert_eq!(hostname().as_deref(), Some(kernel));
+        }
     }
 
     /// The first sample of a debiased average is the sample, and a constant rate converges

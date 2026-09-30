@@ -148,6 +148,26 @@ pub struct Deployment {
     pub programs: LazyPrograms,
 }
 
+/// The name the deployment gave each node it placed, by the node id its claim reported
+///
+/// A record whose id does not parse names nothing, and the member is named another way.
+///
+/// # Arguments
+///
+/// * `record` - The cluster record
+#[must_use]
+pub fn record_names(record: &ClusterRecord) -> std::collections::BTreeMap<NodeId, String> {
+    record
+        .nodes
+        .iter()
+        .filter_map(|(name, node)| {
+            Uuid::parse_str(&node.node)
+                .ok()
+                .map(|id| (NodeId(id), name.clone()))
+        })
+        .collect()
+}
+
 /// Quote every directory for a shell and join them with spaces
 ///
 /// # Arguments
@@ -1338,13 +1358,20 @@ impl Deployment {
             .map(crate::cluster::stats::plan_line)
     }
 
-    /// Print every member's figures and every plan's progress, as the leader holds them
+    /// Chart every member's figures and every plan's progress full screen, or print them, as
+    /// the leader holds them
+    ///
+    /// The full screen view is drawn only when stdout is a terminal and neither lines nor json
+    /// were asked for, so a pipe or a script always gets lines
+    /// ([F64](../../../docs/src/features/stats-tui.md)). Either way a member is named by the
+    /// hostname its figures carry, else by the name this deployment gave it, else by its id.
     ///
     /// # Arguments
     ///
     /// * `table` - The table to narrow the figures to, if one
-    /// * `watch` - Print again every so many seconds, if given
+    /// * `watch` - Read again every so many seconds, if given; the full screen view's interval
     /// * `json` - Print the answer as json rather than as lines
+    /// * `basic` - Print lines rather than drawing the full screen view
     ///
     /// # Errors
     ///
@@ -1354,6 +1381,7 @@ impl Deployment {
         table: Option<&str>,
         watch: Option<u64>,
         json: bool,
+        basic: bool,
     ) -> color_eyre::Result<()>
     where
         S: QuerySupport + Send + Sync + 'static,
@@ -1380,17 +1408,24 @@ impl Deployment {
                 "the node reached does not answer the Stats read; it runs a build from before F52"
             );
         }
-        let mut leader = None;
+        // the name each deployed node was given, for a member whose figures carry no hostname
+        let names = record_names(&record);
+        let mut poller = crate::cluster::stats::tui::Poller::new(
+            shoal,
+            table.map(str::to_string),
+            names,
+            self.inventory.admin.clone(),
+            self.state.password()?,
+        );
+        // a terminal that asked for neither lines nor json gets the full screen view
+        if !json && !basic && std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            let every = Duration::from_secs(watch.unwrap_or(2).max(1));
+            return crate::cluster::stats::tui::run(poller, self.inventory.name.clone(), every)
+                .await;
+        }
         loop {
             // the leader's answer, or the reached node's own with why
-            let dial = |addr: String| async move {
-                self.connect::<S>(&addr, Instant::now())
-                    .await
-                    .map_err(|error| error.to_string())
-            };
-            let figures = crate::cluster::stats::leader_stats(&shoal, table, &mut leader, dial)
-                .await
-                .map_err(|error| eyre!(error))?;
+            let figures = poller.poll().await.map_err(|error| eyre!(error))?;
             // a watch redraws from the top of the screen
             if watch.is_some() && !json {
                 print!("\x1b[2J\x1b[H");
@@ -1864,5 +1899,27 @@ mod tests {
             {"phase": "member", "record": {}},
         ]});
         assert_eq!(seed_addresses(&frame), vec!["10.0.0.1:12002", "10.0.0.2:12002"]);
+    }
+
+    /// The deployment names each node it placed by the id its claim reported, and a record
+    /// whose id does not parse names nothing
+    #[test]
+    fn record_names_are_keyed_by_the_claimed_ids() {
+        use super::{record_names, ClusterRecord, NodeRecord};
+        use shoal::shared::identity::NodeId;
+        // two nodes with ids, and one whose id was never read
+        let id = "aaaaaaaa-1111-1111-1111-111111111111";
+        let mut record = ClusterRecord::default();
+        let node = |node: &str| NodeRecord {
+            node: node.to_string(),
+            address: "10.0.0.1".to_string(),
+            target: "host".to_string(),
+        };
+        record.nodes.insert("hyperion".to_string(), node(id));
+        record.nodes.insert("titan".to_string(), node("not an id"));
+        let names = record_names(&record);
+        assert_eq!(names.len(), 1);
+        let key = NodeId(uuid::Uuid::parse_str(id).unwrap());
+        assert_eq!(names.get(&key).map(String::as_str), Some("hyperion"));
     }
 }

@@ -3717,6 +3717,8 @@ impl Core {
         stats.resident_bytes = crate::server::shard::process_resident_bytes()
             .and_then(|bytes| u64::try_from(bytes).ok())
             .unwrap_or(0);
+        // and the machine's name, which the admin tools name the member by (F64)
+        stats.hostname = super::stats::hostname().unwrap_or_default();
         self.last_stats = Some(stats);
     }
 

@@ -67,14 +67,16 @@ every committed member's control address, claims it and issues its leaf, starts 
 `cluster.migration.retire_after` (five minutes by default, the inventory's `retire_after` if it
 names one), since a move finishes when its source has reclaimed the retired copy.
 
-**Is it progressing, and how fast.** `shoaladm stats -i <inventory> --watch` shows the
+**Is it progressing, and how fast.** `shoaladm stats -i <inventory>` shows the
 plan's steps moved out of the total, its planned and streamed bytes, how long it has run and
 each finished step took, the average and current throughput, and an estimate of what is left;
 the new node's row shows its tablets, partitions and applied rate climbing as it is fed. An
 estimate is the larger of the bytes at the current pace and the steps at the finished pace,
 since every step waits out `retire_after` however small it is
-([F52](../features/cluster-stats.md)). `shoaladm add --rebalance` prints the same line as each
-step moves.
+([F52](../features/cluster-stats.md)). On a terminal it charts them: the plan is at the foot,
+and the streams and placement tabs draw the new node's line climbing beside the others,
+named by its hostname; `--basic --watch` prints the tables instead ([F64](../features/stats-tui.md)).
+`shoaladm add --rebalance` prints the same line as each step moves.
 
 **Rollback.** A node nothing was placed on is stopped and its directory deleted. One a plan has
 moved sets onto is [decommissioned](#4-decommission).

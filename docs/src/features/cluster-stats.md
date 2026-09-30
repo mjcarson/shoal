@@ -127,7 +127,11 @@ few bytes it holds. A plan of small sets is paced by that wait, not by its bytes
 
 - **`shoaladm stats -i <inventory> [--table <t>] [--watch [secs]] [--json]`**
   connects to any member and reads `Stats`. If the answer is a follower's local view, it dials
-  the leader's advertised client address and reads again. It prints:
+  the leader's advertised client address and reads again. ~~It prints:~~ Since
+  [F64](stats-tui.md) it charts the figures full screen when stdout is a terminal, and
+  `--basic` (or `--json`, or a pipe) prints what it printed before. Either way a member is named
+  by the hostname its figures carry, else by the deployment's name for it, else by its id, where
+  the sample below shows ids. The printed form is:
   - the cluster's led write and byte rates, and its partitions counted once per row;
   - a member table: state (with `(m)` for maintenance), report age, groups, tablets and
     partitions as hosted/led, archived bytes and free bytes;
@@ -148,7 +152,8 @@ few bytes it holds. A plan of small sets is paced by that wait, not by its bytes
   under its step lines each time a step moves.
 - **The cluster tab** reads `Stats` after its six reads. It reads from the leader the same way,
   dialing it unauthenticated since a read needs no principal. It draws the compact lines under
-  the model: a member table with 10s rates, and the open plans.
+  the model: a member table with 10s rates, and the open plans. Since [F64](stats-tui.md) it
+  names each member by hostname, and by its id when the figures carry none.
 
 ```text
 stats from daa5325b at version 31

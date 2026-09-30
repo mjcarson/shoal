@@ -214,7 +214,9 @@ It polls six admin reads a second - `Members`, `Readiness`, `Replication`, `Plan
 whose `Members` frame lists `stats` in `admin_reads` is asked for a seventh, `Stats`; when the
 node reached is not the control leader, the tab dials the leader's advertised client address
 as nobody (a read needs no principal) and asks there, and draws every member's figures and the
-open plans' pace under the model. A node from before F52 is never sent it, since it would close
+open plans' pace under the model. Since [F64](../features/stats-tui.md) those figures name each
+member by the hostname it reports, or by its id when it reports none; the tab has no deployment
+record to name it by. A node from before F52 is never sent it, since it would close
 the connection on a kind it cannot decode:
 
 ```text
