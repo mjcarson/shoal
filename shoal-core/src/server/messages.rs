@@ -319,6 +319,13 @@ pub struct Reply {
     /// Written ahead of the payload by a relay whose connection negotiated the section, and
     /// dropped by one that did not ([F41](../../../docs/src/features/read-consistency.md)).
     pub token: Option<crate::shared::protocol::read::SessionToken>,
+    /// The kind of query this answers, as an index into the node's query figures, when the
+    /// answer's own bytes are not this node's to read
+    ///
+    /// Set only for a forwarded query's whole answer, which is a peer's bytes passed to the
+    /// client unvalidated; every other answer was sealed here and its kind is read off it
+    /// ([F65](../../../docs/src/features/query-figures-home-tab.md)).
+    pub op: Option<u8>,
 }
 
 /// What a peer link learned, delivered into the shard that owns it

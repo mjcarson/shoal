@@ -30,12 +30,14 @@ use uuid::Uuid;
 
 use super::migrate::MoveRecord;
 use super::plan::{PlanRecord, StepState};
-use crate::server::replication::ShardReplication;
+use crate::server::replication::{QueryCounters, ShardReplication};
+use crate::server::shard::meter::{percentile, LATENCY_SAMPLE_EVERY, OPS};
 use crate::shared::identity::{GroupId, NodeId};
 use crate::shared::protocol::stats::{
-    GroupRate,
-    NodeStats, PlanProgress, Rates, TableStats, WriteCounters, WriteRates,
+    query_op_index, GroupRate, NodeStats, OpStats, PlanProgress, QueryStats, Rates, TableStats,
+    WriteCounters, WriteRates, QUERY_OPS,
 };
+use crate::shared::responses::ResponseActionNames;
 
 /// How many status reports in a row one carries the node's figures
 ///
@@ -52,6 +54,10 @@ const WINDOW_SECS: [f64; 3] = [10.0, 60.0, 300.0];
 
 /// A rate below this is read as nothing, so a table nobody writes to decays out of the figures
 const NEGLIGIBLE_RATE: f64 = 1e-6;
+
+/// The time constant the latency percentiles are taken over, in seconds: the rates' shortest
+/// window, so a p99 and a rate beside it describe the same stretch of time
+const LATENCY_TAU_SECS: f64 = 10.0;
 
 /// Milliseconds since the epoch, for a figure's timestamp and a plan's elapsed time
 #[must_use]
@@ -225,6 +231,103 @@ struct TableTick {
     led: WriteCounters,
 }
 
+/// The windows over what a node's clients were answered
+///
+/// The rates are the same three windows every other rate keeps. The latency is a histogram per
+/// kind in which every tick's timed answers are added and every earlier one's weight decays by
+/// its age over [`LATENCY_TAU_SECS`], so a percentile read from it describes about the last ten
+/// seconds, and a quiet node's percentiles fade out rather than reading one tick's handful
+/// ([F65](../../../../docs/src/features/query-figures-home-tab.md)).
+#[derive(Debug, Default)]
+struct QueryWindows {
+    /// Answers per second, by kind
+    answers: [Windows; OPS],
+    /// Answer bytes per second, by kind
+    bytes_out: [Windows; OPS],
+    /// Bytes the clients sent per second
+    bytes_in: Windows,
+    /// Each kind's timed answers per latency bucket, weighted by their age
+    latency: [Vec<f64>; OPS],
+}
+
+impl QueryWindows {
+    /// Take one interval's gains as a sample of every rate, and age the latencies by it
+    ///
+    /// # Arguments
+    ///
+    /// * `gained` - What the node's shards counted over the interval
+    /// * `dt` - The interval, in seconds
+    #[allow(clippy::cast_precision_loss)]
+    fn observe(&mut self, gained: &QueryCounters, dt: f64) {
+        // what every earlier answer is still worth after this interval
+        let decay = (-dt / LATENCY_TAU_SECS).exp();
+        for op in 0..OPS {
+            // each kind's rates, like any other counter's
+            self.answers[op].observe(gained.answers[op] as f64 / dt, dt);
+            self.bytes_out[op].observe(gained.bytes_out[op] as f64 / dt, dt);
+            // the earlier waits aged, and this interval's added at full weight
+            let buckets = &mut self.latency[op];
+            if buckets.len() < gained.latency[op].len() {
+                buckets.resize(gained.latency[op].len(), 0.0);
+            }
+            for bucket in buckets.iter_mut() {
+                *bucket *= decay;
+            }
+            for (bucket, count) in buckets.iter_mut().zip(&gained.latency[op]) {
+                *bucket += *count as f64;
+            }
+        }
+        self.bytes_in.observe(gained.bytes_in as f64 / dt, dt);
+    }
+
+    /// The node's query figures: every kind it has answered, and every kind but failures together
+    ///
+    /// # Arguments
+    ///
+    /// * `totals` - What the node's shards have counted since they started
+    fn stats(&self, totals: &QueryCounters) -> QueryStats {
+        // a quantile of some buckets in milliseconds
+        let millis = |buckets: &[f64], quantile: f64| {
+            percentile(buckets, quantile).map(|micros| micros / 1000.0)
+        };
+        // every kind the node has answered since its shards started
+        let ops = (0..OPS)
+            .filter(|op| totals.answers[*op] > 0)
+            .map(|op| OpStats {
+                op: QUERY_OPS[op].to_string(),
+                rate: self.answers[op].rates(),
+                bytes_out: self.bytes_out[op].rates(),
+                p50_ms: millis(&self.latency[op], 0.5),
+                p99_ms: millis(&self.latency[op], 0.99),
+                answers_total: totals.answers[op],
+                bytes_out_total: totals.bytes_out[op],
+            })
+            .collect();
+        // every kind but failures together, which answer early and would pull the waits down
+        let failed = query_op_index(&ResponseActionNames::Error);
+        let mut merged: Vec<f64> = Vec::new();
+        for (op, buckets) in self.latency.iter().enumerate() {
+            if op == failed {
+                continue;
+            }
+            if merged.len() < buckets.len() {
+                merged.resize(buckets.len(), 0.0);
+            }
+            for (total, weight) in merged.iter_mut().zip(buckets) {
+                *total += weight;
+            }
+        }
+        QueryStats {
+            ops,
+            bytes_in: self.bytes_in.rates(),
+            bytes_in_total: totals.bytes_in,
+            p50_ms: millis(&merged, 0.5),
+            p99_ms: millis(&merged, 0.99),
+            sampled_every: u32::try_from(LATENCY_SAMPLE_EVERY).unwrap_or(u32::MAX),
+        }
+    }
+}
+
 /// A node's trailing rates, derived from its shards' cumulative counters tick by tick
 #[derive(Debug, Default)]
 pub struct NodeStatsTracker {
@@ -246,6 +349,10 @@ pub struct NodeStatsTracker {
     stream_sent: Windows,
     /// Snapshot bytes streamed in
     stream_received: Windows,
+    /// Every shard's query counters as the last tick read them
+    prev_queries: HashMap<usize, QueryCounters>,
+    /// The windows over what the node's clients were answered
+    queries: QueryWindows,
 }
 
 impl NodeStatsTracker {
@@ -397,6 +504,26 @@ impl NodeStatsTracker {
             }
         }
         self.prev_wal = Some(wal);
+        // what the node's clients were answered, read shard by shard so a shard that started
+        // again is read whole rather than as a loss (F65)
+        let mut query_gained = QueryCounters::default();
+        let mut query_totals = QueryCounters::default();
+        let mut query_seen = HashMap::with_capacity(shards.len());
+        for (shard, report) in shards {
+            let gained = match self.prev_queries.get(shard) {
+                Some(prev) => report.queries.since(prev),
+                None => report.queries.clone(),
+            };
+            query_gained.absorb(&gained);
+            query_totals.absorb(&report.queries);
+            query_seen.insert(*shard, report.queries.clone());
+        }
+        self.prev_queries = query_seen;
+        // the rates and waits only move once there is an interval to divide by
+        if let Some(dt) = dt {
+            self.queries.observe(&query_gained, dt);
+        }
+        stats.queries = self.queries.stats(&query_totals);
         stats.wal_segments = shards
             .values()
             .map(|report| u64::try_from(report.segments).unwrap_or(u64::MAX))
@@ -1043,6 +1170,97 @@ mod tests {
         assert_eq!(fourth.total.groups, 1);
         assert!(fourth.total.applied.inserts.r10s < r10s);
         assert!(fourth.total.applied.inserts.r10s > 0.0);
+    }
+
+    /// Two shards whose clients were answered gets: a count, answer bytes, and waits of
+    /// `micros` each timed
+    ///
+    /// # Arguments
+    ///
+    /// * `gets` - Each shard's gets answered since it started
+    /// * `micros` - What each timed get waited, in microseconds
+    fn answering(gets: [u64; 2], micros: u64) -> BTreeMap<usize, ShardReplication> {
+        use crate::server::shard::meter::bucket_of;
+        (0..2)
+            .map(|shard| {
+                // every get timed, each in the one bucket its wait falls in
+                let mut latency = vec![0; bucket_of(micros) + 1];
+                latency[bucket_of(micros)] = gets[shard];
+                let mut queries = QueryCounters {
+                    bytes_in: gets[shard] * 50,
+                    ..QueryCounters::default()
+                };
+                queries.answers[0] = gets[shard];
+                queries.bytes_out[0] = gets[shard] * 100;
+                queries.latency[0] = latency;
+                let report = ShardReplication {
+                    shard,
+                    queries,
+                    ..ShardReplication::default()
+                };
+                (shard, report)
+            })
+            .collect()
+    }
+
+    /// Answers become rates by kind, their waits percentiles, a restarted shard is read whole,
+    /// and a node that stops answering keeps its totals while its percentiles fade out
+    #[test]
+    fn tracker_derives_query_rates_and_percentiles() {
+        let node = NodeId(Uuid::new_v4());
+        let mut tracker = NodeStatsTracker::default();
+        let start = Instant::now();
+        // the first tick is a baseline: totals, but no rates or waits yet
+        let first = tracker.tick(node, start, 1, &answering([100, 50], 200), 0);
+        let get = first.queries.op("get").expect("gets were answered");
+        assert_eq!(get.answers_total, 150);
+        assert_eq!(get.bytes_out_total, 15_000);
+        assert_eq!(get.rate.r10s, 0.0);
+        assert_eq!(get.p99_ms, None);
+        assert_eq!(first.queries.bytes_in_total, 7_500);
+        assert_eq!(first.queries.sampled_every, 1);
+        // only the kinds answered are listed
+        assert_eq!(first.queries.ops.len(), 1);
+        // a second later each shard answered 100 more gets of 2ms
+        let second = tracker.tick(
+            node,
+            start + Duration::from_secs(1),
+            2,
+            &answering([200, 150], 2000),
+            0,
+        );
+        let get = second.queries.op("get").expect("gets were answered");
+        assert!((get.rate.r10s - 200.0).abs() < 1e-9, "{:?}", get.rate);
+        assert!((get.bytes_out.r5m - 20_000.0).abs() < 1e-6);
+        assert!((second.queries.bytes_in.r1m - 10_000.0).abs() < 1e-6);
+        // every wait timed this interval was 2ms, which its bucket holds to within a quarter
+        let p99 = get.p99_ms.expect("a p99");
+        assert!((1.5..=2.5).contains(&p99), "{p99}");
+        assert_eq!(second.queries.p99_ms, get.p99_ms);
+        assert!(second.queries.rate_of(&["get"]) > 0.0);
+        // a shard that started again reads its counters whole rather than as a loss
+        let third = tracker.tick(
+            node,
+            start + Duration::from_secs(2),
+            3,
+            &answering([10, 150], 2000),
+            0,
+        );
+        let get = third.queries.op("get").expect("gets were answered");
+        assert_eq!(get.answers_total, 160);
+        assert!(get.rate.r10s > 0.0);
+        // a minute with nothing answered: the totals stay and the waits fade out
+        let quiet = tracker.tick(
+            node,
+            start + Duration::from_secs(62),
+            4,
+            &answering([10, 150], 2000),
+            0,
+        );
+        let get = quiet.queries.op("get").expect("gets were answered once");
+        assert_eq!(get.answers_total, 160);
+        assert_eq!(get.p99_ms, None, "a quiet node's waits fade out");
+        assert_eq!(quiet.queries.p50_ms, None);
     }
 
     /// A step's move record gives its start and end, and an open plan its estimate

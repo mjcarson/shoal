@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::shared::identity::{GroupId, ShardAddr, TableId};
-use crate::shared::protocol::stats::WriteCounters;
+use crate::shared::protocol::stats::{QUERY_OPS, WriteCounters};
 
 /// One group as its hosting shard sees it
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,6 +328,82 @@ pub struct ShardReplication {
     /// How many of those batches fell in each size bucket (`wal::SYNC_SIZE_BOUNDS`)
     #[serde(default)]
     pub wal_sync_sizes: Vec<u64>,
+    /// What the shard's clients were answered and how long they waited
+    /// ([F65](../../../../docs/src/features/query-figures-home-tab.md))
+    #[serde(default)]
+    pub queries: QueryCounters,
+}
+
+/// What a shard's clients were answered since it started, by kind, and how long they waited
+///
+/// Counted by the shard a client connected to, whichever shards served its queries, so a node's
+/// shards summed count every client query once ([`crate::server::shard::meter`]). Every array
+/// is in the order of [`QUERY_OPS`](crate::shared::protocol::stats::QUERY_OPS).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QueryCounters {
+    /// Answers written, by kind
+    pub answers: [u64; QUERY_OPS.len()],
+    /// Bytes of those answers, by kind
+    pub bytes_out: [u64; QUERY_OPS.len()],
+    /// Bytes of the bundles the clients sent
+    pub bytes_in: u64,
+    /// How many timed answers fell in each latency bucket
+    /// ([`crate::server::shard::meter::bucket_of`]), by kind, the empty buckets past a kind's
+    /// slowest wait left off
+    pub latency: [Vec<u64>; QUERY_OPS.len()],
+}
+
+impl QueryCounters {
+    /// What these counters gained since an earlier reading of them, a counter below its
+    /// earlier reading read whole
+    ///
+    /// A counter going backwards means the shard started again, which counts from zero.
+    ///
+    /// # Arguments
+    ///
+    /// * `prev` - The earlier reading
+    #[must_use]
+    pub fn since(&self, prev: &QueryCounters) -> QueryCounters {
+        // a counter that went backwards belongs to a shard that started again
+        let gained = |now: u64, then: u64| now.checked_sub(then).unwrap_or(now);
+        QueryCounters {
+            answers: std::array::from_fn(|op| gained(self.answers[op], prev.answers[op])),
+            bytes_out: std::array::from_fn(|op| gained(self.bytes_out[op], prev.bytes_out[op])),
+            bytes_in: gained(self.bytes_in, prev.bytes_in),
+            latency: std::array::from_fn(|op| {
+                self.latency[op]
+                    .iter()
+                    .enumerate()
+                    .map(|(bucket, now)| {
+                        gained(*now, prev.latency[op].get(bucket).copied().unwrap_or(0))
+                    })
+                    .collect()
+            }),
+        }
+    }
+
+    /// Add another shard's counters to these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The counters to add
+    pub fn absorb(&mut self, other: &QueryCounters) {
+        // every counter is summed on its own
+        for op in 0..self.answers.len() {
+            self.answers[op] = self.answers[op].saturating_add(other.answers[op]);
+            self.bytes_out[op] = self.bytes_out[op].saturating_add(other.bytes_out[op]);
+            // the buckets grow to the longest either holds
+            let buckets = &mut self.latency[op];
+            if buckets.len() < other.latency[op].len() {
+                buckets.resize(other.latency[op].len(), 0);
+            }
+            for (total, count) in buckets.iter_mut().zip(&other.latency[op]) {
+                *total = total.saturating_add(*count);
+            }
+        }
+        self.bytes_in = self.bytes_in.saturating_add(other.bytes_in);
+    }
 }
 
 /// What a shard's reads have cost and dropped since it started

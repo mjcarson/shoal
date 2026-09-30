@@ -17,6 +17,7 @@ use crate::server::shard::ShardInfo;
 use crate::shared::queries::{
     ArchivedSortedQuery, ArchivedUnsortedQuery, SortedQuery, UnsortedQuery,
 };
+use crate::shared::responses::ResponseActionNames;
 use crate::shared::traits::{ShoalSortedTable, ShoalUnsortedTable};
 
 /// Read a queries partition keys out of the archive they arrived in
@@ -227,6 +228,18 @@ pub trait ArchivedShardRouting: rkyv::Archive + Sized {
     /// * `archived` - The query, still in the buffer it arrived in
     fn archived_is_write(archived: &<Self as rkyv::Archive>::Archived) -> bool;
 
+    /// What kind of query this is, judged from the archive
+    ///
+    /// What a node's query figures count an answer under when the answer's own bytes are not
+    /// the node's to read: a forwarded query's whole answer is a peer's bytes, passed to the
+    /// client unvalidated, so the kind is read off the query the origin validated instead
+    /// ([F65](../../../docs/src/features/query-figures-home-tab.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The query, still in the buffer it arrived in
+    fn archived_action(archived: &<Self as rkyv::Archive>::Archived) -> ResponseActionNames;
+
     /// Narrow this query to the partitions the shard executing it owns
     ///
     /// This is the other half of [`ArchivedShardRouting::route_archived`], run on the shard
@@ -331,6 +344,17 @@ impl<T: ShoalSortedTable + std::fmt::Debug> ArchivedShardRouting for SortedQuery
         )
     }
 
+    fn archived_action(archived: &<Self as rkyv::Archive>::Archived) -> ResponseActionNames {
+        // each query answers in the action of its own name
+        match archived {
+            ArchivedSortedQuery::Insert { .. } => ResponseActionNames::Insert,
+            ArchivedSortedQuery::Get(_) => ResponseActionNames::Get,
+            ArchivedSortedQuery::Delete { .. } => ResponseActionNames::Delete,
+            ArchivedSortedQuery::Update(_) => ResponseActionNames::Update,
+            ArchivedSortedQuery::Exists(_) => ResponseActionNames::Exists,
+        }
+    }
+
     fn narrow_to(self, keys: Vec<u64>) -> Self {
         // only the two multi partition queries have anything to narrow
         match self {
@@ -430,6 +454,17 @@ impl<T: ShoalUnsortedTable + std::fmt::Debug> ArchivedShardRouting for UnsortedQ
                 | ArchivedUnsortedQuery::Delete { .. }
                 | ArchivedUnsortedQuery::Update(_)
         )
+    }
+
+    fn archived_action(archived: &<Self as rkyv::Archive>::Archived) -> ResponseActionNames {
+        // each query answers in the action of its own name
+        match archived {
+            ArchivedUnsortedQuery::Insert { .. } => ResponseActionNames::Insert,
+            ArchivedUnsortedQuery::Get(_) => ResponseActionNames::Get,
+            ArchivedUnsortedQuery::Delete { .. } => ResponseActionNames::Delete,
+            ArchivedUnsortedQuery::Update(_) => ResponseActionNames::Update,
+            ArchivedUnsortedQuery::Exists(_) => ResponseActionNames::Exists,
+        }
     }
 
     fn narrow_to(self, keys: Vec<u64>) -> Self {

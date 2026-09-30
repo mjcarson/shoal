@@ -20,6 +20,37 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::shared::identity::NodeId;
+use crate::shared::responses::ResponseActionNames;
+
+/// The kinds a node's answers to its clients are counted by, in the order every array of them
+/// is kept ([F65](../../../../docs/src/features/query-figures-home-tab.md))
+///
+/// The five query kinds a client can send, and `error` for an answer that failed, whatever the
+/// query was: a failure is read out of the answer, which no longer says what was asked.
+pub const QUERY_OPS: [&str; 6] = ["get", "exists", "insert", "update", "delete", "error"];
+
+/// The kinds among [`QUERY_OPS`] that read a table
+pub const READ_OPS: [&str; 2] = ["get", "exists"];
+
+/// The kinds among [`QUERY_OPS`] that change a table
+pub const WRITE_OPS: [&str; 3] = ["insert", "update", "delete"];
+
+/// Where an answer of a kind is counted among [`QUERY_OPS`]
+///
+/// # Arguments
+///
+/// * `kind` - The kind the answer says it is
+#[must_use]
+pub fn query_op_index(kind: &ResponseActionNames) -> usize {
+    match kind {
+        ResponseActionNames::Get => 0,
+        ResponseActionNames::Exists => 1,
+        ResponseActionNames::Insert => 2,
+        ResponseActionNames::Update => 3,
+        ResponseActionNames::Delete => 4,
+        ResponseActionNames::Error => 5,
+    }
+}
 
 /// How many rows and bytes a group's writes have applied, since its shard started
 ///
@@ -180,6 +211,97 @@ impl WriteRates {
             && self.update_bytes.is_zero()
             && self.delete_bytes.is_zero()
             && self.misses.is_zero()
+    }
+}
+
+/// What a node answered its clients of one kind
+///
+/// Counted where a client's query arrived and was answered, so a query is counted once however
+/// many shards and nodes served it, and on the node the client reached rather than the ones that
+/// hold its rows ([F65](../../../../docs/src/features/query-figures-home-tab.md)).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpStats {
+    /// The kind, one of [`QUERY_OPS`]
+    pub op: String,
+    /// Answers per second
+    pub rate: Rates,
+    /// Bytes of those answers per second, as written to the clients
+    pub bytes_out: Rates,
+    /// The median time from a query's bundle arriving to its answer being written, in
+    /// milliseconds, over roughly the last ten seconds; none when too few were timed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p50_ms: Option<f64>,
+    /// The 99th percentile of the same
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p99_ms: Option<f64>,
+    /// Answers since the node's shards started
+    pub answers_total: u64,
+    /// Bytes of those answers since the node's shards started
+    pub bytes_out_total: u64,
+}
+
+/// What a node answered its clients, by kind, and how long they waited
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QueryStats {
+    /// Every kind the node has answered, in the order of [`QUERY_OPS`]
+    pub ops: Vec<OpStats>,
+    /// Bytes of the bundles the node's clients sent, per second
+    pub bytes_in: Rates,
+    /// Bytes of those bundles since the node's shards started
+    pub bytes_in_total: u64,
+    /// The median wait over every kind but `error`, in milliseconds
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p50_ms: Option<f64>,
+    /// The 99th percentile of the same
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p99_ms: Option<f64>,
+    /// One in how many bundles was timed; every answer is counted whatever this is
+    pub sampled_every: u32,
+}
+
+impl QueryStats {
+    /// Whether the node has answered nothing, which is what a build from before F65 sends
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.ops.is_empty() && self.bytes_in_total == 0
+    }
+
+    /// One kind's figures, if the node has answered any of it
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The kind, one of [`QUERY_OPS`]
+    #[must_use]
+    pub fn op(&self, op: &str) -> Option<&OpStats> {
+        self.ops.iter().find(|stats| stats.op == op)
+    }
+
+    /// The answers per second of several kinds together, over their ten second windows
+    ///
+    /// # Arguments
+    ///
+    /// * `ops` - The kinds, each one of [`QUERY_OPS`]
+    #[must_use]
+    pub fn rate_of(&self, ops: &[&str]) -> f64 {
+        ops.iter()
+            .filter_map(|op| self.op(op))
+            .map(|stats| stats.rate.r10s)
+            .sum()
+    }
+
+    /// The answer bytes per second of several kinds together, over their ten second windows
+    ///
+    /// # Arguments
+    ///
+    /// * `ops` - The kinds, each one of [`QUERY_OPS`]
+    #[must_use]
+    pub fn bytes_out_of(&self, ops: &[&str]) -> f64 {
+        ops.iter()
+            .filter_map(|op| self.op(op))
+            .map(|stats| stats.bytes_out.r10s)
+            .sum()
     }
 }
 
@@ -385,6 +507,12 @@ pub struct NodeStats {
     /// A group commit that settles on small batches shows as the first buckets filling (O64).
     #[serde(default)]
     pub wal_sync_sizes: Vec<f64>,
+    /// What the node answered its clients, by kind, and how long they waited
+    /// ([F65](../../../../docs/src/features/query-figures-home-tab.md))
+    ///
+    /// Empty from a build before F65, and left out of the frame when empty.
+    #[serde(default, skip_serializing_if = "QueryStats::is_empty")]
+    pub queries: QueryStats,
 }
 
 /// How busy one group a node leads was over the last interval
@@ -441,6 +569,7 @@ impl NodeStats {
             wal_sync_ms: 0.0,
             wal_appends_per_sync: 0.0,
             wal_sync_sizes: Vec::new(),
+            queries: QueryStats::default(),
         }
     }
 
@@ -689,14 +818,90 @@ mod tests {
         full.total.partitions = 7;
         full.stream_sent.r1m = 12.5;
         full.hostname = "hyperion".to_string();
+        full.queries = QueryStats {
+            ops: vec![OpStats {
+                op: "get".to_string(),
+                rate: Rates {
+                    r10s: 40.0,
+                    ..Rates::default()
+                },
+                p50_ms: Some(0.2),
+                p99_ms: Some(1.5),
+                answers_total: 400,
+                bytes_out_total: 40_000,
+                ..OpStats::default()
+            }],
+            bytes_in_total: 9_000,
+            p99_ms: Some(1.5),
+            sampled_every: 1,
+            ..QueryStats::default()
+        };
         let json = serde_json::to_value(&full).expect("encodes");
         let back: NodeStats = serde_json::from_value(json).expect("decodes");
         assert_eq!(back, full);
         // a frame without a hostname, as a build from before F64 sends it, names none
         assert!(stats.hostname.is_empty());
+        // and one without query figures, as a build from before F65 sends it, has none
+        assert!(stats.queries.is_empty());
         // and an empty one is left out of the frame rather than sent as an empty string
         let bare = serde_json::to_value(NodeStats::empty(node)).expect("encodes");
         assert!(bare.get("hostname").is_none(), "{bare}");
+        // nor are empty query figures, or a percentile nothing was timed for
+        assert!(bare.get("queries").is_none(), "{bare}");
+        let json = serde_json::to_value(&full.queries).expect("encodes");
+        assert!(json.get("p50_ms").is_none(), "{json}");
+    }
+
+    /// Every answer kind is counted in its own place, and a node's query figures stay small on
+    /// the wire
+    #[test]
+    fn query_figures_name_every_kind_and_stay_small() {
+        // every kind has a place of its own, and the reads and writes are among them
+        let kinds = [
+            ResponseActionNames::Get,
+            ResponseActionNames::Exists,
+            ResponseActionNames::Insert,
+            ResponseActionNames::Update,
+            ResponseActionNames::Delete,
+            ResponseActionNames::Error,
+        ];
+        for kind in &kinds {
+            let index = query_op_index(kind);
+            assert_eq!(QUERY_OPS[index], format!("{kind:?}").to_lowercase());
+        }
+        assert!(READ_OPS.iter().chain(WRITE_OPS.iter()).all(|op| QUERY_OPS.contains(op)));
+        // a node that answered every kind at full precision
+        let busy = |op: &str| OpStats {
+            op: op.to_string(),
+            rate: Rates {
+                r10s: 123_456.789_012,
+                r1m: 123_456.789_012,
+                r5m: 123_456.789_012,
+            },
+            bytes_out: Rates {
+                r10s: 98_765_432.109_876,
+                r1m: 98_765_432.109_876,
+                r5m: 98_765_432.109_876,
+            },
+            p50_ms: Some(0.123_456_789),
+            p99_ms: Some(12.345_678_9),
+            answers_total: u64::MAX / 3,
+            bytes_out_total: u64::MAX / 3,
+        };
+        let queries = QueryStats {
+            ops: QUERY_OPS.iter().map(|op| busy(op)).collect(),
+            bytes_in: busy("get").rate,
+            bytes_in_total: u64::MAX / 3,
+            p50_ms: Some(0.123_456_789),
+            p99_ms: Some(12.345_678_9),
+            sampled_every: 16,
+        };
+        // rides one status report in four, so it is held to under two kilobytes
+        let bytes = serde_json::to_vec(&queries).expect("encodes").len();
+        assert!(bytes < 2048, "{bytes} bytes");
+        // and the rates of several kinds add up
+        assert!((queries.rate_of(&READ_OPS) - 2.0 * 123_456.789_012).abs() < 1e-6);
+        assert!(queries.bytes_out_of(&["nothing"]).abs() < f64::EPSILON);
     }
 
     /// Narrowing keeps one table and makes it the total, and a view sums what members lead

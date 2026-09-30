@@ -18402,6 +18402,24 @@ fn member_total(view: &serde_json::Value, node: &str, path: &[&str]) -> Option<s
     Some(figure.clone())
 }
 
+/// How many answers of one kind a member's clients were written, as a stats view carries it
+///
+/// # Arguments
+///
+/// * `view` - The stats view
+/// * `node` - The node's id
+/// * `op` - The kind, such as `get`
+fn member_answers(view: &serde_json::Value, node: &str, op: &str) -> u64 {
+    // the member's row, then its query figures, then the kind's total
+    view["members"]
+        .as_array()
+        .and_then(|members| members.iter().find(|member| member["node"] == node))
+        .and_then(|member| member["stats"]["queries"]["ops"].as_array())
+        .and_then(|ops| ops.iter().find(|stats| stats["op"] == op))
+        .and_then(|stats| stats["answers_total"].as_u64())
+        .unwrap_or(0)
+}
+
 /// Every placed member's figures count the rows written once per copy and once per leader,
 /// its partitions once, its rates move, and its standing is the committed one (F52)
 ///
@@ -18410,7 +18428,9 @@ fn member_total(view: &serde_json::Value, node: &str, path: &[&str]) -> Option<s
 /// over the copies led, and the archived partitions the leaders hold add up to the rows; a
 /// follower answers its own figures only and names the leader; a table narrows the figures to
 /// itself and an unknown one is refused by name; the spare, killed and put in maintenance,
-/// reads as down in maintenance ([F52](../../docs/src/features/cluster-stats.md)).
+/// reads as down in maintenance ([F52](../../docs/src/features/cluster-stats.md)). The inserts and
+/// the gets are counted as answers on node zero, the node their client reached, and nowhere
+/// else, with their bytes and their waits ([F65](../../docs/src/features/query-figures-home-tab.md)).
 #[tokio::test(flavor = "multi_thread")]
 async fn stats_count_writes_partitions_and_status() -> Result<(), FixtureError> {
     let mut cluster = three_placed_one_spare(
@@ -18432,6 +18452,17 @@ async fn stats_count_writes_partitions_and_status() -> Result<(), FixtureError> 
     for node in 0..3 {
         compact_now(&mut cluster, node, "Note")?;
     }
+    // and a third of them read back through node zero, which it answers as gets, and a few
+    // through the spare, which holds nothing and forwards every one (F65)
+    let read = &keys[..20];
+    for key in read {
+        assert!(read_note(&addr0, *key).await?.is_some(), "note {key} was not found");
+    }
+    let addr3 = cluster.node(3).endpoints.client.to_string();
+    let forwarded = &keys[20..25];
+    for key in forwarded {
+        assert!(read_note(&addr3, *key).await?.is_some(), "note {key} was not found");
+    }
     let ids = cluster.node_ids();
     let rows = keys.len() as u64;
     // the leader's view holds every member's figures once their reports have landed
@@ -18448,7 +18479,9 @@ async fn stats_count_writes_partitions_and_status() -> Result<(), FixtureError> 
         let counted = sum(&["led_total", "inserts"]) == rows
             && sum(&["applied_total", "inserts"]) == rows * 3
             && sum(&["partitions_led"]) == rows
-            && sum(&["partitions"]) == rows * 3;
+            && sum(&["partitions"]) == rows * 3
+            && member_answers(&view, &ids[0], "get") == read.len() as u64
+            && member_answers(&view, &ids[3], "get") == forwarded.len() as u64;
         if counted {
             break view;
         }
@@ -18474,6 +18507,31 @@ async fn stats_count_writes_partitions_and_status() -> Result<(), FixtureError> 
             .unwrap_or(0);
         assert!(insert_bytes >= rows * 8, "{node} counted no bytes: {view}");
     }
+    // every insert and get was answered by the node the client reached, and by no other
+    // member, whatever copies served them; the spare's gets were forwarded answers, counted by
+    // the kind of the query rather than read off a peer's bytes (F65)
+    assert_eq!(member_answers(&view, &ids[0], "insert"), rows, "{view}");
+    assert_eq!(member_answers(&view, &ids[3], "insert"), 0, "{view}");
+    assert_eq!(member_answers(&view, &ids[3], "error"), 0, "{view}");
+    for node in &ids[1..3] {
+        for op in ["insert", "get"] {
+            assert_eq!(member_answers(&view, node, op), 0, "{node} answered {op}s: {view}");
+        }
+    }
+    let queries = view["members"]
+        .as_array()
+        .and_then(|members| members.iter().find(|member| member["node"] == ids[0]))
+        .map(|member| member["stats"]["queries"].clone())
+        .expect("node zero's query figures");
+    let get = queries["ops"]
+        .as_array()
+        .and_then(|ops| ops.iter().find(|stats| stats["op"] == "get"))
+        .expect("node zero's gets");
+    // the gets' answers carried their rows, the bundles came in, and the waits were timed
+    assert!(get["bytes_out_total"].as_u64().unwrap_or(0) > 0, "{queries}");
+    assert!(queries["bytes_in_total"].as_u64().unwrap_or(0) > 0, "{queries}");
+    assert!(get["p99_ms"].as_f64().is_some_and(|p99| p99 > 0.0), "{queries}");
+    assert!(queries["p99_ms"].as_f64().is_some_and(|p99| p99 > 0.0), "{queries}");
     // the spare holds and does nothing, and still has a row with its standing
     let spare = member_total(&view, &ids[3], &["groups"]).and_then(|groups| groups.as_u64());
     assert_eq!(spare, Some(0), "{view}");
