@@ -629,19 +629,16 @@ fn totals_lines(screen: &Screen) -> Vec<Line<'static>> {
     lines
 }
 
-/// A member's row of the home tab's table: its answers by kind, bytes, waits and memory
+/// A member's figures as the home tab's table writes them, after its name, in the order of
+/// [`HOME_COLUMNS`]
 ///
 /// # Arguments
 ///
-/// * `name` - The member's name in its color
 /// * `stats` - Its figures, if they are current
-fn member_row(name: Span<'static>, stats: Option<&NodeStats>) -> Row<'static> {
+fn member_cells(stats: Option<&NodeStats>) -> Vec<String> {
     // a stale member's figures, or an older build's missing ones, are dashes
     let Some(stats) = stats else {
-        return Row::new(
-            std::iter::once(Cell::from(name))
-                .chain((1..HOME_COLUMNS.len()).map(|_| Cell::from("-"))),
-        );
+        return vec!["-".to_string(); HOME_COLUMNS.len() - 1];
     };
     let queries = &stats.queries;
     let known = !queries.is_empty();
@@ -653,37 +650,37 @@ fn member_row(name: Span<'static>, stats: Option<&NodeStats>) -> Row<'static> {
         }
     };
     let millis = |millis: Option<f64>| millis.map_or("-".to_string(), |ms| format!("{ms:.2}"));
-    Row::new(vec![
-        Cell::from(name),
-        Cell::from(per_sec(&["get"])),
-        Cell::from(per_sec(&["insert"])),
-        Cell::from(per_sec(&["update"])),
-        Cell::from(per_sec(&["delete"])),
-        Cell::from(per_sec(&["exists"])),
-        Cell::from(per_sec(&["error"])),
-        Cell::from(if known {
+    vec![
+        per_sec(&["get"]),
+        per_sec(&["insert"]),
+        per_sec(&["update"]),
+        per_sec(&["delete"]),
+        per_sec(&["exists"]),
+        per_sec(&["error"]),
+        if known {
             byte_rate(queries.bytes_out_of(&READ_OPS))
         } else {
             "-".to_string()
-        }),
-        Cell::from(byte_rate(row_bytes(&stats.total.led))),
-        Cell::from(millis(queries.p50_ms)),
-        Cell::from(millis(queries.p99_ms)),
-        Cell::from(format!(
+        },
+        byte_rate(row_bytes(&stats.total.led)),
+        millis(queries.p50_ms),
+        millis(queries.p99_ms),
+        format!(
             "{}/{}",
             bytes(stats.memory_bytes),
             bytes(stats.memory_budget)
-        )),
-        Cell::from(bytes(stats.resident_bytes)),
-    ])
+        ),
+        bytes(stats.resident_bytes),
+    ]
 }
 
-/// The home tab's cluster row: every current member's figures summed, and the slowest waits
+/// The home tab's cluster figures: every current member's summed, and the slowest waits, after
+/// the row's name, in the order of [`HOME_COLUMNS`]
 ///
 /// # Arguments
 ///
 /// * `model` - The answer shown
-fn cluster_row(model: &StatsModel) -> Row<'static> {
+fn cluster_cells(model: &StatsModel) -> Vec<String> {
     let current: Vec<&NodeStats> = model.view.members.iter().filter_map(live).collect();
     // each kind's answers summed over the members
     let per_sec = |ops: &[&str]| {
@@ -702,25 +699,79 @@ fn cluster_row(model: &StatsModel) -> Row<'static> {
             .map_or("-".to_string(), |ms| format!("{ms:.2}"))
     };
     let totals = home_totals(model);
-    Row::new(vec![
-        Cell::from("cluster"),
-        Cell::from(per_sec(&["get"])),
-        Cell::from(per_sec(&["insert"])),
-        Cell::from(per_sec(&["update"])),
-        Cell::from(per_sec(&["delete"])),
-        Cell::from(per_sec(&["exists"])),
-        Cell::from(per_sec(&["error"])),
-        Cell::from(byte_rate(totals.read_bytes)),
-        Cell::from(byte_rate(totals.write_bytes)),
-        Cell::from(slowest(|stats| stats.queries.p50_ms)),
-        Cell::from(slowest(|stats| stats.queries.p99_ms)),
-        Cell::from(format!("{}/{}", bytes(totals.rows), bytes(totals.budget))),
-        Cell::from(bytes(totals.resident)),
-    ])
-    .style(heading_style())
+    vec![
+        per_sec(&["get"]),
+        per_sec(&["insert"]),
+        per_sec(&["update"]),
+        per_sec(&["delete"]),
+        per_sec(&["exists"]),
+        per_sec(&["error"]),
+        byte_rate(totals.read_bytes),
+        byte_rate(totals.write_bytes),
+        slowest(|stats| stats.queries.p50_ms),
+        slowest(|stats| stats.queries.p99_ms),
+        format!("{}/{}", bytes(totals.rows), bytes(totals.budget)),
+        bytes(totals.resident),
+    ]
 }
 
-/// Draw the home tab's table: a row per member by name, and the cluster's under them
+/// Which of the home tab's columns fit a width, the least needed ones left out first
+///
+/// Each column has the width its widest figure needs and a rank: the name, the gets, the
+/// speeds, the p99 and the resident memory go last, exists and deletes first.
+///
+/// # Arguments
+///
+/// * `name` - How wide the name column is
+/// * `width` - The width the table has
+#[must_use]
+pub fn home_columns(name: u16, width: u16) -> Vec<(usize, u16)> {
+    // each column's width and how late it is left out, in the order of the header
+    const FIGURES: [(u16, u8); 12] = [
+        (7, 9),  // get/s
+        (7, 7),  // ins/s
+        (7, 6),  // upd/s
+        (7, 2),  // del/s
+        (7, 1),  // ex/s
+        (7, 7),  // err/s
+        (11, 9), // read/s
+        (11, 9), // write/s
+        (8, 5),  // p50
+        (8, 8),  // p99
+        (17, 3), // rows/budget
+        (9, 8),  // resident
+    ];
+    let mut shown: Vec<(usize, u16)> = std::iter::once((0, name))
+        .chain(
+            FIGURES
+                .iter()
+                .enumerate()
+                .map(|(index, (width, _))| (index + 1, *width)),
+        )
+        .collect();
+    // the columns and the one space between each pair
+    let needed = |shown: &[(usize, u16)]| -> u16 {
+        let widths: u16 = shown.iter().map(|(_, width)| *width).sum();
+        widths + u16::try_from(shown.len().saturating_sub(1)).unwrap_or(u16::MAX)
+    };
+    // leave out the least needed column until the rest fit, never the name
+    while needed(&shown) > width && shown.len() > 1 {
+        let Some(least) = shown
+            .iter()
+            .enumerate()
+            .skip(1)
+            .min_by_key(|(_, (column, _))| FIGURES[column - 1].1)
+            .map(|(position, _)| position)
+        else {
+            break;
+        };
+        shown.remove(least);
+    }
+    shown
+}
+
+/// Draw the home tab's table: a row per member by name, and the cluster's under them, with as
+/// many columns as the width holds
 ///
 /// # Arguments
 ///
@@ -729,6 +780,22 @@ fn cluster_row(model: &StatsModel) -> Row<'static> {
 /// * `model` - The answer shown
 fn render_members(frame: &mut Frame, area: Rect, model: &StatsModel) {
     let colors = colors(Some(model));
+    // the name column fits the longest name, and the figures that fit beside it are shown
+    let name = model
+        .labels
+        .values()
+        .map(|label| label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("cluster".len());
+    let columns = home_columns(u16::try_from(name).unwrap_or(u16::MAX), area.width);
+    // a row of cells, the name first and then the shown figures
+    let row = |name: Span<'static>, cells: Vec<String>| {
+        Row::new(columns.iter().map(|(column, _)| match column {
+            0 => Cell::from(name.clone()),
+            column => Cell::from(cells[column - 1].clone()),
+        }))
+    };
     // by name, the way the summaries list them
     let mut members: Vec<_> = model.view.members.iter().collect();
     members.sort_by_key(|member| model.label(&member.node));
@@ -737,34 +804,12 @@ fn render_members(frame: &mut Frame, area: Rect, model: &StatsModel) {
         .map(|member| {
             let color = colors.get(&member.node).copied().unwrap_or(Color::Gray);
             let name = Span::styled(model.label(&member.node), Style::default().fg(color));
-            member_row(name, live(member))
+            row(name, member_cells(live(member)))
         })
         .collect();
-    rows.push(cluster_row(model));
-    // the name column fits the longest name, and every figure the widest it is written
-    let name = model
-        .labels
-        .values()
-        .map(|label| label.chars().count())
-        .max()
-        .unwrap_or(0)
-        .max("cluster".len());
-    let widths = [
-        Constraint::Length(u16::try_from(name).unwrap_or(u16::MAX)),
-        Constraint::Length(7),
-        Constraint::Length(7),
-        Constraint::Length(7),
-        Constraint::Length(7),
-        Constraint::Length(7),
-        Constraint::Length(7),
-        Constraint::Length(11),
-        Constraint::Length(11),
-        Constraint::Length(8),
-        Constraint::Length(8),
-        Constraint::Length(17),
-        Constraint::Length(9),
-    ];
-    let header = Row::new(HOME_COLUMNS).style(dim_style());
+    rows.push(row(Span::raw("cluster"), cluster_cells(model)).style(heading_style()));
+    let widths = columns.iter().map(|(_, width)| Constraint::Length(*width));
+    let header = Row::new(columns.iter().map(|(column, _)| HOME_COLUMNS[*column])).style(dim_style());
     frame.render_widget(Table::new(rows, widths).header(header), area);
 }
 
@@ -1557,7 +1602,25 @@ mod tests {
         small.draw(|frame| render(frame, &mut screen, now)).expect("a small home tab draws");
         let drawn = text(&small);
         assert!(drawn.contains("rows 1-"), "{drawn}");
-        assert!(drawn.contains("hyperion"), "{drawn}");
+        // its table leaves out the least needed columns rather than cutting a name short
+        let header = drawn
+            .lines()
+            .find(|line| line.trim_start().starts_with("member"))
+            .unwrap_or_else(|| panic!("no table header: {drawn}"));
+        assert!(header.contains("resident") && header.contains("p99"), "{header}");
+        assert!(!header.contains("ex/s") && !header.contains("rows/budget"), "{header}");
+        assert!(drawn.lines().any(|line| line.starts_with("hyperion ")), "{drawn}");
+        // every column fits a wide table, the least needed go first, and the name never does
+        assert_eq!(home_columns(8, 160).len(), HOME_COLUMNS.len());
+        let narrow: Vec<&str> = home_columns(8, 100)
+            .iter()
+            .map(|(column, _)| HOME_COLUMNS[*column])
+            .collect();
+        assert_eq!(
+            narrow,
+            ["member", "get/s", "ins/s", "upd/s", "err/s", "read/s", "write/s", "p50", "p99", "resident"]
+        );
+        assert_eq!(home_columns(8, 4), vec![(0, 8)]);
     }
 
     /// A tab's charts take as many columns as fit and no more than a square needs, and a grid
