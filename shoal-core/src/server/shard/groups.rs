@@ -3194,6 +3194,8 @@ where
                 table_index_bytes: u64::try_from(self.tables.index_bytes()).unwrap_or(u64::MAX),
                 lru_bytes: u64::try_from(self.lru_bytes()).unwrap_or(u64::MAX),
                 memory_budget: u64::try_from(self.memory_budget).unwrap_or(u64::MAX),
+                // what this shard's clients were answered, which a shard counts whatever it hosts
+                queries: self.meter.counters(),
                 ..ShardReplication::default()
             };
         };
@@ -3321,6 +3323,8 @@ where
             unknown_outcomes: replication.stats.unknown,
             rejected: replication.stats.rejected,
             reads: self.read_stats,
+            // what this shard's clients were answered and how long they waited (F65)
+            queries: self.meter.counters(),
             snapshots: {
                 // what the loop counted, what the partials counted, what the sender counted
                 let mut stats = replication.snapshots;

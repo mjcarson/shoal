@@ -29,8 +29,8 @@ pub use machine::{GroupMachine, MachineState, SnapshotData, Stall};
 pub use network::{GroupNetwork, GroupPeer, ReplicationLink, RpcFailure, ShardNetwork, ShardPeer};
 pub use proposal::{BarrierAnswer, ProposalOutcome};
 pub use report::{
-    GroupReport, IntegrityStats, NodeReplication, ReadStats, ReadVerb, ReplicationVerb,
-    ShardReplication, SnapshotStats,
+    GroupReport, IntegrityStats, NodeReplication, QueryCounters, ReadStats, ReadVerb,
+    ReplicationVerb, ShardReplication, SnapshotStats,
 };
 pub use snapshot::{BuiltSnapshot, SnapshotAnswer, SnapshotManifest, SnapshotRpc};
 pub use types::{ApplyOutcome, CommandResult, DataConfig, Remembered, ResultKind};

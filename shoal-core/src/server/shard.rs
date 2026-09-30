@@ -4,6 +4,7 @@ pub mod backup;
 mod gather;
 mod groups;
 pub use groups::membership_as_of;
+pub mod meter;
 pub mod migrate;
 mod reads;
 pub mod repair;
@@ -62,6 +63,7 @@ use super::request_body::RequestBody;
 use super::ring::Ring;
 use super::routing::ArchivedShardRouting;
 use super::stage_profile::{self, StageStamps, Stamp};
+use meter::QueryMeter;
 use super::tls;
 use super::trace;
 use super::{Comms, Conf, ServerError};
@@ -79,10 +81,12 @@ use crate::{
             error::{self as proto_error, ErrorCode},
             handshake,
             read::{ReadOptions, SessionToken, CLIENT_CAP_READ_OPTIONS, READ_OPTIONS_HEAD_LEN},
+            stats::query_op_index,
             trace::{TraceContext, TRACE_CONTEXT_LEN},
             Flags, Header, MessageType, ProtocolError,
         },
         queries::{ArchivedQueries, Queries},
+        responses::ResponseActionNames,
         traits::{QuerySupport, ShoalResponseSupport},
     },
     storage::{FullArchiveMap, LoaderMsg, Loaders},
@@ -261,6 +265,7 @@ impl Future for ReplyRoom<'_> {
 /// * `backlog` - What this connection's write relay has taken and not yet written
 /// * `client_rx` - The channel this connection's answers wait on, read only for its length
 /// * `max_queued_replies` - The most answers this connection may owe before it stops being read
+/// * `meter` - Where this shard counts what its clients sent and were answered
 #[allow(clippy::too_many_arguments)]
 async fn client_rx_relay<S: ShoalDatabase>(
     peer: Uuid,
@@ -271,6 +276,7 @@ async fn client_rx_relay<S: ShoalDatabase>(
     backlog: &ReplyBacklog,
     client_rx: &AsyncReceiver<Reply>,
     max_queued_replies: usize,
+    meter: &QueryMeter,
 ) {
     // keep waiting for messages until  our tcp socket closes
     loop {
@@ -411,6 +417,8 @@ async fn client_rx_relay<S: ShoalDatabase>(
                 break;
             }
         };
+        // count what this client sent, for the node's figures (F65)
+        meter.read(payload_len);
         // start this bundles clock now that all of its bytes are here
         //
         // every stage offset a query in this bundle records is measured from here, since
@@ -598,6 +606,32 @@ async fn write_error_frame(
     true
 }
 
+/// The kind an answer this server sealed is, as an index into the node's query figures
+///
+/// Read off the answer rather than carried from the query, so nothing on the path between the
+/// two has to carry it; a failed query reads as `error` whatever it asked
+/// ([F65](../../../docs/src/features/query-figures-home-tab.md)). Never called for a forwarded
+/// query's whole answer, which is a peer's bytes and carries its kind instead.
+///
+/// # Arguments
+///
+/// * `archived` - An answer's bytes, as a shard sealed them for a client
+fn answer_op<S: ShoalDatabase>(archived: &[u8]) -> usize {
+    // SAFETY: this is only called for an answer that carries no `op`, and every such answer was
+    // sealed by this server, with rkyv, from a `ResponseKinds` of this schema or the borrowed
+    // mirror sealed gets use, whose archive is the same by construction - the client reads both
+    // with one checked `access`. The buffer is the aligned one the seal wrote and nothing writes
+    // to it after. The one answer a client relay is handed that this server did not seal, a
+    // forwarded query's whole answer, carries its `op` (`reply_sealed_as`), so no bytes off a
+    // socket are read here. Reading the kind is a match on two discriminants.
+    let response = unsafe {
+        rkyv::access_unchecked::<
+            <<S::ClientType as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived,
+        >(archived)
+    };
+    query_op_index(&<S::ClientType as QuerySupport>::kind(response))
+}
+
 /// Relay responses back to one client
 ///
 /// Like the read half, nothing in here panics. A write that fails ends this connection and leaves
@@ -614,15 +648,28 @@ async fn write_error_frame(
 /// * `peer_max_frame_bytes` - The largest frame this client said it would accept
 /// * `caps` - The optional sections this client's hello asked for
 /// * `backlog` - What this relay has taken and not yet written, which the read relay waits on
+/// * `client` - The client this relay writes to
+/// * `meter` - Where this shard counts what its clients were answered
 async fn client_tx_relay<S: ShoalDatabase>(
     client_rx: AsyncReceiver<Reply>,
     tcp_tx: WriteHalf<TcpStream>,
     peer_max_frame_bytes: u32,
     caps: u8,
     backlog: Rc<ReplyBacklog>,
+    client: Uuid,
+    meter: Rc<QueryMeter>,
 ) {
     // write until the client or the channel goes away
-    write_replies::<S>(&client_rx, tcp_tx, peer_max_frame_bytes, caps, &backlog).await;
+    write_replies::<S>(
+        &client_rx,
+        tcp_tx,
+        peer_max_frame_bytes,
+        caps,
+        &backlog,
+        client,
+        &meter,
+    )
+    .await;
     // then tell the read relay, which may be waiting on this one for room that will never come
     backlog.close();
 }
@@ -636,12 +683,16 @@ async fn client_tx_relay<S: ShoalDatabase>(
 /// * `peer_max_frame_bytes` - The largest frame this client said it would accept
 /// * `caps` - The optional sections this client's hello asked for
 /// * `backlog` - What this relay has taken and not yet written, which the read relay waits on
+/// * `client` - The client this relay writes to
+/// * `meter` - Where this shard counts what its clients were answered
 async fn write_replies<S: ShoalDatabase>(
     client_rx: &AsyncReceiver<Reply>,
     mut tcp_tx: WriteHalf<TcpStream>,
     peer_max_frame_bytes: u32,
     caps: u8,
     backlog: &ReplyBacklog,
+    client: Uuid,
+    meter: &QueryMeter,
 ) {
     // loop over messages to send back to our client
     'relay: loop {
@@ -665,11 +716,13 @@ async fn write_replies<S: ShoalDatabase>(
             backlog.started();
             let Reply {
                 id: query_id,
+                index,
                 kind,
                 span,
                 mut stamps,
                 archived,
                 token,
+                op,
                 ..
             } = reply;
             // enter this query's own span for the framing and the write
@@ -740,6 +793,9 @@ async fn write_replies<S: ShoalDatabase>(
                     // this query's journey ended here, so hand it to the profile before it is
                     // forgotten - the failure is the last thing this server knows about it
                     if profiled {
+                        // and it was answered, with a failure, for the node's figures (F65)
+                        let op = query_op_index(&ResponseActionNames::Error);
+                        meter.answered(client, query_id, index, op, 0, Stamp::now());
                         stamps.mark_socket_written();
                         stage_profile::emit(query_id, stamps);
                     }
@@ -783,6 +839,10 @@ async fn write_replies<S: ShoalDatabase>(
             }
             // a frame or an admin answer has no journey to record
             if profiled {
+                // count this answer by its kind and time it against its bundle's arrival, now
+                // that its last byte is the socket's (F65)
+                let op = op.map_or_else(|| answer_op::<S>(&archived), usize::from);
+                meter.answered(client, query_id, index, op, archived.len(), Stamp::now());
                 // record that this responses last byte is now the sockets problem
                 stamps.mark_socket_written();
                 // hand this queries journey to the profile
@@ -824,6 +884,7 @@ fn control_reply(id: Uuid, kind: ReplyKind, json: &[u8]) -> Reply {
         attempt: 0,
         slot: 0,
         token: None,
+        op: None,
     }
 }
 
@@ -1128,6 +1189,7 @@ async fn server_auth(
 /// * `store` - The users this shard will accept, and whether it requires one
 /// * `tls` - What to encrypt connections with, if this listener is encrypted
 /// * `max_queued_replies` - The most answers one connection may owe before it stops being read
+/// * `meter` - Where this shard counts what its clients sent and were answered
 #[allow(clippy::future_not_send, clippy::too_many_arguments)]
 async fn client_acceptor<S: ShoalDatabase>(
     tcp_sock: TcpListener,
@@ -1137,6 +1199,7 @@ async fn client_acceptor<S: ShoalDatabase>(
     store: Rc<CredentialStore>,
     tls: Option<Arc<ServerConfig>>,
     max_queued_replies: usize,
+    meter: Rc<QueryMeter>,
 ) -> Result<(), ServerError> {
     loop {
         // try to read a single datagram from our udp socket
@@ -1155,6 +1218,8 @@ async fn client_acceptor<S: ShoalDatabase>(
         let store = store.clone();
         // the tls config is shared the same way, and is an `Arc` only because rustls asks for one
         let tls = tls.clone();
+        // and so is the meter, which only client connections are handed (F65)
+        let meter = meter.clone();
         // run this whole connection under one task that owns its lifetime
         //
         // the two halves of a split stream keep the stream alive between them, so a read relay
@@ -1255,6 +1320,8 @@ async fn client_acceptor<S: ShoalDatabase>(
                 hello.max_frame_bytes,
                 hello.caps & CLIENT_CAP_READ_OPTIONS,
                 backlog.clone(),
+                client,
+                meter.clone(),
             ));
             // read this clients bundles until it goes away, sends something we refuse, or can no
             // longer be written to; its principal rides along, since an admin request on this
@@ -1269,11 +1336,14 @@ async fn client_acceptor<S: ShoalDatabase>(
                 &backlog,
                 &owed,
                 max_queued_replies,
+                &meter,
             )
             .await;
             // stop writing to a client that is not reading, which drops the last half of the
             // stream and closes the socket
             tx_task.cancel().await;
+            // the answers this client is still owed will never be written, so their clocks go
+            meter.forget(client);
             // then tell every shard this client is gone, the way a peer lane's end is told:
             // every shard was told of it, so every shard holds its channel until told otherwise
             // ([Resolved #32](../../../docs/src/appendix/resolved/client-gone-broadcast.md))
@@ -1453,6 +1523,11 @@ pub(super) struct Shard<D: ShoalDatabase> {
     next_attempt: u64,
     /// What this shard's reads have waited on and dropped
     read_stats: crate::server::replication::ReadStats,
+    /// What this shard's clients sent and were answered, and how long they waited
+    ///
+    /// Shared with every client connection's relays on this shard and nothing else
+    /// ([F65](../../../docs/src/features/query-figures-home-tab.md)).
+    meter: Rc<QueryMeter>,
     /// The shares this shard is holding back rather than sending, for the fixture
     ///
     /// `None` unless a `HoldShares` verb is in force
@@ -1718,6 +1793,7 @@ where
             gathering: gather::Gathers::default(),
             next_attempt: 1,
             read_stats: crate::server::replication::ReadStats::default(),
+            meter: Rc::new(QueryMeter::default()),
             held: None,
             shard_local_tx,
             shard_local_rx,
@@ -2085,6 +2161,7 @@ where
                 Rc::new(self.conf.auth.store()?),
                 tls,
                 self.conf.networking.max_queued_replies,
+                self.meter.clone(),
             ),
             self.high_priority,
         )?;
@@ -2782,6 +2859,15 @@ where
         // paid once per bundle and charged to every query in it, so the report still has to
         // label it as a batch level cost rather than a per query one
         stamps.mark_decoded();
+        // note when this frame arrived, before any of its queries can be answered, so the
+        // client's write relay can time their answers against it (F65)
+        self.meter.arrived(
+            peer,
+            archived.id,
+            archived.base_index.to_native() as usize,
+            archived.queries.len(),
+            base,
+        );
         // route every query in the bundle to the shards that answer it
         self.send_to_shard(peer, &span, &body, archived, stamps, base, options.as_ref())
             .await
@@ -2899,10 +2985,53 @@ where
         end: bool,
         kind: ReplyKind,
         span: Span,
+        stamps: StageStamps,
+        archived: rkyv::util::AlignedVec<16>,
+        token: Option<SessionToken>,
+        route: (u64, u16),
+    ) -> Result<(), ServerError> {
+        // an answer sealed on this node is read for its kind where it is written
+        self.reply_sealed_as(
+            client, query_id, index, end, kind, span, stamps, archived, token, route, None,
+        )
+        .await
+    }
+
+    /// Send a serialized reply back to the client, naming the kind of query it answers
+    ///
+    /// [`Self::reply_sealed`] for an answer whose bytes this node did not seal: a forwarded
+    /// query's whole answer is a peer's bytes, passed on unvalidated, so the client relay is
+    /// told its kind rather than reading it off them
+    /// ([F65](../../../docs/src/features/query-figures-home-tab.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The client to send this reply to
+    /// * `query_id` - The id of the query being answered
+    /// * `index` - The index the answer is owed under
+    /// * `end` - Whether the answered query was the last of its stream
+    /// * `kind` - Whether this is a whole answer or a share
+    /// * `span` - The span to reply under
+    /// * `stamps` - When this query reached each stage so far, and its index
+    /// * `archived` - The serialized response
+    /// * `token` - The session token a committed write minted, if this answers one
+    /// * `route` - The attempt and slot a peer relay echoes on the answer head
+    /// * `op` - The kind of query answered, as an index into the node's query figures, when
+    ///   the answer is not this node's to read
+    #[allow(clippy::too_many_arguments)]
+    async fn reply_sealed_as(
+        &mut self,
+        client: Uuid,
+        query_id: Uuid,
+        index: usize,
+        end: bool,
+        kind: ReplyKind,
+        span: Span,
         mut stamps: StageStamps,
         archived: rkyv::util::AlignedVec<16>,
         token: Option<SessionToken>,
         route: (u64, u16),
+        op: Option<u8>,
     ) -> Result<(), ServerError> {
         // get this clients channel to send replies over
         match self.client_map.get(&client) {
@@ -2928,6 +3057,7 @@ where
                         attempt: route.0,
                         slot: route.1,
                         token,
+                        op,
                     })
                     .await
                     .is_err()
@@ -3577,6 +3707,33 @@ where
         Ok(())
     }
 
+    /// The kind of query a forward carried, as an index into the node's query figures
+    ///
+    /// Read off the bundle this node validated rather than off the peer's answer, which is
+    /// passed to the client unvalidated ([F65](../../../docs/src/features/query-figures-home-tab.md)).
+    /// A query that cannot be found in its bundle, which a pending forward never names, is
+    /// counted as a failure.
+    ///
+    /// # Arguments
+    ///
+    /// * `pending` - What this node kept of the forward
+    fn forwarded_op(&self, pending: &Pending<D>) -> u8 {
+        // SAFETY: a pending forward's body is the bundle the coordinator validated with
+        // `Queries::access` before routing any of it, held as immutable `Bytes` ever since,
+        // which is the contract `unarchive_queries` asks for
+        let queries = unsafe { D::unarchive_queries(&pending.body) };
+        // the query this forward carried, by its place in the bundle
+        let action = usize::try_from(pending.entry.offset)
+            .ok()
+            .and_then(|offset| queries.queries.get(offset))
+            .map_or(ResponseActionNames::Error, |query| {
+                <<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::archived_action(
+                    query,
+                )
+            });
+        u8::try_from(query_op_index(&action)).unwrap_or(u8::MAX)
+    }
+
     /// Turn an answer a peer sent back into a reply, a share, or a failure
     ///
     /// # Arguments
@@ -3636,9 +3793,11 @@ where
         // the peer ran the query, so it knows what kind it was; this record did not until now
         pending.stamps.adopt_served(preamble.served);
         match preamble.kind {
-            // a whole answer is bytes for the client, never re-validated on this node
+            // a whole answer is bytes for the client, never re-validated on this node, so its
+            // kind for the node's figures is read off the query this node validated (F65)
             ForwardedKind::Whole => {
-                self.reply_sealed(
+                let op = Some(self.forwarded_op(&pending));
+                self.reply_sealed_as(
                     pending.client,
                     bundle,
                     preamble.index as usize,
@@ -3649,6 +3808,7 @@ where
                     payload,
                     preamble.token,
                     (preamble.attempt, 0),
+                    op,
                 )
                 .await
             }

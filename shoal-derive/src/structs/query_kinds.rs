@@ -218,6 +218,17 @@ pub fn add(
             }
         }
     });
+    // Generate archived_action match arms, the same way
+    let archived_action_arms = tables.iter().map(|table| {
+        let variant = &table.variant_ident;
+        let inner = &table.inner_type;
+        let query_ty = table.kind.query_type();
+        quote! {
+            #archived_query_ident::#variant(query) => {
+                <::shoal::shared::queries::#query_ty<#inner> as ::shoal::server::routing::ArchivedShardRouting>::archived_action(query)
+            }
+        }
+    });
     // Generate narrow_to match arms
     //
     // the narrowed query goes back into the variant it came out of, the same way a split one did
@@ -418,6 +429,19 @@ pub fn add(
                 ) -> bool {
                     match archived {
                         #(#archived_is_write_arms),*
+                    }
+                }
+
+                /// What kind of query this is, judged from the archive
+                ///
+                /// # Arguments
+                ///
+                /// * `archived` - The query, still in the buffer it arrived in
+                fn archived_action(
+                    archived: &<Self as ::shoal::rkyv::Archive>::Archived,
+                ) -> ::shoal::shared::responses::ResponseActionNames {
+                    match archived {
+                        #(#archived_action_arms),*
                     }
                 }
 
