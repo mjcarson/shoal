@@ -3,11 +3,15 @@
 //! One catalog is read by the metric list, the chart, the table under it and the help page, so
 //! none of them can name a figure the others do not explain
 //! ([F64](../../../../docs/src/features/stats-tui.md)). Every column `--basic` prints is named
-//! either by a metric here or by a [`Term`], and a test holds the two to that.
+//! either by a metric here or by a [`Term`], and a test holds the two to that. The home tab
+//! charts a handful of them ([`HOME`]) beside a table of each member's figures
+//! ([F65](../../../../docs/src/features/query-figures-home-tab.md)).
 
-use shoal::shared::protocol::stats::{ClusterStatsView, NodeStats, Rates, WriteRates};
+use shoal::shared::protocol::stats::{
+    ClusterStatsView, NodeStats, QUERY_OPS, QueryStats, READ_OPS, Rates, WRITE_OPS, WriteRates,
+};
 
-use super::{byte_rate, rate};
+use super::{byte_rate, live, rate};
 use crate::cluster::model::bytes;
 
 /// How a metric's values are written
@@ -67,6 +71,8 @@ pub enum Reader {
     Member(fn(&NodeStats) -> f64),
     /// One value for the whole cluster, from the answer
     Cluster(fn(&ClusterStatsView) -> f64),
+    /// One value for the whole cluster per kind of query, in the order of [`QUERY_OPS`]
+    Kinds(fn(&ClusterStatsView) -> [(&'static str, f64); QUERY_OPS.len()]),
 }
 
 /// One figure the view can chart
@@ -102,7 +108,11 @@ pub struct Term {
 }
 
 /// The groups metrics are listed under, in order, with what each one is about
-pub const GROUPS: [(&str, &str); 6] = [
+pub const GROUPS: [(&str, &str); 7] = [
+    (
+        "queries",
+        "What each member's clients sent it and were answered, and how long they waited.",
+    ),
     (
         "cluster",
         "The whole cluster, counted once per row through each group's leader.",
@@ -127,7 +137,8 @@ pub const GROUPS: [(&str, &str); 6] = [
 ];
 
 /// The sections terms are listed in, in order, with their headings
-pub const TERM_SECTIONS: [(&str, &str); 3] = [
+pub const TERM_SECTIONS: [(&str, &str); 4] = [
+    ("home", "The home tab"),
     ("figures", "Other words in the figures"),
     ("tables", "The --basic tables"),
     ("plans", "Plans"),
@@ -147,7 +158,7 @@ fn rows(rates: &WriteRates) -> f64 {
 /// # Arguments
 ///
 /// * `rates` - The write rates
-fn row_bytes(rates: &WriteRates) -> f64 {
+pub fn row_bytes(rates: &WriteRates) -> f64 {
     rates.insert_bytes.r10s + rates.update_bytes.r10s + rates.delete_bytes.r10s
 }
 
@@ -169,8 +180,197 @@ fn count(count: u64) -> f64 {
     count as f64
 }
 
+/// A wait that may not be known as a value to chart, which draws a gap where it is not
+///
+/// # Arguments
+///
+/// * `millis` - The wait, in milliseconds, if enough answers were timed to say
+fn wait(millis: Option<f64>) -> f64 {
+    millis.unwrap_or(f64::NAN)
+}
+
+/// Every answer a member's clients were written, of every kind, per second
+///
+/// # Arguments
+///
+/// * `queries` - The member's query figures
+pub fn all_answers(queries: &QueryStats) -> f64 {
+    // folded from a positive zero, since an empty sum of floats is a negative one
+    queries.ops.iter().fold(0.0, |sum, op| sum + op.rate.r10s)
+}
+
+/// Every current member's query figures
+///
+/// # Arguments
+///
+/// * `view` - The answer
+fn live_queries(view: &ClusterStatsView) -> impl Iterator<Item = &QueryStats> {
+    view.members
+        .iter()
+        .filter_map(live)
+        .map(|stats| &stats.queries)
+}
+
+/// Each kind's answers per second, summed over the current members
+///
+/// # Arguments
+///
+/// * `view` - The answer
+fn ops_by_kind(view: &ClusterStatsView) -> [(&'static str, f64); QUERY_OPS.len()] {
+    // every kind, zero when nobody answered one, so the lines stay unbroken
+    QUERY_OPS.map(|op| {
+        let answers = live_queries(view).fold(0.0, |sum, queries| sum + queries.rate_of(&[op]));
+        (op, answers)
+    })
+}
+
+/// Each kind's slowest member's 99th percentile, or a gap for a kind nobody timed
+///
+/// # Arguments
+///
+/// * `view` - The answer
+fn p99_by_kind(view: &ClusterStatsView) -> [(&'static str, f64); QUERY_OPS.len()] {
+    QUERY_OPS.map(|op| {
+        let worst = live_queries(view)
+            .filter_map(|queries| queries.op(op).and_then(|stats| stats.p99_ms))
+            .fold(f64::NAN, f64::max);
+        (op, worst)
+    })
+}
+
+/// The keys of the metrics the home tab charts, in the order it draws them
+pub const HOME: [&str; 6] = [
+    "ops_by_kind",
+    "queries",
+    "bytes_read",
+    "bytes_written",
+    "p99",
+    "resident",
+];
+
 /// Every metric the view can chart, in the order it lists them
 pub const METRICS: &[Metric] = &[
+    // what the clients sent and were answered, counted where they connected
+    Metric {
+        key: "ops_by_kind",
+        name: "ops/s by kind",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Queries answered per second across the cluster, a line per kind: get, exists, \
+               insert, update, delete, and error for an answer that failed whatever it asked. \
+               Each query is counted once, by the member its client connected to, however \
+               many members served it.",
+        read: Reader::Kinds(ops_by_kind),
+    },
+    Metric {
+        key: "queries",
+        name: "queries/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Queries the member answered its clients per second, of every kind. A member is \
+               counted for the queries its clients sent it, not for the rows it holds, so a \
+               cluster whose clients all connect to one member shows that member busy and the \
+               others idle.",
+        read: Reader::Member(|stats| all_answers(&stats.queries)),
+    },
+    Metric {
+        key: "reads",
+        name: "reads/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Gets and exists the member answered its clients per second.",
+        read: Reader::Member(|stats| stats.queries.rate_of(&READ_OPS)),
+    },
+    Metric {
+        key: "client_writes",
+        name: "client writes/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Inserts, updates and deletes the member answered its clients per second. This is \
+               what clients asked of this member; the writes tab's applied rates are what its \
+               copies applied, which every replica does for every write.",
+        read: Reader::Member(|stats| stats.queries.rate_of(&WRITE_OPS)),
+    },
+    Metric {
+        key: "errors",
+        name: "errors/s",
+        group: "queries",
+        unit: Unit::PerSec,
+        columns: &[],
+        help: "Queries the member answered with a failure per second, whatever they asked: a \
+               write refused for want of a quorum, a read past its deadline, a row too large to \
+               frame. Above zero is worth a look; the clients were told why.",
+        read: Reader::Member(|stats| stats.queries.rate_of(&["error"])),
+    },
+    Metric {
+        key: "bytes_read",
+        name: "read bytes/s",
+        group: "queries",
+        unit: Unit::BytesPerSec,
+        columns: &[],
+        help: "Bytes of the answers to gets and exists the member wrote to its clients per \
+               second: the read speed its clients see.",
+        read: Reader::Member(|stats| stats.queries.bytes_out_of(&READ_OPS)),
+    },
+    Metric {
+        key: "bytes_written",
+        name: "write bytes/s",
+        group: "queries",
+        unit: Unit::BytesPerSec,
+        columns: &[],
+        help: "Bytes of write intents per second through the groups the member leads: rows for \
+               inserts and updates, keys for deletes. Every row has one leader, so the members' \
+               figures add up to the cluster's write speed. The writes tab's bytes in counts \
+               them again on every copy.",
+        read: Reader::Member(|stats| row_bytes(&stats.total.led)),
+    },
+    Metric {
+        key: "requests_in",
+        name: "requests in/s",
+        group: "queries",
+        unit: Unit::BytesPerSec,
+        columns: &[],
+        help: "Bytes of the bundles the member's clients sent it per second, reads and writes \
+               alike: what arrives on its client port.",
+        read: Reader::Member(|stats| stats.queries.bytes_in.r10s),
+    },
+    Metric {
+        key: "p50",
+        name: "p50 ms",
+        group: "queries",
+        unit: Unit::Millis,
+        columns: &[],
+        help: "The median time the member took to answer a query, from its bundle's last byte \
+               arriving to the answer's last byte going to the socket, over about the last ten \
+               seconds, every kind but failures. Waiting on other members is in it; the network \
+               to the client is not. No line where too few queries were timed.",
+        read: Reader::Member(|stats| wait(stats.queries.p50_ms)),
+    },
+    Metric {
+        key: "p99",
+        name: "p99 ms",
+        group: "queries",
+        unit: Unit::Millis,
+        columns: &[],
+        help: "The 99th percentile of the same wait: one query in a hundred took longer. A p99 \
+               far above the p50 on one member is a queue, a slow disk or a busy core there; on \
+               every member it is the load.",
+        read: Reader::Member(|stats| wait(stats.queries.p99_ms)),
+    },
+    Metric {
+        key: "p99_by_kind",
+        name: "p99 ms by kind",
+        group: "queries",
+        unit: Unit::Millis,
+        columns: &[],
+        help: "Each kind's 99th percentile on the member where it is highest: which kind of \
+               query is slow. Writes wait for a quorum's log sync, reads usually do not.",
+        read: Reader::Kinds(p99_by_kind),
+    },
     // the cluster, once per row
     Metric {
         key: "cluster_writes",
@@ -587,6 +787,45 @@ pub const METRICS: &[Metric] = &[
 /// Every word the figures use that is not a metric, with what it means
 pub const TERMS: &[Term] = &[
     Term {
+        name: "the totals",
+        section: "home",
+        columns: &[],
+        help: "The line over the home tab's charts sums the current members: queries, reads, \
+               writes and errors answered per second, read and write bytes per second, the \
+               slowest member's p99, the members' resident memory, and their rows in memory \
+               against their budgets together.",
+    },
+    Term {
+        name: "get/s ins/s upd/s del/s ex/s err/s",
+        section: "home",
+        columns: &[],
+        help: "The home tab's table: each member's answers per second by kind, counted where \
+               the client connected. The cluster row sums them.",
+    },
+    Term {
+        name: "read/s write/s",
+        section: "home",
+        columns: &[],
+        help: "The home tab's table: the read and write bytes per second of the queries tab. \
+               Read is answer bytes of gets and exists; write is intent bytes through the \
+               groups the member leads, which sum to the cluster's.",
+    },
+    Term {
+        name: "p50 p99",
+        section: "home",
+        columns: &[],
+        help: "The home tab's table: each member's median and 99th percentile answer time in \
+               milliseconds, every kind but failures. The cluster row gives the slowest \
+               member's. A dash where too few queries were timed.",
+    },
+    Term {
+        name: "rows/budget",
+        section: "home",
+        columns: &[],
+        help: "The home tab's table: the rows the member holds in memory against its eviction \
+               budget. Resident beside it is the process's whole memory.",
+    },
+    Term {
         name: "member",
         section: "figures",
         columns: &["member"],
@@ -823,7 +1062,30 @@ mod tests {
         tabbed.sort_unstable();
         assert_eq!(tabbed, (0..METRICS.len()).collect::<Vec<_>>());
         assert_eq!(in_group("streams").len(), 2);
+        assert_eq!(in_group("queries").len(), 11);
         assert!(in_group("nothing").is_empty());
+        // every chart the home tab draws is a metric, and none is drawn twice
+        let home: HashSet<&str> = HOME.iter().copied().collect();
+        assert_eq!(home.len(), HOME.len());
+        for key in HOME {
+            assert!(index_of(key).is_some(), "the home tab names {key}, which is no metric");
+        }
+        // a kind of query is read for every kind, in the order the figures list them
+        let view: ClusterStatsView = shoal::serde_json::from_value(shoal::serde_json::json!({
+            "source": "leader", "answered_by": "aaaaaaaa-1111-1111-1111-111111111111"
+        }))
+        .expect("an empty answer decodes");
+        let Reader::Kinds(read) = METRICS[index_of("ops_by_kind").expect("the kinds")].read else {
+            panic!("ops by kind is read by kind");
+        };
+        let kinds: Vec<&str> = read(&view).iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(kinds, QUERY_OPS);
+        // with nobody answering, every kind reads zero and no wait is known
+        assert!(read(&view).iter().all(|(_, value)| *value == 0.0));
+        let Reader::Kinds(waits) = METRICS[index_of("p99_by_kind").expect("the waits")].read else {
+            panic!("p99 by kind is read by kind");
+        };
+        assert!(waits(&view).iter().all(|(_, value)| value.is_nan()));
         // and a key finds its metric
         assert_eq!(index_of("applied").map(|index| METRICS[index].name), Some("applied writes/s"));
         assert_eq!(index_of("nothing"), None);

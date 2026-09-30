@@ -3,7 +3,9 @@
 //! The `Stats` read answers the figures as they are now; nothing on the server keeps their past.
 //! The view keeps its own: every metric of every member each time that member's figures are
 //! new, and the cluster's metrics each time any member's are
-//! ([F64](../../../../docs/src/features/stats-tui.md)).
+//! ([F64](../../../../docs/src/features/stats-tui.md)). A metric broken down by kind of query
+//! keeps a line per kind, sampled with the cluster's
+//! ([F65](../../../../docs/src/features/query-figures-home-tab.md)).
 //!
 //! # Invariants
 //!
@@ -35,6 +37,8 @@ pub enum Series {
     Cluster,
     /// One member
     Member(NodeId),
+    /// One kind of query, across the cluster
+    Kind(&'static str),
 }
 
 /// Every sample the view has taken, by metric and line
@@ -82,8 +86,17 @@ impl History {
         // the cluster's figures only move when a member's do
         if sampled {
             for (index, metric) in METRICS.iter().enumerate() {
-                if let Reader::Cluster(read) = metric.read {
-                    self.push(index, Series::Cluster, at, read(&model.view));
+                match metric.read {
+                    Reader::Cluster(read) => {
+                        self.push(index, Series::Cluster, at, read(&model.view));
+                    }
+                    // a line per kind, every kind every time so a line is unbroken while idle
+                    Reader::Kinds(read) => {
+                        for (kind, value) in read(&model.view) {
+                            self.push(index, Series::Kind(kind), at, value);
+                        }
+                    }
+                    Reader::Member(_) => (),
                 }
             }
         }
@@ -172,6 +185,10 @@ mod tests {
                     "total": {
                         "applied": { "inserts": { "r10s": inserts } },
                         "led": { "inserts": { "r10s": inserts } }
+                    },
+                    "queries": {
+                        "sampled_every": 1,
+                        "ops": [{ "op": "insert", "rate": { "r10s": inserts } }]
                     }
                 } },
                 { "node": b, "state": "down", "stale": true, "stats": {
@@ -207,6 +224,16 @@ mod tests {
         // the cluster line moves with the reports, once per row through the leaders
         let totals = history.series(cluster, Duration::from_secs(60), now);
         assert_eq!(totals, vec![(Series::Cluster, vec![(-4.0, 10.0), (-2.0, 20.0)])]);
+        // a kind's line moves with the cluster's, and every kind has one, idle or not
+        let kinds = history.series(index_of("ops_by_kind").expect("the kinds metric"), Duration::from_secs(60), now);
+        assert_eq!(kinds.len(), 6, "{kinds:?}");
+        let insert = kinds
+            .iter()
+            .find(|(series, _)| *series == Series::Kind("insert"))
+            .expect("the insert line");
+        assert_eq!(insert.1, vec![(-4.0, 10.0), (-2.0, 20.0)]);
+        // and a wait nobody timed draws no line at all
+        assert!(history.series(index_of("p99").expect("p99"), Duration::from_secs(60), now).is_empty());
         // a window of three seconds holds only the later point
         let recent = history.series(inserts, Duration::from_secs(3), now);
         assert_eq!(recent[0].1, vec![(-2.0, 20.0)]);
