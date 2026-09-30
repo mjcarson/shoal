@@ -271,8 +271,8 @@ The meter's own cost, from the ignored `meter_cost` test run on hyperion. The bu
 A get on the same host takes about 290 µs at the reference depth, so timing every answer is
 about a thousandth of it.
 
-**Before and after.** The committed engine change (`cfe606f`) was compared against its parent
-(`f6fa6df`), both built for `znver1` and run by `shoal-workload` on hyperion. The conditions:
+**Before and after.** The committed engine change (`6257939` and `cfe606f`, built at `cfe606f`)
+was compared against `f6fa6df`, the commit before it, both built for `znver1` and run by `shoal-workload` on hyperion. The conditions:
 
 - hyperion: Zen1 V1756B, 4 cores and 8 threads, `performance` governor;
 - the lab's tmdb node on that host stopped for the runs;
