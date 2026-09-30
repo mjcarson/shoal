@@ -219,11 +219,13 @@ pub enum Command {
         #[clap(flatten)]
         inventory: InventoryArg,
     },
-    /// Chart every member's standing, partitions, bytes and write rates, and every plan's
-    /// progress, full screen; or print them with --basic
+    /// Chart every member's queries, speeds, latency, memory, standing, partitions and write
+    /// rates, and every plan's progress, full screen; or print them with --basic
     ///
     /// Members are named by hostname ([F64](../../docs/src/features/stats-tui.md)). The full
-    /// screen view is drawn only when stdout is a terminal, so a pipe or a script gets lines.
+    /// screen view opens on a home tab of the cluster's totals, six charts and a table of
+    /// members ([F65](../../docs/src/features/query-figures-home-tab.md)), and is drawn only
+    /// when stdout is a terminal, so a pipe or a script gets lines.
     Stats {
         /// The inventory
         #[clap(flatten)]

@@ -243,6 +243,30 @@ Not on every change. Take one when:
 Do **not** take one for a docs-only change, a renderer change, or a test-only change. For a renderer
 change, `render` and `render --check` are the verification; the artifacts underneath are untouched.
 
+### Before and after on the lab
+
+**Benchmarks run on the lab nodes**, hyperion or titan (Zen1, 4 cores and 8 threads, no cargo),
+since 2026-09-30. The committed captures and the frozen baseline came from another host, so a
+lab number is an A/B, not a capture. Any change that adds work to a node's query path gets one,
+before and after, and a figure that costs too much is sampled or moved behind a profiling
+feature. The procedure is in `docs/src/performance/benchmarking.md#before-and-after-on-the-lab`,
+and F65's page is the worked example:
+
+1. **Commit the change.** Build `shoal-workload` at it and at the commit before it, each in a
+   worktree beside the repo (glommio is a sibling path dependency), with
+   `RUSTFLAGS="-C target-cpu=znver1"` and its own `CARGO_TARGET_DIR`. `scp` both to the host.
+2. **Use a scratch conf** under `target/lab/<feature>/`, sized for four cores: 2 shards,
+   `exclude_cores: [3]`, storage on `/opt/shoal`, tracing at `Warn`, no remote sink.
+3. **Prepare the host**:
+   - `sudo systemctl stop shoal-tmdb` on it;
+   - `sudo cpupower frequency-set -g performance`;
+   - afterwards, restore `schedutil`, start the node, and check `status` shows 3 of 3.
+4. **Run the sides back to back**, the first alternating by round, for four rounds or more, and
+   wipe `/opt/shoal` before each run. A difference is a result only when the two sides' run
+   intervals are disjoint; repeat a suspicious one with more rounds.
+5. **Quote the numbers on the feature's page**, labelled by host, cpu and governor. Nothing goes
+   into `docs/perf/runs/` unless the user asks for a lab corpus.
+
 A full capture was **seventy-five minutes**, measured by `F20-conf` on 2026-08-22 — the first one
 anybody timed. This file said four to five hours until then, and that figure was never a
 measurement. [F22](docs/src/features/row-size-benchmarks.md) then added 165 macro arms, so the
