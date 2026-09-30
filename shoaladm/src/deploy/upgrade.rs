@@ -317,7 +317,7 @@ impl Deployment {
                 step(
                     None,
                     &format!(
-                        "every member speaks wire {wire}; `cluster upgrade --activate` activates it, \
+                        "every member speaks wire {wire}; `shoaladm upgrade --activate` activates it, \
                          after which no node can roll back below it"
                     ),
                 );

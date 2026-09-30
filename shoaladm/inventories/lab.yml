@@ -5,15 +5,18 @@
 #   hyperion  172.16.2.5   Ryzen Embedded V1756B, 4c/8t, 14 GiB, NVMe
 #   titan     172.16.2.4   Ryzen Embedded V1756B, 4c/8t, 14 GiB, NVMe
 #
-# Build the server program for the oldest cpu here, never `native` - the shell exports
-# `-C target-cpu=native`, and a Zen4 build dies of SIGILL on the V1756B at its claim:
+# This inventory names a `server:`, since the bench schema lives in a module of a workspace
+# crate rather than at a project's root, so the program is built by hand for the oldest cpu
+# here, never `native` - the shell exports `-C target-cpu=native`, and a Zen4 build dies of
+# SIGILL on the V1756B at its claim. An inventory naming a `project:` instead, or neither, has
+# `shoaladm deploy` build the node for each host's cpu itself (F63):
 #
 #   CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
 #       cargo build --release -p shoal-bench --bin shoal-node --bin shoal-benchctl
 #
 # then, from the repository root:
 #
-#   target/deploy/release/shoal-benchctl cluster bootstrap -i shoalctl/inventories/lab.yml
+#   target/deploy/release/shoal-benchctl bootstrap -i shoaladm/inventories/lab.yml
 #
 # Addresses are given rather than resolved: europa's own /etc/hosts maps its name to 127.0.1.1.
 name: lab

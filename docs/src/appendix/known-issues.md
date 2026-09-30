@@ -102,7 +102,7 @@ with the fixture binary run at `--test-threads 6`, since at the default thirty-t
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
 two of `persistent_unsorted_table.rs` fail about one run in five of that binary (item 107).
 [F53](../features/inventory-wizard.md) added 16 and took it to 1,605: thirteen `shoalctl` unit
-tests, a new binary `shoalctl/tests/wizard.rs` (2), and one in `deploy_render.rs`. The workspace
+tests, a new binary `shoaladm/tests/wizard.rs` (2), and one in `deploy_render.rs`. The workspace
 run at six threads with `--no-fail-fast` passed every test.
 [Resolved #127](resolved/wizard-loopback-address.md) added 3 `shoalctl` unit tests and took it to
 1,608, and [F54](../features/tmdb-dataset-deployment.md) 2 in the new `tmdb-dataset` crate and an ignored doctest,

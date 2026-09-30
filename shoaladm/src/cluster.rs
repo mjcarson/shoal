@@ -33,7 +33,7 @@ use uuid::Uuid;
 
 /// Poll the frames a cluster tab draws, and build the model from them
 ///
-/// Shared by the tab's poller and `shoalctl cluster`, which waits on the same model
+/// Shared by the tab's poller and `shoaladm`, which waits on the same model
 /// ([F51](../../docs/src/features/cluster-deployment.md)).
 ///
 /// # Arguments

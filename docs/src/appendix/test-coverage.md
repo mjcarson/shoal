@@ -279,7 +279,7 @@ program, and the probe's resolution telling loopback from no answer.
 - thirteen `shoalctl` unit tests: three over node groups and the refused storage directories,
   one over the rendered split, seven over the wizard's form, one over the probe's script and one
   over the rebased server path
-- a new binary, `shoalctl/tests/wizard.rs` (2), drawing the review and loading a saved file
+- a new binary, `shoaladm/tests/wizard.rs` (2), drawing the review and loading a saved file
 - one test in `shoal-bench`'s `deploy_render.rs`, comparing a group's rendered roots with the
   engine's
 

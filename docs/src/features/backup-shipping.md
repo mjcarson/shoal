@@ -1,4 +1,4 @@
-# F59. Shipping a backup to every host with `shoalctl cluster ship-backup`
+# F59. Shipping a backup to every host with `shoaladm ship-backup`
 
 ## Context
 
@@ -14,16 +14,16 @@ of the cluster testing, and [what is left](../cluster-testing/todo.md) carried i
 ## What it does
 
 ```bash
-shoalctl cluster admin -i <inventory> backup /optane/shoal-backup      # prints the op
-shoalctl cluster ship-backup -i <inventory> /optane/shoal-backup/<op>  # every host holds it all
-shoalctl cluster destroy -i <inventory> --yes
-shoalctl cluster bootstrap -i <inventory>
-shoalctl cluster admin -i <inventory> restore /optane/shoal-backup/<op>
+shoaladm admin -i <inventory> backup /optane/shoal-backup      # prints the op
+shoaladm ship-backup -i <inventory> /optane/shoal-backup/<op>  # every host holds it all
+shoaladm destroy -i <inventory> --yes
+shoaladm bootstrap -i <inventory>
+shoaladm admin -i <inventory> restore /optane/shoal-backup/<op>
 # or into another cluster's hosts, deployed or not yet
-shoalctl cluster ship-backup -i <old> /optane/shoal-backup/<op> --to <new>
+shoaladm ship-backup -i <old> /optane/shoal-backup/<op> --to <new>
 ```
 
-`ship-backup` (`shoalctl/src/deploy/ship.rs`):
+`ship-backup` (`shoaladm/src/deploy/ship.rs`):
 
 1. Lists what every host of the inventory holds under the directory, and of `--to`'s inventory
    when given, over ssh with `sudo find`. A host holding none of it is an empty list, not a

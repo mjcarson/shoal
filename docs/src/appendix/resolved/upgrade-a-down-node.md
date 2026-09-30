@@ -29,7 +29,7 @@ written against the new signature, so it has no failing run of its own against t
 ## The fix
 
 `judge_health` takes the nodes named on the command line. A member that is `down` and was named
-is let through as a repair (`shoalctl/src/deploy/upgrade.rs`). Nothing else changes:
+is let through as a repair (`shoaladm/src/deploy/upgrade.rs`). Nothing else changes:
 
 - a down node that was not named still stops an upgrade of the others,
 - a named node that is leaving or removed is still refused, and
@@ -59,7 +59,7 @@ Nothing.
 
 | Test | What breaks if this is reverted |
 | --- | --- |
-| `a_down_node_named_for_upgrade_is_a_repair` (`shoalctl/src/deploy/upgrade.rs`) | A named down node is refused, or an unnamed down node, a named leaving node or refused writes are let through |
+| `a_down_node_named_for_upgrade_is_a_repair` (`shoaladm/src/deploy/upgrade.rs`) | A named down node is refused, or an unnamed down node, a named leaving node or refused writes are let through |
 
 ## Related
 

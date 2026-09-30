@@ -1,13 +1,35 @@
 # shoalctl
 
-`shoalctl` is a terminal UI for querying a Shoal database, built on [ratatui], and since
-[F51](../features/cluster-deployment.md) a deployment tool that bootstraps a cluster of the same
-schema and adds nodes to it over ssh ([`cluster`](#the-cluster-commands)). Because Shoal's
-schema is a compile-time construct, **shoalctl cannot be a standalone binary** — it is a
-library you compile against your schema, and `shoalctl::cli::main::<DbClient>()` is the whole
-of a program built from it.
+`shoalctl` is a terminal UI for querying a Shoal database, built on [ratatui]. Since
+[F63](../features/shoaladm.md) it is one installed binary: run in the project that defines a
+`#[shoal::db]` struct, it builds the UI for that schema, installs it under `~/.local/shoal/bin`
+and opens it, with no subcommand to type. Deploying and operating a cluster is
+[shoaladm](shoaladm.md)'s job, which used to be this program's `cluster` commands.
 
-## Compiling it for your schema
+~~Because Shoal's schema is a compile-time construct, **shoalctl cannot be a standalone binary** —
+it is a library you compile against your schema.~~ The schema is still a compile-time
+construct, and the UI is still built against it; the difference is who builds it.
+
+## Running it
+
+```bash
+cd my-database          # a project with `#[shoal::db] pub struct MyDb`
+shoalctl                # builds my-database-MyDb-ctl once, then opens it
+shoalctl -i lab.yml     # a deployed cluster, connected to as its admin
+shoalctl --addr 10.0.0.1:12000   # a node, connected to as nobody
+```
+
+With nothing named it opens the inventory the operator is working with - `inventory.yml` in
+the project, else `default_inventory` in `~/.config/shoal/config.yaml`
+([shoaladm](shoaladm.md#the-config)) - and `127.0.0.1:12000` when there is none, which is what
+every program built against `shoalctl::run` did before it had a command line. Run from a
+directory that is not a project it opens the UI a previous build installed for the cluster the
+inventory names, and says so.
+
+## Compiling it for your schema by hand
+
+A program with commands of its own, or one built by something other than `shoalctl`, writes the
+per-schema entry point itself: one line, no runtime dependency of its own.
 
 ```rust
 // no `use shoal::tables::…` and no `use shoal::storage::…` — see below
@@ -17,15 +39,15 @@ pub struct Tmdb {
     pub movies_by_keyword: PersistentSortedTable<MoviesByKeyword, FileSystem>,
 }
 
-#[tokio::main]
-async fn main() -> color_eyre::Result<()> {
-    // the terminal UI with no arguments, `cluster ...` to deploy (F51)
-    shoalctl::cli::main::<TmdbClient>().await
+fn main() -> shoalctl::Result<()> {
+    shoalctl::cli::main_blocking::<TmdbClient>()
 }
 ```
 
 `shoalctl::run(Arc<Shoal<S>>)` is still there for a program that builds its own client - with
-TLS, say, which the command line does not take.
+TLS, say, which the command line does not take - and `shoalctl::cli::run::<S>(&project, TuiArgs)`
+for one that takes the UI as a subcommand beside others, as the TMDB dataset loader does with
+its `tui` ([F54](../features/tmdb-dataset-deployment.md)).
 
 ```toml
 [dependencies]
@@ -38,7 +60,9 @@ deepsize2 = "0.1"
 **shoalctl links no storage engine.** It has no shard, no partitions and no storage, and until
 [F15](../features/client-server-split.md) it compiled all three anyway — a terminal UI that pulled
 in glommio, and therefore io_uring, and therefore Linux. `cargo tree -p shoalctl` now contains
-neither glommio nor io_uring, and its manifest has no `shoal-core` line.
+neither glommio nor io_uring, and its manifest has no `shoal-core` line. It depends on
+`shoaladm` for the cluster tab's model, for connecting to a deployed cluster as its admin, and
+for building itself from a project; that crate links no engine either.
 
 That is what `#[shoal::db(client)]` and `default-features = false` are doing above. The schema is
 otherwise identical to a server's, with one asymmetry: **the table and storage types are named in
@@ -61,7 +85,8 @@ and each writes only its own `#[shoal::db]` struct - the one line that differs b
 halves. Two copies can still drift wherever a schema is written twice; the hello refuses a
 client whose schema fingerprint differs from the server's, so a drift is a refused connection
 rather than responses that fail validation. `shoal/examples/tmdb.rs` is a tour with a smaller
-movie and is not this schema.
+movie and is not this schema. A program `shoalctl` builds from a project has no second copy at
+all: the node and the UI are built from the one struct.
 
 ## Entry point
 
@@ -69,49 +94,23 @@ movie and is not this schema.
 pub async fn run<S>(shoal: Arc<Shoal<S>>) -> color_eyre::Result<()>
 ```
 
-`shoalctl/src/lib.rs:160`
+`shoalctl/src/lib.rs`
 
 `run` installs `color_eyre`, enables mouse capture, initialises the terminal, runs the app, and
-restores the terminal on the way out (`lib.rs:180-197`). The restore happens before the error
+restores the terminal on the way out. The restore happens before the error
 is propagated, so a failure does not leave the terminal in raw mode.
 
-The `where` clause is 20 lines of rkyv bounds (`lib.rs:161-179`), repeated verbatim on
-`run_app` (`lib.rs:119-139`) and on `cli::main` — a good illustration of the ergonomic cost of
+The `where` clause is 20 lines of rkyv bounds, repeated verbatim on
+`run_app` and on `cli::main` — a good illustration of the ergonomic cost of
 the generic-over-schema approach.
 
 ## The cluster commands
 
-`cluster` deploys a cluster of the program's schema from an inventory, over keyless ssh with
-passwordless sudo on every host ([F51](../features/cluster-deployment.md)):
-
-| Command | What it does |
-| --- | --- |
-| `cluster new -o <inv> [--from <inv>]` | Build or edit an inventory in a full-screen form that judges it on every key, shows what each node resolves to, probes hosts with `p`, and writes it with `s` ([F53](../features/inventory-wizard.md)) |
-| `cluster bootstrap -i <inv> [--wipe]` | Stage, claim, issue a leaf, and start every bootstrap node under systemd, then `Initialize` once and wait for writes |
-| `cluster add -i <inv> <node> [--wipe] [--rebalance]` | Join a listed node through every member, and optionally follow a `Rebalance` onto it |
-| `cluster rebalance -i <inv>` | Send `Rebalance` and follow its plan |
-| `cluster admin -i <inv> <operation...>` | Send any operation the cluster tab's command line takes (`repair <table> [verify\|repair]`, `backup [table] <dir>`, `restore <dir>`, `restore-retry <op>`, `decommission <node>`, `status <op>`, ...) without the tab's preview, and follow its record until it is done (`--timeout-secs`, an hour by default). The scriptable form of the tab's query bar, added for the [cluster testing](../cluster-testing/correctness.md) chapter |
-| `cluster ship-backup -i <inv> <path>/<op> [--to <inv>]` | Copy every host's files of a backup to every host (or to another inventory's hosts), each sent only what it lacks, through this machine, so a restore finds each group's file on whichever node leads it; fails unless every host then holds them all ([F59](../features/backup-shipping.md)) |
-| `cluster status -i <inv>` | Every node's id, address and unit, then the cluster tab's lines |
-| `cluster stats -i <inv> [--table <t>] [--watch [s]] [--json]` | Every member's standing, groups, tablets, archived partitions and bytes, its rows, archive map and table index bytes against its memory, and write and stream rates over 10s/1m/5m, the cluster's led totals, and every plan's progress, pace and estimate, from the control leader ([F52](../features/cluster-stats.md)) |
-| `cluster start/stop/restart -i <inv> [node]` | systemctl on one node or every deployed node |
-| `cluster upgrade -i <inv> [node...] [--force] [--activate] [--rollback]` | Replace every node's program with the inventory's, one node at a time and the leader last, waiting for each to be up and caught up; a node that does not come back is swapped back onto its previous program and the run stops. `--activate` activates the wire version every member speaks afterwards; `--rollback` swaps the previous program back ([F55](../features/cluster-upgrade.md)) |
-| `cluster reconfigure -i <inv> [node...] [--force]` | Render every node's `shoal.yml` again from the inventory, keeping the entry it was deployed with, and restart the nodes whose file changed, one at a time and the leader last; a node that does not come back is put back on its old file ([F57](../features/cluster-reconfigure.md)) |
-| `cluster rebuild -i <inv> <node> --yes` | Rebuild one node from its peers under a new identity: stop and disable it, wait until it is committed down, wipe its storage roots and certificate, join it through the other members as a new identity with a new leaf, and remove the old identity onto it, following the plan. Refused while another member is down or a plan is open ([F56](../features/cluster-rebuild.md)) |
-| `cluster logs -i <inv> <node> [-n N]` | The node's journal |
-| `cluster destroy -i <inv> --yes` | Delete every node, its data (every storage directory it resolves) and the local state |
-| `tui [-i <inv> \| --addr <a>]` | The terminal UI, as the cluster's admin with an inventory |
-
-The server program the inventory names is `shoal::server::node::main::<Db>()` for the same
-schema. `shoal-bench`'s `shoal-node` and `shoal-benchctl` are the bench pair, `tmdb_node` and
-`tmdbctl` the TMDB pair, and `tmdb-dataset-node` and `tmdb-dataset-loader` the dataset pair
-([F54](../features/tmdb-dataset-deployment.md)); `shoalctl/inventories/lab.yml` is a worked
-inventory. A program with commands of its own flattens the public `shoalctl::cli::Command` into
-its own subcommand enum and hands the rest to `shoalctl::cli::run`, as the dataset loader does
-with its `load`. `tui -i` needs only the deployment's state, not the node binary the inventory
-names. A node's storage
-directories can be set for the whole deployment, for a named group of nodes, or for one node, each
-directory on its own ([F53](../features/inventory-wizard.md)).
+~~`cluster` deploys a cluster of the program's schema from an inventory, over keyless ssh with
+passwordless sudo on every host ([F51](../features/cluster-deployment.md)).~~ Since
+[F63](../features/shoaladm.md) every one of them is [shoaladm](shoaladm.md)'s, without the
+`cluster` prefix: `shoaladm deploy`, `shoaladm bootstrap`, `shoaladm upgrade` and the rest.
+The cluster tab below is still here, and is the same model those commands wait on.
 
 ## Architecture
 
@@ -209,7 +208,7 @@ Mouse clicks are captured and routed to panes (`app.rs:472`).
 ## The cluster tab
 
 Since [F50](../features/cluster-operations.md), `Space c` opens a tab that shows the cluster the
-connection reached and takes the operations an operator runs on it (`shoalctl/src/cluster/`).
+connection reached and takes the operations an operator runs on it (`shoaladm/src/cluster/`).
 It polls six admin reads a second - `Members`, `Readiness`, `Replication`, `Plans`, `Backups`,
 `Recoveries` - and draws one model from them. Since [F52](../features/cluster-stats.md) a node
 whose `Members` frame lists `stats` in `admin_reads` is asked for a seventh, `Stats`; when the
@@ -508,9 +507,11 @@ of them needs a server or a real terminal ([Test Coverage](../appendix/test-cove
 
 ## Design notes
 
-**A library, not a binary.** The schema is a type, so a generic binary is impossible without
+~~**A library, not a binary.** The schema is a type, so a generic binary is impossible without
 runtime reflection. Making shoalctl a library and asking users to write a ten-line `main` is
-the honest consequence.
+the honest consequence.~~ **A library, and a binary that builds against it.** The schema is
+still a type; since [F63](../features/shoaladm.md) the binary finds it in the project, builds
+the one-line program against it and runs that, so nobody writes the `main`.
 
 **One channel for input and results.** Merging terminal events and query completions into a
 single stream keeps the event loop a simple `select`-free `recv` and guarantees the UI stays
@@ -522,8 +523,10 @@ rows.
 
 ## Limitations
 
-- The schema must be written into the shoalctl binary as well as the server's. ~~No drift
-  detection~~ - the hello refuses a mismatched fingerprint, and the TMDB pair shares one file.
+- ~~The schema must be written into the shoalctl binary as well as the server's.~~ The UI is
+  built against the schema, by `shoalctl` itself from the project since [F63](../features/shoaladm.md).
+  ~~No drift detection~~ - the hello refuses a mismatched fingerprint, and a UI built from the
+  project is built from the same struct as the node.
 - Read-only: SHQL parses no writes, so shoalctl cannot insert, update, or delete.
 - Every query must name a partition key, so there is no way to browse a table.
 - Dead `next`/`prev` methods.

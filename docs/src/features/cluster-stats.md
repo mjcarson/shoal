@@ -125,7 +125,7 @@ few bytes it holds. A plan of small sets is paced by that wait, not by its bytes
 
 ### In shoalctl
 
-- **`shoalctl cluster stats -i <inventory> [--table <t>] [--watch [secs]] [--json]`**
+- **`shoaladm stats -i <inventory> [--table <t>] [--watch [secs]] [--json]`**
   connects to any member and reads `Stats`. If the answer is a follower's local view, it dials
   the leader's advertised client address and reads again. It prints:
   - the cluster's led write and byte rates, and its partitions counted once per row;
@@ -144,7 +144,7 @@ few bytes it holds. A plan of small sets is paced by that wait, not by its bytes
 
   `--watch` redraws every two seconds or every N. `--json` prints the leader's answer as it
   came.
-- **`cluster rebalance`** and **`cluster add --rebalance`** print the plan's progress line
+- **`shoaladm rebalance`** and **`shoaladm add --rebalance`** print the plan's progress line
   under its step lines each time a step moves.
 - **The cluster tab** reads `Stats` after its six reads. It reads from the leader the same way,
   dialing it unauthenticated since a read needs no principal. It draws the compact lines under
@@ -293,10 +293,10 @@ before it reads as not describing the current code. No capture was taken for it.
 | `stats_frames_decode_from_older_shapes` | `shoal-proto/src/shared/protocol/stats.rs` | A frame missing a field no longer decodes, or a full one does not round trip |
 | `narrowing_and_cluster_totals` | `shoal-proto/src/shared/protocol/stats.rs` | `--table` keeps other tables, or the cluster total is not the members' led sum |
 | `admin_bodies_round_trip` (extended) | `shoal-proto/src/shared/protocol/admin.rs` | `Stats` becomes a mutation or stops round tripping |
-| `the_stats_model_reads_a_server_frame` | `shoalctl/src/cluster/stats.rs` | The printed view loses the led cluster total, a member's pairs, maintenance, a table, or the open-then-finished order of plans |
-| `a_local_view_says_so_and_an_empty_one_draws` | `shoalctl/src/cluster/stats.rs` | A follower's view reads as the whole cluster, or an empty frame fails |
-| `stats_are_asked_only_of_a_node_that_answers_them` | `shoalctl/src/cluster/stats.rs` | `Stats` is sent to a node that does not list it, or the tab stops drawing the figures |
-| `figures_are_short` | `shoalctl/src/cluster/stats.rs` | Rates, durations or byte rates print in forms the tables do not fit |
+| `the_stats_model_reads_a_server_frame` | `shoaladm/src/cluster/stats.rs` | The printed view loses the led cluster total, a member's pairs, maintenance, a table, or the open-then-finished order of plans |
+| `a_local_view_says_so_and_an_empty_one_draws` | `shoaladm/src/cluster/stats.rs` | A follower's view reads as the whole cluster, or an empty frame fails |
+| `stats_are_asked_only_of_a_node_that_answers_them` | `shoaladm/src/cluster/stats.rs` | `Stats` is sent to a node that does not list it, or the tab stops drawing the figures |
+| `figures_are_short` | `shoaladm/src/cluster/stats.rs` | Rates, durations or byte rates print in forms the tables do not fit |
 
 ## Related
 

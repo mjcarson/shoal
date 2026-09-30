@@ -252,7 +252,7 @@ Backup files land on each leader's disk with no shipping, encryption, retention 
 restore is once, whole, into an empty cluster - no point-in-time or single-table restore; a
 recovery is to one survivor. A quarantine is routed around per holder, not per table. One
 repair per shard at a time; a scheduled scrub refused stale is not retried. `shoalctl`'s tab
-reaches one node. ~~Nothing issues a certificate.~~ `shoalctl cluster` issues every leaf it deploys
+reaches one node. ~~Nothing issues a certificate.~~ `shoaladm` (`shoalctl cluster` until [F63](../features/shoaladm.md)) issues every leaf it deploys
 ([F51](../features/cluster-deployment.md)). ~~An admin refusal's code is derived from its
 reason text~~ - a refusal carries its kind since
 [Resolved #98](../appendix/resolved/admin-refusal-kinds.md). See [C15](open-issues.md).

@@ -5,10 +5,10 @@
 //! ([F54](../../docs/src/features/tmdb-dataset-deployment.md)):
 //!
 //! - `tmdb-dataset-node` is the server program. An inventory's `server:` names it, and
-//!   `cluster bootstrap` copies it to every host. It reads the `shoal.yml` the deployment rendered
+//!   `shoaladm deploy` builds and copies it to every host. It reads the `shoal.yml` the deployment rendered
 //!   for its node and nothing else, so there is nothing to configure in it.
 //! - `tmdb-dataset-loader` fills a deployed cluster from the csv (`load -i <inventory>`), and
-//!   carries every `shoalctl` command for this schema, `cluster new` and `cluster bootstrap`
+//!   carries every `shoaladm` command for this schema, `new` and `deploy`
 //!   included, so one program deploys the database and loads it.
 //!
 //! The dataset is `TMDB_movie_dataset_v11.csv`, about 538 MB and 1.19 million movies, from

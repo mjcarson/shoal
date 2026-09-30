@@ -43,7 +43,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(180);
 /// A shell command that empties and removes every storage root, a mount point included
 ///
 /// `rm -rf` of a directory that is a mount point empties it and then fails to remove it, which
-/// stopped `cluster destroy` half way on the lab's loop filesystem. Where the removal fails, what
+/// stopped `destroy` half way on the lab's loop filesystem. Where the removal fails, what
 /// is under the root is deleted instead, and the root is left for its mount
 /// ([known issue 157](../../../docs/src/appendix/known-issues.md)).
 ///
@@ -1040,7 +1040,7 @@ impl Deployment {
         } else {
             step(
                 Some(name),
-                "holds no data yet; run `cluster rebalance` to move a share onto it",
+                "holds no data yet; run `shoaladm rebalance` to move a share onto it",
             );
         }
         Ok(())
@@ -1689,7 +1689,7 @@ mod tests {
     /// A storage root that cannot itself be removed is emptied, and the command still succeeds (item 157)
     ///
     /// A root that is a mount point empties under `rm -rf` and then fails its own removal, which
-    /// stopped `cluster destroy` half way. A root whose parent is read-only fails the same way, so
+    /// stopped `destroy` half way. A root whose parent is read-only fails the same way, so
     /// it stands in for the mount point here.
     #[test]
     fn a_root_that_cannot_be_removed_is_emptied() {

@@ -76,7 +76,7 @@ lead is refused under the append reserve
 - **The shares are over each group's voters.** At a factor of three on three nodes, every node
   votes in every group, so 2:1:1 is half, a quarter and a quarter. On a larger cluster a node
   leads its weight's share of the groups it holds, not of all groups.
-- **Nothing measures whether a weight is right.** `cluster stats` shows the groups each member
+- **Nothing measures whether a weight is right.** `shoaladm stats` shows the groups each member
   leads and the busiest groups' leaders, but not the commit latency behind them.
 - **The inventory wizard carries a `lead_weight` through an edit unchanged** but has no field to
   set one. It is written by hand, as `failover` once was.

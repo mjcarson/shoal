@@ -83,7 +83,7 @@ and feeds it again. A tombstoned member is not pinged.
 
 ### A cluster tab in `shoalctl`
 
-`space c` opens a cluster tab (`shoalctl/src/cluster/`). Its content is a `ClusterModel` built
+`space c` opens a cluster tab (`shoaladm/src/cluster/`). Its content is a `ClusterModel` built
 every second from six admin reads through the connection the app has - `Members`, `Readiness`,
 `Replication`, `Plans`, `Backups`, `Recoveries` - ~~and rendered as lines~~ (seven since
 [F52](cluster-stats.md): a node that lists `stats` in `admin_reads` is also asked for `Stats`,
@@ -153,7 +153,7 @@ earlier pages named for M10, and what became of each:
 | The certificate-to-node binding | F38, Q11, C2 | **Resolved here**: the SAN is read and judged on both ends |
 | Certificate and authority rotation | C1, Q11 | **Resolved here**: `ReloadTls`, a bundle, and a test across a live cluster |
 | An address change authenticated | C1, Q11 | **Resolved here**: the M3 rule plus the cluster following the move; the certificate is the authentication |
-| First-boot certificate provisioning before a node id exists | Q11 | ~~**Explicitly unsupported**: a leaf is issued for a node id, so the id comes first - `StorageMeta::claim` on an empty directory mints it, and the operator issues the leaf for it before the node joins; a node with no leaf yet runs plaintext or not at all. The runbook says so~~ **Resolved by [F51](cluster-deployment.md)**: the node program's `claim` prints the id before the first start, and `shoalctl cluster` issues the leaf for it |
+| First-boot certificate provisioning before a node id exists | Q11 | ~~**Explicitly unsupported**: a leaf is issued for a node id, so the id comes first - `StorageMeta::claim` on an empty directory mints it, and the operator issues the leaf for it before the node joins; a node with no leaf yet runs plaintext or not at all. The runbook says so~~ **Resolved by [F51](cluster-deployment.md)**: the node program's `claim` prints the id before the first start, and `shoaladm` (`shoalctl cluster` until [F63](shoaladm.md)) issues the leaf for it |
 | Rolling wire compatibility and activation | C2, C9 | Resolved by [F48](rolling-compatibility.md) |
 | A schema change as a rolling operation | Q10 | **Explicitly unsupported** by F48: a new cluster and a restore |
 | A marker format migration in place | C1, F37 | **Explicitly unsupported** by F48: the build that wrote it, or a restore |
@@ -236,7 +236,7 @@ Nothing on the list was fixed silently; a debt not on it was never named for M10
 - ~~**First-boot provisioning is manual.** The node id is minted at the first claim; the leaf
   for it is the operator's to issue before the node joins under the binding. Nothing issues a
   certificate.~~ Since [F51](cluster-deployment.md) `claim` gives the id before the first start
-  and `shoalctl cluster` issues every leaf it deploys; by hand it is still the operator's.
+  and `shoaladm` (`shoalctl cluster` until [F63](shoaladm.md)) issues every leaf it deploys; by hand it is still the operator's.
 - **A reload is per node.** Every node is reloaded by its own `ReloadTls`; nothing fans it out,
   and the cluster tab's `reload-tls` reaches the node the connection did.
 - **The certificate test needs kTLS**, as every TLS test does, and skips by name without the
@@ -299,8 +299,8 @@ one machine, `emulated` true, one build digest - and the capture deleted.
 | `certificate_rotation_binds_identity` | `shoal/tests/cluster_fixture.rs` | A reissued leaf is not used by the next handshakes after a reload, a bundle does not carry an authority rotation with the old one retired and a restart still joining, a leaf naming another node is not refused by both ends naming the certificate (the misnamed node is the one restarted at that step, so no step depends on which member leads - [Resolved #112](../appendix/resolved/certificate-test-leader.md)), one naming none is not unauthorized, bad material is not refused with nothing changed, or the cluster does not serve once the leaf is its own again. Every reload goes through the admin verb `ReloadTls`, so the operator's path is the one driven and its refusal wording is what is asserted. Skips by name without kTLS |
 | `address_change_is_observed_and_a_stale_clone_is_fenced` | `shoal/tests/cluster_fixture.rs` | A member restarted at fresh ports is not observed by every member - itself included - at the new address and incarnation, its links do not come up both ways, writes through it do not commit, or a clone at the old address is not refused as a duplicate while it keeps serving |
 | `duplicate_node_identity_is_fenced` | `shoal/tests/cluster_fixture.rs` | The M3 row, which now reaches the winning clone: the leader's control thread stops on the clone's shorter log if the control group's reversion allowance is removed |
-| `the_cluster_model_reads_the_admin_frames` | `shoalctl/src/cluster/model.rs` | The M9b figure is not said in the headline, a member's phase, grace or bytes are lost, a done plan is shown as open or a blocked reason dropped, a backup or a recovery is not summarized, the wire is not read, or an older frame fails the tab |
-| `an_action_previews_its_boundary_and_follows_its_record` | `shoalctl/src/cluster/actions.rs` | An operation does not parse from its line or a malformed one is not refused by name, a preview does not name the identity, the movement and the boundary, a request or its follow-up differs, or a record's done state and lines are wrong |
+| `the_cluster_model_reads_the_admin_frames` | `shoaladm/src/cluster/model.rs` | The M9b figure is not said in the headline, a member's phase, grace or bytes are lost, a done plan is shown as open or a blocked reason dropped, a backup or a recovery is not summarized, the wire is not read, or an older frame fails the tab |
+| `an_action_previews_its_boundary_and_follows_its_record` | `shoaladm/src/cluster/actions.rs` | An operation does not parse from its line or a malformed one is not refused by name, a preview does not name the identity, the movement and the boundary, a request or its follow-up differs, or a record's done state and lines are wrong |
 | `physical_cluster_records_each_node_environment` | `shoal-bench/src/model/macro_layer.rs` | Three environments do not round trip under the record in node order, `emulated` is not false only when the hostnames differ, a difference does not name the node and its fields, a build difference is treated as a machine difference, or an F47 record fails to load |
 | `a_remote_spec_parses_and_builds_its_commands` | `shoal-bench/src/workloads/harness/cluster.rs` | A spec does not parse into node, target, host and directory, node zero or a relative directory is accepted, the copy, serve or kill command lines change, or a ready line with an environment is not read and one without is |
 | `a_remote_node_serves_a_smoke_capture` | `shoal-bench/tests/remote_smoke.rs` | With `SHOAL_REMOTE_SMOKE` set: a node on the named host does not serve a smoke capture, or the record does not say which machine it ran on. Unset, it says so and passes |

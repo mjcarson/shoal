@@ -1,4 +1,4 @@
-//! `shoalctl cluster new`: building an inventory in a full screen form
+//! `shoaladm new`: building an inventory in a full screen form
 //!
 //! Writing an inventory by hand means learning its keys from the docs and finding out what is
 //! wrong with it only when `bootstrap` refuses it. The wizard walks the same keys a page at a

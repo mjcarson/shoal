@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn state_is_private_and_minted_once() {
         // a state directory under this test's own temp dir
-        let root = std::env::temp_dir().join(format!("shoalctl-state-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("shoaladm-state-{}", Uuid::new_v4()));
         let state = State {
             dir: root.join("lab"),
         };

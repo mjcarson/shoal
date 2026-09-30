@@ -1,8 +1,8 @@
-# F57. Rendering a deployed cluster's files again with `shoalctl cluster reconfigure`
+# F57. Rendering a deployed cluster's files again with `shoaladm reconfigure`
 
 ## Context
 
-`cluster upgrade` ([F55](cluster-upgrade.md)) replaces a node's program and never its `shoal.yml`.
+`shoaladm upgrade` ([F55](cluster-upgrade.md)) replaces a node's program and never its `shoal.yml`.
 So a change to what an inventory says, or to what the renderer writes, reached no deployed node.
 The lab added `node_memory` to its nodes' files by hand
 ([Resolved #149](../appendix/resolved/node-memory-budget.md)), and ran
@@ -15,7 +15,7 @@ keep. It does keep it: bootstrap mints one into the deployment's state directory
 
 ## What it does
 
-`cluster reconfigure -i <inventory> [node...] [--force]` goes through the deployed nodes one at a
+`shoaladm reconfigure -i <inventory> [node...] [--force]` goes through the deployed nodes one at a
 time, the control leader last, as `upgrade` does. For each node it:
 
 1. reads the `shoal.yml` the node runs on, and keeps the entry it was deployed with: `bootstrap:
@@ -62,7 +62,7 @@ The inventory wizard carries it through an edit at every level, and gained a fie
 
 ## Alternatives rejected
 
-- **Rendering files in `cluster upgrade`.** An upgrade that also changed configuration could not
+- **Rendering files in `shoaladm upgrade`.** An upgrade that also changed configuration could not
   be rolled back by swapping the program back. Two commands keep the two changes apart.
 - **Asking for the admin's password.** The deployment already holds it, from bootstrap. Asking
   would make a script of the command impossible for no gain.
@@ -98,9 +98,9 @@ already rendered.
 
 | Test | What breaks if this is reverted |
 | --- | --- |
-| `only_the_credential_is_ignored` (`shoalctl/src/deploy/upgrade.rs`) | Every node is restarted on every run, or a real change is missed |
+| `only_the_credential_is_ignored` (`shoaladm/src/deploy/upgrade.rs`) | Every node is restarted on every run, or a real change is missed |
 | `a_group_split_renders_the_roots_the_engine_claims` (`shoal-bench/tests/deploy_render.rs`) | A group's `wal_commit_delay` does not reach the engine as the duration it named, or one over 10 ms is accepted |
-| `a_draft_round_trips_an_inventory` (`shoalctl/src/wizard/form.rs`) | The wizard drops `wal_commit_delay` or `failover` from an inventory it edits |
+| `a_draft_round_trips_an_inventory` (`shoaladm/src/wizard/form.rs`) | The wizard drops `wal_commit_delay` or `failover` from an inventory it edits |
 | `the_failover_base_is_a_field` (the same file) | The failover base cannot be typed, blanked or refused in the wizard |
 
 ## Related

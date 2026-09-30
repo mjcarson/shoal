@@ -405,17 +405,29 @@ pub fn manifest(project: &Project, schema: &Schema) -> color_eyre::Result<String
             .or_default()
             .push(dependency_line(dependency));
     }
-    // and the wrapper's own: the project's library, the allocator, and the two tools beside shoal
+    // and the wrapper's own: the project's library, the allocator, and the two tools beside
+    // shoal, each only where the project does not depend on it already under that name
+    let declared: std::collections::BTreeSet<&str> = project
+        .dependencies
+        .iter()
+        .filter(|dependency| dependency.kind.is_none())
+        .map(|dependency| dependency.rename.as_deref().unwrap_or(&dependency.name))
+        .collect();
     let own = groups.entry(None).or_default();
-    if project.lib.is_some() {
+    if project.lib.is_some() && !declared.contains(project.name.as_str()) {
         own.push(format!(
             "{} = {{ path = {} }}",
             quoted_key(&project.name),
             quoted_path(&project.dir)
         ));
     }
-    own.push("mimalloc = \"0.1\"".to_string());
+    if !declared.contains("mimalloc") {
+        own.push("mimalloc = \"0.1\"".to_string());
+    }
     for tool in ["shoaladm", "shoalctl"] {
+        if declared.contains(tool) {
+            continue;
+        }
         let mut fields = Vec::new();
         if shoal.req != "*" {
             fields.push(format!("version = {}", quoted(&shoal.req)));
@@ -775,6 +787,20 @@ mod tests {
         project.dependencies.retain(|dependency| dependency.name != "shoal");
         let error = manifest(&project, &schema(dir.path())).unwrap_err().to_string();
         assert!(error.contains("does not depend on shoal"), "{error}");
+        // a project that depends on the allocator or a tool already is not given it twice, as
+        // the tmdb dataset crate does (F54)
+        let mut project = self::project(dir.path());
+        let mut mimalloc = dependency("mimalloc", None, "*");
+        mimalloc.path = Some(PathBuf::from("/src/mimalloc"));
+        let mut shoalctl = dependency("shoalctl", None, "*");
+        shoalctl.path = Some(PathBuf::from("/src/shoal/shoalctl"));
+        project.dependencies.push(mimalloc);
+        project.dependencies.push(shoalctl);
+        let text = manifest(&project, &schema(dir.path())).unwrap();
+        assert_eq!(text.matches("mimalloc = ").count(), 1, "{text}");
+        assert_eq!(text.matches("shoalctl = ").count(), 1, "{text}");
+        assert!(text.contains("mimalloc = { path = \"/src/mimalloc\" }"), "{text}");
+        assert!(text.contains("shoaladm = { path = \"/src/shoal/shoaladm\" }"), "{text}");
     }
 
     /// The three sources name the database through the module for a main.rs schema and

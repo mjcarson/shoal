@@ -470,7 +470,7 @@ pub fn render(
     // a header saying where the file came from, then the file
     let body = serde_yaml::to_string(&node_conf(inventory, node, entry, password))?;
     Ok(format!(
-        "# written by shoalctl cluster for {} node {}; rewritten on every deploy\n{body}",
+        "# written by shoaladm for {} node {}; rewritten on every deploy\n{body}",
         inventory.name, node.name
     ))
 }

@@ -48,7 +48,7 @@ impl StatsModel {
         StatsModel { view, note }
     }
 
-    /// Every figure as the lines `shoalctl cluster stats` prints
+    /// Every figure as the lines `shoaladm stats` prints
     #[must_use]
     pub fn render_lines(&self) -> Vec<String> {
         let mut lines = self.header_lines();

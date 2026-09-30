@@ -268,7 +268,7 @@ process.
 
 - **A backup's files land on each group's leader's own disk**, under the path given; there
   is ~~no shipping,~~ no encryption and no retention. Since [F59](backup-shipping.md),
-  `shoalctl cluster ship-backup` copies every host's files to every host, or to another
+  `shoaladm ship-backup` copies every host's files to every host, or to another
   inventory's hosts, which is what a restore needs. Storing them outside the failure domain is
   still the operator's step, as C9 says, and a backup's age is not tracked.
 - **A restore is once, into an empty new cluster.** No point-in-time restore, no merge, no

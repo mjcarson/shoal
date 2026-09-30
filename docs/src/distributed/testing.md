@@ -12,7 +12,7 @@ each, and a docs check holds those tables to the milestones page and to the func
 workspace. Built by [F36](../features/cluster-harness.md), extended by every feature after it.
 
 A third way, since: the [distributed cluster testing](../cluster-testing/overview.md) chapter
-deploys the TMDB dataset onto three physical hosts with `shoalctl cluster` and drives it with real
+deploys the TMDB dataset onto three physical hosts with `shoaladm` (`shoalctl cluster` until [F63](../features/shoaladm.md)) and drives it with real
 clients and faults injected from outside the process. It found defects that every fixture test
 had run over, most of all [a use-after-free](../appendix/resolved/read-plan-rc-across-shards.md)
 the fixture's glibc allocator let pass.
