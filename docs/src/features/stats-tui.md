@@ -203,6 +203,13 @@ nothing that `--basic --watch` did not.
 | `spans_and_wrapping` | `shoaladm/src/cluster/stats/view.rs` | The axis labels or the help page's wrapping change |
 | `stats_takes_basic` | `shoaladm/src/cli.rs` | `--basic` is not taken, or a bare `--watch` stops meaning two seconds |
 
+Proved on the lab as well. The user's tmdb cluster, whose nodes run a build from before F64,
+read as titan, europa and hyperion through the record, both with `--basic` and piped with no
+flag, and full screen under `tmux`. A side cluster, `tmdb-f64` on ports 13000-13002, was built
+and deployed from this tree onto the same three hosts. Each node's figures carried its own
+hostname, and 200,000 rows loaded through it drew one line per host on the applied writes chart.
+The side cluster was then destroyed.
+
 ## Related
 
 - [F52. Cluster stats](cluster-stats.md), the figures this view names and charts.

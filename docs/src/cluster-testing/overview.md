@@ -145,6 +145,11 @@ interval, so a load that changes pace partway through shows where. A node
 that judges its own links slow says so in its journal (`this node's links are slow, and it hands
 its leads on`), as does one under its append reserve (`under the append reserve`).
 
+Since [F64](../features/stats-tui.md) the members are named by hostname rather than by id, and
+`shoaladm stats` on a terminal charts every one of these figures over up to half an hour, a line
+per member, with a help page saying what each one means. A script that redirects it to a file
+still gets the tables, which `--basic` prints on a terminal too.
+
 Since round 15 the memory table also has each member's `archive maps`, `table maps` and `wal
 index`, the bytes the shards' archive map indexes, tables' partition indexes and WAL entry indexes
 hold, estimated from their sizes, and since round 16 `lru`, the eviction lists' entries
