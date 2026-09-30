@@ -294,13 +294,20 @@ rather than from the diff:
   replication lane's own byte counters per group are the shape.
 - **A standalone node's figures.** A standalone node refuses admin requests, so it has no
   `Stats`; the counters exist on its shards only when they host groups. Counting at
-  `tables.handle` and answering a standalone read is the shape.
+  `tables.handle` and answering a standalone read is the shape. Since
+  [F65](../features/query-figures-home-tab.md) a standalone node's shards do count what its
+  clients were answered, since the meter sits on every client connection; nothing reads it
+  there yet, for the same reason.
 - **An export.** The figures are a read a tool polls, not a metrics endpoint; a Prometheus or
   OTLP exporter reading the tracker's output on the control thread is the shape
   ([Observability](#observability)).
-- **Latency beside the rates.** The server counts what it applies, not how long a client
+- ~~**Latency beside the rates.** The server counts what it applies, not how long a client
   waited; the bench's `p99_ratio_permille` stays the one measure of what a rebalance costs the
-  foreground.
+  foreground.~~ **Done** by [F65](../features/query-figures-home-tab.md): every node counts
+  what its clients were answered, by kind, and how long they waited, as p50 and p99 over about
+  ten seconds, and `shoaladm stats` opens on a home tab that charts them. The bench's
+  `p99_ratio_permille` is still the measure a capture judges a rebalance by, since the node's
+  figures are a trailing window and not a capture's distribution.
 
 **What F51 left undone, deliberately.** Recorded here so the next change starts from the list
 rather than from the diff:
@@ -1296,7 +1303,9 @@ them with its tablets, archived partitions and bytes as trailing rates the `Stat
 answers; that is a surface an exporter could read, and nothing exports it yet. Since
 [F64](../features/stats-tui.md) `shoaladm stats` charts those figures over half an hour, but the
 history is the view's own and ends when it exits: a monitoring system's retention is still
-what this item asks for. Two pieces of this were
+what this item asks for. Since [F65](../features/query-figures-home-tab.md) the same figures
+count what each node's clients were answered, by kind, with p50 and p99 waits from a histogram
+the node keeps, which is the latency this item's metrics surface would have wanted first. Two pieces of this were
 carved off by [item 9](resolved/orphaned-update-intents.md) and are worth naming separately,
 because that item deliberately stopped short of both.
 
@@ -1306,8 +1315,9 @@ exists precisely so something can read the numbers rather than parse them out of
 does. Whatever gets built should expect to carry more than recovery — resident bytes, LRU depth,
 compaction backlog and blocked-query count are the other obvious first residents. The write
 counters and partition counts [F52](../features/cluster-stats.md) added are the first
-residents that are not recovery; the node's control thread already folds them every report
-tick (`NodeStatsTracker`), which is where the rest could join them.
+residents that are not recovery, and [F65](../features/query-figures-home-tab.md)'s answers by
+kind and their latency histograms the next; the node's control thread already folds them every
+report tick (`NodeStatsTracker`), which is where the rest could join them.
 
 **Aggregating across shards.** The recovery summary is per shard, and there is no pool-wide
 total, because `ShoalPool::start` spawns its shard threads and returns without joining them —

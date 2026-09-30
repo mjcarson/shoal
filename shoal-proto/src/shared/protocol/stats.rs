@@ -288,10 +288,10 @@ impl QueryStats {
     /// * `ops` - The kinds, each one of [`QUERY_OPS`]
     #[must_use]
     pub fn rate_of(&self, ops: &[&str]) -> f64 {
+        // folded from a positive zero, since an empty sum of floats is a negative one
         ops.iter()
             .filter_map(|op| self.op(op))
-            .map(|stats| stats.rate.r10s)
-            .sum()
+            .fold(0.0, |sum, stats| sum + stats.rate.r10s)
     }
 
     /// The answer bytes per second of several kinds together, over their ten second windows
@@ -301,10 +301,10 @@ impl QueryStats {
     /// * `ops` - The kinds, each one of [`QUERY_OPS`]
     #[must_use]
     pub fn bytes_out_of(&self, ops: &[&str]) -> f64 {
+        // folded from a positive zero, since an empty sum of floats is a negative one
         ops.iter()
             .filter_map(|op| self.op(op))
-            .map(|stats| stats.bytes_out.r10s)
-            .sum()
+            .fold(0.0, |sum, stats| sum + stats.bytes_out.r10s)
     }
 }
 
@@ -912,7 +912,9 @@ mod tests {
         assert!(bytes < 2048, "{bytes} bytes");
         // and the rates of several kinds add up
         assert!((queries.rate_of(&READ_OPS) - 2.0 * 123_456.789_012).abs() < 1e-6);
-        assert!(queries.bytes_out_of(&["nothing"]).abs() < f64::EPSILON);
+        // and nothing adds up to a zero that is written as one
+        assert!(queries.bytes_out_of(&["nothing"]).is_sign_positive());
+        assert_eq!(QueryStats::default().rate_of(&READ_OPS).to_string(), "0");
     }
 
     /// Narrowing keeps one table and makes it the total, and a view sums what members lead

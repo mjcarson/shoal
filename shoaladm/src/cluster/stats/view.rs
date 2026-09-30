@@ -4,7 +4,9 @@
 //! and each member's state, a tab per metric group, and the tab's metrics as a grid of charts,
 //! each with its lines' newest, low, mean and high values under it. Space then `f` fills the
 //! body with the selected chart. The open plans are at the foot, and the help page covers all
-//! of it while it is open ([F64](../../../../docs/src/features/stats-tui.md)).
+//! of it while it is open ([F64](../../../../docs/src/features/stats-tui.md)). The home tab
+//! draws the cluster's totals over six charts with a line of legend each, and a table of every
+//! member's figures under them ([F65](../../../../docs/src/features/query-figures-home-tab.md)).
 
 use ratatui::{
     Frame,
@@ -13,17 +15,21 @@ use ratatui::{
     symbols::Marker,
     text::{Line, Span},
     widgets::{
-        Axis, Block, Cell, Chart, Clear, Dataset, GraphType, Paragraph, Row, Table, Tabs,
+        Axis, Block, Cell, Chart, Clear, Dataset, GraphType, Paragraph, Row, Table, Tabs, Wrap,
     },
 };
 use shoal::shared::identity::NodeId;
+use shoal::shared::protocol::stats::{NodeStats, QUERY_OPS, READ_OPS, WRITE_OPS};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use super::history::Series;
-use super::metrics::{GROUPS, METRICS, Metric, Reader, TERM_SECTIONS, TERMS, Unit};
-use super::screen::Screen;
-use super::{StatsModel, age, live, short, state};
+use super::metrics::{
+    GROUPS, METRICS, Metric, Reader, TERM_SECTIONS, TERMS, Unit, all_answers, row_bytes,
+};
+use super::screen::{Screen, TABS, tab_name};
+use super::{StatsModel, age, byte_rate, live, rate, short, state};
+use crate::cluster::model::bytes;
 
 /// The colors members' lines are drawn in, in the order their names sort
 const PALETTE: [Color; 10] = [
@@ -55,9 +61,46 @@ const PLAN_LINES: usize = 4;
 /// How wide the help page's column of keys is
 const KEY_COLUMN: usize = 24;
 
+/// How many lines the legend under a home tab chart takes
+const LEGEND_LINES: usize = 2;
+
+/// The home tab's table of members, as its header names the columns
+const HOME_COLUMNS: [&str; 13] = [
+    "member",
+    "get/s",
+    "ins/s",
+    "upd/s",
+    "del/s",
+    "ex/s",
+    "err/s",
+    "read/s",
+    "write/s",
+    "p50",
+    "p99",
+    "rows/budget",
+    "resident",
+];
+
 /// The keys the foot reminds of
 const KEYS: &str =
-    "tab group  ←↑↓→ select  space f full screen  [ ] window  p freeze  ? help  q quit";
+    "tab next tab  ←↑↓→ select  space f full screen  [ ] window  p freeze  ? help  q quit";
+
+/// The color a kind of query's line is drawn in, the same on every chart
+///
+/// # Arguments
+///
+/// * `kind` - The kind, one of the node figures' query kinds
+fn kind_color(kind: &str) -> Color {
+    match kind {
+        "get" => Color::Cyan,
+        "exists" => Color::LightBlue,
+        "insert" => Color::Green,
+        "update" => Color::Yellow,
+        "delete" => Color::Magenta,
+        "error" => Color::Red,
+        _ => Color::Gray,
+    }
+}
 
 /// The style of a heading
 fn heading_style() -> Style {
@@ -128,6 +171,7 @@ fn series_style(
 ) -> (String, Color) {
     match series {
         Series::Cluster => ("cluster".to_string(), Color::White),
+        Series::Kind(kind) => (kind.to_string(), kind_color(kind)),
         // a member the answer no longer lists is named by its id and drawn in grey
         Series::Member(node) => (
             model.map_or_else(|| short(&node.0.to_string()), |model| model.label(&node)),
@@ -228,13 +272,15 @@ pub fn render(frame: &mut Frame, screen: &mut Screen, now: Instant) {
     ])
     .areas(area);
     frame.render_widget(Paragraph::new(header), top);
-    // the grid, or the selected chart filling the body; the grid decides its scroll first, so
-    // the tab bar can say which rows are shown
+    // the grid, the home tab, or the selected chart filling the body; the grid decides its
+    // scroll first, so the tab bar can say which rows are shown
     let shown = if screen.fullscreen {
-        render_cell(frame, body, screen, screen.metric_index(), true, true, now);
+        render_cell(frame, body, screen, screen.metric_index(), true, true, false, now);
         None
+    } else if screen.is_home() {
+        Some(render_home(frame, body, screen, now))
     } else {
-        Some(render_grid(frame, body, screen, now))
+        Some(render_grid(frame, body, screen, false, now))
     };
     render_tabs(frame, tabs, screen, shown);
     // the open plans, then the keys
@@ -370,11 +416,8 @@ fn member_states(model: &StatsModel) -> Line<'static> {
 fn render_tabs(frame: &mut Frame, area: Rect, screen: &Screen, shown: Option<(Grid, usize)>) {
     let [left, right] =
         Layout::horizontal([Constraint::Min(10), Constraint::Length(30)]).areas(area);
-    // each group numbered by the key that shows it
-    let titles = GROUPS
-        .iter()
-        .enumerate()
-        .map(|(index, (group, _))| format!("{} {group}", index + 1));
+    // each tab numbered by the key that shows it, home first
+    let titles = (0..TABS).map(|tab| format!("{} {}", tab + 1, tab_name(tab)));
     let tabs = Tabs::new(titles)
         .select(screen.tab)
         .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))
@@ -396,6 +439,20 @@ fn render_tabs(frame: &mut Frame, area: Rect, screen: &Screen, shown: Option<(Gr
     );
 }
 
+/// How many lines a metric's summary lists: a member's each, the cluster's one, or a kind's each
+///
+/// # Arguments
+///
+/// * `metric` - The metric
+/// * `members` - How many members the answer holds
+fn summary_len(metric: &Metric, members: usize) -> usize {
+    match metric.read {
+        Reader::Member(_) => members,
+        Reader::Cluster(_) => 1,
+        Reader::Kinds(_) => QUERY_OPS.len(),
+    }
+}
+
 /// Draw the tab's charts as a grid, keeping the selected one's row in view, and return the
 /// grid and its first row drawn
 ///
@@ -404,21 +461,29 @@ fn render_tabs(frame: &mut Frame, area: Rect, screen: &Screen, shown: Option<(Gr
 /// * `frame` - The frame
 /// * `area` - Where to draw
 /// * `screen` - The screen, which the grid's columns and scroll are written to
+/// * `compact` - Whether each chart has a line of legend under it rather than its summary
 /// * `now` - The time now
-fn render_grid(frame: &mut Frame, area: Rect, screen: &mut Screen, now: Instant) -> (Grid, usize) {
+fn render_grid(
+    frame: &mut Frame,
+    area: Rect,
+    screen: &mut Screen,
+    compact: bool,
+    now: Instant,
+) -> (Grid, usize) {
     let metrics = screen.tab_metrics();
-    // a tab of member metrics lists every member under each chart, the cluster's one line
+    // the tallest summary under any of the tab's charts decides how tall a row must be
     let members = screen
         .latest
         .as_ref()
         .map_or(1, |model| model.view.members.len().max(1));
-    let summary = if metrics
-        .iter()
-        .any(|index| matches!(METRICS[*index].read, Reader::Member(_)))
-    {
-        members
+    let summary = if compact {
+        LEGEND_LINES
     } else {
-        1
+        metrics
+            .iter()
+            .map(|index| summary_len(&METRICS[*index], members))
+            .max()
+            .unwrap_or(1)
     };
     let grid = grid(metrics.len(), area.width, area.height, summary);
     // the keys move by the columns drawn, and the selected row stays in view
@@ -434,10 +499,355 @@ fn render_grid(frame: &mut Frame, area: Rect, screen: &mut Screen, now: Instant)
             let Some(metric) = metrics.get(position) else {
                 break;
             };
-            render_cell(frame, *cell, screen, *metric, position == selected, false, now);
+            render_cell(frame, *cell, screen, *metric, position == selected, false, compact, now);
         }
     }
     (grid, screen.first_row)
+}
+
+/// The cluster's figures the home tab's line of totals gives, summed over the current members
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HomeTotals {
+    /// Queries answered per second, of every kind
+    pub queries: f64,
+    /// Gets and exists answered per second
+    pub reads: f64,
+    /// Inserts, updates and deletes answered per second
+    pub writes: f64,
+    /// Failures answered per second
+    pub errors: f64,
+    /// Answer bytes of gets and exists per second
+    pub read_bytes: f64,
+    /// Write intent bytes per second, once per row through its leader
+    pub write_bytes: f64,
+    /// The slowest member's 99th percentile, in milliseconds, if any member timed enough
+    pub p99: Option<f64>,
+    /// The members' resident memory together
+    pub resident: u64,
+    /// The rows the members hold in memory together
+    pub rows: u64,
+    /// The members' eviction budgets together
+    pub budget: u64,
+    /// The current members with no query figures at all, which run a build from before F65
+    pub older: Vec<String>,
+}
+
+/// Sum the current members' figures into the home tab's totals
+///
+/// # Arguments
+///
+/// * `model` - The answer shown
+#[must_use]
+pub fn home_totals(model: &StatsModel) -> HomeTotals {
+    let mut totals = HomeTotals::default();
+    for member in &model.view.members {
+        // a stale member's rates are not current, so they are not summed
+        let Some(stats) = live(member) else {
+            continue;
+        };
+        let queries = &stats.queries;
+        // a member with no query figures at all runs a build that has none
+        if queries.is_empty() {
+            totals.older.push(model.label(&member.node));
+        }
+        totals.queries += all_answers(queries);
+        totals.reads += queries.rate_of(&READ_OPS);
+        totals.writes += queries.rate_of(&WRITE_OPS);
+        totals.errors += queries.rate_of(&["error"]);
+        totals.read_bytes += queries.bytes_out_of(&READ_OPS);
+        totals.write_bytes += row_bytes(&stats.total.led);
+        // the slowest member's tail is the cluster's
+        totals.p99 = match (totals.p99, queries.p99_ms) {
+            (Some(worst), Some(p99)) => Some(worst.max(p99)),
+            (worst, p99) => worst.or(p99),
+        };
+        totals.resident = totals.resident.saturating_add(stats.resident_bytes);
+        totals.rows = totals.rows.saturating_add(stats.memory_bytes);
+        totals.budget = totals.budget.saturating_add(stats.memory_budget);
+    }
+    totals.older.sort();
+    totals
+}
+
+/// The home tab's line of totals, and a note on the members that report no query figures
+///
+/// # Arguments
+///
+/// * `screen` - The screen
+fn totals_lines(screen: &Screen) -> Vec<Line<'static>> {
+    // nothing read yet has nothing to sum; the header says it is waiting
+    let Some(model) = &screen.latest else {
+        return Vec::new();
+    };
+    let totals = home_totals(model);
+    // each figure named in grey, its value in bold
+    let value = heading_style();
+    let mut spans = Vec::with_capacity(20);
+    let mut figure = |name: &str, text: String, style: Style| {
+        if !spans.is_empty() {
+            spans.push(Span::raw("   "));
+        }
+        spans.push(Span::styled(format!("{name} "), dim_style()));
+        spans.push(Span::styled(text, style));
+    };
+    figure("queries", format!("{}/s", rate(totals.queries)), value);
+    figure("reads", format!("{}/s", rate(totals.reads)), value);
+    figure("writes", format!("{}/s", rate(totals.writes)), value);
+    // a failure is worth seeing at a glance
+    let errors = if totals.errors > 0.0 {
+        value.fg(Color::Red)
+    } else {
+        value
+    };
+    figure("errors", format!("{}/s", rate(totals.errors)), errors);
+    figure("read", byte_rate(totals.read_bytes), value);
+    figure("write", byte_rate(totals.write_bytes), value);
+    figure(
+        "p99",
+        totals
+            .p99
+            .map_or("-".to_string(), |p99| Unit::Millis.format(p99)),
+        value,
+    );
+    figure("resident", bytes(totals.resident), value);
+    figure(
+        "rows",
+        format!("{} of {}", bytes(totals.rows), bytes(totals.budget)),
+        value,
+    );
+    let mut lines = vec![Line::from(spans)];
+    // a member on an older build has no figures to sum, which the totals do not show
+    if !totals.older.is_empty() {
+        lines.push(Line::styled(
+            format!(
+                "no query figures from {}: a build from before F65",
+                totals.older.join(", ")
+            ),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    lines
+}
+
+/// A member's figures as the home tab's table writes them, after its name, in the order of
+/// [`HOME_COLUMNS`]
+///
+/// # Arguments
+///
+/// * `stats` - Its figures, if they are current
+fn member_cells(stats: Option<&NodeStats>) -> Vec<String> {
+    // a stale member's figures, or an older build's missing ones, are dashes
+    let Some(stats) = stats else {
+        return vec!["-".to_string(); HOME_COLUMNS.len() - 1];
+    };
+    let queries = &stats.queries;
+    let known = !queries.is_empty();
+    let per_sec = |ops: &[&str]| {
+        if known {
+            rate(queries.rate_of(ops))
+        } else {
+            "-".to_string()
+        }
+    };
+    let millis = |millis: Option<f64>| millis.map_or("-".to_string(), |ms| format!("{ms:.2}"));
+    vec![
+        per_sec(&["get"]),
+        per_sec(&["insert"]),
+        per_sec(&["update"]),
+        per_sec(&["delete"]),
+        per_sec(&["exists"]),
+        per_sec(&["error"]),
+        if known {
+            byte_rate(queries.bytes_out_of(&READ_OPS))
+        } else {
+            "-".to_string()
+        },
+        byte_rate(row_bytes(&stats.total.led)),
+        millis(queries.p50_ms),
+        millis(queries.p99_ms),
+        format!(
+            "{}/{}",
+            bytes(stats.memory_bytes),
+            bytes(stats.memory_budget)
+        ),
+        bytes(stats.resident_bytes),
+    ]
+}
+
+/// The home tab's cluster figures: every current member's summed, and the slowest waits, after
+/// the row's name, in the order of [`HOME_COLUMNS`]
+///
+/// # Arguments
+///
+/// * `model` - The answer shown
+fn cluster_cells(model: &StatsModel) -> Vec<String> {
+    let current: Vec<&NodeStats> = model.view.members.iter().filter_map(live).collect();
+    // each kind's answers summed over the members
+    let per_sec = |ops: &[&str]| {
+        rate(
+            current
+                .iter()
+                .fold(0.0, |sum, stats| sum + stats.queries.rate_of(ops)),
+        )
+    };
+    // the slowest member's wait
+    let slowest = |pick: fn(&NodeStats) -> Option<f64>| {
+        current
+            .iter()
+            .filter_map(|stats| pick(stats))
+            .reduce(f64::max)
+            .map_or("-".to_string(), |ms| format!("{ms:.2}"))
+    };
+    let totals = home_totals(model);
+    vec![
+        per_sec(&["get"]),
+        per_sec(&["insert"]),
+        per_sec(&["update"]),
+        per_sec(&["delete"]),
+        per_sec(&["exists"]),
+        per_sec(&["error"]),
+        byte_rate(totals.read_bytes),
+        byte_rate(totals.write_bytes),
+        slowest(|stats| stats.queries.p50_ms),
+        slowest(|stats| stats.queries.p99_ms),
+        format!("{}/{}", bytes(totals.rows), bytes(totals.budget)),
+        bytes(totals.resident),
+    ]
+}
+
+/// Which of the home tab's columns fit a width, the least needed ones left out first
+///
+/// Each column has the width its widest figure needs and a rank: the name, the gets, the
+/// speeds, the p99 and the resident memory go last, exists and deletes first.
+///
+/// # Arguments
+///
+/// * `name` - How wide the name column is
+/// * `width` - The width the table has
+#[must_use]
+pub fn home_columns(name: u16, width: u16) -> Vec<(usize, u16)> {
+    // each column's width and how late it is left out, in the order of the header
+    const FIGURES: [(u16, u8); 12] = [
+        (7, 9),  // get/s
+        (7, 7),  // ins/s
+        (7, 6),  // upd/s
+        (7, 2),  // del/s
+        (7, 1),  // ex/s
+        (7, 7),  // err/s
+        (11, 9), // read/s
+        (11, 9), // write/s
+        (8, 5),  // p50
+        (8, 8),  // p99
+        (17, 3), // rows/budget
+        (9, 8),  // resident
+    ];
+    let mut shown: Vec<(usize, u16)> = std::iter::once((0, name))
+        .chain(
+            FIGURES
+                .iter()
+                .enumerate()
+                .map(|(index, (width, _))| (index + 1, *width)),
+        )
+        .collect();
+    // the columns and the one space between each pair
+    let needed = |shown: &[(usize, u16)]| -> u16 {
+        let widths: u16 = shown.iter().map(|(_, width)| *width).sum();
+        widths + u16::try_from(shown.len().saturating_sub(1)).unwrap_or(u16::MAX)
+    };
+    // leave out the least needed column until the rest fit, never the name
+    while needed(&shown) > width && shown.len() > 1 {
+        let Some(least) = shown
+            .iter()
+            .enumerate()
+            .skip(1)
+            .min_by_key(|(_, (column, _))| FIGURES[column - 1].1)
+            .map(|(position, _)| position)
+        else {
+            break;
+        };
+        shown.remove(least);
+    }
+    shown
+}
+
+/// Draw the home tab's table: a row per member by name, and the cluster's under them, with as
+/// many columns as the width holds
+///
+/// # Arguments
+///
+/// * `frame` - The frame
+/// * `area` - Where to draw
+/// * `model` - The answer shown
+fn render_members(frame: &mut Frame, area: Rect, model: &StatsModel) {
+    let colors = colors(Some(model));
+    // the name column fits the longest name, and the figures that fit beside it are shown
+    let name = model
+        .labels
+        .values()
+        .map(|label| label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("cluster".len());
+    let columns = home_columns(u16::try_from(name).unwrap_or(u16::MAX), area.width);
+    // a row of cells, the name first and then the shown figures
+    let row = |name: Span<'static>, cells: Vec<String>| {
+        Row::new(columns.iter().map(|(column, _)| match column {
+            0 => Cell::from(name.clone()),
+            column => Cell::from(cells[column - 1].clone()),
+        }))
+    };
+    // by name, the way the summaries list them
+    let mut members: Vec<_> = model.view.members.iter().collect();
+    members.sort_by_key(|member| model.label(&member.node));
+    let mut rows: Vec<Row> = members
+        .into_iter()
+        .map(|member| {
+            let color = colors.get(&member.node).copied().unwrap_or(Color::Gray);
+            let name = Span::styled(model.label(&member.node), Style::default().fg(color));
+            row(name, member_cells(live(member)))
+        })
+        .collect();
+    rows.push(row(Span::raw("cluster"), cluster_cells(model)).style(heading_style()));
+    let widths = columns.iter().map(|(_, width)| Constraint::Length(*width));
+    let header = Row::new(columns.iter().map(|(column, _)| HOME_COLUMNS[*column])).style(dim_style());
+    frame.render_widget(Table::new(rows, widths).header(header), area);
+}
+
+/// Draw the home tab: the cluster's totals, six charts with a line of legend each, and a table
+/// of every member's figures, and return the grid and its first row drawn
+///
+/// # Arguments
+///
+/// * `frame` - The frame
+/// * `area` - Where to draw
+/// * `screen` - The screen, which the grid's columns and scroll are written to
+/// * `now` - The time now
+fn render_home(frame: &mut Frame, area: Rect, screen: &mut Screen, now: Instant) -> (Grid, usize) {
+    // the totals take as many lines as they wrap to
+    let totals = totals_lines(screen);
+    let width = usize::from(area.width.max(1));
+    let strip: usize = totals
+        .iter()
+        .map(|line| line.width().div_ceil(width).max(1))
+        .sum();
+    // the table a row per member, its header and the cluster's row, once there is an answer
+    let table = screen
+        .latest
+        .as_ref()
+        .map_or(0, |model| model.view.members.len() + 2);
+    let [top, charts, bottom] = Layout::vertical([
+        Constraint::Length(u16::try_from(strip).unwrap_or(u16::MAX)),
+        Constraint::Min(6),
+        Constraint::Length(u16::try_from(table).unwrap_or(u16::MAX)),
+    ])
+    .areas(area);
+    frame.render_widget(Paragraph::new(totals).wrap(Wrap { trim: true }), top);
+    // the charts as any tab's grid, each with a line of legend rather than its summary
+    let shown = render_grid(frame, charts, screen, true, now);
+    if let Some(model) = &screen.latest {
+        render_members(frame, bottom, model);
+    }
+    shown
 }
 
 /// Draw one metric's chart with its summary under it, in a border naming it
@@ -450,7 +860,9 @@ fn render_grid(frame: &mut Frame, area: Rect, screen: &mut Screen, now: Instant)
 /// * `metric` - The metric's index into [`METRICS`]
 /// * `selected` - Whether it is the selected chart
 /// * `full` - Whether it fills the body
+/// * `compact` - Whether a line of legend goes under it rather than its summary
 /// * `now` - The time now
+#[allow(clippy::too_many_arguments)]
 fn render_cell(
     frame: &mut Frame,
     area: Rect,
@@ -458,6 +870,7 @@ fn render_cell(
     metric: usize,
     selected: bool,
     full: bool,
+    compact: bool,
     now: Instant,
 ) {
     let name = METRICS[metric].name;
@@ -482,11 +895,42 @@ fn render_cell(
     frame.render_widget(block, area);
     // the chart over its summary, which keeps its rows whatever the chart is left
     let rows = summary_rows(screen, metric, now);
-    let height = u16::try_from(rows.len() + 1).unwrap_or(u16::MAX);
+    let height = if compact {
+        LEGEND_LINES
+    } else {
+        rows.len() + 1
+    };
+    let height = u16::try_from(height).unwrap_or(u16::MAX);
     let [chart, summary] =
         Layout::vertical([Constraint::Min(2), Constraint::Length(height)]).areas(inner);
     render_chart(frame, chart, screen, metric, now);
-    render_summary(frame, summary, METRICS[metric].unit, rows);
+    if compact {
+        render_legend(frame, summary, METRICS[metric].unit, &rows);
+    } else {
+        render_summary(frame, summary, METRICS[metric].unit, rows);
+    }
+}
+
+/// Draw a chart's legend: each line's name in its color and its newest value, wrapped
+///
+/// # Arguments
+///
+/// * `frame` - The frame
+/// * `area` - Where to draw
+/// * `unit` - How the metric's values are written
+/// * `rows` - The chart's summary rows
+fn render_legend(frame: &mut Frame, area: Rect, unit: Unit, rows: &[SummaryRow]) {
+    // a name and a figure per line, a gap between them
+    let mut spans = Vec::with_capacity(rows.len() * 3);
+    for row in rows {
+        if !spans.is_empty() {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(row.name.clone(), Style::default().fg(row.color)));
+        let figure = row.now.map_or("-".to_string(), |value| unit.format(value));
+        spans.push(Span::raw(format!(" {figure}")));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)).wrap(Wrap { trim: true }), area);
 }
 
 /// Draw a metric's lines over the window
@@ -608,13 +1052,25 @@ pub fn summary_rows(screen: &Screen, metric: usize, now: Instant) -> Vec<Summary
             (low, mean, high)
         })
     };
+    // a figure that is not a number, such as a wait nobody timed, is not known
+    let known = |value: f64| Some(value).filter(|value| value.is_finite());
     match METRICS[metric].read {
         Reader::Cluster(read) => vec![SummaryRow {
             name: "cluster".to_string(),
             color: Color::White,
-            now: Some(read(&model.view)),
+            now: known(read(&model.view)),
             range: range(Series::Cluster),
         }],
+        // a row per kind, in the order the kinds are listed
+        Reader::Kinds(read) => read(&model.view)
+            .into_iter()
+            .map(|(kind, value)| SummaryRow {
+                name: kind.to_string(),
+                color: kind_color(kind),
+                now: known(value),
+                range: range(Series::Kind(kind)),
+            })
+            .collect(),
         Reader::Member(read) => {
             let colors = colors(Some(model));
             let mut rows: Vec<SummaryRow> = model
@@ -624,7 +1080,7 @@ pub fn summary_rows(screen: &Screen, metric: usize, now: Instant) -> Vec<Summary
                 .map(|member| SummaryRow {
                     name: model.label(&member.node),
                     color: colors.get(&member.node).copied().unwrap_or(Color::Gray),
-                    now: live(member).map(read),
+                    now: live(member).map(read).and_then(known),
                     range: range(Series::Member(member.node)),
                 })
                 .collect();
@@ -784,6 +1240,13 @@ pub fn help_lines(width: usize, every: Duration) -> Vec<Line<'static>> {
     )));
     lines.push(Line::default());
     lines.extend(para(
+        "The home tab, which the view opens on, gives the cluster's totals on one line, six \
+         charts each with a line of legend giving every line's newest value, and a table of \
+         every member's answers by kind, read and write speed, waits and memory. Queries are \
+         counted by the member their client connected to, once each.",
+    ));
+    lines.push(Line::default());
+    lines.extend(para(
         "Rates are drawn from their ten second windows. The view keeps its own history of what \
          it read, for half an hour, and forgets it when it exits. A member whose figures are \
          stale adds no points, so a line that stops is a member that stopped reporting.",
@@ -813,7 +1276,7 @@ pub fn help_lines(width: usize, every: Duration) -> Vec<Line<'static>> {
     lines.push(Line::default());
     lines.extend(heading("Keys"));
     for (keys, what) in [
-        ("tab, shift-tab, 1-6", "show the next, the previous or a numbered group"),
+        ("tab, shift-tab, 1-8", "show the next, the previous or a numbered tab; 1 is home"),
         ("← ↑ ↓ → or h k j l", "select a chart; with one chart shown, show the previous or next"),
         ("space f", "show the selected chart on its own, and the grid again"),
         ("[ ] or - +", "show a shorter or a longer window: 1m, 5m, 15m, 30m"),
@@ -941,7 +1404,7 @@ mod tests {
         let now = start + Duration::from_secs(2);
         screen.observe(Ok(answer(3000, 300.0)), now);
         let press = |screen: &mut Screen, code: KeyCode| screen.handle_key(KeyEvent::from(code), now);
-        press(&mut screen, KeyCode::Char('2'));
+        press(&mut screen, KeyCode::Char('4'));
         let mut terminal = Terminal::new(TestBackend::new(160, 44)).expect("a terminal");
         terminal
             .draw(|frame| render(frame, &mut screen, now))
@@ -951,7 +1414,7 @@ mod tests {
         assert!(drawn.contains("shoaladm stats · lab · from hyperion (leader) · version 31"), "{drawn}");
         assert!(drawn.contains("europa down 14s!   hyperion up   titan up"), "{drawn}");
         // the tabs, the window beside them, and every chart of the writes tab by name
-        assert!(drawn.contains("1 cluster   2 writes   3 streams"), "{drawn}");
+        assert!(drawn.contains("1 home   2 queries   3 cluster   4 writes   5 streams"), "{drawn}");
         assert!(drawn.contains("last 5m"), "{drawn}");
         for metric in screen.tab_metrics() {
             assert!(drawn.contains(METRICS[metric].name), "{} is not drawn: {drawn}", METRICS[metric].name);
@@ -1010,6 +1473,154 @@ mod tests {
         assert!(page.contains("inserts/s (per second)"), "{page}");
         // and no line is wider than the page
         assert!(help_lines(60, screen.every).iter().all(|line| line.width() <= 60));
+    }
+
+    /// An answer for the home tab: hyperion answering gets, inserts and a few failures with its
+    /// waits timed, titan on a build with no query figures, and europa down and stale
+    ///
+    /// # Arguments
+    ///
+    /// * `at_ms` - When the live members derived their figures
+    fn home_answer(at_ms: u64) -> StatsModel {
+        let a = "aaaaaaaa-1111-1111-1111-111111111111";
+        let b = "bbbbbbbb-2222-2222-2222-222222222222";
+        let c = "cccccccc-3333-3333-3333-333333333333";
+        let gib = 1024u64 * 1024 * 1024;
+        let view = shoal::serde_json::from_value(json!({
+            "source": "leader", "answered_by": a, "leader": a, "version": 40,
+            "members": [
+                { "node": a, "state": "up", "report_age_ms": 500, "stats": {
+                    "node": a, "at_ms": at_ms, "hostname": "hyperion",
+                    "total": { "led": { "insert_bytes": { "r10s": 10240.0 } } },
+                    "memory_bytes": gib, "memory_budget": 4 * gib, "resident_bytes": 2 * gib,
+                    "queries": {
+                        "sampled_every": 1, "p50_ms": 0.4, "p99_ms": 3.5,
+                        "bytes_in": { "r10s": 4096.0 },
+                        "ops": [
+                            { "op": "get", "rate": { "r10s": 300.0 },
+                              "bytes_out": { "r10s": 30720.0 }, "p50_ms": 0.3, "p99_ms": 2.0 },
+                            { "op": "insert", "rate": { "r10s": 100.0 },
+                              "p50_ms": 1.0, "p99_ms": 3.5 },
+                            { "op": "error", "rate": { "r10s": 2.0 } }
+                        ]
+                    }
+                } },
+                { "node": b, "state": "up", "report_age_ms": 500, "stats": {
+                    "node": b, "at_ms": at_ms, "hostname": "titan",
+                    "memory_bytes": gib, "memory_budget": 4 * gib, "resident_bytes": gib
+                } },
+                { "node": c, "state": "down", "stale": true, "report_age_ms": 14000, "stats": {
+                    "node": c, "at_ms": 1, "hostname": "europa"
+                } }
+            ]
+        }))
+        .expect("an answer decodes");
+        StatsModel::new(view, None)
+    }
+
+    /// The home tab sums the current members into one line of totals, charts six figures with a
+    /// line of legend each, lists every member's answers by kind, speeds, waits and memory with
+    /// the cluster's under them, names a member on an older build, and space f shows one of its
+    /// charts with the full summary
+    #[test]
+    fn the_view_draws_the_home_tab() {
+        let start = Instant::now();
+        let mut screen = Screen::new("lab", Duration::from_secs(2));
+        screen.observe(Ok(home_answer(1000)), start);
+        let now = start + Duration::from_secs(2);
+        screen.observe(Ok(home_answer(3000)), now);
+        // the totals: only the current members, the stale one's figures left out
+        let totals = home_totals(screen.latest.as_ref().expect("an answer"));
+        assert!((totals.queries - 402.0).abs() < 1e-9, "{totals:?}");
+        assert!((totals.reads - 300.0).abs() < 1e-9);
+        assert!((totals.writes - 100.0).abs() < 1e-9);
+        assert!((totals.errors - 2.0).abs() < 1e-9);
+        assert!((totals.read_bytes - 30720.0).abs() < 1e-9);
+        assert!((totals.write_bytes - 10240.0).abs() < 1e-9);
+        assert_eq!(totals.p99, Some(3.5));
+        assert_eq!(totals.resident, 3 * 1024 * 1024 * 1024);
+        assert_eq!(totals.older, vec!["titan".to_string()]);
+        // the home tab is what the view opens on
+        let mut terminal = Terminal::new(TestBackend::new(160, 44)).expect("a terminal");
+        terminal
+            .draw(|frame| render(frame, &mut screen, now))
+            .expect("the home tab draws");
+        let drawn = text(&terminal);
+        assert!(drawn.contains("1 home   2 queries   3 cluster"), "{drawn}");
+        // the line of totals, and the member with no query figures named under it
+        assert!(drawn.contains("queries 402/s   reads 300/s   writes 100/s   errors 2.0/s"), "{drawn}");
+        assert!(drawn.contains("read 30.0KiB/s   write 10.0KiB/s   p99 3.50ms"), "{drawn}");
+        assert!(drawn.contains("rows 2.0GiB of 8.0GiB"), "{drawn}");
+        assert!(drawn.contains("no query figures from titan: a build from before F65"), "{drawn}");
+        // the six charts, each with a line of legend giving its lines' newest values
+        for key in crate::cluster::stats::metrics::HOME {
+            let index = crate::cluster::stats::metrics::index_of(key).expect("a home metric");
+            assert!(drawn.contains(METRICS[index].name), "{key} is not drawn: {drawn}");
+        }
+        assert!(drawn.contains("get 300"), "{drawn}");
+        assert!(drawn.contains("insert 100"), "{drawn}");
+        assert_eq!(screen.columns, 3);
+        // the table: every member by name, a dash for what is not known, and the cluster's row
+        assert!(drawn.contains("get/s   ins/s   upd/s   del/s   ex/s    err/s"), "{drawn}");
+        assert!(drawn.contains("rows/budget"), "{drawn}");
+        let row = |name: &str| {
+            drawn
+                .lines()
+                .find(|line| line.trim_start().starts_with(name) && line.contains('/'))
+                .unwrap_or_else(|| panic!("no row for {name}: {drawn}"))
+                .split_whitespace()
+                .collect::<Vec<_>>()
+        };
+        let hyperion = row("hyperion");
+        assert_eq!(&hyperion[1..7], ["300", "100", "0", "0", "0", "2.0"], "{hyperion:?}");
+        assert_eq!(&hyperion[7..11], ["30.0KiB/s", "10.0KiB/s", "0.40", "3.50"], "{hyperion:?}");
+        assert_eq!(&hyperion[11..], ["1.0GiB/4.0GiB", "2.0GiB"], "{hyperion:?}");
+        let titan = row("titan");
+        assert_eq!(&titan[1..8], ["-", "-", "-", "-", "-", "-", "-"], "{titan:?}");
+        assert_eq!(titan[8], "0B/s", "{titan:?}");
+        let cluster = row("cluster");
+        assert_eq!(&cluster[1..3], ["300", "100"], "{cluster:?}");
+        assert_eq!(&cluster[9..11], ["0.40", "3.50"], "{cluster:?}");
+        // space f shows the selected chart with its full summary, a row per kind
+        let press = |screen: &mut Screen, code: KeyCode| screen.handle_key(KeyEvent::from(code), now);
+        press(&mut screen, KeyCode::Char(' '));
+        press(&mut screen, KeyCode::Char('f'));
+        terminal.draw(|frame| render(frame, &mut screen, now)).expect("one chart draws");
+        let full = text(&terminal);
+        assert!(full.contains("ops/s by kind · last 5m · space f back"), "{full}");
+        let ops = crate::cluster::stats::metrics::index_of("ops_by_kind").expect("the kinds metric");
+        let kinds: Vec<String> = summary_rows(&screen, ops, now).into_iter().map(|row| row.name).collect();
+        assert_eq!(kinds, ["get", "exists", "insert", "update", "delete", "error"]);
+        assert!(full.contains("exists"), "{full}");
+        // and a wait nobody timed is not known rather than a number
+        let p99 = crate::cluster::stats::metrics::index_of("p99").expect("p99");
+        let waits = summary_rows(&screen, p99, now);
+        assert_eq!(waits.iter().find(|row| row.name == "titan").and_then(|row| row.now), None);
+        // a short, narrow terminal still draws it, scrolling the charts
+        press(&mut screen, KeyCode::Esc);
+        let mut small = Terminal::new(TestBackend::new(100, 30)).expect("a terminal");
+        small.draw(|frame| render(frame, &mut screen, now)).expect("a small home tab draws");
+        let drawn = text(&small);
+        assert!(drawn.contains("rows 1-"), "{drawn}");
+        // its table leaves out the least needed columns rather than cutting a name short
+        let header = drawn
+            .lines()
+            .find(|line| line.trim_start().starts_with("member"))
+            .unwrap_or_else(|| panic!("no table header: {drawn}"));
+        assert!(header.contains("resident") && header.contains("p99"), "{header}");
+        assert!(!header.contains("ex/s") && !header.contains("rows/budget"), "{header}");
+        assert!(drawn.lines().any(|line| line.starts_with("hyperion ")), "{drawn}");
+        // every column fits a wide table, the least needed go first, and the name never does
+        assert_eq!(home_columns(8, 160).len(), HOME_COLUMNS.len());
+        let narrow: Vec<&str> = home_columns(8, 100)
+            .iter()
+            .map(|(column, _)| HOME_COLUMNS[*column])
+            .collect();
+        assert_eq!(
+            narrow,
+            ["member", "get/s", "ins/s", "upd/s", "err/s", "read/s", "write/s", "p50", "p99", "resident"]
+        );
+        assert_eq!(home_columns(8, 4), vec![(0, 8)]);
     }
 
     /// A tab's charts take as many columns as fit and no more than a square needs, and a grid

@@ -1,8 +1,10 @@
 //! What the stats view shows, and what each key does to it
 //!
-//! The view has a tab per metric group, and each tab draws every metric of its group as a chart
-//! of its own. The arrows select a chart, space then `f` shows the selected one full screen, and
-//! Esc brings the grid back ([F64](../../../../docs/src/features/stats-tui.md)).
+//! The view opens on a home tab of the figures an operator reads first
+//! ([F65](../../../../docs/src/features/query-figures-home-tab.md)), then has a tab per metric
+//! group, and each tab draws every metric of its group as a chart of its own. The arrows select
+//! a chart, space then `f` shows the selected one full screen, and Esc brings the grid back
+//! ([F64](../../../../docs/src/features/stats-tui.md)).
 //!
 //! Nothing here draws: [`super::view`] draws a [`Screen`], so every key and every sample can be
 //! tested without a terminal. The grid's shape depends on the terminal, so the view writes the
@@ -13,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use super::StatsModel;
 use super::history::History;
-use super::metrics::{GROUPS, METRICS, Metric, in_group};
+use super::metrics::{GROUPS, HOME, METRICS, Metric, in_group, index_of};
 
 /// The windows a chart can show, shortest first
 pub const WINDOWS: [Duration; 4] = [
@@ -28,6 +30,22 @@ pub const DEFAULT_WINDOW: usize = 1;
 
 /// How many lines a page key scrolls the help page by
 const HELP_PAGE: u16 = 10;
+
+/// How many tabs there are: the home tab, then one per metric group
+pub const TABS: usize = GROUPS.len() + 1;
+
+/// A tab's name as its label says it
+///
+/// # Arguments
+///
+/// * `tab` - The tab: zero is home, and the rest are [`GROUPS`] in order
+#[must_use]
+pub fn tab_name(tab: usize) -> &'static str {
+    match tab {
+        0 => "home",
+        tab => GROUPS[(tab - 1).min(GROUPS.len() - 1)].0,
+    }
+}
 
 /// What the loop should do after a key
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,10 +69,10 @@ pub struct Screen {
     pub error: Option<String>,
     /// Every sample taken
     pub history: History,
-    /// The tab shown, as an index into [`GROUPS`]
+    /// The tab shown: zero is home, and the rest are [`GROUPS`] in order
     pub tab: usize,
-    /// Each tab's selected chart, as a position among its group's metrics
-    pub selected: [usize; GROUPS.len()],
+    /// Each tab's selected chart, as a position among its metrics
+    pub selected: [usize; TABS],
     /// How many charts a row of the grid holds, as the last frame drew it
     pub columns: usize,
     /// The first row of the grid the last frame drew, when the grid does not fit
@@ -72,7 +90,7 @@ pub struct Screen {
 }
 
 impl Screen {
-    /// A screen with nothing read yet, on the first tab
+    /// A screen with nothing read yet, on the home tab
     ///
     /// # Arguments
     ///
@@ -87,7 +105,7 @@ impl Screen {
             error: None,
             history: History::default(),
             tab: 0,
-            selected: [0; GROUPS.len()],
+            selected: [0; TABS],
             columns: 1,
             first_row: 0,
             fullscreen: false,
@@ -123,10 +141,20 @@ impl Screen {
         }
     }
 
+    /// Whether the home tab is shown
+    #[must_use]
+    pub fn is_home(&self) -> bool {
+        self.tab == 0
+    }
+
     /// The indexes into [`METRICS`] of the tab's metrics, in the order the grid draws them
     #[must_use]
     pub fn tab_metrics(&self) -> Vec<usize> {
-        in_group(GROUPS[self.tab.min(GROUPS.len() - 1)].0)
+        match self.tab {
+            // the home tab's are named by key, from several groups
+            0 => HOME.iter().filter_map(|key| index_of(key)).collect(),
+            tab => in_group(tab_name(tab)),
+        }
     }
 
     /// The selected chart's position among the tab's metrics
@@ -168,9 +196,9 @@ impl Screen {
     ///
     /// # Arguments
     ///
-    /// * `tab` - The tab, as an index into [`GROUPS`]
+    /// * `tab` - The tab: zero is home, and the rest are [`GROUPS`] in order
     fn show_tab(&mut self, tab: usize) {
-        self.tab = tab % GROUPS.len();
+        self.tab = tab % TABS;
         self.first_row = 0;
     }
 
@@ -248,10 +276,10 @@ impl Screen {
             KeyCode::Char(' ') => self.leader = true,
             // the tabs wrap both ways, and a number jumps to one
             KeyCode::Tab => self.show_tab(self.tab + 1),
-            KeyCode::BackTab => self.show_tab(self.tab + GROUPS.len() - 1),
+            KeyCode::BackTab => self.show_tab(self.tab + TABS - 1),
             KeyCode::Char(digit @ '1'..='9') => {
                 let tab = digit as usize - '1' as usize;
-                if tab < GROUPS.len() {
+                if tab < TABS {
                     self.show_tab(tab);
                 }
             }
@@ -321,19 +349,28 @@ mod tests {
         let now = Instant::now();
         let mut screen = Screen::new("lab", Duration::from_secs(2));
         let press = |screen: &mut Screen, code: KeyCode| screen.handle_key(key(code), now);
+        // the view opens on the home tab and its six charts
+        assert!(screen.is_home());
+        assert_eq!(tab_name(screen.tab), "home");
+        let home: Vec<&str> = screen.tab_metrics().iter().map(|index| METRICS[*index].key).collect();
+        assert_eq!(home, HOME);
         // the tabs wrap both ways, and a number jumps to one while one past the last is ignored
         press(&mut screen, KeyCode::Tab);
         assert_eq!(screen.tab, 1);
+        assert_eq!(tab_name(screen.tab), "queries");
         press(&mut screen, KeyCode::BackTab);
         press(&mut screen, KeyCode::BackTab);
-        assert_eq!(screen.tab, GROUPS.len() - 1);
+        assert_eq!(screen.tab, TABS - 1);
+        assert_eq!(tab_name(screen.tab), "storage");
         press(&mut screen, KeyCode::Char('3'));
         assert_eq!(screen.tab, 2);
         press(&mut screen, KeyCode::Char('9'));
         assert_eq!(screen.tab, 2);
+        press(&mut screen, KeyCode::Char('1'));
+        assert!(screen.is_home());
         // the writes tab's seven charts in rows of three
-        press(&mut screen, KeyCode::Char('2'));
-        assert_eq!(GROUPS[screen.tab].0, "writes");
+        press(&mut screen, KeyCode::Char('4'));
+        assert_eq!(tab_name(screen.tab), "writes");
         assert_eq!(screen.tab_metrics().len(), 7);
         screen.columns = 3;
         // along the row, then down a row
@@ -384,7 +421,7 @@ mod tests {
         let now = Instant::now();
         let mut screen = Screen::new("lab", Duration::from_secs(2));
         let press = |screen: &mut Screen, code: KeyCode| screen.handle_key(key(code), now);
-        press(&mut screen, KeyCode::Char('2'));
+        press(&mut screen, KeyCode::Char('4'));
         // space then another key is only a cancelled shortcut
         press(&mut screen, KeyCode::Char(' '));
         assert!(screen.leader);

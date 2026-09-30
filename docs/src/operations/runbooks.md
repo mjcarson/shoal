@@ -76,6 +76,9 @@ since every step waits out `retire_after` however small it is
 ([F52](../features/cluster-stats.md)). On a terminal it charts them: the plan is at the foot,
 and the streams and placement tabs draw the new node's line climbing beside the others,
 named by its hostname; `--basic --watch` prints the tables instead ([F64](../features/stats-tui.md)).
+The home tab the view opens on shows whether the clients feel the move: queries, errors and
+the slowest member's p99, and each member's answers and waits in its table
+([F65](../features/query-figures-home-tab.md)).
 `shoaladm add --rebalance` prints the same line as each step moves.
 
 **Rollback.** A node nothing was placed on is stopped and its directory deleted. One a plan has
