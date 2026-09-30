@@ -262,10 +262,13 @@ pub struct QueryStats {
 }
 
 impl QueryStats {
-    /// Whether the node has answered nothing, which is what a build from before F65 sends
+    /// Whether these are no figures at all, which is what a build from before F65 sends
+    ///
+    /// A node from F65 on always names its sampling, one or more, even before any client has
+    /// sent it anything, so an idle node and an older build are told apart by this alone.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.ops.is_empty() && self.bytes_in_total == 0
+        self.sampled_every == 0 && self.ops.is_empty() && self.bytes_in_total == 0
     }
 
     /// One kind's figures, if the node has answered any of it
@@ -510,7 +513,8 @@ pub struct NodeStats {
     /// What the node answered its clients, by kind, and how long they waited
     /// ([F65](../../../../docs/src/features/query-figures-home-tab.md))
     ///
-    /// Empty from a build before F65, and left out of the frame when empty.
+    /// Empty from a build before F65, which is the only build that leaves it out of the frame:
+    /// a node from F65 on sends it even when no client has sent it anything.
     #[serde(default, skip_serializing_if = "QueryStats::is_empty")]
     pub queries: QueryStats,
 }
@@ -841,8 +845,15 @@ mod tests {
         assert_eq!(back, full);
         // a frame without a hostname, as a build from before F64 sends it, names none
         assert!(stats.hostname.is_empty());
-        // and one without query figures, as a build from before F65 sends it, has none
+        // and one without query figures, as a build from before F65 sends it, has none, where
+        // a node from F65 on that has answered nothing still names its sampling
         assert!(stats.queries.is_empty());
+        let idle = QueryStats {
+            sampled_every: 1,
+            ..QueryStats::default()
+        };
+        assert!(!idle.is_empty());
+        assert!(serde_json::to_value(&idle).expect("encodes").get("sampled_every").is_some());
         // and an empty one is left out of the frame rather than sent as an empty string
         let bare = serde_json::to_value(NodeStats::empty(node)).expect("encodes");
         assert!(bare.get("hostname").is_none(), "{bare}");
