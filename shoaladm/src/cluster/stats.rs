@@ -1,4 +1,4 @@
-//! A cluster's figures as `shoalctl cluster stats` and the cluster tab show them
+//! A cluster's figures as `shoaladm stats` and the cluster tab show them
 //!
 //! One `Stats` admin read answers every member's standing, tablets, partitions, bytes and
 //! trailing write rates, and every plan's progress ([F52](../../../docs/src/features/cluster-stats.md)).
@@ -6,15 +6,28 @@
 //! names the leader's client address, so [`leader_stats`] asks there when the node it reached
 //! is not the leader, and keeps that client for the next poll.
 //!
+//! Since [F64](../../../docs/src/features/stats-tui.md) a member is named by the hostname its
+//! figures carry, then by the name the deployment gave it, and by its id only when neither is
+//! known; a name two members share is written with each one's id beside it. `shoaladm stats`
+//! draws the figures over time in a full screen view ([`tui`]) unless asked for lines.
+//!
 //! Nothing here draws: the model renders itself to lines, so every decision is testable
 //! without a terminal.
 
+pub mod history;
+pub mod metrics;
+pub mod screen;
+pub mod tui;
+pub mod view;
+
 use shoal::Shoal;
+use shoal::shared::identity::NodeId;
 use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest};
 use shoal::shared::protocol::stats::{
     ClusterStatsView, MemberStats, NodeStats, PlanProgress, Rates, TableStats,
 };
 use shoal::shared::traits::QuerySupport;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -27,17 +40,100 @@ const HOT_GROUPS_SHOWN: usize = 10;
 /// How many finished plans the full view lists under the open ones
 const DONE_PLANS_SHOWN: usize = 3;
 
-/// A `Stats` answer, and what the client could not get
+/// The narrowest the member column is drawn, which an eight character id and its padding fit
+const MEMBER_WIDTH: usize = 12;
+
+/// The member table's columns after the member, as `--basic` heads them
+pub const MEMBER_COLUMNS: [&str; 7] = [
+    "state",
+    "age",
+    "groups/led",
+    "tablets/led",
+    "partitions/led",
+    "archived",
+    "free",
+];
+
+/// The applied rates table's columns after the member
+pub const APPLIED_COLUMNS: [&str; 5] = ["insert", "update", "delete", "bytes in", "stream out"];
+
+/// The memory table's columns after the member
+pub const MEMORY_COLUMNS: [&str; 7] = [
+    "rows",
+    "budget",
+    "archive maps",
+    "table maps",
+    "wal index",
+    "lru",
+    "resident",
+];
+
+/// The storage pipeline table's columns after the member
+pub const STORAGE_COLUMNS: [&str; 11] = [
+    "syncs/s",
+    "wal/s",
+    "sync ms",
+    "per sync",
+    "sizes <4K..>1M %",
+    "segments",
+    "compacting",
+    "apply lag",
+    "pending",
+    "shard writes/s",
+    "led by shard",
+];
+
+/// The busiest groups table's columns after the group
+pub const HOT_COLUMNS: [&str; 4] = ["table", "led by", "writes/s", "bytes/s"];
+
+/// The table summary's columns after the table
+pub const TABLE_COLUMNS: [&str; 6] = [
+    "partitions",
+    "archived",
+    "chained",
+    "insert/s",
+    "update/s",
+    "delete/s",
+];
+
+/// The cluster tab's member table's columns after the member
+pub const COMPACT_COLUMNS: [&str; 9] = [
+    "state",
+    "age",
+    "partitions/led",
+    "archived",
+    "ins/s",
+    "upd/s",
+    "del/s",
+    "in B/s",
+    "stream/s",
+];
+
+/// The words each table's first column is headed by
+pub const TABLE_TITLES: [&str; 6] = [
+    "member",
+    "applied/s",
+    "memory",
+    "storage",
+    "busiest groups",
+    "table",
+];
+
+/// A `Stats` answer, what the client could not get, and what each member is called
 #[derive(Debug, Clone, PartialEq)]
 pub struct StatsModel {
     /// The answer
     pub view: ClusterStatsView,
     /// Why the answer holds only the answering node's figures, if it does
     pub note: Option<String>,
+    /// What each member is called in every table, resolved once per answer
+    pub labels: BTreeMap<NodeId, String>,
+    /// The names the deployment gave its nodes, for a member whose figures carry no hostname
+    names: BTreeMap<NodeId, String>,
 }
 
 impl StatsModel {
-    /// A model of an answer
+    /// A model of an answer, naming each member by its hostname or its id
     ///
     /// # Arguments
     ///
@@ -45,13 +141,61 @@ impl StatsModel {
     /// * `note` - Why it holds only the answering node's figures, if it does
     #[must_use]
     pub fn new(view: ClusterStatsView, note: Option<String>) -> Self {
-        StatsModel { view, note }
+        // no deployment names yet, so a member without a hostname is named by its id
+        let names = BTreeMap::new();
+        let labels = member_labels(&view, &names);
+        StatsModel {
+            view,
+            note,
+            labels,
+            names,
+        }
     }
 
-    /// Every figure as the lines `shoaladm stats` prints
+    /// This model with the deployment's names for a member whose figures carry no hostname
+    ///
+    /// # Arguments
+    ///
+    /// * `names` - The name the deployment gave each node, by its id
+    #[must_use]
+    pub fn with_names(mut self, names: &BTreeMap<NodeId, String>) -> Self {
+        // the labels are resolved again with the names under the hostnames
+        self.names = names.clone();
+        self.labels = member_labels(&self.view, &self.names);
+        self
+    }
+
+    /// What a node is called: its label if it is a member, its deployment name, or its id
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node
+    #[must_use]
+    pub fn label(&self, node: &NodeId) -> String {
+        self.labels
+            .get(node)
+            .or_else(|| self.names.get(node))
+            .cloned()
+            .unwrap_or_else(|| short(&node.0.to_string()))
+    }
+
+    /// How wide the member column is drawn: the longest label, and never under the id's width
+    #[must_use]
+    pub fn label_width(&self) -> usize {
+        self.labels
+            .values()
+            .map(|label| label.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(MEMBER_WIDTH)
+    }
+
+    /// Every figure as the lines `shoaladm stats --basic` prints
     #[must_use]
     pub fn render_lines(&self) -> Vec<String> {
         let mut lines = self.header_lines();
+        // the member column fits the longest name, so every table lines up under it
+        let w = self.label_width();
         // the cluster as a whole, counted once per row through each copy's leader
         let total = self.view.cluster_total();
         lines.push(format!(
@@ -75,10 +219,10 @@ impl StatsModel {
         ));
         lines.push(String::new());
         // every member: its standing and what it holds
+        let c = MEMBER_COLUMNS;
         lines.push(format!(
-            "{:<12} {:<9} {:>5} {:>11} {:>13} {:>19} {:>10} {:>10}",
-            "member", "state", "age", "groups/led", "tablets/led", "partitions/led", "archived",
-            "free"
+            "{:<w$} {:<9} {:>5} {:>11} {:>13} {:>19} {:>10} {:>10}",
+            TABLE_TITLES[0], c[0], c[1], c[2], c[3], c[4], c[5], c[6]
         ));
         for member in &self.view.members {
             let stats = member.stats.as_ref();
@@ -88,8 +232,8 @@ impl StatsModel {
                 })
             };
             lines.push(format!(
-                "{:<12} {:<9} {:>5} {:>11} {:>13} {:>19} {:>10} {:>10}",
-                short(&member.node.0.to_string()),
+                "{:<w$} {:<9} {:>5} {:>11} {:>13} {:>19} {:>10} {:>10}",
+                self.label(&member.node),
                 state(member),
                 age(member),
                 pair(|t| t.groups, |t| t.groups_led),
@@ -101,13 +245,14 @@ impl StatsModel {
         }
         lines.push(String::new());
         // every member: what it applies, over every copy it hosts
+        let c = APPLIED_COLUMNS;
         lines.push(format!(
-            "{:<12} {:>22} {:>22} {:>22} {:>28} {:>28}",
-            "applied/s", "insert", "update", "delete", "bytes in", "stream out"
+            "{:<w$} {:>22} {:>22} {:>22} {:>28} {:>28}",
+            TABLE_TITLES[1], c[0], c[1], c[2], c[3], c[4]
         ));
         for member in &self.view.members {
             let Some(stats) = live(member) else {
-                lines.push(format!("{:<12} {}", short(&member.node.0.to_string()), "-"));
+                lines.push(format!("{:<w$} {}", self.label(&member.node), "-"));
                 continue;
             };
             let applied = &stats.total.applied;
@@ -115,8 +260,8 @@ impl StatsModel {
             written.absorb(&applied.update_bytes);
             written.absorb(&applied.delete_bytes);
             lines.push(format!(
-                "{:<12} {:>22} {:>22} {:>22} {:>28} {:>28}",
-                short(&member.node.0.to_string()),
+                "{:<w$} {:>22} {:>22} {:>22} {:>28} {:>28}",
+                self.label(&member.node),
                 rates(&applied.inserts),
                 rates(&applied.updates),
                 rates(&applied.deletes),
@@ -126,19 +271,20 @@ impl StatsModel {
         }
         // every member's memory: the rows against the eviction budget, and the whole process
         lines.push(String::new());
+        let c = MEMORY_COLUMNS;
         lines.push(format!(
-            "{:<12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
-            "memory", "rows", "budget", "archive maps", "table maps", "wal index", "lru", "resident"
+            "{:<w$} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
+            TABLE_TITLES[2], c[0], c[1], c[2], c[3], c[4], c[5], c[6]
         ));
         for member in &self.view.members {
             let Some(stats) = live(member) else {
-                lines.push(format!("{:<12} {}", short(&member.node.0.to_string()), "-"));
+                lines.push(format!("{:<w$} {}", self.label(&member.node), "-"));
                 continue;
             };
             // the indexes are held beside the rows, and no budget counts them
             lines.push(format!(
-                "{:<12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
-                short(&member.node.0.to_string()),
+                "{:<w$} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
+                self.label(&member.node),
                 bytes(stats.memory_bytes),
                 bytes(stats.memory_budget),
                 bytes(stats.archive_map_bytes),
@@ -152,28 +298,18 @@ impl StatsModel {
         // behind their logs and the proposals unanswered, which is what tells a slow node's
         // cause apart (O64)
         lines.push(String::new());
+        let c = STORAGE_COLUMNS;
         lines.push(format!(
-            "{:<12} {:>10} {:>12} {:>9} {:>8} {:>22} {:>9} {:>11} {:>10} {:>12} {:>18} {:>14}",
-            "storage", "syncs/s", "wal/s", "sync ms", "per sync", "sizes <4K..>1M %", "segments",
-            "compacting", "apply lag", "pending", "shard writes/s", "led by shard"
+            "{:<w$} {:>10} {:>12} {:>9} {:>8} {:>22} {:>9} {:>11} {:>10} {:>12} {:>18} {:>14}",
+            TABLE_TITLES[3], c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10]
         ));
         for member in &self.view.members {
             let Some(stats) = live(member) else {
-                lines.push(format!("{:<12} {}", short(&member.node.0.to_string()), "-"));
+                lines.push(format!("{:<w$} {}", self.label(&member.node), "-"));
                 continue;
             };
             // the busiest shard against the quietest, which a node's one busy core shows as
-            let busiest = stats.shard_writes_per_sec.iter().copied().fold(0.0, f64::max);
-            let quietest = stats
-                .shard_writes_per_sec
-                .iter()
-                .copied()
-                .fold(f64::INFINITY, f64::min);
-            let spread = if stats.shard_writes_per_sec.is_empty() {
-                "-".to_string()
-            } else {
-                format!("{}..{}", rate(quietest), rate(busiest))
-            };
+            let spread = shard_spread(stats);
             // the groups each shard leads, in shard order
             let led = stats
                 .shard_groups_led
@@ -193,8 +329,8 @@ impl StatsModel {
                     .join("/")
             };
             lines.push(format!(
-                "{:<12} {:>10} {:>12} {:>9.2} {:>8.1} {:>22} {:>9} {:>11} {:>10} {:>12} {:>18} {:>14}",
-                short(&member.node.0.to_string()),
+                "{:<w$} {:>10} {:>12} {:>9.2} {:>8.1} {:>22} {:>9} {:>11} {:>10} {:>12} {:>18} {:>14}",
+                self.label(&member.node),
                 rate(stats.wal_syncs_per_sec),
                 byte_rate(stats.wal_bytes_per_sec),
                 stats.wal_sync_ms,
@@ -215,23 +351,25 @@ impl StatsModel {
             .iter()
             .filter_map(|member| live(member).map(|stats| (member, stats)))
             .flat_map(|(member, stats)| {
+                let leader = self.label(&member.node);
                 stats
                     .hot_groups
                     .iter()
-                    .map(move |rate| (short(&member.node.0.to_string()), rate))
+                    .map(move |rate| (leader.clone(), rate))
             })
             .collect();
         if !hot.is_empty() {
             let mut hot = hot;
             hot.sort_by(|a, b| b.1.writes_per_sec.total_cmp(&a.1.writes_per_sec));
             lines.push(String::new());
+            let c = HOT_COLUMNS;
             lines.push(format!(
-                "{:<18} {:<20} {:<12} {:>12} {:>12}",
-                "busiest groups", "table", "led by", "writes/s", "bytes/s"
+                "{:<18} {:<20} {:<w$} {:>12} {:>12}",
+                TABLE_TITLES[4], c[0], c[1], c[2], c[3]
             ));
             for (leader, busy) in hot.iter().take(HOT_GROUPS_SHOWN) {
                 lines.push(format!(
-                    "{:<18} {:<20} {:<12} {:>12} {:>12}",
+                    "{:<18} {:<20} {:<w$} {:>12} {:>12}",
                     format!("{:016x}", busy.group),
                     busy.table,
                     leader,
@@ -244,9 +382,10 @@ impl StatsModel {
         let tables = self.table_totals();
         if tables.len() > 1 || self.view.table.is_some() {
             lines.push(String::new());
+            let c = TABLE_COLUMNS;
             lines.push(format!(
                 "{:<20} {:>14} {:>10} {:>9} {:>22} {:>22} {:>22}",
-                "table", "partitions", "archived", "chained", "insert/s", "update/s", "delete/s"
+                TABLE_TITLES[5], c[0], c[1], c[2], c[3], c[4], c[5]
             ));
             for table in &tables {
                 // chained is over every copy: each member writes its own chains (F61)
@@ -274,17 +413,18 @@ impl StatsModel {
         let mut lines = vec![String::new()];
         lines.extend(self.header_lines());
         // per member: its standing, its rows, and its write and stream rates over ten seconds
+        let w = self.label_width();
+        let c = COMPACT_COLUMNS;
         lines.push(format!(
-            "{:<12} {:<9} {:>5} {:>15} {:>10} {:>8} {:>8} {:>8} {:>10} {:>10}",
-            "member", "state", "age", "partitions/led", "archived", "ins/s", "upd/s", "del/s",
-            "in B/s", "stream/s"
+            "{:<w$} {:<9} {:>5} {:>15} {:>10} {:>8} {:>8} {:>8} {:>10} {:>10}",
+            TABLE_TITLES[0], c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8]
         ));
         for member in &self.view.members {
             let stats = live(member);
             let figure = |value: Option<String>| value.unwrap_or_else(|| "-".to_string());
             lines.push(format!(
-                "{:<12} {:<9} {:>5} {:>15} {:>10} {:>8} {:>8} {:>8} {:>10} {:>10}",
-                short(&member.node.0.to_string()),
+                "{:<w$} {:<9} {:>5} {:>15} {:>10} {:>8} {:>8} {:>8} {:>10} {:>10}",
+                self.label(&member.node),
                 state(member),
                 age(member),
                 figure(member.stats.as_ref().map(|stats| {
@@ -318,7 +458,7 @@ impl StatsModel {
         let view = &self.view;
         let mut line = format!(
             "stats from {} at version {}",
-            short(&view.answered_by.0.to_string()),
+            self.label(&view.answered_by),
             view.version
         );
         if let Some(table) = &view.table {
@@ -328,8 +468,8 @@ impl StatsModel {
         // a view from a follower holds its own figures only, and says where the rest are
         if !view.is_leader_view() {
             let leader = match (&view.leader, &view.leader_client) {
-                (Some(leader), Some(client)) => format!("{} at {client}", short(&leader.0.to_string())),
-                (Some(leader), None) => short(&leader.0.to_string()),
+                (Some(leader), Some(client)) => format!("{} at {client}", self.label(leader)),
+                (Some(leader), None) => self.label(leader),
                 _ => "unknown".to_string(),
             };
             lines.push(format!(
@@ -362,7 +502,8 @@ impl StatsModel {
     /// # Arguments
     ///
     /// * `done_shown` - How many finished plans to list after the open ones
-    fn plan_lines(&self, done_shown: usize) -> Vec<String> {
+    #[must_use]
+    pub fn plan_lines(&self, done_shown: usize) -> Vec<String> {
         let (open, done): (Vec<&PlanProgress>, Vec<&PlanProgress>) = self
             .view
             .plans
@@ -383,6 +524,75 @@ impl StatsModel {
         }
         lines
     }
+}
+
+/// What every member of an answer is called
+///
+/// Each member takes the hostname its figures carry, else the name the deployment gave its id,
+/// else its short id. A name two or more members share tells none of them apart, so each of
+/// those is written `name(id)` instead.
+///
+/// # Arguments
+///
+/// * `view` - The answer
+/// * `names` - The name the deployment gave each node, by its id
+#[must_use]
+pub fn member_labels(
+    view: &ClusterStatsView,
+    names: &BTreeMap<NodeId, String>,
+) -> BTreeMap<NodeId, String> {
+    // each member's own name, from the most to the least specific source
+    let mut labels: BTreeMap<NodeId, String> = view
+        .members
+        .iter()
+        .map(|member| {
+            let reported = member
+                .stats
+                .as_ref()
+                .map(|stats| stats.hostname.trim())
+                .filter(|hostname| !hostname.is_empty())
+                .map(str::to_string);
+            let deployed = names
+                .get(&member.node)
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty());
+            let label = reported
+                .or(deployed)
+                .unwrap_or_else(|| short(&member.node.0.to_string()));
+            (member.node, label)
+        })
+        .collect();
+    // how many members each name was given to
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for label in labels.values() {
+        *counts.entry(label.clone()).or_default() += 1;
+    }
+    // a shared name takes each member's id beside it, so the rows can be told apart
+    for (node, label) in &mut labels {
+        if counts.get(label.as_str()).copied().unwrap_or(0) > 1 {
+            *label = format!("{label}({})", short(&node.0.to_string()));
+        }
+    }
+    labels
+}
+
+/// A member's busiest shard's writes against its quietest's, as `quietest..busiest`
+///
+/// # Arguments
+///
+/// * `stats` - The member's figures
+fn shard_spread(stats: &NodeStats) -> String {
+    // a node that reported no shards has no spread to show
+    if stats.shard_writes_per_sec.is_empty() {
+        return "-".to_string();
+    }
+    let busiest = stats.shard_writes_per_sec.iter().copied().fold(0.0, f64::max);
+    let quietest = stats
+        .shard_writes_per_sec
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    format!("{}..{}", rate(quietest), rate(busiest))
 }
 
 /// One plan's progress as one line
@@ -445,7 +655,8 @@ pub fn plan_line(plan: &PlanProgress) -> String {
 /// # Arguments
 ///
 /// * `member` - The member
-fn live(member: &MemberStats) -> Option<&NodeStats> {
+#[must_use]
+pub fn live(member: &MemberStats) -> Option<&NodeStats> {
     member.stats.as_ref().filter(|_| !member.stale)
 }
 
@@ -454,7 +665,8 @@ fn live(member: &MemberStats) -> Option<&NodeStats> {
 /// # Arguments
 ///
 /// * `member` - The member
-fn state(member: &MemberStats) -> String {
+#[must_use]
+pub fn state(member: &MemberStats) -> String {
     if member.maintenance {
         format!("{} (m)", member.state)
     } else {
@@ -467,7 +679,8 @@ fn state(member: &MemberStats) -> String {
 /// # Arguments
 ///
 /// * `member` - The member
-fn age(member: &MemberStats) -> String {
+#[must_use]
+pub fn age(member: &MemberStats) -> String {
     match member.report_age_ms {
         Some(ms) if member.stale => format!("{}s!", ms / 1000),
         Some(ms) => format!("{:.1}s", ms as f64 / 1000.0),
@@ -480,7 +693,8 @@ fn age(member: &MemberStats) -> String {
 /// # Arguments
 ///
 /// * `id` - The id
-fn short(id: &str) -> String {
+#[must_use]
+pub fn short(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
@@ -778,6 +992,91 @@ mod tests {
         assert!(text.contains("10.0.0.9:12000"), "{text}");
         assert!(text.contains("could not be reached"), "{text}");
         assert!(text.contains("no open plans"), "{text}");
+    }
+
+    /// A frame of members, each with figures carrying the hostname given, or none
+    ///
+    /// # Arguments
+    ///
+    /// * `members` - Each member's id and the hostname its figures carry, if it has figures
+    fn named_frame(members: &[(&str, Option<&str>)]) -> ClusterStatsView {
+        let rows: Vec<shoal::serde_json::Value> = members
+            .iter()
+            .map(|(node, hostname)| match hostname {
+                Some(hostname) => json!({
+                    "node": node, "state": "up", "report_age_ms": 300,
+                    "stats": { "node": node, "hostname": hostname }
+                }),
+                None => json!({ "node": node, "state": "down" }),
+            })
+            .collect();
+        shoal::serde_json::from_value(json!({
+            "source": "leader",
+            "answered_by": members[0].0,
+            "leader": members[0].0,
+            "members": rows,
+        }))
+        .expect("a named frame decodes")
+    }
+
+    /// A member is named by its hostname, then by the deployment's name for it, then by its id;
+    /// a shared name takes the id beside it, and the tables widen without changing shape
+    #[test]
+    fn members_are_named_by_hostname_then_record_then_id() {
+        let a = "aaaaaaaa-1111-1111-1111-111111111111";
+        let b = "bbbbbbbb-2222-2222-2222-222222222222";
+        let c = "cccccccc-3333-3333-3333-333333333333";
+        let node = |id: &str| NodeId(Uuid::parse_str(id).expect("an id"));
+        // a reports its hostname, b reports nothing but the deployment named it, c is unknown
+        let view = named_frame(&[(a, Some("hyperion")), (b, None), (c, None)]);
+        let mut names = BTreeMap::new();
+        names.insert(node(b), "titan".to_string());
+        // the deployment's name for a is not used, since a names itself
+        names.insert(node(a), "not-this".to_string());
+        let model = StatsModel::new(view.clone(), None).with_names(&names);
+        assert_eq!(model.label(&node(a)), "hyperion");
+        assert_eq!(model.label(&node(b)), "titan");
+        assert_eq!(model.label(&node(c)), "cccccccc");
+        // the header names the answering node the same way
+        let lines = model.render_lines();
+        assert_eq!(lines[0], "stats from hyperion at version 0");
+        // without the deployment's names, b falls back to its id
+        let bare = StatsModel::new(view, None);
+        assert_eq!(bare.label(&node(b)), "bbbbbbbb");
+        // two members on one machine share its name, so each takes its id beside it
+        let shared = StatsModel::new(named_frame(&[(a, Some("europa")), (b, Some("europa"))]), None);
+        assert_eq!(shared.label(&node(a)), "europa(aaaaaaaa)");
+        assert_eq!(shared.label(&node(b)), "europa(bbbbbbbb)");
+        // and a record name that collides with a hostname is told apart the same way
+        let mut clash = BTreeMap::new();
+        clash.insert(node(b), "europa".to_string());
+        let mixed = StatsModel::new(named_frame(&[(a, Some("europa")), (b, None)]), None)
+            .with_names(&clash);
+        assert_eq!(mixed.label(&node(b)), "europa(bbbbbbbb)");
+        // a long name widens the member column and every row stays aligned under it
+        let long = "a-rather-long-hostname.lab";
+        let wide = StatsModel::new(named_frame(&[(a, Some(long)), (b, Some("titan"))]), None);
+        let narrow = StatsModel::new(named_frame(&[(a, Some("x")), (b, Some("y"))]), None);
+        assert_eq!(wide.label_width(), long.len());
+        assert_eq!(narrow.label_width(), MEMBER_WIDTH);
+        let wide_lines = wide.render_lines();
+        let narrow_lines = narrow.render_lines();
+        // the same lines in the same order, whatever the members are called
+        assert_eq!(wide_lines.len(), narrow_lines.len());
+        let header = wide_lines
+            .iter()
+            .find(|line| line.starts_with("member "))
+            .expect("the member table");
+        let row = wide_lines
+            .iter()
+            .find(|line| line.starts_with("titan "))
+            .expect("titan's row");
+        // the state column starts in the same place on the header and on a row
+        assert_eq!(header.find("state"), Some(long.len() + 1), "{header}");
+        assert_eq!(row.find("up"), Some(long.len() + 1), "{row}");
+        // the cluster tab's lines take the names too
+        let compact = wide.compact_lines().join("\n");
+        assert!(compact.contains(long), "{compact}");
     }
 
     /// A node is only asked for the figures when its `Members` frame says it answers them,

@@ -275,6 +275,13 @@ pub struct NodeStats {
     /// How many shards reported
     #[serde(default)]
     pub shards: u64,
+    /// The name the node's machine gives itself (`gethostname`), which is how the admin tools
+    /// name the member ([F64](../../../../docs/src/features/stats-tui.md))
+    ///
+    /// Empty from a build before F64, or when the node could not read it; a reader falls back
+    /// to another name for the member then.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hostname: String,
     /// Every table with anything to say, by name
     #[serde(default)]
     pub tables: Vec<TableStats>,
@@ -406,6 +413,7 @@ impl NodeStats {
             at_ms: 0,
             observed_ms: 0,
             shards: 0,
+            hostname: String::new(),
             tables: Vec::new(),
             total: TableStats::default(),
             stream_sent: Rates::default(),
@@ -680,9 +688,15 @@ mod tests {
         });
         full.total.partitions = 7;
         full.stream_sent.r1m = 12.5;
+        full.hostname = "hyperion".to_string();
         let json = serde_json::to_value(&full).expect("encodes");
         let back: NodeStats = serde_json::from_value(json).expect("decodes");
         assert_eq!(back, full);
+        // a frame without a hostname, as a build from before F64 sends it, names none
+        assert!(stats.hostname.is_empty());
+        // and an empty one is left out of the frame rather than sent as an empty string
+        let bare = serde_json::to_value(NodeStats::empty(node)).expect("encodes");
+        assert!(bare.get("hostname").is_none(), "{bare}");
     }
 
     /// Narrowing keeps one table and makes it the total, and a view sums what members lead

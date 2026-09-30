@@ -127,6 +127,7 @@
   - [F61. A large sorted partition written as fragments](features/fragmented-partitions.md)
   - [F62. A failover window of one and a half to two bases](features/failover-window.md)
   - [F63. shoalctl and shoaladm, and a deployment built from a Rust project](features/shoaladm.md)
+  - [F64. shoaladm stats names members by hostname, and charts the figures full screen](features/stats-tui.md)
 
 # Direction
 
