@@ -504,6 +504,32 @@ new sweep appeared on the one big page as an unexplained chart and nobody notice
 7. **Take the median of several runs**, never the mean. The macro benchmark's outliers are one
    sided: a run can be arbitrarily slow and cannot be faster than the work.
 
+## Before and after on the lab
+
+Since [F65](../features/query-figures-home-tab.md) a change that adds work to a node's query
+path is checked before and after **on a lab node**, hyperion or titan
+([cluster testing](../cluster-testing/overview.md)), rather than on the host the committed
+captures came from. It is an A/B, not a capture:
+
+1. **Commit the change**, then build `shoal-workload` at it and at its parent, each in a
+   worktree beside the repo, with `RUSTFLAGS="-C target-cpu=znver1"` and a target directory of
+   its own. A native build dies of `SIGILL` on the Zen1 hosts.
+2. **Use a scratch configuration** sized for the host's four cores. The committed `shoal.yml` is
+   sized for sixteen: cpu 0 coordinates, two shards, and one physical core left to the client.
+   Storage goes on `/opt/shoal`, tracing at `Warn`, and there is no remote sink.
+3. **Quiet the host**: stop its tmdb node (`systemctl stop shoal-tmdb`), and set the
+   `performance` governor. Both go back afterwards: `schedutil`, the node started, and
+   `status` showing it up.
+4. **Run the sides back to back**, with the one that goes first alternating by round, for at
+   least four rounds, and wipe `/opt/shoal` before each run.
+5. **Read it the way `compare` reads the macro layer**: a difference is a result only when the
+   two sides' run intervals are disjoint. A median that moved inside overlapping intervals is
+   repeated with more rounds before anything is concluded from it.
+
+The numbers go on the change's own page, labelled by host, cpu and governor, and nothing is
+written to `docs/perf/runs/`. A lab capture set against the frozen baseline would read
+"incomparable" throughout.
+
 ## What is actually measured
 
 **Macro timing is per batch, not per query.** One `Instant` is taken when a batch is submitted

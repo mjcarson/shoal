@@ -328,9 +328,12 @@ is undercounting somewhere ([Known Issues #22](../appendix/known-issues.md#22-si
 not that eviction failed. It is an `INFO` field rather than a warning for exactly that reason
 ([Resolved #13](../appendix/resolved/eviction-log-underflow.md)).
 
-There are still no counters and no gauges in the sense of something scrapeable. Throughput,
-latency, queue depth, resident bytes, cache hit rate, and the number of blocked queries are all
-unobservable except by inference from spans.
+There are still no counters and no gauges in the sense of something scrapeable. ~~Throughput,
+latency,~~ Queue depth, ~~resident bytes,~~ cache hit rate, and the number of blocked queries are all
+unobservable except by inference from spans. A cluster node's throughput by kind and its p50
+and p99 latency are read through `Stats` since [F65](../features/query-figures-home-tab.md),
+and its resident bytes since [F52](../features/cluster-stats.md); a standalone node answers
+none of it.
 
 The one exception is recovery, which does keep counts —
 [`RecoveryStats`](../storage/recovery.md#what-recovery-discards), reachable in-process through
@@ -406,7 +409,10 @@ write and stream rates - and every plan's progress: its steps, bytes, elapsed ti
 estimate of what is left; the leader holds every member's, any other node its own, and
 `Members` lists `stats` in `admin_reads` so a client knows to ask. Since
 [F64](../features/stats-tui.md) a member's figures carry its machine's `hostname`, which the
-admin tools name it by. Since [F47](../features/local-rehome.md) a member's `record`
+admin tools name it by. Since [F65](../features/query-figures-home-tab.md) they carry
+`queries`: what the member's clients were answered, by kind (`get`, `exists`, `insert`,
+`update`, `delete`, `error`), as rates and totals with their bytes, the bytes the clients sent,
+and p50 and p99 waits by kind and for the node, from a histogram decayed over ten seconds. Since [F47](../features/local-rehome.md) a member's `record`
 carries `physical` beside `shards`: the executors it runs beside the slots its peers name it
 by, which differ once its core count has changed; a node whose start ran a rehome logs
 `rehoming the storage directory before any shard starts` with the counts and `rehomed the
@@ -527,7 +533,9 @@ For running Shoal anywhere real, the gaps are:
   [F52](../features/cluster-stats.md) a cluster node counts the rows and bytes it inserts,
   updates and deletes and keeps them as 10s/1m/5m rates, readable through the `Stats` admin
   read and `shoaladm stats`, which since [F64](../features/stats-tui.md) charts them for as
-  long as it runs; nothing exports them to a monitoring system or keeps their history, and the
+  long as it runs; since [F65](../features/query-figures-home-tab.md) it also counts what its
+  clients were answered, by kind, and keeps a latency histogram of them, the one histogram the
+  server has; nothing exports them to a monitoring system or keeps their history, and the
   recovery counters are still an event. Filed in
   [TODOs](../appendix/todos.md#observability). The throughput figure the benchmark harness
   reports is computed by the *client*, not by the server, and is not available at runtime.

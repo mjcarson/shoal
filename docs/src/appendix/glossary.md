@@ -347,7 +347,14 @@ copies it leads, its trailing insert, update and delete rates in rows and bytes 
 seconds, a minute and five minutes, and every plan's progress and estimate. Counted per shard,
 combined per node and held by the control leader ([F52](../features/cluster-stats.md)). Since
 [F64](../features/stats-tui.md) a member's figures carry its machine's hostname, which the admin
-tools name it by, and `shoaladm stats` charts them full screen on a terminal.
+tools name it by, and `shoaladm stats` charts them full screen on a terminal. Since
+[F65](../features/query-figures-home-tab.md) they carry the member's query figures too.
+
+**Query figures** — What a node's clients were answered, counted where they connected: answers
+a second by kind (`get`, `exists`, `insert`, `update`, `delete`, and `error` for a failure),
+their bytes, the bytes the clients sent, and p50 and p99 of the time from a bundle arriving to
+its answer going to the socket, over about ten seconds. `NodeStats::queries`, charted on the
+home tab `shoaladm stats` opens on ([F65](../features/query-figures-home-tab.md)).
 
 **Environment** (node) — What the process that became a node read of its own machine at its
 ready line - host, CPU, governor, kernel, memory, SMT, NUMA, the filesystem under its storage,

@@ -63,6 +63,9 @@ from a client alone and has no record, so a member without a hostname is named b
 only when stdout is a terminal and neither `--basic` nor `--json` was given. Otherwise it prints
 exactly what it printed before, once, or again every `--watch` seconds.
 
+The picture below is F64's tab bar; since [F65](query-figures-home-tab.md) it reads
+`1 home   2 queries   3 cluster   4 writes ...`, and the view opens on home.
+
 ```text
 shoaladm stats · tmdb · from titan (leader) · version 83 · every 2s
 europa up   hyperion up   titan up
@@ -78,7 +81,9 @@ europa up   hyperion up   titan up
 ```
 
 - **A tab per metric group**: the cluster, writes, streams, placement, memory and storage.
-  `Tab` and `Shift-Tab` step through them and `1` to `6` jump to one. Each tab draws every
+  `Tab` and `Shift-Tab` step through them and ~~`1` to `6` jump to one~~ `1` to `8` jump to
+  one: since [F65](query-figures-home-tab.md) the view opens on a home tab, the queries group
+  is the second tab, and the groups here follow them. Each tab draws every
   metric of its group as a chart of its own, in as many columns as fit and no more than a square
   needs, so the storage tab's nine are three by three and the cluster tab's four two by two.
 - **A chart per metric** draws it over the window, one line per member in a color it keeps from

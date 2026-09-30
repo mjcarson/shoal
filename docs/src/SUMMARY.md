@@ -128,6 +128,7 @@
   - [F62. A failover window of one and a half to two bases](features/failover-window.md)
   - [F63. shoalctl and shoaladm, and a deployment built from a Rust project](features/shoaladm.md)
   - [F64. shoaladm stats names members by hostname, and charts the figures full screen](features/stats-tui.md)
+  - [F65. Every node counts what its clients were answered, and shoaladm stats opens on a home tab](features/query-figures-home-tab.md)
 
 # Direction
 

@@ -98,6 +98,12 @@ does not serve is refused by name, the same way `SetTableReadPolicy` refuses it.
    per member in memory with the time it arrived, and notes its own on every tick. A leadership
    change clears the table, the same way it clears capacity.
 
+Only writes are counted here, and only as applies. Since
+[F65](query-figures-home-tab.md) the same figures also carry `queries`: what each node's
+clients were answered, by kind, gets and exists included, with bytes and p50 and p99 waits.
+That is counted where the client connected, rather than on every copy, and reaches the tracker
+through the same report tick.
+
 ### How a plan's progress is computed
 
 `plan_progress` (`control/stats.rs`) folds three sources together:
