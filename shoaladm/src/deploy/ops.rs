@@ -6,7 +6,9 @@
 //! node's files, claim its directory so its id is known, issue it a leaf naming that id, start
 //! it under systemd, and wait for what the runbook says to wait for before the next step. Only
 //! the admin half is generic over the schema, since the client refuses a schema it was not
-//! built for at the hello.
+//! built for at the hello. Since [F63](../../../docs/src/features/shoaladm.md) the program a
+//! node is shipped is decided by [`programs`](super::programs): the inventory's built one, or
+//! one built from the schema's project for that host's cpu before any host is touched.
 
 use color_eyre::eyre::{bail, eyre, WrapErr};
 use rkyv::Archive;
@@ -25,6 +27,7 @@ use uuid::Uuid;
 
 use super::inventory::{Inventory, Node};
 use super::pki::Authority;
+use super::programs::{LazyPrograms, Programs, ProjectHint};
 use super::remote::{quote, Host, SIGILL_STATUS};
 use super::render::{self, Entry, Layout};
 use super::state::{ClusterRecord, NodeRecord, State};
@@ -40,7 +43,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(180);
 /// A shell command that empties and removes every storage root, a mount point included
 ///
 /// `rm -rf` of a directory that is a mount point empties it and then fails to remove it, which
-/// stopped `cluster destroy` half way on the lab's loop filesystem. Where the removal fails, what
+/// stopped `destroy` half way on the lab's loop filesystem. Where the removal fails, what
 /// is under the root is deleted instead, and the root is left for its mount
 /// ([known issue 157](../../../docs/src/appendix/known-issues.md)).
 ///
@@ -135,12 +138,14 @@ pub struct Facts {
     pub claimed: bool,
 }
 
-/// A deployment: an inventory and the state it keeps
+/// A deployment: an inventory, the state it keeps, and where its node program comes from
 pub struct Deployment {
     /// What to deploy
     pub inventory: Inventory,
     /// What has been deployed
     pub state: State,
+    /// The node program, resolved the first time a command needs it
+    pub programs: LazyPrograms,
 }
 
 /// Quote every directory for a shell and join them with spaces
@@ -168,19 +173,119 @@ pub(super) fn step(node: Option<&str>, message: &str) {
 impl Deployment {
     /// Open a deployment from its inventory
     ///
+    /// The node program is not looked for yet: a command that ships one resolves it, from the
+    /// inventory's `server`, its `project`, or the hint, when it first needs it.
+    ///
     /// # Arguments
     ///
     /// * `path` - The inventory file
+    /// * `hint` - What the command line said about the project, for an inventory naming neither
     ///
     /// # Errors
     ///
     /// When the inventory is invalid or its state cannot be located.
-    pub fn open(path: &Path) -> color_eyre::Result<Self> {
+    pub fn open(path: &Path, hint: ProjectHint) -> color_eyre::Result<Self> {
         // the inventory, validated
         let inventory = Inventory::load(path)?;
         // and where its state lives
         let state = State::locate(&inventory.name)?;
-        Ok(Deployment { inventory, state })
+        Ok(Deployment {
+            inventory,
+            state,
+            programs: LazyPrograms::new(hint),
+        })
+    }
+
+    /// Open a deployment whose program is already known, as a test with a built one does
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The inventory file
+    /// * `programs` - Where the node program comes from
+    ///
+    /// # Errors
+    ///
+    /// When the inventory is invalid or its state cannot be located.
+    pub fn with_programs(path: &Path, programs: Programs) -> color_eyre::Result<Self> {
+        let inventory = Inventory::load(path)?;
+        let state = State::locate(&inventory.name)?;
+        Ok(Deployment {
+            inventory,
+            state,
+            programs: LazyPrograms::known(programs),
+        })
+    }
+
+    /// Where the node program comes from, resolved now if it was not yet
+    ///
+    /// # Errors
+    ///
+    /// When the inventory names no program and the project cannot be read or defines none.
+    pub fn programs(&self) -> color_eyre::Result<&Programs> {
+        self.programs.get(&self.inventory)
+    }
+
+    /// Have every node's program ready before any host is touched
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes` - The nodes about to be deployed to
+    ///
+    /// # Errors
+    ///
+    /// When the program cannot be resolved, a host probed, or a build made.
+    pub fn prepare(&self, nodes: &[Node]) -> color_eyre::Result<()> {
+        self.programs()?.prepare(nodes)
+    }
+
+    /// The program a node is shipped
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's inventory name
+    ///
+    /// # Errors
+    ///
+    /// When it has not been prepared.
+    pub fn program(&self, node: &str) -> color_eyre::Result<std::path::PathBuf> {
+        self.programs()?.program(node)
+    }
+
+    /// The file name the node program has on every host
+    ///
+    /// The name the cluster was deployed with, which its units name and which never changes
+    /// afterwards; for a cluster recorded before F63, learned from a host's unit and kept. Before
+    /// a cluster exists, the built program's file name or the schema's.
+    ///
+    /// # Errors
+    ///
+    /// When nothing names it.
+    pub fn server_name(&self) -> color_eyre::Result<String> {
+        // what the cluster was deployed with
+        let mut record = self.state.record()?;
+        if let Some(program) = &record.program {
+            return Ok(program.clone());
+        }
+        // a cluster deployed before the record kept it: its units know, and the answer is kept
+        if let Some((name, node)) = record.nodes.iter().next() {
+            let host = Host {
+                target: node.target.clone(),
+            };
+            let output = host
+                .run(&unit_program_script(&self.inventory.unit_name()))
+                .wrap_err_with(|| format!("reading which program {name} runs"))?;
+            let program = unit_program(&output).ok_or_else(|| eyre!("{name}'s unit names no program"))?;
+            record.program = Some(program.clone());
+            self.state.save(&record)?;
+            return Ok(program);
+        }
+        // nothing deployed yet: a built program named in the inventory, or the schema's
+        if let Some(name) = self.inventory.server_name()? {
+            return Ok(name);
+        }
+        self.programs()?
+            .server_name()
+            .ok_or_else(|| eyre!("the server program names no file"))
     }
 
     /// Open a deployed cluster to talk to it, without the server program it was deployed with
@@ -200,7 +305,11 @@ impl Deployment {
         let inventory = Inventory::read(path)?;
         // and where its state lives
         let state = State::locate(&inventory.name)?;
-        Ok(Deployment { inventory, state })
+        Ok(Deployment {
+            inventory,
+            state,
+            programs: LazyPrograms::default(),
+        })
     }
 
     /// Where every node's files live on its host
@@ -343,7 +452,7 @@ impl Deployment {
             target: node.target.clone(),
         };
         let layout = self.layout();
-        let server = self.inventory.server_name()?;
+        let server = self.server_name()?;
         // the directories, owned by the user the node runs as
         step(Some(&node.name), &format!("staging {} for {}", layout.dir, facts.user));
         // a storage root outside the remote directory is handed over on its own (F53)
@@ -365,7 +474,7 @@ impl Deployment {
         Ok(())
     }
 
-    /// Copy the inventory's server program to a host's temp dir and check its digest there
+    /// Copy a node's server program to its host's temp dir and check its digest there
     ///
     /// Nothing the node runs is touched: the copy lands in the login's own temp dir, which
     /// the caller installs from once it has judged the program.
@@ -373,24 +482,25 @@ impl Deployment {
     /// # Arguments
     ///
     /// * `host` - The host
-    /// * `name` - The node's inventory name, for the refusal
+    /// * `name` - The node's inventory name, which decides which build it gets
     ///
     /// # Errors
     ///
     /// When the copy fails or lands with another digest than the local program's.
     pub(super) fn push_binary(&self, host: &Host, name: &str) -> color_eyre::Result<String> {
-        let server = self.inventory.server_name()?;
+        let server = self.server_name()?;
+        let program = self.program(name)?;
         // the login's own temp dir, since the node's directory is not the login's to write
-        let partial = format!("/tmp/shoalctl-{}-{server}.new", self.inventory.name);
-        host.copy(&self.inventory.server, &partial)?;
+        let partial = format!("/tmp/shoaladm-{}-{server}.new", self.inventory.name);
+        host.copy(&program, &partial)?;
         // and the bytes that landed are the bytes we meant to send
-        let local = digest(&self.inventory.server)?;
+        let local = digest(&program)?;
         let remote = host.run(&format!("sha256sum {}", quote(&partial)))?;
         let remote = remote.split_whitespace().next().unwrap_or_default();
         if remote != local {
             bail!(
                 "{partial} on {name} has digest {remote}, but {} has {local}",
-                self.inventory.server.display()
+                program.display()
             );
         }
         Ok(partial)
@@ -417,17 +527,17 @@ impl Deployment {
             "cd {dir} && sudo -n -u {user} {binary} claim --conf {conf}",
             dir = quote(&layout.dir),
             user = quote(&facts.user),
-            binary = quote(&layout.binary(&self.inventory.server_name()?)),
+            binary = quote(&layout.binary(&self.server_name()?)),
             conf = quote(&layout.conf()),
         );
         let output = host.output(&script, None)?;
         // an illegal instruction is a build for a newer cpu than this host's
         if output.status == Some(SIGILL_STATUS) {
             bail!(
-                "{} died of an illegal instruction on {}: it was built for another cpu. build it \
-                 with RUSTFLAGS=\"-C target-cpu=<the oldest host's cpu>\" rather than native",
-                self.inventory.server.display(),
-                node.name
+                "{} died of an illegal instruction on {}: it was built for another cpu. {}",
+                self.program(&node.name)?.display(),
+                node.name,
+                cpu_advice(&self.inventory)
             );
         }
         if output.status != Some(0) {
@@ -499,7 +609,7 @@ impl Deployment {
         };
         let unit_name = self.inventory.unit_name();
         // the unit, written as root where systemd reads it
-        let text = unit::render(&self.inventory, &facts.user)?;
+        let text = unit::render(&self.inventory, &self.server_name()?, &facts.user);
         host.write(
             &format!("/etc/systemd/system/{unit_name}"),
             text.as_bytes(),
@@ -694,6 +804,13 @@ impl Deployment {
         let password = self.state.password()?;
         let nodes = self.inventory.bootstrap_nodes()?;
         let first = &nodes[0];
+        // every node's program is ready before any host is touched: a build that fails
+        // changes nothing anywhere
+        self.prepare(&nodes)?;
+        record.schema = self.programs()?.schema_record();
+        // the name every unit will run the program by, kept for the cluster's life
+        record.program = Some(self.server_name()?);
+        self.state.save(&record)?;
         // every host is checked before anything is written to any of them
         let mut facts = Vec::with_capacity(nodes.len());
         for node in &nodes {
@@ -755,6 +872,48 @@ impl Deployment {
             ),
         );
         Ok(())
+    }
+
+    /// Make the cluster run this program: bootstrap it if it does not exist, upgrade it if it does
+    ///
+    /// The one command a project needs ([F63](../../../docs/src/features/shoaladm.md)): a
+    /// cluster nothing was recorded for is bootstrapped from the inventory's bootstrap set, and
+    /// one that was is given the program one node at a time, the leader last, as `upgrade`
+    /// does, skipping every node already on it.
+    ///
+    /// # Arguments
+    ///
+    /// * `wipe` - Whether an old node found on a host may be deleted, when bootstrapping
+    ///
+    /// # Errors
+    ///
+    /// As `bootstrap` or `upgrade`.
+    pub async fn deploy<S>(&self, wipe: bool) -> color_eyre::Result<()>
+    where
+        S: QuerySupport + Send + Sync + 'static,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        // what the state says decides which of the two this is
+        let record = self.state.record()?;
+        if record.initialized || !record.nodes.is_empty() {
+            step(
+                None,
+                &format!("{} is deployed: replacing its program one node at a time", self.inventory.name),
+            );
+            self.upgrade::<S>(&[], false, false, false).await
+        } else {
+            step(None, &format!("{} is not deployed yet: bootstrapping it", self.inventory.name));
+            self.bootstrap::<S>(wipe).await
+        }
     }
 
     /// Send `Initialize` for the bootstrap set, once
@@ -840,6 +999,8 @@ impl Deployment {
         if seeds.is_empty() {
             bail!("the cluster names no member to join through");
         }
+        // its program, built for its cpu if it has to be, before its host is touched
+        self.prepare(std::slice::from_ref(&node))?;
         let facts = self.preflight(&node, wipe)?;
         self.stage(&node, &facts, &Entry::Join(seeds), &password)?;
         let (id, _) = self.claim(&node, &facts)?;
@@ -870,7 +1031,7 @@ impl Deployment {
         } else {
             step(
                 Some(name),
-                "holds no data yet; run `cluster rebalance` to move a share onto it",
+                "holds no data yet; run `shoaladm rebalance` to move a share onto it",
             );
         }
         Ok(())
@@ -955,7 +1116,7 @@ impl Deployment {
         loop {
             // a plan runs on in the cluster without its follower, so a member restarting under
             // the follow is waited for while the client reconnects, never taken as the plan's end
-            let (lines, done) = match crate::components::follow_once(shoal, op, Follow::Plan).await
+            let (lines, done) = match crate::cluster::follow_once(shoal, op, Follow::Plan).await
             {
                 Ok(found) => {
                     failing_since = None;
@@ -1044,7 +1205,7 @@ impl Deployment {
         let (op, follow) = if let crate::cluster::ClusterAction::Status { op } = action {
             let mut found = None;
             for follow in [Follow::Plan, Follow::Repair, Follow::Backup, Follow::Restore, Follow::Move] {
-                if crate::components::follow_once(shoal, op, follow).await.is_ok() {
+                if crate::cluster::follow_once(shoal, op, follow).await.is_ok() {
                     found = Some(follow);
                     break;
                 }
@@ -1076,7 +1237,7 @@ impl Deployment {
             // retries that member's open plan rather than recording one, so that plan is the
             // one followed ([Resolved #177](../../../docs/src/appendix/resolved/blocked-plan-retry.md))
             let retried = if follow == Follow::Plan
-                && crate::components::follow_once(shoal, followed, follow)
+                && crate::cluster::follow_once(shoal, followed, follow)
                     .await
                     .is_err()
             {
@@ -1104,7 +1265,7 @@ impl Deployment {
         let deadline = Instant::now() + timeout;
         let mut last = Vec::new();
         loop {
-            let (lines, done) = crate::components::follow_once(shoal, op, follow)
+            let (lines, done) = crate::cluster::follow_once(shoal, op, follow)
                 .await
                 .map_err(|error| eyre!(error))?;
             if lines != last {
@@ -1323,6 +1484,53 @@ impl Deployment {
     }
 }
 
+/// The script that prints the program a unit's `ExecStart` runs
+///
+/// # Arguments
+///
+/// * `unit` - The unit's name
+#[must_use]
+pub fn unit_program_script(unit: &str) -> String {
+    format!(
+        "systemctl cat {} | sed -n 's/^ExecStart=\\([^ ]*\\) .*/\\1/p'",
+        quote(unit)
+    )
+}
+
+/// The program's file name out of what [`unit_program_script`] printed
+///
+/// # Arguments
+///
+/// * `output` - What the script printed
+#[must_use]
+pub fn unit_program(output: &str) -> Option<String> {
+    output
+        .trim()
+        .lines()
+        .next()
+        .and_then(|line| line.rsplit('/').next())
+        .filter(|program| !program.is_empty())
+        .map(str::to_string)
+}
+
+/// What to do about a program built for another cpu, depending on how the inventory gets it
+///
+/// # Arguments
+///
+/// * `inventory` - The inventory
+#[must_use]
+pub fn cpu_advice(inventory: &Inventory) -> String {
+    if inventory.server.is_some() {
+        "build it with RUSTFLAGS=\"-C target-cpu=<the oldest host's cpu>\" rather than native, \
+         or drop `server` from the inventory and let it be built for each host"
+            .to_string()
+    } else {
+        "the host was probed for its cpu and the program built for what it said; set \
+         `target_cpu` on that node in the inventory to an older cpu"
+            .to_string()
+    }
+}
+
 /// Install a program pushed by `push_binary` over a node's program and delete the push
 ///
 /// The program is installed beside its target and renamed over it, so a node running the
@@ -1498,10 +1706,40 @@ pub fn seed_addresses(frame: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
 
+    /// The name a pre-F63 cluster's units run is read off `ExecStart`, through the sed the
+    /// script really runs
+    #[test]
+    fn a_units_program_is_read_off_its_exec_start() {
+        use std::io::Write;
+        // the script, run against a unit as `systemctl cat` prints one, stands in for ssh
+        let unit = "# /etc/systemd/system/shoal-lab.service\n[Service]\nUser=shoal\nExecStart=/opt/shoal-deploy/lab/bin/shoal-node serve --conf /opt/shoal-deploy/lab/shoal.yml\nRestart=on-failure\n";
+        let script = super::unit_program_script("shoal-lab.service")
+            .replace("systemctl cat shoal-lab.service", "cat");
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("sh");
+        child
+            .stdin
+            .take()
+            .expect("a piped stdin")
+            .write_all(unit.as_bytes())
+            .expect("written");
+        let output = child.wait_with_output().expect("sh ran");
+        let printed = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert_eq!(printed.trim(), "/opt/shoal-deploy/lab/bin/shoal-node");
+        assert_eq!(super::unit_program(&printed).as_deref(), Some("shoal-node"));
+        // a unit that names nothing is nothing
+        assert_eq!(super::unit_program("\n"), None);
+    }
+
     /// A storage root that cannot itself be removed is emptied, and the command still succeeds (item 157)
     ///
     /// A root that is a mount point empties under `rm -rf` and then fails its own removal, which
-    /// stopped `cluster destroy` half way. A root whose parent is read-only fails the same way, so
+    /// stopped `destroy` half way. A root whose parent is read-only fails the same way, so
     /// it stands in for the mount point here.
     #[test]
     fn a_root_that_cannot_be_removed_is_emptied() {

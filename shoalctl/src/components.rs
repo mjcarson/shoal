@@ -11,5 +11,5 @@ pub use help_overlay::HelpOverlay;
 pub use status_bar::StatusBar;
 pub use tab::{
     ClusterState, CompletionMenu, CompletionState, ErrorBar, QueryError, QueryLayout, QueryRow,
-    Tab, TabContent, TabKind, TabQueryBar, TabSelector, TabState, follow_once, layout_query,
+    Tab, TabContent, TabKind, TabQueryBar, TabSelector, TabState, layout_query,
 };

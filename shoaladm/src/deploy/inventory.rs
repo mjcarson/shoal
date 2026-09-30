@@ -1,9 +1,11 @@
 //! What a deployment is asked to build: the hosts, the binary and the cluster's shape
 //!
-//! An inventory is a YAML file the operator writes once per cluster. It names the server
-//! program to deploy, the hosts to deploy it to and how to reach them over ssh, and the policy
-//! the cluster is bootstrapped with. Everything else - node ids, certificates, the admin
-//! password - is minted by the deployment and kept in its [state](super::state).
+//! An inventory is a YAML file the operator writes once per cluster. It names the program to
+//! deploy - a built `server`, or since [F63](../../../docs/src/features/shoaladm.md) the
+//! `project` it is built from for every host's cpu, or neither and the project the command runs
+//! in - the hosts to deploy it to and how to reach them over ssh, and the policy the cluster is
+//! bootstrapped with. Everything else - node ids, certificates, the admin password - is minted by
+//! the deployment and kept in its [state](super::state).
 
 use color_eyre::eyre::{bail, eyre, WrapErr};
 use serde::{Deserialize, Serialize};
@@ -153,6 +155,11 @@ pub struct GroupSpec {
     /// lead more than their share ([F58](../../../docs/src/features/weighted-leadership.md)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead_weight: Option<u32>,
+    /// The cpu its nodes' program is built for, as `rustc --print target-cpus` names one, over
+    /// the deployment's; what the host is probed to be if nothing sets it
+    /// ([F63](../../../docs/src/features/shoaladm.md))
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_cpu: Option<String>,
 }
 
 /// Where a resolved node keeps its data
@@ -233,6 +240,10 @@ pub struct NodeSpec {
     /// ([F58](../../../docs/src/features/weighted-leadership.md))
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead_weight: Option<u32>,
+    /// The cpu this node's program is built for, over its group's and the deployment's; what
+    /// the host is probed to be if nothing sets it ([F63](../../../docs/src/features/shoaladm.md))
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_cpu: Option<String>,
 }
 
 impl NodeSpec {
@@ -249,8 +260,22 @@ impl NodeSpec {
 pub struct Inventory {
     /// The cluster's name, which names its unit, its remote directory and its local state
     pub name: String,
-    /// The server program to deploy: a build of `shoal::server::node::main` for the schema
-    pub server: PathBuf,
+    /// A built server program to deploy: `shoal::server::node::main` for the schema, built by
+    /// the operator for the oldest host's cpu; or none, and the program is built from `project`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<PathBuf>,
+    /// The Rust project the server program is built from, once per cpu class among the hosts
+    /// ([F63](../../../docs/src/features/shoaladm.md)); relative to this file. Neither this nor
+    /// `server` is the project the command runs in
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<PathBuf>,
+    /// The `#[shoal::db]` struct to deploy, when the project defines more than one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db: Option<String>,
+    /// The cpu every node's program is built for unless its group or it says otherwise; what
+    /// each host is probed to be if nothing sets it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_cpu: Option<String>,
     /// Where on every host the node's binary, configuration and data live
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_dir: Option<String>,
@@ -406,6 +431,9 @@ pub struct Node {
     pub wal_commit_delay: Option<String>,
     /// Its share of the groups' leads, resolved over its group, if either sets one
     pub lead_weight: Option<u32>,
+    /// The cpu its program is built for, resolved over its group and the deployment, if any
+    /// sets one; the probe decides otherwise
+    pub target_cpu: Option<String>,
 }
 
 impl Node {
@@ -468,10 +496,15 @@ impl Inventory {
             .wrap_err_with(|| format!("failed to read the inventory {}", path.display()))?;
         let mut inventory: Inventory = serde_yaml::from_str(&raw)
             .wrap_err_with(|| format!("{} is not an inventory", path.display()))?;
-        // a relative server path is relative to the inventory, not to wherever we were run
-        if inventory.server.is_relative() {
-            if let Some(parent) = path.parent() {
-                inventory.server = parent.join(&inventory.server);
+        // a relative server or project path is relative to the inventory, not to wherever we
+        // were run
+        if let Some(parent) = path.parent() {
+            for relative in [&mut inventory.server, &mut inventory.project] {
+                if let Some(inner) = relative {
+                    if inner.is_relative() {
+                        *inner = parent.join(&inner);
+                    }
+                }
             }
         }
         inventory.validate_shape()?;
@@ -487,19 +520,32 @@ impl Inventory {
     pub fn validate(&self) -> color_eyre::Result<()> {
         // everything the file itself says
         self.validate_shape()?;
-        // the server binary is copied from here, so it has to be here
-        if !self.server.is_file() {
-            bail!(
-                "the server program {} does not exist; build it first",
-                self.server.display()
-            );
+        // a server binary named is copied from here, so it has to be here
+        if let Some(server) = &self.server {
+            if !server.is_file() {
+                bail!(
+                    "the server program {} does not exist; build it first",
+                    server.display()
+                );
+            }
+            // and it has to be a program: a source file passes the check above and dies on
+            // every host
+            if !is_executable(server) {
+                bail!(
+                    "the server program {} is not executable; name the built node program, not its source",
+                    server.display()
+                );
+            }
         }
-        // and it has to be a program: a source file passes the check above and dies on every host
-        if !is_executable(&self.server) {
-            bail!(
-                "the server program {} is not executable; name the built node program, not its source",
-                self.server.display()
-            );
+        // a project named has to be a directory with a manifest; what it defines is judged
+        // when it is built
+        if let Some(project) = &self.project {
+            if !project.join("Cargo.toml").is_file() {
+                bail!(
+                    "the project {} is not a Rust project: it has no Cargo.toml",
+                    project.display()
+                );
+            }
         }
         Ok(())
     }
@@ -520,6 +566,10 @@ impl Inventory {
                 "the cluster name {:?} has to be non-empty ascii letters, digits, '-' or '_'",
                 self.name
             );
+        }
+        // the program comes from one place: a build the operator made, or a project
+        if self.server.is_some() && self.project.is_some() {
+            bail!("server and project are both set; name the built program or the project it is built from, not both");
         }
         // the control group is one, three or five voters and nothing else
         if !matches!(self.control_voters, 1 | 3 | 5) {
@@ -852,17 +902,39 @@ impl Inventory {
         format!("shoal-{}.service", self.name)
     }
 
-    /// The file name the server program is copied to on every host
+    /// The file name a built server program is copied to on every host, if one is named
     ///
     /// # Errors
     ///
     /// When the server path names no file.
-    pub fn server_name(&self) -> color_eyre::Result<String> {
+    pub fn server_name(&self) -> color_eyre::Result<Option<String>> {
         self.server
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_string)
-            .ok_or_else(|| eyre!("{} names no file", self.server.display()))
+            .as_ref()
+            .map(|server| {
+                server
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+                    .ok_or_else(|| eyre!("{} names no file", server.display()))
+            })
+            .transpose()
+    }
+
+    /// Resolve the cpu a node's program is built for: its own, its group's or the deployment's
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The node
+    #[must_use]
+    pub fn resolve_target_cpu(&self, spec: &NodeSpec) -> Option<String> {
+        // the most specific level that sets it wins
+        spec.target_cpu
+            .clone()
+            .or_else(|| {
+                self.group_of(spec)
+                    .and_then(|(_, group)| group.target_cpu.clone())
+            })
+            .or_else(|| self.target_cpu.clone())
     }
 
     /// Resolve one node by name
@@ -898,6 +970,7 @@ impl Inventory {
             storage,
             wal_commit_delay: self.resolve_wal_commit_delay(spec),
             lead_weight: self.resolve_lead_weight(spec),
+            target_cpu: self.resolve_target_cpu(spec),
         })
     }
 
@@ -1233,13 +1306,26 @@ mod tests {
         assert!(inventory.validate().unwrap_err().to_string().contains("ports"));
         // a server program that has not been built
         let mut inventory = parse(THREE);
-        inventory.server = PathBuf::from("/nonexistent/shoal-node");
+        inventory.server = Some(PathBuf::from("/nonexistent/shoal-node"));
         assert!(inventory.validate().unwrap_err().to_string().contains("build it first"));
         // a source file where the program belongs, as the wizard once wrote (item 127)
         let source = tempfile::NamedTempFile::new().expect("a temp file");
         let mut inventory = parse(THREE);
-        inventory.server = source.path().to_path_buf();
+        inventory.server = Some(source.path().to_path_buf());
         assert!(inventory.validate().unwrap_err().to_string().contains("not executable"));
+        // a program and a project at once is two answers to one question
+        let mut inventory = parse(THREE);
+        inventory.project = Some(PathBuf::from("/nonexistent/project"));
+        assert!(inventory.validate().unwrap_err().to_string().contains("both set"));
+        // a project that is not one
+        let mut inventory = parse(THREE);
+        inventory.server = None;
+        inventory.project = Some(PathBuf::from("/nonexistent/project"));
+        assert!(inventory.validate().unwrap_err().to_string().contains("no Cargo.toml"));
+        // and no program at all is fine: the project the command runs in is meant
+        let mut inventory = parse(THREE);
+        inventory.server = None;
+        inventory.validate().expect("a project-less inventory");
         // an unknown key is a typo, not a setting
         let server = std::env::current_exe().expect("the test binary");
         let yaml = format!("server: {}\nname: lab\nreplication_facter: 1\nnodes: []\n", server.display());

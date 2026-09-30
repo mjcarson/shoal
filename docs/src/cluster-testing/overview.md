@@ -29,7 +29,7 @@ run. Round trip time between them is about 0.12 ms. Europa is also the developme
 runs the clients and the builds, and its numbers carry that noise.
 
 The cluster is `tmdb_cluster.yaml` at the repository root, deployed with
-[F51](../features/cluster-deployment.md)'s `cluster bootstrap`: replication factor 3, three control
+[F51](../features/cluster-deployment.md)'s `shoaladm bootstrap`: replication factor 3, three control
 voters, six cores and 8 GiB per node with a dedicated control core, since round 12 europa at
 `lead_weight: 2` and the Zen1 hosts at a 2 ms `wal_commit_delay`, mutual TLS on the peer lanes,
 SCRAM for clients, and nodes running as the system user `shoal` under systemd with
@@ -42,19 +42,25 @@ Optane before the first test here. Everything below ran on the Optane unless it 
 
 ## Building and deploying
 
+Every command below is spelled as [F63](../features/shoaladm.md) spells it. Through round 16 they
+were `$L cluster bootstrap`, `$L cluster upgrade` and so on, which is how the rounds' own records
+in [correctness](correctness.md) and [performance](performance.md) quote them; the `cluster`
+prefix is gone and nothing else moved. Since F63 the build line is optional too: `shoaladm deploy`
+run in `examples/tmdb_dataset` builds the node for each host's cpu itself.
+
 ```bash
 # the node and the loader, for the oldest cpu in the lab (Zen1), never native
 CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
     cargo build --release -p tmdb-dataset
 L=target/deploy/release/tmdb-dataset-loader
-$L cluster bootstrap -i tmdb_cluster.yaml
-$L cluster upgrade -i tmdb_cluster.yaml        # after every fix, one node at a time
-$L cluster destroy -i tmdb_cluster.yaml --yes  # between tests that need an empty cluster
-$L cluster rebuild -i tmdb_cluster.yaml hyperion --yes   # a node from its peers, as a new identity (F56)
-$L cluster admin -i tmdb_cluster.yaml "restore-retry <op>"  # a restore's failed groups, again (#155)
-$L cluster admin -i tmdb_cluster.yaml "remove <node> <replacement>"  # again: retries a blocked plan (#177)
-$L cluster ship-backup -i tmdb_cluster.yaml /optane/shoal-backup/<op>  # every file to every host (F59)
-$L cluster add -i target/lab/tmdb-add.yaml hyperion   # a member with no placement slot (section 8)
+$L bootstrap -i tmdb_cluster.yaml
+$L upgrade -i tmdb_cluster.yaml        # after every fix, one node at a time
+$L destroy -i tmdb_cluster.yaml --yes  # between tests that need an empty cluster
+$L rebuild -i tmdb_cluster.yaml hyperion --yes   # a node from its peers, as a new identity (F56)
+$L admin -i tmdb_cluster.yaml "restore-retry <op>"  # a restore's failed groups, again (#155)
+$L admin -i tmdb_cluster.yaml "remove <node> <replacement>"  # again: retries a blocked plan (#177)
+$L ship-backup -i tmdb_cluster.yaml /optane/shoal-backup/<op>  # every file to every host (F59)
+$L add -i target/lab/tmdb-add.yaml hyperion   # a member with no placement slot (section 8)
 $L bench -i target/lab/tmdb-add.yaml --addr 172.16.2.5:12000 …   # through that one member, as the admin
 ```
 
@@ -90,7 +96,7 @@ added the rest:
 Round 12's scripts are under `target/lab/r12/`: `180/sweep.sh` (fresh clusters on two builds of
 the node, with the admission gate switched off by a lab-only environment variable that was never
 committed), `o64.sh` (fresh clusters loaded whole, the page cache dropped on every host first or
-not), `leadab.sh` (lead weights rolled onto one cluster with `cluster reconfigure`, then the mixed
+not), `leadab.sh` (lead weights rolled onto one cluster with `shoaladm reconfigure`, then the mixed
 bench), and `132/loop.sh` (an ASan build of one test binary run until it aborts).
 
 Round 13's are under `target/lab/r13/`: `142/loop.sh` (the restore test beside five other heavy
@@ -99,7 +105,7 @@ rolled onto a cluster whose hyperion is on the `dm-delay` device, then the bench
 `o64/o64.sh` and `o64/batches.py` (fresh loads with the storage figures sampled, and each Zen1
 node's sync sizes averaged per load), `part/flap.sh` (a partition cut and healed on a cycle),
 `unplaced/run.sh` (gets through placed and unplaced members, one in flight and loaded),
-`ship/run.sh` (a backup shipped with `cluster ship-backup`, the cluster destroyed and the backup
+`ship/run.sh` (a backup shipped with `shoaladm ship-backup`, the cluster destroyed and the backup
 restored), and `tb/run.sh` (a rebuild under load at a shrunk retention, with each member's snapshot
 installs counted from its journal).
 
@@ -124,7 +130,7 @@ These scripts are scratch and are not committed. What they measured is on these 
 
 ## Reading a node's figures
 
-`cluster stats` prints, since round 11, each member's row memory against its eviction budget and
+`shoaladm stats` prints, since round 11, each member's row memory against its eviction budget and
 its resident memory, and the cluster's ten busiest groups with the member leading each. Since
 round 12 it also prints each member's storage pipeline: WAL syncs and bytes a second, the WAL's
 segments, the sealed segments waiting on a compactor, entries committed and not yet applied, and
@@ -152,7 +158,7 @@ is counted by nothing, and a node whose left over grows under load wants a heap 
 CARGO_TARGET_DIR=target/prof RUSTFLAGS="-C target-cpu=znver1 -C force-frame-pointers=yes" \
     cargo build --release -p tmdb-dataset --bin tmdb-dataset-node --features jemalloc-prof
 # an inventory whose `server:` names target/prof/release/tmdb-dataset-node, rolled on with
-# `cluster upgrade`; then a dump's live bytes by allocation site, symbolized against the binary
+# `shoaladm upgrade`; then a dump's live bytes by allocation site, symbolized against the binary
 python3 target/lab/r15/prof/heap.py /var/tmp/shoal-heap.<pid>.<n>.i<n>.heap \
     target/prof/release/tmdb-dataset-node 3
 ```

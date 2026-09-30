@@ -163,7 +163,7 @@ mod tests {
             .expect("a pem certificate");
         assert_eq!(node_identity_of(&der).expect("a readable san"), Some(node));
         // and the peer configs load it against the certificate written at mint
-        let dir = std::env::temp_dir().join(format!("shoalctl-pki-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("shoaladm-pki-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("node.pem"), &leaf.cert).unwrap();
         std::fs::write(dir.join("node.key"), &leaf.key).unwrap();

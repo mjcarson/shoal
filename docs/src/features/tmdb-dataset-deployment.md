@@ -8,8 +8,8 @@ back, and stopped the pool. Almost everything around the load was configuration:
 file, `--storage` to move the roots off `/opt/shoal`, `--local-tracing` to drop the lab's
 collector, a memory default patched in by hand
 ([Resolved #126](../appendix/resolved/storage-directory-unusable.md)). None of that applies to a
-deployed cluster, where `cluster bootstrap` renders every node's `shoal.yml`. And nothing let the
-dataset be deployed at all: `cluster bootstrap` needs a node program built from the schema and a
+deployed cluster, where `shoaladm bootstrap` renders every node's `shoal.yml`. And nothing let the
+dataset be deployed at all: `shoaladm bootstrap` needs a node program built from the schema and a
 `shoalctl` program built from the same schema, and the example was neither.
 
 The user asked for the example to become a folder holding a deployable database and a loader,
@@ -24,17 +24,29 @@ able to fill a deployed cluster easily.
 | --- | --- |
 | `tmdb_dataset` (lib) | The schema: `Movie`, `MovieByKeyword` and `#[shoal::db] Tmdb`, plus `load`, the pipeline |
 | `tmdb-dataset-node` | `shoal::server::node::main::<Tmdb>()` under mimalloc. The program an inventory's `server:` names |
-| `tmdb-dataset-loader` | `load`, plus every `shoalctl` command for this schema: `cluster new`, `bootstrap`, `status`, `tui` and the rest |
+| `tmdb-dataset-loader` | `load`, plus every admin command for this schema (`new`, `deploy`, `bootstrap`, `status` and the rest, `cluster …` until [F63](shoaladm.md)) and the terminal UI as `tui` |
 
 The whole flow:
+
+```bash
+# since F63: from the project, one tool builds the node for each host's cpu and deploys it
+cd examples/tmdb_dataset
+shoaladm new -o inventory.yml
+shoaladm deploy
+cargo build --release -p tmdb-dataset
+../../target/release/tmdb-dataset-loader load --dataset ~/datasets/TMDB_movie_dataset_v11.csv
+shoalctl
+```
+
+~~The flow before [F63](shoaladm.md), which an inventory naming a `server:` still takes:~~
 
 ```bash
 # the node for the oldest cpu among the hosts, never native, in its own target dir
 CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
     cargo build --release -p tmdb-dataset
-target/deploy/release/tmdb-dataset-loader cluster new -o tmdb.yml
+target/deploy/release/tmdb-dataset-loader new -o tmdb.yml
 #   server: target/deploy/release/tmdb-dataset-node
-target/deploy/release/tmdb-dataset-loader cluster bootstrap -i tmdb.yml
+target/deploy/release/tmdb-dataset-loader bootstrap -i tmdb.yml
 target/deploy/release/tmdb-dataset-loader load -i tmdb.yml --dataset ~/datasets/TMDB_movie_dataset_v11.csv
 target/deploy/release/tmdb-dataset-loader tui -i tmdb.yml
 ```
@@ -197,7 +209,7 @@ back in 11 ms. Measuring Shoal is `shoal-bench`'s job.
 It was also run end to end on the development host. A `tmdb-dataset-node serve` was started
 against a scratch `shoal.yml` under `target/`, and `load --addr` wrote the first 20,000 movies and
 read 2,000 back. The same load run a second time succeeded with the same counts, and a missing
-`--dataset` was refused before connecting. `cluster status -i tmdb_cluster.yaml` accepted the
+`--dataset` was refused before connecting. `shoaladm status -i tmdb_cluster.yaml` accepted the
 edited inventory and stopped at "has not been deployed". ~~The loader has not been run against a
 deployed cluster from this change.~~
 
@@ -211,7 +223,7 @@ wrote everything and hung in verify (item 130).
 
 ## Related
 
-- [F51](cluster-deployment.md), `node::main` and `shoalctl cluster`.
+- [F51](cluster-deployment.md), `node::main` and `shoaladm` (`shoalctl cluster` until [F63](shoaladm.md)).
 - [F53](inventory-wizard.md), the wizard the inventory is built with.
 - [Resolved #127](../appendix/resolved/wizard-loopback-address.md), found deploying this: the
   wizard saved a node whose name resolved only to loopback, and a source file as the server.

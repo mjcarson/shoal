@@ -1,41 +1,19 @@
-//! shoalctl - A terminal UI for querying Shoal databases
+//! shoalctl - a terminal UI for querying a Shoal database
 //!
-//! This binary is a placeholder. To use shoalctl, create your own binary
-//! that imports the shoalctl library and provides your database types.
-//!
-//! # Example
-//!
-//! ```ignore
-//! use std::sync::Arc;
-//! use shoal::client::Shoal;
-//!
-//! // Import your database types
-//! use my_db::{MyDbClient};
-//!
-//! #[tokio::main]
-//! async fn main() -> color_eyre::Result<()> {
-//!     // Create your Shoal client
-//!     let shoal = Arc::new(Shoal::<MyDbClient>::new("127.0.0.1:12000").await?);
-//!     // Run shoalctl with your database
-//!     shoalctl::run(shoal).await
-//! }
-//! ```
+//! A schema is a compile-time construct, so the UI is built against one. Run in the project
+//! that defines it, this program builds that UI for the schema, installs it, and replaces
+//! itself with it ([F63](../../docs/src/features/shoaladm.md)); run elsewhere it opens the one a
+//! previous build installed for the cluster the inventory names.
 
-fn main() {
-    eprintln!("shoalctl requires a database type to be specified at compile time.");
-    eprintln!();
-    eprintln!("Create your own binary that imports shoalctl and provides your database types:");
-    eprintln!();
-    eprintln!("    use std::sync::Arc;");
-    eprintln!("    use shoal::client::Shoal;");
-    eprintln!("    use my_db::MyDbClient;");
-    eprintln!();
-    eprintln!("    #[tokio::main]");
-    eprintln!("    async fn main() -> color_eyre::Result<()> {{");
-    eprintln!(
-        "        let shoal = Arc::new(Shoal::<MyDbClient>::new(\"127.0.0.1:12000\").await?);"
-    );
-    eprintln!("        shoalctl::run(shoal).await");
-    eprintln!("    }}");
-    std::process::exit(1);
+use clap::Parser;
+use shoaladm::build::Role;
+use shoalctl::cli::Cli;
+
+/// Build the schema's terminal UI, or find it, and run it
+fn main() -> shoalctl::Result<()> {
+    // report errors with their context; the UI itself installs this again in its own process
+    color_eyre::install()?;
+    let cli = Cli::parse();
+    let handoff = shoaladm::front::program_for(&cli.project, cli.tui.inventory.as_deref(), Role::Ctl)?;
+    shoaladm::front::exec(&handoff)
 }

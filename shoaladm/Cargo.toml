@@ -1,0 +1,46 @@
+[package]
+name = "shoaladm"
+version = "0.1.0"
+edition = "2024"
+description = "Deploy, upgrade and operate a Shoal cluster over ssh, building the node program from the schema's own project"
+
+[dependencies]
+color-eyre = "0.6.3"
+# the inventory wizard is a full screen form (F53), so the admin program draws too
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+futures = "0.3"
+ratatui = "0.30.0"
+rkyv = "0.8"
+# no engine. every command here connects as a client or runs a script over ssh - it has no
+# shard, no storage and no reason to compile io_uring (F15). the node program it deploys is
+# built by cargo in the schema's own project, never linked here
+shoal = { path = "../shoal", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+uuid = { version = "1.11", features = ["v4"] }
+serde = { version = "1", features = ["derive"] }
+# the wizard races host probes against the terminal through kept receivers
+kanal = { workspace = true }
+
+# the command line, the inventory and the `shoal.yml` it renders, the leaf it issues each node,
+# and the digest it checks a copied program against (F51). every one is a version the lockfile
+# already resolves for another crate, so the graph does not grow
+clap = { version = "4.2", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
+sha2 = "0.10"
+# an inventory's byte sizes are judged by the parser the engine reads them with
+byte-unit = "5.1"
+
+# a project's `src/main.rs` is read for its `#[shoal::db]` struct (F63); the same syn the derive
+# macros parse with, so no second version is resolved
+syn = { version = "2.0.72", features = ["full", "visit"] }
+# the project's workspace manifest is read for its `[patch]` table, at the version the lockfile
+# already holds
+toml = "0.5"
+
+[dev-dependencies]
+# the pki test reads the leaf's der back the way the peer lanes do
+rustls-pemfile = "2"
+# the wizard test writes an inventory somewhere it can throw away
+tempfile = "3"

@@ -42,6 +42,7 @@
 - [Observability](operations/observability.md)
 - [Runbooks](operations/runbooks.md)
 - [shoalctl](operations/shoalctl.md)
+- [shoaladm](operations/shoaladm.md)
 - [Tuning](operations/tuning.md)
 
 # Performance
@@ -113,18 +114,19 @@
   - [F48. Rolling compatibility and activation](features/rolling-compatibility.md)
   - [F49. Backup, restore, export and permanent quorum loss](features/backup-and-recovery.md)
   - [F50. Certificate rotation, the cluster tab, the runbooks and the physical cluster](features/cluster-operations.md)
-  - [F51. Deploying a cluster with shoalctl cluster](features/cluster-deployment.md)
+  - [F51. Deploying a cluster with shoalctl cluster (shoaladm since F63)](features/cluster-deployment.md)
   - [F52. Cluster stats: what every node holds and does, and how fast a plan moves](features/cluster-stats.md)
   - [F53. An inventory wizard, and storage per node group](features/inventory-wizard.md)
   - [F54. The TMDB dataset as a deployable database, and a loader for it](features/tmdb-dataset-deployment.md)
-  - [F55. A rolling upgrade with `shoalctl cluster upgrade`](features/cluster-upgrade.md)
-  - [F56. Rebuilding a node from its peers with `shoalctl cluster rebuild`](features/cluster-rebuild.md)
-  - [F57. Rendering a deployed cluster's files again with `shoalctl cluster reconfigure`](features/cluster-reconfigure.md)
+  - [F55. A rolling upgrade with `shoaladm upgrade`](features/cluster-upgrade.md)
+  - [F56. Rebuilding a node from its peers with `shoaladm rebuild`](features/cluster-rebuild.md)
+  - [F57. Rendering a deployed cluster's files again with `shoaladm reconfigure`](features/cluster-reconfigure.md)
   - [F58. Leads weighted by what each member can commit](features/weighted-leadership.md)
-  - [F59. Shipping a backup to every host with `shoalctl cluster ship-backup`](features/backup-shipping.md)
+  - [F59. Shipping a backup to every host with `shoaladm ship-backup`](features/backup-shipping.md)
   - [F60. WAL segments written directly, and one flush a device (withdrawn)](features/shared-wal-flush.md)
   - [F61. A large sorted partition written as fragments](features/fragmented-partitions.md)
   - [F62. A failover window of one and a half to two bases](features/failover-window.md)
+  - [F63. shoalctl and shoaladm, and a deployment built from a Rust project](features/shoaladm.md)
 
 # Direction
 

@@ -42,7 +42,7 @@ nodes:
 
 A node now carries `group` and `storage` beside its existing `resources`. Settings are resolved
 by `Inventory::resolve_storage` and `Inventory::resolve_resources`
-(`shoalctl/src/deploy/inventory.rs`), and each reports the level it took its value from:
+(`shoaladm/src/deploy/inventory.rs`), and each reports the level it took its value from:
 - **Storage is merged field by field.** The node is checked first, then its group, then the
   deployment. An unset `latency` is `<remote_dir>/data`. An unset `throughput` is the resolved
   latency.
@@ -72,9 +72,9 @@ resolves is still cleaned up.
 `validate` is split in two. `validate_shape` judges everything the file says, and `validate`
 adds the check that the server program exists.
 
-### `cluster new`
+### `shoaladm new`
 
-`shoalctl cluster new -o <file> [--from <inventory>]` (`shoalctl/src/wizard.rs`) is a full-screen
+`shoaladm new -o <file> [--from <inventory>]` (`shoaladm/src/wizard.rs`) is a full-screen
 form over six pages:
 
 | Page | What it edits |
@@ -205,25 +205,25 @@ served exactly as before, and one given two is served the way `Conf` always serv
 
 | Test | Where | What breaks if this is reverted |
 | --- | --- | --- |
-| `a_group_supplies_what_a_node_does_not_set` | `shoalctl/src/deploy/inventory.rs` | The node → group → deployment order, the per-field storage merge, throughput falling back to latency, or the F51 default |
-| `a_group_replaces_resources_whole` | `shoalctl/src/deploy/inventory.rs` | A group's resources are merged by field and hand a node the deployment's memory |
-| `a_storage_root_that_destroy_could_misuse_is_refused` | `shoalctl/src/deploy/inventory.rs` | `destroy` runs `rm -rf` on `/`, `/mnt`, a relative path, the remote directory, `bin`, `tls` or a nested root, or a missing group is deployed |
-| `a_node_file_names_the_directories_its_group_gives_it` | `shoalctl/src/deploy/render.rs` | The rendered `shoal.yml` stops naming the resolved directories under their own writers |
+| `a_group_supplies_what_a_node_does_not_set` | `shoaladm/src/deploy/inventory.rs` | The node → group → deployment order, the per-field storage merge, throughput falling back to latency, or the F51 default |
+| `a_group_replaces_resources_whole` | `shoaladm/src/deploy/inventory.rs` | A group's resources are merged by field and hand a node the deployment's memory |
+| `a_storage_root_that_destroy_could_misuse_is_refused` | `shoaladm/src/deploy/inventory.rs` | `destroy` runs `rm -rf` on `/`, `/mnt`, a relative path, the remote directory, `bin`, `tls` or a nested root, or a missing group is deployed |
+| `a_node_file_names_the_directories_its_group_gives_it` | `shoaladm/src/deploy/render.rs` | The rendered `shoal.yml` stops naming the resolved directories under their own writers |
 | `a_group_split_renders_the_roots_the_engine_claims` | `shoal-bench/tests/deploy_render.rs` | The deployment's roots and the engine's disagree, so a root is left unowned, unwiped or unchecked |
-| `a_draft_round_trips_an_inventory` | `shoalctl/src/wizard/form.rs` | `--from` changes an inventory it was only asked to open, `lab.yml` and a groups inventory included |
-| `a_cluster_typed_in_builds_its_inventory` | `shoalctl/src/wizard/form.rs` | Keys stop building the inventory they describe, or a new node stops following its predecessor's group |
-| `an_issue_lands_on_its_field` | `shoalctl/src/wizard/form.rs` | An error is reported on the wrong page or field, or an unbuilt program refuses the file |
-| `a_group_in_use_cannot_be_deleted` | `shoalctl/src/wizard/form.rs` | Deleting a group strands its nodes, or a rename loses them |
-| `losing_or_replacing_work_is_asked_about` | `shoalctl/src/wizard/form.rs` | Esc drops a changed draft, a save replaces a file unasked, or a draft with an error is written |
-| `a_blank_resource_says_what_it_means` | `shoalctl/src/wizard/form.rs` | A blank resource says `inherited` where the whole-replace rule makes it the default |
-| `a_source_names_its_level` | `shoalctl/src/wizard/form.rs` | The review stops saying where a value came from |
-| `a_loopback_only_name_is_refused_before_saving` | `shoalctl/src/wizard/form.rs` | A node whose name resolves only to loopback saves clean and `bootstrap` refuses it ([#127](../appendix/resolved/wizard-loopback-address.md)) |
-| `a_source_file_is_not_a_server_program` | `shoalctl/src/wizard/form.rs` | A source file named as the server program raises no warning |
-| `a_resolution_tells_loopback_from_nothing` | `shoalctl/src/wizard/probe.rs` | The wizard cannot tell a loopback answer from no answer |
-| `a_probe_reads_what_its_script_prints` | `shoalctl/src/wizard/probe.rs` | The probe's script stops running, or its output is misread |
-| `a_relative_server_is_rebased_onto_the_new_inventory` | `shoalctl/src/wizard.rs` | `--from` into another directory names another program |
-| `the_review_page_shows_what_each_node_resolves_to` | `shoalctl/tests/wizard.rs` | The review draws the wrong resolution or source, a column truncates it, or a page panics at 80×24 |
-| `a_saved_inventory_loads` | `shoalctl/tests/wizard.rs` | The saved file is not an inventory `Inventory::load` accepts, is not the one built, or leaves a `.partial` |
+| `a_draft_round_trips_an_inventory` | `shoaladm/src/wizard/form.rs` | `--from` changes an inventory it was only asked to open, `lab.yml` and a groups inventory included |
+| `a_cluster_typed_in_builds_its_inventory` | `shoaladm/src/wizard/form.rs` | Keys stop building the inventory they describe, or a new node stops following its predecessor's group |
+| `an_issue_lands_on_its_field` | `shoaladm/src/wizard/form.rs` | An error is reported on the wrong page or field, or an unbuilt program refuses the file |
+| `a_group_in_use_cannot_be_deleted` | `shoaladm/src/wizard/form.rs` | Deleting a group strands its nodes, or a rename loses them |
+| `losing_or_replacing_work_is_asked_about` | `shoaladm/src/wizard/form.rs` | Esc drops a changed draft, a save replaces a file unasked, or a draft with an error is written |
+| `a_blank_resource_says_what_it_means` | `shoaladm/src/wizard/form.rs` | A blank resource says `inherited` where the whole-replace rule makes it the default |
+| `a_source_names_its_level` | `shoaladm/src/wizard/form.rs` | The review stops saying where a value came from |
+| `a_loopback_only_name_is_refused_before_saving` | `shoaladm/src/wizard/form.rs` | A node whose name resolves only to loopback saves clean and `bootstrap` refuses it ([#127](../appendix/resolved/wizard-loopback-address.md)) |
+| `a_source_file_is_not_a_server_program` | `shoaladm/src/wizard/form.rs` | A source file named as the server program raises no warning |
+| `a_resolution_tells_loopback_from_nothing` | `shoaladm/src/wizard/probe.rs` | The wizard cannot tell a loopback answer from no answer |
+| `a_probe_reads_what_its_script_prints` | `shoaladm/src/wizard/probe.rs` | The probe's script stops running, or its output is misread |
+| `a_relative_server_is_rebased_onto_the_new_inventory` | `shoaladm/src/wizard.rs` | `--from` into another directory names another program |
+| `the_review_page_shows_what_each_node_resolves_to` | `shoaladm/tests/wizard.rs` | The review draws the wrong resolution or source, a column truncates it, or a page panics at 80×24 |
+| `a_saved_inventory_loads` | `shoaladm/tests/wizard.rs` | The saved file is not an inventory `Inventory::load` accepts, is not the one built, or leaves a `.partial` |
 
 The wizard was also driven in tmux against `lab.yml`: a group was added, two nodes were put in
 it, europa was probed, and the file was saved and loaded by `tmdbctl cluster logs -i`. Driving it

@@ -5,7 +5,7 @@
 //! file on the node that leads the group in the new cluster. Nothing in the cluster moves them,
 //! so before this command an operator gathered every host's files and copied them to every host
 //! by hand ([runbook 10](../../../docs/src/operations/runbooks.md#10-backup-and-restore)).
-//! `cluster ship-backup` does that: it lists what every host holds of one backup, and pipes each
+//! `shoaladm ship-backup` does that: it lists what every host holds of one backup, and pipes each
 //! host the files it lacks from a host that has them, through this machine, as a tar stream. No
 //! file is stored here, and no file a host already holds is sent again.
 

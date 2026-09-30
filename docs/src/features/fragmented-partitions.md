@@ -73,7 +73,7 @@ Each reader handles a chain as follows:
 | An import digest, the fault injection, the install's absent-key sweep, a tablet drop | See whole partitions, or keys, as before |
 
 **The figures.** `TabletUsage` counts a fragment's bytes on its tablet and counts a chain once in
-`chained`. The group report carries `chained`, `TableStats` sums it, and `shoalctl cluster stats`
+`chained`. The group report carries `chained`, `TableStats` sums it, and `shoaladm stats`
 shows a table's chained partitions over every copy. The compactor's long-job report counts
 `fragments` beside `written`. The inventory's `replication:` block names
 `fragment_min_bytes` and `fragment_max_chain`, rendered into the archives' storage section.

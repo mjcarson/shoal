@@ -11,7 +11,7 @@ written on:
 Error: europa resolves only to loopback addresses; give it an address in the inventory
 
 Location:
-    shoalctl/src/deploy/inventory.rs:811:13
+    shoaladm/src/deploy/inventory.rs:811:13
 ```
 
 On europa, `getent hosts europa` answers `127.0.1.1` from `/etc/hosts`, while titan and hyperion
@@ -115,14 +115,14 @@ wizard warns with the same words.
 
 | Test | What breaks if the fix is reverted |
 | --- | --- |
-| `a_loopback_only_name_is_refused_before_saving` (`shoalctl/src/wizard/form.rs`) | A draft whose only node is `localhost` builds with no issue and saves, although `bootstrap_nodes` refuses it. It also pins `Failed` as a warning, and `Resolved` or a given address as no issue. |
-| `a_source_file_is_not_a_server_program` (`shoalctl/src/wizard/form.rs`) | A server path that is a plain file raises no warning. |
-| `a_resolution_tells_loopback_from_nothing` (`shoalctl/src/wizard/probe.rs`) | `localhost` is not `Loopback`, or a name under `.invalid` is not `Failed`. |
-| `an_inventory_that_cannot_be_a_cluster_is_refused` (`shoalctl/src/deploy/inventory.rs`) | `validate` accepts a non-executable file as the server program. |
-| `a_node_resolves_off_the_loopback` (`shoalctl/src/deploy/inventory.rs`) | `lookup` drops loopback, so the wizard cannot tell `Loopback` from `Failed`; or `dialable` stops preferring a routable IPv4 address. |
+| `a_loopback_only_name_is_refused_before_saving` (`shoaladm/src/wizard/form.rs`) | A draft whose only node is `localhost` builds with no issue and saves, although `bootstrap_nodes` refuses it. It also pins `Failed` as a warning, and `Resolved` or a given address as no issue. |
+| `a_source_file_is_not_a_server_program` (`shoaladm/src/wizard/form.rs`) | A server path that is a plain file raises no warning. |
+| `a_resolution_tells_loopback_from_nothing` (`shoaladm/src/wizard/probe.rs`) | `localhost` is not `Loopback`, or a name under `.invalid` is not `Failed`. |
+| `an_inventory_that_cannot_be_a_cluster_is_refused` (`shoaladm/src/deploy/inventory.rs`) | `validate` accepts a non-executable file as the server program. |
+| `a_node_resolves_off_the_loopback` (`shoaladm/src/deploy/inventory.rs`) | `lookup` drops loopback, so the wizard cannot tell `Loopback` from `Failed`; or `dialable` stops preferring a routable IPv4 address. |
 
 ## Related
 
 - [F53](../../features/inventory-wizard.md), the wizard.
 - [F51](../../features/cluster-deployment.md), which introduced `resolve` and its loopback refusal.
-- `shoalctl/inventories/lab.yml`, which gives europa's address by hand for this exact reason.
+- `shoaladm/inventories/lab.yml`, which gives europa's address by hand for this exact reason.

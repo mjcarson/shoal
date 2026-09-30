@@ -2,15 +2,18 @@
 //!
 //! ```sh
 //! # build the inventory, deploy the cluster, then fill it
-//! tmdb-dataset-loader cluster new -o tmdb.yml
-//! tmdb-dataset-loader cluster bootstrap -i tmdb.yml
+//! tmdb-dataset-loader new -o tmdb.yml
+//! tmdb-dataset-loader deploy -i tmdb.yml
 //! tmdb-dataset-loader load -i tmdb.yml --dataset TMDB_movie_dataset_v11.csv
 //! # and query it
 //! tmdb-dataset-loader tui -i tmdb.yml
 //! ```
 //!
-//! Every `shoalctl` command is here for this schema, beside `load`
-//! ([F54](../../../../docs/src/features/tmdb-dataset-deployment.md)).
+//! Every `shoaladm` command is here for this schema, beside `load`, and the terminal UI as
+//! `tui` ([F54](../../../../docs/src/features/tmdb-dataset-deployment.md)). The same cluster
+//! is deployed by plain `shoaladm` run in this crate's directory, which builds this schema's
+//! own admin program ([F63](../../../../docs/src/features/shoaladm.md)); this loader is that
+//! program written by hand, with the load beside it.
 
 use clap::{Parser, Subcommand};
 use tmdb_dataset::bench::{BenchArgs, VerifyAcksArgs, VerifyArgs};
@@ -21,12 +24,15 @@ use tmdb_dataset::TmdbClient;
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Cli {
-    /// What to do; the terminal UI if nothing is given
+    /// The project the schema is in, which every admin command takes
+    #[clap(flatten)]
+    project: shoaladm::cli::ProjectArgs,
+    /// What to do
     #[clap(subcommand)]
-    command: Option<Command>,
+    command: Command,
 }
 
-/// The loader's own command, and every shoalctl command
+/// The loader's own commands, the terminal UI, and every admin command
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Load the TMDB csv into a deployed cluster
@@ -37,36 +43,42 @@ enum Command {
     Verify(VerifyArgs),
     /// Read back every synthetic insert a bench run was acknowledged for
     VerifyAcks(VerifyAcksArgs),
-    /// The terminal UI and the cluster commands
+    /// Open the terminal UI
+    Tui(shoalctl::cli::TuiArgs),
+    /// The admin commands: deploy, upgrade, status and the rest
     #[command(flatten)]
-    Shoalctl(shoalctl::cli::Command),
+    Shoaladm(shoaladm::cli::Command),
 }
 
-/// Load the dataset, or run a shoalctl command
+/// Load the dataset, open the terminal UI, or run an admin command
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
-    // parse what we were asked to do, the terminal UI if nothing
-    match Cli::parse().command {
-        Some(Command::Load(args)) => {
+    // parse what we were asked to do
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Load(args) => {
             // report errors with their context; the terminal UI installs this itself, and a
-            // second install is refused, so only the loader's own path does it here
+            // second install is refused, so only the loader's own paths do it here
             color_eyre::install()?;
             tmdb_dataset::load::run(args).await
         }
         // the lab's test driver, which reports errors the same way
-        Some(Command::Bench(args)) => {
+        Command::Bench(args) => {
             color_eyre::install()?;
             tmdb_dataset::bench::bench(args).await
         }
-        Some(Command::Verify(args)) => {
+        Command::Verify(args) => {
             color_eyre::install()?;
             tmdb_dataset::bench::verify(args).await
         }
-        Some(Command::VerifyAcks(args)) => {
+        Command::VerifyAcks(args) => {
             color_eyre::install()?;
             tmdb_dataset::bench::verify_acks(args).await
         }
-        Some(Command::Shoalctl(command)) => shoalctl::cli::run::<TmdbClient>(Some(command)).await,
-        None => shoalctl::cli::run::<TmdbClient>(None).await,
+        Command::Tui(args) => shoalctl::cli::run::<TmdbClient>(&cli.project, args).await,
+        Command::Shoaladm(command) => {
+            color_eyre::install()?;
+            shoaladm::cli::run::<TmdbClient>(&cli.project, command).await
+        }
     }
 }

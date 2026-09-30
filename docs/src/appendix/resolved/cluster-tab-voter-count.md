@@ -11,7 +11,7 @@ cluster whose only member's row said `role: voter` never reached its one voter.
 
 ## Cause
 
-`ClusterModel::from_frames` (`shoalctl/src/cluster/model.rs`) read `members["voters"]` and
+`ClusterModel::from_frames` (`shoaladm/src/cluster/model.rs`) read `members["voters"]` and
 `members["learners"]` with `as_u64`. The `Members` frame is `serde_json::to_value` of the
 control plane's `TopologyView` (`shoal-core/src/server/control/plane.rs`, `AdminKind::Members`),
 whose `voters` and `learners` are `Vec<NodeId>`, so both fields are arrays of node ids and
@@ -71,8 +71,8 @@ list is already in it; a count beside a list is a second field to keep equal to 
 
 | Test | Where | What breaks if this is reverted |
 | --- | --- | --- |
-| `voters_and_learners_are_counted_from_the_lists_the_frame_carries` | `shoalctl/src/cluster/model.rs` | Reads `(0, 0)` for three voters and a learner |
-| `the_cluster_model_reads_the_admin_frames` | `shoalctl/src/cluster/model.rs` | Its frame now carries lists, so it reads no voters |
+| `voters_and_learners_are_counted_from_the_lists_the_frame_carries` | `shoaladm/src/cluster/model.rs` | Reads `(0, 0)` for three voters and a learner |
+| `the_cluster_model_reads_the_admin_frames` | `shoaladm/src/cluster/model.rs` | Its frame now carries lists, so it reads no voters |
 | `a_rendered_node_claims_starts_and_initializes` | `shoal-bench/tests/deploy_render.rs` | A real node's model never reaches its one voter |
 
 ## Related

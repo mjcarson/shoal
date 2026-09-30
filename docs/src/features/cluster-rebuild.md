@@ -1,11 +1,11 @@
-# F56. Rebuilding a node from its peers with `shoalctl cluster rebuild`
+# F56. Rebuilding a node from its peers with `shoaladm rebuild`
 
 ## Context
 
 A node whose disk will not start it has to be emptied and filled again by its peers. On the lab
 that happened twice: titan, with a hole in its WAL ([#151](../appendix/resolved/purge-ahead-of-its-marker.md)),
 and hyperion, with a torn map entry ([#159](../appendix/resolved/map-ahead-of-archive.md)). Both
-times the only tool was `cluster destroy` of the whole deployment and a reload, since the
+times the only tool was `shoaladm destroy` of the whole deployment and a reload, since the
 alternative, a removal and a re-add, was a hand-made sequence of steps across the host, the
 inventory state and the admin plane.
 
@@ -18,7 +18,7 @@ candidate without the entry could win and the committed write would be gone.
 ## What it does
 
 ```
-shoalctl cluster rebuild -i <inventory> <node> --yes
+shoaladm rebuild -i <inventory> <node> --yes
 ```
 
 1. **Gate.** `rebuild_refusal` refuses a node that is not a plain member, any other member that is
@@ -75,7 +75,7 @@ shoalctl cluster rebuild -i <inventory> <node> --yes
   disk full ([section 8](../cluster-testing/correctness.md#8-an-unplaced-member-coordinates)).
 - **The command follows the plan through one member.** If that member restarts, the command waits
   up to five minutes for its record to be readable again. Past that it stops, and the plan runs on
-  without it: `cluster admin "status <plan>"` follows it from any member.
+  without it: `shoaladm admin "status <plan>"` follows it from any member.
 - **It is not proven past the lab's size, and the defaults are not sized for terabytes.** Steps are
   replica sets, so their number is fixed by the placement (18 on the lab) and their size grows with
   the data: about 55 GB each at a terabyte a node. Extrapolated, **not measured**: under load the lab moved
@@ -92,7 +92,7 @@ shoalctl cluster rebuild -i <inventory> <node> --yes
 
 - **Section 8's rebuilds found and fixed six defects in the moves a rebuild is made of**
   ([cluster testing](../cluster-testing/correctness.md#8-an-unplaced-member-coordinates)). Before
-  [#171](../appendix/resolved/failed-group-publishes-its-set.md), `cluster rebuild` could report success
+  [#171](../appendix/resolved/failed-group-publishes-its-set.md), `shoaladm rebuild` could report success
   with a set published onto the new node whose group never took it. Before
   [#174](../appendix/resolved/snapshot-cut-queue.md), a set's snapshot could wait minutes behind the
   source's compactions and fail its move. On the fixed build, run 9 rebuilt hyperion under the bench in

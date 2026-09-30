@@ -28,9 +28,10 @@ name = "shoal-workload"
 path = "src/workload_main.rs"
 required-features = ["workloads"]
 
-# A node serving the bench schema from a plain `shoal.yml`, and shoalctl built against the same
-# schema to deploy it over ssh (F51). They sit behind `workloads` because the schema does, and
-# they are default targets so `cargo check --workspace --all-targets` compiles both
+# A node serving the bench schema from a plain `shoal.yml`, and the bench schema's admin
+# program and terminal UI to deploy it over ssh and query it (F51, F63). They sit behind
+# `workloads` because the schema does, and they are default targets so
+# `cargo check --workspace --all-targets` compiles both
 [[bin]]
 name = "shoal-node"
 path = "src/node_main.rs"
@@ -67,6 +68,7 @@ workloads = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
     "dep:opentelemetry-otlp",
+    "dep:shoaladm",
     "dep:shoalctl",
     "dep:color-eyre",
     # a workload's client puts a trace context on the wire, so a captured query is one trace
@@ -158,8 +160,9 @@ opentelemetry-otlp = { version = "0.28", optional = true }
 # so that nothing in the repository expires and invalidates a capture
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs", "pem"], optional = true }
 
-# the bench schema's shoalctl (F51): the deployment library and the terminal UI, the client half
-# alone, and the error type its entry point returns
+# the bench schema's admin program and terminal UI (F51, F63): the deployment library and the
+# UI, the client half alone, and the error type their entry points return
+shoaladm = { version = "0.1.0", path = "../shoaladm", optional = true }
 shoalctl = { version = "0.1.0", path = "../shoalctl", optional = true }
 color-eyre = { version = "0.6.3", optional = true }
 

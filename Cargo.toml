@@ -13,6 +13,8 @@ members = [
     "shoal-proto",
     "shoal-spike",
     "shoal-top",
+    # the admin program and the terminal UI, split in F63: shoalctl depends on shoaladm
+    "shoaladm",
     "shoalctl",
     # the TMDB dataset as a deployable database: a node program and a loader (F54)
     "examples/tmdb_dataset",

@@ -1,13 +1,13 @@
-//! Tests for `shoalctl cluster new`, the inventory wizard
+//! Tests for `shoaladm new`, the inventory wizard
 //!
 //! These draw the wizard to an in memory terminal and write its file to a temp dir, so none of
 //! it needs a real terminal or a host ([F53](../../docs/src/features/inventory-wizard.md)).
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use shoalctl::deploy::inventory::Inventory;
-use shoalctl::wizard::form::{Draft, Page, Wizard};
-use shoalctl::wizard::{save, view};
+use shoaladm::deploy::inventory::Inventory;
+use shoaladm::wizard::form::{Draft, Page, Wizard};
+use shoaladm::wizard::{save, view};
 use std::path::PathBuf;
 
 /// An inventory with a group, parsed with this test binary as its server program
@@ -125,5 +125,5 @@ fn a_saved_inventory_loads() {
     );
     // and it opens with the note saying how to build and bootstrap
     let raw = std::fs::read_to_string(&path).unwrap();
-    assert!(raw.starts_with("# Written by `shoalctl cluster new`"));
+    assert!(raw.starts_with("# Written by `shoaladm new`"));
 }

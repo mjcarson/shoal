@@ -17,11 +17,11 @@ pub struct Tmdb {
     pub movie_by_keyword: PersistentSortedTable<MovieByKeyword, FileSystem>,
 }
 
-/// Query a TMDB database, or deploy a cluster of `tmdb_node` over ssh
+/// Query a TMDB database in a terminal
 ///
-/// With no arguments this opens the terminal UI against `127.0.0.1:12000`, as it always did;
-/// `tmdbctl cluster --help` lists the deployment commands ([F51](../../docs/src/features/cluster-deployment.md)).
-#[tokio::main]
-async fn main() -> color_eyre::Result<()> {
-    shoalctl::cli::main::<TmdbClient>().await
+/// With no arguments this opens the terminal UI against `127.0.0.1:12000`, as it always did,
+/// or against the cluster the operator's config names ([F63](../../docs/src/features/shoaladm.md)).
+/// Deploying a cluster of `tmdb_node` is `shoaladm`'s ([F51](../../docs/src/features/cluster-deployment.md)).
+fn main() -> shoalctl::Result<()> {
+    shoalctl::cli::main_blocking::<TmdbClient>()
 }

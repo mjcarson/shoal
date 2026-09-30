@@ -5485,6 +5485,7 @@ dependencies = [
  "shoal",
  "shoal-core",
  "shoal-top",
+ "shoaladm",
  "shoalctl",
  "tempfile",
  "tokio",
@@ -5652,18 +5653,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "shoalctl"
+name = "shoaladm"
 version = "0.1.0"
 dependencies = [
  "byte-unit",
  "clap",
  "color-eyre",
  "crossterm",
- "deepsize2",
  "futures",
  "kanal",
  "ratatui",
- "ratatui-hypertile",
  "rcgen",
  "rkyv 0.8.12",
  "rustls-pemfile",
@@ -5672,7 +5671,29 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "shoal",
+ "syn 2.0.108",
  "tempfile",
+ "tokio",
+ "toml",
+ "uuid",
+]
+
+[[package]]
+name = "shoalctl"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "color-eyre",
+ "crossterm",
+ "deepsize2",
+ "futures",
+ "kanal",
+ "ratatui",
+ "ratatui-hypertile",
+ "rkyv 0.8.12",
+ "serde",
+ "shoal",
+ "shoaladm",
  "tokio",
  "unicode-width 0.2.2",
  "uuid",
@@ -6280,6 +6301,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shoal",
+ "shoaladm",
  "shoalctl",
  "tikv-jemallocator",
  "tokio",

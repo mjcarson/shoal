@@ -1,4 +1,4 @@
-# F55. A rolling upgrade with `shoalctl cluster upgrade`
+# F55. A rolling upgrade with `shoaladm upgrade`
 
 ## Context
 
@@ -18,7 +18,7 @@ here migrates an archive, a marker or a WAL format.
 ## What it does
 
 ```
-shoalctl cluster upgrade -i <inventory> [NODE...] [--force] [--activate] [--rollback]
+shoaladm upgrade -i <inventory> [NODE...] [--force] [--activate] [--rollback]
 ```
 
 The program installed is the inventory's `server:`, the same file `bootstrap` and `add` copy. To
@@ -158,11 +158,11 @@ what `stage`'s did, once per node.
 
 | Test | Where | What breaks if this is reverted |
 | --- | --- | --- |
-| `an_unhealthy_cluster_is_refused_by_name` | `shoalctl/src/deploy/upgrade.rs` | A node is restarted while another is down or leaving, writes are refused, a set is short a copy, or a plan is moving data |
-| `the_leader_is_upgraded_last` | `shoalctl/src/deploy/upgrade.rs` | The leader is restarted mid-run, a narrowed run restarts other nodes, or a typo in a node name is ignored |
-| `caught_up_needs_no_lag_and_no_install` | `shoalctl/src/deploy/upgrade.rs` | The next node is restarted while this one is still behind its leaders |
-| `only_a_higher_common_version_is_activated` | `shoalctl/src/deploy/upgrade.rs` | `--activate` sends a version a member does not speak, or one already activated |
-| `upgrade_parses_its_nodes_and_refuses_a_forced_rollback` | `shoalctl/src/cli.rs` | The node list is not positional, or a rollback can activate |
+| `an_unhealthy_cluster_is_refused_by_name` | `shoaladm/src/deploy/upgrade.rs` | A node is restarted while another is down or leaving, writes are refused, a set is short a copy, or a plan is moving data |
+| `the_leader_is_upgraded_last` | `shoaladm/src/deploy/upgrade.rs` | The leader is restarted mid-run, a narrowed run restarts other nodes, or a typo in a node name is ignored |
+| `caught_up_needs_no_lag_and_no_install` | `shoaladm/src/deploy/upgrade.rs` | The next node is restarted while this one is still behind its leaders |
+| `only_a_higher_common_version_is_activated` | `shoaladm/src/deploy/upgrade.rs` | `--activate` sends a version a member does not speak, or one already activated |
+| `upgrade_parses_its_nodes_and_refuses_a_forced_rollback` | `shoaladm/src/cli.rs` | The node list is not positional, or a rollback can activate |
 | `a_deployed_cluster_serves_every_row_from_every_node` | `shoal-bench/tests/deploy_smoke.rs` | Gated on `SHOAL_DEPLOY_INVENTORY`: after the adds, `upgrade --force` restarts every node through the whole wait and every row is read back through every node; a plain `upgrade` then skips them all |
 
 ## Related

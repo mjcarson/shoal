@@ -13,10 +13,12 @@ and a filesystem under the storage path that takes direct I/O - a tmpfs does not
 
 ~~There is no `shoal` server binary and no `shoalctl` binary~~ - since [F51](../features/cluster-deployment.md)
 both are one generic call: the server is `shoal::server::node::main::<Db>()` and the tool
-`shoalctl::cli::main::<DbClient>()`, and `shoalctl cluster bootstrap` does everything on this
-page from an inventory, over ssh (see [Deploying with shoalctl](#deploying-with-shoalctl)
-below). A schema is still a compile-time construct, so both are still programs you build
-against yours. What follows is the same by hand. The server is `ShoalPool::<Db>::start(conf)` and
+`shoaladm::cli::main_blocking::<DbClient>()`, and `shoaladm deploy` does everything on this
+page from an inventory, over ssh (see [Deploying with shoaladm](#deploying-with-shoaladm)
+below). A schema is still a compile-time construct, ~~so both are still programs you build
+against yours~~ and since [F63](../features/shoaladm.md) `shoaladm` builds both from the
+project that defines it, the node once per cpu class among the hosts. What follows is the same
+by hand. The server is `ShoalPool::<Db>::start(conf)` and
 `ready`, exactly as `shoal/examples/tmdb.rs` does it:
 
 ```rust
@@ -195,7 +197,7 @@ none. The id is minted when the directory is first claimed, so the id comes befo
 A deployment that shares one leaf across every node sets `bind_identity: false` and accepts
 that a member can then speak as another. Rotation is [runbook 14](../operations/runbooks.md#14-rotate-certificates-and-authorities):
 write the new files, `reload-tls` on that node; an authority rotates as a bundle. ~~Nothing in
-Shoal issues a certificate~~ `shoalctl cluster` mints a cluster authority and issues every node it
+Shoal issues a certificate~~ `shoaladm` (`shoalctl cluster` until [F63](../features/shoaladm.md)) mints a cluster authority and issues every node it
 deploys a leaf this way ([F51](../features/cluster-deployment.md)); by hand, the fixture's authority
 (`shoal/tests/cluster/mod.rs`, `Pki`) shows the shape a `rcgen` or `openssl` script produces.
 
@@ -238,31 +240,33 @@ with `bootstrap: true` against an established cluster: it keeps its own and neve
 Never load data before `initialize` on a cluster of more than one node: it stays where the
 bootstrapper's rule put it.
 
-## Deploying with shoalctl
+## Deploying with shoaladm
 
-Everything above, done by a program ([F51](../features/cluster-deployment.md)). Write an inventory naming the server
-program, the hosts and the cluster's shape - `shoalctl/inventories/lab.yml` is a worked one, and
-`cluster new` builds one in a form that judges it as you type
-([F53](../features/inventory-wizard.md)) - and, from a machine with keyless ssh and passwordless
-sudo on every host:
+Everything above, done by a program ([F51](../features/cluster-deployment.md),
+[F63](../features/shoaladm.md)). Write an inventory naming the hosts and the cluster's shape -
+`shoaladm new` builds one in a form that judges it as you type
+([F53](../features/inventory-wizard.md)) - and, from the project that defines the schema, on a
+machine with keyless ssh and passwordless sudo on every host:
 
 ```sh
-shoal-benchctl cluster new -o lab.yml                 # or --from an inventory to edit it
-# the server program, built for the oldest cpu among the hosts - never `native`
-CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
-    cargo build --release -p shoal-bench --bin shoal-node --bin shoal-benchctl
-shoal-benchctl cluster bootstrap -i lab.yml          # stage, claim, leaf, start, initialize
-shoal-benchctl cluster status -i lab.yml
-shoal-benchctl cluster add -i lab.yml <node> --rebalance
-shoal-benchctl tui -i lab.yml                         # the cluster tab, as the admin
+cd my-database                # the project with `#[shoal::db] pub struct MyDb`
+shoaladm new -o inventory.yml # or --from an inventory to edit it; leave Server program blank
+shoaladm deploy               # find the schema, probe every host's cpu, build a node per cpu
+                              # class and the admin program, stage, claim, leaf, start, initialize
+shoaladm status
+shoaladm add <node> --rebalance
+shoalctl                      # the terminal UI with its cluster tab, as the admin
 ```
 
 It renders every file on this page, issues the leaves above from an authority it keeps under
 `~/.shoal/clusters/<name>/`, runs each node as a systemd unit, waits for exactly what the steps
-above wait for, and sends `Initialize` once. Any schema: `tmdbctl` and `tmdb_node` are the same
-pair for TMDB, and `tmdb-dataset-loader` and `tmdb-dataset-node` for the full dataset, with a
-`load -i <inventory>` that fills the deployed cluster
-([F54](../features/tmdb-dataset-deployment.md)).
+above wait for, and sends `Initialize` once. Any schema: the TMDB dataset
+([F54](../features/tmdb-dataset-deployment.md)) is deployed by the same command run in
+`examples/tmdb_dataset`, and its `tmdb-dataset-loader` carries a `load -i <inventory>` that fills
+the deployed cluster beside every admin command. ~~The server program, built for the oldest cpu
+among the hosts - never `native`~~: an inventory may still name a `server:` you built that way
+(`shoaladm/inventories/lab.yml` does, for the bench schema, which lives in a module of a
+workspace crate and is deployed by `shoal-benchctl`), but nothing needs it to.
 
 ## Connect an application
 
@@ -297,7 +301,8 @@ and a half to two times `primary_failover_after` ([C7](failover.md#the-window-an
 
 ## shoalctl
 
-`shoalctl` is the query tool it always was - `i` to type, `Enter` to run, `Space` for the
+`shoalctl` is the query tool it always was, opened with no subcommand and built for the
+schema by itself since [F63](../features/shoaladm.md) - `i` to type, `Enter` to run, `Space` for the
 shortcut mode ([keys](../operations/shoalctl.md#keys)) - with a cluster tab since
 [F50](../features/cluster-operations.md). `Space c` opens it against the node the connection
 reached; it polls `Members`, `Readiness`, `Replication`, `Plans`, `Backups` and `Recoveries`
@@ -357,7 +362,7 @@ done, and `status <op>` follows one from any connection.
 | A node is retired | [4](../operations/runbooks.md#4-decommission) | `decommission <node>`; its process stops itself when done |
 | A node is down for maintenance | [5](../operations/runbooks.md#5-automatic-removal-and-maintenance) | `maintenance <node> on`, then `off` |
 | A removed node's directory turns up | [6](../operations/runbooks.md#6-a-removed-node-returns) | Nothing: it is refused at every door |
-| A new build | [7](../operations/runbooks.md#7-rolling-upgrade) | One node at a time, `wire` on the tab, then `activate <wire>`; on a deployed cluster, `shoalctl cluster upgrade -i <inv> [--activate]` ([F55](../features/cluster-upgrade.md)) |
+| A new build | [7](../operations/runbooks.md#7-rolling-upgrade) | One node at a time, `wire` on the tab, then `activate <wire>`; on a deployed cluster, `shoaladm upgrade -i <inv> [--activate]` ([F55](../features/cluster-upgrade.md)) |
 | The control voters are down | [8](../operations/runbooks.md#8-control-quorum-lost) | Restart them; tablets with a quorum keep serving meanwhile |
 | The control voters are gone | [9](../operations/runbooks.md#9-permanent-quorum-loss) | `force_recover(&conf, &[survivor])` on one stopped survivor |
 | A backup | [10](../operations/runbooks.md#10-backup-and-restore) | `backup /var/backups/shoal`, copy `<dir>/<op>` off the hosts; `restore` into a fresh cluster |
@@ -369,7 +374,7 @@ done, and `status <op>` follows one from any connection.
 ## Limitations
 
 ~~There is no server binary, no `shoalctl` binary and no packaging~~ Both halves are one
-generic call and `shoalctl cluster` deploys them under systemd ([F51](../features/cluster-deployment.md)); there is still no
+generic call and `shoaladm` (`shoalctl cluster` until [F63](../features/shoaladm.md)) deploys them under systemd ([F51](../features/cluster-deployment.md)); there is still no
 packaging, and the program is still yours to build. ~~Nothing issues a certificate.~~ The
 deployment issues every leaf; by hand, nothing does. The
 cluster tab reaches the node the connection reached, so a node's own lag or install is seen by

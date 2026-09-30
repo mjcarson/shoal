@@ -35,7 +35,7 @@ europa restarted at 08:19:53).
   (`NodeReplication::fold`, `shoal-core/src/server/replication/report.rs`). It is `serde(default)`,
   so an older node reads as zero.
 - shoalctl's model carries `starting` and `shards_reporting`, the number of shard reports the fold
-  holds (`shoalctl/src/cluster/model.rs`).
+  holds (`shoaladm/src/cluster/model.rs`).
 - Before restarting a node, `restart_and_wait` reads that node's shard and group counts, trying
   for three seconds. A node that does not answer is being repaired, and the fallback is its
   configured cores and one group. `caught_up` requires the node to report at least those shards
@@ -70,8 +70,8 @@ europa restarted at 08:19:53).
 
 | Test | What breaks if this is reverted |
 | --- | --- |
-| `a_node_still_starting_its_shards_has_not_caught_up` (`shoalctl/src/deploy/upgrade.rs`) | A node with no shard reported, some shards reported, or groups still starting is judged caught up |
-| `caught_up_needs_no_lag_and_no_install` (`shoalctl/src/deploy/upgrade.rs`) | Lag, an install or refused writes stop being checked |
+| `a_node_still_starting_its_shards_has_not_caught_up` (`shoaladm/src/deploy/upgrade.rs`) | A node with no shard reported, some shards reported, or groups still starting is judged caught up |
+| `caught_up_needs_no_lag_and_no_install` (`shoaladm/src/deploy/upgrade.rs`) | Lag, an install or refused writes stop being checked |
 
 ## Related
 

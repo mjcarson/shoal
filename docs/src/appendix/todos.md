@@ -244,12 +244,12 @@ list rather than from the diff:
   and placed by the operator; nothing mints one at first boot, since the id is minted at the
   first claim and a leaf without a node in it is refused under the binding. A `shoalctl`
   `issue` that takes the authority's key and a node id is the shape; not built.~~ **Built by
-  [F51](../features/cluster-deployment.md)** for the nodes `shoalctl cluster` deploys: the node
+  [F51](../features/cluster-deployment.md)** for the nodes `shoaladm` (`shoalctl cluster` until [F63](../features/shoaladm.md)) deploys: the node
   program's `claim` gives the id before the first start and the deployment issues and places the
   leaf. A standalone `issue` for a node deployed some other way is still not built.
 - ~~**A physical capture.** The record and the launcher exist and the launcher was proven
   against no host but by its command lines~~ - the launcher is still unproven on a real host,
-  but since F51 three real hosts exist (`shoalctl/inventories/lab.yml`) and a deployed cluster
+  but since F51 three real hosts exist (`shoaladm/inventories/lab.yml`) and a deployed cluster
   on them is. The capture on unequal hardware, and the render of it, are still the benchmark
   host's.
 - **A cluster-wide reload.** `ReloadTls` reaches the node the connection did; a fan-out that
@@ -265,7 +265,7 @@ list rather than from the diff:
 **What F55 left undone, deliberately.** Recorded here so the next change starts from the list
 rather than from the diff ([F55](../features/cluster-upgrade.md)):
 
-- **A schema, archive or marker upgrade.** `cluster upgrade` replaces the program only. A schema
+- **A schema, archive or marker upgrade.** `shoaladm upgrade` replaces the program only. A schema
   change is still a new cluster and a restore, and a format change has no migration in place.
   The upgrade's gate and waits are where a migration step would go.
 - **Configuration and unit changes.** The rendered `shoal.yml` and the unit are left as they
@@ -795,7 +795,7 @@ falls behind, and its groups commit on the other members. So this stays unbuilt.
 **Done in [F57](../features/cluster-reconfigure.md)**: a `Failover base` field on the Shape page, validated as the inventory is. What follows is the todo as it was filed.
 
 
-`shoalctl/src/wizard/form.rs`. The [cluster testing](../cluster-testing/performance.md#failover-time-against-primary_failover_after)
+`shoaladm/src/wizard/form.rs`. The [cluster testing](../cluster-testing/performance.md#failover-time-against-primary_failover_after)
 chapter added `failover` to the inventory (rendered as `cluster.primary_failover_after`) to
 measure failover against it. The wizard carries an inventory's value through an edit unchanged,
 but cannot set or show one, so a `failover` is written by hand. It was left out because the
@@ -2160,8 +2160,17 @@ variable that a separator would reinterpret.
 - The `../glommio` path dependency makes the build non-reproducible from this repository
   alone and blocks publishing.
 - No CI configuration in the repository.
+- **No cross-compiling in `shoaladm`.** A host of another architecture than the machine running
+  it is refused by name ([F63](../features/shoaladm.md)). Building for it would need the target
+  installed and a linker for it, and a `--target` on the node build; the wrapper crate and the
+  per-class target directories are already shaped for it.
+- **A `main.rs` schema is a module of the generated crate** ([F63](../features/shoaladm.md)):
+  `crate::` paths in it do not resolve, the project's `build.rs` does not run, and a `#[path]` on
+  a `mod` is not followed by the scan. A project that hits any of these keeps its schema in a
+  library, which the wrapper depends on instead. Copying the file into the wrapper and rewriting
+  `crate::` to `crate::schema::` would lift the first.
 - The workspace is split across two editions — `shoal`, `shoal-core` and `shoal-derive` are 2021;
-  `shoal-bench` and `shoalctl` are 2024. That is not a problem in itself, but
+  `shoal-bench`, `shoalctl` and `shoaladm` are 2024. That is not a problem in itself, but
   [item 35](known-issues.md#35-a-refcell-borrow-is-held-across-three-awaits-in-the-compactor) turns
   correct for free under 2024's temporary scoping, so bumping `shoal-core` would silently change a
   latent defect into a non-defect. Whoever bumps it should read that item first and delete it
@@ -2204,7 +2213,7 @@ Multi-shard routing is no longer on that list; it gained coverage with
 | `server/cursor.rs`, `server/response.rs` | Not in the module tree; reference removed APIs. |
 | `shoal-core/src/client.rs:549-603`, `:1048-1114` | Large commented-out blocks. |
 | ~~`.../fs.rs:74-98`~~ | ~~The previous intent-log writer, commented out.~~ **Gone** — the block is no longer in the file. |
-| `shoalctl/src/components/tab.rs:548`, `:558` | `next`/`prev`, never called — the compiler warns about them on every build. |
+| `shoalctl/src/components/tab.rs:851`, `:861` | `next`/`prev`, never called — the compiler warns about them on every build. |
 | ~~`EphemeralTable`~~ | ~~Cannot be used in a `#[db]` database.~~ Deleted by [F9](../features/ephemeral-tables.md), which replaced it with aliases over the persistent tables. |
 | `shoal/examples/basic.rs.bak` | A `.bak` file in the source tree. |
 
@@ -2292,7 +2301,7 @@ to accept both sides of.
 
 ## ~~A node's memory on `Stats`~~
 
-**Done in round 11** of the [cluster testing](../cluster-testing/performance.md#who-leads-the-busiest-groups): `NodeStats` carries the shards' row bytes, their eviction budgets and the process's resident memory, and `cluster stats` prints them. On the lab under the bench: about 340 MiB of rows against 2.9 GiB resident a node. What follows is the todo as it was filed.
+**Done in round 11** of the [cluster testing](../cluster-testing/performance.md#who-leads-the-busiest-groups): `NodeStats` carries the shards' row bytes, their eviction budgets and the process's resident memory, and `shoaladm stats` prints them. On the lab under the bench: about 340 MiB of rows against 2.9 GiB resident a node. What follows is the todo as it was filed.
 
 
 Filed by [Resolved #149](resolved/node-memory-budget.md). The eviction budget counts table data
@@ -2303,7 +2312,7 @@ process's resident memory, on the node's `Stats`, would let an operator read it 
 
 ## ~~Per-group write rates in `Stats`~~
 
-**Done in round 11** of the [cluster testing](../cluster-testing/performance.md#who-leads-the-busiest-groups): `NodeStats::hot_groups` names the eight busiest groups a node leads, by writes a second over the last interval, and `cluster stats` prints the cluster's ten busiest with their leaders. It did not support O64's hypothesis. Weighing leadership balance by it is not done: see [weighted leadership](#leadership-is-spread-evenly-whatever-each-member-can-do). What follows is the todo as it was filed.
+**Done in round 11** of the [cluster testing](../cluster-testing/performance.md#who-leads-the-busiest-groups): `NodeStats::hot_groups` names the eight busiest groups a node leads, by writes a second over the last interval, and `shoaladm stats` prints the cluster's ten busiest with their leaders. It did not support O64's hypothesis. Weighing leadership balance by it is not done: see [weighted leadership](#leadership-is-spread-evenly-whatever-each-member-can-do). What follows is the todo as it was filed.
 
 
 Filed by [O64](optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab).
@@ -2364,23 +2373,23 @@ map, not the rows, is what an in-memory index cannot keep up with.
 
 ## ~~Re-render a deployment's node files~~
 
-**Done as [F57](../features/cluster-reconfigure.md)**, `cluster reconfigure`. The credential it was thought to need is the one bootstrap keeps in the deployment's state directory. What follows is the todo as it was filed.
+**Done as [F57](../features/cluster-reconfigure.md)**, `shoaladm reconfigure`. The credential it was thought to need is the one bootstrap keeps in the deployment's state directory. What follows is the todo as it was filed.
 
 
-Filed by [Resolved #149](resolved/node-memory-budget.md). `cluster upgrade` swaps a node's program
+Filed by [Resolved #149](resolved/node-memory-budget.md). `shoaladm upgrade` swaps a node's program
 and never rewrites its `shoal.yml`, so a change to what the renderer writes reaches no deployed
 node. The lab's nodes had `node_memory` added by hand. Re-rendering needs the admin's credential,
-which the tool deliberately does not keep, so a `cluster reconfigure` would ask for it.
+which the tool deliberately does not keep, so a `shoaladm reconfigure` would ask for it.
 
 ## ~~Rebuild a node from its peers~~
 
-**Done as [F56](../features/cluster-rebuild.md)**, `cluster rebuild <node>`, under a new identity
+**Done as [F56](../features/cluster-rebuild.md)**, `shoaladm rebuild <node>`, under a new identity
 with a `Remove` and a replacement, as the sketch below wanted. The same-identity rebuild stays
 unoffered for the reason given. What follows is the todo as it was filed.
 
 Filed by [Resolved #151](resolved/purge-ahead-of-its-marker.md). A node whose disk cannot start
 it, like titan with a hole in its WAL, has to be wiped and fed by its peers. The only path today
-is `cluster destroy` of the whole deployment or a hand-made removal and re-add. A `cluster rebuild
+is `shoaladm destroy` of the whole deployment or a hand-made removal and re-add. A `shoaladm rebuild
 <node>`, meaning stop, wipe and rejoin under a new identity with a `Replace`, would make it an
 operation.
 
@@ -2398,7 +2407,7 @@ Take an entry committed with its acknowledgement and held by one other member on
 member fails, a candidate without the entry can win with the wiped node's vote, and a committed
 write is gone. The same-identity rebuild is safe when, for every group the node votes in, the
 other voters have already matched the leader's committed index before the wipe, as on an idle
-cluster. So a `cluster rebuild` built on it has to check that first, per group, and refuse
+cluster. So a `shoaladm rebuild` built on it has to check that first, per group, and refuse
 otherwise. The `Replace` path has no such condition.
 
 

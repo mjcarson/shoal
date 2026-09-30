@@ -527,7 +527,7 @@ where
     async fn handle_cluster_frame(
         &mut self,
         tab_id: Uuid,
-        model: Result<crate::cluster::ClusterModel, String>,
+        model: Result<shoaladm::cluster::ClusterModel, String>,
     ) {
         let Some(tab) = self.tabs.tabs.iter_mut().find(|t| t.id == tab_id) else {
             return;
@@ -541,7 +541,7 @@ where
         }
         // an operation being followed is read at the same cadence, until its record is done
         if let Some((op, follow)) = tab.cluster.following {
-            match crate::components::follow_once::<S>(&self.shoal, op, follow).await {
+            match shoaladm::cluster::follow_once::<S>(&self.shoal, op, follow).await {
                 Ok((lines, done)) => {
                     tab.cluster.outcome = lines;
                     if done {
@@ -565,7 +565,7 @@ where
         &mut self,
         tab_id: Uuid,
         outcome: Result<Vec<String>, String>,
-        follow: Option<(Uuid, crate::cluster::Follow)>,
+        follow: Option<(Uuid, shoaladm::cluster::Follow)>,
     ) {
         let Some(tab) = self.tabs.tabs.iter_mut().find(|t| t.id == tab_id) else {
             return;

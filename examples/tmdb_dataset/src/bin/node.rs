@@ -6,7 +6,7 @@
 //! ```
 //!
 //! This is the program an inventory's `server:` names. It has no settings of its own: every host
-//! runs it under the systemd unit `cluster bootstrap` installs, against the `shoal.yml` the
+//! runs it under the systemd unit `shoaladm deploy` installs, against the `shoal.yml` the
 //! deployment rendered for that node - its cores, memory, storage, ports, TLS and admin
 //! credential ([F54](../../../../docs/src/features/tmdb-dataset-deployment.md)).
 

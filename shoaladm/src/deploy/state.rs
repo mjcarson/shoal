@@ -31,6 +31,19 @@ pub struct NodeRecord {
     pub target: String,
 }
 
+/// The schema a cluster was deployed from, so the tools can find its programs without the project
+///
+/// Written when the node program was built from a project ([F63](../../../docs/src/features/shoaladm.md)):
+/// `shoalctl -i <inventory>` run anywhere looks for `<package>-<db>-ctl` under the installed
+/// programs by these two names.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SchemaRecord {
+    /// The package the schema is in
+    pub package: String,
+    /// The `#[shoal::db]` struct
+    pub db: String,
+}
+
 /// Everything a deployment remembers about its cluster
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct ClusterRecord {
@@ -46,6 +59,18 @@ pub struct ClusterRecord {
     /// Whether `Initialize` was answered
     #[serde(default)]
     pub initialized: bool,
+    /// The schema the node program was built from, when it was built from a project
+    ///
+    /// Absent in a record written before F63, and for a cluster deployed from a built `server`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<SchemaRecord>,
+    /// The file name the node program has on every host, decided at bootstrap and kept
+    ///
+    /// A unit names the program by this, so it never changes for a deployed cluster whatever
+    /// the inventory later says about where the program comes from. Absent in a record written
+    /// before F63, and learned from a host's unit then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
 }
 
 /// A cluster's local state directory
@@ -238,7 +263,7 @@ mod tests {
     #[test]
     fn state_is_private_and_minted_once() {
         // a state directory under this test's own temp dir
-        let root = std::env::temp_dir().join(format!("shoalctl-state-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("shoaladm-state-{}", Uuid::new_v4()));
         let state = State {
             dir: root.join("lab"),
         };
@@ -258,6 +283,19 @@ mod tests {
         state.save(&record).expect("a saved record");
         assert!(state.exists());
         assert_eq!(state.record().expect("a record"), record);
+        // a record written before the schema was remembered reads back without one, and one
+        // that remembers it reads it back
+        let old = r#"{"cluster":"c","nodes":{},"initialize_op":null,"initialized":true}"#;
+        let parsed: ClusterRecord = serde_json::from_str(old).expect("an old record");
+        assert_eq!(parsed.schema, None);
+        assert_eq!(parsed.program, None);
+        record.program = Some("tmdb-dataset-Tmdb-node".into());
+        record.schema = Some(SchemaRecord {
+            package: "tmdb-dataset".into(),
+            db: "Tmdb".into(),
+        });
+        state.save(&record).expect("a saved record");
+        assert_eq!(state.record().expect("a record").schema, record.schema);
         // the password is minted once and kept, unless the override is set
         if std::env::var_os(PASSWORD_ENV).is_none() {
             let first = state.password().expect("a password");

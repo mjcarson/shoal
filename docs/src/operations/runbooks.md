@@ -9,9 +9,12 @@ the three that run on a stopped directory (`force_recover`, `export_standalone`,
 which are said so, and [15](#15-a-tables-intent-log-failed), which is a restart. What each operation refuses is on the feature page it links; what it costs
 the foreground is on [Performance](../distributed/performance.md).
 
-Runbooks [1](#1-bootstrap) and [2](#2-add-a-node) are also a program: `shoalctl cluster
-bootstrap` and `shoalctl cluster add <node> --rebalance` do every step below from an inventory,
-over ssh, and wait where these say to wait ([F51](../features/cluster-deployment.md)).
+Runbooks [1](#1-bootstrap) and [2](#2-add-a-node) are also a program: `shoaladm deploy`,
+`shoaladm bootstrap` and `shoaladm add <node> --rebalance` do every step below from an inventory,
+over ssh, and wait where these say to wait ([F51](../features/cluster-deployment.md)). Since
+[F63](../features/shoaladm.md) they build the node program too, from the schema's project,
+once per cpu class among the hosts; until then they were `shoalctl cluster …` and the program
+was the operator's to build.
 
 Read first: **a directory never changes mode or identity**, an operation is **idempotent by
 its operation id** (retry it with the same id and it is answered as the first time), and a
@@ -34,9 +37,9 @@ asked for. Then `Initialize { nodes }` in the order you want the tablets dealt, 
 every tablet over those nodes at the factor. Wait for `Readiness.data.default_writes` to say
 `Ok` before opening the cluster to clients - `Members = up` is not data readiness.
 
-**With shoalctl.** `shoalctl cluster new -o <inventory>` writes the inventory in a form that
+**With shoaladm.** `shoaladm new -o <inventory>` writes the inventory in a form that
 judges it the way bootstrap will, and groups hosts sharing disks so their storage directories are
-written once ([F53](../features/inventory-wizard.md)). `shoalctl cluster bootstrap -i <inventory>` preflights every host, stages and
+written once ([F53](../features/inventory-wizard.md)). `shoaladm bootstrap -i <inventory>` preflights every host, stages and
 claims each node, issues each a leaf for the id its claim printed, starts them under systemd in
 this order, sends `Initialize` once in inventory order, and waits for `default_writes`. It
 refuses a cluster its state says it already deployed; `destroy --yes` is its rollback.
@@ -58,19 +61,19 @@ have, `voter`. Read its `free_bytes` and `weight`. Nothing is placed on it yet: 
 `Rebalance` and follow `PlanStatus { op }` to `completed`; a `blocked` reason names the set and
 the reserve or cap it waits on. A read of the plan's steps is the preview there is.
 
-**With shoalctl.** `shoalctl cluster add -i <inventory> <node> --rebalance` seeds the node through
+**With shoaladm.** `shoaladm add -i <inventory> <node> --rebalance` seeds the node through
 every committed member's control address, claims it and issues its leaf, starts it, waits for it
 `up`, and follows the `Rebalance` plan to its outcome. A step takes at least
 `cluster.migration.retire_after` (five minutes by default, the inventory's `retire_after` if it
 names one), since a move finishes when its source has reclaimed the retired copy.
 
-**Is it progressing, and how fast.** `shoalctl cluster stats -i <inventory> --watch` shows the
+**Is it progressing, and how fast.** `shoaladm stats -i <inventory> --watch` shows the
 plan's steps moved out of the total, its planned and streamed bytes, how long it has run and
 each finished step took, the average and current throughput, and an estimate of what is left;
 the new node's row shows its tablets, partitions and applied rate climbing as it is fed. An
 estimate is the larger of the bytes at the current pace and the steps at the finished pace,
 since every step waits out `retire_after` however small it is
-([F52](../features/cluster-stats.md)). `cluster add --rebalance` prints the same line as each
+([F52](../features/cluster-stats.md)). `shoaladm add --rebalance` prints the same line as each
 step moves.
 
 **Rollback.** A node nothing was placed on is stopped and its directory deleted. One a plan has
@@ -89,7 +92,7 @@ blocked naming the missing member until the replacement has joined; supply the c
 and do not wait for the removal.
 
 **On the same host, with shoalctl.** When the host is fine and only its data is lost or bad,
-`cluster rebuild -i <inventory> <node> --yes` ([F56](../features/cluster-rebuild.md)) does all of
+`shoaladm rebuild -i <inventory> <node> --yes` ([F56](../features/cluster-rebuild.md)) does all of
 the above in order: it stops the node, waits for it to be committed down, wipes it, joins it as a
 new identity, and removes the old one onto it. It refuses while another member is down or a plan
 is open.
@@ -111,7 +114,7 @@ for a set to go - is recorded `blocked` naming why, not refused; add capacity an
 resumes on its own. A set whose move failed twice is blocked too (`its move failed 2 times`); once
 the cause is dealt with, send the same `Decommission` (or `Remove`) again, which forgives the plan's
 failures so far and plans the set afresh ([Resolved #177](../appendix/resolved/blocked-plan-retry.md)).
-`cluster admin` follows the retried plan. `shoalctl cluster stats` follows the plan's pace and estimate the way it
+`shoaladm admin` follows the retried plan. `shoaladm stats` follows the plan's pace and estimate the way it
 does a rebalance's, and the leaving member's row shows its tablets and partitions falling
 ([F52](../features/cluster-stats.md)).
 
@@ -126,7 +129,7 @@ does a rebalance's, and the leaving member's row shows its tablets and partition
 `grace_remaining_ms`. To hold it - a host being repaired - `Maintenance { node, suspend: true }`;
 the count stops and the member is not removed. `Maintenance { node, suspend: false }` resumes
 it from the committed count. An expired grace records an `Expiry` plan; a `blocked` one is what
-to page on. `shoalctl cluster stats` shows a held member as `down (m)` with the grace it has
+to page on. `shoaladm stats` shows a held member as `down (m)` with the grace it has
 left ([F52](../features/cluster-stats.md)).
 
 **Rollback.** A held grace is resumed; an expired one is a removal ([3](#3-replace-a-dead-node)).
@@ -154,7 +157,7 @@ Inside the window the old and new builds negotiate the older version on every li
 member reports the new version, `Activate { wire }`; it is refused naming any member below it.
 After the activation no member starts on a build below it, which is the rollback point.
 
-**With `shoalctl`.** On a cluster deployed from an inventory, `shoalctl cluster upgrade -i <inv>`
+**With `shoaladm`.** On a cluster deployed from an inventory, `shoaladm upgrade -i <inv>` (or `shoaladm deploy`, which builds the new program first)
 is this runbook: it refuses an unhealthy cluster, upgrades one node at a time with the leader
 last, waits for each to be up and caught up, swaps a node that does not come back onto its
 previous program, and stops. `--activate` ends the window, and `--rollback` is the rollback
@@ -214,7 +217,7 @@ it; follow `BackupStatus { op }` until every group is `Done`, and read each grou
 `Written`, `Skipped` (every ephemeral table), or `Failed` with a reason. Copy the `<path>/<op>`
 directory out of the failure domain yourself. ~~Nothing ships it.~~ A restore reads each group's
 file on that group's new leader, so every host of the cluster restored into needs every file:
-`shoalctl cluster ship-backup -i <inventory> <path>/<op> [--to <new inventory>]` copies each host
+`shoaladm ship-backup -i <inventory> <path>/<op> [--to <new inventory>]` copies each host
 the files it lacks and fails unless every host then holds them all
 ([F59](../features/backup-shipping.md)). It is not one cross-tablet
 snapshot; the record says each group's boundary.
@@ -231,7 +234,7 @@ A node of the old cluster started against the new is refused as removed.
 **A group failed.** ~~A restore that failed is a cluster to delete and bootstrap again.~~ Read
 each failed group's `reason` and `failed_in`, deal with the cause (an unreadable file, a full
 disk, copies that are not empty), activate wire version 6 if it is not, and
-`RetryRestore { restore: <op> }` (`cluster admin "restore-retry <op>"`). Only the failed groups
+`RetryRestore { restore: <op> }` (`shoaladm admin "restore-retry <op>"`). Only the failed groups
 are driven again, from the phase each failed in, and the command follows the restore's record
 until every group is done ([#155](../appendix/resolved/restore-retry.md)).
 

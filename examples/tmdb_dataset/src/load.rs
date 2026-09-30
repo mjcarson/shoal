@@ -17,7 +17,7 @@ use shoal::client::{SendOptions, Shoal, ShoalQueryStream};
 use shoal::shared::queries::Queries;
 use shoal::shared::responses::ResponseActionNames;
 use shoal::{Errors, QuerySuceededOpts};
-use shoalctl::deploy::Deployment;
+use shoaladm::deploy::Deployment;
 use shoal::shared::protocol::error::ErrorCode;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -200,7 +200,7 @@ async fn connect_deployment(inventory: &PathBuf) -> color_eyre::Result<Vec<Arc<S
     let record = deployment.state.record()?;
     if record.nodes.is_empty() {
         bail!(
-            "{} has no deployed nodes; run `cluster bootstrap -i {}` first",
+            "{} has no deployed nodes; run `deploy -i {}` first",
             deployment.inventory.name,
             inventory.display()
         );
@@ -212,7 +212,7 @@ async fn connect_deployment(inventory: &PathBuf) -> color_eyre::Result<Vec<Arc<S
             .address
             .parse()
             .wrap_err_with(|| format!("{name} was recorded with the address {:?}", node.address))?;
-        let addr = shoalctl::deploy::inventory::socket(address, deployment.inventory.ports.client);
+        let addr = shoaladm::deploy::inventory::socket(address, deployment.inventory.ports.client);
         // a member that will not answer is skipped rather than fatal
         match deployment
             .connect::<TmdbClient>(&addr, Instant::now() + CONNECT_DEADLINE)

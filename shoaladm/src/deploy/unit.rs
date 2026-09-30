@@ -12,19 +12,17 @@ use super::render::Layout;
 /// # Arguments
 ///
 /// * `inventory` - The deployment
+/// * `server` - The file name the program has on every host
 /// * `user` - The user the node runs as on its host
-///
-/// # Errors
-///
-/// When the server path names no file.
-pub fn render(inventory: &Inventory, user: &str) -> color_eyre::Result<String> {
+#[must_use]
+pub fn render(inventory: &Inventory, server: &str, user: &str) -> String {
     // where the program and its configuration are on the host
     let layout = Layout {
         dir: inventory.remote_dir(),
     };
-    let binary = layout.binary(&inventory.server_name()?);
-    Ok(format!(
-        "# written by shoalctl cluster; rewritten on every deploy
+    let binary = layout.binary(server);
+    format!(
+        "# written by shoaladm; rewritten on every deploy
 [Unit]
 Description=Shoal node of the {name} cluster
 After=network-online.target
@@ -50,7 +48,7 @@ WantedBy=multi-user.target
         name = inventory.name,
         dir = layout.dir,
         conf = layout.conf(),
-    ))
+    )
 }
 
 #[cfg(test)]
@@ -68,7 +66,7 @@ mod tests {
             server.display()
         ))
         .unwrap();
-        let unit = render(&inventory, "ops").expect("a unit");
+        let unit = render(&inventory, &name, "ops");
         assert!(unit.contains("User=ops\n"));
         assert!(unit.contains(&format!(
             "ExecStart=/opt/shoal-deploy/lab/bin/{name} serve --conf /opt/shoal-deploy/lab/shoal.yml\n"

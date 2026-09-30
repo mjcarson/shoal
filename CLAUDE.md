@@ -41,8 +41,8 @@ cd shoal-top && RUSTFLAGS="-C target-cpu=generic" \
 # `shoal/otel` and cargo unifies features - this is the form that runs it on its own (F35)
 cargo test -p shoal --features otel --test trace_propagation
 
-# and the same property on a program somebody runs
-cargo build -p shoalctl
+# and the same property on the two programs somebody runs (F63): the admin tool and the UI
+cargo build -p shoaladm -p shoalctl
 
 # the TMDB node on jemalloc with sampled heap profiling built in (round 15 of the cluster testing):
 # built by nobody else, and what names a node's memory when `cluster stats` cannot. Dumps land in
@@ -103,27 +103,41 @@ cargo run -p shoal-spike --release
 # the cluster grows, which is the Q13-at-M3 record on the same page
 cargo run -p shoal-spike --release -- fanout
 
-# a cluster on real hosts (F51): the node program and its shoalctl, built for the oldest cpu
-# among them - never native, which the shell exports and which dies of SIGILL on the Zen1 hosts.
-# its own target dir, so the native build is left alone
+# a cluster on real hosts from a project (F63): run in the project that defines the schema,
+# shoaladm finds the #[shoal::db] struct, probes every host's cpu over ssh, builds the node once
+# per cpu class and the schema's admin program, installs them under ~/.local/shoal/bin, and
+# bootstraps the cluster - or upgrades one that exists. no cargo line to remember; the first
+# run compiles the engine once per program and class (3m19s on europa for the tmdb example
+# against the lab's two classes), later runs are incremental. shoalctl does the same for the UI
+cargo build --release -p shoaladm -p shoalctl
+cd examples/tmdb_dataset && ../../target/release/shoaladm new -o inventory.yml   # leave Server program blank
+../../target/release/shoaladm deploy
+../../target/release/shoaladm status
+../../target/release/shoalctl
+# the inventory every command reads when given none lives in ~/.config/shoal/config.yaml
+../../target/release/shoaladm config default-inventory inventory.yml
+# the bench schema lives in a module of a workspace crate, so its pair is written by hand and
+# its inventory names a `server:` built for the oldest cpu among the hosts - never native, which
+# the shell exports and which dies of SIGILL on the Zen1 hosts. its own target dir, so the
+# native build is left alone
 CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
     cargo build --release -p shoal-bench --bin shoal-node --bin shoal-benchctl
 # an inventory is written in a form (F53) that judges it as you type; --from edits one. a node's
 # storage directories can be set per deployment, per named group of nodes, or per node
-target/deploy/release/shoal-benchctl cluster new -o target/wizard/my.yml --from shoalctl/inventories/lab.yml
-target/deploy/release/shoal-benchctl cluster bootstrap -i shoalctl/inventories/lab.yml
-target/deploy/release/shoal-benchctl cluster status -i shoalctl/inventories/lab.yml
+target/deploy/release/shoal-benchctl new -o target/wizard/my.yml --from shoaladm/inventories/lab.yml
+target/deploy/release/shoal-benchctl bootstrap -i shoaladm/inventories/lab.yml
+target/deploy/release/shoal-benchctl status -i shoaladm/inventories/lab.yml
 # a rebuilt node program onto a running cluster, one node at a time and the leader last (F55);
 # --activate ends the rolling window, --rollback swaps every node back onto its .prev before it
-target/deploy/release/shoal-benchctl cluster upgrade -i shoalctl/inventories/lab.yml
-target/deploy/release/shoal-benchctl cluster destroy -i shoalctl/inventories/lab.yml --yes
+target/deploy/release/shoal-benchctl upgrade -i shoaladm/inventories/lab.yml
+target/deploy/release/shoal-benchctl destroy -i shoaladm/inventories/lab.yml --yes
 # the rendered shoal.yml parsed and validated as a Conf, claimed, started and initialized
 cargo test -p shoal-bench --test deploy_render
 # and against the hosts: bootstrap, rows through every node, add --rebalance, destroy. a
 # rebalance step takes at least the inventory's retire_after (15s on the lab, five minutes by
 # default). the lab's nodes run as the system user `shoal`: a node running as you on europa
 # spends your io_uring locked-memory budget and every glommio test here dies at its probe
-SHOAL_DEPLOY_INVENTORY=$PWD/shoalctl/inventories/lab-add.yml \
+SHOAL_DEPLOY_INVENTORY=$PWD/shoaladm/inventories/lab-add.yml \
     cargo test --release -p shoal-bench --test deploy_smoke -- --nocapture
 
 # Run with hotpath profiling enabled (attribution only, never a baseline number)
@@ -134,13 +148,12 @@ cargo build --release --bin shoal-workload --features hotpath
 cargo run --example tmdb
 
 # The real dataset as a deployed database (F54): examples/tmdb_dataset is a crate with the
-# node an inventory names and a loader that is also this schema's shoalctl. It needs
-# TMDB_movie_dataset_v11.csv (538MB, from kaggle, not in this repo) and a deployed cluster;
-# --addr loads a node started by hand instead. The rows/sec it prints is not a measurement.
-CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
-    cargo build --release -p tmdb-dataset
-target/deploy/release/tmdb-dataset-loader cluster bootstrap -i tmdb.yml
-target/deploy/release/tmdb-dataset-loader load -i tmdb.yml --dataset ~/datasets/TMDB_movie_dataset_v11.csv --limit 10000
+# node program and a loader that is also this schema's admin program and UI. It needs
+# TMDB_movie_dataset_v11.csv (538MB, from kaggle, not in this repo) and a deployed cluster
+# (`shoaladm deploy` in that directory, above); --addr loads a node started by hand instead.
+# The rows/sec it prints is not a measurement.
+cargo build --release -p tmdb-dataset
+target/release/tmdb-dataset-loader load -i examples/tmdb_dataset/inventory.yml --dataset ~/datasets/TMDB_movie_dataset_v11.csv --limit 10000
 ```
 
 ## Benchmarking
@@ -478,8 +491,22 @@ go through `shoal`.**
   crate; keep it that way, since a schedule that needs the engine to replay is worth nothing
 - **tmdb-dataset** - The TMDB dataset as a deployable database ([F54](docs/src/features/tmdb-dataset-deployment.md)),
   under `examples/tmdb_dataset/`: the library is the schema, `tmdb-dataset-node` is its
-  `node::main`, and `tmdb-dataset-loader` is `load -i <inventory>` beside every shoalctl command.
-  Both binaries use the one `Tmdb` type, so they cannot disagree about the fingerprint
+  `node::main`, and `tmdb-dataset-loader` is `load -i <inventory>` beside every shoaladm command
+  and the UI as `tui`. Both binaries use the one `Tmdb` type, so they cannot disagree about the
+  fingerprint. `shoaladm deploy` run in its directory finds `Tmdb` in the library and builds the
+  same node itself
+- **shoaladm** - Deploying and operating a cluster over ssh ([F51](docs/src/features/cluster-deployment.md)),
+  the inventory wizard ([F53](docs/src/features/inventory-wizard.md)), the cluster tab's model,
+  and since [F63](docs/src/features/shoaladm.md) building a schema's programs from its project:
+  `project` scans `src/main.rs` then `src/lib.rs` for `#[shoal::db]`, `build` generates a wrapper
+  crate under the project's `target/shoal-build/` and runs cargo, `cpu` probes a host and names
+  its `-C target-cpu`, `config` reads `~/.config/shoal/config.yaml` and installs programs under
+  `~/.local/shoal/bin`. The binary knows no schema: for a command that connects it builds the
+  schema's admin program and `exec`s it. **Links no engine** - `cargo tree -p shoaladm | grep -c glommio`
+  is 0 - and every dependency is one the lockfile already resolves
+- **shoalctl** - The terminal UI, a library entered by `shoalctl::cli::main_blocking::<DbClient>()`
+  and a binary that builds that program for the project's schema and runs it (F63). Depends on
+  `shoaladm` for the cluster tab's model and for connecting to a deployed cluster; links no engine
 
 ### Key Abstractions
 
@@ -495,7 +522,7 @@ go through `shoal`.**
 **Macros:**
 - `#[derive(ShoalSortedTable)]` - Generates query structs (Get, Insert, Update, Delete) and trait impl for sorted tables
 - `#[derive(ShoalUnsortedTable)]` - Same for unsorted tables
-- `#[shoal_db]` - Attribute macro that rewrites table field types (adds `<Self>` to storage and `TableNames`; for an ephemeral table there is no storage generic to add it to, so `Self` is pushed as one) and generates `TableNames` enum, `*Client` struct, `QueryKinds`/`ResponseKinds` enums. It classifies a field by looking for `Sorted`/`Unsorted`/`Persistent`/`Ephemeral` in the type name, so a table type named anything else panics during expansion
+- `#[shoal::db]` (`#[shoal::db(client)]` for the client half alone; there is no `shoal_db`) - Attribute macro that rewrites table field types (adds `<Self>` to storage and `TableNames`; for an ephemeral table there is no storage generic to add it to, so `Self` is pushed as one) and generates `TableNames` enum, `*Client` struct, `QueryKinds`/`ResponseKinds` enums. It classifies a field by looking for `Sorted`/`Unsorted`/`Persistent`/`Ephemeral` in the type name, so a table type named anything else panics during expansion
 
 **Field Attributes:**
 - `#[shoal(partition)]` - Partition key (required)
@@ -616,7 +643,7 @@ pub struct MyTable {
 }
 
 // 2. Define database schema
-#[shoal_db]
+#[shoal::db]
 pub struct MyDb {
     pub my_table: PersistentUnsortedTable<MyTable, FileSystem>,
 }

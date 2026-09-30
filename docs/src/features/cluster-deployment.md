@@ -1,4 +1,4 @@
-# F51. Deploying a cluster with `shoalctl cluster`
+# F51. Deploying a cluster with `shoalctl cluster` (`shoaladm` since F63)
 
 ## Context
 
@@ -36,7 +36,7 @@ schema's own program is three lines:
 | Half | Entry point | Commands | Links |
 | --- | --- | --- | --- |
 | Server | `shoal::server::node::main::<Db>()` | `serve --conf`, `claim --conf` | the engine |
-| Tool | `shoalctl::cli::main::<DbClient>()` | `tui`, `cluster …` | the client alone ([F15](client-server-split.md)) |
+| Tool | ~~`shoalctl::cli::main::<DbClient>()`~~ `shoaladm::cli::main_blocking::<DbClient>()` since [F63](shoaladm.md) | ~~`tui`, `cluster …`~~ `deploy`, `bootstrap`, `add`, … | the client alone ([F15](client-server-split.md)) |
 
 Two pairs are built:
 - **Bench:** `shoal-bench`'s `shoal-node` and `shoal-benchctl`.
@@ -46,7 +46,9 @@ Two pairs are built:
   `tmdb-dataset-node` and `tmdb-dataset-loader`, one crate and one schema type. The tool half is
   `shoalctl::cli::run` with a `load` of its own beside the shoalctl commands.
 
-`tmdbctl` with no arguments still opens the terminal UI at `127.0.0.1:12000`.
+`tmdbctl` with no arguments still opens the terminal UI at `127.0.0.1:12000`. Since
+[F63](shoaladm.md) nobody has to write either program: `shoaladm` and `shoalctl` build them
+from the project that defines the schema.
 
 ### `serve` and `claim`
 
@@ -67,7 +69,7 @@ had listed that as explicitly unsupported ("first-boot certificate provisioning"
 
 ### The inventory and the state
 
-An inventory is YAML, one per cluster (`shoalctl/src/deploy/inventory.rs`). It names:
+An inventory is YAML, one per cluster (`shoaladm/src/deploy/inventory.rs`). It names:
 - the cluster, and the server program to copy;
 - the remote directory (default `/opt/shoal-deploy/<name>`);
 - the ports;
@@ -117,7 +119,7 @@ An inventory is YAML, one per cluster (`shoalctl/src/deploy/inventory.rs`). It n
 
 An address that is not given is resolved locally, and a loopback answer is refused. A
 machine's own `/etc/hosts` commonly maps its name to `127.0.1.1`, which no peer can dial.
-`cluster new` resolves the same way while the inventory is written, and will not save a node
+`shoaladm new` resolves the same way while the inventory is written, and will not save a node
 whose name answers only loopback ([Resolved #127](../appendix/resolved/wizard-loopback-address.md)).
 The `server` program has to be an executable file. A source file is refused by name.
 
@@ -128,7 +130,7 @@ What the deployment mints is kept on the operator's machine under `~/.shoal/clus
 - `cluster.json`: the cluster id, each deployed node's name, id, address and ssh target, and
   the `Initialize` operation id.
 
-### `cluster bootstrap`
+### `shoaladm bootstrap`
 
 For the inventory's bootstrap set, in order:
 1. **Preflight every host before touching any.** One ssh round trip reports the user, the cpus,
@@ -154,7 +156,7 @@ For the inventory's bootstrap set, in order:
 
 A cluster that `cluster.json` says was deployed is refused a second bootstrap.
 
-### `cluster add <node> [--rebalance]`
+### `shoaladm add <node> [--rebalance]`
 
 For a node the inventory lists and the state does not:
 - Read the cluster's `Members` frame through any deployed node. The joiner's seeds are the
@@ -182,22 +184,26 @@ For a node the inventory lists and the state does not:
 
 ### The lab
 
-`shoalctl/inventories/lab.yml` is europa, hyperion and titan at a factor of three.
+`shoaladm/inventories/lab.yml` is europa, hyperion and titan at a factor of three.
 `lab-add.yml` is hyperion and titan at a factor of two, with europa listed for `add`. Both hold
-four shards per host. The program has to be built for the oldest cpu, not `native`:
+four shards per host. Both name a `server:`, so the program has to be built for the oldest cpu,
+not `native` (an inventory naming a `project:` instead has `shoaladm` build it per host,
+[F63](shoaladm.md)):
 
 ```sh
 CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
     cargo build --release -p shoal-bench --bin shoal-node --bin shoal-benchctl
-target/deploy/release/shoal-benchctl cluster bootstrap -i shoalctl/inventories/lab.yml
+target/deploy/release/shoal-benchctl bootstrap -i shoaladm/inventories/lab.yml
 ```
 
 ## Design choices
 
 - **A generic `main` in the engine, not a binary per schema in the repository.** The program
   C14 asked every operator to write was the same twelve lines each time. Writing it once, with
-  `claim` beside `serve`, is what makes the deployment schema-independent: shoalctl copies
-  whatever program the inventory names and never compiles one.
+  `claim` beside `serve`, is what makes the deployment schema-independent: ~~shoalctl copies
+  whatever program the inventory names and never compiles one~~ since [F63](shoaladm.md)
+  `shoaladm` compiles it, by cargo in the schema's project, once per cpu class among the hosts,
+  and still copies rather than links.
 - **`claim` is the start's own code.** `resolve_executors` and `claim_root` were cut out of
   `ShoalPool::start` rather than written again. A claim that resolved the cpus differently from
   the start would issue a leaf for an identity with another slot count.
@@ -252,6 +258,8 @@ target/deploy/release/shoal-benchctl cluster bootstrap -i shoalctl/inventories/l
   F15 split out and `shoal-client-check` exists to keep out.
 - **Compiling the server on each host.** The hosts have no toolchain, and a build per host is
   a cluster of several builds. The digest check refuses exactly that for a copied program.
+  [F63](shoaladm.md) builds per cpu *class* on the operator's machine instead, and each host is
+  shipped its class's program under the same check.
 
 ## Limitations
 
@@ -261,10 +269,12 @@ target/deploy/release/shoal-benchctl cluster bootstrap -i shoalctl/inventories/l
 - **Clients connect in plaintext.** The deployment secures the peer lanes. `networking.tls` for
   clients is not rendered, so the admin's SCRAM exchange crosses the network unencrypted
   (SCRAM never sends the password itself).
-- **The program is the operator's to build**, for the oldest cpu among the hosts. A build for a
-  newer one is caught at the claim by its SIGILL (exit 132) and refused by name, before
-  anything starts. Since [F55](cluster-upgrade.md), `upgrade` refuses it the same way, from a
-  `--version` run on the host, before the node's program is replaced.
+- ~~**The program is the operator's to build**, for the oldest cpu among the hosts.~~ Since
+  [F63](shoaladm.md) `shoaladm` builds it from the project, once per cpu class the hosts are
+  probed to be; an inventory that names a `server:` still takes the operator's build. A build
+  for a newer cpu than the host's is caught at the claim by its SIGILL (exit 132) and refused
+  by name, before anything starts. Since [F55](cluster-upgrade.md), `upgrade` refuses it the
+  same way, from a `--version` run on the host, before the node's program is replaced.
 - **Losing the state directory loses the authority**, and with it the ability to issue a leaf
   to a node added later. The cluster itself is untouched. Nothing backs the directory up.
 - **`add` never decommissions, and `destroy` is all or nothing.** Removing one node is still
@@ -289,8 +299,8 @@ target/deploy/release/shoal-benchctl cluster bootstrap -i shoalctl/inventories/l
   `add`.
 - **The rendered file is a `Conf`.** A field added to the mirror has to be one `Conf` accepts,
   in the section `Conf` has it in; `deploy_render.rs` is the check.
-- **shoalctl links no engine.** `cargo tree -p shoalctl | grep -c glommio` is 0, and every
-  dependency added here is one the lockfile already resolved.
+- **shoalctl links no engine, and neither does shoaladm.** `cargo tree -p shoaladm | grep -c glommio`
+  is 0, as is `shoalctl`'s, and every dependency added here is one the lockfile already resolved.
 - **Every wait reads the model the tab draws**, so a model defect fails a deployment rather
   than hiding in a view.
 - **Every file under the node's directory is its user's**, written through sudo and handed over
@@ -314,17 +324,17 @@ layers' source paths, so every capture before it reads as not describing the cur
 | --- | --- | --- |
 | `a_rendered_node_claims_starts_and_initializes` | `shoal-bench/tests/deploy_render.rs` | A rendered bootstrap file is no longer a `Conf` (its `retire_after` included), a claim disagrees with the start, or the rendered admin cannot `Initialize` |
 | `a_deployed_cluster_serves_every_row_from_every_node` | `shoal-bench/tests/deploy_smoke.rs` | Gated on `SHOAL_DEPLOY_INVENTORY`: bootstrap, rows through every node, `add --rebalance`, `destroy` on real hosts |
-| `an_inventory_defaults_to_the_documented_cluster` | `shoalctl/src/deploy/inventory.rs` | The defaults stop being the documented ports, factor, voters and paths |
-| `an_inventory_that_cannot_be_a_cluster_is_refused` | `shoalctl/src/deploy/inventory.rs` | An impossible cluster is deployed rather than refused |
-| `a_node_resolves_off_the_loopback` | `shoalctl/src/deploy/inventory.rs` | A node advertises `127.0.1.1` to its peers |
-| `state_is_private_and_minted_once` | `shoalctl/src/deploy/state.rs` | The key or password become readable, or the password changes between runs |
-| `a_leaf_names_its_node_under_a_rebuilt_authority` | `shoalctl/src/deploy/pki.rs` | A node added later gets a leaf that no node trusts, or that names no node |
-| `a_node_file_says_how_it_enters_and_holds_no_password` | `shoalctl/src/deploy/render.rs` | A joiner bootstraps, or the password lands on a host |
-| `the_unit_runs_the_deployed_program` | `shoalctl/src/deploy/unit.rs` | The unit runs another program, as root, or without the tls module |
-| `commands_are_batch_mode_and_quoted` | `shoalctl/src/deploy/remote.rs` | ssh prompts, a path with a space splits, or an owned file is renamed into place before it is handed over |
-| `a_command_reports_its_output` | `shoalctl/src/deploy/remote.rs` | A failure is read as success |
-| `members_are_ready_when_every_node_is_up_and_voting` | `shoalctl/src/deploy/ops.rs` | A wait ends before the voters exist |
-| `seeds_are_the_placeable_members_control_addresses` | `shoalctl/src/deploy/ops.rs` | A joiner seeds through a leaving member or its client port |
+| `an_inventory_defaults_to_the_documented_cluster` | `shoaladm/src/deploy/inventory.rs` | The defaults stop being the documented ports, factor, voters and paths |
+| `an_inventory_that_cannot_be_a_cluster_is_refused` | `shoaladm/src/deploy/inventory.rs` | An impossible cluster is deployed rather than refused |
+| `a_node_resolves_off_the_loopback` | `shoaladm/src/deploy/inventory.rs` | A node advertises `127.0.1.1` to its peers |
+| `state_is_private_and_minted_once` | `shoaladm/src/deploy/state.rs` | The key or password become readable, or the password changes between runs |
+| `a_leaf_names_its_node_under_a_rebuilt_authority` | `shoaladm/src/deploy/pki.rs` | A node added later gets a leaf that no node trusts, or that names no node |
+| `a_node_file_says_how_it_enters_and_holds_no_password` | `shoaladm/src/deploy/render.rs` | A joiner bootstraps, or the password lands on a host |
+| `the_unit_runs_the_deployed_program` | `shoaladm/src/deploy/unit.rs` | The unit runs another program, as root, or without the tls module |
+| `commands_are_batch_mode_and_quoted` | `shoaladm/src/deploy/remote.rs` | ssh prompts, a path with a space splits, or an owned file is renamed into place before it is handed over |
+| `a_command_reports_its_output` | `shoaladm/src/deploy/remote.rs` | A failure is read as success |
+| `members_are_ready_when_every_node_is_up_and_voting` | `shoaladm/src/deploy/ops.rs` | A wait ends before the voters exist |
+| `seeds_are_the_placeable_members_control_addresses` | `shoaladm/src/deploy/ops.rs` | A joiner seeds through a leaving member or its client port |
 
 ## Related
 

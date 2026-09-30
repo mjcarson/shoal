@@ -75,9 +75,14 @@ with different instruction sets. Its *output* is: a given gxhash version hashes 
 value on every platform it supports, which is what lets a directory move between machines
 ([Resolved #65](../appendix/resolved/gxhash-pin.md)).
 
-**A program deployed to other machines is built for the oldest of them**, in its own target
-directory so the native build is left alone. `RUSTFLAGS` beats every config file, which is what
-makes this work, and the environment's `native` export is what makes it necessary:
+~~**A program deployed to other machines is built for the oldest of them**, in its own target
+directory so the native build is left alone.~~ Since [F63](../features/shoaladm.md) **a program
+deployed to other machines is built by `shoaladm` for each machine's cpu**: it probes every host
+over ssh, maps what it finds to a `-C target-cpu` and builds the node once per cpu class, with
+`RUSTFLAGS` set for that build alone (any `native` the environment exports is replaced) in a
+target directory of its own. The one build for the oldest host is still what an inventory's
+`server:` line takes, and how the bench pair is deployed, since its schema is not at a project's
+root:
 
 ```bash
 # the lab's hosts are Zen1 (hyperion, titan) and Zen4 (europa); Zen1 has AES-NI and AVX2
@@ -85,9 +90,8 @@ CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
     cargo build --release -p shoal-bench --bin shoal-node --bin shoal-benchctl
 ```
 
-A native Zen4 build dies of SIGILL on a Zen1 host. `shoalctl cluster` meets that at the node's
-`claim`, before anything starts, and refuses it by name
-([F51](../features/cluster-deployment.md)).
+A native Zen4 build dies of SIGILL on a Zen1 host. `shoaladm` meets that at the node's `claim`,
+before anything starts, and refuses it by name ([F51](../features/cluster-deployment.md)).
 
 > This page claimed that before the file existed. The flag was in a `[build]` table in the
 > workspace `Cargo.toml`, where **cargo silently ignores it** — which is why the docs and
@@ -168,15 +172,16 @@ needed a config, a storage flag and a tracing flag to do it. Since
 node program to deploy and a loader to fill the deployed cluster:
 
 ```bash
-# built for the oldest cpu among the hosts, never native, in its own target dir
-CARGO_TARGET_DIR=target/deploy RUSTFLAGS="-C target-cpu=znver1" \
-    cargo build --release -p tmdb-dataset
-# an inventory whose server is target/deploy/release/tmdb-dataset-node, then the cluster
-target/deploy/release/tmdb-dataset-loader cluster new -o tmdb.yml
-target/deploy/release/tmdb-dataset-loader cluster bootstrap -i tmdb.yml
-# the dataset, into every member, then a sample read back
-target/deploy/release/tmdb-dataset-loader load -i tmdb.yml \
-    --dataset ~/datasets/TMDB_movie_dataset_v11.csv
+# from the project: the inventory, then the cluster - shoaladm finds `Tmdb` in the library,
+# probes each host's cpu and builds the node for it (F63)
+cd examples/tmdb_dataset
+shoaladm new -o inventory.yml
+shoaladm deploy
+# the dataset, into every member, then a sample read back; the loader is this schema's own
+# admin program with `load` beside every command, built by the deploy under ~/.local/shoal/bin
+# or by cargo
+cargo build --release -p tmdb-dataset
+../../target/release/tmdb-dataset-loader load --dataset ~/datasets/TMDB_movie_dataset_v11.csv
 ```
 
 The dataset is `TMDB_movie_dataset_v11.csv`, about 538 MB and 1.19 million movies, from

@@ -83,8 +83,12 @@ impl Page {
 pub enum FieldId {
     /// The cluster's name
     Name,
-    /// The server program to deploy
+    /// A built server program to deploy, or blank to build one from the project
     Server,
+    /// The project the server program is built from, or blank for the one the command runs in
+    Project,
+    /// The database to deploy, when the project defines more than one
+    Db,
     /// Where every host keeps the node's files
     RemoteDir,
     /// The system user nodes run as
@@ -119,6 +123,8 @@ pub enum FieldId {
     Latency,
     /// The throughput storage directory, at the level being edited
     Throughput,
+    /// The cpu the node program is built for, at the level being edited
+    TargetCpu,
     /// A group's name
     GroupName,
     /// A node's name
@@ -152,6 +158,8 @@ impl FieldId {
             Page::Cluster => &[
                 FieldId::Name,
                 FieldId::Server,
+                FieldId::Project,
+                FieldId::Db,
                 FieldId::RemoteDir,
                 FieldId::User,
                 FieldId::Admin,
@@ -173,6 +181,7 @@ impl FieldId {
                 FieldId::ControlCoreShared,
                 FieldId::Latency,
                 FieldId::Throughput,
+                FieldId::TargetCpu,
             ],
             Page::Groups => &[
                 FieldId::GroupName,
@@ -182,6 +191,7 @@ impl FieldId {
                 FieldId::ControlCoreShared,
                 FieldId::Latency,
                 FieldId::Throughput,
+                FieldId::TargetCpu,
             ],
             Page::Nodes => &[
                 FieldId::NodeName,
@@ -195,6 +205,7 @@ impl FieldId {
                 FieldId::ControlCoreShared,
                 FieldId::Latency,
                 FieldId::Throughput,
+                FieldId::TargetCpu,
             ],
             Page::Review => &[],
         }
@@ -216,6 +227,8 @@ impl FieldId {
         match self {
             FieldId::Name => "Cluster name",
             FieldId::Server => "Server program",
+            FieldId::Project => "Project",
+            FieldId::Db => "Database",
             FieldId::RemoteDir => "Remote directory",
             FieldId::User => "Run as user",
             FieldId::Admin => "Admin principal",
@@ -233,6 +246,7 @@ impl FieldId {
             FieldId::ControlCoreShared => "Share control core",
             FieldId::Latency => "Latency storage",
             FieldId::Throughput => "Throughput storage",
+            FieldId::TargetCpu => "Target cpu",
             FieldId::GroupName => "Group name",
             FieldId::NodeName => "Node name",
             FieldId::NodeSsh => "ssh target",
@@ -250,7 +264,16 @@ impl FieldId {
                 "Names the systemd unit, the remote directory and the local state. Letters, digits, '-' and '_'."
             }
             (FieldId::Server, _) => {
-                "A build of shoal::server::node::main for your schema. A relative path is relative to the inventory file. Build it for the oldest host's cpu, never native."
+                "A node program you built yourself, relative to the inventory file. Leave it blank and shoaladm builds one from the project for every host's cpu."
+            }
+            (FieldId::Project, _) => {
+                "The Rust project whose #[shoal::db] struct is deployed, relative to the inventory file. Blank means the project shoaladm is run in."
+            }
+            (FieldId::Db, _) => {
+                "The #[shoal::db] struct to deploy, only when the project defines more than one."
+            }
+            (FieldId::TargetCpu, _) => {
+                "The cpu the node program is built for, as rustc --print target-cpus names one. Blank probes each host and builds for what it has."
             }
             (FieldId::RemoteDir, _) => {
                 "Where every host keeps the node's program, configuration and keys. destroy deletes it."
@@ -326,7 +349,7 @@ impl FieldId {
                 "The group this node takes whatever it does not set itself from. Left and right cycle it."
             }
             (FieldId::NodeBootstrap, _) => {
-                "Whether bootstrap forms the cluster from this node. A node left out can be joined later with `cluster add`. Space toggles it."
+                "Whether bootstrap forms the cluster from this node. A node left out can be joined later with `shoaladm add`. Space toggles it."
             }
         }
     }
@@ -335,6 +358,10 @@ impl FieldId {
     #[must_use]
     pub fn placeholder(self, page: Page) -> &'static str {
         match (self, page) {
+            (FieldId::Server, _) => "built from the project",
+            (FieldId::Project, _) => "the project shoaladm runs in",
+            (FieldId::Db, _) => "the one #[shoal::db] struct",
+            (FieldId::TargetCpu, _) => "probed",
             (FieldId::RemoteDir, _) => "/opt/shoal-deploy/<name>",
             (FieldId::User, _) => "the ssh login",
             (FieldId::RetireAfter, _) => "5m (the engine's)",
@@ -496,6 +523,8 @@ pub struct GroupDraft {
     pub wal_commit_delay: Option<String>,
     /// The lead weight an inventory being edited named for it, kept as it was (F58)
     pub lead_weight: Option<u32>,
+    /// The cpu its nodes' program is built for, blank to probe each host
+    pub target_cpu: String,
 }
 
 /// A node as the wizard edits it
@@ -519,6 +548,8 @@ pub struct NodeDraft {
     pub wal_commit_delay: Option<String>,
     /// The lead weight an inventory being edited named for it, kept as it was (F58)
     pub lead_weight: Option<u32>,
+    /// The cpu its program is built for, blank to probe the host
+    pub target_cpu: String,
 }
 
 /// An inventory as the wizard edits it: every field as typed
@@ -526,8 +557,14 @@ pub struct NodeDraft {
 pub struct Draft {
     /// The cluster's name
     pub name: String,
-    /// The server program, as typed
+    /// A built server program, as typed, blank to build one from the project
     pub server: String,
+    /// The project the program is built from, as typed, blank for the one the command runs in
+    pub project: String,
+    /// The database to deploy, blank for the project's one
+    pub db: String,
+    /// The cpu every node's program is built for, blank to probe each host
+    pub target_cpu: String,
     /// The remote directory, blank for the default
     pub remote_dir: String,
     /// The system user, blank for the ssh login
@@ -577,6 +614,9 @@ impl Default for Draft {
         Draft {
             name: String::new(),
             server: String::new(),
+            project: String::new(),
+            db: String::new(),
+            target_cpu: String::new(),
             remote_dir: String::new(),
             // a user of its own keeps the node off the operator's io_uring budget
             user: "shoal".to_string(),
@@ -690,6 +730,7 @@ impl Draft {
                 storage: StorageDraft::from_spec(group.storage.as_ref()),
                 wal_commit_delay: group.wal_commit_delay.clone(),
                 lead_weight: group.lead_weight,
+                target_cpu: group.target_cpu.clone().unwrap_or_default(),
             })
             .collect();
         // then the nodes, naming their group by that identity
@@ -719,11 +760,23 @@ impl Draft {
                 storage: StorageDraft::from_spec(node.storage.as_ref()),
                 wal_commit_delay: node.wal_commit_delay.clone(),
                 lead_weight: node.lead_weight,
+                target_cpu: node.target_cpu.clone().unwrap_or_default(),
             })
             .collect();
         Draft {
             name: inventory.name.clone(),
-            server: inventory.server.display().to_string(),
+            server: inventory
+                .server
+                .as_ref()
+                .map(|server| server.display().to_string())
+                .unwrap_or_default(),
+            project: inventory
+                .project
+                .as_ref()
+                .map(|project| project.display().to_string())
+                .unwrap_or_default(),
+            db: inventory.db.clone().unwrap_or_default(),
+            target_cpu: inventory.target_cpu.clone().unwrap_or_default(),
             remote_dir: inventory.remote_dir.clone().unwrap_or_default(),
             user: inventory.user.clone().unwrap_or_default(),
             admin: inventory.admin.clone(),
@@ -775,8 +828,12 @@ impl Draft {
         // the cluster page
         let cluster = Target::Field(Page::Cluster);
         let text = |raw: &str| Some(raw.trim().to_string()).filter(|raw| !raw.is_empty());
-        if self.server.trim().is_empty() {
-            issues.push(cluster.error(FieldId::Server, "name the server program to deploy"));
+        // a program and a project are two answers to one question
+        if !self.server.trim().is_empty() && !self.project.trim().is_empty() {
+            issues.push(cluster.error(
+                FieldId::Project,
+                "name the built server program or the project it is built from, not both",
+            ));
         }
         // the shape page, every number parsed on its own so each is reported where it is
         let shape = Target::Field(Page::Shape);
@@ -844,6 +901,7 @@ impl Draft {
                 storage: group.storage.build(),
                 wal_commit_delay: group.wal_commit_delay.clone(),
                 lead_weight: group.lead_weight,
+                target_cpu: text(&group.target_cpu),
             };
             if groups.insert(group.name.trim().to_string(), spec).is_some() {
                 issues.push(at.error(
@@ -885,6 +943,7 @@ impl Draft {
                 storage: node.storage.build(),
                 wal_commit_delay: node.wal_commit_delay.clone(),
                 lead_weight: node.lead_weight,
+                target_cpu: text(&node.target_cpu),
             });
             // a name is what every command addresses the node by
             if node.name.trim().is_empty() {
@@ -923,7 +982,10 @@ impl Draft {
         };
         let inventory = Inventory {
             name: self.name.trim().to_string(),
-            server: PathBuf::from(self.server.trim()),
+            server: text(&self.server).map(PathBuf::from),
+            project: text(&self.project).map(PathBuf::from),
+            db: text(&self.db),
+            target_cpu: text(&self.target_cpu),
             remote_dir: text(&self.remote_dir),
             ports,
             replication_factor,
@@ -954,12 +1016,24 @@ impl Draft {
                 issues.push(self.place(&error.to_string()));
             }
         }
+        // a project that is not one yet is worth saying too
+        if let Some(project) = &inventory.project {
+            let project = if project.is_relative() { base.join(project) } else { project.clone() };
+            if !project.join("Cargo.toml").is_file() {
+                issues.push(Issue {
+                    severity: Severity::Warning,
+                    target: Target::Field(Page::Cluster),
+                    field: Some(FieldId::Project),
+                    message: format!("{} has no Cargo.toml yet", project.display()),
+                });
+            }
+        }
         // a program that is not built yet is worth saying, never worth refusing the file over
-        if !self.server.trim().is_empty() {
-            let server = if inventory.server.is_relative() {
-                base.join(&inventory.server)
+        if let Some(server) = &inventory.server {
+            let server = if server.is_relative() {
+                base.join(server)
             } else {
-                inventory.server.clone()
+                server.clone()
             };
             if !server.is_file() {
                 issues.push(Issue {
@@ -1081,6 +1155,8 @@ impl Draft {
         let value = match field {
             FieldId::Name => &self.name,
             FieldId::Server => &self.server,
+            FieldId::Project => &self.project,
+            FieldId::Db => &self.db,
             FieldId::RemoteDir => &self.remote_dir,
             FieldId::User => &self.user,
             FieldId::Admin => &self.admin,
@@ -1097,6 +1173,11 @@ impl Draft {
             FieldId::Memory => &level?.0.memory,
             FieldId::Latency => &level?.1.latency,
             FieldId::Throughput => &level?.1.throughput,
+            FieldId::TargetCpu => match page {
+                Page::Groups => &self.groups.get(index)?.target_cpu,
+                Page::Nodes => &self.nodes.get(index)?.target_cpu,
+                _ => &self.target_cpu,
+            },
             FieldId::GroupName => &self.groups.get(index)?.name,
             FieldId::NodeName => &self.nodes.get(index)?.name,
             FieldId::NodeSsh => &self.nodes.get(index)?.ssh,
@@ -1203,6 +1284,8 @@ impl Draft {
         Some(match field {
             FieldId::Name => &mut self.name,
             FieldId::Server => &mut self.server,
+            FieldId::Project => &mut self.project,
+            FieldId::Db => &mut self.db,
             FieldId::RemoteDir => &mut self.remote_dir,
             FieldId::User => &mut self.user,
             FieldId::Admin => &mut self.admin,
@@ -1217,6 +1300,11 @@ impl Draft {
             FieldId::Memory => &mut level?.0.memory,
             FieldId::Latency => &mut level?.1.latency,
             FieldId::Throughput => &mut level?.1.throughput,
+            FieldId::TargetCpu => match page {
+                Page::Groups => &mut self.groups.get_mut(index)?.target_cpu,
+                Page::Nodes => &mut self.nodes.get_mut(index)?.target_cpu,
+                _ => &mut self.target_cpu,
+            },
             FieldId::GroupName => &mut self.groups.get_mut(index)?.name,
             FieldId::NodeName => &mut self.nodes.get_mut(index)?.name,
             FieldId::NodeSsh => &mut self.nodes.get_mut(index)?.ssh,
@@ -1696,6 +1784,7 @@ impl Wizard {
                     storage: StorageDraft::default(),
                     wal_commit_delay: None,
                     lead_weight: None,
+                    target_cpu: String::new(),
                 });
                 self.selected = self.draft.groups.len() - 1;
             }
@@ -1713,6 +1802,7 @@ impl Wizard {
                     storage: StorageDraft::default(),
                     wal_commit_delay: None,
                     lead_weight: None,
+                    target_cpu: String::new(),
                 });
                 self.selected = self.draft.nodes.len() - 1;
             }

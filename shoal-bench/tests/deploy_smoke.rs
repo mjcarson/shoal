@@ -1,4 +1,4 @@
-//! `shoal-benchctl cluster` against real hosts, when an inventory is named
+//! `shoal-benchctl` against real hosts, when an inventory is named
 //!
 //! `SHOAL_DEPLOY_INVENTORY=<file>` names an inventory whose hosts are reachable over keyless ssh
 //! with passwordless sudo and whose `server` is a `shoal-node` built for their cpus. The test then
@@ -11,8 +11,8 @@
 use shoal::shared::queries::Queries;
 use shoal::Shoal;
 use shoal_bench::workloads::schema::{BenchClient, Item, ItemGet};
-use shoalctl::deploy::inventory::{socket, Inventory};
-use shoalctl::deploy::Deployment;
+use shoaladm::deploy::inventory::{socket, Inventory};
+use shoaladm::deploy::{Deployment, ProjectHint};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -20,19 +20,19 @@ use std::sync::Arc;
 /// How many rows the smoke test writes
 const ROWS: u64 = 1_000;
 
-/// Run one `shoal-benchctl cluster` command and refuse a failure
+/// Run one `shoal-benchctl` admin command and refuse a failure
 ///
 /// # Arguments
 ///
 /// * `inventory` - The inventory
-/// * `args` - The cluster command and its arguments
+/// * `args` - The command and its arguments
 fn ctl(inventory: &Path, args: &[&str]) {
-    // the ctl built with this test, against the same schema as the rows below
+    // the program built with this test, against the same schema as the rows below
     let mut command = Command::new(env!("CARGO_BIN_EXE_shoal-benchctl"));
-    command.arg("cluster").args(&args[..1]);
+    command.args(&args[..1]);
     command.arg("--inventory").arg(inventory).args(&args[1..]);
     let status = command.status().expect("shoal-benchctl runs");
-    assert!(status.success(), "shoal-benchctl cluster {args:?} failed: {status}");
+    assert!(status.success(), "shoal-benchctl {args:?} failed: {status}");
 }
 
 /// Write the smoke rows through one client
@@ -115,7 +115,7 @@ fn a_deployed_cluster_serves_every_row_from_every_node() {
     // bootstrap over whatever an earlier run left
     ctl(path, &["bootstrap", "--wipe"]);
     let runtime = tokio::runtime::Runtime::new().expect("a runtime");
-    let deployment = Deployment::open(path).expect("a deployment");
+    let deployment = Deployment::open(path, ProjectHint::default()).expect("a deployment");
     runtime.block_on(async {
         // write through the first node
         let record = deployment.state.record().expect("a record");

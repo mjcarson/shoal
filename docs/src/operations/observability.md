@@ -524,7 +524,7 @@ For running Shoal anywhere real, the gaps are:
   ones, which are emitted as an event rather than exposed~~ - since
   [F52](../features/cluster-stats.md) a cluster node counts the rows and bytes it inserts,
   updates and deletes and keeps them as 10s/1m/5m rates, readable through the `Stats` admin
-  read and `shoalctl cluster stats`; nothing exports them to a monitoring system, and the
+  read and `shoaladm stats`; nothing exports them to a monitoring system, and the
   recovery counters are still an event. Filed in
   [TODOs](../appendix/todos.md#observability). The throughput figure the benchmark harness
   reports is computed by the *client*, not by the server, and is not available at runtime.
