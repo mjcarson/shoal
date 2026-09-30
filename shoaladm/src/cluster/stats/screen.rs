@@ -1,14 +1,19 @@
 //! What the stats view shows, and what each key does to it
 //!
+//! The view has a tab per metric group, and each tab draws every metric of its group as a chart
+//! of its own. The arrows select a chart, space then `f` shows the selected one full screen, and
+//! Esc brings the grid back ([F64](../../../../docs/src/features/stats-tui.md)).
+//!
 //! Nothing here draws: [`super::view`] draws a [`Screen`], so every key and every sample can be
-//! tested without a terminal ([F64](../../../../docs/src/features/stats-tui.md)).
+//! tested without a terminal. The grid's shape depends on the terminal, so the view writes the
+//! columns it drew and the row it scrolled to back here, and the keys move by them.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::{Duration, Instant};
 
 use super::StatsModel;
 use super::history::History;
-use super::metrics::{METRICS, Metric};
+use super::metrics::{GROUPS, METRICS, Metric, in_group};
 
 /// The windows a chart can show, shortest first
 pub const WINDOWS: [Duration; 4] = [
@@ -46,8 +51,18 @@ pub struct Screen {
     pub error: Option<String>,
     /// Every sample taken
     pub history: History,
-    /// The metric charted, as an index into [`METRICS`]
-    pub selected: usize,
+    /// The tab shown, as an index into [`GROUPS`]
+    pub tab: usize,
+    /// Each tab's selected chart, as a position among its group's metrics
+    pub selected: [usize; GROUPS.len()],
+    /// How many charts a row of the grid holds, as the last frame drew it
+    pub columns: usize,
+    /// The first row of the grid the last frame drew, when the grid does not fit
+    pub first_row: usize,
+    /// Whether the selected chart fills the screen
+    pub fullscreen: bool,
+    /// Whether space was pressed and the next key is a shortcut
+    pub leader: bool,
     /// The window charted, as an index into [`WINDOWS`]
     pub window: usize,
     /// How far the help page is scrolled, while it is open
@@ -57,7 +72,7 @@ pub struct Screen {
 }
 
 impl Screen {
-    /// A screen with nothing read yet
+    /// A screen with nothing read yet, on the first tab
     ///
     /// # Arguments
     ///
@@ -71,7 +86,12 @@ impl Screen {
             latest: None,
             error: None,
             history: History::default(),
-            selected: 0,
+            tab: 0,
+            selected: [0; GROUPS.len()],
+            columns: 1,
+            first_row: 0,
+            fullscreen: false,
+            leader: false,
             window: DEFAULT_WINDOW,
             help: None,
             paused_at: None,
@@ -103,10 +123,29 @@ impl Screen {
         }
     }
 
-    /// The metric charted
+    /// The indexes into [`METRICS`] of the tab's metrics, in the order the grid draws them
+    #[must_use]
+    pub fn tab_metrics(&self) -> Vec<usize> {
+        in_group(GROUPS[self.tab.min(GROUPS.len() - 1)].0)
+    }
+
+    /// The selected chart's position among the tab's metrics
+    #[must_use]
+    pub fn position(&self) -> usize {
+        let count = self.tab_metrics().len();
+        self.selected[self.tab].min(count.saturating_sub(1))
+    }
+
+    /// The selected metric's index into [`METRICS`], which the history keys its lines by
+    #[must_use]
+    pub fn metric_index(&self) -> usize {
+        self.tab_metrics()[self.position()]
+    }
+
+    /// The selected metric
     #[must_use]
     pub fn metric(&self) -> &'static Metric {
-        &METRICS[self.selected.min(METRICS.len() - 1)]
+        &METRICS[self.metric_index()]
     }
 
     /// The window charted
@@ -125,6 +164,48 @@ impl Screen {
         self.paused_at.unwrap_or(now)
     }
 
+    /// Show another tab, drawn from its top with the chart it had selected
+    ///
+    /// # Arguments
+    ///
+    /// * `tab` - The tab, as an index into [`GROUPS`]
+    fn show_tab(&mut self, tab: usize) {
+        self.tab = tab % GROUPS.len();
+        self.first_row = 0;
+    }
+
+    /// Move the selection: through the grid by its rows and columns, or through the tab's
+    /// metrics in order while one fills the screen
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The arrow pressed
+    fn step(&mut self, key: KeyCode) {
+        let count = self.tab_metrics().len();
+        let at = self.position();
+        let columns = self.columns.max(1);
+        let next = if self.fullscreen {
+            // one chart at a time, wrapping at both ends
+            match key {
+                KeyCode::Left | KeyCode::Up => (at + count - 1) % count,
+                _ => (at + 1) % count,
+            }
+        } else {
+            match key {
+                // along a row, stopping at the first and the last chart
+                KeyCode::Left => at.saturating_sub(1),
+                KeyCode::Right => (at + 1).min(count - 1),
+                // a row up, if there is one
+                KeyCode::Up if at >= columns => at - columns,
+                // a row down, or the last chart when the row below it is short
+                KeyCode::Down if at + columns < count => at + columns,
+                KeyCode::Down if at / columns < (count - 1) / columns => count - 1,
+                _ => at,
+            }
+        };
+        self.selected[self.tab] = next;
+    }
+
     /// Handle one key press
     ///
     /// # Arguments
@@ -140,7 +221,7 @@ impl Screen {
         if let Some(scroll) = self.help {
             self.help = match key.code {
                 KeyCode::Char('q') => return Outcome::Quit,
-                KeyCode::Esc | KeyCode::Char('?' | 'h') | KeyCode::F(1) => None,
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::F(1) => None,
                 KeyCode::Up | KeyCode::Char('k') => Some(scroll.saturating_sub(1)),
                 KeyCode::Down | KeyCode::Char('j') => Some(scroll.saturating_add(1)),
                 KeyCode::PageUp => Some(scroll.saturating_sub(HELP_PAGE)),
@@ -151,23 +232,42 @@ impl Screen {
             };
             return Outcome::Continue;
         }
+        // after space, the next key is a shortcut and nothing else, whatever it is
+        if self.leader {
+            self.leader = false;
+            if key.code == KeyCode::Char('f') {
+                self.fullscreen = !self.fullscreen;
+            }
+            return Outcome::Continue;
+        }
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return Outcome::Quit,
-            // the metric list wraps at both ends
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.selected = (self.selected + METRICS.len() - 1) % METRICS.len();
+            KeyCode::Char('q') => return Outcome::Quit,
+            // Esc brings the grid back before it leaves
+            KeyCode::Esc if self.fullscreen => self.fullscreen = false,
+            KeyCode::Esc => return Outcome::Quit,
+            KeyCode::Char(' ') => self.leader = true,
+            // the tabs wrap both ways, and a number jumps to one
+            KeyCode::Tab => self.show_tab(self.tab + 1),
+            KeyCode::BackTab => self.show_tab(self.tab + GROUPS.len() - 1),
+            KeyCode::Char(digit @ '1'..='9') => {
+                let tab = digit as usize - '1' as usize;
+                if tab < GROUPS.len() {
+                    self.show_tab(tab);
+                }
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.selected = (self.selected + 1) % METRICS.len();
-            }
+            // the arrows and their vi keys move the selection
+            KeyCode::Left | KeyCode::Char('h') => self.step(KeyCode::Left),
+            KeyCode::Right | KeyCode::Char('l') => self.step(KeyCode::Right),
+            KeyCode::Up | KeyCode::Char('k') => self.step(KeyCode::Up),
+            KeyCode::Down | KeyCode::Char('j') => self.step(KeyCode::Down),
             // the windows stop at both ends
-            KeyCode::Left | KeyCode::Char('-') => self.window = self.window.saturating_sub(1),
-            KeyCode::Right | KeyCode::Char('+' | '=') => {
+            KeyCode::Char('[' | '-') => self.window = self.window.saturating_sub(1),
+            KeyCode::Char(']' | '+' | '=') => {
                 self.window = (self.window + 1).min(WINDOWS.len() - 1);
             }
-            KeyCode::Char('?' | 'h') | KeyCode::F(1) => self.help = Some(0),
+            KeyCode::Char('?') | KeyCode::F(1) => self.help = Some(0),
             // a freeze holds the picture at the moment it was pressed
-            KeyCode::Char('p' | ' ') => {
+            KeyCode::Char('p') => {
                 self.paused_at = match self.paused_at {
                     Some(_) => None,
                     None => Some(now),
@@ -214,44 +314,130 @@ mod tests {
         StatsModel::new(view, None)
     }
 
-    /// The keys choose a metric and a window, open and scroll the help page, freeze the
-    /// picture and leave, and Esc closes the help page before it leaves
+    /// The tabs wrap and jump, each keeps its selection, and the arrows move through the grid
+    /// by its columns
     #[test]
     fn keys_move_the_screen() {
         let now = Instant::now();
         let mut screen = Screen::new("lab", Duration::from_secs(2));
-        // the metric list wraps both ways
-        assert_eq!(screen.handle_key(key(KeyCode::Up), now), Outcome::Continue);
-        assert_eq!(screen.selected, METRICS.len() - 1);
-        screen.handle_key(key(KeyCode::Down), now);
-        screen.handle_key(key(KeyCode::Char('j')), now);
-        assert_eq!(screen.selected, 1);
+        let press = |screen: &mut Screen, code: KeyCode| screen.handle_key(key(code), now);
+        // the tabs wrap both ways, and a number jumps to one while one past the last is ignored
+        press(&mut screen, KeyCode::Tab);
+        assert_eq!(screen.tab, 1);
+        press(&mut screen, KeyCode::BackTab);
+        press(&mut screen, KeyCode::BackTab);
+        assert_eq!(screen.tab, GROUPS.len() - 1);
+        press(&mut screen, KeyCode::Char('3'));
+        assert_eq!(screen.tab, 2);
+        press(&mut screen, KeyCode::Char('9'));
+        assert_eq!(screen.tab, 2);
+        // the writes tab's seven charts in rows of three
+        press(&mut screen, KeyCode::Char('2'));
+        assert_eq!(GROUPS[screen.tab].0, "writes");
+        assert_eq!(screen.tab_metrics().len(), 7);
+        screen.columns = 3;
+        // along the row, then down a row
+        press(&mut screen, KeyCode::Right);
+        press(&mut screen, KeyCode::Char('l'));
+        assert_eq!(screen.position(), 2);
+        press(&mut screen, KeyCode::Down);
+        assert_eq!(screen.position(), 5);
+        // the row below is short, so down lands on its one chart, and stays there
+        press(&mut screen, KeyCode::Down);
+        assert_eq!(screen.position(), 6);
+        press(&mut screen, KeyCode::Char('j'));
+        assert_eq!(screen.position(), 6);
+        assert_eq!(screen.metric().name, "misses/s");
+        // up a row, then left to the first chart and no further
+        press(&mut screen, KeyCode::Up);
+        assert_eq!(screen.position(), 3);
+        assert_eq!(screen.metric().name, "deletes/s");
+        for _ in 0..5 {
+            press(&mut screen, KeyCode::Char('h'));
+        }
+        assert_eq!(screen.position(), 0);
+        press(&mut screen, KeyCode::Up);
+        assert_eq!(screen.position(), 0);
+        // each tab keeps its own selection
+        press(&mut screen, KeyCode::Right);
+        press(&mut screen, KeyCode::Tab);
+        assert_eq!(screen.position(), 0);
+        press(&mut screen, KeyCode::BackTab);
+        assert_eq!(screen.position(), 1);
         // the windows stop at both ends
         assert_eq!(screen.window(), WINDOWS[DEFAULT_WINDOW]);
         for _ in 0..10 {
-            screen.handle_key(key(KeyCode::Right), now);
+            press(&mut screen, KeyCode::Char(']'));
         }
         assert_eq!(screen.window(), *WINDOWS.last().unwrap());
         for _ in 0..10 {
-            screen.handle_key(key(KeyCode::Left), now);
+            press(&mut screen, KeyCode::Char('['));
         }
         assert_eq!(screen.window(), WINDOWS[0]);
-        // the help page opens, scrolls, and takes the arrows from the metric list
-        screen.handle_key(key(KeyCode::Char('?')), now);
-        assert_eq!(screen.help, Some(0));
-        screen.handle_key(key(KeyCode::PageDown), now);
-        screen.handle_key(key(KeyCode::Down), now);
-        assert_eq!(screen.help, Some(HELP_PAGE + 1));
-        assert_eq!(screen.selected, 1);
-        screen.handle_key(key(KeyCode::Home), now);
-        assert_eq!(screen.help, Some(0));
-        // Esc closes it rather than leaving, and a second Esc leaves
-        assert_eq!(screen.handle_key(key(KeyCode::Esc), now), Outcome::Continue);
+    }
+
+    /// Space then f fills the screen with the selected chart and back, space then anything else
+    /// does nothing, the arrows step through the tab while one chart is shown, and Esc brings
+    /// the grid back before it leaves
+    #[test]
+    fn space_f_fills_the_screen() {
+        let now = Instant::now();
+        let mut screen = Screen::new("lab", Duration::from_secs(2));
+        let press = |screen: &mut Screen, code: KeyCode| screen.handle_key(key(code), now);
+        press(&mut screen, KeyCode::Char('2'));
+        // space then another key is only a cancelled shortcut
+        press(&mut screen, KeyCode::Char(' '));
+        assert!(screen.leader);
+        press(&mut screen, KeyCode::Right);
+        assert!(!screen.leader && !screen.fullscreen);
+        assert_eq!(screen.position(), 0);
+        // space then f fills the screen
+        press(&mut screen, KeyCode::Char(' '));
+        press(&mut screen, KeyCode::Char('f'));
+        assert!(screen.fullscreen && !screen.leader);
+        // one chart at a time, wrapping at both ends
+        press(&mut screen, KeyCode::Left);
+        assert_eq!(screen.position(), 6);
+        press(&mut screen, KeyCode::Down);
+        assert_eq!(screen.position(), 0);
+        press(&mut screen, KeyCode::Right);
+        assert_eq!(screen.metric().name, "inserts/s");
+        // space then f again brings the grid back
+        press(&mut screen, KeyCode::Char(' '));
+        press(&mut screen, KeyCode::Char('f'));
+        assert!(!screen.fullscreen);
+        // Esc leaves the full screen chart before it leaves the view
+        press(&mut screen, KeyCode::Char(' '));
+        press(&mut screen, KeyCode::Char('f'));
+        assert_eq!(press(&mut screen, KeyCode::Esc), Outcome::Continue);
+        assert!(!screen.fullscreen);
+        assert_eq!(press(&mut screen, KeyCode::Esc), Outcome::Quit);
+    }
+
+    /// The help page opens, scrolls, takes the arrows and closes, and q and ctrl-c leave
+    #[test]
+    fn the_help_page_takes_the_keys() {
+        let now = Instant::now();
+        let mut screen = Screen::new("lab", Duration::from_secs(2));
+        let press = |screen: &mut Screen, code: KeyCode| screen.handle_key(key(code), now);
+        // h moves left now, and ? opens the page
+        press(&mut screen, KeyCode::Char('h'));
         assert_eq!(screen.help, None);
-        assert_eq!(screen.handle_key(key(KeyCode::Esc), now), Outcome::Quit);
-        // q leaves even from the help page, and so does ctrl-c
-        screen.handle_key(key(KeyCode::Char('h')), now);
-        assert_eq!(screen.handle_key(key(KeyCode::Char('q')), now), Outcome::Quit);
+        press(&mut screen, KeyCode::Char('?'));
+        assert_eq!(screen.help, Some(0));
+        // it scrolls, and the arrows scroll it rather than move the selection
+        press(&mut screen, KeyCode::PageDown);
+        press(&mut screen, KeyCode::Down);
+        assert_eq!(screen.help, Some(HELP_PAGE + 1));
+        assert_eq!(screen.position(), 0);
+        press(&mut screen, KeyCode::Home);
+        assert_eq!(screen.help, Some(0));
+        // Esc closes it rather than leaving
+        assert_eq!(press(&mut screen, KeyCode::Esc), Outcome::Continue);
+        assert_eq!(screen.help, None);
+        // q leaves even from the page, and so does ctrl-c
+        press(&mut screen, KeyCode::F(1));
+        assert_eq!(press(&mut screen, KeyCode::Char('q')), Outcome::Quit);
         let ctrl_c = KeyEvent {
             modifiers: KeyModifiers::CONTROL,
             ..key(KeyCode::Char('c'))

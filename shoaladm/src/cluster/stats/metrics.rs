@@ -743,6 +743,21 @@ pub const TERMS: &[Term] = &[
     },
 ];
 
+/// The indexes into [`METRICS`] of one group's metrics, in the order they are listed
+///
+/// # Arguments
+///
+/// * `group` - The group, one of [`GROUPS`]
+#[must_use]
+pub fn in_group(group: &str) -> Vec<usize> {
+    METRICS
+        .iter()
+        .enumerate()
+        .filter(|(_, metric)| metric.group == group)
+        .map(|(index, _)| index)
+        .collect()
+}
+
 /// The index of a metric by its key
 ///
 /// # Arguments
@@ -803,6 +818,12 @@ mod tests {
         for column in printed {
             assert!(explained.contains(column), "the column {column} has no help");
         }
+        // every metric is in exactly one group's tab, in the catalog's order
+        let mut tabbed: Vec<usize> = GROUPS.iter().flat_map(|(group, _)| in_group(group)).collect();
+        tabbed.sort_unstable();
+        assert_eq!(tabbed, (0..METRICS.len()).collect::<Vec<_>>());
+        assert_eq!(in_group("streams").len(), 2);
+        assert!(in_group("nothing").is_empty());
         // and a key finds its metric
         assert_eq!(index_of("applied").map(|index| METRICS[index].name), Some("applied writes/s"));
         assert_eq!(index_of("nothing"), None);

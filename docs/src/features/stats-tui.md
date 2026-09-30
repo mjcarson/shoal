@@ -64,29 +64,48 @@ only when stdout is a terminal and neither `--basic` nor `--json` was given. Oth
 exactly what it printed before, once, or again every `--watch` seconds.
 
 ```text
-┌ metrics ───────────────┐┌ applied writes/s · last 5m ────────────────────────────────────┐
-│cluster                 ││12.1k┤ ━ europa  ━ hyperion  ━ titan         ⢀⡠⠤⠒⠒⠤⣀            │
-│ cluster writes/s       ││     │                                  ⢀⠔⠉      ⠈⠒⠤⣀        │
-│writes                  ││ 6.0k┤                           ⢀⣀⡠⠤⠒⠉                        │
-│ applied writes/s       ││     │               ⣀⣀⣀⡠⠤⠤⠔⠒⠒⠉⠉                               │
-│ inserts/s              ││    0┼───────────────────────────────────────────────────────  │
-│ ...                    ││     -5m                     -2m30s                       now  │
-└────────────────────────┘└───────────────────────────────────────────────────────────────┘
+shoaladm stats · tmdb · from titan (leader) · version 83 · every 2s
+europa up   hyperion up   titan up
+ 1 cluster   2 writes   3 streams   4 placement   5 memory   6 storage             last 5m
+┌ wal syncs/s ─────────────────────┐┌ wal bytes/s ──────────────────────┐┌ sync ms ─────────
+│1.0│                        ⢀⡠⠤⠒⠒⠤⣀││1.0KiB/s│                ⢀⣀⡠⠤⠒⠉  ││1.00ms│
+│0  │                ⣀⣀⣀⡠⠤⠤⠔⠒⠒⠉     ││0B/s    │    ⣀⣀⣀⡠⠤⠤⠔⠒⠒⠉          ││0.00ms│
+│ -5m          -2m30s          now ││      -5m     -2m30s          now ││    -5m
+│member   now    low    mean  high ││member   now    low   mean   high ││member   now
+│europa   0      0      0     0    ││europa   0B/s   0B/s  0B/s   0B/s ││europa   0.00ms
+│hyperion 0      0      0     0    ││hyperion 0B/s   0B/s  0B/s   0B/s ││hyperion 0.00ms
+└──────────────────────────────────┘└───────────────────────────────────┘└──────────────────
 ```
 
-- **The list on the left** holds every metric the view can chart, under six groups: the
-  cluster, writes, streams, placement, memory and storage. `↑`/`↓` choose one.
-- **The chart** draws the chosen metric over the window, one line per member in a color it
-  keeps from metric to metric, or one line for a cluster metric. `←`/`→` choose a window of
-  one, five, fifteen or thirty minutes. Rates are drawn from their ten second window.
-- **The table under the chart** gives each line's newest value and its low, mean and high over
-  the window, beside each member's state and the age of its figures.
+- **A tab per metric group**: the cluster, writes, streams, placement, memory and storage.
+  `Tab` and `Shift-Tab` step through them and `1` to `6` jump to one. Each tab draws every
+  metric of its group as a chart of its own, in as many columns as fit and no more than a square
+  needs, so the storage tab's nine are three by three and the cluster tab's four two by two.
+- **A chart per metric** draws it over the window, one line per member in a color it keeps from
+  chart to chart, or one line for a cluster metric. Rates are drawn from their ten second window.
+  `[` and `]` choose a window of one, five, fifteen or thirty minutes, shown beside the tabs.
+- **Under each chart, its summary**: each line's name in its color, which is the chart's legend,
+  and its newest value and its low, mean and high over the window. A stale member's newest value
+  is `-`.
+- **The header's second line** gives each member's state, green when up and red when down, and
+  the age of its figures with `!` when they are stale. ~~The table under the chart gave each
+  member's state and age beside its figures.~~ The user asked for the summaries without them.
+- **The arrows select a chart**, whose border is drawn in cyan. **Space then `f`** fills the body
+  with the selected chart and its summary, and again brings the grid back; Esc does too. While
+  one chart is shown the arrows step through the tab's metrics. Space shows the shortcut it
+  started in a small box, as shoalctl's Space shortcuts do.
+- **A grid taller than the terminal scrolls** to keep the selected chart's row in view, and the
+  tab bar says which rows are shown.
 - **The foot** lists the open plans, as the `--basic` output does, and the keys.
 - **`p`** freezes the picture. The figures keep being read underneath, so the lines that
   arrived meanwhile are there when it is unfrozen.
 - **`?`** opens the help page. It explains how to read the view, then every metric with its
   unit, every other word the figures and the `--basic` tables use, each field of a plan's line,
   and the keys. `q` leaves.
+
+~~F64 was first delivered as a list of every metric on the left and the one chosen charted on
+the right, with the table under it.~~ The user asked the same day for the tabs, a chart per
+metric with its summary, and space f to enlarge one.
 
 The figures are read every `--watch` seconds, two by default, which is about how often a member
 sends them to the leader. The view keeps what it read for half an hour and forgets it on exit.
@@ -102,8 +121,8 @@ sends them to the leader. The view keeps what it read for half an hour and forge
 - **The record is the fallback, not the source.** A member the leader has never heard from,
   or one running an older build, still has a name an operator recognizes. The record is only
   read where it exists, which is `shoaladm stats`.
-- **One catalog feeds the list, the chart, the table and the help page**
-  (`stats/metrics.rs`). Each metric names the `--basic` columns that print it, and each other
+- **One catalog feeds the tabs, the charts, their summaries and the help page**
+  (`stats/metrics.rs`). A tab is a group of the catalog (`metrics::in_group`). Each metric names the `--basic` columns that print it, and each other
   word the tables use is a `Term` naming its own. A test fails if any column of any table is
   explained by neither, so a column added to `--basic` without help is caught.
 - **The history is sampled per report, not per poll.** A member's figures are recognized by
@@ -118,6 +137,13 @@ sends them to the leader. The view keeps what it read for half an hour and forge
   to the public `cli::run`, which every schema's admin program calls. With no channel between
   the read and the screen there is no kanal receive to race either
   ([#152](../appendix/resolved/kanal-receive-races.md)).
+- **The grid's shape is the frame's to decide.** Only a draw knows the terminal's size, so the
+  view writes the columns it drew and the row it scrolled to back to the screen, and the arrows
+  move by them (`view::grid`, `view::scroll`). Up and down move by a row; down from a row whose
+  next is short lands on its last chart.
+- **Space is a leader key, as in shoalctl.** The next key after it is a shortcut and nothing else,
+  whatever it is, so `f` cannot also mean anything on the grid. Space no longer freezes the
+  picture; `p` does.
 - **A pipe always gets lines.** The lab's scripts redirect `stats` to files and read lines by
   number. A full screen view on a pipe would break them silently, so the view is drawn only on a
   terminal.
@@ -132,9 +158,15 @@ sends them to the leader. The view keeps what it read for half an hour and forge
   a member that never reported. It would also be a control state change for a display
   convenience, and it would go stale when a host is renamed. A down member is already covered by
   the record.
-- **A tabbed dashboard of small charts.** The user chose one chart with a metric list over tabs
+- ~~**A tabbed dashboard of small charts.** The user chose one chart with a metric list over tabs
   by category with four to six charts each. One large chart reads more precisely, and the list
-  shows every metric at once.
+  shows every metric at once.~~ **One chart beside a metric list**, F64's first form. It showed
+  one metric at a time, so comparing two meant flipping between them. The user asked the same
+  day for a tab of charts per group, with space f for the one large chart the first form gave.
+- **Every chart on one screen.** Thirty-nine charts do not fit a terminal at any size worth
+  reading; a group is what an operator compares at once.
+- **A legend on each chart.** It covers the lines it names on a small chart, and the summary
+  under the chart already names every line in its color.
 - **History kept on the server.** The leader keeps only the newest figures of each member, in
   memory ([F52](cluster-stats.md)). Keeping a history there would make every leader change lose
   it, and would grow the leader's memory for a view nobody may be running. The view's own
@@ -154,6 +186,10 @@ sends them to the leader. The view keeps what it read for half an hour and forge
   [Observability](../operations/observability.md#what-is-missing) is still open.
 - **A frozen picture's chart ends where it was frozen**, but the samples taken meanwhile are
   kept, and a thirty minute freeze outlives the oldest of them.
+- **A short terminal scrolls the grid.** Below about three chart rows the storage and placement
+  tabs show some of their charts at a time.
+- **Many members crowd the charts.** Every member has a line in every summary, so a cluster of
+  ten makes each chart's summary taller than its chart; a chart shown full screen still reads.
 - **A long hostname widens every table.** The `--basic` tables grow by as many columns as the
   longest name is over twelve characters.
 
@@ -168,6 +204,8 @@ sends them to the leader. The view keeps what it read for half an hour and forge
 - **Every column `--basic` prints is named by a metric or a term.** The header arrays
   (`MEMBER_COLUMNS` and the rest) are what the tables print and what the help test reads, so a
   column cannot be added to one and not the other.
+- **The keys move by the grid the last frame drew.** `Screen::columns` and `first_row` are the
+  view's to write; a key handled before the first frame moves by one column.
 - **A read in flight is never dropped by a key.** The loop keeps the read's future across its
   turns. If it is ever moved to a spawned task, the answer must reach the screen through a
   kept receiver, never a raced kanal `recv()`.
@@ -197,9 +235,12 @@ nothing that `--basic --watch` did not.
 | `every_metric_and_column_has_help` | `shoaladm/src/cluster/stats/metrics.rs` | A metric has no help or group, two share a key, or a column of a `--basic` table is explained nowhere |
 | `units_write_values_as_the_tables_do` | `shoaladm/src/cluster/stats/metrics.rs` | The chart's values are written differently from the tables' |
 | `history_dedupes_skips_stale_and_trims` | `shoaladm/src/cluster/stats/history.rs` | A report read twice is charted twice, a stale member draws a line, a window does not slice, or old points are kept |
-| `keys_move_the_screen` | `shoaladm/src/cluster/stats/screen.rs` | A key does something else, the help page does not take the arrows, or Esc leaves with the help page open |
+| `keys_move_the_screen` | `shoaladm/src/cluster/stats/screen.rs` | The tabs stop wrapping or a number stops jumping, a tab forgets its selection, the arrows stop moving by the grid's columns or stop at its ends, down from a short row does not land on its last chart, or the window keys change |
+| `space_f_fills_the_screen` | `shoaladm/src/cluster/stats/screen.rs` | Space then f does not enter or leave the full screen chart, space then another key does anything, the arrows stop stepping through the tab while one chart is shown, or Esc leaves the view before the chart |
+| `the_help_page_takes_the_keys` | `shoaladm/src/cluster/stats/screen.rs` | The help page does not take the arrows, Esc leaves with it open, or q and ctrl-c stop leaving |
 | `a_frozen_picture_keeps_sampling` | `shoaladm/src/cluster/stats/screen.rs` | Freezing stops the sampling or lets the picture move, or a failed read clears the answer |
-| `the_view_draws_hostnames_and_help` | `shoaladm/src/cluster/stats/view.rs` | The view does not name members by hostname, loses the chart, the table, the plan or the keys, or the help page omits a metric or term, scrolls past its end or overflows its width |
+| `the_view_draws_a_tab_of_charts` | `shoaladm/src/cluster/stats/view.rs` | A tab does not draw every metric of its group, a summary loses its figures or gains state or age, the header loses a member's state or a stale member's age, space shows no shortcut, space f does not draw one chart alone, the plan or the keys go, or the help page omits a metric or term, scrolls past its end or overflows its width |
+| `the_grid_fits_its_area` | `shoaladm/src/cluster/stats/view.rs` | The columns stop fitting the width or the square, the rows shown stop fitting the height, or the scroll loses the selected row |
 | `spans_and_wrapping` | `shoaladm/src/cluster/stats/view.rs` | The axis labels or the help page's wrapping change |
 | `stats_takes_basic` | `shoaladm/src/cli.rs` | `--basic` is not taken, or a bare `--watch` stops meaning two seconds |
 
@@ -208,7 +249,9 @@ read as titan, europa and hyperion through the record, both with `--basic` and p
 flag, and full screen under `tmux`. A side cluster, `tmdb-f64` on ports 13000-13002, was built
 and deployed from this tree onto the same three hosts. Each node's figures carried its own
 hostname, and 200,000 rows loaded through it drew one line per host on the applied writes chart.
-The side cluster was then destroyed.
+The side cluster was then destroyed. The tabbed layout was checked on the tmdb cluster at
+160×45, where the storage tab's nine charts fit three by three and space f showed one alone,
+and at 100×30, where they took two columns and scrolled with the selection.
 
 ## Related
 
