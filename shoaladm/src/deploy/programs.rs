@@ -270,3 +270,51 @@ pub fn check_program(path: &Path) -> color_eyre::Result<()> {
     }
     Ok(())
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::{Schema, SchemaSource};
+
+    /// A built program is named by its file, a project's by its package and database, and a
+    /// program is handed out only once it was prepared
+    #[test]
+    fn programs_are_named_by_where_they_come_from() {
+        let fixed = Programs::Fixed(PathBuf::from("/build/release/shoal-node"));
+        assert_eq!(fixed.server_name().as_deref(), Some("shoal-node"));
+        assert_eq!(fixed.schema_record(), None);
+        assert_eq!(fixed.program("anyone").unwrap(), PathBuf::from("/build/release/shoal-node"));
+        let built = Programs::Built {
+            project: Project {
+                dir: PathBuf::from("/src/demo"),
+                name: "demo".to_string(),
+                edition: "2024".to_string(),
+                target_directory: PathBuf::from("/src/demo/target"),
+                workspace_root: PathBuf::from("/src/demo"),
+                lib: None,
+                dependencies: Vec::new(),
+                features: BTreeMap::new(),
+            },
+            schema: Schema {
+                name: "Demo".to_string(),
+                module_path: Vec::new(),
+                source: SchemaSource::Main,
+                file: PathBuf::from("/src/demo/src/main.rs"),
+            },
+            config: Config::default(),
+            built: RefCell::new(BTreeMap::new()),
+        };
+        assert_eq!(built.server_name().as_deref(), Some("demo-Demo-node"));
+        assert_eq!(
+            built.schema_record(),
+            Some(SchemaRecord {
+                package: "demo".to_string(),
+                db: "Demo".to_string()
+            })
+        );
+        // nothing built yet is an error naming the order, not a panic
+        let error = built.program("a").unwrap_err().to_string();
+        assert!(error.contains("prepare comes first"), "{error}");
+    }
+}

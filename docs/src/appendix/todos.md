@@ -2213,7 +2213,7 @@ Multi-shard routing is no longer on that list; it gained coverage with
 | `server/cursor.rs`, `server/response.rs` | Not in the module tree; reference removed APIs. |
 | `shoal-core/src/client.rs:549-603`, `:1048-1114` | Large commented-out blocks. |
 | ~~`.../fs.rs:74-98`~~ | ~~The previous intent-log writer, commented out.~~ **Gone** — the block is no longer in the file. |
-| `shoalctl/src/components/tab.rs:548`, `:558` | `next`/`prev`, never called — the compiler warns about them on every build. |
+| `shoalctl/src/components/tab.rs:851`, `:861` | `next`/`prev`, never called — the compiler warns about them on every build. |
 | ~~`EphemeralTable`~~ | ~~Cannot be used in a `#[db]` database.~~ Deleted by [F9](../features/ephemeral-tables.md), which replaced it with aliases over the persistent tables. |
 | `shoal/examples/basic.rs.bak` | A `.bak` file in the source tree. |
 

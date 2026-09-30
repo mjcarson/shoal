@@ -198,6 +198,10 @@ and closes by naming `shoaladm deploy -i <file>` and `shoaladm config default-in
 - **The state directory stays at `~/.shoal/clusters/<name>/`**, where [F51](cluster-deployment.md)
   put it; moving it would orphan every deployed cluster's authority. The config and the
   programs are where the user asked for them.
+- **A record written before this feature learns its program name from a host's unit**, over
+  ssh, the first time a command needs it; the sed it runs is tested under `sh` against a unit as
+  `systemctl cat` prints one, and was run by hand on europa against the lab's cluster, but no
+  test drives the ssh round trip itself.
 - **The lab inventories keep `server:`**, since the bench schema lives in a module of a
   workspace crate rather than at a project's root, and `shoal-benchctl` is its program
   written by hand.
@@ -257,7 +261,9 @@ build costs is the engine's compile time; nothing here changes what a node does 
 | `the_ui_needs_no_subcommand` | `shoalctl/src/cli.rs` | `shoalctl` needs `tui` again, or an address and an inventory are both taken |
 | `an_inventory_that_cannot_be_a_cluster_is_refused` | `shoaladm/src/deploy/inventory.rs` | `server` and `project` are both accepted, a project without a manifest is, or an inventory naming neither is refused |
 | `state_is_private_and_minted_once` | `shoaladm/src/deploy/state.rs` | An old record without `schema` or `program` stops reading, or a new one does not keep them |
-| `the_unit_runs_the_deployed_program` | `shoaladm/src/deploy/unit.rs` | The unit runs a program named by something other than the deployment's `server_name` |
+| `the_unit_runs_the_deployed_program` | `shoaladm/src/deploy/unit.rs` | The unit stops running the program by the name it is given |
+| `programs_are_named_by_where_they_come_from` | `shoaladm/src/deploy/programs.rs` | A built program's on-host name stops being its file name, a project's stops being `<package>-<Db>-node`, the record forgets the schema, or an unprepared node gets a program |
+| `a_units_program_is_read_off_its_exec_start` | `shoaladm/src/deploy/ops.rs` | The sed a pre-F63 cluster's program name is learned through stops matching `ExecStart`, run for real under `sh` |
 | `a_deployed_cluster_serves_every_row_from_every_node` | `shoal-bench/tests/deploy_smoke.rs` | Gated on `SHOAL_DEPLOY_INVENTORY`: the bench pair's flattened commands stop deploying |
 | The lab run above | by hand | `shoaladm deploy` from `examples/tmdb_dataset` stops building two classes and bootstrapping |
 

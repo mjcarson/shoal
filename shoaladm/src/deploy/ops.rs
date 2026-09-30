@@ -271,19 +271,10 @@ impl Deployment {
             let host = Host {
                 target: node.target.clone(),
             };
-            let program = host
-                .run(&format!(
-                    "systemctl cat {} | sed -n 's/^ExecStart=\\([^ ]*\\) .*/\\1/p'",
-                    quote(&self.inventory.unit_name())
-                ))
+            let output = host
+                .run(&unit_program_script(&self.inventory.unit_name()))
                 .wrap_err_with(|| format!("reading which program {name} runs"))?;
-            let program = program
-                .trim()
-                .rsplit('/')
-                .next()
-                .filter(|program| !program.is_empty())
-                .map(str::to_string)
-                .ok_or_else(|| eyre!("{name}'s unit names no program"))?;
+            let program = unit_program(&output).ok_or_else(|| eyre!("{name}'s unit names no program"))?;
             record.program = Some(program.clone());
             self.state.save(&record)?;
             return Ok(program);
@@ -1493,6 +1484,35 @@ impl Deployment {
     }
 }
 
+/// The script that prints the program a unit's `ExecStart` runs
+///
+/// # Arguments
+///
+/// * `unit` - The unit's name
+#[must_use]
+pub fn unit_program_script(unit: &str) -> String {
+    format!(
+        "systemctl cat {} | sed -n 's/^ExecStart=\\([^ ]*\\) .*/\\1/p'",
+        quote(unit)
+    )
+}
+
+/// The program's file name out of what [`unit_program_script`] printed
+///
+/// # Arguments
+///
+/// * `output` - What the script printed
+#[must_use]
+pub fn unit_program(output: &str) -> Option<String> {
+    output
+        .trim()
+        .lines()
+        .next()
+        .and_then(|line| line.rsplit('/').next())
+        .filter(|program| !program.is_empty())
+        .map(str::to_string)
+}
+
 /// What to do about a program built for another cpu, depending on how the inventory gets it
 ///
 /// # Arguments
@@ -1685,6 +1705,36 @@ pub fn seed_addresses(frame: &Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The name a pre-F63 cluster's units run is read off `ExecStart`, through the sed the
+    /// script really runs
+    #[test]
+    fn a_units_program_is_read_off_its_exec_start() {
+        use std::io::Write;
+        // the script, run against a unit as `systemctl cat` prints one, stands in for ssh
+        let unit = "# /etc/systemd/system/shoal-lab.service\n[Service]\nUser=shoal\nExecStart=/opt/shoal-deploy/lab/bin/shoal-node serve --conf /opt/shoal-deploy/lab/shoal.yml\nRestart=on-failure\n";
+        let script = super::unit_program_script("shoal-lab.service")
+            .replace("systemctl cat shoal-lab.service", "cat");
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("sh");
+        child
+            .stdin
+            .take()
+            .expect("a piped stdin")
+            .write_all(unit.as_bytes())
+            .expect("written");
+        let output = child.wait_with_output().expect("sh ran");
+        let printed = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert_eq!(printed.trim(), "/opt/shoal-deploy/lab/bin/shoal-node");
+        assert_eq!(super::unit_program(&printed).as_deref(), Some("shoal-node"));
+        // a unit that names nothing is nothing
+        assert_eq!(super::unit_program("\n"), None);
+    }
 
     /// A storage root that cannot itself be removed is emptied, and the command still succeeds (item 157)
     ///
