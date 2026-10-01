@@ -1,0 +1,30 @@
+[package]
+name = "bench-dataset"
+version = "0.1.0"
+edition = "2021"
+description = "A small schema and dataset that shoaladm bench is tested against: two tables that opt in to datasets and one that does not (F66)"
+publish = false
+
+# The schema. A benchmark of it is `shoaladm bench run --dataset dataset` in this directory; the
+# library holds no benchmark code, which is the point (F66)
+[lib]
+name = "bench_dataset"
+path = "src/lib.rs"
+
+# The node program an inventory's `server:` can name, the way tmdb-dataset has one
+[[bin]]
+name = "bench-dataset-node"
+path = "src/bin/node.rs"
+
+[dependencies]
+shoal = { version = "0.1.0", path = "../../shoal" }
+rkyv = { workspace = true }
+deepsize2 = { workspace = true }
+mimalloc = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# the driver the smoke test runs against a node started in process
+shoal-loadgen = { path = "../../shoal-loadgen" }
+tokio = { workspace = true }
+tempfile = "3"

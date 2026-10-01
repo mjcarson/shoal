@@ -619,6 +619,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bench-dataset"
+version = "0.1.0"
+dependencies = [
+ "deepsize2",
+ "mimalloc",
+ "rkyv 0.8.12",
+ "serde",
+ "shoal",
+ "shoal-loadgen",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "bencher"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5585,6 +5599,23 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.108",
+]
+
+[[package]]
+name = "shoal-loadgen"
+version = "0.1.0"
+dependencies = [
+ "csv",
+ "deepsize2",
+ "hdrhistogram",
+ "rkyv 0.8.12",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "shoal",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

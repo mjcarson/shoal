@@ -110,7 +110,7 @@ where
     serde::Deserialize,
 )]
 #[rkyv(derive(Debug))]
-#[shoal_table(db = "Tmdb")]
+#[shoal_table(db = "Tmdb", dataset)]
 pub struct Movie {
     /// The id for this movie, which it is partitioned by
     ///
