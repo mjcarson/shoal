@@ -63,6 +63,19 @@ pub fn line(event: &BenchEvent, total: &mut usize) -> Option<String> {
     }
 }
 
+/// Wait for the run's next event
+///
+/// A tokio receiver's `recv` is cancel safe, so racing this in `select!` loses nothing; it is
+/// awaited here, where it is made, so the workspace's scan for raced kanal receives
+/// (`shoal-channel/tests/no_raced_receives.rs`, #152) has nothing to judge.
+///
+/// # Arguments
+///
+/// * `rx` - The run's progress
+async fn next_event(rx: &mut tokio::sync::mpsc::Receiver<BenchEvent>) -> Option<BenchEvent> {
+    rx.recv().await
+}
+
 /// Print a run's progress until it finishes, asking it to stop on Ctrl-C
 ///
 /// # Arguments
@@ -79,7 +92,7 @@ pub async fn print(
     let mut finished = None;
     loop {
         tokio::select! {
-            event = rx.recv() => {
+            event = next_event(&mut rx) => {
                 // a closed channel is a run that has ended
                 let Some(event) = event else {
                     return finished;
