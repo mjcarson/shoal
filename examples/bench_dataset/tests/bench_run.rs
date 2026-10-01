@@ -104,3 +104,59 @@ async fn a_run_against_one_node_writes_a_capture_that_compares() {
     assert!(refused.contains("spec"), "{refused}");
     drop(pool);
 }
+
+/// A run told to stop mid arm stops there, says why, and still writes what it measured
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_aborted_run_stops_and_keeps_what_it_measured() {
+    use shoal_loadgen::dataset::Dataset;
+    use shoal_loadgen::progress::{Control, Progress};
+    use shoaladm::bench::orchestrate::{orchestrate, Context};
+    // a node serving the catalog, in this process
+    let storage = tempfile::TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let mut pool = ShoalPool::<Catalog>::start(conf(&storage)).expect("the node starts");
+    let addr = pool.ready(Duration::from_secs(30)).expect("the node is ready").to_string();
+    let out = tempfile::TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let dataset = format!("{}/dataset", env!("CARGO_MANIFEST_DIR"));
+    // one long arm, so the abort lands inside it
+    let cli = Cli::try_parse_from([
+        "shoaladm", "--project", env!("CARGO_MANIFEST_DIR"), "bench", "run", "--addr", &addr,
+        "--dataset", &dataset, "--mixes", "read100", "--bundles", "8", "--duration", "60",
+        "--warmup", "0", "--runs", "1", "--basic", "--allow-dirty",
+    ])
+    .unwrap();
+    let Command::Bench(shoaladm::bench::BenchCommand::Run(args)) = cli.command else {
+        panic!("not a run");
+    };
+    let spec = args.spec().unwrap();
+    let ctx = Context {
+        project: cli.project.clone(),
+        dataset: Dataset::open::<CatalogClient>(&spec.dataset).unwrap(),
+        spec,
+        args: *args,
+        dir: out.path().to_path_buf(),
+        label: "aborted".to_string(),
+        inventory: None,
+        project_facts: Default::default(),
+        shoal_facts: Default::default(),
+    };
+    let (control_tx, control_rx) = tokio::sync::watch::channel(Control::Run);
+    let started = std::time::Instant::now();
+    // the run on a thread and runtime of its own, as `shoaladm bench` runs it: it holds a
+    // deployment, which is not Send
+    let run = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        runtime.block_on(orchestrate::<CatalogClient>(ctx, Progress::none(), control_rx, None))
+    });
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    control_tx.send(Control::Abort).unwrap();
+    let result = tokio::task::spawn_blocking(move || run.join().unwrap()).await.unwrap();
+    // it stopped long before its minute, and says it was stopped
+    assert!(started.elapsed() < Duration::from_secs(40), "the abort was not heeded");
+    let capture = Capture::read(out.path()).expect("a capture");
+    let run = &capture.arms[0].runs[0];
+    assert_eq!(run.ended_early.as_ref().map(|ended| ended.reason.as_str()), Some("aborted"));
+    assert!(run.measured.read.ok > 0);
+    assert!(result.is_ok() || capture.error.is_some());
+    drop(pool);
+}
+

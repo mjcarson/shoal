@@ -61,6 +61,12 @@ const SERVER_EVERY: Duration = Duration::from_secs(2);
 /// How many preloaded rows a table is sampled for, to check an attached cluster holds them
 const PRELOADED_SAMPLE: u64 = 1000;
 
+/// The largest frame a node accepts by default (`networking.max_frame_bytes`)
+const MAX_FRAME_BYTES: u64 = 64 << 20;
+
+/// How much wider than a file's mean row a bundle is judged, for rows wider than the mean
+const FRAME_HEADROOM: u64 = 4;
+
 /// Everything a run was asked for, decided before it starts
 #[derive(Clone)]
 pub struct Context {
@@ -392,6 +398,22 @@ where
     for mix in &spec.mixes {
         Picker::new(mix, &scan_refs, &spec.tables, spec.distribution, spec.read_keys, spec.seed, "check")
             .map_err(|error| eyre!(error))?;
+    }
+    // a bundle has to fit the frame a node accepts, judged from the file's mean row with room to
+    // spare, since a row's archived form is not its text and some rows are wider than the mean
+    let largest = spec.bundles.iter().copied().max().unwrap_or(1) as u64;
+    for scan in &scans {
+        let bytes = scan.mean_row_bytes() * largest * FRAME_HEADROOM;
+        if bytes > MAX_FRAME_BYTES {
+            bail!(
+                "{}'s rows average {} bytes, so a bundle of {largest} would be near {} MiB, past the {} MiB \
+                 a node accepts in a frame; use smaller bundles",
+                scan.table,
+                scan.mean_row_bytes(),
+                bytes >> 20,
+                MAX_FRAME_BYTES >> 20
+            );
+        }
     }
     let arms = spec.arms();
     progress.send(BenchEvent::Planned {
