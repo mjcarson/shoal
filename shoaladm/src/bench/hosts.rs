@@ -184,9 +184,13 @@ pub fn dropin_path(unit: &str) -> String {
 /// * `unit` - The unit
 #[must_use]
 pub fn remove_dropin_script(unit: &str) -> String {
+    // the file, then its directory if nothing else is in it, so nothing of the bench is left
+    let path = dropin_path(unit);
+    let dir = path.rsplit_once('/').map(|(dir, _)| dir.to_string()).unwrap_or_default();
     format!(
-        "sudo -n rm -f {path}; sudo -n systemctl daemon-reload",
-        path = quote(&dropin_path(unit))
+        "sudo -n rm -f {path}; sudo -n rmdir {dir} 2>/dev/null; sudo -n systemctl daemon-reload",
+        path = quote(&path),
+        dir = quote(&dir)
     )
 }
 
@@ -495,8 +499,11 @@ mod tests {
             assert!(script.contains("shoal-tmdb.service"));
             assert!(!script.contains("disable") && !script.contains("rm "), "{script}");
         }
-        assert!(remove_dropin_script("shoal-tmdb-bench.service")
-            .contains("/run/systemd/system/shoal-tmdb-bench.service.d/shoal-bench.conf"));
+        let remove = remove_dropin_script("shoal-tmdb-bench.service");
+        assert!(remove.contains("rm -f /run/systemd/system/shoal-tmdb-bench.service.d/shoal-bench.conf"));
+        // the directory goes too, but only empty: rmdir never removes another drop-in
+        assert!(remove.contains("rmdir /run/systemd/system/shoal-tmdb-bench.service.d"));
+        assert!(!remove.contains("rm -rf"));
         assert!(governor_script("performance").contains("cpupower frequency-set -g performance"));
     }
 

@@ -174,8 +174,11 @@ pub fn show_lines(capture: &Capture) -> Vec<String> {
             }
             lines.push(line);
             if let Some(event) = &run.event {
-                for (name, window) in &event.windows {
-                    lines.push(format!("    {name}: {}", window.line()));
+                // in the order they happened, not the order their names sort
+                for name in ["before", "during", "after"] {
+                    if let Some(window) = event.windows.get(name) {
+                        lines.push(format!("    {name}: {}", window.line()));
+                    }
                 }
                 if let Some(ratio) = event.p99_ratio_permille {
                     lines.push(format!("    p99 during/before: {:.2}x", ratio as f64 / 1000.0));
