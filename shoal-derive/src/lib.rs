@@ -158,6 +158,14 @@ pub fn derive_shoal_sorted_table(stream: TokenStream) -> TokenStream {
     );
     traits::table_row_format::add(&mut output, name, &all_fields);
     traits::rearchive::add(&mut output, name, &mirror_fields);
+    // let the table be loaded from a dataset by name, or refuse by name if it did not opt in
+    traits::dataset::add(
+        &mut output,
+        name,
+        &partition_fields,
+        &sort_fields,
+        attrs.dataset,
+    );
     //traits::from_query::add_sorted(&mut output, name, &query_name);
     // generate the Filter and Update structs
     structs::filter::add(&mut output, name, &filter_fields);
@@ -258,6 +266,8 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
     );
     traits::table_row_format::add(&mut output, name, &all_fields);
     traits::rearchive::add(&mut output, name, &mirror_fields);
+    // let the table be loaded from a dataset by name, or refuse by name if it did not opt in
+    traits::dataset::add(&mut output, name, &partition_fields, &[], attrs.dataset);
     // generate the Filter and Update structs
     structs::filter::add(&mut output, name, &filter_fields);
     structs::get::add_unsorted(&mut output, name, &partition_fields);

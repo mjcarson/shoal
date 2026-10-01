@@ -2,6 +2,7 @@
 
 use super::utils;
 
+pub mod dataset;
 pub mod db;
 pub mod display;
 pub mod fingerprint;
