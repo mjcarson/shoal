@@ -61,7 +61,7 @@ polled once so that it waits, a value is sent, and the receive is dropped: exact
 The test passes, and is kept as the pin on kanal's behaviour.
 
 The test that found it passed 36 of 36 runs alone on the unfixed tree
-(`fe7d106`, six copies at once, `target/lab/r12/152/`). That is consistent with the rate the item
+(`308313c`, six copies at once, `target/lab/r12/152/`). That is consistent with the rate the item
 recorded and says nothing more: the window is two polls wide.
 
 ## The fix

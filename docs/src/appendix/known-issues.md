@@ -372,7 +372,7 @@ does on purpose within a page. So this stays open until it recurs on a tree with
 never does.
 
 **Looped under ASan in round 12, 169 runs, no abort.** The binary built with
-`-Zsanitizer=address -Zsanitizer-recover=address` on `f9254f5` (the tree with
+`-Zsanitizer=address -Zsanitizer-recover=address` on `030b57a` (the tree with
 [Resolved #152](resolved/kanal-receive-races.md)) ran all fifteen tests 169 times at six threads
 on europa, beside lab loads (`target/lab/r12/132/loop.sh`). Every run reported exactly one error,
 at one address: gxhash's `get_partial_unsafe` reading past a short key. Nothing else, and no
@@ -389,7 +389,7 @@ verbs. `migration_resumes_after_each_phase_failure` fails less often.
 **Established by running it**, on the development host with nothing else running, at the commit
 that fixed items 139 to 141 and applied O62:
 
-| Test | Current tree | `b681dcc` (before 139–141, O62) |
+| Test | Current tree | `5c49888` (before 139–141, O62) |
 | --- | --- | --- |
 | `lost_response_retry_returns_original_result` | 4 of 17 runs failed | 0 of 6 |
 | `migration_resumes_after_each_phase_failure` | 2 of 8 runs failed | 0 of 3 |
@@ -463,7 +463,7 @@ was run eight times on its own on the fixed tree: 2 of 8 failed. One failure was
 `"no member of the target is up to take the lead"`, and one was openraft's own debug assertion in
 the test process's node, `Some(log_id) <= committed` at `log_state_reader.rs:25`: a member was
 handed a log id at an index it had already committed, under a different leader. Because #170
-changed how a leader reads its log, the same loop was run on `48dfad8`, the tree before it. The
+changed how a leader reads its log, the same loop was run on `0296da8`, the tree before it. The
 assertion fired there on the first run, and 2 of the 3 runs taken failed. So it predates #170,
 and it is the first time this item has a message from inside openraft rather than a deadline.
 The assertion is the one [Resolved #109](resolved/volatile-majority-loss.md) met for a volatile
@@ -506,7 +506,7 @@ handed when its wait for the next job lost a race against a retry's timer. A los
 WAL segment, and a held segment holds every group's checkpoint on its shard, which is the shape of
 the lost-response test's *"checkpoint never reached 5"*. Whether it was the cause is not
 established; round 12's suite runs record the rate on the fixed tree.
-The first full run of round 12 (`28f0385`, 1,715 tests at six threads) failed only
+The first full run of round 12 (`05e9e15`, 1,715 tests at six threads) failed only
 `a_restore_rides_out_an_unreachable_member`, its second failure on record, and in the same shape
 as the first: one group left at `Pending` with no driver and no attempts, never driven again
 within 300 s, while the other two were `Done`. It passed alone straight after, and ten runs of it

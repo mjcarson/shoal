@@ -37,7 +37,7 @@ got the group out of it until the load fell.
 
 ## Evidence
 
-**Established by running it**, in the fixture on the development host, at `b7f4d1c`. The same loop
+**Established by running it**, in the fixture on the development host, at `f03f938`. The same loop
 of six heavy tests at six threads, before and after:
 
 | Build | Rounds | Tests failed |

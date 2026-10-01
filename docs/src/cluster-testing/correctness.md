@@ -948,7 +948,7 @@ verb.
 3. Hyperion is started again.
 
 Afterwards every acknowledged insert, and the csv, is read back through each member alone at `One`.
-The build is `c3b8874`, which is also the build of section 10's last rebuild. The runs are under
+The build is `3e1133b`, which is also the build of section 10's last rebuild. The runs are under
 `target/lab/r176/`.
 
 | | Idle, third newest segment | Bench, third newest | Bench, newest sealed |
@@ -990,7 +990,7 @@ hyperion 25 s in. The runs are under `target/lab/o74/`.
 
 | Run | Build | Plan | Whole rebuild | Acknowledged inserts, each member alone | csv, each member alone |
 | --- | --- | --- | --- | --- | --- |
-| base | `fc91fb7`, the compactor's phases logged | 18 moved | 430 s | not read back | not read back |
+| base | `3e1133b`, the compactor's phases logged | 18 moved | 430 s | not read back | not read back |
 | c1 | + 32 reads in flight for a merge and a pass | 18 moved | 315 s | 3,926,919, 0 lost | 0 missing, 0 different |
 | c2 | + passes paced a minute apart, 8 reads in flight, frames read as one span | 18 moved | 534 s | not read back | not read back |
 | c3 | + a pass stops inside an archive at 16 MiB, 16 reads in flight | 18 moved | **272 s** | 3,950,753, 0 lost | 0 missing, 0 different |
@@ -1009,8 +1009,8 @@ Three defects were left open by the sections above: overload answered `OutcomeUn
 still stopped every pipelined client
 ([#143](../appendix/resolved/silent-partition-hops.md#the-first-seconds-closed)), and a node whose
 disk was nearly full could only stop ([#156](../appendix/resolved/wal-failure-stops-the-node.md#the-second-part-an-append-reserve)).
-All three were fixed and each fix measured here, on builds `5efa0b9` through `d276baa`, with
-`35d47a6` as the base. The runs are under `target/lab/r11/`.
+All three were fixed and each fix measured here, on the builds squashed into `1539cc1`, with
+`ebf237e` as the base. The runs are under `target/lab/r11/`.
 
 **Performance first.** Every change was measured against the base, and one version of each fix was
 thrown out for costing throughput:
@@ -1029,9 +1029,9 @@ arm finishes if it can, each on a destroyed and freshly bootstrapped cluster
 
 | Build | Loads | Finished | Rows a second | Retried unknown | Retried shed |
 | --- | --- | --- | --- | --- | --- |
-| `35d47a6`, the base | 3 | 1; 2 died on `IdentityExpired` | 29,476 | 207,029 | 0 |
+| `ebf237e`, the base | 3 | 1; 2 died on `IdentityExpired` | 29,476 | 207,029 | 0 |
 | the gate switched off | 3 | 2; 1 died on `IdentityExpired` | 10,156, 6,659 | 1.3M, 2.0M | 0 |
-| the gate as shipped (`d276baa`) | 2 | 2 | 28,916, 32,593 | 4,031, 2,543 | 872k, 589k |
+| the gate as shipped (`1539cc1`) | 2 | 2 | 28,916, 32,593 | 4,031, 2,543 | 872k, 589k |
 
 A shed write was never applied, so a client can retry it at once with no identity to keep. The
 unknown outcomes that remain are writes admitted before a group's bound came down.
@@ -1043,8 +1043,8 @@ waited in the server's queues longer than that was refused as though it were a r
 the group had forgotten. None of the gated loads met it.
 
 **At a normal load nothing moved.** The loader at its default gate on a fresh cluster: 28,730 and
-29,226 rows/s on the base, 29,010 on `5efa0b9` and 30,350 on `d276baa`, with no retry. On
-`c9d6a61`, whose gate started at 64, the first load shed one hot keyword group until a row ran out
+29,226 rows/s on the base, 29,010 on the first cut of `1539cc1` and 30,350 on its final build,
+with no retry. On the second cut, whose gate started at 64, the first load shed one hot keyword group until a row ran out
 of its eight retries, and the load after it ran at 31,432 with 6,399 writes shed. That is the cut
 this section threw out. Every run was read back
 whole with `verify` (0 missing, 0 different). Every acknowledged insert of the bench that followed
@@ -1056,7 +1056,7 @@ was read back through each member alone: 0 lost in every run. The bench's own co
 The partition test of [section 4](#partition-one-node) again: hyperion's peer ports dropped both
 ways for 20 s under the mixed bench.
 
-| Second | t05f, before | After (`c9d6a61`) |
+| Second | t05f, before | After (`1539cc1`) |
 | --- | --- | --- |
 | cut −1 | 44,300 | 72,067 |
 | cut | 10,784 | 25,961 |
@@ -1074,7 +1074,7 @@ All 620,159 acknowledged inserts were read back through each member, and no node
 [Fill a node's disk](#fill-a-nodes-disk) again: hyperion on a 2 GiB loop filesystem, the whole csv
 loaded (`target/lab/r11/diskfill.sh`).
 
-| | The base, section 4 | Fixed (`d276baa`) |
+| | The base, section 4 | Fixed (`1539cc1`) |
 | --- | --- | --- |
 | At about 1.35 GB used | the disk filled 70 s in and hyperion stopped, then failed every start until the disk grew | all six shards went under the 512 MiB reserve together and handed on 12 leads in 0.6 s |
 | For the rest of the load | down, restarting | up, no restart, 478 MB free for ten minutes |
@@ -1092,7 +1092,7 @@ recovers on its own.
 
 ### The suite
 
-All 133 cluster fixture tests passed at six threads on `c9d6a61`, two ignored as before, and the 331
+All 133 cluster fixture tests passed at six threads on `1539cc1`, two ignored as before, and the 331
 `shoal-core` unit tests. The three fixes' own tests are
 `an_overloaded_group_sheds_rather_than_timing_out`, `a_silent_partitions_first_seconds_hold_no_writes`
 and `a_node_under_the_append_reserve_leads_nothing_and_serves`. Each fails without its fix: 5,300
@@ -1104,7 +1104,7 @@ writes unknown with the gate out of reach, a write through the cut-off node answ
 [What is left](todo.md) listed faults no section had tried: a network that is slow or lossy rather
 than cut, partitions in one direction or of the control port alone, losing a quorum, a slow disk,
 clock skew, a real power cut, and a partition long enough to outlast the kernel's patience. All of
-them ran on the build at `e34fd0f`, and the long partition again on `80b44ec`. The scripts are
+them ran on the build at `85cddc8`, and the long partition again on `ee61695`. The scripts are
 under `target/lab/r11/`, the runs under `target/lab/r11/sc/`.
 
 **How.** `fault.sh` as in [section 4](#4-faults-under-load): the mixed bench for 60 s (get 55,
@@ -1168,7 +1168,7 @@ It was TCP. A connection whose packets are dropped stays open, its retransmissio
 each try, and after a heal nothing moves until the timer next fires: tens of seconds after a
 minute of backoff. Fixed as [#181](../appendix/resolved/partition-retransmit-backoff.md): every
 peer connection sets `TCP_USER_TIMEOUT` (`transport.unacked_timeout`, 5 s), so the kernel aborts
-it and the link dials again. On `80b44ec`, the same 60 s partition:
+it and the link dials again. On `ee61695`, the same 60 s partition:
 
 | Seconds after the heal | Before #181 | After |
 | --- | --- | --- |
@@ -1202,7 +1202,7 @@ itself remains to be done by hand.
 
 Round 11 left five items on [what is left](todo.md): #180, the first second and a half of a
 silent partition (#143), #132 and #152, which had not recurred, O64's two modes, and weighted
-leadership. This round works through them on builds from `fe7d106` on. The runs are under
+leadership. This round works through them on builds from `308313c` on. The runs are under
 `target/lab/r12/`.
 
 ### A compactor job lost to a timer
@@ -1274,7 +1274,7 @@ for a cut.
 
 Round 12 left [what is left](todo.md) with #142's deadlines and its restore stall, O64's spread,
 two limitations that were never filed (a slow disk's cost and a get through an unplaced member),
-and four scenarios nobody had run. This round works through them on builds from `1578fe7` on,
+and four scenarios nobody had run. This round works through them on builds from `6cdec88` on,
 which added each member's WAL sync time, appends per sync and sync sizes to `cluster stats`
 ([overview](overview.md#reading-a-nodes-figures)). The runs are under `target/lab/r13/`.
 
@@ -1335,7 +1335,7 @@ lag`.
 ### Longer partitions, and a flapping one
 
 [What is left](todo.md) listed partitions longer than a minute and links that flap, since #181 had
-been found at 60 s. All three ran on `4955733`, with the lab's inventory: `target/lab/r11/fault2.sh`
+been found at 60 s. All three ran on `9f06f2e`, with the lab's inventory: `target/lab/r11/fault2.sh`
 for the two long cuts and `target/lab/r13/part/flap.sh` for the flapping one. Each cut hyperion's
 peer ports both ways (`partition.sh`) under the mixed bench, and every acknowledged insert was read
 back through each member alone afterwards.
@@ -1450,7 +1450,7 @@ runs of ten alone.
 
 ### The final build
 
-`cluster destroy`, `bootstrap` and `target/lab/r11/abload.sh` on the round's last build (`cf266ec`),
+`cluster destroy`, `bootstrap` and `target/lab/r11/abload.sh` on the round's last build (`efe4d1f`),
 with the lab's inventory:
 
 | | |
@@ -1461,7 +1461,7 @@ with the lab's inventory:
 | Acknowledged inserts, each member alone | 687,372, 0 lost |
 
 **Verdict: pass.** The same shape as round 12's runs: 103,900 to 122,600 operations a second.
-The build with #187 (`c7c4474`) was then rolled onto the same cluster with `cluster upgrade`, one
+The build with #187 (`0fef803`) was then rolled onto the same cluster with `cluster upgrade`, one
 node at a time, and hyperion alone read back the whole csv (0 missing, 0 different) and all
 687,372 acknowledged inserts.
 
@@ -1487,7 +1487,7 @@ growing until the next restart.
 
 Round 13 left [what is left](todo.md) with the byte half of a step that outlasts the log, a cut
 written whole before it is sent, O64's spread, #142's deadlines and a handful of rows to confirm.
-This round works through them on builds from `0d24968` on. Its runs are under `target/lab/r14/`.
+This round works through them on builds from `0fef803` on. Its runs are under `target/lab/r14/`.
 Two things were added to the inventory's `replication:` block to stage them:
 `stream_bytes_per_sec`, which throttles every node's snapshot streams, and `hold_bytes` (below).
 
@@ -1569,7 +1569,7 @@ has not recurred, and for what the full suite run finds next.
 
 ### Round 14's final build
 
-On the round's last build (`96ebbe5`), with the lab's inventory (`target/lab/r14/confirm.sh`):
+On the round's last build (`2b34549`), with the lab's inventory (`target/lab/r14/confirm.sh`):
 
 | | |
 | --- | --- |
@@ -1757,7 +1757,7 @@ loop now keeps every failing round's child logs (`loop-keep.sh`), so the next on
 
 ### Round 15's final build
 
-On the round's last code (`d320328`), with the lab's inventory (`target/lab/r15/confirm.sh`),
+On the round's last code (`71af7d8`), with the lab's inventory (`target/lab/r15/confirm.sh`),
 beside [round 14's](#round-14s-final-build):
 
 | | Round 15 | Round 14 |
@@ -1879,7 +1879,7 @@ read and titan's last dump taken inside that bench, symbolized against the binar
 (`heap.py`, depth 3). The first run charged each sorted entry a fixed share of a node; the
 profile showed why that is not enough, and the second charges the nodes themselves.
 
-| | Round 15 (one copy, `d320328`) | A share of a node per entry | A node per eight entries (final) |
+| | Round 15 (one copy, `71af7d8`) | A share of a node per entry | A node per eight entries (final) |
 | --- | --- | --- | --- |
 | Rows the profile holds, titan | 3.0 GiB of a 3.4 GiB "rows" figure that counted the table map and the LRU too | 1,497 MiB: Movie 581 deserialized + 571 partition boxes; keyword 252 of B-tree nodes + 82 of row heap + 10 | 1,549 MiB: Movie 607 + 589; keyword 257 of nodes + 87 of row heap + 10 |
 | `rows` counted by `Stats` | 2.3 GiB (77% of the rows) | 1,229 MiB (82%) | 1,319 MiB (85%) |
@@ -1902,7 +1902,7 @@ node - rows, the two maps, the WAL index and the eviction list - where round 15'
 
 ### Round 16's final build
 
-On the round's last lab build (`3d6312e`, with #193, #196 and F62; #197 followed it and changed
+On the round's last lab build (`67ac964`, with #193, #196 and F62; #197 followed it and changed
 the move driver alone, which a load, a kill and a partition never exercise), with the lab's
 inventory (`target/lab/r16/confirm/run.sh`), beside [round 15's](#round-15s-final-build):
 
@@ -1917,7 +1917,7 @@ inventory (`target/lab/r16/confirm/run.sh`), beside [round 15's](#round-15s-fina
 failover window is [F62](../features/failover-window.md)'s, and a partition's worst second is
 where [#143](../appendix/resolved/silent-partition-hops.md#still-open)'s remainder left it
 (40%, 53% and 47% over three rounds: the kernel's two retransmission timeouts). The round's last
-code (`296fffa`, #197 in it) was then rolled onto the same cluster with `cluster upgrade`, one
+code (`a33b07c`, #197 in it) was then rolled onto the same cluster with `cluster upgrade`, one
 node at a time: 3 of 3 upgraded, 3 of 3 copies, writes admitted. A rolling upgrade moves no set,
 so that is a smoke of the binary and not of #197, whose test is the fixture's; the lab is left on
 it.

@@ -125,7 +125,7 @@ inventory and render tests were extended for `fragment_min_bytes`, `fragment_max
 `moves_per_node` and `migration_timeout`. The workspace run at six threads on the round's build
 before O83 passed **1,740 of 1,740, eight ignored**: the first full run in which
 [#142](known-issues.md#142-two-fixture-tests-fail-intermittently-on-an-idle-host) found nothing.
-The run on the round's final code (`d320328`) passed **1,742 of 1,742, eight ignored**; one more,
+The run on the round's final code (`71af7d8`) passed **1,742 of 1,742, eight ignored**; one more,
 `the_entry_index_is_counted_as_it_grows` (#196's reported part), came after it and passed with
 the `shoal-core` library's 365, which makes 1,743.
 
@@ -153,7 +153,7 @@ The final run (six threads) passed **1,727 of 1,728, eight ignored**; the failur
 ([#186](resolved/marker-lost-update.md)). In `shoalctl` (3): `ship-backup`'s plan, directory split
 and scripts ([F59](../features/backup-shipping.md)). The inventory's `replication:` block extended
 existing tests, `deploy_render` among them, and `installing_tablet_never_serves_partial_state` now
-expects the read answered by another holder. The final run (`c7c4474`, six threads) passed
+expects the read answered by another holder. The final run (`0fef803`, six threads) passed
 **1,726 of 1,726, eight ignored**.
 
 **Round 12 of the [distributed cluster testing](../cluster-testing/overview.md) chapter added 14**,

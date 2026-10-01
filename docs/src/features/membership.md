@@ -402,7 +402,7 @@ outstanding, medians of two runs, p50 / p90 / p99:
 
 The two-node arms came out thirty microseconds above the medians
 [F38's page](inter-node-transport.md#performance) records at the same shard, and that was not
-written down as membership's cost before it was checked: F38's commit (`2f6c437`) was built in
+written down as membership's cost before it was checked: F38's commit (`0cdad73`) was built in
 a worktree and run the same way on the same host an hour later, and its medians were F39's to
 within a few microseconds (third column). The shift is the host's state under `powersave`
 between two runs hours apart, not the code. What held is what a hop costs: the peer hop is

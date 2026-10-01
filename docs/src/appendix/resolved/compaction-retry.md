@@ -46,7 +46,7 @@ its twenty-second timeout - the `.unwrap()` is glommio's and is filed below.
 **The fix reproduced on purpose.** `a_compaction_that_meets_an_unreadable_archive_is_tried_again`,
 in both table test files, archives a partition, makes the archives unreadable, writes to that
 partition again and rotates the log behind it, waits a second, puts the archives back, and
-waits for the rotated logs to be compacted. Against the tree at `939873f` the test never
+waits for the rotated logs to be compacted. Against the tree at `2f65f77` the test never
 finishes: the compactor dies on the rotation's job, the next rotation's send closes the shard,
 and the writes after it never return - killed at a hundred and fifty seconds. With the fix
 the logs are gone within a few hundred milliseconds of the restore, both rows of the sorted

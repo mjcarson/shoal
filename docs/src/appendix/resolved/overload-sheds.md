@@ -37,7 +37,7 @@ rate. Then 4,000 writes are sent to it through its leader and 4,000 through a fo
 through the leader: {"OutcomeUnknown": 3400, "ok": 600}; through a follower: {"OutcomeUnknown": 4000}
 ```
 
-**And on the lab**, on a freshly bootstrapped cluster running `35d47a6`, with the loader at 8 × 4,096
+**And on the lab**, on a freshly bootstrapped cluster running `ebf237e`, with the loader at 8 × 4,096
 (`target/lab/r11/abload.sh`, arm `base`): two loads in a row stopped at 50 and 51 s on
 `OutcomeUnknown` "did not commit the write within the deadline".
 
@@ -70,7 +70,7 @@ switched off in two runs of the fixed build by setting its bounds out of reach:
 
 | Build | Runs | Outcome of each | Rows a second | Retried: unknown | Retried: shed |
 | --- | --- | --- | --- | --- | --- |
-| `35d47a6`, before | 3 | 1 finished, 2 stopped on `IdentityExpired` | 29,476 (the one that finished) | 207,029 | 0 |
+| `ebf237e`, before | 3 | 1 finished, 2 stopped on `IdentityExpired` | 29,476 (the one that finished) | 207,029 | 0 |
 | fixed, gate off | 3 | 2 finished, 1 stopped on `IdentityExpired` | 10,156 and 6,659 | 1.3M and 2.0M | 0 |
 | fixed, #143's first cut | 5 | all finished | 23,420, 24,667, 24,616, 19,384, 12,027 | 512, 268, 0, 384, 221,343 | 1.1M–1.96M |
 | fixed | 1 | finished | 24,050 | 0 | 1.56M |
@@ -92,7 +92,7 @@ refused as though it were a late retry.
 **Nothing is lost at a normal load.** On the same lab, with the loader at its default gate and the
 120 s mixed bench, both read back through each member (`target/lab/r11/abload.sh`):
 
-| | Before (`35d47a6`) | Fixed |
+| | Before (`ebf237e`) | Fixed |
 | --- | --- | --- |
 | Load at the default gate | 28,730 and 29,226 rows/s | 29,010 rows/s |
 | Mixed bench | 109,061 and 105,042 ops/s | 105,099 ops/s |

@@ -43,7 +43,7 @@ committed again, and the observation goes through.
 **Reproduced deterministically.** `a_clone_that_stands_before_it_observes_is_fenced` in
 `shoal/tests/cluster_fixture.rs` starts the clone with its first observation held back two
 seconds - several election timeouts - through `control::plane::hold_observe`, which the
-fixture carries as `ChildOverrides::observe_hold_ms`. Against the tree at `16f9a53` with the
+fixture carries as `ChildOverrides::observe_hold_ms`. Against the tree at `8de7f6a` with the
 gate in `maybe_observe` already removed, so that the observation was at least attempted:
 
 ```text

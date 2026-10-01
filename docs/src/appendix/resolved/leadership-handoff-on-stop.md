@@ -20,7 +20,7 @@ the transfer that avoids it (`trigger().transfer_leader`), and repair already us
 ## Evidence
 
 **Reproduced against the unfixed tree** with `a_stopped_leader_hands_its_groups_off`, in a worktree
-of `b681dcc` with only the test and the fixture's new `EXIT` verb copied in. Three nodes at the
+of `5c49888` with only the test and the fixture's new `EXIT` verb copied in. Three nodes at the
 default failover base, node one leading the key's group, a writer through node zero across a
 graceful stop of node one:
 

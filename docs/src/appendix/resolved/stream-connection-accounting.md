@@ -38,7 +38,7 @@ Three defects, each of which on its own is survivable:
 ## Evidence
 
 **Reproduced against the unfixed tree.** The two unit tests below were run in a worktree of
-`8afdeac`, written in the old `Waiter { conn: Some(..) }` shape. The old waiter can only name the
+`41b6477`, written in the old `Waiter { conn: Some(..) }` shape. The old waiter can only name the
 connection a stream's last bundle went to, so the multi-connection stream is expressed as
 `conn: Some(2)`, which is exactly what the old code recorded:
 

@@ -63,7 +63,7 @@ On the fix, the same twenty minute arm (`target/lab/r15/mem.sh`) on the same clu
 
 | Build | Rows a node, 20 min in | Counted by nothing |
 | --- | --- | --- |
-| `bbeb814`, before | 11–24 MiB | 5.6–5.9 GiB |
+| `238dde9`, before | 11–24 MiB | 5.6–5.9 GiB |
 | a map saved without a clone, a sparse table map shrunk | 18–590 MiB | 4.8–6.0 GiB |
 | this fix and O81's arena | 1.2 GiB on titan and hyperion | 2.6–3.6 GiB |
 

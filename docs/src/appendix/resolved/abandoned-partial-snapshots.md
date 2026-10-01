@@ -32,7 +32,7 @@ begin until the plan gave up on it.
 
 ## Evidence
 
-**Established by the lab's journals and by reading the begin**, at `b426395`
+**Established by the lab's journals and by reading the begin**, at `f7ef5e4`
 (`target/lab/r15/rb4/`): 820 refusals naming 1,173,622,511 bytes held, the same figure every time,
 while the plan's moves failed and nothing was being assembled for the group that held them. The
 begin sums `manifest.total` over every other group's partial with no test of whether its stream

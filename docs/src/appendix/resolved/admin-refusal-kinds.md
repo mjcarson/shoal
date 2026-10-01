@@ -27,7 +27,7 @@ sites; the knowledge was thrown away at the boundary where it became a string.
 ## Evidence
 
 **Reproduced.** The assertion added to `admin_mutations_require_principal_and_operation_identity`
-in `shoal/tests/cluster_fixture.rs`, run against the tree at `af249c6` with the code spelled as
+in `shoal/tests/cluster_fixture.rs`, run against the tree at `8de7f6a` with the code spelled as
 its number so it compiled there:
 
 ```text

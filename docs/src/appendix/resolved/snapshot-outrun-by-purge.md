@@ -47,7 +47,7 @@ terabyte case, where a step's snapshot is tens of gigabytes.
 
 ## Evidence
 
-**Established by running it**, on the lab at `12c7eb1`, twice. The first run had `retained_bytes`
+**Established by running it**, on the lab at `84f41f3`, twice. The first run had `retained_bytes`
 shrunk to 24 MiB as well (`target/lab/r13/tb/shrunk1`), and its numbers are the ones above. The
 second held `retained_bytes` at its default, to isolate the entry retention the fix addresses
 (`target/lab/r13/tb/ab.sh`). On the tree without the fix, one group installed 46 snapshots, its

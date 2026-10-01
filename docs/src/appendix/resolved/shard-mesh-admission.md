@@ -26,7 +26,7 @@ the coordinator routing a client's bundle.
 
 **Reproduced.** `a_query_for_a_shard_that_fell_behind_is_shed` in `shoal/tests/backpressure.rs`:
 two shards, a bound of eight, shard one held for two seconds through a test hook, two hundred
-gets over distinct keys through a pool of twenty connections. Against the tree at `73ab29f`
+gets over distinct keys through a pool of twenty connections. Against the tree at `db185a9`
 with the bound neutralised:
 
 ```text

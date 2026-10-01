@@ -2788,7 +2788,7 @@ change. `ArchiveMap` keeps a `TabletUsage` of both figures. It is counted as the
 open, and moved by `set_partition` (the old entry off, the new one on) and `remove_partition`,
 which are the only two ways `to_archive` changes. `tablet_usage` copies it, and
 `tablet_usage_by_pass` keeps the old pass for the drift test. **Measured:** on titan under the
-lab's mixed bench, `ArchiveMap::tablet_usage` was 1.36% of the node's samples on `35d47a6` and
+lab's mixed bench, `ArchiveMap::tablet_usage` was 1.36% of the node's samples on `ebf237e` and
 absent on the fixed build ([performance](../cluster-testing/performance.md#the-admission-gate-and-the-bench)).
 `tablet_bytes_follow_the_map` now also churns 2,000 inserts, replacements and removals and
 checks the counters against a pass.
@@ -3462,7 +3462,7 @@ the cluster rebuild 8 left:
 **Measured: where a merge's time goes.** A job that holds the compactor over 5 s now logs its
 phases: the frames it read, the partitions it read from the archives, the apply, the writes, the
 syncs and a map fold (`JobPhases`). On a fresh cluster under the bench with hyperion rebuilt
-(run *base*, build `fc91fb7`), the average long segment merge:
+(run *base*, build `3e1133b`), the average long segment merge:
 
 | Phase | titan (762 long merges) | hyperion (424) |
 | --- | --- | --- |
@@ -3517,10 +3517,10 @@ The steady state, on one cluster, arms alternated so each build follows the othe
 
 | A/B, 300 s arms | Build | ops/s, each arm | Update p99 | Titan's archives, each arm | Titan's WAL, each arm |
 | --- | --- | --- | --- | --- | --- |
-| first | phases logged (`fc91fb7`) | 34,368 / 35,045 | 111 / 112 ms | passes copied 42 MiB in an arm | – |
-| | c1: 32 in flight, passes unpaced (`e7302c5`) | 31,518 / 30,878 | 149 / 160 ms | passes copied 2,139 MiB in an arm | – |
-| last | phases logged (`fc91fb7`) | 35,824 / 32,852 | 109 / 125 ms | **+2,523 / +2,576 MB** | **+805 / +514 MB** |
-| | c3, kept (`c3b8874`) | 32,762 / 31,354 | 133 / 143 ms | −948 / −736 MB | +62 / +53 MB |
+| first | phases logged (`3e1133b`) | 34,368 / 35,045 | 111 / 112 ms | passes copied 42 MiB in an arm | – |
+| | c1: 32 in flight, passes unpaced (`3e1133b`) | 31,518 / 30,878 | 149 / 160 ms | passes copied 2,139 MiB in an arm | – |
+| last | phases logged (`3e1133b`) | 35,824 / 32,852 | 109 / 125 ms | **+2,523 / +2,576 MB** | **+805 / +514 MB** |
+| | c3, kept (`3e1133b`) | 32,762 / 31,354 | 133 / 143 ms | −948 / −736 MB | +62 / +53 MB |
 
 **What it costs.** The kept build serves about 6% fewer operations a second than the timing-only
 one in a 300 s window, with update p99 about 20 ms higher. The timing-only build is faster because it

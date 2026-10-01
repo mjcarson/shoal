@@ -22,7 +22,7 @@ was filed rather than fixed then.
 
 **Reproduced.** `a_table_under_its_own_root_is_marked_and_guarded` in
 `shoal/tests/storage_meta.rs` starts a server with `TestRecord` under a root of its own,
-writes a row and stops it. Against the tree at `b411018`:
+writes a row and stops it. Against the tree at `bc913e6`:
 
 ```text
 thread 'a_table_under_its_own_root_is_marked_and_guarded' panicked at shoal/tests/storage_meta.rs:232:56:

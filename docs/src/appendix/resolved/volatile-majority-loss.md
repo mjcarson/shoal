@@ -30,7 +30,7 @@ the report said `up`.
 twenty rows written to the ephemeral table through node zero and agreed by digest, nodes one
 and two killed at once and restarted at once, and the survivor's view of every volatile group
 polled for a leader at a term above the one before - or for the survivor still leading - with
-its copies alive throughout. Against the tree at `3735cab` with the two changes neutralised,
+its copies alive throughout. Against the tree at `db185a9` with the two changes neutralised,
 twice, the test failed at its twenty-second deadline:
 
 ```text

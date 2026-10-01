@@ -54,7 +54,7 @@ survivor from a laggard.
 ## Evidence
 
 **Established from the logs, then reproduced.** The logs above came from the tenth run of a loop
-of the migration test (two failures in twelve runs) on the tree at `c901895`.
+of the migration test (two failures in twelve runs) on the tree at `5fa2b9a`.
 `a_restarted_volatile_leader_elects_nobody_missing_its_commits` in `shoal/tests/cluster_fixture.rs`
 builds the same situation on purpose. It uses three nodes at a factor of three, reads at `Quorum`,
 and runs these steps:
@@ -75,7 +75,7 @@ thread 'unnamed-2' (1381000) panicked at …/openraft-0.10.0-alpha.34/src/raft_s
 
 A first cut of the test isolated C on every lane instead, and passed on the unfixed tree. An
 isolated node does not stand for a while after it heals
-([the reserve change in `c901895`](wal-failure-stops-the-node.md)). Its reads were also served at
+([the reserve change in `5fa2b9a`](wal-failure-stops-the-node.md)). Its reads were also served at
 `One` from K's own copy, which held the rows whoever led.
 
 With the fix the test passed three runs of three, in 7 s each. `migration_resumes_after_each_phase_failure`,

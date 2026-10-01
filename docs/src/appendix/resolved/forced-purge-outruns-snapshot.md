@@ -42,7 +42,7 @@ took about 50 s, longer than the retention's span.
 
 ## Evidence
 
-**Established by running it**, on the lab at `0d24968` (`target/lab/r14/tb/ab.sh`), against the
+**Established by running it**, on the lab at `0fef803` (`target/lab/r14/tb/ab.sh`), against the
 fix on the same inventory (`slow-unfixed.yaml` and `slow-fixed.yaml`, which differ only in the node
 program). A first run at 40 MiB with unthrottled streams (`bytes-unfixed`) did not reproduce it:
 every group installed once, and the rebuild took 200 s.

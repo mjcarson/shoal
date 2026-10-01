@@ -214,7 +214,7 @@ the 5 s bar. A merge now reads 32 partitions at a time, as a snapshot cut has si
 
 That changed what the compactor spent its time on, and three rebuilds and three A/B runs followed
 it. The details are on [O74](../appendix/optimizations.md#o74-a-zen1-nodes-compactor-falls-hundreds-of-jobs-behind-under-the-bench).
-The rebuilds, each on a fresh cluster loaded from the csv (build c3 is `c3b8874`):
+The rebuilds, each on a fresh cluster loaded from the csv (build c3 is `3e1133b`):
 
 | | base | c3 |
 | --- | --- | --- |
@@ -237,10 +237,10 @@ cluster, each build following the other:
 
 | A/B, 300 s arms | Build | ops/s, each arm | Update p99 | Titan's archives, each arm | Titan's WAL, each arm |
 | --- | --- | --- | --- | --- | --- |
-| first | phases logged (`fc91fb7`) | 34,368 / 35,045 | 111 / 112 ms | passes copied 42 MiB in an arm | – |
-| | c1: 32 in flight, passes unpaced (`e7302c5`) | 31,518 / 30,878 | 149 / 160 ms | passes copied 2,139 MiB in an arm | – |
-| last | phases logged (`fc91fb7`) | 35,824 / 32,852 | 109 / 125 ms | **+2,523 / +2,576 MB** | **+805 / +514 MB** |
-| | c3, kept (`c3b8874`) | 32,762 / 31,354 | 133 / 143 ms | −948 / −736 MB | +62 / +53 MB |
+| first | phases logged (`3e1133b`) | 34,368 / 35,045 | 111 / 112 ms | passes copied 42 MiB in an arm | – |
+| | c1: 32 in flight, passes unpaced (`3e1133b`) | 31,518 / 30,878 | 149 / 160 ms | passes copied 2,139 MiB in an arm | – |
+| last | phases logged (`3e1133b`) | 35,824 / 32,852 | 109 / 125 ms | **+2,523 / +2,576 MB** | **+805 / +514 MB** |
+| | c3, kept (`3e1133b`) | 32,762 / 31,354 | 133 / 143 ms | −948 / −736 MB | +62 / +53 MB |
 
 The lab's bench is a worst case for this: 45% of its operations rewrite a row, so about 6,000 rows
 a second leave a dead copy behind on every node.
@@ -251,7 +251,7 @@ a second leave a dead copy behind on every node.
 group's openraft queue ([#129](../appendix/resolved/overload-sheds.md)), a quorum judgement before
 every write a leader appends ([#143](../appendix/resolved/silent-partition-hops.md#the-first-seconds-closed))
 and a free-space check once a second a shard ([#156](../appendix/resolved/wal-failure-stops-the-node.md#the-second-part-an-append-reserve)).
-All three sit on the write path, so each build was benched against the base, `35d47a6`: the
+All three sit on the write path, so each build was benched against the base, `ebf237e`: the
 default 120 s mixed bench (get 70, keyword 15, update 10, insert 5; eight workers × 128 in flight),
 on one loaded cluster, rolling every node onto each build in turn (`target/lab/r11/benchab.sh`).
 
@@ -328,7 +328,7 @@ europa leading five of the ten. The mode is still unexplained.
 [O64](../appendix/optimizations.md#o64-a-shorter-failover-base-halves-write-throughput-on-the-lab)'s
 whole-load rate still varies from one fresh bootstrap to the next. Round 12 gave the loader a rate
 every five seconds (`load --series`) and `cluster stats` each member's storage pipeline, then
-loaded about forty fresh clusters on the build of `00149e7` and later (`target/lab/r12/o64*.sh`). The
+loaded about forty fresh clusters on the build of `05e9e15` and later (`target/lab/r12/o64*.sh`). The
 spread was 36,000 to 48,000 rows a second, and it is set within the first ten seconds: a slow load
 is slow throughout, and no load changed pace partway through.
 
@@ -505,7 +505,7 @@ Round 15 built it ([F61](../features/fragmented-partitions.md)) and measured it 
 script (`target/lab/r15/seg.sh`), each arm a fresh cluster of the lab's inventory at 10 MiB
 segments, a whole load and a 120 s mixed bench, traced by table on titan. `nofrag` is the same
 build with `fragment_max_chain: 0`, which writes every partition whole as before. The baseline is
-the build before F61 (`341d40c`), run the same morning.
+the build before F61 (`2b34549`), run the same morning.
 
 | Arm | Loads, rows a second | Archive writes during a load, all / keyword / maps | Mixed bench, ops a second | Update p99 |
 | --- | --- | --- | --- | --- |
@@ -565,8 +565,8 @@ node was started again (`mem.sh`), each member's figures every minute:
 
 | Build | Resident a node | Rows | Archive maps | Table maps | Not counted by any figure |
 | --- | --- | --- | --- | --- | --- |
-| `bbeb814`, restarted after the ten copy load | 2.7–2.9 GiB | 40–46 MiB | 1.2 GiB | 6–8 MiB | 1.4–1.7 GiB |
-| `bbeb814`, 20 min in | 8.0–8.4 GiB | 11–24 MiB | 2.3 GiB | 55–200 MiB | 5.6–5.9 GiB |
+| `238dde9`, restarted after the ten copy load | 2.7–2.9 GiB | 40–46 MiB | 1.2 GiB | 6–8 MiB | 1.4–1.7 GiB |
+| `238dde9`, 20 min in | 8.0–8.4 GiB | 11–24 MiB | 2.3 GiB | 55–200 MiB | 5.6–5.9 GiB |
 | a sparse table map shrunk, a map saved without a clone, 20 min in | 7.9–8.3 GiB | 18–590 MiB | 2.3 GiB | 14–212 MiB | 4.8–6.0 GiB |
 
 The first row is the ten copy cluster as loaded, 11.8 million Movie partitions a node; the others

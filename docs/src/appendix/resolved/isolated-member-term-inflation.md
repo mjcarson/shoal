@@ -28,7 +28,7 @@ from the term, not from any state the node's runtime let the engine reach.
 `shoal/tests/cluster_fixture.rs`: three nodes with every lane through a proxy, node two
 isolated for twelve seconds under writes through node zero, then healed; its control term read
 before, during and after through the topology view, which now carries it. Against the tree at
-`b626b99`:
+`db185a9`:
 
 ```text
 node two's control term: 1 before, 52 isolated, 54 healed

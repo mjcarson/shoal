@@ -3,7 +3,7 @@
 **Built, measured on the lab, and removed in round 14.** It made a whole load no faster and the
 mixed bench's write tail worse, because under load the lab's devices were not bound by the WAL's
 syncs. The page is kept because the measurements that led to it, and away from it, correct what
-round 13 believed about a sync. The code is in `14c1297` and was removed in the change after it.
+round 13 believed about a sync. The code is in `f03f938` and was removed in the change after it.
 
 ## Context
 
@@ -101,7 +101,7 @@ Above. No capture: the lab's figures are the reason it was removed.
 
 ## Tests
 
-None in the tree. `14c1297` has them: the flush group's three tests, openraft's storage suite
+None in the tree. `f03f938` has them: the flush group's three tests, openraft's storage suite
 over both modes, and `direct_segments_share_flushes_and_recover_whole`.
 
 ## Related

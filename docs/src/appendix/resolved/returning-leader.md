@@ -30,7 +30,7 @@ its first tick, at the next term, into followers whose lease of it runs for two 
 **Reproduced.** `a_leader_restarted_inside_its_lease_stalls_no_hop` in
 `shoal/tests/cluster_fixture.rs`: three nodes at a base of one second and a five second
 deadline, node one killed and restarted at once, a key it led written through node zero
-without a retry every tenth of a second until it lands. Against the tree at `fc12d80` with
+without a retry every tenth of a second until it lands. Against the tree at `5c35074` with
 the two changes neutralised, twice:
 
 ```text

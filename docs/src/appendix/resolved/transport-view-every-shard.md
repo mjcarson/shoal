@@ -22,7 +22,7 @@ as the whole node.
 ## Evidence
 
 **Reproduced.** `the_transport_view_names_every_shard` in `shoal/tests/pool.rs`, a two-shard
-standalone pool asking for its transport view, against the tree at `dbdd13c`:
+standalone pool asking for its transport view, against the tree at `8de7f6a`:
 
 ```text
 thread 'the_transport_view_names_every_shard' panicked at shoal/tests/pool.rs:328:5:

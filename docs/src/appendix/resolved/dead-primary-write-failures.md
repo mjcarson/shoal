@@ -34,7 +34,7 @@ five second base is ten to fifteen seconds after the kill" - and the item read t
 ## Evidence
 
 **Reproduced, with the codes.** The timeline now keeps each failure's error code, and a smoke
-run of `macro/cluster/failover/kill` on this host against the tree at `bcf9aa4` with the
+run of `macro/cluster/failover/kill` on this host against the tree at `bc913e6` with the
 codes recorded (`--allow-dirty`, into a scratch directory under `target/`, deleted):
 
 | Window | Ops | Errors | By code |

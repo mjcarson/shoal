@@ -32,7 +32,7 @@ does not say when any of its writes was sent.
 ## Evidence
 
 **Reproduced against the unfixed tree** with `a_stream_older_than_the_retry_window_still_writes`,
-in a worktree of `8afdeac`. One node, a two second retry window, one write on a stream, a three
+in a worktree of `41b6477`. One node, a two second retry window, one write on a stream, a three
 second wait, and a second write on the same stream:
 
 ```text

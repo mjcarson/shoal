@@ -30,7 +30,7 @@ already routes around it. An installing copy had no such path.
 
 ## Evidence
 
-**Established by running it**, on the lab at `ac3b98b`: `target/lab/r13/part/cut300`, the bench's
+**Established by running it**, on the lab at `9f06f2e`: `target/lab/r13/part/cut300`, the bench's
 summary samples one message per code per second, and every refused get after the heal carried the
 message above. No write was refused for it: a write goes through the group's leader, whatever the
 local copy is doing.

@@ -5,7 +5,7 @@
 The M10c certificate test failed about half its runs alone, in three shapes: `node 0 did not
 join within 60s` with node zero `recovering` and three members up; `OutcomeUnknown: the
 replication rpc timed out` at a write; `NotLeader: group … elected no leader within the
-deadline` at another. One in four runs against the tree at `16f9a53`, five in eight against the
+deadline` at another. One in four runs against the tree at `8de7f6a`, five in eight against the
 tree at [Resolved #100](clone-fencing-under-load.md), and it had passed in every six-thread
 suite run before that day and failed in some after.
 

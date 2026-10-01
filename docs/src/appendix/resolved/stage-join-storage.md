@@ -26,7 +26,7 @@ runbook says to build it, and none did.
 ## Evidence
 
 **Reproduced.** `cargo test -p shoal-bench --features stage-profile --test stage_join` on
-`europa`, against the tree at `7633c10`:
+`europa`, against the tree at `4dc8f2b`:
 
 ```text
 thread 'a_grid_arm_joins_its_stage_records' panicked at shoal-bench/tests/stage_join.rs:61:6:
