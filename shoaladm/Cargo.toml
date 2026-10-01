@@ -20,6 +20,9 @@ uuid = { version = "1.11", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }
 # the schema generic benchmark driver `shoaladm bench` runs (F66), engine-free like this crate
 shoal-loadgen = { path = "../shoal-loadgen" }
+# a benchmark's full screen view points stderr at the run's log while it draws, at the version
+# the lockfile already resolves for shoal-core
+libc = "0.2"
 # the wizard races host probes against the terminal through kept receivers
 kanal = { workspace = true }
 

@@ -5696,6 +5696,7 @@ dependencies = [
  "crossterm",
  "futures",
  "kanal",
+ "libc",
  "ratatui",
  "rcgen",
  "rkyv 0.8.12",

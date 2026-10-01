@@ -39,6 +39,50 @@ use orchestrate::Context;
 /// How many progress events may wait for the screen before new ones are dropped
 const PROGRESS_DEPTH: usize = 4096;
 
+/// The process's stderr pointed at a file until this is dropped
+struct StderrTo {
+    /// A copy of the stderr there was, put back on drop
+    saved: std::os::fd::OwnedFd,
+}
+
+impl StderrTo {
+    /// Point stderr at a file
+    ///
+    /// # Arguments
+    ///
+    /// * `file` - The file
+    ///
+    /// # Errors
+    ///
+    /// When the descriptors cannot be duplicated.
+    fn file(file: &std::fs::File) -> std::io::Result<Self> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // SAFETY: dup of the process's own stderr returns a new descriptor or -1, checked below
+        let saved = unsafe { libc::dup(2) };
+        if saved < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `saved` is a descriptor this function just opened and nothing else owns
+        let saved = unsafe { std::os::fd::OwnedFd::from_raw_fd(saved) };
+        // SAFETY: both descriptors are open for the length of the call
+        if unsafe { libc::dup2(file.as_raw_fd(), 2) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(StderrTo { saved })
+    }
+}
+
+impl Drop for StderrTo {
+    /// Put stderr back as it was
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the saved descriptor is open until self is dropped, after this call
+        unsafe {
+            libc::dup2(self.saved.as_raw_fd(), 2);
+        }
+    }
+}
+
 /// Print what a run would do, and touch nothing
 ///
 /// # Arguments
@@ -159,9 +203,18 @@ where
     // the spec as it ran, beside the capture
     std::fs::write(capture_dir.join("spec.yml"), serde_yaml::to_string(&ctx.spec)?)?;
     let log = std::fs::File::create(capture_dir.join("log.txt"))?;
+    // the full screen view on a terminal that did not ask for lines
+    let tui = !ctx.args.basic && std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let title = ctx
+        .inventory
+        .as_ref()
+        .and_then(|path| crate::deploy::Inventory::read(path).ok())
+        .map_or_else(|| ctx.args.addr.clone().unwrap_or_default(), |inventory| inventory.name);
     // the run on a thread and runtime of its own, the screen here
     let (tx, rx) = tokio::sync::mpsc::channel(PROGRESS_DEPTH);
     let (control_tx, control_rx) = tokio::sync::watch::channel(Control::Run);
+    let (poller_tx, poller_rx) = tokio::sync::mpsc::channel(4);
+    let pollers = tui.then_some(poller_tx);
     let progress = Progress::new(tx);
     let runner = std::thread::Builder::new()
         .name("shoaladm-bench".to_string())
@@ -171,14 +224,34 @@ where
                 .thread_name("bench")
                 .build()?;
             runtime.block_on(async move {
-                let result = orchestrate::orchestrate::<S>(ctx, progress.clone(), control_rx).await;
+                let result = orchestrate::orchestrate::<S>(ctx, progress.clone(), control_rx, pollers).await;
                 // the end is the one event that is never dropped
                 let finished = result.as_ref().map(Clone::clone).map_err(|error| format!("{error:#}"));
                 progress.send_wait(BenchEvent::Finished(finished)).await;
                 result
             })
         })?;
-    headless::print(rx, control_tx, Some(log)).await;
+    if tui {
+        // deploying prints its steps to stderr, which would draw over the screen: they go to
+        // the run's log until the screen is gone
+        let redirect = StderrTo::file(&log.try_clone()?)?;
+        let drawn = crate::cluster::stats::tui::run_with::<S>(
+            None,
+            format!("{title} · bench"),
+            std::time::Duration::from_secs(2),
+            Some(crate::cluster::stats::tui::BenchChannels {
+                progress: rx,
+                pollers: poller_rx,
+                control: control_tx,
+                log: Some(log),
+            }),
+        )
+        .await;
+        drop(redirect);
+        drawn?;
+    } else {
+        headless::print(rx, control_tx, Some(log)).await;
+    }
     // the run's own answer, whatever the screen saw
     let result = runner
         .join()

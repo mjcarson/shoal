@@ -198,6 +198,7 @@ pub async fn orchestrate<S>(
     ctx: Context,
     progress: Progress,
     control: tokio::sync::watch::Receiver<Control>,
+    pollers: Option<Pollers<S>>,
 ) -> color_eyre::Result<PathBuf>
 where
     S: DatasetSupport + Send + Sync + 'static,
@@ -274,7 +275,7 @@ where
     capture.write(&ctx.dir)?;
     // everything changed on the hosts is recorded here and put back on every way out
     let restore = Arc::new(Mutex::new(Restore::default()));
-    let result = drive::<S>(&ctx, &mut capture, tables, &restore, &progress, control).await;
+    let result = drive::<S>(&ctx, &mut capture, tables, &restore, &progress, control, pollers).await;
     // the cluster down, then the hosts back, off the runtime since ssh blocks
     progress.send(BenchEvent::Phase(Phase::Teardown));
     let failures = tokio::task::spawn_blocking(move || {
@@ -316,7 +317,8 @@ where
 /// * `restore` - Where changes to the hosts are recorded
 /// * `progress` - Where what it is doing is sent
 /// * `control` - What it is told
-#[allow(clippy::too_many_lines)]
+/// * `pollers` - Where a screen is handed a poller of each cluster the run brings up
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn drive<S>(
     ctx: &Context,
     capture: &mut Capture,
@@ -324,6 +326,7 @@ async fn drive<S>(
     restore: &Arc<Mutex<Restore>>,
     progress: &Progress,
     control: tokio::sync::watch::Receiver<Control>,
+    pollers: Option<Pollers<S>>,
 ) -> color_eyre::Result<()>
 where
     S: DatasetSupport + Send + Sync + 'static,
@@ -360,6 +363,7 @@ where
     // the cluster
     let mut cluster = open::<S>(ctx, capture, restore, progress).await?;
     capture.write(&ctx.dir)?;
+    hand_poller::<S>(&cluster, pollers.as_ref()).await;
     let mut driver: Option<Driver<S>> = None;
     let mut loaded = false;
     let mut disturbed = false;
@@ -373,6 +377,7 @@ where
             if disturbed || *current != wanted {
                 progress.send(BenchEvent::Phase(Phase::Reset));
                 reset::<S>(ctx, &mut cluster, arm.overrides.as_ref(), progress).await?;
+                hand_poller::<S>(&cluster, pollers.as_ref()).await;
                 driver = None;
                 loaded = false;
             }
@@ -444,6 +449,52 @@ where
     }
     capture.complete = true;
     Ok(())
+}
+
+/// Where a screen is handed a poller of each cluster the run brings up
+pub type Pollers<S> = tokio::sync::mpsc::Sender<crate::cluster::stats::tui::Poller<S>>;
+
+/// Hand a screen a poller of the cluster as it is now, if a screen wants one
+///
+/// A reset brings up a new cluster under new identities, so the screen is told to read that one
+/// rather than a member that no longer exists.
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `pollers` - Where the screen takes its pollers, if one is drawn
+async fn hand_poller<S>(cluster: &Cluster, pollers: Option<&Pollers<S>>)
+where
+    S: QuerySupport + Send + Sync + 'static,
+    for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            rkyv::rancor::Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+{
+    // one node by hand, or no screen, has nothing to read
+    let (Some(pollers), Some(deployment)) = (pollers, cluster.deployment()) else {
+        return;
+    };
+    let Ok(record) = deployment.state.record() else {
+        return;
+    };
+    let (Ok(admin), Ok(password)) = (deployment.any_member::<S>(&record).await, deployment.state.password()) else {
+        return;
+    };
+    let poller = crate::cluster::stats::tui::Poller::new(
+        admin,
+        None,
+        cluster.names(),
+        deployment.inventory.admin.clone(),
+        password,
+    );
+    // a screen that has gone away wants nothing
+    let _ = pollers.send(poller).await;
 }
 
 /// Bring the cluster a run drives up, or find it
