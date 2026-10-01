@@ -62,6 +62,7 @@ const SERVER_EVERY: Duration = Duration::from_secs(2);
 const PRELOADED_SAMPLE: u64 = 1000;
 
 /// Everything a run was asked for, decided before it starts
+#[derive(Clone)]
 pub struct Context {
     /// What the command line said about the project
     pub project: ProjectArgs,
@@ -81,6 +82,39 @@ pub struct Context {
     pub project_facts: CodeFacts,
     /// Shoal's code
     pub shoal_facts: CodeFacts,
+}
+
+impl Context {
+    /// What a deployment of the bench's own cluster is told about the project: a profile build
+    /// when `--profile` was given
+    fn hint(&self) -> crate::deploy::ProjectHint {
+        crate::deploy::ProjectHint {
+            flavor: if self.args.profile {
+                crate::build::Flavor::Profile
+            } else {
+                crate::build::Flavor::Release
+            },
+            ..self.project.hint()
+        }
+    }
+
+    /// Bring a profile build's heap dumps back from every node, if this is one
+    ///
+    /// # Arguments
+    ///
+    /// * `progress` - Where a failure is said
+    fn collect_profiles(&self, progress: &Progress) {
+        // only a profile build writes dumps, and only the bench's own cluster runs one
+        if !self.args.profile {
+            return;
+        }
+        let Ok(inventory) = Inventory::read(&self.dir.join("inventory.bench.yml")) else {
+            return;
+        };
+        for failure in super::profile::collect(&inventory, &self.dir.join("prof")) {
+            progress.log(format!("heap dumps: {failure}"));
+        }
+    }
 }
 
 /// The cluster a run drives
@@ -276,6 +310,10 @@ where
     // everything changed on the hosts is recorded here and put back on every way out
     let restore = Arc::new(Mutex::new(Restore::default()));
     let result = drive::<S>(&ctx, &mut capture, tables, &restore, &progress, control, pollers).await;
+    // a profile build's last dumps, before the teardown deletes the directory they are in
+    let collecting = ctx.clone();
+    let collector = progress.clone();
+    let _ = tokio::task::spawn_blocking(move || collecting.collect_profiles(&collector)).await;
     // the cluster down, then the hosts back, off the runtime since ssh blocks
     progress.send(BenchEvent::Phase(Phase::Teardown));
     let failures = tokio::task::spawn_blocking(move || {
@@ -376,6 +414,8 @@ where
             let wanted = arm.overrides.as_ref().map(|over| over.name.clone());
             if disturbed || *current != wanted {
                 progress.send(BenchEvent::Phase(Phase::Reset));
+                // a reset stops every node, so their dumps so far come back first
+                ctx.collect_profiles(progress);
                 reset::<S>(ctx, &mut cluster, arm.overrides.as_ref(), progress).await?;
                 hand_poller::<S>(&cluster, pollers.as_ref()).await;
                 driver = None;
@@ -545,7 +585,7 @@ where
     }
     // the bench's own: copied, probed, its neighbours judged, then brought up
     let bench = derive(ctx, &inventory_path, None)?;
-    let deployment = Deployment::open(&bench.path, ctx.project.hint())?;
+    let deployment = Deployment::open(&bench.path, ctx.hint())?;
     capture.provenance.bench_inventory_digest = Some(owned::file_digest(&bench.path)?);
     probe_nodes(&bench.inventory, capture)?;
     prepare_hosts(ctx, &bench, capture, restore)?;
@@ -571,11 +611,19 @@ where
     };
     progress.send(BenchEvent::Phase(Phase::Bootstrap));
     bring_up::<S>(&mut cluster).await?;
-    // which program each node runs, now that it was built
+    // which program each node runs, now that it was built; a profile build's beside its dumps,
+    // which are read against it
     if let Cluster::Owned { deployment, .. } = &cluster {
         for (name, facts) in &mut capture.provenance.nodes {
             if let Ok(program) = deployment.program(name) {
                 facts.program_sha256 = crate::deploy::ops::digest(&program).ok();
+                if ctx.args.profile {
+                    let bin = ctx.dir.join("prof").join("bin");
+                    std::fs::create_dir_all(&bin)?;
+                    if let Some(file) = program.file_name() {
+                        std::fs::copy(&program, bin.join(file))?;
+                    }
+                }
             }
         }
     }
@@ -803,7 +851,7 @@ where
         ));
         let record = deployment.state.record()?;
         *bench = derive(ctx, base_path, overrides)?;
-        let reopened = Deployment::open(&bench.path, ctx.project.hint())?;
+        let reopened = Deployment::open(&bench.path, ctx.hint())?;
         // the record carries over, so the wipe guard knows the cluster it is wiping
         reopened.state.save(&record)?;
         *deployment = reopened;

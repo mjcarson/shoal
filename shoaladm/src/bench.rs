@@ -20,6 +20,7 @@ pub mod headless;
 pub mod hosts;
 pub mod orchestrate;
 pub mod owned;
+pub mod profile;
 pub mod provenance;
 pub mod store;
 

@@ -70,6 +70,7 @@ impl ProjectArgs {
         ProjectHint {
             dir: self.project.clone(),
             db: self.db.clone(),
+            flavor: crate::build::Flavor::Release,
         }
     }
 
