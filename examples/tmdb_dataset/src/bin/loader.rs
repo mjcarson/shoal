@@ -38,7 +38,10 @@ enum Command {
     /// Load the TMDB csv into a deployed cluster
     Load(LoadArgs),
     /// Drive a timed mix of reads and writes and print a line a second
-    Bench(BenchArgs),
+    ///
+    /// Called `bench` until F66, when `shoaladm bench` took that name for the benchmark every
+    /// schema gets; this is the lab's fault test driver, which knows the TMDB rows by name.
+    Drive(BenchArgs),
     /// Read every movie and keyword partition back and compare them with the csv
     Verify(VerifyArgs),
     /// Read back every synthetic insert a bench run was acknowledged for
@@ -63,7 +66,7 @@ async fn main() -> color_eyre::Result<()> {
             tmdb_dataset::load::run(args).await
         }
         // the lab's test driver, which reports errors the same way
-        Command::Bench(args) => {
+        Command::Drive(args) => {
             color_eyre::install()?;
             tmdb_dataset::bench::bench(args).await
         }
@@ -80,5 +83,21 @@ async fn main() -> color_eyre::Result<()> {
             color_eyre::install()?;
             shoaladm::cli::run::<TmdbClient>(&cli.project, command).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::CommandFactory;
+
+    /// The loader's commands and every admin command it flattens have one name each
+    ///
+    /// clap only finds a duplicate subcommand when the line is parsed, in a debug build, so a
+    /// name shoaladm takes later (as `bench` was in F66) panics the loader the first time it is
+    /// run; this finds it when the tests are.
+    #[test]
+    fn every_command_has_one_name() {
+        Cli::command().debug_assert();
     }
 }

@@ -1603,7 +1603,7 @@ pub(super) fn install_binary(
 /// # Arguments
 ///
 /// * `path` - The file
-pub(super) fn digest(path: &Path) -> color_eyre::Result<String> {
+pub fn digest(path: &Path) -> color_eyre::Result<String> {
     // read it whole: a server program is tens of megabytes
     let bytes = std::fs::read(path).wrap_err_with(|| format!("failed to read {}", path.display()))?;
     let hash = Sha256::digest(&bytes);
@@ -1637,7 +1637,7 @@ pub fn members_ready(model: &ClusterModel, ids: &[NodeId], voters: usize) -> boo
 /// * `shoal` - The admin client
 /// * `ids` - The nodes that have to be up
 /// * `voters` - How many voters the control group has to have
-pub(super) async fn wait_for_members<S>(
+pub async fn wait_for_members<S>(
     shoal: &Arc<Shoal<S>>,
     ids: &[NodeId],
     voters: usize,
@@ -1675,7 +1675,7 @@ where
 /// # Arguments
 ///
 /// * `shoal` - The admin client
-async fn wait_for_writes<S>(shoal: &Arc<Shoal<S>>) -> color_eyre::Result<()>
+pub async fn wait_for_writes<S>(shoal: &Arc<Shoal<S>>) -> color_eyre::Result<()>
 where
     S: QuerySupport + Send + Sync + 'static,
 {

@@ -15,9 +15,11 @@ rkyv = "0.8"
 # shard, no storage and no reason to compile io_uring (F15). the node program it deploys is
 # built by cargo in the schema's own project, never linked here
 shoal = { path = "../shoal", default-features = false }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }
 uuid = { version = "1.11", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }
+# the schema generic benchmark driver `shoaladm bench` runs (F66), engine-free like this crate
+shoal-loadgen = { path = "../shoal-loadgen" }
 # the wizard races host probes against the terminal through kept receivers
 kanal = { workspace = true }
 

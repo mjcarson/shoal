@@ -31,6 +31,7 @@
 
 use clap::{Args, Parser, Subcommand};
 use rkyv::Archive;
+use shoal::shared::dataset::DatasetSupport;
 use shoal::shared::traits::QuerySupport;
 use std::path::PathBuf;
 
@@ -308,6 +309,10 @@ pub enum Command {
         #[clap(long, short = 'n', default_value_t = 200)]
         lines: usize,
     },
+    /// Benchmark the project's schema against a dataset folder, and list, show and compare the
+    /// captures ([F66](../../docs/src/features/dataset-benchmarks.md))
+    #[clap(subcommand)]
+    Bench(crate::bench::BenchCommand),
     /// Stop and delete every node of the inventory, its data, and the local state
     Destroy {
         /// The inventory
@@ -348,7 +353,7 @@ impl Command {
                 | Command::Stats { .. }
                 | Command::Upgrade { .. }
                 | Command::Reconfigure { .. }
-        )
+        ) || matches!(self, Command::Bench(command) if command.needs_schema())
     }
 }
 
@@ -359,7 +364,13 @@ impl Command {
 /// Whatever the command failed with.
 pub async fn main<S>() -> color_eyre::Result<()>
 where
-    S: QuerySupport + Send + Sync + 'static,
+    S: DatasetSupport + Send + Sync + 'static,
+    S::QueryKinds: Send + Sync + 'static,
+    <S::QueryKinds as Archive>::Archived: Send + Sync,
+    S::ResponseKinds: Send + Sync,
+    <S::ResponseKinds as Archive>::Archived: Send
+        + Sync
+        + rkyv::Deserialize<S::ResponseKinds, rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>>,
     for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: rkyv::bytecheck::CheckBytes<
             rkyv::rancor::Strategy<
                 rkyv::validation::Validator<
@@ -385,7 +396,13 @@ where
 /// When the runtime cannot be built, or whatever the command failed with.
 pub fn main_blocking<S>() -> color_eyre::Result<()>
 where
-    S: QuerySupport + Send + Sync + 'static,
+    S: DatasetSupport + Send + Sync + 'static,
+    S::QueryKinds: Send + Sync + 'static,
+    <S::QueryKinds as Archive>::Archived: Send + Sync,
+    S::ResponseKinds: Send + Sync,
+    <S::ResponseKinds as Archive>::Archived: Send
+        + Sync
+        + rkyv::Deserialize<S::ResponseKinds, rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>>,
     for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: rkyv::bytecheck::CheckBytes<
             rkyv::rancor::Strategy<
                 rkyv::validation::Validator<
@@ -417,7 +434,13 @@ where
 /// Whatever the command failed with.
 pub async fn run<S>(project: &ProjectArgs, command: Command) -> color_eyre::Result<()>
 where
-    S: QuerySupport + Send + Sync + 'static,
+    S: DatasetSupport + Send + Sync + 'static,
+    S::QueryKinds: Send + Sync + 'static,
+    <S::QueryKinds as Archive>::Archived: Send + Sync,
+    S::ResponseKinds: Send + Sync,
+    <S::ResponseKinds as Archive>::Archived: Send
+        + Sync
+        + rkyv::Deserialize<S::ResponseKinds, rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>>,
     for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: rkyv::bytecheck::CheckBytes<
             rkyv::rancor::Strategy<
                 rkyv::validation::Validator<
@@ -499,6 +522,7 @@ where
             nodes,
             force,
         } => open(&inventory)?.reconfigure::<S>(&nodes, force).await,
+        Command::Bench(command) => crate::bench::run::<S>(project, command).await,
         // everything else was run above
         other => unreachable!("{other:?} connects to no cluster and was run already"),
     }
@@ -554,6 +578,12 @@ pub async fn run_local(project: &ProjectArgs, command: Command) -> color_eyre::R
                 );
             }
             Deployment::attach(&inventory.resolve(project)?)?.destroy()?;
+        }
+        Command::Bench(command) => {
+            // a capture is read here; a run connects, and is handed back
+            if let Some(run) = crate::bench::store::run_local(project, command)? {
+                return Ok(Some(Command::Bench(run)));
+            }
         }
         other => return Ok(Some(other)),
     }

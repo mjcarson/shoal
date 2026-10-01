@@ -24,7 +24,11 @@ mimalloc = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-# the driver the smoke test runs against a node started in process
+# the driver the smoke test runs against a node started in process, and the command that runs
+# it whole
 shoal-loadgen = { path = "../../shoal-loadgen" }
+shoaladm = { path = "../../shoaladm" }
 tokio = { workspace = true }
 tempfile = "3"
+clap = { version = "4.2", features = ["derive"] }
+color-eyre = "0.6.3"

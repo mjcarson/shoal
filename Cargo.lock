@@ -622,12 +622,15 @@ dependencies = [
 name = "bench-dataset"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "color-eyre",
  "deepsize2",
  "mimalloc",
  "rkyv 0.8.12",
  "serde",
  "shoal",
  "shoal-loadgen",
+ "shoaladm",
  "tempfile",
  "tokio",
 ]
@@ -5702,6 +5705,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "shoal",
+ "shoal-loadgen",
  "syn 2.0.108",
  "tempfile",
  "tokio",

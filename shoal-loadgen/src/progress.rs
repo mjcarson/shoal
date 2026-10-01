@@ -166,6 +166,18 @@ impl Progress {
         }
     }
 
+    /// Send an event that must not be lost, such as the run's end, waiting for room
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The event to send
+    pub async fn send_wait(&self, event: BenchEvent) {
+        // a watcher that has gone away has nothing to wait for
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(event).await;
+        }
+    }
+
     /// Send a line worth reading
     ///
     /// # Arguments
