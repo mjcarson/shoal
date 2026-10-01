@@ -61,7 +61,7 @@ $L admin -i tmdb_cluster.yaml "restore-retry <op>"  # a restore's failed groups,
 $L admin -i tmdb_cluster.yaml "remove <node> <replacement>"  # again: retries a blocked plan (#177)
 $L ship-backup -i tmdb_cluster.yaml /optane/shoal-backup/<op>  # every file to every host (F59)
 $L add -i target/lab/tmdb-add.yaml hyperion   # a member with no placement slot (section 8)
-$L bench -i target/lab/tmdb-add.yaml --addr 172.16.2.5:12000 …   # through that one member, as the admin
+$L drive -i target/lab/tmdb-add.yaml --addr 172.16.2.5:12000 …   # through that one member, as the admin
 ```
 
 ## The driver
@@ -73,10 +73,16 @@ The loader is the test driver. Beside `load` it has three commands, all in
 | --- | --- | --- |
 | `load` | Writes the whole csv, retrying the codes that say to try again, then reads a sample back | The dataset can be loaded, and at what rate |
 | `verify` | Reads every movie back and compares it field by field with the csv, then reads every keyword partition whole and compares its set of sort keys | Nothing written was lost, changed or misplaced, on either table |
-| `bench` | Drives a mix of `get`, `keyword` (a partition read, limited to 50 rows), `update` (an overview rewritten to the value it has) and `insert` (a synthetic movie above id 2⁴⁰) for a fixed time, printing a line a second with throughput, p50, p99 and max per kind, and the failures by code. `--slow-ms` also logs each operation slower than the threshold, with the member it went through and when it was sent | Throughput and latency under a mix, and what a fault does to both second by second |
-| `verify-acks` | Reads back every synthetic insert a `bench` run was acknowledged for, through one member, each member in turn, or all of them | No acknowledged write was lost, whatever happened during the run |
+| `drive` (`bench` until [F66](../features/dataset-benchmarks.md), when `shoaladm bench` took the name) | Drives a mix of `get`, `keyword` (a partition read, limited to 50 rows), `update` (an overview rewritten to the value it has) and `insert` (a synthetic movie above id 2⁴⁰) for a fixed time, printing a line a second with throughput, p50, p99 and max per kind, and the failures by code. `--slow-ms` also logs each operation slower than the threshold, with the member it went through and when it was sent | Throughput and latency under a mix, and what a fault does to both second by second |
+| `verify-acks` | Reads back every synthetic insert a `drive` run was acknowledged for, through one member, each member in turn, or all of them | No acknowledged write was lost, whatever happened during the run |
 
-Updates rewrite a value the row already has, so a `verify` after a `bench` still matches the csv.
+Updates rewrite a value the row already has, so a `verify` after a `drive` still matches the csv.
+The rounds below were run while it was still called `bench`, and quote it by that name.
+
+`shoaladm bench` ([F66](../features/dataset-benchmarks.md)) is the generic benchmark every schema
+gets, and runs on a cluster of its own beside this one. The loader's `drive` stays the fault test
+driver: it knows the TMDB rows by name, which is what its keyword reads, updates and synthetic
+movies need.
 Synthetic ids are offset by `--run` and by worker, so no two runs write the same row.
 
 Faults are injected from outside the process with `systemctl kill -s SIGKILL`, `SIGSTOP` and
