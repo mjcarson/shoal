@@ -531,7 +531,7 @@ pub fn prepare<S>(
 ) -> Result<Arc<dyn TableSource<S::QueryKinds>>, ScanError>
 where
     S: DatasetSupport,
-    S::QueryKinds: Send + Sync + 'static,
+    S::QueryKinds: Send + Sync + Clone + 'static,
 {
     // find the table's row type and scan the file as it
     S::visit_table(file.table, Prepare { file, options }).map_err(ScanError::Dataset)?

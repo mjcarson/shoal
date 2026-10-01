@@ -366,7 +366,7 @@ impl Command {
 pub async fn main<S>() -> color_eyre::Result<()>
 where
     S: DatasetSupport + Send + Sync + 'static,
-    S::QueryKinds: Send + Sync + 'static,
+    S::QueryKinds: Send + Sync + Clone + 'static,
     <S::QueryKinds as Archive>::Archived: Send + Sync,
     S::ResponseKinds: Send + Sync,
     <S::ResponseKinds as Archive>::Archived: Send
@@ -398,7 +398,7 @@ where
 pub fn main_blocking<S>() -> color_eyre::Result<()>
 where
     S: DatasetSupport + Send + Sync + 'static,
-    S::QueryKinds: Send + Sync + 'static,
+    S::QueryKinds: Send + Sync + Clone + 'static,
     <S::QueryKinds as Archive>::Archived: Send + Sync,
     S::ResponseKinds: Send + Sync,
     <S::ResponseKinds as Archive>::Archived: Send
@@ -436,7 +436,7 @@ where
 pub async fn run<S>(project: &ProjectArgs, command: Command) -> color_eyre::Result<()>
 where
     S: DatasetSupport + Send + Sync + 'static,
-    S::QueryKinds: Send + Sync + 'static,
+    S::QueryKinds: Send + Sync + Clone + 'static,
     <S::QueryKinds as Archive>::Archived: Send + Sync,
     S::ResponseKinds: Send + Sync,
     <S::ResponseKinds as Archive>::Archived: Send

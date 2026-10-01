@@ -238,6 +238,10 @@ pub struct BenchRunArgs {
     /// Skip an insert whose key an earlier row had, so every insert is a new row
     #[clap(long)]
     pub dedupe: bool,
+    /// How many times an arm's query that failed in a retriable way is sent again; none by
+    /// default, so every failure is counted where it happened
+    #[clap(long)]
+    pub retries: Option<u32>,
     /// When an arm's inserts run out: end it there, or wrap and insert them again
     #[clap(long, value_parser = on_exhaust)]
     pub on_exhaust: Option<OnExhaust>,
@@ -365,7 +369,7 @@ impl BenchRunArgs {
             spec.events.clone_from(events);
         }
         take!(
-            workers, duration, warmup, runs, seed, distribution,
+            workers, duration, warmup, runs, seed, distribution, retries,
             read_keys, read_level, reads, preload, on_exhaust, max_parse_errors, tables,
             event_at, restart_at, event_timeout
         );

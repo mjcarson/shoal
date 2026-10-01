@@ -109,6 +109,7 @@ async fn every_mix_runs_against_a_node_and_loses_nothing() {
                 warmup: Duration::from_secs(0),
                 duration: Duration::from_secs(2),
                 on_exhaust: OnExhaust::Wrap,
+                retries: 0,
                 picker,
                 inserts: mix.writes(),
             };

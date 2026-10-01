@@ -139,7 +139,7 @@ fn dry_run(ctx: &Context) {
 pub async fn run<S>(project: &ProjectArgs, command: BenchCommand) -> color_eyre::Result<()>
 where
     S: DatasetSupport + Send + Sync + 'static,
-    S::QueryKinds: Send + Sync + 'static,
+    S::QueryKinds: Send + Sync + Clone + 'static,
     <S::QueryKinds as Archive>::Archived: Send + Sync,
     S::ResponseKinds: Send + Sync,
     <S::ResponseKinds as Archive>::Archived: Send

@@ -300,6 +300,9 @@ pub struct BenchSpec {
     pub dedupe: bool,
     /// What an arm does when its inserts run out
     pub on_exhaust: OnExhaust,
+    /// How many times an arm's query that failed in a retriable way is sent again; none by
+    /// default, so a failure is counted where it happened
+    pub retries: u32,
     /// The share of a file's rows that may fail to parse, in percent
     pub max_parse_errors: f64,
     /// The weight of each table, by name; by default the size of its pool
@@ -344,6 +347,7 @@ impl Default for BenchSpec {
             reads: Reads::Warm,
             dedupe: false,
             on_exhaust: OnExhaust::End,
+            retries: 0,
             max_parse_errors: 1.0,
             tables: BTreeMap::new(),
             event_at: 33.0,

@@ -17,6 +17,7 @@
 
 use rkyv::Archive;
 use shoal::client::{SendOptions, ShoalQueryStream};
+use shoal::shared::protocol::error::ErrorCode;
 use shoal::shared::protocol::read::ReadLevel as WireReadLevel;
 use shoal::shared::queries::Queries;
 use shoal::shared::traits::QuerySupport;
@@ -44,6 +45,55 @@ const REOPEN_AFTER: Duration = Duration::from_millis(200);
 
 /// How long a worker waits on a feed with nothing parsed before asking again
 const FEED_POLL: Duration = Duration::from_millis(1);
+
+/// How many times a preload's or a read back's query is sent again after a retriable failure
+///
+/// A cluster just bootstrapped admits writes before every group has settled, and the first few
+/// seconds of a preload can answer `OutcomeUnknown`; a preload has to load every row, so it
+/// retries the way the tmdb loader does.
+pub const LOAD_RETRIES: u32 = 8;
+
+/// The first wait before a query is sent again
+const RETRY_FIRST: Duration = Duration::from_millis(20);
+
+/// The longest wait before a query is sent again
+const RETRY_CAP: Duration = Duration::from_millis(500);
+
+/// Whether a failure says that sending the query again may succeed
+///
+/// The codes the client's own retry repeats a bundle on: turned away before anything ran, a
+/// leader that is not one, a quorum that is not there, a lost connection, a deadline, and an
+/// outcome that is unknown. A retry is a new query, which is safe because a benchmark's every
+/// write is an insert of a whole row, and a read changes nothing.
+///
+/// # Arguments
+///
+/// * `code` - The code the query failed with
+#[must_use]
+pub fn retriable(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::OutcomeUnknown
+            | ErrorCode::Shedding
+            | ErrorCode::NotLeader
+            | ErrorCode::Unavailable
+            | ErrorCode::QuorumUnavailable
+            | ErrorCode::ConnectionLost
+            | ErrorCode::Timeout
+    )
+}
+
+/// How long to wait before sending a query again, after it has been sent `attempts` times
+///
+/// # Arguments
+///
+/// * `attempts` - How many times it has been sent
+fn backoff(attempts: u32) -> Duration {
+    // doubling from the first wait, never past the cap
+    RETRY_FIRST
+        .saturating_mul(1 << attempts.saturating_sub(1).min(8))
+        .min(RETRY_CAP)
+}
 
 /// The send options that ask for a read level
 ///
@@ -140,6 +190,13 @@ impl ArmClock {
         }
     }
 
+    /// When workers stop sending, since the start: the arm's time, or later if an event kept it
+    /// running
+    #[must_use]
+    pub fn deadline(&self) -> Duration {
+        Duration::from_millis(self.deadline_ms.load(Ordering::Relaxed))
+    }
+
     /// Why the arm ended early, if it did
     #[must_use]
     pub fn ended_early(&self) -> Option<EndedEarly> {
@@ -187,6 +244,8 @@ struct Shared<K> {
     seconds: Vec<Mutex<Vec<Window>>>,
     /// What to do when a feed is spent
     on_exhaust: OnExhaust,
+    /// How many times a query that failed in a retriable way is sent again
+    retries: u32,
     /// How many queries a bundle holds
     bundle: usize,
     /// How many queries a worker keeps outstanding
@@ -211,6 +270,21 @@ impl<K> Shared<K> {
             windows.resize_with(second + 1, Window::default);
         }
         windows[second].record(kind, outcome);
+    }
+
+    /// Record that a query is being sent again
+    ///
+    /// # Arguments
+    ///
+    /// * `worker` - Which worker
+    /// * `kind` - What kind of operation
+    fn record_retry(&self, worker: usize, kind: OpKind) {
+        let second = self.clock.second();
+        let mut windows = lock(&self.seconds[worker]);
+        if windows.len() <= second {
+            windows.resize_with(second + 1, Window::default);
+        }
+        windows[second].record(kind, Outcome::Retried);
     }
 
     /// Record a bundle whose answers are all in
@@ -270,13 +344,43 @@ impl<K> Shared<K> {
 }
 
 /// One query that was sent and not yet answered
-struct Sent {
+struct Sent<K> {
     /// What kind of operation it was
     kind: OpKind,
     /// The bundle it went in
     bundle: u64,
     /// The insert to acknowledge if it succeeds: its table and sequence
     ack: Option<(usize, u64)>,
+    /// A copy to send again, kept only when retries are allowed
+    copy: Option<K>,
+    /// How many times it has been sent, this time included
+    attempts: u32,
+}
+
+/// One query staged in a bundle
+struct Staged<K> {
+    /// What kind of operation it is
+    kind: OpKind,
+    /// The insert to acknowledge if it succeeds
+    ack: Option<(usize, u64)>,
+    /// A copy to send again, kept only when retries are allowed
+    copy: Option<K>,
+    /// How many times it has been sent before
+    attempts: u32,
+}
+
+/// A query waiting to be sent again
+struct Retry<K> {
+    /// The query
+    query: K,
+    /// What kind of operation it is
+    kind: OpKind,
+    /// The insert to acknowledge if it succeeds
+    ack: Option<(usize, u64)>,
+    /// How many times it has been sent
+    attempts: u32,
+    /// When it may be sent again
+    at: Instant,
 }
 
 /// One bundle that was sent and not all answered
@@ -308,6 +412,9 @@ pub struct ArmOutcome {
     pub cpu: Vec<f64>,
     /// Why the arm ended before its time, if it did
     pub ended_early: Option<EndedEarly>,
+    /// When its workers were due to stop, since it started: its time, or later if an event kept
+    /// it running
+    pub deadline: Duration,
     /// What each table's feed did, by table
     pub feeds: Vec<(String, FeedFacts)>,
 }
@@ -325,6 +432,8 @@ pub struct ArmSettings {
     pub duration: Duration,
     /// What it does when its inserts run out
     pub on_exhaust: OnExhaust,
+    /// How many times a query that failed in a retriable way is sent again
+    pub retries: u32,
     /// What its workers choose
     pub picker: Picker,
     /// Whether it inserts at all, so its feeds are opened
@@ -360,7 +469,7 @@ pub struct Driver<S: QuerySupport> {
 impl<S> Driver<S>
 where
     S: QuerySupport + Send + Sync + 'static,
-    S::QueryKinds: Send + Sync + 'static,
+    S::QueryKinds: Send + Sync + Clone + 'static,
     <S::QueryKinds as Archive>::Archived: Send + Sync,
     S::ResponseKinds: Send + Sync,
     <S::ResponseKinds as Archive>::Archived: Send
@@ -442,6 +551,7 @@ where
             tables: self.tables.clone(),
             seconds: (0..self.workers).map(|_| Mutex::new(Vec::new())).collect(),
             on_exhaust: settings.on_exhaust,
+            retries: settings.retries,
             bundle: settings.bundle,
             in_flight: settings.in_flight,
             work: Work::Arm(Arc::new(settings.picker.clone())),
@@ -464,6 +574,7 @@ where
             seconds,
             cpu,
             ended_early: clock.ended_early(),
+            deadline: clock.deadline(),
             feeds,
         }
     }
@@ -496,6 +607,7 @@ where
             tables: self.tables.clone(),
             seconds: (0..self.workers).map(|_| Mutex::new(Vec::new())).collect(),
             on_exhaust: OnExhaust::End,
+            retries: LOAD_RETRIES,
             bundle,
             in_flight,
             work: Work::Load,
@@ -555,6 +667,7 @@ where
             tables: self.tables.clone(),
             seconds: (0..self.workers).map(|_| Mutex::new(Vec::new())).collect(),
             on_exhaust: OnExhaust::End,
+            retries: LOAD_RETRIES,
             bundle,
             in_flight,
             work: Work::Queries(Arc::new(Mutex::new(queries))),
@@ -666,7 +779,7 @@ async fn worker_loop<S>(
     options: SendOptions,
 ) where
     S: QuerySupport + Send + Sync + 'static,
-    S::QueryKinds: Send + Sync + 'static,
+    S::QueryKinds: Send + Sync + Clone + 'static,
     <S::QueryKinds as Archive>::Archived: Send + Sync,
     S::ResponseKinds: Send + Sync,
     <S::ResponseKinds as Archive>::Archived: Send
@@ -689,8 +802,10 @@ async fn worker_loop<S>(
         bundles: 0,
         spent: false,
     };
-    while !cursor.spent && shared.clock.live() {
-        if drive_stream(&client, &shared, &options, &mut cursor).await.is_err() {
+    // the queries waiting to be sent again survive a stream that failed, too
+    let mut retries: VecDeque<Retry<S::QueryKinds>> = VecDeque::new();
+    while (!cursor.spent || !retries.is_empty()) && shared.clock.live() {
+        if drive_stream(&client, &shared, &options, &mut cursor, &mut retries).await.is_err() {
             // everything outstanding on it was recorded; pause so a dead member is not hammered
             tokio::time::sleep(REOPEN_AFTER).await;
         }
@@ -707,25 +822,53 @@ async fn worker_loop<S>(
 ///
 /// Returns what was staged, or why nothing was: `Err(true)` for a feed with nothing parsed yet,
 /// `Err(false)` for a worker with nothing more to send.
-fn stage<K>(
+fn stage<K: Clone>(
     shared: &Shared<K>,
     cursor: &mut Cursor,
     buffer: &mut Vec<K>,
-) -> Result<(OpKind, Option<(usize, u64)>), bool> {
+    retries: &mut VecDeque<Retry<K>>,
+) -> Result<Staged<K>, bool> {
+    // a query due to be sent again goes first
+    if retries.front().is_some_and(|retry| retry.at <= Instant::now()) {
+        let retry = retries.pop_front().expect("there is a front");
+        let copy = Some(retry.query.clone());
+        buffer.push(retry.query);
+        return Ok(Staged {
+            kind: retry.kind,
+            ack: retry.ack,
+            copy,
+            attempts: retry.attempts,
+        });
+    }
+    // a worker with nothing new to send only waits on its retries
+    if cursor.spent {
+        return Err(!retries.is_empty());
+    }
+    // a copy is kept only when it may be sent again
+    let keep = |query: &K| (shared.retries > 0).then(|| query.clone());
+    let staged = |kind, ack, copy| Staged {
+        kind,
+        ack,
+        copy,
+        attempts: 0,
+    };
     match &shared.work {
         Work::Arm(picker) => {
             // the choice at this worker's index; the index moves only once something is staged
             match picker.at(cursor.worker, cursor.index) {
                 Pick::Read { table, keys } => {
-                    buffer.push(shared.tables[table].read_query(&keys));
+                    let query = shared.tables[table].read_query(&keys);
+                    let copy = keep(&query);
+                    buffer.push(query);
                     cursor.index += 1;
-                    Ok((OpKind::Read, None))
+                    Ok(staged(OpKind::Read, None, copy))
                 }
                 Pick::Insert { table } => match shared.tables[table].take_insert() {
                     Take::Row { query, seq } => {
+                        let copy = keep(&query);
                         buffer.push(query);
                         cursor.index += 1;
-                        Ok((OpKind::Insert, Some((table, seq))))
+                        Ok(staged(OpKind::Insert, Some((table, seq)), copy))
                     }
                     Take::Stalled => Err(true),
                     Take::Exhausted => {
@@ -746,9 +889,10 @@ fn stage<K>(
                 let table = (cursor.worker + cursor.index as usize + offset) % tables;
                 match shared.tables[table].take_insert() {
                     Take::Row { query, seq } => {
+                        let copy = keep(&query);
                         buffer.push(query);
                         cursor.index += 1;
-                        return Ok((OpKind::Insert, Some((table, seq))));
+                        return Ok(staged(OpKind::Insert, Some((table, seq)), copy));
                     }
                     Take::Stalled => stalled = true,
                     Take::Exhausted => (),
@@ -759,8 +903,9 @@ fn stage<K>(
         }
         Work::Queries(queue) => match lock(queue).pop_front() {
             Some(query) => {
+                let copy = keep(&query);
                 buffer.push(query);
-                Ok((OpKind::Read, None))
+                Ok(staged(OpKind::Read, None, copy))
             }
             None => Err(false),
         },
@@ -780,8 +925,8 @@ fn stage<K>(
 async fn flush<S: QuerySupport>(
     queries_tx: &mut ShoalQueryStream<S>,
     buffer: &mut Vec<S::QueryKinds>,
-    staged: &mut Vec<(OpKind, Option<(usize, u64)>)>,
-    outstanding: &mut HashMap<usize, Sent>,
+    staged: &mut Vec<Staged<S::QueryKinds>>,
+    outstanding: &mut HashMap<usize, Sent<S::QueryKinds>>,
     bundles: &mut HashMap<u64, Bundle>,
     cursor: &mut Cursor,
 ) -> Result<(), Errors> {
@@ -807,8 +952,17 @@ async fn flush<S: QuerySupport>(
             remaining: staged.len(),
         },
     );
-    for (offset, (kind, ack)) in staged.drain(..).enumerate() {
-        outstanding.insert(base + offset, Sent { kind, bundle, ack });
+    for (offset, item) in staged.drain(..).enumerate() {
+        outstanding.insert(
+            base + offset,
+            Sent {
+                kind: item.kind,
+                bundle,
+                ack: item.ack,
+                copy: item.copy,
+                attempts: item.attempts + 1,
+            },
+        );
     }
     Ok(())
 }
@@ -843,9 +997,11 @@ async fn drive_stream<S>(
     shared: &Shared<S::QueryKinds>,
     options: &SendOptions,
     cursor: &mut Cursor,
+    retries: &mut VecDeque<Retry<S::QueryKinds>>,
 ) -> Result<(), Errors>
 where
     S: QuerySupport + Send + Sync + 'static,
+    S::QueryKinds: Clone,
     <S::ResponseKinds as Archive>::Archived:
         rkyv::Deserialize<S::ResponseKinds, rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>>,
     for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: rkyv::bytecheck::CheckBytes<
@@ -862,18 +1018,18 @@ where
     let (mut queries_tx, mut results_rx) = client.stream_unordered_with(options.clone())?;
     let mut buffer: Vec<S::QueryKinds> = Vec::with_capacity(shared.bundle);
     let mut staged = Vec::with_capacity(shared.bundle);
-    let mut outstanding: HashMap<usize, Sent> = HashMap::with_capacity(shared.in_flight);
+    let mut outstanding: HashMap<usize, Sent<S::QueryKinds>> = HashMap::with_capacity(shared.in_flight);
     let mut bundles: HashMap<u64, Bundle> = HashMap::new();
     // how long the stream has gone without an answer while owed one
     let mut silent = Duration::ZERO;
     let outcome: Result<(), Errors> = async {
         loop {
             // top the pipeline up while there is time and work left
-            while !cursor.spent
+            while (!cursor.spent || retries.front().is_some_and(|retry| retry.at <= Instant::now()))
                 && shared.clock.live()
                 && outstanding.len() + staged.len() < shared.in_flight
             {
-                match stage(shared, cursor, &mut buffer) {
+                match stage(shared, cursor, &mut buffer, retries) {
                     Ok(sent) => staged.push(sent),
                     Err(true) => {
                         // a feed still parsing: send what is staged, then wait for it
@@ -888,6 +1044,10 @@ where
                     }
                     Err(false) => cursor.spent = true,
                 }
+                // a spent worker with retries still waiting stops topping up until one is due
+                if cursor.spent && !retries.front().is_some_and(|retry| retry.at <= Instant::now()) {
+                    break;
+                }
                 if staged.len() >= shared.bundle {
                     flush(&mut queries_tx, &mut buffer, &mut staged, &mut outstanding, &mut bundles, cursor).await?;
                 }
@@ -896,8 +1056,12 @@ where
             flush(&mut queries_tx, &mut buffer, &mut staged, &mut outstanding, &mut bundles, cursor).await?;
             // stop once there is nothing to send and every answer is in
             if outstanding.is_empty() {
-                if cursor.spent || !shared.clock.live() {
+                if !shared.clock.live() || cursor.spent && retries.is_empty() {
                     return Ok(());
+                }
+                // a retry not yet due is waited for rather than spun on
+                if let Some(due) = retries.front().map(|retry| retry.at) {
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(due)).await;
                 }
                 continue;
             }
@@ -930,6 +1094,20 @@ where
             // a failure by its code, a read that found nothing as a miss, a success by its time
             let latency = bundles.get(&sent.bundle).map(|bundle| bundle.at.elapsed());
             let outcome = match response.error() {
+                // a failure that says to try again is sent again, while attempts remain
+                Some(error)
+                    if retriable(error.code()) && sent.copy.is_some() && sent.attempts <= shared.retries =>
+                {
+                    retries.push_back(Retry {
+                        query: sent.copy.clone().expect("a copy is kept"),
+                        kind: sent.kind,
+                        ack: sent.ack,
+                        attempts: sent.attempts,
+                        at: Instant::now() + backoff(sent.attempts),
+                    });
+                    shared.record_retry(cursor.worker, sent.kind);
+                    Outcome::Retried
+                }
                 Some(error) => Outcome::Failed {
                     code: format!("{:?}", error.code()),
                     message: error.msg().to_string(),
@@ -949,7 +1127,9 @@ where
             if let (Outcome::Ok(_), Some((table, seq))) = (&outcome, sent.ack) {
                 shared.tables[table].ack(seq);
             }
-            shared.record(cursor.worker, sent.kind, outcome);
+            if outcome != Outcome::Retried {
+                shared.record(cursor.worker, sent.kind, outcome);
+            }
             // the bundle is done when its last answer is in
             if let Some(bundle) = bundles.get_mut(&sent.bundle) {
                 bundle.remaining -= 1;
@@ -965,23 +1145,47 @@ where
     if let Err(error) = &outcome {
         let code = stream_code(error);
         let message = error.to_string();
+        // what the stream owed is sent again on the next one while attempts remain, and is
+        // recorded as failed otherwise
+        let now = Instant::now();
         for (_, sent) in outstanding.drain() {
-            shared.record(
-                cursor.worker,
-                sent.kind,
-                Outcome::Failed {
-                    code: code.clone(),
-                    message: message.clone(),
-                },
-            );
+            match sent.copy {
+                Some(query) if sent.attempts <= shared.retries => {
+                    retries.push_back(Retry {
+                        query,
+                        kind: sent.kind,
+                        ack: sent.ack,
+                        attempts: sent.attempts,
+                        at: now + backoff(sent.attempts),
+                    });
+                    shared.record_retry(cursor.worker, sent.kind);
+                }
+                _ => shared.record(
+                    cursor.worker,
+                    sent.kind,
+                    Outcome::Failed {
+                        code: code.clone(),
+                        message: message.clone(),
+                    },
+                ),
+            }
         }
-        // what was staged and never sent goes back to nobody: a read is simply not made, and
-        // an insert taken from a feed and never sent is recorded as failed so it is not lost
-        for (kind, ack) in staged.drain(..) {
-            if ack.is_some() {
+        // what was staged and never sent is sent on the next stream if it can be; a read with
+        // no copy is simply not made, and an insert with none is recorded as failed so it is
+        // not lost
+        for (item, query) in staged.drain(..).zip(buffer.drain(..)) {
+            if shared.retries > 0 {
+                retries.push_back(Retry {
+                    query,
+                    kind: item.kind,
+                    ack: item.ack,
+                    attempts: item.attempts,
+                    at: now,
+                });
+            } else if item.ack.is_some() {
                 shared.record(
                     cursor.worker,
-                    kind,
+                    item.kind,
                     Outcome::Failed {
                         code: code.clone(),
                         message: "never sent".to_string(),
@@ -999,4 +1203,30 @@ where
     })
     .await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{backoff, retriable, RETRY_CAP, RETRY_FIRST};
+    use shoal::shared::protocol::error::ErrorCode;
+    use std::time::Duration;
+
+    /// A retry waits longer each time, up to a cap
+    #[test]
+    fn a_retry_backs_off_to_a_cap() {
+        assert_eq!(backoff(1), RETRY_FIRST);
+        assert_eq!(backoff(2), RETRY_FIRST * 2);
+        assert_eq!(backoff(3), RETRY_FIRST * 4);
+        assert_eq!(backoff(40), RETRY_CAP);
+        assert!(RETRY_CAP <= Duration::from_secs(1));
+    }
+
+    /// Only a failure that says to try again is retried
+    #[test]
+    fn only_a_failure_that_says_to_try_again_is_retried() {
+        assert!(retriable(ErrorCode::OutcomeUnknown));
+        assert!(retriable(ErrorCode::NotLeader));
+        assert!(!retriable(ErrorCode::CorruptArchive));
+        assert!(!retriable(ErrorCode::WrongCluster));
+    }
 }

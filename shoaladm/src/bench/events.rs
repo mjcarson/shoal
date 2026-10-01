@@ -159,22 +159,32 @@ async fn bring_back(target: &str, unit: &str, restore: &Arc<Mutex<Restore>>) -> 
 
 /// Sample the cluster's largest replication lag once a second until it holds at zero
 ///
+/// Sampling starts once the returning node is up again: before it reports, the cluster's lag
+/// is the lag of the members that stayed, which was never the question.
+///
 /// # Arguments
 ///
 /// * `admin` - A client of a member that stayed up
 /// * `clock` - The arm's clock
+/// * `node` - The returning node's id
 /// * `deadline` - When to stop sampling, since the arm started
-async fn catch_up<S>(admin: &Arc<Shoal<S>>, clock: &ArmClock, deadline: Duration) -> Catchup
+async fn catch_up<S>(admin: &Arc<Shoal<S>>, clock: &ArmClock, node: &str, deadline: Duration) -> Catchup
 where
     S: QuerySupport + Send + Sync + 'static,
 {
-    // the lag every group reports, as the largest of them
+    // the lag every group reports, as the largest of them, once the node is back among them
     let mut samples = Vec::new();
     while clock.started().elapsed() < deadline {
         if let Ok(model) = crate::cluster::poll(admin).await {
-            samples.push((clock.elapsed_ms(), model.lag_max));
-            if converged(&samples).is_some() {
-                break;
+            let back = model
+                .members
+                .iter()
+                .any(|member| member.node == node && member.health.eq_ignore_ascii_case("up"));
+            if back {
+                samples.push((clock.elapsed_ms(), model.lag_max));
+                if converged(&samples).is_some() {
+                    break;
+                }
             }
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -359,7 +369,7 @@ where
     mark(run, clock, progress, "restart", Some(node));
     // and how long its groups took to catch up, within the arm and its timeout
     let deadline = clock.started().elapsed() + plan.timeout;
-    let catchup = catch_up(admin, clock, deadline).await;
+    let catchup = catch_up(admin, clock, plan.node_id.as_deref().unwrap_or_default(), deadline).await;
     if let Some(at) = catchup.converged_ms {
         let converged = Mark {
             kind: "converged".to_string(),

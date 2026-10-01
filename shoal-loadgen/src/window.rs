@@ -46,6 +46,8 @@ pub enum Outcome {
     Ok(Duration),
     /// It was a read that found no row
     Miss,
+    /// It failed in a way that says to try again, and is being sent again
+    Retried,
     /// It failed with this code and message
     Failed {
         /// The error code, or what ended the stream it was on
@@ -80,6 +82,8 @@ pub struct KindWindow {
     pub latency: Histogram<u64>,
     /// How many reads found no row
     pub misses: u64,
+    /// How many were sent again after a retriable failure
+    pub retried: u64,
     /// How many failed, by code
     pub errors: BTreeMap<String, u64>,
     /// The first message each code came with
@@ -92,6 +96,7 @@ impl Default for KindWindow {
         KindWindow {
             latency: histogram(),
             misses: 0,
+            retried: 0,
             errors: BTreeMap::new(),
             samples: BTreeMap::new(),
         }
@@ -110,6 +115,7 @@ impl KindWindow {
             .add(&other.latency)
             .expect("the histograms share their bounds");
         self.misses += other.misses;
+        self.retried += other.retried;
         for (code, count) in &other.errors {
             *self.errors.entry(code.clone()).or_default() += count;
         }
@@ -187,6 +193,7 @@ impl Window {
         match outcome {
             Outcome::Ok(latency) => record(&mut stats.latency, latency),
             Outcome::Miss => stats.misses += 1,
+            Outcome::Retried => stats.retried += 1,
             Outcome::Failed { code, message } => {
                 stats.samples.entry(code.clone()).or_insert(message);
                 *stats.errors.entry(code).or_default() += 1;
@@ -247,6 +254,7 @@ impl Window {
             per_sec: stats.latency.len() as f64 / secs,
             latency: LatencySummary::of(&stats.latency),
             misses: stats.misses,
+            retried: stats.retried,
             errors: stats.errors.clone(),
             samples: stats.samples.clone(),
         };
@@ -315,6 +323,9 @@ pub struct KindSummary {
     pub latency: LatencySummary,
     /// How many reads found no row
     pub misses: u64,
+    /// How many were sent again after a retriable failure
+    #[serde(default)]
+    pub retried: u64,
     /// How many failed, by code
     pub errors: BTreeMap<String, u64>,
     /// The first message each code came with
@@ -383,6 +394,9 @@ impl WindowSummary {
             );
             if stats.misses > 0 {
                 part.push_str(&format!(" misses {}", stats.misses));
+            }
+            if stats.retried > 0 {
+                part.push_str(&format!(" retried {}", stats.retried));
             }
             if !stats.errors.is_empty() {
                 part.push_str(&format!(" errors {:?}", stats.errors));

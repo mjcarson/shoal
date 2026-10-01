@@ -236,7 +236,7 @@ pub async fn orchestrate<S>(
 ) -> color_eyre::Result<PathBuf>
 where
     S: DatasetSupport + Send + Sync + 'static,
-    S::QueryKinds: Send + Sync + 'static,
+    S::QueryKinds: Send + Sync + Clone + 'static,
     <S::QueryKinds as Archive>::Archived: Send + Sync,
     S::ResponseKinds: Send + Sync,
     <S::ResponseKinds as Archive>::Archived: Send
@@ -368,7 +368,7 @@ async fn drive<S>(
 ) -> color_eyre::Result<()>
 where
     S: DatasetSupport + Send + Sync + 'static,
-    S::QueryKinds: Send + Sync + 'static,
+    S::QueryKinds: Send + Sync + Clone + 'static,
     <S::QueryKinds as Archive>::Archived: Send + Sync,
     S::ResponseKinds: Send + Sync,
     <S::ResponseKinds as Archive>::Archived: Send
@@ -904,7 +904,7 @@ where
 async fn check_preloaded<S>(driver: &Driver<S>, progress: &Progress) -> color_eyre::Result<()>
 where
     S: QuerySupport + Send + Sync + 'static,
-    S::QueryKinds: Send + Sync + 'static,
+    S::QueryKinds: Send + Sync + Clone + 'static,
     <S::QueryKinds as Archive>::Archived: Send + Sync,
     S::ResponseKinds: Send + Sync,
     <S::ResponseKinds as Archive>::Archived: Send
@@ -1116,7 +1116,7 @@ async fn run_arm<S>(
 ) -> color_eyre::Result<RunResult>
 where
     S: DatasetSupport + Send + Sync + 'static,
-    S::QueryKinds: Send + Sync + 'static,
+    S::QueryKinds: Send + Sync + Clone + 'static,
     <S::QueryKinds as Archive>::Archived: Send + Sync,
     S::ResponseKinds: Send + Sync,
     <S::ResponseKinds as Archive>::Archived: Send
@@ -1167,6 +1167,7 @@ where
         warmup,
         duration,
         on_exhaust: spec.on_exhaust,
+        retries: spec.retries,
         picker,
         inserts: arm.mix.writes(),
     };
@@ -1287,14 +1288,16 @@ fn result(
 ) -> RunResult {
     let warm = spec.warmup as usize;
     let seconds = &outcome.seconds;
-    // the measured time, cut short where the arm ended early
+    // the measured time: to the deadline, which an event may have moved past the arm's time,
+    // or to where the arm ended early
+    let due = outcome.deadline.as_secs_f64() - spec.warmup as f64;
     let measured_secs = match &outcome.ended_early {
-        Some(ended) => (ended.at_secs - spec.warmup as f64).clamp(0.001, spec.duration as f64),
-        None => spec.duration as f64,
+        Some(ended) => (ended.at_secs - spec.warmup as f64).clamp(0.001, due.max(0.001)),
+        None => due.max(0.001),
     };
     let measured = Window::sum(seconds.iter().skip(warm)).summary(Duration::from_secs_f64(measured_secs));
     let warmup = Window::sum(seconds.iter().take(warm)).summary(Duration::from_secs(spec.warmup.max(1)));
-    let end = warm + spec.duration as usize;
+    let end = outcome.deadline.as_secs() as usize;
     let series: Vec<SecondSample> = seconds
         .iter()
         .enumerate()
@@ -1374,10 +1377,14 @@ fn event_facts(arm: &ArmPlan, seconds: &[Window], from: usize, run: EventRun) ->
         };
         let before = window(cut.before.clone());
         let during = window(cut.during.clone());
-        facts.p99_ratio_permille = p99_ratio_permille(
-            before.read.latency.p99_ms.max(before.insert.latency.p99_ms),
-            during.read.latency.p99_ms.max(during.insert.latency.p99_ms),
-        );
+        // the kind the event hurt most: a slow insert must not hide reads that slowed more
+        facts.p99_ratio_permille = [
+            (before.read.latency.p99_ms, during.read.latency.p99_ms),
+            (before.insert.latency.p99_ms, during.insert.latency.p99_ms),
+        ]
+        .into_iter()
+        .filter_map(|(before, during)| p99_ratio_permille(before, during))
+        .max();
         facts.windows.insert("before".to_string(), before);
         facts.windows.insert("during".to_string(), during);
         facts.windows.insert("after".to_string(), window(cut.after.clone()));
