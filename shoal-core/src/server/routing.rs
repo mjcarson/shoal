@@ -15,7 +15,8 @@ use rkyv::vec::ArchivedVec;
 use crate::server::ring::Ring;
 use crate::server::shard::ShardInfo;
 use crate::shared::queries::{
-    ArchivedSortedQuery, ArchivedUnsortedQuery, SortedQuery, UnsortedQuery,
+    ArchivedSortedQuery, ArchivedSortedWrite, ArchivedUnsortedQuery, ArchivedUnsortedWrite,
+    SortedQuery, UnsortedQuery,
 };
 use crate::shared::responses::ResponseActionNames;
 use crate::shared::traits::{ShoalSortedTable, ShoalUnsortedTable};
@@ -131,6 +132,10 @@ impl<T: ShoalSortedTable + std::fmt::Debug> ShardRouting for SortedQuery<T> {
                 // an update names a single partition so it goes to a single shard
                 found.push((ring.find_shard(update.partition_key), self.clone()));
             }
+            SortedQuery::Conditional(conditional) => {
+                // a conditional write names a single partition so it goes to a single shard
+                found.push((ring.find_shard(conditional.partition_key()), self.clone()));
+            }
         }
     }
 }
@@ -161,6 +166,7 @@ impl<T: ShoalUnsortedTable + std::fmt::Debug> ShardRouting for UnsortedQuery<T> 
             }
             UnsortedQuery::Update(update) => ring.find_shard(update.partition_key),
             UnsortedQuery::Exists(exists) => ring.find_shard(exists.partition_key),
+            UnsortedQuery::Conditional(conditional) => ring.find_shard(conditional.partition_key()),
         };
         found.push((shard, self.clone()));
     }
@@ -288,6 +294,10 @@ impl<T: ShoalSortedTable + std::fmt::Debug> ArchivedShardRouting for SortedQuery
                 // an update names a single partition so it goes to a single shard
                 found.push((ring.find_shard(update.partition_key.to_native()), None));
             }
+            ArchivedSortedQuery::Conditional(conditional) => {
+                // a conditional write names a single partition so it goes to a single shard
+                found.push((ring.find_shard(conditional.partition_key()), None));
+            }
         }
     }
 
@@ -307,6 +317,7 @@ impl<T: ShoalSortedTable + std::fmt::Debug> ArchivedShardRouting for SortedQuery
                 vec![key.to_native()]
             }
             ArchivedSortedQuery::Update(update) => vec![update.partition_key.to_native()],
+            ArchivedSortedQuery::Conditional(conditional) => vec![conditional.partition_key()],
         }
     }
 
@@ -341,6 +352,7 @@ impl<T: ShoalSortedTable + std::fmt::Debug> ArchivedShardRouting for SortedQuery
             ArchivedSortedQuery::Insert { .. }
                 | ArchivedSortedQuery::Delete { .. }
                 | ArchivedSortedQuery::Update(_)
+                | ArchivedSortedQuery::Conditional(_)
         )
     }
 
@@ -352,6 +364,12 @@ impl<T: ShoalSortedTable + std::fmt::Debug> ArchivedShardRouting for SortedQuery
             ArchivedSortedQuery::Delete { .. } => ResponseActionNames::Delete,
             ArchivedSortedQuery::Update(_) => ResponseActionNames::Update,
             ArchivedSortedQuery::Exists(_) => ResponseActionNames::Exists,
+            // a conditional write answers as the write it guards when it is applied
+            ArchivedSortedQuery::Conditional(conditional) => match &conditional.write {
+                ArchivedSortedWrite::Insert { .. } => ResponseActionNames::Insert,
+                ArchivedSortedWrite::Delete { .. } => ResponseActionNames::Delete,
+                ArchivedSortedWrite::Update(_) => ResponseActionNames::Update,
+            },
         }
     }
 
@@ -404,6 +422,9 @@ impl<T: ShoalUnsortedTable + std::fmt::Debug> ArchivedShardRouting for UnsortedQ
             ArchivedUnsortedQuery::Exists(exists) => {
                 ring.find_shard(exists.partition_key.to_native())
             }
+            ArchivedUnsortedQuery::Conditional(conditional) => {
+                ring.find_shard(conditional.partition_key())
+            }
         };
         found.push((shard, None));
     }
@@ -423,6 +444,7 @@ impl<T: ShoalUnsortedTable + std::fmt::Debug> ArchivedShardRouting for UnsortedQ
             | ArchivedUnsortedQuery::Delete { key, .. } => vec![key.to_native()],
             ArchivedUnsortedQuery::Update(update) => vec![update.partition_key.to_native()],
             ArchivedUnsortedQuery::Exists(exists) => vec![exists.partition_key.to_native()],
+            ArchivedUnsortedQuery::Conditional(conditional) => vec![conditional.partition_key()],
         }
     }
 
@@ -453,6 +475,7 @@ impl<T: ShoalUnsortedTable + std::fmt::Debug> ArchivedShardRouting for UnsortedQ
             ArchivedUnsortedQuery::Insert { .. }
                 | ArchivedUnsortedQuery::Delete { .. }
                 | ArchivedUnsortedQuery::Update(_)
+                | ArchivedUnsortedQuery::Conditional(_)
         )
     }
 
@@ -464,6 +487,12 @@ impl<T: ShoalUnsortedTable + std::fmt::Debug> ArchivedShardRouting for UnsortedQ
             ArchivedUnsortedQuery::Delete { .. } => ResponseActionNames::Delete,
             ArchivedUnsortedQuery::Update(_) => ResponseActionNames::Update,
             ArchivedUnsortedQuery::Exists(_) => ResponseActionNames::Exists,
+            // a conditional write answers as the write it guards when it is applied
+            ArchivedUnsortedQuery::Conditional(conditional) => match &conditional.write {
+                ArchivedUnsortedWrite::Insert { .. } => ResponseActionNames::Insert,
+                ArchivedUnsortedWrite::Delete { .. } => ResponseActionNames::Delete,
+                ArchivedUnsortedWrite::Update(_) => ResponseActionNames::Update,
+            },
         }
     }
 

@@ -226,6 +226,19 @@ pub trait QuerySupport: 'static + Sized {
         archived: &<Self::ResponseKinds as Archive>::Archived,
     ) -> Option<&ArchivedResponseError>;
 
+    /// Get why a conditional write was refused, if it was
+    ///
+    /// Like [`QuerySupport::error`], this answers whatever the caller's options are: a refusal
+    /// is a definite answer that the write was not applied, and why
+    /// ([F68](../../../docs/src/features/conditional-writes.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The archived response to get the refusal from
+    fn refusal(
+        archived: &<Self::ResponseKinds as Archive>::Archived,
+    ) -> Option<crate::shared::queries::ConditionRefusal>;
+
     /// Parse a SHQL (Shoal Query Language) string into a query
     ///
     /// SHQL supports SQL-like SELECT queries for reading data from tables.
@@ -432,7 +445,22 @@ pub trait ShoalTableSupport:
     type UpdateData: RkyvSupport + std::fmt::Debug + Clone;
 
     /// Any filters to apply when listing/crawling rows
-    type Filters: rkyv::Archive + std::fmt::Debug + Clone;
+    ///
+    /// A conditional write carries these through a tablet group's log and every replica
+    /// validates and decodes them at apply, so they are archivable, checkable and decodable
+    /// wherever a table is ([F68](../../../docs/src/features/conditional-writes.md)).
+    type Filters: RkyvSupport<
+            Archived: for<'a> rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            > + rkyv::Deserialize<Self::Filters, Strategy<Pool, rkyv::rancor::Error>>,
+        > + std::fmt::Debug
+        + Clone;
 
     /// The subsets of this tables rows that a get can ask to be answered with
     ///

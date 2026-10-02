@@ -27,8 +27,11 @@ that was made before the page was written.
 
 ### The wire is negotiated, not matched
 
-~~`PROTOCOL_VERSION` is 5~~ `PROTOCOL_VERSION` is 6 since [#155](../appendix/resolved/restore-retry.md),
-and `MIN_PEER_VERSION` is 4 (`shoal-proto/src/shared/protocol.rs`). Version 6 moved no frame's
+~~`PROTOCOL_VERSION` is 5~~ ~~`PROTOCOL_VERSION` is 6 since [#155](../appendix/resolved/restore-retry.md)~~
+`PROTOCOL_VERSION` is 7 since [F68](conditional-writes.md), whose conditional write is refused
+until 7 is activated (`CONDITIONAL_WIRE_VERSION`): a body at 7 is encoded as at 6, but a replica at
+6 does not know the conditional intent and would refuse a command its peers applied. 6 came with
+[#155](../appendix/resolved/restore-retry.md), and `MIN_PEER_VERSION` is 4 (`shoal-proto/src/shared/protocol.rs`). Version 6 moved no frame's
 encoding: a body at 6 is encoded as at 5. It exists because the control log gained
 `RetryRestore` and a group's restore record gained `failed_in` and `generation`, which a replica
 at 5 would refuse to decode or drop, so the command is refused until 6 is activated

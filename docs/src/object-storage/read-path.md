@@ -3,8 +3,8 @@
 ## Context
 
 Objects are seekable (R12): a reader asks for any range of an object of any size and should
-pay for that range. Under replication that is one read from one device. Under an erasure
-code it is one read from one device as well, provided the code is systematic and nothing is
+pay for that range. Under replication that is one read from one slice. Under an erasure
+code it is one read from one slice as well, provided the code is systematic and nothing is
 wrong; when a holder is down, stale or lying, it is a decode.
 
 A reader also shares the stripe with writers, and writes are in place. This page is what a
@@ -42,7 +42,7 @@ sequenceDiagram
     Note over N: inline? answer from the row.<br/>else stripes = offset / stripe size ...
     N->>G: one get of every stripe key in the range
     G-->>N: for each: its row or no row,<br/>and the placement group's generation
-    N->>H: for each piece the range falls in:<br/>read(range, the label the row names)
+    N->>H: for each stripe chunk the range falls in:<br/>read(range, the label the row names)
     H-->>N: verified bytes, or "I hold another label"
     N-->>C: ranged frames, in order
 ```
@@ -53,9 +53,9 @@ sequenceDiagram
    index. One get names every stripe key the range covers. Most are misses for an object
    that was never patched, and a miss is a lookup. Each answer carries the placement
    group's generation ([S5](placement.md#generations)).
-3. **The pieces.** For a replicated stripe, any one piece the row calls current. For an
-   erasure coded one, the data pieces the range falls in. A piece on this node's own device
-   is preferred, then the nearest.
+3. **The stripe chunks.** For a replicated stripe, any one chunk the row calls current. For
+   an erasure coded one, the data chunks the range falls in. A chunk on one of this node's own
+   slices is preferred, then the nearest.
 4. **The read.** Each holder is asked for its part of the range **at the label the row
    names**, and answers with verified bytes or with the label it holds instead
    ([S6](device-store.md#reads)).
@@ -78,46 +78,46 @@ sequenceDiagram
 No level ever returns bytes of a write that did not commit. A holder serves staged bytes
 only to a reader whose label names them, and a label comes from a committed row.
 
-### A piece under another label
+### A stripe chunk under another label
 
 A holder may hold a label the reader did not ask for.
 
 | The holder's label is | It means | The reader |
 | --- | --- | --- |
-| Older than the row's | The piece is stale: its device missed a write | Treats it as missing and reads other pieces |
+| Older than the row's | The chunk is stale: its slice missed a write | Treats it as missing and reads other chunks |
 | Newer than the row's | The reader's row is stale: a write committed since | Reads the row again, forward, and asks again |
 | Unknown to any row state it reads | A write staged and not committed | Is never shown it |
 
 The second row is the rule that keeps [P10](contract.md#the-contract). Accepting the newer
-piece would be harmless for a replicated stripe, whose every piece is a whole state. For an
-erasure coded one it would mean combining a piece from one write with pieces from before
-it. One rule serves both: **a reader moves its row forward and never accepts a piece ahead
+chunk would be harmless for a replicated stripe, whose every chunk is a whole state. For an
+erasure coded one it would mean combining a chunk from one write with chunks from before
+it. One rule serves both: **a reader moves its row forward and never accepts a chunk ahead
 of it.**
 
 A stripe written continuously can make a reader try again more than once, since an apply in
 place replaces what the reader was about to ask for. The retries are bounded and the read
-then fails by name. Whether a holder should keep a piece's previous state for a moment, so
+then fails by name. Whether a holder should keep a chunk's previous state for a moment, so
 that a reader in flight can finish, is not designed and is noted under
 [What it costs](#what-it-costs).
 
 ### Degraded reads
 
-When a piece the read wants is stale, missing or fails a checksum:
+When a stripe chunk the read wants is stale, missing or fails a checksum:
 
 - **replicated**: read another copy;
-- **erasure coded**: read any `k` current pieces of the codewords the range touches and
+- **erasure coded**: read any `k` current chunks of the unit rows the range touches and
   decode those units alone ([S8](erasure-coding.md#decoding-and-rebuilding)).
 
 A unit that fails its checksum is treated as missing and reported, so that a scrub does not
-have to find it again ([S11](scrub.md)). With fewer than `k` current pieces the read of that
+have to find it again ([S11](scrub.md)). With fewer than `k` current chunks the read of that
 stripe fails by name; the other stripes of the object, and every other object, read as they
 did.
 
 ### Holes and ends
 
-A stripe inside the object's size with no row and no pieces is zeros. So is one under a
+A stripe inside the object's size with no row and no chunks is zeros. So is one under a
 truncate's floor ([S3](objects.md#size-holes-and-truncate)). A range past the size ends
-there. None of the three reads a device.
+there. None of the three reads a slice.
 
 ### Streams
 
@@ -129,21 +129,21 @@ device reading ahead is the difference between one seek a stripe and one a unit.
 ### Where the bytes travel
 
 From the holder to the coordinating shard, and from there to the client: two crossings,
-since a client does not choose its node and holds no pool map. A client that read pieces
-itself would save one, and waits on [D7](../direction/shard-aware-routing.md)
+since a client does not choose its node and holds no pool map. A client that read stripe
+chunks itself would save one, and waits on [D7](../direction/shard-aware-routing.md)
 ([Q15](contract.md#questions-to-answer)).
 
 ## Alternatives rejected
 
-**A quorum of holders.** Reading `R` pieces and taking the newest is what a store without an
-arbiter does. Here the row is the arbiter, so one piece at the row's label is as good as
-all of them, and a quorum would cost reads the row makes unnecessary.
+**A quorum of holders.** Reading `R` stripe chunks and taking the newest is what a store
+without an arbiter does. Here the row is the arbiter, so one chunk at the row's label is as
+good as all of them, and a quorum would cost reads the row makes unnecessary.
 
 **Every read through the stripe's leader.** It serializes readers with writers and removes
 the retry. It adds a hop to every read and makes a leader's node carry a pool's whole read
 load.
 
-**A replicated piece trusted without its row.** One copy is a consistent state by itself,
+**A replicated stripe chunk trusted without its row.** One copy is a consistent state by itself,
 so the row could be skipped. Then a stale copy is served with nothing to say how stale, and
 a truncate or a replace is invisible to the reader. The row is one cheap lookup.
 
@@ -158,24 +158,24 @@ tablets. [P6](../distributed/protocol.md#the-contract) already declines that for
 - **Retries under contention**, bounded, and a refusal past the bound. A reader of a stripe
   that is being rewritten continuously can fail where a reader of a row would be served a
   stale row. That is a real difference from tables and it is deliberate for now: the
-  alternative is to keep two states of a piece on a device.
+  alternative is to keep two states of a chunk on a slice.
 - **A unit read whole for a byte** ([S6](device-store.md#what-it-costs)).
 
 ## What it breaks
 
 - "A read is answered from a shard's memory or its archives": most of an object read comes
-  from devices the shard does not own.
+  from slices the shard does not own.
 - "An answer is one frame": a read's answer is many ([S12](wire-and-client.md)).
 - "A stale read is still an answer": see the contention item above.
 
 ## Invariants to uphold
 
-- A reader asks a holder for a label and combines only pieces that answered with the labels
+- A reader asks a holder for a label and combines only chunks that answered with the labels
   one row state names.
-- A reader never accepts a piece newer than its row. It moves the row forward.
+- A reader never accepts a chunk newer than its row. It moves the row forward.
 - No unit that fails its checksum reaches a client or a decoder.
 - A holder serves staged bytes only for a label a reader names.
-- A hole is zeros, and reading one touches no device.
+- A hole is zeros, and reading one touches no slice.
 - A stripe that cannot be read fails alone.
 
 ## Prerequisites
@@ -186,7 +186,7 @@ tablets. [P6](../distributed/protocol.md#the-contract) already declines that for
 ## How it would be measured
 
 The read arms of [S15](performance.md): time to the first byte and bytes a second for a
-whole object, for a range inside one piece, and for a range across pieces; each with every
+whole object, for a range inside one stripe chunk, and for a range across chunks; each with every
 holder up and with one down; each on an SSD pool and, once a disk is fitted, a rotational
 one. The lookup for each stripe is priced by [X10](spikes.md#x10-what-a-stripe-row-costs)
 and the stream by [X11](spikes.md#x11-streamed-bodies).
@@ -197,10 +197,10 @@ and the stream by [X11](spikes.md#x11-streamed-bodies).
 | --- | --- | --- |
 | `one_reads_never_mix_and_move_forward` | A reader racing writes to a stripe returns one committed state of it, never bytes of two, and never an older state than its row | M15 |
 | `strong_read_observes_prior_acknowledged_write` | A strong read begun after a write's acknowledgement returns that write or a later one, through a leader change | M15 |
-| `stale_piece_is_never_served_as_current` | A device that missed a write is read around, and its piece is never returned | M15 |
-| `range_read_touches_only_the_pieces_it_needs` | A range inside one data piece of a healthy k+m stripe reads one device and decodes nothing | M18 |
+| `stale_chunk_is_never_served_as_current` | A slice that missed a write is read around, and its chunk is never returned | M15 |
+| `range_read_touches_only_the_chunks_it_needs` | A range inside one data chunk of a healthy k+m stripe reads one slice and decodes nothing | M18 |
 | `degraded_read_decodes_only_what_it_needs` | With a holder down, a range read decodes the units it covers and no others | M18 |
-| `unreadable_stripe_fails_alone` | With fewer than `k` current pieces of one stripe, that range fails by name and every other range of the object reads | M18 |
+| `unreadable_stripe_fails_alone` | With fewer than `k` current chunks of one stripe, that range fails by name and every other range of the object reads | M18 |
 
 ## Related
 

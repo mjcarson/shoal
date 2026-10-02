@@ -457,6 +457,19 @@ costs 17 bytes, answers `Get(None)` / `Exists(false)` / `Delete(false)` / `Updat
 without touching disk, and is evicted once compaction has pruned the archive entry it shadows
 ([Partitions](partitions.md#tombstones)).
 
+### Conditional writes
+
+Since [F68](../features/conditional-writes.md), an insert, a delete or an update can carry a
+`WriteCondition`: `Absent`, or `Matches` the table's own filter. A standalone table's
+`conditional` finds the row the way a delete does: a partition that is not resident parks on a
+read, and a sorted partition that lacks the row with `check_disk` set reads first. It then
+judges the condition with `WriteCondition::judge` or `judge_archived`, where the row lies. A
+refusal is answered at once, `Refused(RowExists | RowMissing | RowMismatch)`, and commits
+nothing. A condition that holds hands the plain write to `insert`, `delete` or `update`, so the
+intent log holds the write decided on, never the condition. A cluster node judges the same
+condition at apply instead, in committed order, and the compactor judges it again when it folds
+the command's frame. A sorted batch holding one is never written as a fragment.
+
 ## exists
 
 `exists` short-circuits on the first matching row rather than collecting

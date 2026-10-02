@@ -242,7 +242,7 @@ left.
   [C4](../distributed/tablet-map.md#how-a-map-reaches-a-shard-and-a-client) is step 1 of this page, built for servers
   and clients at once
 - [Object Storage](../object-storage/overview.md) — a second thing a routing client would be for:
-  one that read and wrote pieces itself would save one of the two network crossings every object
+  one that read and wrote stripe chunks itself would save one of the two network crossings every object
   byte makes ([S9](../object-storage/read-path.md#where-the-bytes-travel)). That plan lists this
   page as optional, has a node coordinate every operation, and keeps this page's rule that the hop
   is measured before it is removed ([S1](../object-storage/prerequisites.md#optional))

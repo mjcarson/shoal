@@ -41,7 +41,8 @@ use uuid::Uuid;
 
 use crate::server::replication::QueryCounters;
 use crate::server::stage_profile::Stamp;
-use crate::shared::protocol::stats::QUERY_OPS;
+use crate::shared::protocol::stats::{query_op_index, QUERY_OPS};
+use crate::shared::responses::ResponseActionNames;
 
 /// How many kinds answers are counted by
 pub const OPS: usize = QUERY_OPS.len();
@@ -298,8 +299,13 @@ impl QueryMeter {
         bytes: usize,
         now: Stamp,
     ) {
-        // every answer is counted, timed or not
-        let op = op.min(OPS - 1);
+        // every answer is counted, timed or not, and a kind this build does not know is a
+        // failure: `refused` follows `error` since F68, so the last kind is no longer the one
+        let op = if op < OPS {
+            op
+        } else {
+            query_op_index(&ResponseActionNames::Error)
+        };
         bump(&self.answers[op], 1);
         bump(
             &self.bytes_out[op],
@@ -492,9 +498,10 @@ mod tests {
         meter.answered(other, bundle, 0, 5, 12, after(base, 70));
         assert_eq!(meter.timing(), 0);
         assert_eq!(meter.counters().answers[5], 1);
-        // a kind past the last is counted as the last
+        // a kind past the last is counted as a failure, not as whichever kind is last
         meter.answered(other, bundle, 0, 99, 0, base);
         assert_eq!(meter.counters().answers[5], 2);
+        assert_eq!(meter.counters().answers[6], 0);
     }
 
     /// What recording costs, printed rather than asserted: run by hand on the bench host

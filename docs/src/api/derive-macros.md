@@ -100,6 +100,8 @@ Movie
     ├── ShoalTableSupport        — is_filtered / is_filtered_archived
     ├── ShoalSortedTable | ShoalUnsortedTable
     ├── ShoalProjection          — the identity projection of the row into itself
+    ├── ConditionalWrite         — if_matches, on the row, MovieUpdate and MovieDelete (F68)
+    ├── ConditionalInsert        — if_absent, on the row alone (F68)
     └── FromShoal<DbClient>      — response downcasting
 ```
 
@@ -237,6 +239,17 @@ of `UpdateData` matters because update intents are written for every update and 
 already implied by the partition being written to.
 
 Update fields are wrapped in `Option`, so an update carries only what it changes.
+
+### Conditional writes
+
+Since [F68](../features/conditional-writes.md) both table derives implement
+`ConditionalWrite` for the row (an insert), `MovieUpdate` and `MovieDelete`, and
+`ConditionalInsert` for the row alone. `write.if_matches(MovieFilter { .. })` applies the write
+only if a row is stored under its key and passes the filter. `movie.if_absent()` inserts only if
+none is. `#[shoal::db]` converts the resulting `Conditional<Q>` into the table's
+`Conditional` query. A condition can name only `#[shoal(filter)]` fields, so a version column a
+writer compares against is marked `#[shoal(filter, update)]`. Since F68 every `Filter` also
+implements `RkyvSupport`, because a condition carries it through a tablet group's log.
 
 ### Filter
 

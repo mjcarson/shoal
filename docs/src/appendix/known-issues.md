@@ -96,7 +96,7 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ ~~**1,674 tests**~~ ~~**1,685 tests**~~ ~~**1,691 tests**~~ ~~**1,715 tests**~~ ~~**1,725 tests**~~ ~~**1,726 tests**~~ ~~**1,728 tests**~~ ~~**1,782 tests**~~ ~~**1,785 tests**~~ ~~**1,790 tests** since [F65](../features/query-figures-home-tab.md), eleven ignored~~ ~~**1,892 tests** since [F67](../features/bench-run-wizard.md)~~ **1,894 tests** since [Resolved #201](resolved/attached-read-order.md), twelve ignored (F66 took it to 1,873 without moving this line), plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ ~~**1,674 tests**~~ ~~**1,685 tests**~~ ~~**1,691 tests**~~ ~~**1,715 tests**~~ ~~**1,725 tests**~~ ~~**1,726 tests**~~ ~~**1,728 tests**~~ ~~**1,782 tests**~~ ~~**1,785 tests**~~ ~~**1,790 tests** since [F65](../features/query-figures-home-tab.md), eleven ignored~~ ~~**1,892 tests** since [F67](../features/bench-run-wizard.md)~~ ~~**1,894 tests** since [Resolved #201](resolved/attached-read-order.md)~~ **1,911 tests** since [F68](../features/conditional-writes.md), twelve ignored (F66 took it to 1,873 without moving this line), plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
@@ -930,11 +930,11 @@ directory is still claimed, which keeps first start working. Note this cannot be
 check — [item 45](resolved/storage-marker-format.md) covers a marker that is *wrong*, and this is
 one that is *absent*.
 
-**Must be fixed before object storage's M14.** A pool's device would be claimed the way a storage
-root is, and the case this item calls disposable becomes the ordinary one: a failed disk replaced
+**Must be fixed before object storage's M14.** A storage pool's device, and each slice of it,
+would be claimed the way a storage root is, and the case this item calls disposable becomes the ordinary one: a failed disk replaced
 by a new one at the same mount path is an empty directory, and a directory with files and no
 marker is somebody's data. The fix direction above is the claim with three outcomes that
-[S4](../object-storage/pools-and-devices.md#a-device-has-an-identity) needs, and
+[S4](../object-storage/pools-and-devices.md#a-device-has-slices) needs, and
 [S1](../object-storage/prerequisites.md#required) lists this item as required for that reason.
 
 ### 47. A torn tail on the active log is counted as data loss

@@ -83,7 +83,7 @@ use crate::{
             read::{ReadOptions, SessionToken, CLIENT_CAP_READ_OPTIONS, READ_OPTIONS_HEAD_LEN},
             stats::query_op_index,
             trace::{TraceContext, TRACE_CONTEXT_LEN},
-            Flags, Header, MessageType, ProtocolError,
+            Flags, Header, MessageType, ProtocolError, CONDITIONAL_WIRE_VERSION,
         },
         queries::{ArchivedQueries, Queries},
         responses::ResponseActionNames,
@@ -3243,6 +3243,25 @@ where
                         .await;
                 }
             };
+            // a conditional write is judged at apply on every replica, so it is refused until
+            // the cluster has activated the wire version every member that judges one speaks:
+            // a replica from before it would refuse the command its peers applied, and the
+            // copies would no longer agree ([F68](../../../docs/src/features/conditional-writes.md))
+            if command.is_some() && D::is_conditional(&query) {
+                // read the wire version the installed map says the cluster activated
+                let activated = self.map.get().activated_wire;
+                if activated < CONDITIONAL_WIRE_VERSION {
+                    let error = crate::shared::responses::ResponseError::new(
+                        ErrorCode::WireVersion,
+                        format!(
+                            "a conditional write needs wire version {CONDITIONAL_WIRE_VERSION} activated, and this cluster has activated {activated}"
+                        ),
+                    );
+                    return self
+                        .answer_read_failure(meta, query, span, gathered_meta, error)
+                        .await;
+                }
+            }
             if let Some((table, key, payload)) = command {
                 // a write names no partitions of its own, so its tablet is judged from its key
                 // truncation cannot happen: a tablet id is twelve bits

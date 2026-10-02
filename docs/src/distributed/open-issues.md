@@ -107,7 +107,7 @@ the complete record; the ones an operator meets first:
   ([O55](../appendix/optimizations.md#o55-a-learner-inside-the-retained-log-is-fed-a-snapshot-when-the-leaders-cached-cut-is-newer-than-its-purge-point));
   a rehome that serves while it runs ([O59](../appendix/optimizations.md#o59-the-rehome-runs-on-one-core-and-blocks-the-start)).
 - A failure domain on a member, so voters and copies can be spread over one ([F46](../features/capacity-rebalancing.md)).
-  The object storage plan requires it before any piece is placed
+  The object storage plan requires it before any stripe chunk is placed
   ([S1](../object-storage/prerequisites.md#required)).
 - A frame-class fake transport in the fixture; disk-full and torn-archive-write faults
   ([F36](../features/cluster-harness.md), [F44](../features/repair.md)). The two storage

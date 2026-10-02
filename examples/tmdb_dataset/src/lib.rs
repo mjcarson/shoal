@@ -16,6 +16,7 @@
 //! this repository fetches it.
 
 pub mod bench;
+pub mod contend;
 pub mod load;
 
 use deepsize2::DeepSizeOf;

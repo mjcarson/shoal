@@ -1830,7 +1830,7 @@ mod tests {
         assert!(full.contains("ops/s by kind · last 5m · space f back"), "{full}");
         let ops = crate::cluster::stats::metrics::index_of("ops_by_kind").expect("the kinds metric");
         let kinds: Vec<String> = summary_rows(&screen, ops, now).into_iter().map(|row| row.name).collect();
-        assert_eq!(kinds, ["get", "exists", "insert", "update", "delete", "error"]);
+        assert_eq!(kinds, ["get", "exists", "insert", "update", "delete", "error", "refused"]);
         assert!(full.contains("exists"), "{full}");
         // and a wait nobody timed is not known rather than a number
         let p99 = crate::cluster::stats::metrics::index_of("p99").expect("p99");

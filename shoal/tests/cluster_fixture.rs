@@ -3293,11 +3293,10 @@ async fn table_ids_and_streams_are_stable_across_restart() -> Result<(), Fixture
         .into_iter()
         .map(|(name, id)| (name.to_string(), id.0))
         .collect();
-    assert_eq!(derived.len(), 2);
-    assert_ne!(
-        derived[0].1, derived[1].1,
-        "two tables share an id: {derived:?}"
-    );
+    // three since F68 appended the sorted table, every one apart
+    assert_eq!(derived.len(), 3);
+    let distinct: std::collections::HashSet<u64> = derived.iter().map(|(_, id)| *id).collect();
+    assert_eq!(distinct.len(), derived.len(), "two tables share an id: {derived:?}");
     let committed =
         |cluster: &mut Cluster, id: usize| -> Result<Vec<(String, u64)>, FixtureError> {
             let map = cluster.node_mut(id).command("MAP")?;
@@ -9205,7 +9204,7 @@ async fn volatile_replication_uses_common_encoding() -> Result<(), FixtureError>
     for shard in view["shards"].as_array().into_iter().flatten() {
         for group in shard["groups"].as_array().into_iter().flatten() {
             match (group["table_name"].as_str(), group["volatile"].as_bool()) {
-                (Some("Row"), Some(true)) => volatile += 1,
+                (Some("Row" | "Entry"), Some(true)) => volatile += 1,
                 (Some("Note"), Some(false)) => durable += 1,
                 other => panic!("a group is labelled wrongly: {other:?} in {group}"),
             }
@@ -12488,7 +12487,8 @@ async fn move_preserves_write_after_zero_lag_report() -> Result<(), FixtureError
     assert!(
         group_record
             .as_object()
-            .is_some_and(|groups| groups.len() == 2),
+            // one group a table: three tables since F68 appended the sorted one
+            .is_some_and(|groups| groups.len() == 3),
         "{record}"
     );
     let map = cluster.node_mut(3).command("MAP")?;
@@ -20855,6 +20855,434 @@ async fn a_copy_moved_in_after_a_restore_holds_the_restored_rows() -> Result<(),
         missing.len(),
         moved.len(),
         &missing[..missing.len().min(3)]
+    );
+    Ok(())
+}
+
+/// Activate this build's newest wire version and wait for every node to install it
+///
+/// A fresh cluster runs at the floor until an operator activates a newer version, and a
+/// conditional write is refused below [`CONDITIONAL_WIRE_VERSION`](shoal::shared::protocol::CONDITIONAL_WIRE_VERSION)
+/// ([F68](../../docs/src/features/conditional-writes.md)).
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster, every node of which speaks the newest version
+fn activate_newest(cluster: &mut Cluster) -> Result<(), FixtureError> {
+    use shoal::shared::protocol::PROTOCOL_VERSION;
+    // the activation is committed through the control group
+    let activated = cluster
+        .node_mut(0)
+        .command(&format!("ACTIVATE {PROTOCOL_VERSION}"))?;
+    assert!(activated["ok"]["version"].is_number(), "{activated}");
+    // and every node's map carries it before a write is judged against it
+    for node in 0..cluster.len() {
+        wait_activated(cluster, node, PROTOCOL_VERSION, Duration::from_secs(30))?;
+    }
+    Ok(())
+}
+
+/// Send one conditional write and say whether it was applied, or why it was refused
+///
+/// Any other answer is returned as the error it is, so a refusal can never hide a failure.
+///
+/// # Arguments
+///
+/// * `client` - The client to send with
+/// * `query` - The conditional write
+async fn conditional_outcome<
+    Q: Into<<TestDbClient as shoal::shared::traits::QuerySupport>::QueryKinds>,
+>(
+    client: &Shoal<TestDbClient>,
+    query: Q,
+) -> Result<Option<shoal::shared::queries::ConditionRefusal>, shoal::client::Errors> {
+    // a refused write fails its response by name, with why
+    match client.send_one(query).await {
+        Ok(_) => Ok(None),
+        Err(shoal::client::Errors::Refused { reason, .. }) => Ok(Some(reason)),
+        Err(error) => Err(error),
+    }
+}
+
+/// Conditional writes raced through every node are judged in committed order (F68)
+///
+/// Three writers, one through each node, each read a note's counter through their own node -
+/// often stale, since a read at `One` is served by whichever copy answers - and replace it with
+/// the next value only if it still holds the one they read. Every write is answered applied or
+/// refused by name; once the copies agree, every note holds exactly as many increments as were
+/// applied to it, read through every node. On the sorted table the three race an insert of one
+/// row expecting nothing and then a delete of it expecting a row: exactly one of each is
+/// applied, the rest refused for the reason the committed order gives them
+/// ([F68](../../docs/src/features/conditional-writes.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn conditional_writes_race_in_committed_order() -> Result<(), FixtureError> {
+    use cluster::schema::{Entry, EntryDelete, EntryFilter, NoteFilter};
+    use shoal::shared::queries::{ConditionRefusal, ConditionalInsert, ConditionalWrite};
+    use std::collections::HashMap;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .start()
+        .await?;
+    activate_newest(&mut cluster)?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let keys: Vec<u64> = (31_000..31_004).collect();
+    let addrs: Vec<String> = (0..3)
+        .map(|node| cluster.node(node).endpoints.client.to_string())
+        .collect();
+    // every counter starts at zero, on every copy
+    for key in &keys {
+        write_note(&addrs[0], *key, "0").await.map_err(ok)?;
+    }
+    for addr in &addrs {
+        for key in &keys {
+            wait_note(addr, *key, Some("0"), Duration::from_secs(10)).await?;
+        }
+    }
+    // three writers incrementing every counter by compare and swap
+    let mut tasks = Vec::new();
+    for addr in addrs.clone() {
+        let keys = keys.clone();
+        tasks.push(tokio::spawn(async move {
+            let client = Shoal::<TestDbClient>::new(&addr).await?;
+            let mut applied: HashMap<u64, u64> = HashMap::new();
+            let mut refused = 0u64;
+            for _ in 0..15 {
+                for key in &keys {
+                    // read the counter as this node has it
+                    let seen = read_note(&addr, *key)
+                        .await?
+                        .expect("a counter is never deleted");
+                    let next = seen.parse::<u64>().expect("a counter") + 1;
+                    // and replace it only if it still holds what was read
+                    let write = Note {
+                        key: *key,
+                        text: next.to_string(),
+                    }
+                    .if_matches(NoteFilter {
+                        text: Some(vec![seen]),
+                    });
+                    match conditional_outcome(&client, write).await? {
+                        None => *applied.entry(*key).or_default() += 1,
+                        Some(ConditionRefusal::RowMismatch) => refused += 1,
+                        Some(other) => panic!("a counter was refused as {other:?}"),
+                    }
+                }
+            }
+            Ok::<_, shoal::client::Errors>((applied, refused))
+        }));
+    }
+    let mut applied: HashMap<u64, u64> = HashMap::new();
+    let mut refused = 0u64;
+    for task in tasks {
+        let (theirs, their_refusals) = task.await.expect("a writer panicked").map_err(ok)?;
+        for (key, count) in theirs {
+            *applied.entry(key).or_default() += count;
+        }
+        refused += their_refusals;
+    }
+    // every attempt was answered one way or the other, and some were refused: three writers
+    // reading through three copies are bound to read a value another already moved
+    let attempts: u64 = applied.values().sum::<u64>() + refused;
+    assert_eq!(attempts, 3 * 15 * keys.len() as u64);
+    assert!(
+        refused > 0,
+        "no write was ever refused, so nothing was raced"
+    );
+    // the copies agree, and every counter is exactly the increments applied to it
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for addr in &addrs {
+        for key in &keys {
+            let expected = applied.get(key).copied().unwrap_or_default().to_string();
+            assert_eq!(
+                read_note(addr, *key).await.map_err(ok)?,
+                Some(expected),
+                "note {key} through {addr}"
+            );
+        }
+    }
+    // on the sorted table, each round's row is inserted by one writer and deleted by one
+    for phase in ["insert", "delete"] {
+        let mut tasks = Vec::new();
+        for addr in addrs.clone() {
+            tasks.push(tokio::spawn(async move {
+                let client = Shoal::<TestDbClient>::new(&addr).await?;
+                let mut outcomes = Vec::new();
+                for name in 0..10u64 {
+                    let outcome = if phase == "insert" {
+                        let row = Entry {
+                            bucket: 7,
+                            name: name.to_string(),
+                            version: 1,
+                        };
+                        conditional_outcome(&client, row.if_absent()).await?
+                    } else {
+                        let delete = EntryDelete::new(7, name.to_string());
+                        conditional_outcome(&client, delete.if_matches(EntryFilter::default()))
+                            .await?
+                    };
+                    outcomes.push((name, outcome));
+                }
+                Ok::<_, shoal::client::Errors>(outcomes)
+            }));
+        }
+        let mut by_name: HashMap<u64, Vec<Option<ConditionRefusal>>> = HashMap::new();
+        for task in tasks {
+            for (name, outcome) in task.await.expect("a writer panicked").map_err(ok)? {
+                by_name.entry(name).or_default().push(outcome);
+            }
+        }
+        // one write of each row applied, and the other two refused as the order says
+        let lost = if phase == "insert" {
+            ConditionRefusal::RowExists
+        } else {
+            ConditionRefusal::RowMissing
+        };
+        for (name, outcomes) in &by_name {
+            let won = outcomes.iter().filter(|outcome| outcome.is_none()).count();
+            assert_eq!(won, 1, "{phase} of row {name}: {outcomes:?}");
+            assert!(
+                outcomes.iter().flatten().all(|reason| *reason == lost),
+                "{phase} of row {name}: {outcomes:?}"
+            );
+        }
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Entry", Duration::from_secs(30))?;
+    Ok(())
+}
+
+/// A refused conditional write retried under its identity is refused again (F68)
+///
+/// The refusal is the command's committed result, remembered with its identity like any
+/// other. A note at `v1` refuses a write expecting `v0`; the note is then written to `v0`, which
+/// the condition would now hold against, and the same write under the same identity is
+/// answered with the refusal it was first given rather than applied
+/// ([F68](../../docs/src/features/conditional-writes.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn refused_write_retry_is_answered_the_same() -> Result<(), FixtureError> {
+    use cluster::schema::NoteFilter;
+    use shoal::client::SendOptions;
+    use shoal::shared::queries::{ConditionRefusal, ConditionalWrite};
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .start()
+        .await?;
+    activate_newest(&mut cluster)?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr).await.map_err(ok)?;
+    let key = 32_000u64;
+    write_note(&addr, key, "v1").await.map_err(ok)?;
+    // a write expecting v0, under one identity, is refused: the note is at v1
+    let write = || {
+        Note {
+            key,
+            text: "v2".to_string(),
+        }
+        .if_matches(NoteFilter {
+            text: Some(vec!["v0".to_string()]),
+        })
+    };
+    let options = SendOptions::new().identity(uuid::Uuid::new_v4());
+    let first = client.send_one_with(write(), &options).await;
+    assert!(
+        matches!(
+            first,
+            Err(shoal::client::Errors::Refused {
+                reason: ConditionRefusal::RowMismatch,
+                ..
+            })
+        ),
+        "the first try was answered {first:?}"
+    );
+    // the note moves to the value the write expected
+    write_note(&addr, key, "v0").await.map_err(ok)?;
+    // and the same write under the same identity is the refusal it was first given
+    let again = client.send_one_with(write(), &options).await;
+    assert!(
+        matches!(
+            again,
+            Err(shoal::client::Errors::Refused {
+                reason: ConditionRefusal::RowMismatch,
+                ..
+            })
+        ),
+        "the retry was answered {again:?}"
+    );
+    assert_eq!(
+        read_note(&addr, key).await.map_err(ok)?,
+        Some("v0".to_string())
+    );
+    // while the same write under a new identity is judged afresh, and applied
+    let fresh = client.send_one(write()).await;
+    assert!(fresh.is_ok(), "a new identity was answered {fresh:?}");
+    assert_eq!(
+        read_note(&addr, key).await.map_err(ok)?,
+        Some("v2".to_string())
+    );
+    Ok(())
+}
+
+/// Refused conditional writes in compacted WAL segments are not folded into the archives (F68)
+///
+/// A refused command still has a frame in the WAL, and the compactor folds sealed segments into
+/// archives by judging every conditional intent again against the partition it is folding.
+/// A chain of applied compare and swaps, each beside two writes refused for different reasons,
+/// is written past many small segments and compacted on every node; a node restarted on those
+/// archives reads the chain's last value, and its digest agrees with the others'. A compactor
+/// that folded the refused writes would leave an archive holding one of them
+/// ([F68](../../docs/src/features/conditional-writes.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn conditional_write_survives_compaction_and_restart() -> Result<(), FixtureError> {
+    use cluster::schema::NoteFilter;
+    use shoal::shared::queries::{ConditionRefusal, ConditionalInsert, ConditionalWrite};
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .checkpoint_entries(8)
+        .segment_bytes(64 * 1024)
+        .start()
+        .await?;
+    activate_newest(&mut cluster)?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addrs: Vec<String> = (0..3)
+        .map(|node| cluster.node(node).endpoints.client.to_string())
+        .collect();
+    let client = Shoal::<TestDbClient>::new(&addrs[0]).await.map_err(ok)?;
+    let key = 33_000u64;
+    // each value is wide, so the chain seals many segments
+    let pad = "p".repeat(4_000);
+    let value = |step: u64| format!("{step}-{pad}");
+    write_note(&addrs[0], key, &value(0)).await.map_err(ok)?;
+    for step in 0..60u64 {
+        // the one built on the value the note holds moves it on
+        let next = Note {
+            key,
+            text: value(step + 1),
+        }
+        .if_matches(NoteFilter {
+            text: Some(vec![value(step)]),
+        });
+        assert_eq!(conditional_outcome(&client, next).await.map_err(ok)?, None);
+        // an insert expecting no note is refused: there is one
+        let clobber = Note {
+            key,
+            text: format!("clobber-{step}-{pad}"),
+        };
+        assert_eq!(
+            conditional_outcome(&client, clobber.if_absent())
+                .await
+                .map_err(ok)?,
+            Some(ConditionRefusal::RowExists)
+        );
+        // a replace built on a value the note never held is refused
+        let stale = Note {
+            key,
+            text: format!("stale-{step}-{pad}"),
+        }
+        .if_matches(NoteFilter {
+            text: Some(vec![format!("never-{step}")]),
+        });
+        assert_eq!(
+            conditional_outcome(&client, stale).await.map_err(ok)?,
+            Some(ConditionRefusal::RowMismatch)
+        );
+        // and so is a delete built on one: the refused write a fold must never apply is last,
+        // so nothing applied after it could cover for a fold that did
+        let delete = NoteDelete::new(key).if_matches(NoteFilter {
+            text: Some(vec![format!("never-{step}")]),
+        });
+        assert_eq!(
+            conditional_outcome(&client, delete).await.map_err(ok)?,
+            Some(ConditionRefusal::RowMismatch)
+        );
+    }
+    // plain writes to other keys of the same group carry its checkpoint past the chain and seal
+    // the segments holding it, so the restarted copy reads the chain out of its archives
+    let (group, _) = group_of(&mut cluster, 0, "Note", key)?;
+    for other in keys_in_group(&mut cluster, "Note", &group, key + 1, 40)? {
+        write_note(&addrs[0], other, &format!("filler-{pad}"))
+            .await
+            .map_err(ok)?;
+    }
+    // every copy agrees, then every node folds its sealed segments into archives
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for node in 0..3 {
+        let _ = cluster.node_mut(node).command("COMPACT")?;
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    for node in 0..3 {
+        let _ = cluster.node_mut(node).command("COMPACT")?;
+    }
+    // a node restarted on what it compacted holds the chain's end and nothing a refusal carried
+    cluster.restart(1, NodeKind::Server)?;
+    cluster.wait_joined(&[1])?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))?;
+    // a restarted node may listen somewhere new, so every endpoint is read again
+    for node in 0..3 {
+        let addr = cluster.node(node).endpoints.client.to_string();
+        wait_note(&addr, key, Some(&value(60)), Duration::from_secs(10)).await?;
+    }
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A conditional write is refused until the cluster activates wire version 7 (F68)
+///
+/// Two members pinned below it are members that would not know the conditional intent; a
+/// write that reached their copies would be refused there while the third applied it. The
+/// coordinator refuses it by name instead, before anything is proposed, and the note is
+/// untouched ([F68](../../docs/src/features/conditional-writes.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn conditional_write_refused_below_wire_7() -> Result<(), FixtureError> {
+    use cluster::schema::NoteFilter;
+    use shoal::shared::protocol::error::ErrorCode;
+    use shoal::shared::protocol::{CONDITIONAL_WIRE_VERSION, MIN_PEER_VERSION};
+    use shoal::shared::queries::ConditionalWrite;
+    let cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .wire_version(1, MIN_PEER_VERSION)
+        .wire_version(2, MIN_PEER_VERSION)
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr).await.map_err(ok)?;
+    let key = 34_000u64;
+    write_note(&addr, key, "v1").await.map_err(ok)?;
+    // a conditional write, at the floor every member speaks
+    let refused = client
+        .send_one(
+            Note {
+                key,
+                text: "v2".to_string(),
+            }
+            .if_matches(NoteFilter {
+                text: Some(vec!["v1".to_string()]),
+            }),
+        )
+        .await;
+    // a conditional one is refused by name, naming the version it needs
+    assert_eq!(
+        failure_code(&refused),
+        Some(ErrorCode::WireVersion),
+        "{refused:?}"
+    );
+    let Err(shoal::client::Errors::Server { msg, .. }) = &refused else {
+        unreachable!("the code was read from a server failure");
+    };
+    assert!(
+        msg.contains(&CONDITIONAL_WIRE_VERSION.to_string()),
+        "the refusal did not name the version: {msg}"
+    );
+    // and nothing was written
+    assert_eq!(
+        read_note(&addr, key).await.map_err(ok)?,
+        Some("v1".to_string())
     );
     Ok(())
 }

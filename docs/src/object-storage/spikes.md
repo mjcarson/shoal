@@ -5,7 +5,7 @@
 be learnt.
 
 A milestone plan is a set of claims: that one design is safe, that it is fast enough, that
-one piece of work comes before another. The pages before this one make those claims as
+one part of the work comes before another. The pages before this one make those claims as
 preferences and hang each on a question ([S18](contract.md#questions-to-answer)). Nineteen
 questions are open. A plan drawn over nineteen open questions is an order of work nobody
 should hold anyone to, which is why the milestones page says *provisional* at its top and
@@ -123,8 +123,9 @@ rule is (Q16), and whether truncate by epoch holds (Q18).
 results are expected to be close and would each move a page:
 
 - a reader of a stripe that is written continuously cannot finish without a holder keeping
-  a piece's previous state, which would reopen [S9](read-path.md#a-piece-under-another-label);
-- an untouched piece on a device that is down cannot safely count toward `k + f`, which
+  a chunk's previous state, which would reopen
+  [S9](read-path.md#a-stripe-chunk-under-another-label);
+- an untouched chunk on a slice that is down cannot safely count toward `k + f`, which
   would tighten Q16;
 - two stagers can starve each other without a reservation, which would make the leader's
   reservation part of the protocol and not an optimization.
@@ -157,11 +158,12 @@ push carries today, 13,493 bytes at sixty-four members and sixteen tables, by en
 deltas.
 
 **Method.** A pure simulation of the three candidates of
-[S5](placement.md#the-placement-function) over generated maps. Shapes: three hosts of one
-device and of two; six hosts of twelve; fifty of twenty-four; devices of two sizes mixed;
-two classes. Placement groups at one, four and sixteen a tablet. Changes: a device added,
-removed, reweighted and replaced, and a host lost. The map's frame is sized by extending
-`shoal-spike fanout`, which already prints a tablet map's.
+[S5](placement.md#the-placement-function) over generated maps, placing chunks on slices and
+never two chunks of a stripe on slices of one device. Shapes: three hosts of one device and
+of two; six hosts of twelve; fifty of twenty-four; devices of two sizes mixed, and of one
+slice and of several; two classes. Placement groups at one, four and sixteen a tablet.
+Changes: a device added, removed, reweighted and replaced, and a host lost. The map's frame
+is sized by extending `shoal-spike fanout`, which already prints a tablet map's.
 
 **Where.** Anywhere.
 
@@ -170,7 +172,7 @@ removed, reweighted and replaced, and a host lost. The map's frame is sized by e
 | For each candidate and shape | |
 | --- | --- |
 | Fill | The fullest device over the mean, and the spread |
-| Movement | Pieces moved by each change, over the least that change could move |
+| Movement | Chunks moved by each change, over the least that change could move |
 | Feasibility | Placement groups that cannot meet the domain rule |
 | The map | Bytes of a frame, microseconds to encode it, microseconds to push it to a thousand subscribers |
 | A lookup | Nanoseconds for one placement group |
@@ -226,12 +228,12 @@ code that is systematic, decodes from any `k`, and has an update form. Any of th
 move that preference:
 
 - a code without those properties is several times faster, enough to pay for a decode on
-  every read and `k + m` pieces rewritten on every small write;
-- recoding makes a rebuild measurably cheaper with one piece of a stripe a device;
+  every read and `k + m` chunks rewritten on every small write;
+- recoding makes a rebuild measurably cheaper with one chunk of a stripe a slice;
 - a Zen1 core encodes 4+2 at under about a gibibyte a second, which would make dedicated
   executors a requirement of an erasure coded pool and not a preference
   ([S13](isolation.md#shared-executors-or-dedicated-ones));
-- no candidate offers an update of one data piece, which would leave reconstruct-write as
+- no candidate offers an update of one data chunk, which would leave reconstruct-write as
   the only way to overwrite part of a stripe.
 
 **Candidates**, pinned from their sources on [S18](contract.md#decision-record):
@@ -244,7 +246,7 @@ move that preference:
 | Reed-Solomon | `isa-l` 0.2.0 | Bindings to the C library Ceph defaults to; needs a C toolchain; binds no update |
 | Reed-Solomon | `rusty_erasure` 0.4.1 | A Rust port of that library **with** an update call; three weeks old |
 | Fountain | `raptorq` 2.0.1 | Systematic and rateless; decodes from "about k"; symbols of at most 64 KiB |
-| XOR | none | One parity piece. The ceiling, and all a 2+1 pool needs |
+| XOR | none | One parity chunk. The ceiling, and all a 2+1 pool needs |
 
 **Method.** A harness that feeds each candidate the same buffers. It is built twice, for
 `znver1` and natively, and the first build is run on titan and on europa: that is the build
@@ -253,8 +255,8 @@ AVX512 from a binary built for Zen1. One core, pinned, `performance` governor, t
 
 Correctness before speed:
 
-- every pattern of `m` lost pieces decodes, for each layout up to 6+3;
-- for a code with random coefficients, the fraction of sets of `k` pieces that fail to
+- every pattern of `m` lost chunks decodes, for each layout up to 6+3;
+- for a code with random coefficients, the fraction of sets of `k` chunks that fail to
   decode is counted over a large sample, not assumed;
 - encoding the same input twice, on both hosts and both builds, gives the same bytes where
   the code is deterministic.
@@ -263,13 +265,13 @@ Correctness before speed:
 
 | Property, for each candidate | Why the design cares |
 | --- | --- |
-| Systematic or not | A healthy range read touches one piece, or `k` pieces and a decode |
+| Systematic or not | A healthy range read touches one chunk, or `k` chunks and a decode |
 | Decodes from any `k`, or with what probability | [P11](contract.md#the-contract) is stated for any `k` |
-| Pieces a small write in place rewrites | `1 + m`, or `k + m` |
-| An update of one data piece, in the public API | Parity delta |
-| Recoding, and pieces read to rebuild one | What a repair costs |
-| Bytes a piece carries beyond its data | Coefficients, padding, markers |
-| Constraints on a piece's size | Alignment with the stripe unit and with direct I/O |
+| Chunks a small write in place rewrites | `1 + m`, or `k + m` |
+| An update of one data chunk, in the public API | Parity delta |
+| Recoding, and chunks read to rebuild one | What a repair costs |
+| Bytes a chunk carries beyond its data | Coefficients, padding, markers |
+| Constraints on a chunk's size | Alignment with the chunk unit and with direct I/O |
 | Writes into a caller's buffer, or allocates | A copy into an aligned buffer, or none |
 | Threads | A crate with a thread pool of its own does not fit an executor a core |
 | Licence, MSRV, `unsafe`, C toolchain, last release | Whether it can be a dependency |
@@ -278,7 +280,7 @@ Correctness before speed:
 | --- | --- |
 | Layouts | 2+1, 4+2, 6+3, 8+3, 10+4 |
 | Units | 4 KiB, 16 KiB, 64 KiB, 256 KiB, 1 MiB |
-| Operations | Encode; decode with one to `m` pieces lost; update of one data piece; recode |
+| Operations | Encode; decode with one to `m` chunks lost; update of one data chunk; recode |
 | Figure | GiB a second of data, on Zen1 and on Zen4, from the `znver1` build and the native one |
 
 **Where.** titan and europa. **Depends on.** Nothing.
@@ -289,7 +291,7 @@ recorded on S18 against them.
 
 ### X5. Checksums
 
-**Question.** Which checksum guards a stripe unit, and can its definition ever move
+**Question.** Which checksum guards a chunk unit, and can its definition ever move
 ([Q21](contract.md#questions-to-answer))?
 
 **What would change the design.** gxhash, which the tree already has, gives different
@@ -301,7 +303,7 @@ disagreed ([Resolved #65](../appendix/resolved/gxhash-pin.md)).
 **Method.** `crc32c`, a 64-bit CRC, xxh3, gxhash and blake3 over units from 4 KiB to 1 MiB,
 from the `znver1` build on both hosts. Fixed vectors are checked for equality across the
 two hosts, both builds, and one-shot against incremental feeding. For the CRCs, whether a
-whole piece's checksum can be combined from its units', since a checksum that combines
+whole chunk's checksum can be combined from its units', since a checksum that combines
 needs no second pass.
 
 **Where.** titan and europa.
@@ -313,20 +315,24 @@ for stability under each condition; a yes or no for combining.
 
 ### X6. The device store on SSD
 
-**Question.** How should pieces lie on a device, how is an update applied, and what does a
-sync cost ([Q22](contract.md#questions-to-answer))? And the half of
+**Question.** How should stripe chunks lie on a slice, how is an update applied, and what
+does a sync cost ([Q22](contract.md#questions-to-answer))? How many slices does an SSD need
+for its cores to drive it, one core to a slice? And the half of
 [Q27](contract.md#questions-to-answer) that is about a device: what a small write in place
 costs.
 
 **What would change the design.**
 
-- Creating, syncing and renaming a piece costs enough that a file a piece is not viable at
-  small sizes. Then pieces share large files, with the index and the compaction that
+- Creating, syncing and renaming a chunk costs enough that a file a chunk is not viable at
+  small sizes. Then chunks share large files, with the index and the compaction that
   brings.
+- One core falls well short of what an SSD can do. Then such a device is given several
+  slices, and the number this spike finds is what the inventory wizard offers
+  ([S4](pools-and-devices.md#inventories)).
 - A clone of a range makes a partial write one write and not two, and its sync is as cheap
   as an overwrite's. Then the clone is the way to apply, and the filesystem becomes a
   requirement: XFS or btrfs, not ext4.
-- Listing a placement group's directory at a million pieces takes long enough that a light
+- Listing a placement group's directory at a million chunks takes long enough that a light
   scrub needs an index of its own.
 
 **Method.** A spike binary over glommio's `DmaFile`, with the three layouts of
@@ -334,13 +340,14 @@ costs.
 
 | Measured | At |
 | --- | --- |
-| A whole piece: create, write ahead, write, sync, rename, sync the directory | 64 KiB to 64 MiB; one writer and six |
+| A whole chunk: create, write ahead, write, sync, rename, sync the directory | 64 KiB to 64 MiB; one writer and six |
 | The journal: commits a second, written ahead and overwritten against appended | 4 KiB to 64 KiB records; one sync a batch |
 | A partial write: journal and apply in place, against stage and clone | 4 KiB to 1 MiB; latency, and bytes the device was asked to write |
-| Removing pieces | A thousand at a time |
-| Listing a placement group | A hundred thousand and a million pieces; cold and warm |
-| A read of one unit at a random offset | Cold |
-| Fragmentation after a run of clones | Extents a piece |
+| Removing chunks | A thousand at a time |
+| Listing a placement group | A hundred thousand and a million chunks; cold and warm |
+| A read of one chunk unit at a random offset | Cold |
+| Fragmentation after a run of clones | Extents a chunk |
+| One device given one, two and four slices, each slice driven by its own executor | Throughput and the tail; the point past which another slice adds nothing |
 
 **Where.** titan and hyperion on ext4, europa on btrfs, and an XFS filesystem once one is
 fitted. Device and filesystem are confounded across those three, and the page says so with
@@ -362,7 +369,7 @@ runs on its blocking pool, or a clone call added to it
   a rotational pool and not optional.
 - Applies in place, reads and scrubs on one arm interfere enough that a disk needs an
   executor to itself, or a different layout.
-- Many small pieces cost a seek each to create and to find. Then a rotational pool sets its
+- Many small chunks cost a seek each to create and to find. Then a rotational pool sets its
   inline threshold and its stripe size differently from an SSD pool, or shares files.
 
 **Method.** X6's measurements that matter, on the disk, and four that only a disk shows:
@@ -386,7 +393,7 @@ runs on its blocking pool, or a clone call added to it
 ride the metadata log ([Q27](contract.md#questions-to-answer))? It is also the cost half of
 [Q14](contract.md#questions-to-answer).
 
-**What would change the design.** The size at which staged pieces overtake bytes in the
+**What would change the design.** The size at which staged chunks overtake bytes in the
 log, on each kind of device. If there is no such size below a stripe, A is the design for
 replicated pools. If it is very small, the log path is not worth having. If it sits in the
 tens of kibibytes, [S7](write-path.md#small-writes)'s threshold is real and the spike has
@@ -421,7 +428,7 @@ required, and a node of four cores gives one up or does not serve a pool.
 
 **Method.** The workload grid's reference cell, `macro/grid/unsorted/r50/1024`, with a task
 behind a feature of the node that does what object work does (checksum, encode, direct
-writes) at a set rate, yielding between stripe units. Three arms: the cell alone; the task
+writes) at a set rate, yielding between chunk units. Three arms: the cell alone; the task
 on the table shards at low priority; the task on a core of its own. The lab's
 before-and-after procedure throughout.
 
@@ -473,7 +480,7 @@ to a connection shared with small queries ([Q26](contract.md#questions-to-answer
 - A small query's tail on a shared connection moves by more than its budget. Then object
   bytes get connections of their own in the client's connection pool.
 - A connection cannot be handed from the executor that accepted it to the one that owns the
-  device, in the glommio fork, with kernel TLS on it. Then every frame crosses executors as
+  slice, in the glommio fork, with kernel TLS on it. Then every frame crosses executors as
   a buffer, and that hop's cost is part of every write.
 - kernel TLS bounds a stream below the device's rate.
 
@@ -503,8 +510,8 @@ defaults change, or the budget adapts to the foreground, which today's does not.
 scrub inside its budget cannot finish in its interval, which makes the interval a function
 of the device's size and not a constant.
 
-**Method.** The pipelines without the protocol around them: read `k` pieces, compute one,
-write it; read every unit and verify it. Each under a byte budget, beside a foreground load
+**Method.** The pipelines without the protocol around them: read `k` chunks, compute one,
+write it; read every chunk unit and verify it. Each under a byte budget, beside a foreground load
 from X6 or X7's harness.
 
 **Where.** The lab, with disks for the rotational half. A rebuild across hosts is bounded
@@ -545,7 +552,7 @@ would a later listing or an S3 gateway need the metadata to have left room for
 
 **What would change the design.** Anything [S17](prior-art.md#ceph) lists as recalled that
 turns out otherwise where a page leans on it. The likeliest: what an acknowledgement of an
-erasure coded write waits for, how positions are kept stable when a device leaves, and how
+erasure coded write waits for, how positions are kept stable when a holder leaves, and how
 a truncate is fenced.
 
 **Method.** Reading, at the pinned release: the erasure coding back end and the peering

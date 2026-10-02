@@ -2992,6 +2992,18 @@ impl<S: QuerySupport> ShoalResponse<S> {
         <S as QuerySupport>::error(archived)
     }
 
+    /// Get why this conditional write was refused, if it was
+    ///
+    /// Returns `Some` only for a conditional write whose condition did not hold, which was not
+    /// applied ([F68](../../../docs/src/features/conditional-writes.md)). A refused write fails
+    /// [`ShoalResponse::suceeded`] whatever its options say, as [`Errors::Refused`].
+    pub fn refusal(&self) -> Option<shoal_proto::shared::queries::ConditionRefusal> {
+        // get a reference to our archived data
+        let archived = unsafe { &*self.archived };
+        // get why this write was refused, if it was
+        <S as QuerySupport>::refusal(archived)
+    }
+
     /// Format this response as column headers and row values
     ///
     /// Returns `Some((headers, rows))` for Get responses with data,

@@ -53,7 +53,7 @@ Implied by the code's shape but not present.
 Planned and not built, as a part of its own: [Object Storage](../object-storage/overview.md).
 Buckets declared beside tables in the `#[shoal::db]` struct, objects of any size reached by a
 path and writable at any offset, their metadata in generated unsorted tables and their bytes
-replicated or erasure coded over named pools of devices, scrubbed for bitrot, and benchmarked by
+replicated or erasure coded over named storage pools of devices, scrubbed for bitrot, and benchmarked by
 `shoaladm bench`. Nothing of it exists in the tree.
 
 Three pages of that part are lists of work rather than design, and they are where to start:
@@ -74,6 +74,33 @@ One collision with a decision this book has already taken is recorded there and 
 schema change is a new cluster and a restore, a restore carries rows and not object bytes, so
 adding a table to a cluster that holds objects would strand them
 ([Q31](../object-storage/contract.md#questions-to-answer)).
+
+### Storage pools for a file system and block volumes
+
+Not designed, and not part of the object storage plan beyond what it reserves. A file system
+in the manner of CephFS and block volumes in the manner of RBD are expected after buckets, and
+**on the same storage pools**: one `ShoalStoragePool` is to serve a bucket, a file system and a
+block volume at once, as one RADOS pool can serve RGW, CephFS and RBD. A pool per consumer was
+rejected for that reason ([S4](../object-storage/pools-and-devices.md#alternatives-rejected)).
+
+What the plan reserves for them, so that neither needs a second storage layer:
+
+- **A consumer, not a bucket, is what a pool serves.** A binding points a consumer at a pool
+  and mints it a consumer id that is never reused
+  ([S4](../object-storage/pools-and-devices.md#pools-and-bindings-are-policy)).
+- **The consumer id is in every stripe's key and every chunk's identity**, so placement
+  groups, the files on a slice, scrub and recovery never meet two consumers' stripes under one
+  name, and never ask what kind of consumer they serve.
+- **A stripe is consumer neutral**: a fixed-size run of some owner's bytes, which a file's or
+  a volume's offsets map onto as an object's do.
+- **Reclamation's question is the one a consumer answers**: whether an owner id is still
+  named. A bucket answers it from its `ObjectMeta` rows; a file system would answer it from
+  its own metadata.
+
+What is left for whoever designs them: where a file system's metadata lives (tables, as a
+bucket's does, or something with directories and rename), what a block volume's write
+ordering promises over a stripe's, and whether a volume wants smaller stripes than a pool's
+buckets do, which the fixed geometry of a pool would then make a second pool.
 
 ### Retiring `shoal-bench`
 
@@ -543,7 +570,7 @@ list rather than from the diff:
   dry run.
 - **The failure domain.** C8's placement priorities name it; a member has no domain and the
   planner spreads by node alone. Now a required prerequisite of object storage: a failure
-  domain on a member lands at the start of the gate that places pieces
+  domain on a member lands at the start of the gate that places stripe chunks
   ([S1](../object-storage/prerequisites.md#required)), and
   [S5](../object-storage/placement.md#failure-domains) is the first thing that reads it.
 - **A hotspot threshold**, Q8's last half: a single hot partition is as indivisible as C8 says.
@@ -1302,6 +1329,39 @@ than only reads.
 Worth knowing before designing it: [FoundationDB](../direction/prior-art.md#foundationdb) does not
 solve this, it sidesteps it — it retries the *transaction*, so the request-level question never
 arises. Shoal has no transaction to retry, so it has to answer the question directly.
+
+### Conditional writes in SHQL
+
+[F68](../features/conditional-writes.md) built conditional writes as typed queries only, because
+SHQL is SELECT only ([SHQL](../api/shql.md)). The pieces would carry over: `WHERE pk = .. AND
+version = ..` builds the table's filter through `shql_build_filters` unchanged, and `IF NOT
+EXISTS` is `Absent`. What is missing is the write grammar itself, `INSERT`, `UPDATE` and
+`DELETE`, and a second parsed form beside `ParsedSelect`. It was not built because no caller
+wanted to write through SHQL, and conditional writes alone are not a reason to start.
+
+### Refusals in the figures
+
+[F68](../features/conditional-writes.md) counts a refusal two ways, and neither is complete.
+
+- **The query meter** counts a `refused` answer as its own kind, but only one the node sealed
+  itself. A forwarded query's answer is counted by the kind of the query it carried, because the
+  relay does not read a peer's answer ([F65](../features/query-figures-home-tab.md)). So on a
+  cluster `refused` undercounts, and a refused forwarded update reads as an update.
+- **A group's write counters** count a refusal as a `miss`, beside an update of a row that was
+  not there.
+
+A `refusals` counter in `WriteCounters`, and the forwarded answer's kind read from the answer
+(which needs the relay to validate a peer's bytes, and is the cost F65 avoided), would close
+both. The object store's commits make a refusal rate a figure worth watching on its own.
+
+### Conditions beyond equality
+
+A [F68](../features/conditional-writes.md) condition is the table's filter: equality, or one of
+a list of values, on `#[shoal(filter)]` fields. The object store's commits need no more (a
+sequence, an epoch and a generation are each compared for equality), and
+[Q25](../object-storage/contract.md#questions-to-answer) is where more would be asked for. A
+`version < n` or a condition on a field that is not a filter would need its own predicate type
+beside `Filters`, judged in the same two functions.
 
 ### An in-process client for a colocated application
 

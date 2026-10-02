@@ -325,6 +325,8 @@ pub enum ResponseAction<T> {
     Update(bool),
     Exists(bool),
     Error(ResponseError),
+    /// since F68: a conditional write whose condition did not hold, and why
+    Refused(ConditionRefusal),
 }
 ```
 
@@ -335,7 +337,12 @@ Mutations return only a boolean, so a failed insert and a rejected insert are bo
 it. A query that *could not run* is `Error(ResponseError { code, msg })`, where the code is a pinned
 `u16` from `protocol::error::ErrorCode`, so a get that found nothing and a get whose partition could
 not be read are no longer the same answer. The variant is appended, never inserted: rkyv derives the
-wire representation from the declaration order.
+wire representation from the declaration order. `Refused` is appended after it by
+[F68](../features/conditional-writes.md): a conditional write whose row was not as its writer
+expected answers `RowExists`, `RowMissing` or `RowMismatch`. That is a definite answer, not an
+`ErrorCode`, and the client raises it as `Errors::Refused`. The query it answers is
+`UnsortedQuery::Conditional` or `SortedQuery::Conditional`, also appended, which leaves
+`CLIENT_WIRE_VERSION` at 4. A replicated one needs wire 7 activated.
 
 ### The `Error` frame
 

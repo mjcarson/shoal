@@ -131,6 +131,7 @@
   - [F65. Every node counts what its clients were answered, and shoaladm stats opens on a home tab](features/query-figures-home-tab.md)
   - [F66. shoaladm bench: benchmark any schema against a dataset folder](features/dataset-benchmarks.md)
   - [F67. shoaladm bench run names workloads, chooses a run in a wizard, and proves every stat moves](features/bench-run-wizard.md)
+  - [F68. Conditional writes, with a typed refusal](features/conditional-writes.md)
 
 # Direction
 
@@ -179,7 +180,7 @@
   - [S1. What has to exist first](object-storage/prerequisites.md)
   - [S2. Buckets in the schema](object-storage/buckets.md)
   - [S3. Objects, stripes and their metadata](object-storage/objects.md)
-  - [S4. Storage pools and devices](object-storage/pools-and-devices.md)
+  - [S4. Storage pools, devices and slices](object-storage/pools-and-devices.md)
   - [S5. Placement and the pool map](object-storage/placement.md)
   - [S6. The device store](object-storage/device-store.md)
   - [S7. The write path](object-storage/write-path.md)

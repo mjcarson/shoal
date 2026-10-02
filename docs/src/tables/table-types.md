@@ -128,6 +128,7 @@ Requires a partition key and forbids sort keys; the macro panics on
 | `exists` | Loads from disk if needed | Loads from disk if needed |
 | `delete` | Loads from disk if needed | Loads from disk if needed |
 | `update` | Loads from disk if needed | Loads from disk if needed |
+| a conditional write ([F68](../features/conditional-writes.md)) | Loads from disk if the row is not held and `check_disk` is set | Loads from disk if needed |
 
 They get there differently, because of what "not resident" can mean for each. A sorted
 partition can be *partially* resident — some rows in memory, more on disk — so it carries a

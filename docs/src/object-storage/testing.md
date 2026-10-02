@@ -55,18 +55,18 @@ abstracted to the property this part relies on.
 
 | Actor | State | Notes |
 | --- | --- | --- |
-| The row | Sequence, a label for each piece, truncate epoch, the placement group's generation, who missed what | An atomic object that applies conditional commits in one order. The tablet group is **not** modelled again: P1 to P6 are the contract it is held to, and a leader change appears here as a stager losing its view |
-| A holder | A piece under a label; staged writes; what is durable and what is not | A crash loses what was not synced. A device may be replaced by an empty one |
+| The row | Sequence, a label for each stripe chunk, truncate epoch, the placement group's generation, who missed what | An atomic object that applies conditional commits in one order. The tablet group is **not** modelled again: P1 to P6 are the contract it is held to, and a leader change appears here as a stager losing its view |
+| A holder | A slice: a stripe chunk under a label; staged writes; what is durable and what is not | A crash loses what was not synced. Its device may be lost or replaced by an empty one, and every slice on it with it |
 | A stager | What it read, what it staged, whether it has proposed | Several may act on one stripe |
-| A reader | The row state it consulted, the pieces it was answered | At either read level |
-| The pool map | Generations and the devices at each | Changes at any time |
+| A reader | The row state it consulted, the chunks it was answered | At either read level |
+| The pool map | Generations, the slices at each and the device each slice is on | Changes at any time |
 | The reclaimer | Nothing of its own | Asks, and discards on what it is told |
 
 **Events** are what [S7](write-path.md#the-schedules-that-shaped-it)'s table is made of: a
 stage sent, delivered, lost or duplicated; a holder's sync; a crash and a restart; a commit
 proposed, applied or refused; an apply told or never told; a write torn; a device lost or
-replaced; the map changed; a truncate; a question about a row answered by a replica that
-lags.
+replaced, with every slice on it; the map changed; a truncate; a question about a row
+answered by a replica that lags.
 
 **The policy** has a safe setting and one unsafe setting for each rule the design depends
 on, each with a saved schedule that makes the checker fire:
@@ -79,7 +79,7 @@ on, each with a saved schedule that makes the checker fire:
 | An acknowledgement after one stage | P11 |
 | A parity staged as a patch | P15 |
 | An apply before the commit | P9 |
-| A reader that accepts a newer piece | P10 |
+| A reader that accepts a newer chunk | P10 |
 | A discard on a lagging replica's view | P16 |
 | A commit that ignores the generation | P8, P17 |
 | A commit that ignores the truncate epoch | P13 |
@@ -100,20 +100,20 @@ as C13 owns the tablet model's.
 
 ### The fixture
 
-**Devices.** A child gets several directories as devices, so one host can run a pool with a
-device failure domain, and five children can run 4+2 with a host one. That is how a layout
-wider than the lab's three hosts is tested at all.
+**Devices and slices.** A child gets several directories as devices, each with its slices, so
+one host can run a pool with a device failure domain, and five children can run 4+2 with a
+host one. That is how a layout wider than the lab's three hosts is tested at all.
 
 **Faults**, each a prerequisite of [S1](prerequisites.md#required) and each tested against
 itself before anything relies on it:
 
 | Fault | What it does | What it is for |
 | --- | --- | --- |
-| A torn write | Part of a write to a named piece reaches the device and the rest does not | P9 inside a piece; [S6](device-store.md)'s replay |
+| A torn write | Part of a write to a named stripe chunk reaches the device and the rest does not | P9 inside a chunk; [S6](device-store.md)'s replay |
 | A full disk | A device refuses writes past a point | Space taken at the stage; nothing failing after a commit |
-| A lost device | A device's directory answers every call with an error | P17; a rebuild |
-| An empty replacement | A device's directory is emptied while its child is down | [S4](pools-and-devices.md#a-device-has-an-identity) |
-| A flipped bit | One byte of a unit is changed on disk and synced | P15; a scrub |
+| A lost device | Every slice of a device answers every call with an error | P17; a rebuild |
+| An empty replacement | A device's directory, every slice in it, is emptied while its child is down | [S4](pools-and-devices.md#a-device-has-slices) |
+| A flipped bit | One byte of a chunk unit is changed on disk and synced | P15; a scrub |
 
 **Crash points** for a stripe write: after a stage is synced and before its answer; after
 the answers and before the proposal; proposed and not applied; committed and no holder told;
@@ -136,12 +136,12 @@ of their names.
 | --- | --- |
 | [S2](buckets.md#acceptance-tests) | The generated tables, the fingerprint, the client half |
 | [S3](objects.md#acceptance-tests) | Path identity, inline objects, holes, truncate, replace |
-| [S4](pools-and-devices.md#acceptance-tests) | Device identity, committed policy, readiness |
+| [S4](pools-and-devices.md#acceptance-tests) | Device and slice identity, committed policy, readiness |
 | [S5](placement.md#acceptance-tests) | Failure domains, movement, generations |
 | [S6](device-store.md#acceptance-tests) | Staging, applying, tearing, space, checksums |
 | [S7](write-path.md#acceptance-tests) | Atomicity, fencing, acknowledgement, retries |
 | [S8](erasure-coding.md#acceptance-tests) | Decoding, labels, partial overwrites |
-| [S9](read-path.md#acceptance-tests) | Read levels, stale pieces, degraded reads |
+| [S9](read-path.md#acceptance-tests) | Read levels, stale chunks, degraded reads |
 | [S10](recovery.md#acceptance-tests) | Missed writes, backfill, moves, reclamation |
 | [S11](scrub.md#acceptance-tests) | Finding damage, never laundering it |
 | [S12](wire-and-client.md#acceptance-tests) | Frames, windows, retried streams |

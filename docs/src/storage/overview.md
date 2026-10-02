@@ -107,8 +107,12 @@ pub enum UnsortedIntents<T> {
     Insert(T),
     Delete { partition_key: u64 },
     Update(UnsortedUpdate<T>),
+    Conditional(UnsortedConditional<T>),
 }
 ```
+
+Each also has a `Conditional` variant since [F68](../features/conditional-writes.md), which only
+a tablet group's WAL holds (`SortedConditional<T>` for the sorted one).
 
 `.../persistent/sorted.rs:42-51`, `.../persistent/unsorted.rs:42-48`
 

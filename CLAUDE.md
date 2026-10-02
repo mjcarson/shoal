@@ -84,6 +84,12 @@ cargo run -p shoal-model --example regenerate_schedules   # after a model change
 cargo test -p shoal --test cluster_fixture -- --test-threads 6
 SHOAL_CHILD_LOG=$PWD/target/child-logs cargo test -p shoal --test cluster_fixture -- <one test>
 
+# conditional writes on every table kind of a standalone server (F68); the replicated half - a
+# race through three nodes, a refused retry, a compaction and restart, the wire 7 gate - is four
+# `conditional` tests in the fixture. a cluster refuses one until `activate 7`
+cargo test -p shoal --test conditional_writes
+cargo test -p shoal --test cluster_fixture -- --test-threads 6 conditional
+
 # item 33's reproduction (F41): a standalone two shard get whose shares are held expires at the
 # bundle deadline. run against the tree with the gather sweep disabled it never returns
 cargo test -p shoal --test gather_expiry
@@ -154,6 +160,8 @@ cargo run --example tmdb
 # The rows/sec it prints is not a measurement.
 cargo build --release -p tmdb-dataset
 target/release/tmdb-dataset-loader load -i examples/tmdb_dataset/inventory.yml --dataset ~/datasets/TMDB_movie_dataset_v11.csv --limit 10000
+# conditional writes raced through every member, judged against the committed order (F68)
+target/release/tmdb-dataset-loader contend -i examples/tmdb_dataset/inventory.yml --keys 16 --workers 24
 
 # benchmark any schema against a dataset folder (F66): one <Table>.csv/.json/.jsonl a table, the
 # table opted in with #[shoal_table(db = "...", dataset)] and serde::Deserialize. Run in the

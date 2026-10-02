@@ -46,7 +46,9 @@ the two relays of every client connection that shard accepted, and with nothing 
   several frames under one id, and the index range keeps them apart.
 - **The write relay counts each answer** once its last byte has gone to the socket:
   - It reads the answer's kind off the answer: `get`, `exists`, `insert`, `update` or `delete`,
-    or `error` for a failure, whatever the query asked.
+    or `error` for a failure, whatever the query asked. Since
+    [F68](conditional-writes.md) it can also be `refused`, for a conditional write whose condition
+    did not hold, read off the answer the same way.
   - It adds the answer's bytes.
   - If the answer's frame is being timed, it records the time from the frame's arrival to the
     write. The histogram has four buckets to every power of two of microseconds, and the last

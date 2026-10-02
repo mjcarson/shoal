@@ -25,9 +25,14 @@ use crate::shared::responses::ResponseActionNames;
 /// The kinds a node's answers to its clients are counted by, in the order every array of them
 /// is kept ([F65](../../../../docs/src/features/query-figures-home-tab.md))
 ///
-/// The five query kinds a client can send, and `error` for an answer that failed, whatever the
-/// query was: a failure is read out of the answer, which no longer says what was asked.
-pub const QUERY_OPS: [&str; 6] = ["get", "exists", "insert", "update", "delete", "error"];
+/// The five query kinds a client can send, `error` for an answer that failed, whatever the
+/// query was: a failure is read out of the answer, which no longer says what was asked. And
+/// `refused` for a conditional write whose condition did not hold, read out of the answer the
+/// same way ([F68](../../../../docs/src/features/conditional-writes.md)). A conditional write that
+/// was applied is counted as the insert, update or delete it was.
+pub const QUERY_OPS: [&str; 7] = [
+    "get", "exists", "insert", "update", "delete", "error", "refused",
+];
 
 /// The kinds among [`QUERY_OPS`] that read a table
 pub const READ_OPS: [&str; 2] = ["get", "exists"];
@@ -49,6 +54,7 @@ pub fn query_op_index(kind: &ResponseActionNames) -> usize {
         ResponseActionNames::Update => 3,
         ResponseActionNames::Delete => 4,
         ResponseActionNames::Error => 5,
+        ResponseActionNames::Refused => 6,
     }
 }
 
@@ -907,9 +913,11 @@ mod tests {
             p99_ms: Some(12.345_678_9),
             sampled_every: 16,
         };
-        // rides one status report in four, so it is held to under two kilobytes
+        // rides one status report in four, so it is held to under two and a quarter kilobytes:
+        // two until F68's seventh kind, `refused`, which a node that answered every kind at the
+        // largest figures takes past two by about a hundred bytes
         let bytes = serde_json::to_vec(&queries).expect("encodes").len();
-        assert!(bytes < 2048, "{bytes} bytes");
+        assert!(bytes < 2304, "{bytes} bytes");
         // and the rates of several kinds add up
         assert!((queries.rate_of(&READ_OPS) - 2.0 * 123_456.789_012).abs() < 1e-6);
         // and nothing adds up to a zero that is written as one

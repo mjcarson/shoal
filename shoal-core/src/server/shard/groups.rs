@@ -1690,6 +1690,10 @@ where
             (ResultKind::Insert | ResultKind::Update | ResultKind::Delete, false) => {
                 counters.misses += 1;
             }
+            // a refused conditional write changed nothing, which is what a miss counts
+            (ResultKind::Refused(_), _) => {
+                counters.misses += 1;
+            }
             (ResultKind::Scrub, _) => {}
         }
     }

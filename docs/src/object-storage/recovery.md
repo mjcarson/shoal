@@ -3,13 +3,13 @@
 ## Context
 
 A pool's devices fail, fill, are replaced and are added to. A write that committed while a
-holder was away has left that holder's piece stale. A device that died has left every stripe
-it held one piece short. A device that was added holds nothing and should hold its share.
-All three are the same work: **make a piece current on a device where it is not**, by
-copying it or by rebuilding it from the others, without disturbing the writes that go on
-meanwhile.
+holder was away has left that holder's chunk stale. A device that died has left every stripe
+it held one chunk short, whichever of its slices held it. A device that was added holds
+nothing on any of its slices and should hold its share. All three are the same work: **make
+a stripe chunk current on a slice where it is not**, by copying it or by rebuilding it from
+the others, without disturbing the writes that go on meanwhile.
 
-This page is how the cluster knows which pieces those are, who does the work, how bytes that
+This page is how the cluster knows which chunks those are, who does the work, how bytes that
 are no longer wanted are removed, and what holds the work to a budget.
 
 ## What exists today
@@ -35,7 +35,7 @@ For tables, each of these has an answer built on a tablet group's own log.
   `retries.bin` beside the checkpoint and seeded from it
   (`shoal-core/src/server/wal/mod.rs:97`); it also rides in a snapshot's trailer.
 
-None of it reaches a device of a pool. A piece is in no group's log, a snapshot stream
+None of it reaches a slice of a pool. A stripe chunk is in no group's log, a snapshot stream
 carries a group's rows and is judged against a group, and the budget is not a device's. The
 book says of it: "A node with two storage devices shares one budget"
 ([F46](../features/capacity-rebalancing.md#limitations)). The code builds it for each shard:
@@ -48,16 +48,16 @@ book says of it: "A node with two storage devices shares one budget"
 | Event | How it is known | What follows |
 | --- | --- | --- |
 | A stage is refused, fails or is late | The stager did not get its answer | The write commits without that holder if the acknowledgement rule allows, and the commit records that it missed |
-| A device reports errors, or is gone | Its node marks it failed and reports it; the control group commits the state | Its pieces are rebuilt on other devices at once. A dead disk does not come back holding data, so there is nothing to wait for |
-| A device is full | Its node refuses stages past the reserve | It keeps what it holds and takes no more. The planner moves placement groups off it |
-| A node is down | The detector, as today | Every device of the node is down with it, and the **member's grace applies**. Nothing is rebuilt until it expires; reads decode and writes proceed while the rule can be met |
-| A device or a node returns | A status report | It learns what it missed, and is brought current |
-| A device is added | A join, or a restart with a new device | It holds nothing. The planner moves placement groups onto it |
+| A device reports errors, or is gone | Its node marks it failed and reports it; the control group commits the state | Every slice on it is down with it, and their chunks are rebuilt on other devices at once. A dead disk does not come back holding data, so there is nothing to wait for |
+| A device is full | Its node refuses stages past the reserve | Its slices keep what they hold and take no more. The planner moves placement groups off them |
+| A node is down | The detector, as today | Every device of the node is down with it, and every slice on each, and the **member's grace applies**. Nothing is rebuilt until it expires; reads decode and writes proceed while the rule can be met |
+| A device or a node returns | A status report | Each of its slices learns what it missed, and is brought current |
+| A device is added | A join, or a restart with a new device | Its slices hold nothing. The planner moves placement groups onto them |
 
 The grace is the Distributed chapter's R3, kept: a node that is down for ten minutes does
 not cause a pool's worth of rebuilding.
 
-### How a device learns what it missed
+### How a slice learns what it missed
 
 It does not find out by itself. **The tablet group that owns the placement group knows**,
 because every commit said so.
@@ -65,12 +65,12 @@ because every commit said so.
 1. A commit names the holders its write touched that did not stage
    ([S7](write-path.md#the-preferred-direction-step-by-step)).
 2. Every replica of the group derives from that, at apply, a **missed record** for each
-   placement group and position: the stripes whose piece at that position is now stale. It
+   placement group and position: the stripes whose chunk at that position is now stale. It
    is derived state, as the retry table is.
-3. When the pool map shows the device up, the group's leader runs a **rebuild driver** for
-   each of its placement groups with a record against that device. For each stripe it asks
-   the holder what label it holds (a lost acknowledgement leaves a piece that is current
-   after all), copies or rebuilds the piece if it is stale, and commits the piece's label in
+3. When the pool map shows the slice up, the group's leader runs a **rebuild driver** for
+   each of its placement groups with a record against that slice. For each stripe it asks
+   the holder what label it holds (a lost acknowledgement leaves a chunk that is current
+   after all), copies or rebuilds the chunk if it is stale, and commits the chunk's label in
    the stripe's row, conditional on the row's sequence so that it never overwrites a newer
    write. Its progress is committed as it goes, so a new leader resumes.
 4. **The record is bounded.** Past the bound the position is marked as needing a backfill,
@@ -82,43 +82,43 @@ stripe's writes is the one place that saw every one of them.
 
 Two things about the record are [Q17](contract.md#questions-to-answer)'s. It has to survive
 a checkpoint and reach a new replica through a snapshot, as the retry table does, or a
-replica built from a snapshot would call stale pieces current. And its granularity is open:
-a record of stripes rebuilds a whole piece for a 4 KiB write that was missed; a record of
+replica built from a snapshot would call stale chunks current. And its granularity is open:
+a record of stripes rebuilds a whole chunk for a 4 KiB write that was missed; a record of
 unit ranges rebuilds less and is larger.
 
 ### Backfill
 
-When the record has overflowed, or a device is new or was replaced, the driver compares what
-should be there with what is.
+When the record has overflowed, or a slice is new because its device was added or replaced,
+the driver compares what should be there with what is.
 
 - **What should be there** has two sources, because a stripe written only at its object's
   creation has no row ([S3](objects.md#the-two-rows)): the engine's walk of the tablet's
   stripe rows ([S1](prerequisites.md#required)), and the inventories of the placement
   group's other holders, which are directory listings with labels
-  ([S6](device-store.md#what-is-in-a-devices-directory)).
-- **What is there** is the device's own inventory.
+  ([S6](device-store.md#what-is-in-a-slices-directory)).
+- **What is there** is the slice's own inventory.
 
 Whatever is missing or stale is rebuilt as above. A backfill costs a walk of the placement
 group, where a record costs only what was missed.
 
-### Rebuilding a piece
+### Rebuilding a stripe chunk
 
 - **Replicated**: read a current copy, write it whole.
-- **Erasure coded**: read `k` current pieces, compute the missing one, write it whole
+- **Erasure coded**: read `k` current chunks, compute the missing one, write it whole
   ([S8](erasure-coding.md#decoding-and-rebuilding)).
 
-Either way the new piece is staged as a whole piece and made current by a commit of its
-label. A rebuild is therefore a write of one piece under [S7](write-path.md)'s rules, and it
+Either way the new chunk is staged as a whole chunk and made current by a commit of its
+label. A rebuild is therefore a write of one chunk under [S7](write-path.md)'s rules, and it
 inherits them: it is refused if the row has moved, and it never mixes labels.
 
-A corrupt piece is never a source ([P15](contract.md#the-contract)). When fewer than `k`
-current, verified pieces remain, the stripe is reported lost by name and nothing is
+A corrupt chunk is never a source ([P15](contract.md#the-contract)). When fewer than `k`
+current, verified chunks remain, the stripe is reported lost by name and nothing is
 invented.
 
 ### Moves
 
 A change to the pool map that alters where a placement group belongs makes a new
-generation. The placement group's pieces are still where the old generation says, and a
+generation. The placement group's chunks are still where the old generation says, and a
 **move** takes them to where the new one does.
 
 ```mermaid
@@ -126,13 +126,13 @@ stateDiagram-v2
     direction LR
     [*] --> Planned: the pool map records the move
     Planned --> Both: the group commits that it is moving to the new generation
-    Both --> Copied: every piece that changes place is copied or rebuilt
+    Both --> Copied: every chunk that changes place is copied or rebuilt
     Copied --> Switched: the group commits that it is at the new generation
-    Switched --> Retired: the old holders drop their pieces, after a grace
+    Switched --> Retired: the old holders drop their chunks, after a grace
     Retired --> [*]
 ```
 
-While the group is in `Both`, a write stages on the devices of both generations and its
+While the group is in `Both`, a write stages on the slices of both generations and its
 commit names both, so nothing written during the move is missing from either side
 ([S5](placement.md#generations)). Reads use the old generation until the switch. The copy is
 the rebuild above with a holder to copy from, and a move whose old holder is gone is a
@@ -150,22 +150,27 @@ Bytes that are no longer wanted:
 | What | The committed fact that allows it |
 | --- | --- |
 | A staged write that lost | The stripe's row names another tag at a higher sequence |
-| The pieces of a replaced or deleted object, or of a put that was abandoned | The path's entry names the object's id as retired, or names it nowhere |
-| The stripes past a truncate | The entry's floor covers them |
-| The pieces left behind by a move | The group's generation has moved past the one they sit under |
-| A piece nothing explains | The same facts, asked for by a light scrub ([S11](scrub.md)) |
+| The chunks of a replaced or deleted object, or of a put that was abandoned | The consumer names the owner id as retired, or names it nowhere: for a bucket, the path's `ObjectMeta` entry |
+| The stripes past a truncate | The owner's floor covers them: for a bucket, the entry's |
+| The chunks left behind by a move | The group's generation has moved past the one they sit under |
+| A chunk nothing explains | The same facts, asked for by a light scrub ([S11](scrub.md)) |
 
 [P16](contract.md#the-contract) is the whole of the rule: a holder discards on a committed
 fact that cannot be undone, and never on a timer.
 
-**Absence is judged by a strong read.** "The entry names this id nowhere" is safe only
-because an id is recorded before any piece is written for it and is never reused, so once
+**The question goes to the chunk's consumer.** A slice asks the consumer named in the chunk's
+identity whether the owner id in it, an object id for a bucket, is still named. A bucket
+answers from the `ObjectMeta` entry of the object's path; a file system, later, would answer
+from its own metadata. Nothing here assumes the consumer is a bucket.
+
+**Absence is judged by a strong read.** "The consumer names this id nowhere" is safe only
+because an id is recorded before any chunk is written for it and is never reused, so once
 it has been recorded and removed it stays gone. But a lagging replica may simply not have
 applied the recording yet. A holder that discarded on that replica's word would destroy a
 put in flight. So the question is asked behind a read barrier, and a default read is never
 an answer to it.
 
-**Readers get a grace, and a grace is not a permission.** The pieces of a retired object
+**Readers get a grace, and a grace is not a permission.** The chunks of a retired object
 are kept for a while so that a reader that began before the replace can finish. When they
 go, a reader still at it fails by name; it is never given other bytes, since an id is never
 reused.
@@ -178,26 +183,26 @@ cannot be right for both a rotational disk and an SSD beside it: sized for the S
 saturates the disk, and sized for the disk it leaves the SSD's rebuild slow and its pool
 exposed for longer.
 
-The reserve is checked where the bytes land, before a rebuild's piece is staged, as a
+The reserve is checked where the bytes land, before a rebuild's chunk is staged, as a
 snapshot stream's is today. What the budgets should be is
 [Q29](contract.md#questions-to-answer), and how they sit beside foreground work is
 [S13](isolation.md).
 
 ## Alternatives rejected
 
-**A log on every device**, as a RADOS placement group has. It is what makes Ceph's recovery
+**A log on every slice**, as a RADOS placement group has one on every OSD. It is what makes Ceph's recovery
 local and fast, and it is a second replicated log to keep consistent with the first. The
 group already has the facts.
 
-**Finding stale pieces by walking every row.** No scan exists for a client, and the
+**Finding stale chunks by walking every row.** No scan exists for a client, and the
 engine's walk is of a whole table on a shard. It is the fallback, not the method.
 
-**A stand-in device** that takes a down holder's writes and hands them back. It is another
-place a piece might be, and another thing a read has to consult.
+**A stand-in slice** that takes a down holder's writes and hands them back. It is another
+place a chunk might be, and another thing a read has to consult.
 
 **Rebuilding the moment a node is called down.** R3, again.
 
-**Reclaiming by age.** A put that takes longer than the age loses its pieces before it
+**Reclaiming by age.** A put that takes longer than the age loses its chunks before it
 commits.
 
 **A commit for every stripe a move touches.** It makes the move's cost linear in commits.
@@ -207,9 +212,9 @@ The generation is the placement group's, and one commit moves it.
 
 - **State in each tablet group**: a generation and a bounded missed record for each of its
   placement groups, persisted with the checkpoint and carried in a snapshot.
-- **A commit for every piece rebuilt**, since a rebuild makes a piece current through its
-  row. A stripe with no row gains one when a piece of it is rebuilt.
-- **`k` reads for one piece** under an erasure code, most of them over the network. On the
+- **A commit for every chunk rebuilt**, since a rebuild makes a chunk current through its
+  row. A stripe with no row gains one when a chunk of it is rebuilt.
+- **`k` reads for one chunk** under an erasure code, most of them over the network. On the
   lab's 1 GbE that bounds a rebuild near 117 MiB/s divided by `k`
   ([X12](spikes.md#x12-recovery-and-scrub-rates)).
 - **Space on both sides of a move** until the old side is retired.
@@ -220,19 +225,19 @@ The generation is the placement group's, and one commit moves it.
 
 - "A group's persisted state is its checkpoint and its retry table."
 - "A move is a group's membership change": a placement group's move changes no membership.
-- "A returning replica is fed a log": a returning device is fed pieces, chosen by a record.
+- "A returning replica is fed a log": a returning slice is fed chunks, chosen by a record.
 - "The stream budget is the node's" ([Q8's remainder](../distributed/open-issues.md#not-settled)):
   a device has its own.
 
 ## Invariants to uphold
 
-- A piece becomes current only by a commit of its label in the stripe's row. A rebuild, a
+- A chunk becomes current only by a commit of its label in the stripe's row. A rebuild, a
   move and a write are alike in that.
 - A missed record is derived at apply, by every replica, from committed commands alone.
 - A driver asks a holder what it holds before it moves a byte.
-- A corrupt or stale piece is never a source.
-- A placement group's generation moves only after every piece that changes place is current
-  on its new device.
+- A corrupt or stale chunk is never a source.
+- A placement group's generation moves only after every chunk that changes place is current
+  on its new slice.
 - A holder discards only on a committed fact, and absence is established behind a barrier.
 - A node that is down is not rebuilt around until its grace expires; a device that failed
   on a live node is.
@@ -261,10 +266,10 @@ record it today.
 | `missed_record_survives_restart_snapshot_and_leader_change` | A replica restarted, or built from a snapshot, or newly leading, holds the same record | M16 |
 | `overflowed_record_falls_back_to_backfill` | A device away past the bound is brought current by a backfill, including stripes that have no row | M16 |
 | `rebuild_never_overwrites_a_newer_write` | A rebuild racing a write to the same stripe is refused and tried again against the new row | M16 |
-| `move_serves_reads_and_writes_throughout` | Every acknowledged write during a move is on the new devices after the switch; no read fails for the move | M16 |
+| `move_serves_reads_and_writes_throughout` | Every acknowledged write during a move is on the new slices after the switch; no read fails for the move | M16 |
 | `node_down_inside_its_grace_rebuilds_nothing` | A node killed and returned inside the grace causes no rebuild, only the catch-up of what it missed | M16 |
-| `discard_requires_a_committed_fact` | No holder drops a piece on a timer, on a default read's absence, or on a stager's word | M20 |
-| `retired_object_is_reclaimed` | After a replace and the grace, the old object's pieces and rows are gone and a reader of them fails by name | M20 |
+| `discard_requires_a_committed_fact` | No holder drops a chunk on a timer, on a default read's absence, or on a stager's word | M20 |
+| `retired_object_is_reclaimed` | After a replace and the grace, the old object's chunks and rows are gone and a reader of them fails by name | M20 |
 
 ## Related
 

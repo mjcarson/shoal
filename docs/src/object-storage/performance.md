@@ -46,7 +46,7 @@ that any change to a node's query path follows
 
 | Experiment | Held constant | What it tells |
 | --- | --- | --- |
-| Stripes as rows against staged pieces, replicated | Hosts, object sizes, concurrency | What a data plane buys at each size, and where it stops paying ([Q14](contract.md#questions-to-answer), [Q27](contract.md#questions-to-answer)) |
+| Stripes as rows against staged stripe chunks, replicated | Hosts, object sizes, concurrency | What a data plane buys at each size, and where it stops paying ([Q14](contract.md#questions-to-answer), [Q27](contract.md#questions-to-answer)) |
 | Replicated against k+m | The pool's devices | What encoding costs a write, and decoding a read |
 | A whole stripe against part of one | The pool | What a write in place costs over a put |
 | A healthy read against one with a holder down | The pool and the range | What a degraded read costs |
@@ -98,8 +98,8 @@ What an arm records, each second:
 | The driver's CPU and how fast it made bytes | A driver that cannot make bytes as fast as the cluster takes them is measuring itself |
 | The read back of everything acknowledged | A byte acknowledged and not there, or there and wrong, is a failure of the run |
 
-Overrides vary one thing about the pool: its redundancy, its stripe size, its unit, its `f`.
-Events add to the ones F66 has: a device killed, a device added, a deep scrub asked for.
+Overrides vary one thing about the pool: its redundancy, its stripe size, its chunk unit, its
+`f`. Events add to the ones F66 has: a device killed, a device added, a deep scrub asked for.
 Each is cut into before, during and after as a kill or a rebalance is today.
 
 ### The bench's own cluster
@@ -132,7 +132,7 @@ were. Each is agreed before the gate it judges and revised only with a recorded 
 | Tables beside objects | The reference cell's p99 within 1.25 times what it is alone, with pools on their own devices |
 | A streaming put, replicated | Bounded by the slower of the devices and the network, with the bound named; on the lab that is 1 GbE |
 | A small write in place | No more than twice a table write's median on the same hosts, since it pays two rounds for one |
-| A range read inside one piece, healthy | One lookup and one device read: no decode, no second device |
+| A range read inside one stripe chunk, healthy | One lookup and one slice read: no decode, no second slice |
 | A degraded read | Reported as a curve against `k`; no promised multiple |
 | A rebuild | A device's worth inside a stated time at the default budget, with the foreground's p99 under twice its own |
 | A deep scrub | The foreground's p99 within 1.25 times, at the default budget |

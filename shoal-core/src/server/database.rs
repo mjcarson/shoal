@@ -296,6 +296,17 @@ where
         query: &<Self::ClientType as QuerySupport>::QueryKinds,
     ) -> Result<Option<(Self::TableNames, u64, Vec<u8>)>, ServerError>;
 
+    /// Whether a query is a write applied only if its condition holds
+    ///
+    /// A replicated conditional write is refused until the cluster has activated the wire
+    /// version whose replicas all judge one
+    /// ([F68](../../../docs/src/features/conditional-writes.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query
+    fn is_conditional(query: &<Self::ClientType as QuerySupport>::QueryKinds) -> bool;
+
     /// Apply a committed command to the table it names, in committed order
     ///
     /// # Arguments

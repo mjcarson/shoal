@@ -100,7 +100,21 @@ use trace::{TraceContext, TRACE_CONTEXT_LEN};
 /// or body encoding moved - a body at 6 is encoded as at 5 - but the control log gained a
 /// command and a group's restore record two fields, which a replica built before them would
 /// apply differently or refuse to decode, so the command is refused until 6 is activated.
-pub const PROTOCOL_VERSION: u8 = 6;
+///
+/// Went to 7 when a tablet group's log gained the conditional write
+/// ([F68](../../../docs/src/features/conditional-writes.md)). No frame's framing or body encoding
+/// moved - a body at 7 is encoded as at 6 - but a replica built before it does not know the
+/// conditional intent and would refuse a command its peers applied, so a conditional write is
+/// refused at the coordinator until [`CONDITIONAL_WIRE_VERSION`] is activated. The client lane
+/// took no part: the query is a new variant appended to a table's query enum, which a server
+/// from before it refuses as a query it cannot validate, never as one it misreads.
+pub const PROTOCOL_VERSION: u8 = 7;
+
+/// The wire version a cluster has to have activated before it accepts a conditional write
+///
+/// Every replica judges a conditional write at apply, so every replica has to know one
+/// ([F68](../../../docs/src/features/conditional-writes.md)).
+pub const CONDITIONAL_WIRE_VERSION: u8 = 7;
 
 /// The oldest wire version a peer of this build is spoken to
 ///

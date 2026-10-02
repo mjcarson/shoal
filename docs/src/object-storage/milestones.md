@@ -34,9 +34,9 @@ weakening a clause of [the contract](contract.md#the-contract).
 | --- | --- | --- | --- |
 | Before M11 | The contract agreed | Q14, Q15, Q16, Q18, Q19 | — |
 | M11 | The model, the fixture's faults, the driver's kinds | Q30 | Device faults in the fixture; operation kinds and byte counters in the driver |
-| M12 | Buckets in the schema and the tables they generate | Q25 | The conditional write; items 198 and 202 |
+| M12 | Buckets in the schema and the tables they generate | Q25 | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); items 198 and 202 |
 | M13 | The wire, pool policy, inline objects, the baseline | Q21, Q26 | More than one frame for one query |
-| M14 | Devices, the pool map, placement and the device store, on one node | Q22, Q24 | Item 46; a failure domain on a member; free bytes for every root |
+| M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22, Q24 | Item 46; a failure domain on a member; free bytes for every root |
 | M15 | Replicated pools: stage, commit, apply and read | Q27 | — |
 | M16 | Recovery and moves | Q17, Q29 | The walk of a tablet's rows |
 | M17 | Scrub and repair | Q28 | — |
@@ -67,7 +67,7 @@ The evidence is [X1](spikes.md#x1-the-stripe-protocol-as-a-model) for safety,
 is changed with a recorded cause, and the page that leaned on it is changed with it.
 
 No type, wire format, file format or dependency of the object store is added at this gate.
-The model is the one piece of it written beforehand. A prerequisite of
+The model is the one part of it written beforehand. A prerequisite of
 [S1](prerequisites.md#the-order) is another matter: each is worth having with no object
 store at all, and several can land while the spikes run. A design cannot pass by calling the
 appointment of a primary an edit to the pool map, and it cannot pass on a latency number
@@ -109,7 +109,8 @@ exercised by a kind a test supplies.
 commit to a cold row costs ([X10](spikes.md#x10-what-a-stripe-row-costs)). A generated row
 is persisted from the first object on, so its layout is fixed here.
 
-**Lands first.** A conditional write on unsorted tables, with a typed refusal. Known issue
+**Lands first.** ~~A conditional write on unsorted tables, with a typed refusal~~ ✅ landed
+as [F68](../features/conditional-writes.md), for sorted tables too. Known issue
 198, the partition key of two fields, which is also item 92. Known issue 202, a byte bound on
 an append batch.
 
@@ -132,7 +133,7 @@ tables and no others. X10's figures are taken again on the generated rows as bui
 
 **Closed before it.** Q26, streamed bodies ([X11](spikes.md#x11-streamed-bodies)). Q21, the
 checksum ([X5](spikes.md#x5-checksums)): a frame that carries a unit's checksum fixes it on
-the wire before any device stores one, so the dependency is chosen here.
+the wire before any slice stores one, so the dependency is chosen here.
 
 **Lands first.** More than one frame for one query on the client wire.
 
@@ -179,30 +180,32 @@ root.
 
 **Delivers.**
 
-- A device: its marker, lock and id, the claim with three outcomes, its class as a label
-  ([S4](pools-and-devices.md#a-device-has-an-identity)).
-- Devices reported when a node joins and in every status report, with size and free bytes.
-- The pool map, committed and pushed: devices and their states, generations
+- A device and its slices: their markers and ids, a slice's lock, the claim with three
+  outcomes, the device's class as a label ([S4](pools-and-devices.md#a-device-has-slices)).
+- Devices and their slices reported when a node joins and in every status report, with each
+  device's size and free bytes.
+- The pool map, committed and pushed: devices, slices and their states, generations
   ([S5](placement.md#the-pool-map)). The placement function. Readiness that names what a
   pool is short of.
-- The device store ([S6](device-store.md)): pieces, the journal, stage, apply, read and
-  discard, a checksum for every unit bound to its place, space taken at the stage.
-- The executor that owns each device, the budget every object buffer is drawn from, and the
-  order of work on a device ([S13](isolation.md)).
-- Devices in the fixture and in an inventory, and a bench cluster that moves them.
+- The device store ([S6](device-store.md)): stripe chunks, the journal, stage, apply, read
+  and discard, a checksum for every chunk unit bound to its place, space taken at the stage.
+- The executor that owns each slice, the budget every object buffer is drawn from, and the
+  order of work on a slice ([S13](isolation.md)).
+- Devices and their slices in the fixture and in an inventory, and a bench cluster that
+  moves them.
 
-**Acceptance.** S4's device, class and report rows. S5's two placement rows. S6's five rows.
-S13's device-loss, ownership and budget rows. S14's readiness row. S15's inventory and
-capture rows.
+**Acceptance.** S4's device, slice, class and report rows. S5's two placement rows. S6's
+five rows. S13's device-loss, ownership and budget rows. S14's readiness row. S15's inventory
+and capture rows.
 
 **Evidence/exit.** X6's figures taken again from the store as built: a stage's sync, an
 apply, a listing. The pool map's frame at the lab's shape and at sixty-four members, against
-what X2 predicted. The reference cell's p99 beside a synthetic load on a device's executor,
+what X2 predicted. The reference cell's p99 beside a synthetic load on a slice's executor,
 against [S15](performance.md#the-acceptance-numbers)'s budget, labelled as sharing a disk
 with the tables where it does.
 
 *Not at this gate:* no client's byte reaches a device. The store is driven by tests. The
-lane that carries pieces between nodes is M15's, where there is something to carry.
+lane that carries stripe chunks between nodes is M15's, where there is something to carry.
 
 ## Group 2: replicated pools
 
@@ -220,7 +223,7 @@ depends on it, and a command is persisted in a log.
 - A losing stage discarded on a committed fact, and the leader's no-op for a stage whose
   stager died.
 - The read path of [S9](read-path.md): default and strong reads, a reader moving its row
-  forward, a stale piece read around, holes, streams inside a window.
+  forward, a stale chunk read around, holes, streams inside a window.
 - The object lane between nodes, behind its capability and an activated wire version
   ([S13](isolation.md#a-lane-for-object-bytes)).
 - The standalone node's path ([S4](pools-and-devices.md#the-standalone-node)).
@@ -242,7 +245,7 @@ rebuilds it. Nothing is reclaimed but a losing stage. No erasure coded pool take
 
 ### M16. Recovery
 
-**Closed before it.** Q17, how a device learns what it missed and how that record survives
+**Closed before it.** Q17, how a slice learns what it missed and how that record survives
 a checkpoint and a snapshot. Q29, the budgets for recovery and moves
 ([X12](spikes.md#x12-recovery-and-scrub-rates)).
 
@@ -263,7 +266,7 @@ as the rebalance arms do today. A rebuild's rate at the default budget against X
 final errors, and the foreground's p99 under twice its own, through a rebuild and through a
 move.
 
-*Not at this gate:* the pieces a move leaves behind are not removed until M20.
+*Not at this gate:* the stripe chunks a move leaves behind are not removed until M20.
 
 ### M17. Scrub and repair
 
@@ -272,7 +275,7 @@ move.
 
 **Delivers.** [S11](scrub.md) for replicated pools. A checksum failure on a read reported
 and not only refused. The light scrub: holders' inventories against the rows and against
-each other. The deep scrub: every unit read and verified where it lies, and the copies'
+each other. The deep scrub: every chunk unit read and verified where it lies, and the copies'
 checksum tables compared. A cursor committed as it goes. Quarantine, a rebuild on a
 checksum's own evidence, and everything else stopped with its evidence. A schedule, a
 window, a stagger, and a byte budget shared with recovery. On by default.
@@ -285,7 +288,7 @@ the foreground's p99 within S15's budget at the default. The time to scrub a dev
 budget, against X12's arithmetic. A flipped bit found by a read, and found by a scrub when
 nothing reads it.
 
-*Not at this gate:* the check that parity matches data, which needs parity. A piece nothing
+*Not at this gate:* the check that parity matches data, which needs parity. A chunk nothing
 explains is reported, and removed at M20.
 
 ## Group 3: erasure coding and rotational devices
@@ -298,15 +301,15 @@ is added here and not before.
 
 **Delivers**, in three steps that are each a place to stop:
 
-1. **Whole stripes.** Encode once and stage whole pieces. A healthy read that decodes
+1. **Whole stripes.** Encode once and stage whole chunks. A healthy read that decodes
    nothing, a degraded read that decodes only what it needs, a rebuild by decode, short
-   stripes with no padding, and plain XOR at one parity piece ([S8](erasure-coding.md)).
+   stripes with no padding, and plain XOR at one parity chunk ([S8](erasure-coding.md)).
 2. **Reconstruct-write**, for a write of part of a stripe.
 3. **Parity delta**, where the code has an update form.
 
 With them, the third row of [the acknowledgement rule](write-path.md#the-acknowledgement-rule)
 and the deep scrub's check of parity by summaries. The stripe's row has kept a label for
-each piece since M15, so no persisted row changes here.
+each chunk since M15, so no persisted row changes here.
 
 **Acceptance.** S8's seven rows. S9's three erasure coded rows. S11's parity row.
 
@@ -348,7 +351,7 @@ finishes inside its interval.
 
 ### M20. Reclamation and device lifecycle
 
-**Delivers.** [S10's reclamation](recovery.md#reclamation): the pieces and rows of a
+**Delivers.** [S10's reclamation](recovery.md#reclamation): the stripe chunks and rows of a
 replaced or deleted object and of an abandoned put, the stripes past a truncate and the
 floors that hid them, what a move left behind, and what a light scrub cannot explain. Each
 on its committed fact, with absence judged behind a read barrier, and with a grace for
@@ -356,7 +359,7 @@ readers that is not a permission. And a device's life ([S14](operations.md#admin
 drained, removed and tombstoned, reweighted, added and filled, and drained without being
 asked once its checksum failures pass a threshold.
 
-**Acceptance.** S10's two reclamation rows. S11's unexplained-piece row. S14's drain and
+**Acceptance.** S10's two reclamation rows. S11's unexplained-chunk row. S14's drain and
 tombstone rows.
 
 **Evidence/exit.** Space comes back: a bucket filled, deleted and reclaimed leaves its
@@ -375,7 +378,7 @@ not by a spike, and this gate does not open without it.
 authorized, audited and advertised; the figures for a bucket, a device and a pool; pools in
 the wizard, in the stats view and in the cluster tab; activation through a rolling upgrade
 from a build that knows no objects. Whatever Q31 decides, and under any answer a bucket that
-refuses by name when its rows are older than its pieces. The six procedures of
+refuses by name when its rows are older than its stripe chunks. The six procedures of
 [day two](operations.md#day-two) as runbooks.
 
 **Acceptance.** S14's two rows for this gate.
@@ -393,11 +396,11 @@ Named so that nothing above is read as including them.
 | --- | --- |
 | An ordered listing of a bucket | [Q32](contract.md#questions-to-answer), and a decision of its own |
 | A gateway that speaks S3 | Listing, and a reason |
-| Clients that place, encode and write pieces themselves | [D7](../direction/shard-aware-routing.md), and a measurement that the crossing is worth removing |
+| Clients that place, encode and write stripe chunks themselves | [D7](../direction/shard-aware-routing.md), and a measurement that the crossing is worth removing |
 | Changing a pool's redundancy; moving a bucket between pools | A migration between two pools, designed as one |
 | A backup of object bytes | Whatever Q31 leaves undone |
 | Authorization for a bucket | Authorization for a table, built once for both |
-| Codes that rebuild from fewer pieces; a raw block device; tiering | Nothing here precludes them, and nothing here asks for them |
+| Codes that rebuild from fewer chunks; a raw block device; tiering | Nothing here precludes them, and nothing here asks for them |
 
 ## What the spikes can still move
 
@@ -411,7 +414,7 @@ The reason this page is provisional, spike by spike.
 | X4 | No candidate has an update form | M18 ends at its second step |
 | X4, X9 | A Zen1 core encodes below a device's rate, or shared executors move a table's tail past its budget | M14 delivers dedicated executors only, and a four-core node gives up a core or serves no pool |
 | X5 | gxhash's output is not stable across builds | A second checksum is a new dependency before M13 |
-| X6 | A file a piece is not viable at small sizes, or a clone is worth requiring | M14's store changes layout; or a clone call lands in the glommio fork first and the filesystems M14 accepts narrow |
+| X6 | A file a stripe chunk is not viable at small sizes, or a clone is worth requiring | M14's store changes layout; or a clone call lands in the glommio fork first and the filesystems M14 accepts narrow |
 | X7 | A disk needs a journal on an SSD, or an executor to itself | M19 grows by that, and a shared journal becomes a failure domain on S5 |
 | X8 | A size below which bytes in the commit win | M15 gains the small-write path, and item 202 carries more weight |
 | X10 | A commit to a cold stripe row stalls its group | The rows of M12 change shape, or M15 keeps stripe rows resident and pays for it in memory |

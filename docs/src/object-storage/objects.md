@@ -9,8 +9,9 @@ the two generated rows hold, how an object of any size has metadata that does no
 it, and what an unsorted table cannot do for a bucket however it is used.
 
 The unit everything else on these pages is built from is the **stripe**: a fixed-size run of
-an object's bytes, written, placed, encoded, recovered and scrubbed on its own. It is what
-RADOS calls an object, and it is the reason "arbitrarily large" is not a special case.
+an object's bytes, cut into one stripe chunk for each holder, and written, placed, encoded,
+recovered and scrubbed on its own. It is what RADOS calls an object, and it is the reason
+"arbitrarily large" is not a special case.
 
 ## What exists today
 
@@ -20,8 +21,10 @@ An unsorted table holds exactly one row for each partition key, and the key is a
   (`shoal-derive/src/traits/partition_key.rs:104-115`); a tablet is the key's top twelve bits
   (`shoal-core/src/server/ring.rs:343-350`).
 - "One row per partition. Inserting to an existing key replaces the row outright"
-  ([Table Types](../tables/table-types.md)). An update succeeds whenever the row exists, and
-  nothing is conditional ([S1](prerequisites.md#required)).
+  ([Table Types](../tables/table-types.md)). An update succeeds whenever the row exists, ~~and
+  nothing is conditional ([S1](prerequisites.md#required))~~ and since [F68](../features/conditional-writes.md) any write can
+  be made conditional on the row being absent or matching a filter, which is what an entry's
+  create and change are built on.
 - **Keys collide and nothing detects it.** The glossary says so in those words, and for an
   unsorted table "a hash collision silently overwrites a row"
   ([Table Types](../tables/table-types.md#limitations)).
@@ -75,10 +78,12 @@ unusable for no reason its author could discover.
 
 Every object has an id minted when it is created: 128 bits, time-ordered, as a bundle's retry
 identity already is (`Uuid::now_v7`, `shoal-client/src/client.rs:1699`). It is **never
-reused**, and stripes are keyed by it and not by the path. That is what makes replace and
-delete safe: the stripes of a replaced object and the stripes of its successor at the same
-path have different keys, sit in different rows and are different pieces on every device, so
-nothing that reads, rebuilds or reclaims one can touch the other.
+reused**, and stripes are keyed by it and not by the path: a stripe's key is the hash of its
+consumer's id, its object id and its stripe index ([S5](placement.md)), the consumer here
+being the bucket. That is what makes replace and delete safe: the stripes of a replaced object
+and the stripes of its successor at the same path have different keys, sit in different rows
+and are different stripe chunks on every slice, so nothing that reads, rebuilds or reclaims
+one can touch the other.
 
 ### The two rows
 
@@ -87,16 +92,16 @@ flowchart LR
     subgraph om["PostersObjectMeta (key: hash of the path)"]
         e["entry: path, object id, size,<br/>geometry, truncate epoch and floors,<br/>times, user map, state,<br/>inline bytes (small objects)"]
     end
-    subgraph sm["PostersStripeMeta (key: object id, stripe index)"]
-        s["sequence, a label for each piece,<br/>length, truncate epoch stamped"]
+    subgraph sm["PostersStripeMeta (key: consumer id, object id, stripe index)"]
+        s["sequence, a label for each chunk,<br/>length, truncate epoch stamped"]
     end
-    subgraph pcs["devices of the stripe's placement group"]
-        p0["piece 0"]
-        p1["piece 1"]
-        p2["piece ..."]
+    subgraph pcs["slices of the stripe's placement group"]
+        p0["stripe chunk 0"]
+        p1["stripe chunk 1"]
+        p2["stripe chunk ..."]
     end
     e -- "object id, and offset / stripe size" --> s
-    s -- "which label each piece must carry" --> p0
+    s -- "which label each chunk must carry" --> p0
     s --> p1
     s --> p2
 ```
@@ -108,7 +113,7 @@ flowchart LR
 | Path | The whole path, compared on every read |
 | Object id | The current object at the path |
 | Size | The object's length in bytes |
-| Geometry | Stripe size, stripe unit and redundancy as they were when the object was created. Fixed for the object's life, so an offset maps to a stripe by division |
+| Geometry | Stripe size, chunk unit and redundancy as they were when the object was created. Fixed for the object's life, so an offset maps to a stripe by division |
 | Truncate epoch, floors | A counter every truncate moves, and a short list of `(length, epoch)` marks left by truncates not yet reclaimed |
 | State | Live; a replacement in flight and its id; ids retired and not yet reclaimed |
 | Times, user map | Created and modified, as a clock said, for people and never for a decision; a small bounded map of strings |
@@ -119,15 +124,15 @@ flowchart LR
 | Field | Holds |
 | --- | --- |
 | Sequence | How many writes to this stripe have committed |
-| A label for each piece | The sequence and the tag of the write that last changed that piece ([S18](contract.md#identity-and-progress)) |
+| A label for each stripe chunk | The sequence and the tag of the write that last changed that chunk ([S18](contract.md#identity-and-progress)) |
 | Length | How much of the stripe holds bytes |
 | Truncate epoch | The object's epoch when this row was last committed |
 
-Where a stripe's pieces are is not in its row. It is its placement group's generation, which
+Where a stripe's chunks are is not in its row. It is its placement group's generation, which
 the tablet group holds once for every stripe in the group ([S5](placement.md#generations)).
 
 **A stripe written only when its object was created has no row.** A whole object put under a
-new id writes its pieces straight into place, each labelled with sequence zero and the
+new id writes its stripe chunks straight into place, each labelled with sequence zero and the
 object's own tag, and the one commit that makes them current is the `ObjectMeta` change that
 makes the object current ([S7](write-path.md#a-whole-object-in-one-commit)). A stripe gets a
 row on its first write in place. So an object that is put and read and never patched, the S3
@@ -163,7 +168,7 @@ and was not read at source; [X14](spikes.md#x14-ceph-and-s3-at-the-source) reads
 ### Small objects stay inline
 
 An object at or under its pool's inline threshold is stored in its `ObjectMeta` entry and has
-no stripes, no pieces and no device. It is a row: one commit, replicated by the tablet group
+no stripes, no stripe chunks and no slice. It is a row: one commit, replicated by the tablet group
 at the cluster's factor.
 
 The threshold belongs to the **storage pool**, and zero turns it off. That is deliberate: a
@@ -180,15 +185,16 @@ not move back.
 ### Replace and delete
 
 - **Replace.** The new object's id is recorded in the path's entry as a replacement in
-  flight; its pieces are written; one conditional commit makes it current and moves the old
+  flight; its stripe chunks are written; one conditional commit makes it current and moves the old
   id to the retired list. A reader sees the old object or the new one
   ([P19](contract.md#the-contract)'s one exception).
 - **Delete.** The current id moves to the retired list. The entry stays until the object's
-  pieces and stripe rows are reclaimed, and goes when its list is empty.
-- **Registration comes first.** No piece is written for an id the row does not name. That is
-  what lets a device ask the row about any piece it holds and get an answer that can only
-  move one way: named as current, in flight or retired, or named nowhere and therefore
-  discardable ([S10](recovery.md#reclamation)).
+  stripe chunks and stripe rows are reclaimed, and goes when its list is empty.
+- **Registration comes first.** No stripe chunk is written for an id the row does not name.
+  That is what lets a slice ask the consumer that owns a chunk about any chunk it holds, which
+  for a bucket is the path's `ObjectMeta` entry, and get an answer that can only move one way:
+  named as current, in flight or retired, or named nowhere and therefore discardable
+  ([S10](recovery.md#reclamation)).
 
 ### What an unsorted table cannot do
 
@@ -206,8 +212,8 @@ index rebuild would both be made of.
 ## Alternatives rejected
 
 **The path's hash as the object's identity.** A replaced object would share stripe keys with
-its successor, and every safety argument about a retired object's pieces would need an extra
-generation to tell them apart. The id is that generation, minted once.
+its successor, and every safety argument about a retired object's stripe chunks would need an
+extra generation to tell them apart. The id is that generation, minted once.
 
 **One row an object holding every stripe's state.** It is rewritten whole as the object
 grows, it is bounded by a frame and by rkyv, and it makes every stripe of an object contend
@@ -215,8 +221,8 @@ on one row. P18 rules it out.
 
 **An object's rows kept in one tablet**, so that size and stripes commit together. It makes
 truncate atomic and costs more than it saves: keys would be allocated and not hashed, an
-object would be confined to one group's commit rate, and its pieces to one tablet's placement
-groups ([Q18](contract.md#questions-to-answer)).
+object would be confined to one group's commit rate, and its stripe chunks to one tablet's
+placement groups ([Q18](contract.md#questions-to-answer)).
 
 **A row for every stripe, written or not.** It doubles the commits of a streaming put and
 makes metadata linear in size for the workload that never overwrites.
@@ -248,10 +254,13 @@ makes metadata linear in size for the workload that never overwrites.
 
 ## Invariants to uphold
 
-- An object id is never reused, and a stripe's key contains it.
+- An object id is never reused, and a stripe's key contains it beside its consumer's id.
 - A path is compared whole on every read, and an entry is changed only by a commit
   conditional on what its writer read.
-- No piece is written for an id its path's entry does not name.
+- No stripe chunk is written for an id its path's entry does not name.
+- Nothing in a storage pool, a slice, a scrub or reclamation assumes the consumer is a bucket.
+  What a slice asks about a chunk it holds, whether its owner id is still named, is asked of
+  the consumer, and a bucket answers it from `ObjectMeta`.
 - A stripe is committed before the size that reveals it; a truncate's epoch is committed
   before any stripe it hides is reclaimed.
 - A stripe stamped below a floor that covers it is a hole.
@@ -260,7 +269,7 @@ makes metadata linear in size for the workload that never overwrites.
 
 ## Prerequisites
 
-[S1](prerequisites.md#required): the conditional write, known issue 198, the byte bound on an
+[S1](prerequisites.md#required): ~~the conditional write~~ (delivered, [F68](../features/conditional-writes.md)), known issue 198, the byte bound on an
 append batch (inline objects are rows) and the tablet walk. [S2](buckets.md), which generates
 the rows.
 
@@ -279,9 +288,9 @@ counts.
 | `colliding_paths_are_told_apart` | Two paths forced onto one key are stored, read, replaced and deleted independently | M13 |
 | `inline_object_never_touches_a_device` | An object under the threshold is written and read with no device configured, and one over it is refused there by name | M13 |
 | `metadata_cost_is_linear_and_published` | A put of any size leaves one row; rows grow by one for each stripe written in place and by nothing else | M15 |
-| `a_hole_reads_as_zeros` | A stripe never written, inside the object's size, reads as zeros and holds no piece | M15 |
+| `a_hole_reads_as_zeros` | A stripe never written, inside the object's size, reads as zeros and holds no stripe chunk | M15 |
 | `truncated_bytes_never_return` | A stripe committed past a cut by a writer that read the size before the truncate is never shown, after any later extension | M15 |
-| `replace_shares_nothing_with_its_predecessor` | During and after a replace, no read, rebuild or reclamation of one object touches a piece of the other | M15 |
+| `replace_shares_nothing_with_its_predecessor` | During and after a replace, no read, rebuild or reclamation of one object touches a stripe chunk of the other | M15 |
 
 ## Related
 

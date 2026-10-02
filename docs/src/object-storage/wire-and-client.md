@@ -95,10 +95,10 @@ The second point is why `Cancel` is optional ([S1](prerequisites.md#optional)). 
 that seeks away or drops its handle stops by not asking for the next range; what it cannot
 take back is the range in flight, which is bounded by the window.
 
-**A frame carries whole stripe units** where it can, and is read straight into a buffer
+**A frame carries whole chunk units** where it can, and is read straight into a buffer
 aligned for direct I/O, so that the bytes a holder stages on this node are the bytes that
 came off the socket. Whether the checksum a client computes over a unit can be the one the
-device stores, so that a unit is checksummed once from the caller to the disk, is part of
+slice stores, so that a unit is checksummed once from the caller to the disk, is part of
 [Q21](contract.md#questions-to-answer).
 
 ### Sharing a connection with queries
@@ -151,14 +151,15 @@ token, as a query may.
 
 ### What the client does not do
 
-It does not hold a pool map, choose a device, encode or talk to a holder. A node
+It does not hold a pool map, choose a slice, encode or talk to a holder. A node
 coordinates every operation. That keeps the client the thin thing it is and costs a network
 crossing on every byte ([S9](read-path.md#where-the-bytes-travel)).
 
-It is not precluded. The frames between nodes that stage and read pieces
-([S13](isolation.md#a-lane-for-object-bytes)) are designed so that a client could one day
-send them, and the day is after [D7](../direction/shard-aware-routing.md) and after a
-measurement says the crossing is worth removing.
+It is not precluded. The frames between nodes that stage and read stripe chunks
+([S13](isolation.md#a-lane-for-object-bytes)) each name a slice, never an executor, and are
+designed so that a client could one day send them, and the day is after
+[D7](../direction/shard-aware-routing.md) and after a measurement says the crossing is worth
+removing.
 
 ## Alternatives rejected
 
@@ -223,7 +224,7 @@ generated client half. `Cancel`, only if ranges turn out not to be enough
 [X11](spikes.md#x11-streamed-bodies): megabytes a second through one connection, plaintext
 and under kTLS, at frame sizes from 64 KiB to 8 MiB; the memory one stream holds; what a
 small query's tail does on a connection carrying object frames and on one that is not; and
-whether a connection can be handed to the executor that owns the device its bytes are for.
+whether a connection can be handed to the executor that owns the slice its bytes are for.
 Loopback on europa for what a core costs; across the lab for what 1 GbE allows, labelled as
 the network's number and not the design's.
 

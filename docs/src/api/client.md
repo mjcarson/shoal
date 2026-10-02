@@ -415,7 +415,10 @@ pub struct QuerySuceededOpts {
 `shoal-client/src/client.rs`
 
 Defaults to `true` everywhere, so by default **a get that finds nothing
-is an error**, and so is an update that matched no row. `send_one` and `exec` apply the
+is an error**, and so is an update that matched no row. A conditional write that was refused
+([F68](../features/conditional-writes.md)) is always an error, whatever the options say:
+`Errors::Refused { reason, .. }`, with `reason` one of `RowExists`, `RowMissing` and
+`RowMismatch`. A caller reading a bundle gets the same reason from `ShoalResponse::refusal()`. `send_one` and `exec` apply the
 default, which is why the tests treat a missing row as a failure. To treat absence as normal,
 pass an opts value with `get: false`, or use `exists`.
 

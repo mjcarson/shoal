@@ -48,7 +48,9 @@ still holds for every whole partition. Only fragments carry tombstones on disk.
 - its fragments so far are under half its base;
 - its batch holds only inserts and deletes.
 
-An update needs the row it changes, so a batch with one goes to the ordinary merge. So does every
+An update needs the row it changes, so a batch with one goes to the ordinary merge. Since
+[F68](conditional-writes.md) a batch holding a conditional write goes there too, since its
+condition is judged against the row, which a fragment does not hold. So does every
 other partition. The merge reads the base and the chain, folds them, applies the batch and writes
 one whole record, which ends the chain. `fragment_max_chain: 0` writes every partition whole, as
 before.
@@ -125,7 +127,8 @@ would put apply logic on the read path. The keyword table is written by inserts 
   read-in-place.
 - A chained read makes one read per record: the base and up to `fragment_max_chain` fragments.
   The merge's and the pass's reads of a chain are the same.
-- A batch with one update rewrites its partition whole, however large.
+- A batch with one update, or one conditional write ([F68](conditional-writes.md)), rewrites its
+  partition whole, however large.
 - The half-the-base rule consolidates a small base early. A partition just over
   `fragment_min_bytes` gets one or two fragments before it is written whole again.
 - Map files and intent logs from before F61 do not load: the serialized map gained a field, and

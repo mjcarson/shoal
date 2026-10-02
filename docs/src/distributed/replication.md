@@ -170,7 +170,9 @@ across groups and the spike found a thousand groups saturate a thread. One share
 with one fsync per batch, because sixty-four independent groups fsyncing on one executor cost
 27× one group ([C13](protocol.md#q1-and-q13-at-m1)). Apply-and-derive on every replica rather
 than execute-on-the-leader-and-ship-the-effect, because the result of an insert or a
-conditional update depends on state only committed order settles. A time-ordered identity,
+conditional update depends on state only committed order settles - which since
+[F68](../features/conditional-writes.md) includes a write's own condition, refused at apply and
+remembered with its identity. A time-ordered identity,
 because an index is nothing a client can compare its retry to. The retry table beside the
 checkpoint, because a retry past the purge point has no log to be answered from.
 

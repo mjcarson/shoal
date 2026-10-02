@@ -105,6 +105,17 @@ pub fn add(
                 #archived_response_ident::#variant_ident(response)=> response.error(),
             }
         });
+    // build the arms that read why a conditional write was refused
+    let refusal_arms = tables
+        .iter()
+        .map(|table| table.variant_ident.clone())
+        // a projected get is never refused, but every variant has to be matched
+        .chain(projected.iter().map(|projection| (*projection).clone()))
+        .map(|variant_ident| {
+            quote! {
+                #archived_response_ident::#variant_ident(response)=> response.refusal(),
+            }
+        });
     // build our table names ident
     let table_names_ident = format_ident!("{}TableNames", struct_ident);
     // build our query_table_name arms
@@ -606,6 +617,17 @@ pub fn add(
             fn error(archived: &<Self::ResponseKinds as ::shoal::rkyv::Archive>::Archived) -> Option<&::shoal::shared::responses::ArchivedResponseError> {
                 match archived {
                     #(#error_arms)*
+                }
+            }
+
+            /// Get why a conditional write was refused, if it was
+            ///
+            /// # Arguments
+            ///
+            /// * `archived` - The archived response to get the refusal from
+            fn refusal(archived: &<Self::ResponseKinds as ::shoal::rkyv::Archive>::Archived) -> Option<::shoal::shared::queries::ConditionRefusal> {
+                match archived {
+                    #(#refusal_arms)*
                 }
             }
 

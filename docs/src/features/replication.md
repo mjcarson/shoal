@@ -63,8 +63,9 @@ table's intent once - the same `UnsortedIntents`/`SortedIntents` bytes the stand
 stores - and wraps it as a `Command { table, tablet, request: {bundle, index}, payload }`. The
 command is proposed through the group; every replica applies it to the table when the group
 commits it, in log order, without any storage commit of its own, and derives the result -
-inserted or not, deleted or not, updated or not - from the state it finds. A conditional
-result is therefore the same on every replica, because every replica applied the same commands
+inserted or not, deleted or not, updated or not, and since
+[F68](conditional-writes.md) refused or not by a write's condition - from the state it finds. A
+conditional result is therefore the same on every replica, because every replica applied the same commands
 in the same order. A partition a delete or an update needs from disk parks the batch until the
 read lands and applies again; the parked batch blocks the group behind it and nothing else.
 `One` reads are served from the local replica's applied state, so a follower cut off from its

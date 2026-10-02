@@ -7,7 +7,7 @@ replicated or erasure coded (R11), and a write that is acknowledged has to survi
 its pool was sized for. The hard case is the one Ceph spent years on: a write that changes
 part of an erasure coded stripe and reaches some of its holders. Until it has reached enough
 of them it must be possible to abandon it; once it has, it must be finished everywhere; and
-at no instant may a reader or a decoder be handed pieces from both sides of it.
+at no instant may a reader or a decoder be handed stripe chunks from both sides of it.
 
 This page is that protocol. It carries four candidates, prefers one, and is explicit that the
 preference is a hypothesis: [Q14](contract.md#questions-to-answer) is settled at the gate
@@ -56,16 +56,16 @@ not choose the node it writes to ([D7](../direction/shard-aware-routing.md)).
 
 | | Candidate | Durable rounds | What it needs that Shoal lacks | What it gives up |
 | --- | --- | --- | --- | --- |
-| A | **Stripes are rows.** A stripe's bytes are a row of a generated table, replicated by its tablet group | 1 | A way to patch part of a row; a byte bound on an append batch | Erasure coding, storage pools and devices altogether. Every byte through the WAL, the archives and the compactor, and a 4 KiB change rewrites the stripe at the next merge |
+| A | **Stripes are rows.** A stripe's bytes are a row of a generated table, replicated by its tablet group | 1 | A way to patch part of a row; a byte bound on an append batch | Erasure coding, storage pools, devices and slices altogether. Every byte through the WAL, the archives and the compactor, and a 4 KiB change rewrites the stripe at the next merge |
 | B | **The row's group orders; the bytes stay out of its log.** Holders stage, one conditional commit of the stripe's row decides, holders apply | 2 | A device store, a conditional write, a pool map | One round of latency against A |
-| C | **A group among the holders**, one a placement group, with a log on every device: a Raft group with payloads out of band, or a primary and peering as RADOS has | 1 | A quorum of `k + f` with a different payload for each member; or a peering protocol | The first was not found to be offered by openraft; the second is the custom protocol [C13](../distributed/protocol.md#alternatives-rejected) declined. Either puts a consensus log on the pool's devices |
+| C | **A group among the holders**, one a placement group, with a log on every slice: a Raft group with payloads out of band, or a primary and peering as RADOS has | 1 | A quorum of `k + f` with a different payload for each member; or a peering protocol | The first was not found to be offered by openraft; the second is the custom protocol [C13](../distributed/protocol.md#alternatives-rejected) declined. Either puts a consensus log on the pool's slices |
 | D | **Redirect on write.** Every write makes new extents; the row holds a map of them | 2 | Collection of dead extents; a larger row | Nothing is applied in place, so nothing tears; but a stripe fragments, a rotational disk reads it badly, and the row grows with every overwrite |
 
 **B is preferred. A is the baseline every measurement is read against**, and a candidate in
 its own right for small writes ([below](#small-writes)). C stays the alternative Q14 is
-judged against. D is rejected for the reasons in its row, with one part kept: a whole piece
-replaced is written beside the old one and renamed, which is redirect on write at the size
-where it is free ([S6](device-store.md#staging-two-cases)).
+judged against. D is rejected for the reasons in its row, with one part kept: a whole stripe
+chunk replaced is written beside the old one and renamed, which is redirect on write at the
+size where it is free ([S6](device-store.md#staging-two-cases)).
 
 One sentence carries the difference between B and Ceph: **Ceph keeps undo and applies at
 once; B keeps redo and applies after the decision.** Ceph's write is "a two-phase process:
@@ -88,14 +88,14 @@ proposal and marked as one). What B changes is who decides.
 sequenceDiagram
     participant C as client
     participant N as coordinating shard
-    participant H as holders, k+m devices
+    participant H as holders, k+m slices
     participant G as the row's tablet group
     C->>N: write_at(path, offset, bytes), under an identity
     N->>G: read the object's entry (strong), the stripe's row,<br/>the placement group's generation
-    Note over N: label = (sequence + 1, tag of this identity)<br/>new bytes for each piece the write touches
-    N->>H: stage(piece, label, the label it expects, bytes)
+    Note over N: label = (sequence + 1, tag of this identity)<br/>new bytes for each stripe chunk the write touches
+    N->>H: stage(chunk, label, the label it expects, bytes)
     H-->>N: staged, after fdatasync
-    Note over N: are k + f pieces current or staged?
+    Note over N: are k + f chunks current or staged?
     N->>G: commit, if sequence, epoch and generation are as read
     Note over G: applied in committed order,<br/>the condition judged there
     G-->>N: applied, or refused and why
@@ -107,16 +107,16 @@ sequenceDiagram
 1. **Read.** The coordinating shard reads the object's entry with a strong read, for the
    truncate epoch ([S3](objects.md#size-holes-and-truncate)), then the row of each stripe
    the write touches and its placement group's generation ([S5](placement.md#generations)).
-2. **Stage.** It computes the new bytes of every piece the write touches and sends each to
-   its holder under the write's label. A holder stages durably and answers
+2. **Stage.** It computes the new bytes of every stripe chunk the write touches and sends each
+   to the slice that holds it, under the write's label. A holder stages durably and answers
    ([S6](device-store.md#staging-two-cases)).
-3. **Commit.** With enough pieces staged ([below](#the-acknowledgement-rule)) it proposes
-   one command to the row's group: move the sequence, set the labels of the touched pieces,
+3. **Commit.** With enough chunks staged ([below](#the-acknowledgement-rule)) it proposes
+   one command to the row's group: move the sequence, set the labels of the touched chunks,
    record which holders did not stage, **if** the row's sequence, the object's truncate
    epoch and the placement group's generation are the ones this write read.
 4. **Acknowledge.** The client is answered when that command has applied on a durable
    majority, as any table write is.
-5. **Apply.** Holders are told and fold the staged bytes into their pieces. A holder that
+5. **Apply.** Holders are told and fold the staged bytes into their chunks. A holder that
    is not told learns from the next read, or asks the row.
 6. **If refused**, the row has moved under another write. This write's staged bytes are now
    excluded by a committed fact, and holders drop them when they learn of it. The
@@ -131,21 +131,23 @@ sequenceDiagram
 
 A partial write of an erasure coded stripe computes new parity from the stripe as it read
 it. If another write committed in between, that parity describes a stripe that no longer
-exists. With today's unconditional update the second commit simply lands: every label is
+exists. With an unconditional update the second commit simply lands: every label is
 "current", every unit verifies, and the stripe decodes to garbage the first time a data
-piece is missing. Nothing else in the design can catch it, which is why the conditional
-write is the first row of [S1](prerequisites.md#required).
+chunk is missing. Nothing else in the design can catch it, which is why the conditional
+write is the first row of [S1](prerequisites.md#required), delivered by [F68](../features/conditional-writes.md): the
+stripe's commit is an update `if_matches` the sequence it was staged under, and a moved row
+refuses it as `RowMismatch`.
 
 ### Labels, not numbers
 
 Two shards can stage against one row at once: two clients, or one write retried through a
 new leader. Both produce "sequence plus one" with different bytes. A holder told only that
-the next sequence had committed would apply whichever it had staged, and the pieces of one
+the next sequence had committed would apply whichever it had staged, and the chunks of one
 stripe would then hold two different writes under one number.
 
-So a piece is labelled by the sequence **and a tag derived from the write's request
-identity**, the row keeps a label for each piece, and a holder applies a staged write only
-when the row names that write's tag for its piece. The loser of a race needs no abort: the
+So a chunk is labelled by the sequence **and a tag derived from the write's request
+identity**, the row keeps a label for each chunk, and a holder applies a staged write only
+when the row names that write's tag for its chunk. The loser of a race needs no abort: the
 committed row naming another tag is the fact that excludes it.
 
 ### Who stages
@@ -168,22 +170,22 @@ ignoring it is slow and never unsafe.
 ### The acknowledgement rule
 
 There is no single number of stages that is "enough". The rule is about what is true after
-the commit: **at least `k + f` pieces are current**, in distinct failure domains, where a
-replicated pool has `k = 1`. `f` is the pool's, and at least one
+the commit: **at least `k + f` stripe chunks are current**, in distinct failure domains,
+where a replicated pool has `k = 1`. `f` is the pool's, and at least one
 ([P11](contract.md#the-contract)).
 
-| Write, with every piece current beforehand | Pieces it touches | Stages it needs |
+| Write, with every chunk current beforehand | Chunks it touches | Stages it needs |
 | --- | --- | --- |
 | Replicated, `r` copies | `r` | `1 + f` |
 | Erasure coded, the whole stripe | `k + m` | `k + f` |
-| Erasure coded, part of the stripe, `d` data pieces | `d + m` | Enough that at most `m - f` pieces are stale afterwards |
+| Erasure coded, part of the stripe, `d` data chunks | `d + m` | Enough that at most `m - f` chunks are stale afterwards |
 
-The third row is the one that is easy to get wrong. A 4+2 write that touches one data piece
-touches three pieces. Acknowledged after one stage, it is held by one device, and losing
-that device loses an acknowledged write, though four pieces of the stripe are "current"
-by their old labels. Pieces already stale before the write count against the same budget.
+The third row is the one that is easy to get wrong. A 4+2 write that touches one data chunk
+touches three chunks. Acknowledged after one stage, it is held by one slice, and losing that
+slice's device loses an acknowledged write, though four chunks of the stripe are "current"
+by their old labels. Chunks already stale before the write count against the same budget.
 
-A read, by contrast, needs no quorum: any `k` pieces the row calls current, each confirming
+A read, by contrast, needs no quorum: any `k` chunks the row calls current, each confirming
 its label ([S9](read-path.md)). The row arbitrates, so `W + R > N` has no part here.
 
 A pool that cannot meet the rule refuses the write by name. A weaker acknowledgement is a
@@ -196,19 +198,19 @@ down.
 
 ### A whole object in one commit
 
-A put of a whole object does not use the three steps, because nothing can read its pieces
-until the object exists.
+A put of a whole object does not use the three steps, because nothing can read its stripe
+chunks until the object exists.
 
 1. The new object's id is recorded in the path's entry as a replacement in flight.
-2. Its pieces are written straight into place, labelled with sequence zero and the object's
-   own tag. No stripe gets a row.
-3. When every stripe has `k + f` pieces durable, one conditional commit makes the id
+2. Its stripe chunks are written straight into place, labelled with sequence zero and the
+   object's own tag. No stripe gets a row.
+3. When every stripe has `k + f` chunks durable, one conditional commit makes the id
    current and retires the old one.
 
 That is two commits for an object of any size, and it is what makes
 [P19](contract.md#the-contract)'s one exception true: a reader sees the old object or the
 new one. A put that is abandoned leaves an id the entry names as in flight; aborting it is a
-commit to that entry, after which its pieces are named nowhere and are discardable
+commit to that entry, after which its chunks are named nowhere and are discardable
 ([S10](recovery.md#reclamation)).
 
 ### Writes that span stripes
@@ -238,8 +240,8 @@ writers, so the floor there is two of those where a table write pays one; on eur
 it is two of 0.2 ms. On those hosts the pool's device and the WAL are also the same disk.
 
 One answer is candidate A at small sizes: a write under a threshold rides **inside** the
-commit command, is durable when the group's log is, and is folded into the pieces
-afterwards. It is one round. Its bytes cross the WAL, the row holds them until they are
+commit command, is durable when the group's log is, and is folded into the stripe
+chunks afterwards. It is one round. Its bytes cross the WAL, the row holds them until they are
 folded, and a read overlays them. Whether the threshold exists, and where, is
 [Q27](contract.md#questions-to-answer); [X8](spikes.md#x8-one-small-write-three-ways) finds
 the size at which the two paths cross on each kind of device.
@@ -252,24 +254,24 @@ faults a review found in the first form of this design.
 
 | Schedule | What goes wrong | What prevents it |
 | --- | --- | --- |
-| Two stagers on one base, by a second client or a leader change | Pieces of one stripe hold two writes under one number | Labels carry a tag; the row names one |
+| Two stagers on one base, by a second client or a leader change | Chunks of one stripe hold two writes under one number | Labels carry a tag; the row names one |
 | A parity delta built from a stale row, committed unconditionally | Parity describes a stripe that no longer exists | The commit is conditional on the sequence |
-| A device returns after an hour | It cannot learn which pieces it missed | A placement group is inside a tablet, whose group recorded it ([S10](recovery.md)) |
+| A slice returns after an hour | It cannot learn which chunks it missed | A placement group is inside a tablet, whose group recorded it ([S10](recovery.md)) |
 | A writer reads size 100 stripes; a truncate to 10 commits; the writer commits stripe 50; the object is later extended to 60 | Truncated bytes return | The commit stamps the epoch it read; the stripe is under a floor ([S3](objects.md#size-holes-and-truncate)) |
-| The pool map changes during a write | Pieces committed where no reader looks | The commit names its generation ([S5](placement.md#generations)) |
+| The pool map changes during a write | Chunks committed where no reader looks | The commit names its generation ([S5](placement.md#generations)) |
 | A stager times out and tells holders to drop, while its commit is in flight to the leader | An acknowledged write whose bytes are gone | Holders discard only on a committed fact |
-| A 4+2 write touching one data piece is acknowledged after one stage; that device dies | An acknowledged write is lost | The acknowledgement rule |
+| A 4+2 write touching one data chunk is acknowledged after one stage; that slice's device dies | An acknowledged write is lost | The acknowledgement rule |
 | Parity staged as a patch; a crash after the apply; the record replayed | Parity corrupt under a current label | Staged records hold new values |
 | A crash during an apply in place | A torn unit | The staged copy outlives the apply; the unit's checksum finds it |
 | A stager paused for minutes resumes and proposes | Nothing: the condition refuses it | The condition |
-| A stage's acknowledgement is lost; the commit proceeds without that holder | The row calls a current piece stale | A rebuild first asks the holder what it holds |
-| A disk swapped for an empty one at the same path | The row calls an empty directory current | A device's identity ([S4](pools-and-devices.md#a-device-has-an-identity)) |
+| A stage's acknowledgement is lost; the commit proceeds without that holder | The row calls a current chunk stale | A rebuild first asks the holder what it holds |
+| A disk swapped for an empty one at the same path | The row calls an empty directory current | The ids of a device and its slices ([S4](pools-and-devices.md#a-device-has-slices)) |
 | The disk fills between the stage and the apply | A failure after the commit | Space is taken at the stage |
 | A holder discards because a lagging replica shows no row | Bytes of a live stripe dropped | Absence on one replica is not a committed fact; only a state that cannot be undone is |
 
 ## Alternatives rejected
 
-**A as the only path.** It has no erasure coding, no pools and no devices, and it moves
+**A as the only path.** It has no erasure coding, no pools and no slices, and it moves
 every byte through three structures built for rows. It is kept as the measured baseline, and
 possibly as the path for small writes.
 
@@ -293,10 +295,10 @@ built to avoid.
   of an erasure coded stripe.
 - **Every byte crosses the network twice on its way in**: client to coordinator, coordinator
   to holders, with parity added on the second leg.
-- **A stage wasted for every writer that loses a race**, and staged bytes held on a device
-  until a commit decides them. A device bounds what it will hold staged and refuses beyond
+- **A stage wasted for every writer that loses a race**, and staged bytes held on a slice
+  until a commit decides them. A slice bounds what it will hold staged and refuses beyond
   it.
-- **A commit command a write**, small: a label for each touched piece and the holders that
+- **A commit command a write**, small: a label for each touched chunk and the holders that
   missed.
 - **A strong read of the object's entry** before each write in place.
 
@@ -312,19 +314,20 @@ built to avoid.
 
 ## Invariants to uphold
 
-- A holder applies a staged write only when the row names its tag for that piece, and
+- A holder applies a staged write only when the row names its tag for that chunk, and
   discards one only when a committed row state excludes it.
 - The commit is conditional on the row's sequence, the object's truncate epoch and the
   placement group's generation, judged at apply.
 - A staged record holds new values, and staging the same write twice is staging it once.
-- No acknowledgement precedes `k + f` current pieces and a durable majority.
-- A partial write never makes a stale piece current; only a write of the whole piece does.
+- No acknowledgement precedes `k + f` current stripe chunks and a durable majority.
+- A partial write never makes a stale chunk current; only a write of the whole chunk does.
 - Nothing is decided by a timer. A timer may cause a commit.
 - A write's tags are a function of its request identity, so its retry is the same write.
 
 ## Prerequisites
 
-[S1](prerequisites.md#required): the conditional write with a typed refusal, and a byte
+[S1](prerequisites.md#required): the conditional write with a typed refusal (delivered,
+[F68](../features/conditional-writes.md)), and a byte
 bound on an append batch if small writes ride the log. [S3](objects.md), [S5](placement.md)
 and [S6](device-store.md). [S16](testing.md#the-model)'s model before any of it.
 
@@ -344,10 +347,10 @@ and [S6](device-store.md). [S16](testing.md#the-model)'s model before any of it.
 
 | Test | Asserts | Milestone |
 | --- | --- | --- |
-| `stripe_write_is_atomic_at_every_crash_point` | A coordinator, a holder or the leader killed at each step leaves the stripe at its old state or its new one on every piece that is read | M15 |
+| `stripe_write_is_atomic_at_every_crash_point` | A coordinator, a holder or the leader killed at each step leaves the stripe at its old state or its new one on every chunk that is read | M15 |
 | `stale_stager_cannot_commit` | A stager that lost a race, was paused across a leader change or read a stale row is refused, and its staged bytes are dropped only afterwards | M15 |
-| `uncommitted_bytes_never_replace_committed` | No holder changes a piece for a write whose tag the row does not name | M15 |
-| `ack_requires_k_plus_f_current` | No write to a replicated pool is acknowledged with fewer current pieces, in distinct failure domains, than the pool's setting | M15 |
+| `uncommitted_bytes_never_replace_committed` | No holder changes a chunk for a write whose tag the row does not name | M15 |
+| `ack_requires_k_plus_f_current` | No write to a replicated pool is acknowledged with fewer current chunks, in distinct failure domains, than the pool's setting | M15 |
 | `staged_bytes_outlive_a_stagers_timeout` | A stager that gives up and tells holders to drop, while its commit is in flight, loses nothing: a holder keeps what it staged until the row excludes it | M15 |
 | `retried_write_is_the_same_write` | A write retried across a leader change, with some stripes done, completes without changing a stripe twice | M15 |
 | `whole_object_replace_is_atomic` | A reader during a put sees the old object or the new | M15 |

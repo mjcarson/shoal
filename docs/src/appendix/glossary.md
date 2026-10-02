@@ -77,6 +77,12 @@ no archive at all ([Resolved #80](resolved/never-flushed-partitions.md)). It dec
 whether a query is parked on a disk read, and whether a get may be answered out of the rows the
 shard is already holding ([F27](../features/grouped-responses.md)).
 
+**Conditional write** — An insert, a delete or an update applied only if the row under its key is
+as its writer expects: `Absent`, or `Matches` the table's own filter (`WriteCondition`). Judged
+where the write is applied: at apply in committed order on a cluster, and as the table handles
+it on a standalone node. A write whose condition does not hold is a *refusal*
+([F68](../features/conditional-writes.md)).
+
 **Compaction** — Two distinct operations sharing one background task. *Intent compaction*
 folds a sealed intent log into archives. *Archive compaction* reclaims space from archives
 whose live fraction has dropped below 50%. See [Compaction](../storage/compaction.md).
@@ -132,7 +138,8 @@ in - every write stamps the generation it committed in, which the unsorted updat
 [Resolved #124](resolved/unsorted-update-generation.md); comparing against the flushed generation
 is what makes eviction safe.
 
-**Intent** — One logged mutation: `Insert`, `Delete`, or `Update`. The unit of the write-ahead
+**Intent** — One logged mutation: `Insert`, `Delete`, or `Update`, and in a tablet group's WAL
+`Conditional` since [F68](../features/conditional-writes.md). The unit of the write-ahead
 log. `Insert` carries the whole row; `Update` carries only changed fields, which is why
 replaying one requires the base partition.
 
@@ -195,6 +202,12 @@ implements the trait back in. See [F28](../features/rearchived-rows.md).
 **Pending response** — A response held in `PendingResponse` against the intent log offset one
 past its record, released once the durability watermark passes it. See
 [Durability model](../storage/overview.md#durability-model).
+
+**Refusal** (conditional write) — The answer to a conditional write whose condition did not
+hold: `ResponseAction::Refused` with `RowExists`, `RowMissing` or `RowMismatch`, raised as
+`Errors::Refused`. A definite answer, not a failure, and remembered with the request's identity
+so a retry is refused again ([F68](../features/conditional-writes.md)). Not the same thing as an
+`ApplyOutcome::Refused`, which is a command that could not be applied at all.
 
 **Recovery stats** — `RecoveryStats`, the counts of everything replaying a table's intent logs
 had to discard. Three of its four counters mean data was lost; `updates_after_delete` does not,
@@ -515,11 +528,15 @@ than mistaking it for the end of the log. See
 | Hop | A network hop | Where a query ran relative to the shard that accepted its connection: `same` (that shard), `local` (another shard of the node, over the mesh) or `remote` (another node, over a peer link). A property of the query and its connection, since the kernel picks the accepting shard, which is why the hop arms state an expected mix and the stage report splits by it ([F38](../features/inter-node-transport.md)) |
 | `sync` | Force to stable storage | On `StreamWriter`, issues a background write and returns. `sync_blocking` is the real one — but on glommio's `DmaStreamWriter`, `sync` *does* fsync |
 | Bucket | A token bucket, or a container in S3 | Unbuilt. A named container of objects, declared as a field of the `#[shoal::db]` struct, whose metadata is two generated unsorted tables ([S2](../object-storage/buckets.md)). Never a token bucket, which is what the stream budget above is |
-| Storage pool | A connection pool | Unbuilt. A named set of devices of one class with one redundancy and one failure domain rule, committed as policy and bound to buckets in the deployment ([S4](../object-storage/pools-and-devices.md)). Written in full everywhere outside that part, since `ShoalPool` is the server and the client holds a connection pool |
-| Device | A disk | Unbuilt. One directory on one filesystem on one node, with an id in a marker of its own, a class its operator wrote and one executor that owns it ([S4](../object-storage/pools-and-devices.md#a-device-has-an-identity)) |
-| Stripe | One row of blocks across the disks of an array | Unbuilt. A fixed-size run of an object's bytes: the bounded, mutable unit that is placed, written, recovered and scrubbed on its own, which is what RADOS calls an object. What Ceph's erasure coding calls a stripe is a *codeword* here ([S3](../object-storage/objects.md), [S8](../object-storage/erasure-coding.md#geometry)) |
-| Piece | A shard, a chunk or a fragment | Unbuilt. One device's part of a stripe: a whole copy under replication, a data or a parity piece under an erasure code. Called a piece because `shard`, `chunk` and `fragment` each mean something else in this book ([Object Storage](../object-storage/overview.md#vocabulary)) |
-| Placement group | A hash bucket of objects with its own log and primary | Unbuilt. A sub-range of one tablet's stripes, mapped to an ordered list of devices, so that the tablet's group is its log. It shares a name and a purpose with Ceph's and almost none of the mechanism ([S5](../object-storage/placement.md#a-placement-group-is-a-sub-range-of-a-tablet)) |
+| Storage pool | A connection pool | Unbuilt. `ShoalStoragePool`: a named set of slices on devices of one class with one redundancy and one failure domain rule, committed as policy. It serves several consumers at once, of mixed kinds: buckets now, a file system or block volumes later ([S4](../object-storage/pools-and-devices.md)). Never `ShoalPool`, which is the server |
+| Consumer | A reader of a queue | Unbuilt. Anything bound to a storage pool that stores stripes in it: a bucket today, a file system or a block volume later. Every stripe's key and every chunk's identity names its consumer, so that consumers of different kinds share one pool's slices ([S4](../object-storage/pools-and-devices.md#pools-and-bindings-are-policy)) |
+| Device | A disk | Unbuilt. The physical thing a node stores object bytes on: a disk mounted at a path today, a raw block device perhaps later. It has an id, a class its operator wrote, a size and one or more slices, and it is the smallest failure domain: no two chunks of a stripe are on one device ([S4](../object-storage/pools-and-devices.md#a-device-has-slices)) |
+| Slice | A part of an array | Unbuilt. `DeviceSlice`: the part of a device one executor owns. Today a directory on the device's filesystem with a marker and a lock of its own; with raw block management, a range of the device. What placement chooses, what a peer names and what holds a chunk. Two slices of one device share its failure ([S4](../object-storage/pools-and-devices.md#a-device-has-slices)) |
+| Stripe | One row of blocks across the disks of an array | Unbuilt. A fixed-size run of an object's bytes, cut into one chunk for each holder and combined by the pool's code, as md RAID's stripe is one chunk a disk. The bounded, mutable unit that is placed, written, recovered and scrubbed on its own, which is what RADOS calls an object ([S3](../object-storage/objects.md), [S8](../object-storage/erasure-coding.md#geometry)) |
+| Stripe chunk | A chunk of anything | Unbuilt. `StripeChunk`: one holder's part of a stripe, a whole copy under replication or a data or parity chunk under an erasure code; together they make up the stripe. Always "stripe chunk" or a chunk of a stripe, since a bare chunk is a snapshot stream's ([Object Storage](../object-storage/overview.md#the-hierarchy)) |
+| Chunk unit | A stripe unit | Unbuilt. The fixed granule inside a stripe chunk: what one checksum covers and what is encoded ([S8](../object-storage/erasure-coding.md#geometry)) |
+| Unit row | A row of a table | Unbuilt, and only inside an erasure coded stripe: the same chunk unit of every chunk of a stripe, encoded together, of which a decode needs any `k`. Coding theory calls it a codeword; Ceph's erasure coding calls it a stripe ([S8](../object-storage/erasure-coding.md#geometry)). Always written in full, since a bare row is a table's |
+| Placement group | A hash bucket of objects with its own log and primary | Unbuilt. A sub-range of one tablet's stripes of one consumer, mapped to an ordered list of slices, so that the tablet's group is its log. It shares a name and a purpose with Ceph's and almost none of the mechanism ([S5](../object-storage/placement.md#a-placement-group-is-a-sub-range-of-a-tablet)) |
 
 **Workload** — One purpose-built benchmark in `shoal-bench`, isolating one path through the
 engine: it generates its own rows from a seed, drives a server it owns, and writes one block of

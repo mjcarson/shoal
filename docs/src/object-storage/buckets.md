@@ -76,7 +76,8 @@ code and a client can both name. `client.bucket::<Posters>()` is how a caller re
 ([S12](wire-and-client.md#the-clients-handle)).
 
 The declaration says nothing about a storage pool, a redundancy, a stripe size or a device.
-Those are the deployment's ([S4](pools-and-devices.md)), so the schema above starts on a
+Those are the deployment's: a binding makes the bucket one of a storage pool's consumers
+([S4](pools-and-devices.md#pools-and-bindings-are-policy)), so the schema above starts on a
 laptop with one directory and on the lab with three hosts, unchanged.
 
 ### What the macro generates
@@ -89,7 +90,7 @@ For each one the macro emits:
 | `PostersObjectMeta` and `PostersStripeMeta`, two row types | The bucket's metadata ([S3](objects.md#the-two-rows)). Named from the marker, so nothing here is called a "head" |
 | A `PersistentUnsortedTable` for each, held inside the `Bucket` | They are ordinary unsorted tables under the ordinary storage engine. The cluster replicates them as it replicates `movies` |
 | Two more variants of the table enum, with `TableId::of` their names | What puts the two tables in `table_ids`, and so gives them tablet groups |
-| A bucket enum, one variant a bucket, with `BucketId::of` the marker's name | The identity a piece, a pool binding and a wire frame name, never the enum's position |
+| A bucket enum, one variant a bucket, with `BucketId::of` the marker's name | The identity a pool binding and a wire frame name, never the enum's position. A stripe chunk names the consumer id the binding mints instead ([S4](pools-and-devices.md#pools-and-bindings-are-policy)) |
 | The bucket's part of the client: its name, its id, the operations of [S12](wire-and-client.md) | Emitted in both halves, naming `::shoal::shared` paths alone |
 | A constant for the generated rows' layout, folded into the fingerprint | Two builds that generate different rows refuse each other at the hello, as two builds with different tables do |
 
@@ -185,7 +186,7 @@ gets longer.
 ## Prerequisites
 
 [S1](prerequisites.md#required): the conditional write, which the generated rows' updates are
-built on, and known issue 198, since `StripeMeta`'s key is two fields.
+built on (delivered, [F68](../features/conditional-writes.md)), and known issue 198, since `StripeMeta`'s key is more than one field.
 
 ## How it would be measured
 
