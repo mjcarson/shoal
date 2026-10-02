@@ -14,6 +14,7 @@
 //! Nothing here draws: the model renders itself to lines, so every decision is testable
 //! without a terminal.
 
+pub mod bench;
 pub mod history;
 pub mod metrics;
 pub mod screen;

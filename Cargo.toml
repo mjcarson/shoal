@@ -9,6 +9,8 @@ members = [
     "shoal-client-check",
     "shoal-core",
     "shoal-derive",
+    # the schema generic benchmark driver shoaladm bench is built on (F66)
+    "shoal-loadgen",
     "shoal-model",
     "shoal-proto",
     "shoal-spike",
@@ -18,6 +20,8 @@ members = [
     "shoalctl",
     # the TMDB dataset as a deployable database: a node program and a loader (F54)
     "examples/tmdb_dataset",
+    # a small schema and committed dataset shoaladm bench is tested against (F66)
+    "examples/bench_dataset",
 ]
 
 [workspace.dependencies]

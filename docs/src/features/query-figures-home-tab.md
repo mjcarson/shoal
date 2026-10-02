@@ -91,7 +91,7 @@ The block's shape, with example values:
 ### A home tab
 
 `shoaladm stats` now opens on **home**. The group tabs follow it, keyed `1` to `8`. This is the
-lab's side cluster under the loader's `bench`, with each chart's body cut:
+lab's side cluster under the loader's `bench` (its `drive` since [F66](dataset-benchmarks.md)), with each chart's body cut:
 
 ```text
 shoaladm stats · tmdb-f65 · from hyperion (leader) · version 11 · every 2s
@@ -331,7 +331,7 @@ out exists, deletes and rows against budget, keep the p99 and the resident memor
 **Proved on the lab.** A side cluster, `tmdb-f65` on ports 13000-13002, was built from this tree
 and deployed onto hyperion, titan and europa. Its programs and state were kept under
 `target/lab/f65/`. It was loaded with 30,000 movies (219,343 rows), then driven for four minutes
-by the loader's `bench`, spread round robin over the three members.
+by the loader's `bench` (now `drive`), spread round robin over the three members.
 
 - **The counts matched the client's.** The home tab read 81.1k gets, 9.6k updates and 4.8k
   inserts a second. Over the same seconds the bench counted 70–85k gets and keyword reads,

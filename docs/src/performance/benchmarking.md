@@ -7,6 +7,13 @@ you how to take; the frozen `B1` capture and the hardware it came from are in
 [F3](../features/performance-harness.md), and of the tool that drives it,
 [F7](../features/bench-runner.md).
 
+**To benchmark a schema of your own, on your own cluster**, use `shoaladm bench run` instead
+([F66](../features/dataset-benchmarks.md)). It loads a dataset folder into a cluster of its own,
+copied from your inventory, runs read and insert mixes at bundle sizes with optional events, and
+keeps captures that `shoaladm bench compare` judges with the same disjoint-interval rule. It is
+meant to replace this harness, which stays until it is retired
+([todos](../appendix/todos.md#retiring-shoal-bench)). Everything below is `shoal-bench`.
+
 Most of the work in benchmarking Shoal is not running the harness. It is making sure the two
 runs you are holding up against each other differ in exactly one thing.
 

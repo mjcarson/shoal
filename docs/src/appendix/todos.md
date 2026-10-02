@@ -48,6 +48,58 @@ all eight had drifted.
 
 Implied by the code's shape but not present.
 
+### Retiring `shoal-bench`
+
+[F66](../features/dataset-benchmarks.md)'s `shoaladm bench` is meant to become how Shoal is
+benchmarked, and `shoal-bench` is to be retired once it does. Until then `shoal-bench`, its corpus
+under `docs/perf/runs/`, the frozen B1 baseline, the generated pages under
+`docs/src/performance/` and the [explorer](../features/benchmark-explorer.md) stay exactly as they
+are. What has to exist before they can go:
+
+- **A results page or explorer index for `shoaladm bench` captures.** `show` and `compare` print
+  text. `render` and the explorer read only `shoal-bench`'s corpus, and they are the only way
+  anyone reads a capture's charts today.
+- **A committed bench schema and dataset for the engine's own questions.** `shoal-bench`'s
+  isolating workloads (resident against archived gets, ephemeral against persistent pairs, the
+  fanout and transport arms) answer questions about the engine rather than a schema. They need a
+  schema and dataset of their own, and a spec per question, so the same questions can be asked
+  through `shoaladm bench`.
+- **The configuration sweep as overrides.** F66 has the `overrides:` axis. The fifty-eight
+  `macro/conf/*` arms, and the test that every sweep brackets the committed value, have not
+  been written as specs.
+- **The micro layer stays** (`cargo bench -p shoal --features bench`). It was never
+  `shoal-bench`'s to retire.
+- **CLAUDE.md's Benchmarking section**, and [Optimizations](optimizations.md)' rule that an entry
+  names the benchmark that would show it, are rewritten around `shoaladm bench`.
+
+### What F66 left undone
+
+Each of these was left out of [F66](../features/dataset-benchmarks.md) on purpose:
+
+- **An open-loop load generator.** Every worker is closed loop, so a stall delays the queries
+  behind it rather than piling them up. That is coordinated omission, written down rather than
+  discovered. An offered rate (`--rate`) with latency measured from the scheduled send is the
+  fix.
+- **Update and delete mixes, and a partition scan of a sorted table.** A mix is reads and
+  inserts. An update needs an update field's value to write, which a dataset row has, and a scan
+  needs a limit, which a spec would carry.
+- **`perf record` beside the heap profiles.** `--profile` builds with frame pointers, so a `perf`
+  run on each node during an arm would attribute cpu as the heap dumps attribute memory.
+- **`--stages`, hotpath and OTel export.** The stage breakdown ([F6](../features/stage-breakdown.md))
+  needs the client half built with `stage-profile` as well as the node, so the admin program
+  would be a second flavor too. hotpath and the OTel metrics `shoal-workload` exports were
+  not asked for.
+- **A reset restored from a backup.** A reset is a whole bootstrap and a preload, minutes per
+  arm on the lab. Restoring a backup taken after the first preload would skip the preload, for
+  [F49](../features/backup-and-recovery.md)'s cost.
+- **Compressed datasets and parallel parsing.** One reader thread per table parses its file.
+  `feed_wait_ms` says when that is what was measured. A `.csv.gz` is refused as an unknown
+  extension.
+- **Count-mode arms.** An arm runs for a duration. `shoal-bench`'s count-based workloads have no
+  equivalent.
+- **Per-operation fault windows.** Windows are cut at second resolution. `shoal-bench` cut at
+  each operation's time.
+
 ### Retiring `render` in favour of the explorer
 
 [F29](../features/benchmark-explorer.md) is meant to become how the numbers are read, and the eleven

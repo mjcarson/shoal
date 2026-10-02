@@ -30,6 +30,55 @@ pub use shoal_client::channel;
 
 // The protocol: what both peers see. Present whether or not an engine is linked.
 pub use shoal_proto::shared::{self, traits};
+/// Loading a table from a dataset file and benchmarking it by name
+///
+/// A table opts in to being loaded from a dataset and benchmarked by name with `dataset`, and a
+/// row that does must also derive `serde::Deserialize`
+/// ([F66](../docs/src/features/dataset-benchmarks.md)):
+///
+/// ```
+/// use deepsize2::DeepSizeOf;
+/// use rkyv::{Archive, Deserialize, Serialize};
+/// use shoal::tables::EphemeralUnsortedTable;
+/// use shoal::ShoalUnsortedTable;
+///
+/// #[derive(Debug, Archive, Serialize, Deserialize, serde::Deserialize, Clone, ShoalUnsortedTable, DeepSizeOf)]
+/// #[rkyv(derive(Debug))]
+/// #[shoal_table(db = "Shop", dataset)]
+/// pub struct Item {
+///     #[shoal(partition)]
+///     pub id: u64,
+/// }
+///
+/// #[shoal::db]
+/// pub struct Shop {
+///     pub items: EphemeralUnsortedTable<Item>,
+/// }
+/// ```
+///
+/// The same row without `serde::Deserialize` is refused where it opts in, not where a benchmark
+/// first reads it:
+///
+/// ```compile_fail
+/// use deepsize2::DeepSizeOf;
+/// use rkyv::{Archive, Deserialize, Serialize};
+/// use shoal::tables::EphemeralUnsortedTable;
+/// use shoal::ShoalUnsortedTable;
+///
+/// #[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, DeepSizeOf)]
+/// #[rkyv(derive(Debug))]
+/// #[shoal_table(db = "Shop", dataset)]
+/// pub struct Item {
+///     #[shoal(partition)]
+///     pub id: u64,
+/// }
+///
+/// #[shoal::db]
+/// pub struct Shop {
+///     pub items: EphemeralUnsortedTable<Item>,
+/// }
+/// ```
+pub use shoal_proto::shared::dataset;
 
 // The client. Its error types come from the protocol crate rather than from here, because
 // `QuerySupport` and `shared::responses` both name them.

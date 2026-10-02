@@ -48,6 +48,12 @@ pub struct TestRecord {
 Parsed by `darling` into `ShoalField` (`shoal-derive/src/tables.rs:11-30`). Attributes
 combine: a field can be both `filter` and `update`.
 
+`#[shoal_table(db = "...", dataset)]` with `dataset` lets the table be loaded from a dataset file
+and benchmarked by name ([F66](../features/dataset-benchmarks.md)). The row must also derive
+`serde::Deserialize`, and the derive then emits `DatasetRow` (parse a row, insert it, read it back
+by its keys) and `DatasetTable`. Without it, the table refuses by name and puts no serde bound on
+the row. It never reaches the schema fingerprint.
+
 `#[shoal_table(db = "...")]` names the database this table belongs to. It must match the
 `#[db]` struct's name exactly — it is used to construct identifiers like `TestDbClient` and
 `TestDbQueryKinds` (`shoal-derive/src/lib.rs:76-82`).

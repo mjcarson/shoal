@@ -168,6 +168,48 @@ mod projected {
     }
 }
 
+/// The base schema with its table opted in to datasets, which must not move either fingerprint
+mod dataset_opted {
+    use deepsize2::DeepSizeOf;
+    use rkyv::{Archive, Deserialize, Serialize};
+    use shoal::tables::EphemeralSortedTable;
+    use shoal_derive::{db, ShoalSortedTable};
+
+    /// The base row, loadable from a dataset
+    #[derive(
+        Debug,
+        Archive,
+        Serialize,
+        Deserialize,
+        serde::Deserialize,
+        Clone,
+        ShoalSortedTable,
+        PartialEq,
+        Eq,
+        DeepSizeOf,
+    )]
+    #[rkyv(derive(Debug))]
+    #[shoal_table(db = "Wire", dataset)]
+    pub struct Row {
+        /// The partition this row belongs to
+        #[shoal(partition)]
+        pub partition_key: String,
+        /// The key this row is sorted by within its partition
+        #[shoal(sort)]
+        pub sort_key: String,
+        /// The payload
+        #[shoal(update)]
+        pub data: String,
+    }
+
+    /// The base schema with a table that opted in
+    #[db]
+    pub struct Wire {
+        /// The only table in this schema
+        pub rows: EphemeralSortedTable<Row>,
+    }
+}
+
 /// A schema is fingerprinted as something other than the value it started from
 ///
 /// A constant that came out as the seed, or as zero, would mean the fold never ran, and every
@@ -340,5 +382,31 @@ fn table_ids_are_stable_across_a_reorder_and_distinct_by_name() {
     assert_ne!(
         <base::WireClient as QuerySupport>::SCHEMA_ID,
         <reordered::WireClient as QuerySupport>::SCHEMA_ID
+    );
+}
+
+/// Opting a table in to datasets changes nothing either peer compares
+///
+/// `dataset` is read by the derive and nowhere else: a benchmark client built with it attaches
+/// to a cluster whose node was built without it, so it must never reach the fingerprint, the
+/// schema id or a table's identity (F66).
+#[test]
+fn opting_in_to_datasets_moves_no_fingerprint() {
+    // the database's fingerprint and id are unchanged
+    assert_eq!(
+        base::WireClient::SCHEMA_FINGERPRINT,
+        dataset_opted::WireClient::SCHEMA_FINGERPRINT,
+        "opting in to datasets moved the schema fingerprint"
+    );
+    assert_eq!(
+        <base::WireClient as QuerySupport>::SCHEMA_ID,
+        <dataset_opted::WireClient as QuerySupport>::SCHEMA_ID,
+        "opting in to datasets moved the schema id"
+    );
+    // and so is the row's own
+    assert_eq!(
+        <base::Row as TableSchemaSupport>::SCHEMA_FINGERPRINT,
+        <dataset_opted::Row as TableSchemaSupport>::SCHEMA_FINGERPRINT,
+        "opting in to datasets moved the row's fingerprint"
     );
 }
