@@ -57,6 +57,29 @@ impl Role {
     }
 }
 
+/// What a node program is built to do beside serving
+///
+/// A profile build is `shoaladm bench run --profile`'s ([F66](../../docs/src/features/dataset-benchmarks.md)):
+/// jemalloc with heap profiling built in, frame pointers and line tables. It is generated into
+/// a wrapper crate of its own and built into target directories of its own, so a profile build
+/// never changes a byte of a plain one or makes it rebuild.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Flavor {
+    /// What a deployment runs
+    #[default]
+    Release,
+    /// Heap profiled, with frame pointers, for a benchmark
+    Profile,
+}
+
+/// The settings a profile build's jemalloc starts with: a sample every 512 KiB allocated, a
+/// dump every 2 GiB and one at exit, written as `heap.*` in the node's working directory
+pub const PROFILE_MALLOC_CONF: &str =
+    "prof:true,prof_active:true,lg_prof_sample:19,lg_prof_interval:31,prof_final:true,prof_prefix:heap";
+
+/// The flags a profile build adds to whatever it is built with
+pub const PROFILE_RUSTFLAGS: &str = "-C force-frame-pointers=yes -C debuginfo=line-tables-only";
+
 /// What cpu a program is built for
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
@@ -84,7 +107,23 @@ impl Target {
 /// * `project` - The project
 #[must_use]
 pub fn wrapper_dir(project: &Project) -> PathBuf {
-    project.target_directory.join("shoal-build").join(&project.name)
+    wrapper_dir_for(project, Flavor::Release)
+}
+
+/// Where a project's wrapper crate of a flavor is generated
+///
+/// # Arguments
+///
+/// * `project` - The project
+/// * `flavor` - The flavor
+#[must_use]
+pub fn wrapper_dir_for(project: &Project, flavor: Flavor) -> PathBuf {
+    // a profile build's wrapper beside the plain one, never inside it
+    let name = match flavor {
+        Flavor::Release => project.name.clone(),
+        Flavor::Profile => format!("{}-profile", project.name),
+    };
+    project.target_directory.join("shoal-build").join(name)
 }
 
 /// The name a wrapper binary has for a role
@@ -126,6 +165,25 @@ pub fn installed_name(package: &str, db: &str, role: Role, target: &Target) -> S
     match role {
         Role::Node => format!("{package}-{db}-node-{}", target.word()),
         other => format!("{package}-{db}-{}", other.word()),
+    }
+}
+
+/// The name a program of a flavor is installed under; a profile build's says so, so a plain
+/// deploy can never pick it up
+///
+/// # Arguments
+///
+/// * `project` - The project
+/// * `schema` - The database
+/// * `role` - The role
+/// * `target` - The cpu
+/// * `flavor` - The flavor
+#[must_use]
+pub fn install_name_for(project: &Project, schema: &Schema, role: Role, target: &Target, flavor: Flavor) -> String {
+    let name = install_name(project, schema, role, target);
+    match flavor {
+        Flavor::Release => name,
+        Flavor::Profile => format!("{name}-profile"),
     }
 }
 
@@ -371,7 +429,30 @@ pub fn patches(workspace_root: &Path) -> color_eyre::Result<Option<String>> {
 ///
 /// When the project does not depend on `shoal`, or its workspace manifest cannot be read.
 pub fn manifest(project: &Project, schema: &Schema) -> color_eyre::Result<String> {
+    manifest_for(project, schema, Flavor::Release)
+}
+
+/// The wrapper crate's manifest for a flavor
+///
+/// A profile wrapper replaces any `tikv-jemallocator` the project declares with one of its own
+/// carrying the profiling feature, optional and enabled by a feature of the wrapper's own, so a
+/// project feature naming `dep:tikv-jemallocator` keeps its meaning.
+///
+/// # Arguments
+///
+/// * `project` - The project
+/// * `schema` - The database
+/// * `flavor` - The flavor
+///
+/// # Errors
+///
+/// When the project does not depend on shoal, or defines the profile feature itself.
+pub fn manifest_for(project: &Project, schema: &Schema, flavor: Flavor) -> color_eyre::Result<String> {
     let shoal = project.shoal_dependency()?;
+    let profile = flavor == Flavor::Profile;
+    if profile && project.features.contains_key(PROFILE_FEATURE) {
+        bail!("{} defines a feature named {PROFILE_FEATURE}, which a profile build adds itself", project.name);
+    }
     let shoal_origin = Origin::of(shoal);
     let mut text = String::new();
     text.push_str(&format!(
@@ -399,6 +480,8 @@ pub fn manifest(project: &Project, schema: &Schema) -> color_eyre::Result<String
         .dependencies
         .iter()
         .filter(|dependency| dependency.kind.is_none())
+        // a profile wrapper brings its own jemalloc
+        .filter(|dependency| !profile || dependency.name != "tikv-jemallocator")
     {
         groups
             .entry(dependency.target.clone())
@@ -424,6 +507,11 @@ pub fn manifest(project: &Project, schema: &Schema) -> color_eyre::Result<String
     if !declared.contains("mimalloc") {
         own.push("mimalloc = \"0.1\"".to_string());
     }
+    if profile {
+        own.push(
+            "tikv-jemallocator = { version = \"0.6\", features = [\"profiling\"], optional = true }".to_string(),
+        );
+    }
     for tool in ["shoaladm", "shoalctl"] {
         if declared.contains(tool) {
             continue;
@@ -447,11 +535,14 @@ pub fn manifest(project: &Project, schema: &Schema) -> color_eyre::Result<String
         text.push('\n');
     }
     // the project's features, so `cfg(feature = …)` in its schema file keeps its meaning
-    if !project.features.is_empty() {
+    if !project.features.is_empty() || profile {
         text.push_str("[features]\n");
         for (name, enables) in &project.features {
             let enables: Vec<String> = enables.iter().map(|enabled| quoted(enabled)).collect();
             text.push_str(&format!("{} = [{}]\n", quoted_key(name), enables.join(", ")));
+        }
+        if profile {
+            text.push_str(&format!("{PROFILE_FEATURE} = [\"dep:tikv-jemallocator\"]\n"));
         }
         text.push('\n');
     }
@@ -505,7 +596,46 @@ pub fn include(project: &Project, schema: &Schema) -> color_eyre::Result<(String
 ///
 /// When the schema cannot be reached, as [`include`] says.
 pub fn source(project: &Project, schema: &Schema, role: Role) -> color_eyre::Result<String> {
+    source_for(project, schema, role, Flavor::Release)
+}
+
+/// The feature a profile wrapper builds its node with
+pub const PROFILE_FEATURE: &str = "shoal-bench-profile";
+
+/// A wrapper's source for a role and a flavor
+///
+/// # Arguments
+///
+/// * `project` - The project
+/// * `schema` - The database
+/// * `role` - The role
+/// * `flavor` - The flavor
+///
+/// # Errors
+///
+/// When the schema cannot be reached, as [`include`] says.
+pub fn source_for(project: &Project, schema: &Schema, role: Role, flavor: Flavor) -> color_eyre::Result<String> {
     let (include, root) = include(project, schema)?;
+    // a profile node is jemalloc with its settings baked in, which `_RJEM_MALLOC_CONF` overrides
+    if role == Role::Node && flavor == Flavor::Profile {
+        let db = format!("{root}::{}", schema.path());
+        return Ok(format!(
+            "//! The heap profiled node program for the {name} database of {package}, generated by shoaladm bench --profile; do not edit\n\n\
+             {include}\n\
+             /// jemalloc with heap profiling built in\n\
+             #[global_allocator]\n\
+             static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;\n\n\
+             /// The profile's settings, which jemalloc reads at its first allocation\n\
+             static PROFILE_CONF: &[u8] = b\"{PROFILE_MALLOC_CONF}\\0\";\n\n\
+             /// The symbol jemalloc reads its settings from\n\
+             #[unsafe(export_name = \"_rjem_malloc_conf\")]\n\
+             pub static MALLOC_CONF: Option<&'static u8> = Some(&PROFILE_CONF[0]);\n\n\
+             /// Serve or claim a node of the schema\n\
+             fn main() -> Result<(), shoal::server::ServerError> {{\n    shoal::server::node::main::<{db}>()\n}}\n",
+            name = schema.name,
+            package = project.name,
+        ));
+    }
     let db = format!("{root}::{}", schema.path());
     let client = format!("{root}::{}", schema.client_path());
     let header = format!(
@@ -551,12 +681,27 @@ fn write_if_changed(path: &Path, text: &str) -> color_eyre::Result<()> {
 ///
 /// When the manifest cannot be built or a file cannot be written.
 pub fn write_wrapper(project: &Project, schema: &Schema) -> color_eyre::Result<PathBuf> {
-    let dir = wrapper_dir(project);
+    write_wrapper_for(project, schema, Flavor::Release)
+}
+
+/// Generate the wrapper crate of a flavor, or bring it up to date
+///
+/// # Arguments
+///
+/// * `project` - The project
+/// * `schema` - The database
+/// * `flavor` - The flavor
+///
+/// # Errors
+///
+/// When the manifest cannot be built or a file cannot be written.
+pub fn write_wrapper_for(project: &Project, schema: &Schema, flavor: Flavor) -> color_eyre::Result<PathBuf> {
+    let dir = wrapper_dir_for(project, flavor);
     std::fs::create_dir_all(&dir).wrap_err_with(|| format!("failed to create {}", dir.display()))?;
     // the manifest and the three sources
-    write_if_changed(&dir.join("Cargo.toml"), &manifest(project, schema)?)?;
+    write_if_changed(&dir.join("Cargo.toml"), &manifest_for(project, schema, flavor)?)?;
     for role in [Role::Node, Role::Adm, Role::Ctl] {
-        write_if_changed(&dir.join(role.source_file()), &source(project, schema, role)?)?;
+        write_if_changed(&dir.join(role.source_file()), &source_for(project, schema, role, flavor)?)?;
     }
     // the project's lockfile, so every version is the project's own; copied again only when
     // the project's changed, since cargo adds the wrapper's own dependencies to the copy
@@ -634,7 +779,34 @@ pub fn program(
     config: &Config,
     note: Option<&str>,
 ) -> color_eyre::Result<PathBuf> {
-    let wrapper = write_wrapper(project, schema)?;
+    program_with(project, schema, role, target, config, note, Flavor::Release)
+}
+
+/// Build one of a schema's programs of a flavor and install it
+///
+/// # Arguments
+///
+/// * `project` - The project
+/// * `schema` - The database
+/// * `role` - Which program
+/// * `target` - Which cpu
+/// * `config` - The operator's config, for where it is installed
+/// * `note` - What to say beside the step, such as `1 of 2`
+/// * `flavor` - The flavor
+///
+/// # Errors
+///
+/// When the wrapper cannot be written, cargo fails, or the program cannot be installed.
+pub fn program_with(
+    project: &Project,
+    schema: &Schema,
+    role: Role,
+    target: &Target,
+    config: &Config,
+    note: Option<&str>,
+    flavor: Flavor,
+) -> color_eyre::Result<PathBuf> {
+    let wrapper = write_wrapper_for(project, schema, flavor)?;
     let bin = bin_name(project, role);
     let target_dir = wrapper.join(target.word());
     let note = note.map_or(String::new(), |note| format!(" ({note})"));
@@ -656,8 +828,18 @@ pub fn program(
         .current_dir(&project.dir)
         .stdin(std::process::Stdio::null());
     // a cpu build replaces whatever cpu the environment names, and nothing else in it
-    if let Target::Cpu(cpu) = target {
-        let flags = rustflags(std::env::var("RUSTFLAGS").ok().as_deref(), cpu);
+    let current = std::env::var("RUSTFLAGS").ok();
+    let mut flags = match target {
+        Target::Cpu(cpu) => Some(rustflags(current.as_deref(), cpu)),
+        Target::Native => None,
+    };
+    // a profile build adds frame pointers and line tables, and its feature
+    if flavor == Flavor::Profile {
+        let base = flags.clone().or(current).unwrap_or_default();
+        flags = Some(format!("{base} {PROFILE_RUSTFLAGS}").trim().to_string());
+        command.args(["--features", PROFILE_FEATURE]);
+    }
+    if let Some(flags) = flags {
         command.env("RUSTFLAGS", flags);
         command.env_remove("CARGO_ENCODED_RUSTFLAGS");
     }
@@ -670,7 +852,11 @@ pub fn program(
     if !built.is_file() {
         bail!("cargo built {bin} but {} is not there", built.display());
     }
-    let installed = config::install(&built, &config.bin_dir()?, &install_name(project, schema, role, target))?;
+    let installed = config::install(
+        &built,
+        &config.bin_dir()?,
+        &install_name_for(project, schema, role, target, flavor),
+    )?;
     eprintln!("[build] installed {}", installed.display());
     Ok(installed)
 }
@@ -916,6 +1102,55 @@ mod tests {
             output.status.success(),
             "cargo check failed: {}",
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// A profile build is a wrapper of its own whose node is jemalloc with its settings, built
+    /// with frame pointers under a feature of its own, and a plain build does not change
+    #[test]
+    fn a_profile_build_is_its_own_wrapper() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+        let mut project = project(dir.path());
+        // a project that brings its own jemalloc, behind a feature of its own
+        let mut jemalloc = dependency("tikv-jemallocator", Some("registry+https://github.com/rust-lang/crates.io-index"), "^0.6");
+        jemalloc.optional = true;
+        project.dependencies.push(jemalloc);
+        project
+            .features
+            .insert("jemalloc-prof".to_string(), vec!["dep:tikv-jemallocator".to_string()]);
+        let schema = schema(dir.path());
+        // the plain wrapper is where it was, and its node is mimalloc
+        assert_eq!(wrapper_dir(&project), wrapper_dir_for(&project, Flavor::Release));
+        assert_ne!(wrapper_dir(&project), wrapper_dir_for(&project, Flavor::Profile));
+        let plain = source_for(&project, &schema, Role::Node, Flavor::Release).unwrap();
+        assert_eq!(plain, source(&project, &schema, Role::Node).unwrap());
+        assert!(plain.contains("mimalloc::MiMalloc") && !plain.contains("jemalloc"));
+        // the profile node is jemalloc, its settings exported where jemalloc reads them
+        let profiled = source_for(&project, &schema, Role::Node, Flavor::Profile).unwrap();
+        assert!(profiled.contains("tikv_jemallocator::Jemalloc"), "{profiled}");
+        assert!(profiled.contains("#[unsafe(export_name = \"_rjem_malloc_conf\")]"), "{profiled}");
+        assert!(profiled.contains(&format!("b\"{PROFILE_MALLOC_CONF}\\0\"")), "{profiled}");
+        assert!(PROFILE_MALLOC_CONF.contains("prof_final:true") && PROFILE_MALLOC_CONF.contains("prof_prefix:heap"));
+        // and the other programs are the plain ones
+        assert_eq!(
+            source_for(&project, &schema, Role::Adm, Flavor::Profile).unwrap(),
+            source(&project, &schema, Role::Adm).unwrap()
+        );
+        // its manifest replaces the project's jemalloc with one that profiles, behind its feature,
+        // and keeps the project's feature naming it
+        let manifest = manifest_for(&project, &schema, Flavor::Profile).unwrap();
+        assert_eq!(manifest.matches("tikv-jemallocator").count(), 3, "{manifest}");
+        assert!(manifest.contains("tikv-jemallocator = { version = \"0.6\", features = [\"profiling\"], optional = true }"), "{manifest}");
+        assert!(manifest.contains(&format!("{PROFILE_FEATURE} = [\"dep:tikv-jemallocator\"]")), "{manifest}");
+        assert!(manifest.contains("\"jemalloc-prof\" = [\"dep:tikv-jemallocator\"]") || manifest.contains("jemalloc-prof = [\"dep:tikv-jemallocator\"]"), "{manifest}");
+        // a project that already defines the feature is refused
+        project.features.insert(PROFILE_FEATURE.to_string(), Vec::new());
+        assert!(manifest_for(&project, &schema, Flavor::Profile).is_err());
+        // and a profile program is installed under a name a plain deploy never picks up
+        assert_eq!(
+            install_name_for(&super::tests::project(dir.path()), &schema, Role::Node, &Target::Cpu("znver1".to_string()), Flavor::Profile),
+            "demo-Demo-node-znver1-profile"
         );
     }
 }

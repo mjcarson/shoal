@@ -248,6 +248,7 @@ nothing that `--basic --watch` did not.
 | `the_grid_fits_its_area` | `shoaladm/src/cluster/stats/view.rs` | The columns stop fitting the width or the square, the rows shown stop fitting the height, or the scroll loses the selected row |
 | `spans_and_wrapping` | `shoaladm/src/cluster/stats/view.rs` | The axis labels or the help page's wrapping change |
 | `stats_takes_basic` | `shoaladm/src/cli.rs` | `--basic` is not taken, or a bare `--watch` stops meaning two seconds |
+| `every_metric_reaches_the_view` and `bench-dataset`'s `stats::every_metric_that_should_move_does` ([F67](bench-run-wizard.md)) | `shoaladm/src/cluster/stats/view.rs`, `examples/bench_dataset/tests/stats.rs` | A metric of the catalog no longer reaches its reader, history line or tab from a fixture with every figure set, or one marked `Moves` reads zero throughout a real run on a cluster of one node |
 
 Proved on the lab as well. The user's tmdb cluster, whose nodes run a build from before F64,
 read as titan, europa and hyperion through the record, both with `--basic` and piped with no

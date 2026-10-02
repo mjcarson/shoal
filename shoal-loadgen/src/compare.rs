@@ -1,0 +1,472 @@
+//! Whether two captures can be compared, and what comparing them shows
+//!
+//! **Two captures are compared only when nothing that changes their numbers differs**: the
+//! dataset, the spec, the shape of the cluster, each node's machine and governor, the driver's
+//! machine, what the nodes ran, and the schema. Every difference is listed, and a comparison
+//! goes ahead only when each one is waived by name - `shoal-bench compare` never checked any of
+//! these, and a comparison across two datasets reads as a result.
+//!
+//! A difference in a metric is a **result** only when the two captures' intervals across their
+//! runs - lowest to highest - do not overlap, the rule `shoal-bench` used. The effect is the gap
+//! between the nearest ends, so it is a lower bound rather than a difference of means.
+
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+use crate::results::{ArmResult, Capture};
+use crate::window::WindowSummary;
+
+/// One fact two captures disagree on
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Difference {
+    /// The fact, by the name `--allow` waives it with
+    pub fact: String,
+    /// The baseline's value
+    pub baseline: String,
+    /// The other capture's value
+    pub candidate: String,
+}
+
+impl std::fmt::Display for Difference {
+    /// Write the fact and both values
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {} vs {}", self.fact, self.baseline, self.candidate)
+    }
+}
+
+/// Every fact that changes a capture's numbers, by name, as text
+///
+/// # Arguments
+///
+/// * `capture` - The capture
+fn facts(capture: &Capture) -> BTreeMap<String, String> {
+    // each fact by the name it is waived by
+    let provenance = &capture.provenance;
+    let mut facts = BTreeMap::new();
+    facts.insert("format".to_string(), capture.format.to_string());
+    facts.insert("dataset".to_string(), capture.dataset.digest.clone());
+    facts.insert("spec".to_string(), capture.spec_digest.clone());
+    facts.insert("mode".to_string(), format!("{:?}", provenance.mode));
+    facts.insert("flavor".to_string(), provenance.flavor.clone());
+    facts.insert("schema".to_string(), format!("{}:{:x}", provenance.schema.db, provenance.schema.fingerprint));
+    facts.insert(
+        "inventory".to_string(),
+        provenance.inventory_shape.clone().unwrap_or_default(),
+    );
+    facts.insert(
+        "driver".to_string(),
+        format!(
+            "{} ({}, {} cpus, {})",
+            provenance.driver.hostname, provenance.driver.cpu, provenance.driver.cores, provenance.driver.governor
+        ),
+    );
+    facts.insert(
+        "driver-shares-host".to_string(),
+        provenance.driver_shares_host.to_string(),
+    );
+    // each node's machine, by its name in the inventory
+    let nodes: Vec<String> = provenance
+        .nodes
+        .iter()
+        .map(|(name, node)| {
+            format!(
+                "{name}={} {} cpus {} bytes {}",
+                node.host.cpu,
+                node.host.cores,
+                node.host.memory_bytes,
+                node.governor_ran.as_deref().unwrap_or(&node.host.governor)
+            )
+        })
+        .collect();
+    facts.insert("nodes".to_string(), nodes.join("; "));
+    facts
+}
+
+/// Every fact two captures disagree on
+///
+/// # Arguments
+///
+/// * `baseline` - The capture compared against
+/// * `candidate` - The capture compared
+#[must_use]
+pub fn differences(baseline: &Capture, candidate: &Capture) -> Vec<Difference> {
+    // every fact either has, compared by name
+    let left = facts(baseline);
+    let right = facts(candidate);
+    let mut differences: Vec<Difference> = left
+        .iter()
+        .filter(|(fact, value)| right.get(*fact) != Some(*value))
+        .map(|(fact, value)| Difference {
+            fact: fact.clone(),
+            baseline: value.clone(),
+            candidate: right.get(fact).cloned().unwrap_or_default(),
+        })
+        .collect();
+    // a single run has no interval, so nothing it shows is a result
+    for (which, capture) in [("baseline", baseline), ("candidate", candidate)] {
+        if capture.spec.runs < 2 {
+            differences.push(Difference {
+                fact: "runs".to_string(),
+                baseline: format!("the {which} has {} run", capture.spec.runs),
+                candidate: "at least 2 are needed for an interval".to_string(),
+            });
+        }
+    }
+    differences
+}
+
+/// The lowest and highest of a metric across an arm's runs
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Interval {
+    /// The lowest
+    pub low: f64,
+    /// The highest
+    pub high: f64,
+}
+
+/// What a metric's two intervals say
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    /// The candidate is better, by at least this share of the baseline
+    Better {
+        /// The gap between the nearest ends, in percent of the baseline's nearer end
+        gap_pct: f64,
+    },
+    /// The candidate is worse, by at least this share of the baseline
+    Worse {
+        /// The gap between the nearest ends, in percent of the baseline's nearer end
+        gap_pct: f64,
+    },
+    /// The intervals overlap, so no difference is established
+    NoDifference,
+    /// The arm ran on only one side
+    Absent,
+}
+
+/// One metric of one arm, on both sides
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricVerdict {
+    /// The metric
+    pub metric: String,
+    /// The baseline's interval
+    pub baseline: Option<Interval>,
+    /// The candidate's interval
+    pub candidate: Option<Interval>,
+    /// What they say
+    pub verdict: Verdict,
+}
+
+/// Every metric of one arm
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArmComparison {
+    /// The arm
+    pub id: String,
+    /// Each metric
+    pub metrics: Vec<MetricVerdict>,
+}
+
+/// Two captures compared
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Comparison {
+    /// The differences that were waived to allow it
+    pub waived: Vec<Difference>,
+    /// Every arm either side ran
+    pub arms: Vec<ArmComparison>,
+}
+
+/// A metric read off a measured window, and whether higher is better
+struct Metric {
+    /// Its name
+    name: &'static str,
+    /// Whether a higher value is better
+    higher_is_better: bool,
+    /// Read it off a window, or `None` if the window has nothing to read
+    read: fn(&WindowSummary) -> Option<f64>,
+}
+
+/// Every metric a comparison reads
+const METRICS: &[Metric] = &[
+    Metric {
+        name: "read/s",
+        higher_is_better: true,
+        read: |w| (w.read.ok > 0).then_some(w.read.per_sec),
+    },
+    Metric {
+        name: "insert/s",
+        higher_is_better: true,
+        read: |w| (w.insert.ok > 0).then_some(w.insert.per_sec),
+    },
+    Metric {
+        name: "read p50 ms",
+        higher_is_better: false,
+        read: |w| (w.read.ok > 0).then_some(w.read.latency.p50_ms),
+    },
+    Metric {
+        name: "read p99 ms",
+        higher_is_better: false,
+        read: |w| (w.read.ok > 0).then_some(w.read.latency.p99_ms),
+    },
+    Metric {
+        name: "insert p50 ms",
+        higher_is_better: false,
+        read: |w| (w.insert.ok > 0).then_some(w.insert.latency.p50_ms),
+    },
+    Metric {
+        name: "insert p99 ms",
+        higher_is_better: false,
+        read: |w| (w.insert.ok > 0).then_some(w.insert.latency.p99_ms),
+    },
+    Metric {
+        name: "bundle p99 ms",
+        higher_is_better: false,
+        read: |w| (w.bundle.count > 0).then_some(w.bundle.p99_ms),
+    },
+];
+
+/// The interval of a metric across an arm's runs
+///
+/// # Arguments
+///
+/// * `arm` - The arm
+/// * `metric` - The metric
+fn interval(arm: &ArmResult, metric: &Metric) -> Option<Interval> {
+    // every run that has the metric
+    let values: Vec<f64> = arm
+        .runs
+        .iter()
+        .filter_map(|run| (metric.read)(&run.measured))
+        .collect();
+    if values.is_empty() {
+        return None;
+    }
+    let low = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let high = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    Some(Interval { low, high })
+}
+
+/// Judge two intervals of one metric
+///
+/// # Arguments
+///
+/// * `baseline` - The baseline's interval
+/// * `candidate` - The candidate's interval
+/// * `higher_is_better` - Whether a higher value is better
+#[must_use]
+pub fn judge(baseline: Interval, candidate: Interval, higher_is_better: bool) -> Verdict {
+    // the gap between the nearest ends, as a share of the baseline's nearer end
+    let gap = |from: f64, to: f64| {
+        if from.abs() < f64::EPSILON {
+            return 0.0;
+        }
+        (to - from).abs() / from.abs() * 100.0
+    };
+    if candidate.low > baseline.high {
+        let gap_pct = gap(baseline.high, candidate.low);
+        return if higher_is_better {
+            Verdict::Better { gap_pct }
+        } else {
+            Verdict::Worse { gap_pct }
+        };
+    }
+    if candidate.high < baseline.low {
+        let gap_pct = gap(baseline.low, candidate.high);
+        return if higher_is_better {
+            Verdict::Worse { gap_pct }
+        } else {
+            Verdict::Better { gap_pct }
+        };
+    }
+    Verdict::NoDifference
+}
+
+/// Compare a candidate capture against a baseline
+///
+/// # Arguments
+///
+/// * `baseline` - The capture compared against
+/// * `candidate` - The capture compared
+/// * `allow` - The facts allowed to differ, by name
+///
+/// # Errors
+///
+/// Every difference that was not waived, when there is any.
+pub fn compare(
+    baseline: &Capture,
+    candidate: &Capture,
+    allow: &[String],
+) -> Result<Comparison, Vec<Difference>> {
+    // refuse on anything not waived
+    let (waived, refused): (Vec<Difference>, Vec<Difference>) = differences(baseline, candidate)
+        .into_iter()
+        .partition(|difference| allow.contains(&difference.fact));
+    if !refused.is_empty() {
+        return Err(refused);
+    }
+    // every arm either side ran, baseline order first
+    let mut ids: Vec<&str> = baseline.arms.iter().map(|arm| arm.id.0.as_str()).collect();
+    for arm in &candidate.arms {
+        if !ids.contains(&arm.id.0.as_str()) {
+            ids.push(&arm.id.0);
+        }
+    }
+    let find = |capture: &'_ Capture, id: &str| capture.arms.iter().find(|arm| arm.id.0 == id).cloned();
+    let arms = ids
+        .into_iter()
+        .map(|id| {
+            let left = find(baseline, id);
+            let right = find(candidate, id);
+            // a run that wrapped its inserts measured overwrites, never compared with new rows
+            let wrapped = |arm: &Option<ArmResult>| {
+                arm.as_ref()
+                    .is_some_and(|arm| arm.runs.iter().any(|run| run.wrapped))
+            };
+            let mixed_wrap = wrapped(&left) != wrapped(&right);
+            let metrics = METRICS
+                .iter()
+                .filter_map(|metric| {
+                    let base = left.as_ref().and_then(|arm| interval(arm, metric));
+                    let cand = right.as_ref().and_then(|arm| interval(arm, metric));
+                    // a metric neither side has is not a row
+                    if base.is_none() && cand.is_none() {
+                        return None;
+                    }
+                    let verdict = match (base, cand) {
+                        (Some(_), Some(_)) if mixed_wrap => Verdict::Absent,
+                        (Some(base), Some(cand)) => judge(base, cand, metric.higher_is_better),
+                        _ => Verdict::Absent,
+                    };
+                    Some(MetricVerdict {
+                        metric: metric.name.to_string(),
+                        baseline: base,
+                        candidate: cand,
+                        verdict,
+                    })
+                })
+                .collect();
+            ArmComparison {
+                id: id.to_string(),
+                metrics,
+            }
+        })
+        .collect();
+    Ok(Comparison { waived, arms })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compare, differences, judge, Interval, Verdict};
+    use crate::results::{ArmResult, Capture, DatasetFacts, Provenance, RunResult, FORMAT};
+    use crate::spec::{ArmId, BenchSpec, EventKind};
+    use crate::window::WindowSummary;
+    use std::collections::BTreeMap;
+
+    /// A run whose reads did this many a second
+    ///
+    /// # Arguments
+    ///
+    /// * `per_sec` - Reads a second
+    fn run(per_sec: f64) -> RunResult {
+        let mut measured = WindowSummary::default();
+        measured.read.ok = 100;
+        measured.read.per_sec = per_sec;
+        RunResult {
+            run: 0,
+            order: 0,
+            started_at: String::new(),
+            measured,
+            warmup: WindowSummary::default(),
+            series: Vec::new(),
+            ended_early: None,
+            feeds: BTreeMap::new(),
+            wrapped: false,
+            verify: None,
+            event: None,
+            server_series: Vec::new(),
+            unfigured: Vec::new(),
+            figures_unread: None,
+            driver_cpu_peak_pct: 0.0,
+            progress_dropped: 0,
+        }
+    }
+
+    /// A capture of one arm whose runs read this many a second
+    ///
+    /// # Arguments
+    ///
+    /// * `rates` - Each run's reads a second
+    fn capture(rates: &[f64]) -> Capture {
+        let spec = BenchSpec {
+            runs: rates.len() as u32,
+            ..BenchSpec::default()
+        };
+        Capture {
+            format: FORMAT,
+            label: "x".to_string(),
+            provenance: Provenance::default(),
+            spec_digest: spec.digest(),
+            spec,
+            dataset: DatasetFacts::new(Vec::new()),
+            preload: None,
+            arms: vec![ArmResult {
+                id: ArmId("read100/b1/none".to_string()),
+                workload: "read100".to_string(),
+                bundle: 1,
+                in_flight: 4,
+                overrides: None,
+                event: EventKind::None,
+                runs: rates.iter().map(|rate| run(*rate)).collect(),
+            }],
+            complete: true,
+            error: None,
+        }
+    }
+
+    /// Disjoint intervals are a result in the right direction; overlapping ones are not
+    #[test]
+    fn only_disjoint_intervals_are_a_result() {
+        let base = Interval { low: 100.0, high: 110.0 };
+        let faster = Interval { low: 121.0, high: 130.0 };
+        let overlapping = Interval { low: 105.0, high: 130.0 };
+        assert_eq!(judge(base, faster, true), Verdict::Better { gap_pct: 10.0 });
+        // the same numbers are worse when they are latencies
+        assert_eq!(judge(base, faster, false), Verdict::Worse { gap_pct: 10.0 });
+        assert_eq!(judge(base, overlapping, true), Verdict::NoDifference);
+    }
+
+    /// Two comparable captures are judged arm by arm
+    #[test]
+    fn comparable_captures_are_judged() {
+        let comparison = compare(&capture(&[100.0, 110.0]), &capture(&[121.0, 130.0]), &[]).unwrap();
+        let reads = &comparison.arms[0].metrics[0];
+        assert_eq!(reads.metric, "read/s");
+        assert!(matches!(reads.verdict, Verdict::Better { .. }));
+        // inserts were never run, so they are not a row
+        assert_eq!(comparison.arms[0].metrics.len(), 3);
+    }
+
+    /// A capture of another dataset is refused unless that fact is waived by name
+    #[test]
+    fn incomparable_captures_are_refused_by_fact() {
+        let base = capture(&[100.0, 110.0]);
+        let mut other = capture(&[100.0, 110.0]);
+        other.dataset.digest = "something else".to_string();
+        other.provenance.driver.hostname = "elsewhere".to_string();
+        let refused = compare(&base, &other, &[]).unwrap_err();
+        let facts: Vec<&str> = refused.iter().map(|difference| difference.fact.as_str()).collect();
+        assert_eq!(facts, vec!["dataset", "driver"]);
+        let waived = compare(&base, &other, &["dataset".to_string(), "driver".to_string()]).unwrap();
+        assert_eq!(waived.waived.len(), 2);
+    }
+
+    /// A single run is no interval, and says so
+    #[test]
+    fn a_single_run_is_refused() {
+        let refused = differences(&capture(&[100.0]), &capture(&[100.0, 101.0]));
+        assert!(refused.iter().any(|difference| difference.fact == "runs"));
+    }
+}

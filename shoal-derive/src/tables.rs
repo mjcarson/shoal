@@ -43,6 +43,12 @@ pub(super) struct ShoalField {
 pub(super) struct ShoalTable {
     /// The name of the database this table is in
     pub db: String,
+    /// Whether this table can be loaded from a dataset and benchmarked by name
+    ///
+    /// The row must also derive `serde::Deserialize`. This never reaches the schema fingerprint
+    /// ([F66](../../../docs/src/features/dataset-benchmarks.md)).
+    #[darling(default)]
+    pub dataset: bool,
 }
 
 /// Extend a token stream with a ShoalTableSupport implementation

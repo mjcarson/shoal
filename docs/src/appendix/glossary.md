@@ -46,6 +46,22 @@ produces, and what **every** macro percentile recorded before
 [F8](../features/purpose-built-workloads.md) is. Never comparable with a *service time*; the
 artifact records which one a number is. Contrast **Service time**.
 
+**Arm** (`shoaladm bench`) — One workload of reads and inserts (~~a mix~~ until
+[F67](../features/bench-run-wizard.md)) at one bundle size, under one set of inventory overrides
+and one event, run `--runs` times. Named `{workload}/b{bundle}[/{override}]/{event}`, which is
+what two captures are compared on ([F66](../features/dataset-benchmarks.md)).
+`shoal-bench` uses the word for one workload in a sweep.
+
+**Capture** (`shoaladm bench`) — One benchmark run whole: `bench.json` with the run's provenance,
+spec and dataset digests and every run of every arm, under the project's
+`target/shoaladm-bench/<label>/` ([F66](../features/dataset-benchmarks.md)). `shoal-bench`'s
+captures are its own and live under `docs/perf/runs/`.
+
+**Dataset** (`shoaladm bench`) — A folder of one `<Table>.csv`, `.json` or `.jsonl` per table,
+named by the table's exact name. Each file splits into a **preload**, loaded before anything is
+measured and the only keys a read asks for, and an **insert pool**, streamed again for each arm
+that inserts ([F66](../features/dataset-benchmarks.md)).
+
 **Blocked query** — A query parked in `blocked: HashMap<u64, Vec<...>>` waiting for a
 partition to be read from disk. Re-injected as a `ServerMsg::Released` when the read
 completes, rather than being resumed as a suspended future. It carries the query itself, unlike
@@ -505,3 +521,9 @@ the macro artifact. Its identifier — `macro/get_archived`, `macro/fanout/evict
 every comparison joins on, so **renaming one orphans every capture taken before the rename**. Not
 to be confused with the *macro layer*, which is the set of all of them. See
 [F8](../features/purpose-built-workloads.md).
+
+**Workload** (`shoaladm bench`) — The share of reads and inserts an arm sends: `read100`,
+`insert100`, `rw50`, `read90` or `read:N,insert:M`, chosen with `--workloads` or in the run
+wizard. Called a *mix* until [F67](../features/bench-run-wizard.md). Unlike `shoal-bench`'s
+sense above, it names no path and owns no server: one workload runs at every bundle size and
+event of a run.

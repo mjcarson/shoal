@@ -144,10 +144,12 @@ where the resolution above does not name the inventory.
 | `logs <node> [-n N]` | The node's journal |
 | `destroy --yes` | Delete every node, its data and the local state |
 | `config show` / `config default-inventory <file>` | The config above |
+| `bench run --dataset <dir> [-i <inv>] [--spec bench.yml] ...` | Benchmark the project's schema against a folder of `<Table>.csv`/`.json`/`.jsonl`, on a cluster of its own copied from the inventory (`<name>-bench`, every root, port and directory moved), or on the inventory's own with `--attach`. Workloads (`--workloads`, ~~`--mixes`~~) `insert100`, `read100`, `rw50`, `read90` at bundle sizes, chosen in a wizard on a terminal when none is named ([F67](../features/bench-run-wizard.md)), optional events (`kill`, `rebalance`, ...), `--profile` for a heap profiled node, `--stop-unit` and `--governor` put back on every way out. On a terminal it draws the stats view with a bench tab ([F66](../features/dataset-benchmarks.md)) |
+| `bench list` / `bench show <capture>` / `bench compare <baseline> <candidate> [--allow <fact>]` | The captures under the project's `target/shoaladm-bench/`; compare refuses two that differ in anything that moves their numbers |
 
-The commands that connect to a cluster (`deploy` through `reconfigure`) run in the schema's
-admin program; `new`, `build`, `config`, `ship-backup`, the units, `logs` and `destroy` run in
-`shoaladm` itself and need no schema.
+The commands that connect to a cluster (`deploy` through `reconfigure`, and `bench run`) run in
+the schema's admin program; `new`, `build`, `config`, `ship-backup`, the units, `logs`,
+`destroy` and `bench list`/`show`/`compare` run in `shoaladm` itself and need no schema.
 
 ## A schema's own program
 

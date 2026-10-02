@@ -129,6 +129,8 @@
   - [F63. shoalctl and shoaladm, and a deployment built from a Rust project](features/shoaladm.md)
   - [F64. shoaladm stats names members by hostname, and charts the figures full screen](features/stats-tui.md)
   - [F65. Every node counts what its clients were answered, and shoaladm stats opens on a home tab](features/query-figures-home-tab.md)
+  - [F66. shoaladm bench: benchmark any schema against a dataset folder](features/dataset-benchmarks.md)
+  - [F67. shoaladm bench run names workloads, chooses a run in a wizard, and proves every stat moves](features/bench-run-wizard.md)
 
 # Direction
 
@@ -327,6 +329,9 @@
   - [195. A node's scheduled scrubs were refused for a stale version](appendix/resolved/scheduled-scrub-starved.md)
   - [196. The eviction budget undercounted what a node holds](appendix/resolved/row-charge-undercount.md)
   - [197. A move's source resumed the drive and reconfigured itself out, and a retired copy's driver held its slot](appendix/resolved/retired-driver-holds-slot.md)
+  - [199. A bench against a cluster on a build from before F65 recorded an empty server series](appendix/resolved/bench-unfigured-members.md)
+  - [200. A bench run by `--addr` never read the node's own figures](appendix/resolved/bench-addr-reads-no-figures.md)
+  - [201. An attached run that read before it inserted was refused](appendix/resolved/attached-read-order.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

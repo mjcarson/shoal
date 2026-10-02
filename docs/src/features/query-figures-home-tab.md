@@ -91,7 +91,7 @@ The block's shape, with example values:
 ### A home tab
 
 `shoaladm stats` now opens on **home**. The group tabs follow it, keyed `1` to `8`. This is the
-lab's side cluster under the loader's `bench`, with each chart's body cut:
+lab's side cluster under the loader's `bench` (its `drive` since [F66](dataset-benchmarks.md)), with each chart's body cut:
 
 ```text
 shoaladm stats · tmdb-f65 · from hyperion (leader) · version 11 · every 2s
@@ -323,6 +323,7 @@ all six kinds sends under two kilobytes of JSON, which a test holds it to. The f
 | `keys_move_the_screen` (renumbered) | `shoaladm/src/cluster/stats/screen.rs` | The view does not open on home, home does not chart the `HOME` metrics, or the tabs do not follow it in order |
 | `the_view_draws_the_home_tab` | `shoaladm/src/cluster/stats/view.rs` | The totals sum a stale member or lose a figure, an older build goes unnamed, a home chart or its legend is missing, the table's rows or the cluster's row read wrong, space f loses a kind's summary row, or a small terminal does not draw |
 | `the_view_draws_a_tab_of_charts` (renumbered) | `shoaladm/src/cluster/stats/view.rs` | The tab bar stops naming home and queries first |
+| `stats::every_metric_that_should_move_does` ([F67](bench-run-wizard.md)) | `examples/bench_dataset/tests/stats.rs` | The per kind counts, bytes and waits stop reaching the view from a real node under a bench run: `ops_by_kind` must draw `get` and `insert` above zero, and every other query figure above zero |
 
 `the_view_draws_the_home_tab` also covers the narrow table. At a hundred columns it must leave
 out exists, deletes and rows against budget, keep the p99 and the resident memory, and write
@@ -331,7 +332,7 @@ out exists, deletes and rows against budget, keep the p99 and the resident memor
 **Proved on the lab.** A side cluster, `tmdb-f65` on ports 13000-13002, was built from this tree
 and deployed onto hyperion, titan and europa. Its programs and state were kept under
 `target/lab/f65/`. It was loaded with 30,000 movies (219,343 rows), then driven for four minutes
-by the loader's `bench`, spread round robin over the three members.
+by the loader's `bench` (now `drive`), spread round robin over the three members.
 
 - **The counts matched the client's.** The home tab read 81.1k gets, 9.6k updates and 4.8k
   inserts a second. Over the same seconds the bench counted 70–85k gets and keyword reads,

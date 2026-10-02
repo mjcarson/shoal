@@ -28,7 +28,7 @@ commands to compile the right things - one tool will do all of that", with a con
 
 | Program | What it is | What it builds, and when |
 | --- | --- | --- |
-| `shoaladm` | The admin tool: `deploy`, `bootstrap`, `add`, `upgrade`, `rebuild`, `reconfigure`, `rebalance`, `admin`, `ship-backup`, `status`, `stats`, `start`, `stop`, `restart`, `logs`, `destroy`, `new`, `build`, `config` | For a command that connects to a cluster: the schema's admin program, then the node program once per cpu class among the hosts |
+| `shoaladm` | The admin tool: `deploy`, `bootstrap`, `add`, `upgrade`, `rebuild`, `reconfigure`, `rebalance`, `admin`, `ship-backup`, `status`, `stats`, `start`, `stop`, `restart`, `logs`, `destroy`, `new`, `build`, `config`, and since [F66](dataset-benchmarks.md) `bench run`/`list`/`show`/`compare` | For a command that connects to a cluster: the schema's admin program, then the node program once per cpu class among the hosts |
 | `shoalctl` | The terminal UI, with no subcommand: `shoalctl [-i inventory \| --addr addr]` | The schema's terminal UI |
 
 Both are ordinary binaries that know no schema. Run in a project directory (or given

@@ -154,12 +154,36 @@ cargo run --example tmdb
 # The rows/sec it prints is not a measurement.
 cargo build --release -p tmdb-dataset
 target/release/tmdb-dataset-loader load -i examples/tmdb_dataset/inventory.yml --dataset ~/datasets/TMDB_movie_dataset_v11.csv --limit 10000
+
+# benchmark any schema against a dataset folder (F66): one <Table>.csv/.json/.jsonl a table, the
+# table opted in with #[shoal_table(db = "...", dataset)] and serde::Deserialize. Run in the
+# schema's project, it copies the inventory into a cluster of its own (<name>-bench, every root,
+# port and directory moved), runs every workload at every bundle size, and tears it down again. Proving
+# a change on the lab: isolate it the way a side cluster is, and never point it at tmdb without
+# --attach (read-only unless --yes-write)
+cd examples/tmdb_dataset && SHOAL_BIN_DIR=$PWD/../../target/lab/<f>/bin SHOAL_DEPLOY_HOME=$PWD/../../target/lab/<f>/state \
+    ../../target/debug/shoaladm bench run -i <side inventory> --dataset <folder> --workloads read100,rw50 \
+    --bundles 1,16 --runs 2 --duration 10 --allow-neighbours        # --dry-run prints the plan first
+# leave --workloads out on a terminal and a wizard chooses the whole run, explaining each choice;
+# ctrl-s saves it as a spec that `--spec` runs again (F67). With no terminal the four defaults run
+../../target/debug/shoaladm bench list | show <label> | compare <baseline> <candidate>
+# the driver, the dataset, the capture and compare, engine-free like shoaladm
+cargo test -p shoal-loadgen
+cargo tree -p shoal-loadgen | grep -c glommio     # 0
+# the whole path against a node in process, nothing schema specific in it, and a real profile build.
+# its `stats` test starts a cluster of one node and holds every metric of the stats view that
+# says it moves (`Metric::under_load`) to a real run (F67)
+cargo test -p bench-dataset
+cargo test -p bench-dataset --test profile_build -- --ignored
 ```
 
 ## Benchmarking
 
-Everything goes through `shoal-bench`, the workspace crate that runs the benchmarks, stores the
-results with their provenance, compares them, and generates the book's results page.
+**A schema's own workload on its own cluster is `shoaladm bench`** ([F66](docs/src/features/dataset-benchmarks.md)),
+above under the build commands; it is meant to replace `shoal-bench`, which stays until it is
+retired (`docs/src/appendix/todos.md#retiring-shoal-bench`). Everything else in this section is
+`shoal-bench`, the workspace crate that runs the engine's benchmarks, stores the results with their
+provenance, compares them, and generates the book's results page.
 
 ```bash
 # capture a full run: micro + macro + hotpath + stages, into docs/perf/runs/
@@ -519,6 +543,13 @@ go through `shoal`.**
   and the UI as `tui`. Both binaries use the one `Tmdb` type, so they cannot disagree about the
   fingerprint. `shoaladm deploy` run in its directory finds `Tmdb` in the library and builds the
   same node itself
+- **shoal-loadgen** - The schema generic benchmark ([F66](docs/src/features/dataset-benchmarks.md)):
+  the dataset folder and its streaming readers, the preload and insert pool, the spec and its arm
+  matrix, the seeded picker, per-second hdrhistogram windows, the driver, event window cutting,
+  the capture and compare. Generic over `S: DatasetSupport`; the per-table pieces come from the
+  table derives. **Links no engine** - `cargo tree -p shoal-loadgen | grep -c glommio` is 0
+- **bench-dataset** - `examples/bench_dataset/`, a small catalog schema with a committed dataset
+  (and a `dataset-bad/` refused by name) that the whole `shoaladm bench` path is tested against
 - **shoaladm** - Deploying and operating a cluster over ssh ([F51](docs/src/features/cluster-deployment.md)),
   the inventory wizard ([F53](docs/src/features/inventory-wizard.md)), the cluster tab's model,
   and since [F63](docs/src/features/shoaladm.md) building a schema's programs from its project:
@@ -526,7 +557,10 @@ go through `shoal`.**
   crate under the project's `target/shoal-build/` and runs cargo, `cpu` probes a host and names
   its `-C target-cpu`, `config` reads `~/.config/shoal/config.yaml` and installs programs under
   `~/.local/shoal/bin`. The binary knows no schema: for a command that connects it builds the
-  schema's admin program and `exec`s it. **Links no engine** - `cargo tree -p shoaladm | grep -c glommio`
+  schema's admin program and `exec`s it. Since F66 `bench/` is `shoaladm bench`: the bench's own
+  cluster (`owned.rs`, every root moved and checked disjoint), host changes undone on every way out
+  (`hosts.rs`), events, `--profile` builds (a wrapper of their own, `build::Flavor`), and the run on
+  a thread of its own drawn in the stats view. **Links no engine** - `cargo tree -p shoaladm | grep -c glommio`
   is 0 - and every dependency is one the lockfile already resolves
 - **shoalctl** - The terminal UI, a library entered by `shoalctl::cli::main_blocking::<DbClient>()`
   and a binary that builds that program for the project's schema and runs it (F63). Depends on
@@ -549,6 +583,8 @@ go through `shoal`.**
 - `#[shoal::db]` (`#[shoal::db(client)]` for the client half alone; there is no `shoal_db`) - Attribute macro that rewrites table field types (adds `<Self>` to storage and `TableNames`; for an ephemeral table there is no storage generic to add it to, so `Self` is pushed as one) and generates `TableNames` enum, `*Client` struct, `QueryKinds`/`ResponseKinds` enums. It classifies a field by looking for `Sorted`/`Unsorted`/`Persistent`/`Ephemeral` in the type name, so a table type named anything else panics during expansion
 
 **Field Attributes:**
+- `#[shoal_table(db = "DbName", dataset)]` - `dataset` lets the table be loaded from a dataset file
+  and benchmarked by name (F66); the row must also derive `serde::Deserialize`
 - `#[shoal(partition)]` - Partition key (required)
 - `#[shoal(sort)]` - Sort key (sorted tables only)
 - `#[shoal(filter)]` - Filterable field

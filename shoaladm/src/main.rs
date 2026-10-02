@@ -56,6 +56,7 @@ fn inventory_of(command: &Command) -> Option<std::path::PathBuf> {
         | Command::Reconfigure { inventory, .. }
         | Command::Logs { inventory, .. }
         | Command::Destroy { inventory, .. } => inventory.inventory.clone(),
+        Command::Bench(command) => command.inventory(),
         Command::Build { .. } | Command::Config(_) | Command::New { .. } => None,
     }
 }

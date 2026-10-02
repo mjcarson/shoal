@@ -21,6 +21,7 @@
 //! depends on this crate for the cluster tab's model and for connecting to a deployed cluster
 //! as its admin.
 
+pub mod bench;
 pub mod build;
 pub mod cli;
 pub mod cluster;

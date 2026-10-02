@@ -21,6 +21,9 @@ use std::time::{Duration, Instant};
 
 use super::screen::{Outcome, Screen};
 use super::{StatsModel, leader_stats, view};
+use shoal_loadgen::progress::{BenchEvent, Control};
+use std::future::Future;
+use std::io::Write;
 
 /// How often the screen is drawn when nothing else happens, so the chart's edge moves on
 const REDRAW_EVERY: Duration = Duration::from_secs(1);
@@ -157,10 +160,97 @@ where
             >,
         >,
 {
-    let mut screen = Screen::new(title, every);
+    run_with(Some(poller), title, every, None).await
+}
+
+/// What a running benchmark hands the view: its progress, a poller for each cluster it brings
+/// up, the way to stop it, and its log ([F66](../../../../docs/src/features/dataset-benchmarks.md))
+pub struct BenchChannels<S: QuerySupport> {
+    /// The run's progress
+    pub progress: tokio::sync::mpsc::Receiver<BenchEvent>,
+    /// A poller of each cluster the run brings up, since a reset is a new cluster
+    pub pollers: tokio::sync::mpsc::Receiver<Poller<S>>,
+    /// What the run is told
+    pub control: tokio::sync::watch::Sender<Control>,
+    /// The run's log, which every event's line is written to
+    pub log: Option<std::fs::File>,
+}
+
+/// Wait on an optional receiver, forever when there is none or it has closed
+///
+/// A tokio receiver's `recv` is cancel safe, so racing it in the loop's `select!` loses
+/// nothing; a closed one is put away so it is not polled again (#152 is about kanal's, which
+/// is not).
+///
+/// # Arguments
+///
+/// * `rx` - The receiver, if there is one
+async fn recv_or_wait<T>(rx: &mut Option<tokio::sync::mpsc::Receiver<T>>) -> Option<T> {
+    // a receiver that is gone never answers again
+    let Some(inner) = rx.as_mut() else {
+        return std::future::pending().await;
+    };
+    let received = inner.recv().await;
+    if received.is_none() {
+        *rx = None;
+    }
+    received
+}
+
+/// Wait on the read in flight, forever when there is none
+///
+/// # Arguments
+///
+/// * `read` - The read, if one is in flight
+async fn read_or_wait<F: Future + Unpin>(read: &mut Option<F>) -> F::Output {
+    match read {
+        Some(read) => read.await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Draw the figures full screen, with a running benchmark beside them if one is given, until
+/// the operator leaves
+///
+/// A view with a benchmark asks before it leaves a run still going, and stops the run rather
+/// than stranding it: the run tears its cluster down and puts the hosts back, and the view
+/// stays up until it says it has.
+///
+/// # Arguments
+///
+/// * `poller` - What reads the figures, if a cluster is up yet
+/// * `title` - The cluster's name
+/// * `every` - How often the figures are read
+/// * `bench` - The benchmark drawn beside the figures, if one is running
+///
+/// # Errors
+///
+/// When the terminal fails.
+pub async fn run_with<S>(
+    poller: Option<Poller<S>>,
+    title: String,
+    every: Duration,
+    bench: Option<BenchChannels<S>>,
+) -> color_eyre::Result<()>
+where
+    S: QuerySupport + Send + Sync + 'static,
+    for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            rkyv::rancor::Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+{
+    let mut screen = match bench {
+        Some(_) => Screen::with_bench(title, every, Instant::now()),
+        None => Screen::new(title, every),
+    };
     // the terminal, restored whatever the loop comes to
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &mut screen, poller).await;
+    let result = event_loop(&mut terminal, &mut screen, poller, bench).await;
     ratatui::restore();
     result
 }
@@ -175,7 +265,8 @@ where
 async fn event_loop<S>(
     terminal: &mut ratatui::DefaultTerminal,
     screen: &mut Screen,
-    poller: Poller<S>,
+    poller: Option<Poller<S>>,
+    bench: Option<BenchChannels<S>>,
 ) -> color_eyre::Result<()>
 where
     S: QuerySupport + Send + Sync + 'static,
@@ -193,7 +284,13 @@ where
     let mut events = EventStream::new();
     let mut redraw = tokio::time::interval(REDRAW_EVERY);
     // the first read starts at once; it is kept across turns, so a key never drops it
-    let mut read = Box::pin(read_after(poller, Duration::ZERO));
+    let mut read = poller.map(|poller| Box::pin(read_after(poller, Duration::ZERO)));
+    // a benchmark's progress, its pollers, its control and its log, each its own
+    let (mut progress, mut pollers, control, mut log) = match bench {
+        Some(bench) => (Some(bench.progress), Some(bench.pollers), Some(bench.control), bench.log),
+        None => (None, None, None, None),
+    };
+    let mut arms = 0usize;
     loop {
         terminal.draw(|frame| view::render(frame, screen, Instant::now()))?;
         tokio::select! {
@@ -209,14 +306,34 @@ where
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                if screen.handle_key(key, Instant::now()) == Outcome::Quit {
-                    return Ok(());
+                match screen.handle_key(key, Instant::now()) {
+                    Outcome::Quit => return Ok(()),
+                    // the run stops and puts everything back; the view waits to hear it has
+                    Outcome::Abort => {
+                        if let Some(control) = &control {
+                            let _ = control.send(Control::Abort);
+                        }
+                    }
+                    Outcome::Continue => (),
                 }
             }
-            (poller, answer) = &mut read => {
+            (poller, answer) = read_or_wait(&mut read) => {
                 // sample the answer, and arm the next read an interval after it
                 screen.observe(answer, Instant::now());
-                read = Box::pin(read_after(poller, screen.every));
+                read = Some(Box::pin(read_after(poller, screen.every)));
+            }
+            Some(poller) = recv_or_wait(&mut pollers) => {
+                // a cluster brought up again is read from now on, at once
+                read = Some(Box::pin(read_after(poller, Duration::ZERO)));
+            }
+            Some(event) = recv_or_wait(&mut progress) => {
+                // every event's line goes to the run's log, and the event to the pane
+                if let (Some(log), Some(line)) = (log.as_mut(), crate::bench::headless::line(&event, &mut arms)) {
+                    let _ = writeln!(log, "{line}");
+                }
+                if let Some(pane) = screen.bench.as_mut() {
+                    pane.apply(event, Instant::now());
+                }
             }
             _ = redraw.tick() => (),
         }

@@ -27,6 +27,7 @@ use super::history::Series;
 use super::metrics::{
     GROUPS, METRICS, Metric, Reader, TERM_SECTIONS, TERMS, Unit, all_answers, row_bytes,
 };
+use super::bench::{BenchPane, Status};
 use super::screen::{Screen, TABS, tab_name};
 use super::{StatsModel, age, byte_rate, live, rate, short, state};
 use crate::cluster::model::bytes;
@@ -84,6 +85,10 @@ const HOME_COLUMNS: [&str; 13] = [
 /// The keys the foot reminds of
 const KEYS: &str =
     "tab next tab  ←↑↓→ select  space f full screen  [ ] window  p freeze  ? help  q quit";
+
+/// The keys the foot reminds of while a benchmark is drawn
+const BENCH_KEYS: &str =
+    "tab next tab  0 bench  ←↑↓→ select  space f full screen  [ ] window  p freeze  ? help  q stop";
 
 /// The color a kind of query's line is drawn in, the same on every chart
 ///
@@ -259,8 +264,11 @@ pub fn render(frame: &mut Frame, screen: &mut Screen, now: Instant) {
         render_help(frame, area, screen);
         return;
     }
-    // the header, the tabs, the body and the foot
-    let header = header_lines(screen);
+    // the header, the tabs, the body and the foot; a benchmark's strip under the header on home
+    let mut header = header_lines(screen);
+    if let Some(pane) = screen.bench.as_ref().filter(|_| screen.is_home()) {
+        header.extend(pane.strip(now).into_iter().map(|line| Line::styled(line, bench_style())));
+    }
     let plans = plan_lines(screen);
     let head = u16::try_from(header.len()).unwrap_or(u16::MAX);
     let foot = u16::try_from(plans.len() + 1).unwrap_or(u16::MAX);
@@ -274,7 +282,12 @@ pub fn render(frame: &mut Frame, screen: &mut Screen, now: Instant) {
     frame.render_widget(Paragraph::new(header), top);
     // the grid, the home tab, or the selected chart filling the body; the grid decides its
     // scroll first, so the tab bar can say which rows are shown
-    let shown = if screen.fullscreen {
+    let shown = if screen.is_bench() {
+        if let Some(pane) = &screen.bench {
+            render_bench(frame, body, pane, now);
+        }
+        None
+    } else if screen.fullscreen {
         render_cell(frame, body, screen, screen.metric_index(), true, true, false, now);
         None
     } else if screen.is_home() {
@@ -283,9 +296,21 @@ pub fn render(frame: &mut Frame, screen: &mut Screen, now: Instant) {
         Some(render_grid(frame, body, screen, false, now))
     };
     render_tabs(frame, tabs, screen, shown);
-    // the open plans, then the keys
+    // the open plans, then the keys, or the question a quit during a benchmark asks
     let mut lines: Vec<Line> = plans.into_iter().map(Line::from).collect();
-    lines.push(Line::styled(KEYS, dim_style()));
+    match screen.bench.as_ref() {
+        Some(pane) if pane.confirm => lines.push(Line::styled(
+            "stop the benchmark? q or y again stops it, tears its cluster down and puts the hosts back; any other key carries on",
+            Style::default().fg(Color::Black).bg(Color::Red),
+        )),
+        Some(pane) if pane.status == Status::Stopping => lines.push(Line::styled(
+            "stopping: tearing the cluster down and putting the hosts back...",
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        )),
+        Some(pane) if pane.finished() => lines.push(Line::styled("the benchmark is over: q leaves", dim_style())),
+        Some(_) => lines.push(Line::styled(BENCH_KEYS, dim_style())),
+        None => lines.push(Line::styled(KEYS, dim_style())),
+    }
     frame.render_widget(Paragraph::new(lines), footer);
     // the shortcut space started, over everything
     if screen.leader {
@@ -416,8 +441,11 @@ fn member_states(model: &StatsModel) -> Line<'static> {
 fn render_tabs(frame: &mut Frame, area: Rect, screen: &Screen, shown: Option<(Grid, usize)>) {
     let [left, right] =
         Layout::horizontal([Constraint::Min(10), Constraint::Length(30)]).areas(area);
-    // each tab numbered by the key that shows it, home first
-    let titles = (0..TABS).map(|tab| format!("{} {}", tab + 1, tab_name(tab)));
+    // each tab numbered by the key that shows it, home first, a benchmark's last as 0
+    let titles = (0..screen.tab_count()).map(|tab| {
+        let key = if tab == TABS { 0 } else { tab + 1 };
+        format!("{key} {}", tab_name(tab))
+    });
     let tabs = Tabs::new(titles)
         .select(screen.tab)
         .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))
@@ -1161,6 +1189,208 @@ fn render_leader(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
+/// The style a benchmark's strip is drawn in
+fn bench_style() -> Style {
+    Style::default().fg(Color::LightCyan)
+}
+
+/// Draw a running benchmark: its arms, the current arm's client figures as charts with its
+/// event's marks, and what is worth warning about ([F66](../../../../docs/src/features/dataset-benchmarks.md))
+///
+/// # Arguments
+///
+/// * `frame` - The frame
+/// * `area` - Where to draw
+/// * `pane` - The benchmark
+/// * `now` - The time now
+fn render_bench(frame: &mut Frame, area: Rect, pane: &BenchPane, now: Instant) {
+    // the strip on top, the arms beside the charts, the warnings and the log under them
+    let strip: Vec<Line> = pane
+        .strip(now)
+        .into_iter()
+        .map(|line| Line::styled(line, bench_style()))
+        .collect();
+    let [top, middle, bottom] = Layout::vertical([
+        Constraint::Length(strip.len() as u16),
+        Constraint::Min(8),
+        Constraint::Length(6),
+    ])
+    .areas(area);
+    frame.render_widget(Paragraph::new(strip), top);
+    let [arms, charts] =
+        Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).areas(middle);
+    render_bench_arms(frame, arms, pane);
+    let [rates, waits] = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(charts);
+    // operations a second by kind, then the client's latency per query and per bundle
+    let series = |read: fn(&shoal_loadgen::window::WindowSummary) -> f64| -> Vec<(f64, f64)> {
+        pane.seconds.iter().map(|sample| (sample.at as f64, read(&sample.summary))).collect()
+    };
+    render_bench_chart(
+        frame,
+        rates,
+        pane,
+        "client ops/s (from send)",
+        Unit::PerSec,
+        vec![
+            ("read".to_string(), kind_color("get"), series(|summary| summary.read.per_sec)),
+            ("insert".to_string(), kind_color("insert"), series(|summary| summary.insert.per_sec)),
+        ],
+    );
+    render_bench_chart(
+        frame,
+        waits,
+        pane,
+        "client p99 ms (from send; a node's own is from its frame's arrival)",
+        Unit::Millis,
+        vec![
+            ("read".to_string(), kind_color("get"), series(|summary| summary.read.latency.p99_ms)),
+            ("insert".to_string(), kind_color("insert"), series(|summary| summary.insert.latency.p99_ms)),
+            ("bundle".to_string(), Color::Magenta, series(|summary| summary.bundle.p99_ms)),
+        ],
+    );
+    // what is worth warning about, then the newest lines
+    let mut lines: Vec<Line> = pane
+        .warnings()
+        .into_iter()
+        .map(|warning| Line::styled(format!("! {warning}"), Style::default().fg(Color::Yellow)))
+        .collect();
+    let room = usize::from(bottom.height).saturating_sub(lines.len());
+    lines.extend(
+        pane.log
+            .iter()
+            .rev()
+            .take(room)
+            .rev()
+            .map(|line| Line::styled(line.clone(), dim_style())),
+    );
+    frame.render_widget(Paragraph::new(lines), bottom);
+}
+
+/// Draw the run's arms, done, running and to come, keeping the running one in view
+///
+/// # Arguments
+///
+/// * `frame` - The frame
+/// * `area` - Where to draw
+/// * `pane` - The benchmark
+fn render_bench_arms(frame: &mut Frame, area: Rect, pane: &BenchPane) {
+    let visible = usize::from(area.height.saturating_sub(1)).max(1);
+    let current = pane.current.unwrap_or(0);
+    let first = current.saturating_sub(visible / 2).min(pane.arms.len().saturating_sub(visible));
+    let rows = pane.arms.iter().enumerate().skip(first).take(visible).map(|(index, row)| {
+        // done, running or to come, and what a done one measured
+        let (marker, style) = match (&row.summary, pane.current == Some(index)) {
+            (Some(_), _) => ("✓", Style::default()),
+            (None, true) => ("▶", selected_style()),
+            (None, false) => ("·", dim_style()),
+        };
+        let measured = row.summary.as_ref().map_or(String::new(), |summary| {
+            let p99 = summary.read.latency.p99_ms.max(summary.insert.latency.p99_ms);
+            let mut text = format!("{:.0}/s p99 {:.1}ms", summary.ops_per_sec(), p99);
+            if summary.read.failed() + summary.insert.failed() > 0 {
+                text.push_str(&format!(" {} failed", summary.read.failed() + summary.insert.failed()));
+            }
+            if row.ended_early.is_some() {
+                text.push_str(" early");
+            }
+            text
+        });
+        Row::new(vec![
+            Cell::from(marker),
+            Cell::from(row.arm.id.0.clone()),
+            Cell::from(format!("{}", row.arm.run)),
+            Cell::from(measured),
+        ])
+        .style(style)
+    });
+    let table = Table::new(
+        rows,
+        [Constraint::Length(1), Constraint::Min(18), Constraint::Length(3), Constraint::Min(16)],
+    )
+    .header(Row::new(vec!["", "arm", "run", "measured"]).style(heading_style()));
+    frame.render_widget(table, area);
+}
+
+/// Draw one of a benchmark's charts over the current arm, with its event's marks as rules
+///
+/// # Arguments
+///
+/// * `frame` - The frame
+/// * `area` - Where to draw
+/// * `pane` - The benchmark
+/// * `title` - What the chart shows
+/// * `unit` - Its values' unit
+/// * `lines` - Each line's name, color and points
+fn render_bench_chart(
+    frame: &mut Frame,
+    area: Rect,
+    pane: &BenchPane,
+    title: &str,
+    unit: Unit,
+    lines: Vec<(String, Color, Vec<(f64, f64)>)>,
+) {
+    let [head, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).areas(area);
+    // the title with each line's name in its color
+    let mut spans = vec![Span::styled(format!("{title}  "), heading_style())];
+    for (name, color, _) in &lines {
+        spans.push(Span::styled(format!("{name} "), Style::default().fg(*color)));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), head);
+    if pane.seconds.is_empty() {
+        frame.render_widget(Paragraph::new(Line::styled("waiting for the arm's first second", dim_style())), body);
+        return;
+    }
+    // the axes: the arm's seconds so far, and zero to a little over the highest point
+    let right = pane.seconds.last().map_or(1.0, |sample| sample.at as f64).max(1.0);
+    let high = lines
+        .iter()
+        .flat_map(|(_, _, points)| points.iter().map(|(_, value)| *value))
+        .fold(0.0_f64, f64::max);
+    let top = if high > 0.0 { high * 1.1 } else { 1.0 };
+    // each mark as a rule from the floor to the top
+    let rules: Vec<Vec<(f64, f64)>> = pane
+        .marks
+        .iter()
+        .map(|mark| {
+            let at = mark.at_ms as f64 / 1000.0;
+            vec![(at, 0.0), (at, top)]
+        })
+        .collect();
+    let mut datasets: Vec<Dataset> = lines
+        .iter()
+        .map(|(name, color, points)| {
+            Dataset::default()
+                .name(name.clone())
+                .marker(Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(*color))
+                .data(points)
+        })
+        .collect();
+    datasets.extend(rules.iter().map(|rule| {
+        Dataset::default()
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Yellow))
+            .data(rule)
+    }));
+    let chart = Chart::new(datasets)
+        .x_axis(
+            Axis::default()
+                .bounds([0.0, right])
+                .labels(["0s".to_string(), format!("{:.0}s", right / 2.0), format!("{right:.0}s")])
+                .style(dim_style()),
+        )
+        .y_axis(
+            Axis::default()
+                .bounds([0.0, top])
+                .labels([unit.format(0.0), unit.format(top / 2.0), unit.format(top)])
+                .style(dim_style()),
+        )
+        .legend_position(None);
+    frame.render_widget(chart, body);
+}
+
 /// Wrap text to a width at its spaces
 ///
 /// # Arguments
@@ -1255,6 +1485,16 @@ pub fn help_lines(width: usize, every: Duration) -> Vec<Line<'static>> {
     lines.extend(para(
         "shoaladm stats --basic prints the same figures as tables, once or with --watch, and \
          is what a pipe or a script gets. --json prints the leader's answer as it came.",
+    ));
+    lines.push(Line::default());
+    lines.extend(para(
+        "shoaladm bench run draws this view with a benchmark in it: a strip on the home tab \
+         with the arm running and what the driver measures, and a bench tab (0 or b) charting \
+         the arm's seconds with its event's marks as rules. The driver's latency is from each \
+         query's send, per query and per bundle; the members' own p99 here is from when a \
+         bundle's frame arrived, so a large bundle's queries wait in it before that clock \
+         starts. q stops a benchmark only when pressed twice, and the view stays up while it \
+         tears its cluster down and puts the hosts back.",
     ));
     // every metric, under its group
     for (group, about) in GROUPS {
@@ -1659,5 +1899,196 @@ mod tests {
         assert_eq!(span_label(150), "2m30s");
         assert_eq!(wrap("one two three four", 10), vec!["one two", "three four"]);
         assert!(wrap("", 10).is_empty());
+    }
+
+    /// A benchmark draws its strip on home, its tab with its arms and charts and its marks, and
+    /// asks before it stops ([F66](../../../../docs/src/features/dataset-benchmarks.md))
+    #[test]
+    fn a_benchmark_draws_its_strip_and_tab() {
+        use shoal_loadgen::events::Mark;
+        use shoal_loadgen::progress::{BenchEvent, Phase};
+        use shoal_loadgen::results::{SecondPhase, SecondSample};
+        use shoal_loadgen::spec::BenchSpec;
+        let start = Instant::now();
+        let mut screen = Screen::with_bench("lab", Duration::from_secs(2), start);
+        screen.observe(Ok(answer(1000, 100.0)), start);
+        let spec = BenchSpec {
+            dataset: "d".into(),
+            runs: 1,
+            bundles: vec![16],
+            ..BenchSpec::default()
+        };
+        let arms = spec.arms();
+        let pane = screen.bench.as_mut().unwrap();
+        pane.apply(BenchEvent::Planned { label: "nightly".to_string(), arms: arms.clone() }, start);
+        pane.apply(BenchEvent::ArmStarted { index: 2, arm: arms[2].clone(), warmup: 0, duration: 30 }, start);
+        pane.apply(BenchEvent::Phase(Phase::Measure), start);
+        for at in 0..5u64 {
+            let mut sample = SecondSample {
+                at,
+                phase: SecondPhase::Measure,
+                summary: Default::default(),
+                driver_cpu_pct: 40.0,
+            };
+            sample.summary.read.per_sec = 1000.0 + at as f64;
+            sample.summary.read.latency.p99_ms = 2.5;
+            pane.apply(BenchEvent::Second(sample), start);
+        }
+        pane.apply(BenchEvent::Mark(Mark { kind: "kill".to_string(), at_ms: 2000, note: Some("titan".to_string()) }), start);
+        let now = start + Duration::from_secs(5);
+        let mut terminal = Terminal::new(TestBackend::new(170, 48)).expect("a terminal");
+        // the home tab has the strip over the cluster's figures, and the bench tab is listed
+        terminal.draw(|frame| render(frame, &mut screen, now)).expect("drawn");
+        let home = text(&terminal);
+        assert!(home.contains("bench nightly · arm 3/4 rw50/b16/none run 0 · measure"), "{home}");
+        assert!(home.contains("client (from send): read 1004/s"), "{home}");
+        assert!(home.contains("0 bench"), "{home}");
+        assert!(home.contains("q stop"), "{home}");
+        // the bench tab lists the arms and charts the arm with its mark in the log
+        screen.handle_key(KeyEvent::from(KeyCode::Char('b')), now);
+        terminal.draw(|frame| render(frame, &mut screen, now)).expect("drawn");
+        let tab = text(&terminal);
+        assert!(tab.contains("read100/b16/none"), "{tab}");
+        assert!(tab.contains("client ops/s (from send)"), "{tab}");
+        assert!(tab.contains("a node's own is from its frame's arrival"), "{tab}");
+        assert!(tab.contains("kill at 2.0s: titan"), "{tab}");
+        // a quit asks first
+        screen.handle_key(KeyEvent::from(KeyCode::Char('q')), now);
+        terminal.draw(|frame| render(frame, &mut screen, now)).expect("drawn");
+        assert!(text(&terminal).contains("stop the benchmark?"));
+    }
+
+    /// Figures from one live member with every number the view reads set above zero
+    ///
+    /// Built from the wire form the way a node's answer is, so a field the frame leaves out
+    /// when zero is set here by name; a metric whose reader reads a field this leaves at zero
+    /// fails [`every_metric_reaches_the_view`], which names it.
+    ///
+    /// # Arguments
+    ///
+    /// * `at_ms` - When the member derived its figures
+    /// * `scale` - What every figure is multiplied by, so two answers differ
+    fn every_figure(at_ms: u64, scale: f64) -> StatsModel {
+        use shoal::shared::protocol::stats::{NodeStats, OpStats, QUERY_OPS, Rates, WriteRates};
+        let node = "aaaaaaaa-1111-1111-1111-111111111111";
+        let rates = |value: f64| Rates {
+            r10s: value * scale,
+            r1m: value * scale,
+            r5m: value * scale,
+        };
+        // every count and gauge the frame always carries, through the wire form
+        let mut stats: NodeStats = shoal::serde_json::from_value(json!({
+            "node": node, "at_ms": at_ms, "hostname": "hyperion", "shards": 2,
+            "total": {
+                "table": "", "groups": 4, "groups_led": 3, "tablets": 4, "tablets_led": 3,
+                "partitions": 900, "partitions_led": 800, "chained": 5, "bytes": 1 << 30,
+                "bytes_led": 1 << 29
+            },
+            "free_bytes": 1u64 << 40, "volatile_bytes": 1 << 20, "memory_bytes": 1 << 30,
+            "memory_budget": 1u64 << 32, "archive_map_bytes": 1 << 22,
+            "table_index_bytes": 1 << 23, "wal_index_bytes": 1 << 21, "lru_bytes": 1 << 24,
+            "resident_bytes": 1u64 << 31, "wal_segments": 6, "compacting_segments": 1,
+            "apply_lag": 12, "pending_bytes": 4096
+        }))
+        .expect("figures decode");
+        // the rates, which the frame leaves out at zero
+        let writes = WriteRates {
+            inserts: rates(100.0),
+            updates: rates(20.0),
+            deletes: rates(10.0),
+            insert_bytes: rates(10_240.0),
+            update_bytes: rates(2_048.0),
+            delete_bytes: rates(512.0),
+            misses: rates(1.0),
+        };
+        stats.total.applied = writes.clone();
+        stats.total.led = writes;
+        stats.stream_sent = rates(4096.0);
+        stats.stream_received = rates(2048.0);
+        stats.wal_syncs_per_sec = 50.0 * scale;
+        stats.wal_bytes_per_sec = 65_536.0 * scale;
+        stats.wal_sync_ms = 0.8;
+        stats.wal_appends_per_sync = 4.0;
+        stats.shard_writes_per_sec = vec![60.0 * scale, 40.0 * scale];
+        // every kind of answer, timed
+        stats.queries.sampled_every = 1;
+        stats.queries.p50_ms = Some(0.4);
+        stats.queries.p99_ms = Some(3.5);
+        stats.queries.bytes_in = rates(4096.0);
+        stats.queries.ops = QUERY_OPS
+            .iter()
+            .map(|op| OpStats {
+                op: (*op).to_string(),
+                rate: rates(100.0),
+                bytes_out: rates(1024.0),
+                p50_ms: Some(0.3),
+                p99_ms: Some(2.0),
+                answers_total: 1000,
+                bytes_out_total: 1 << 20,
+            })
+            .collect();
+        let view = shoal::serde_json::from_value(json!({
+            "source": "leader", "answered_by": node, "leader": node, "version": 7,
+            "members": [{ "node": node, "state": "up", "report_age_ms": 500,
+                          "stats": shoal::serde_json::to_value(&stats).expect("figures encode") }]
+        }))
+        .expect("an answer decodes");
+        StatsModel::new(view, None)
+    }
+
+    /// Every metric of the catalog reaches the view from a member's figures: each one reads
+    /// above zero, has a line in the history with a point above zero (a line per kind for a
+    /// per kind metric) and a current value in its summary, and the home tab draws every one of
+    /// its figures with no dash and no wait
+    #[test]
+    fn every_metric_reaches_the_view() {
+        use crate::cluster::stats::metrics::values;
+        use shoal::shared::protocol::stats::QUERY_OPS;
+        let start = Instant::now();
+        let mut screen = Screen::new("lab", Duration::from_secs(2));
+        screen.observe(Ok(every_figure(1000, 1.0)), start);
+        let now = start + Duration::from_secs(2);
+        screen.observe(Ok(every_figure(3000, 2.0)), now);
+        let latest = screen.latest.clone().expect("an answer");
+        let mut flat = Vec::new();
+        for (index, metric) in METRICS.iter().enumerate() {
+            // the reader finds a figure above zero
+            let read = values(metric, &latest.view);
+            if read.is_empty() || read.iter().any(|(_, value)| !(*value > 0.0)) {
+                flat.push(format!("{} reads {read:?}", metric.key));
+            }
+            // the history holds a line to draw, every point of it a number
+            let lines = screen.history.series(index, Duration::from_secs(300), now);
+            let expected = match metric.read {
+                Reader::Kinds(_) => QUERY_OPS.len(),
+                Reader::Member(_) | Reader::Cluster(_) => 1,
+            };
+            if lines.len() != expected
+                || lines.iter().any(|(_, points)| points.iter().all(|(_, value)| *value <= 0.0))
+            {
+                flat.push(format!("{} has the lines {lines:?}", metric.key));
+            }
+        }
+        assert!(flat.is_empty(), "metrics that never reach the view: {flat:#?}");
+        // the home tab: every chart's legend has a value, and no member cell is a dash
+        let mut terminal = Terminal::new(TestBackend::new(160, 44)).expect("a terminal");
+        terminal
+            .draw(|frame| render(frame, &mut screen, now))
+            .expect("the home tab draws");
+        let drawn = text(&terminal);
+        assert!(!drawn.contains("waiting"), "{drawn}");
+        assert!(!drawn.contains("no query figures"), "{drawn}");
+        let row = drawn
+            .lines()
+            .find(|line| line.trim_start().starts_with("hyperion") && line.contains('/'))
+            .unwrap_or_else(|| panic!("no row for hyperion: {drawn}"));
+        assert!(!row.split_whitespace().any(|cell| cell == "-"), "{row}");
+        // and every other tab draws each of its charts with no wait
+        for tab in 1..=GROUPS.len() {
+            screen.tab = tab;
+            terminal.draw(|frame| render(frame, &mut screen, now)).expect("a tab draws");
+            let drawn = text(&terminal);
+            assert!(!drawn.contains("waiting"), "tab {tab}: {drawn}");
+        }
     }
 }

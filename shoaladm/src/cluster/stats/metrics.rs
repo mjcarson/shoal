@@ -92,6 +92,23 @@ pub struct Metric {
     pub help: &'static str,
     /// Where its value comes from
     pub read: Reader,
+    /// Whether a short run of reads and inserts must move it, or why it may stay at zero
+    pub under_load: Expect,
+}
+
+/// What a short run of reads and inserts does to a metric
+///
+/// Judged against one setup: a few seconds of `rw50` on a single node cluster serving
+/// bench_dataset's `Catalog`. A metric every such run moves is held to it by
+/// `bench-dataset`'s `stats` test against a real node, so a figure that stops reaching the view
+/// fails a test rather than drawing a flat line; one that waits on a threshold that run may
+/// not cross says why it is let off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expect {
+    /// The run moves it off zero; a per kind metric, for each kind the run sends
+    Moves,
+    /// It may stay at zero under that run, for this reason
+    Quiet(&'static str),
 }
 
 /// A word the figures use that is not charted, and what it means
@@ -238,6 +255,33 @@ fn p99_by_kind(view: &ClusterStatsView) -> [(&'static str, f64); QUERY_OPS.len()
     })
 }
 
+/// Every value a metric reads from one answer, named by member, by `cluster`, or by kind
+///
+/// A member's value is read only from current figures, the way the chart samples it.
+///
+/// # Arguments
+///
+/// * `metric` - The metric
+/// * `view` - The answer
+#[must_use]
+pub fn values(metric: &Metric, view: &ClusterStatsView) -> Vec<(String, f64)> {
+    match metric.read {
+        // each member with current figures
+        Reader::Member(read) => view
+            .members
+            .iter()
+            .filter_map(|member| live(member).map(|stats| (member.node.to_string(), read(stats))))
+            .collect(),
+        // the cluster as one
+        Reader::Cluster(read) => vec![("cluster".to_string(), read(view))],
+        // a value per kind of query
+        Reader::Kinds(read) => read(view)
+            .into_iter()
+            .map(|(kind, value)| (kind.to_string(), value))
+            .collect(),
+    }
+}
+
 /// The keys of the metrics the home tab charts, in the order it draws them
 pub const HOME: [&str; 6] = [
     "ops_by_kind",
@@ -262,6 +306,7 @@ pub const METRICS: &[Metric] = &[
                Each query is counted once, by the member its client connected to, however \
                many members served it.",
         read: Reader::Kinds(ops_by_kind),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "queries",
@@ -274,6 +319,7 @@ pub const METRICS: &[Metric] = &[
                cluster whose clients all connect to one member shows that member busy and the \
                others idle.",
         read: Reader::Member(|stats| all_answers(&stats.queries)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "reads",
@@ -283,6 +329,7 @@ pub const METRICS: &[Metric] = &[
         columns: &[],
         help: "Gets and exists the member answered its clients per second.",
         read: Reader::Member(|stats| stats.queries.rate_of(&READ_OPS)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "client_writes",
@@ -294,6 +341,7 @@ pub const METRICS: &[Metric] = &[
                what clients asked of this member; the writes tab's applied rates are what its \
                copies applied, which every replica does for every write.",
         read: Reader::Member(|stats| stats.queries.rate_of(&WRITE_OPS)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "errors",
@@ -305,6 +353,7 @@ pub const METRICS: &[Metric] = &[
                write refused for want of a quorum, a read past its deadline, a row too large to \
                frame. Above zero is worth a look; the clients were told why.",
         read: Reader::Member(|stats| stats.queries.rate_of(&["error"])),
+        under_load: Expect::Quiet("only a query that failed moves it, and a healthy run has none"),
     },
     Metric {
         key: "bytes_read",
@@ -315,6 +364,7 @@ pub const METRICS: &[Metric] = &[
         help: "Bytes of the answers to gets and exists the member wrote to its clients per \
                second: the read speed its clients see.",
         read: Reader::Member(|stats| stats.queries.bytes_out_of(&READ_OPS)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "bytes_written",
@@ -327,6 +377,7 @@ pub const METRICS: &[Metric] = &[
                figures add up to the cluster's write speed. The writes tab's bytes in counts \
                them again on every copy.",
         read: Reader::Member(|stats| row_bytes(&stats.total.led)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "requests_in",
@@ -337,6 +388,7 @@ pub const METRICS: &[Metric] = &[
         help: "Bytes of the bundles the member's clients sent it per second, reads and writes \
                alike: what arrives on its client port.",
         read: Reader::Member(|stats| stats.queries.bytes_in.r10s),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "p50",
@@ -349,6 +401,7 @@ pub const METRICS: &[Metric] = &[
                seconds, every kind but failures. Waiting on other members is in it; the network \
                to the client is not. No line where too few queries were timed.",
         read: Reader::Member(|stats| wait(stats.queries.p50_ms)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "p99",
@@ -360,6 +413,7 @@ pub const METRICS: &[Metric] = &[
                far above the p50 on one member is a queue, a slow disk or a busy core there; on \
                every member it is the load.",
         read: Reader::Member(|stats| wait(stats.queries.p99_ms)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "p99_by_kind",
@@ -370,6 +424,7 @@ pub const METRICS: &[Metric] = &[
         help: "Each kind's 99th percentile on the member where it is highest: which kind of \
                query is slow. Writes wait for a quorum's log sync, reads usually do not.",
         read: Reader::Kinds(p99_by_kind),
+        under_load: Expect::Moves,
     },
     // the cluster, once per row
     Metric {
@@ -382,6 +437,7 @@ pub const METRICS: &[Metric] = &[
                the members' led rates, so a row counts once however many copies it has. This \
                is the cluster's real write rate, and it does not spike while a node catches up.",
         read: Reader::Cluster(|view| rows(&view.cluster_total().led)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "cluster_bytes",
@@ -393,6 +449,7 @@ pub const METRICS: &[Metric] = &[
                is the row for an insert or an update and the key for a delete. It is what the \
                logs carry, not what the archives end up holding.",
         read: Reader::Cluster(|view| row_bytes(&view.cluster_total().led)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "cluster_partitions",
@@ -404,6 +461,7 @@ pub const METRICS: &[Metric] = &[
                leader. A write is only counted once the compactor has merged it into an \
                archive, so a busy cluster reads low until it compacts.",
         read: Reader::Cluster(|view| count(view.cluster_total().partitions_led)),
+        under_load: Expect::Quiet("archived partitions are counted, and a write is counted only once the compactor merges it"),
     },
     Metric {
         key: "cluster_archived",
@@ -414,6 +472,7 @@ pub const METRICS: &[Metric] = &[
         help: "Bytes the cluster's archives hold, once per row through each group's leader. \
                Like the partitions, it lags a write until the write is compacted.",
         read: Reader::Cluster(|view| count(view.cluster_total().bytes_led)),
+        under_load: Expect::Quiet("rows reach an archive only when a table flushes, which a short run may not reach"),
     },
     // what each member applies
     Metric {
@@ -428,6 +487,7 @@ pub const METRICS: &[Metric] = &[
                being fed, or one back from an outage) applies a backlog in a burst, so a \
                spike here on one member is not new load.",
         read: Reader::Member(|stats| rows(&stats.total.applied)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "inserts",
@@ -437,6 +497,7 @@ pub const METRICS: &[Metric] = &[
         columns: &["insert", "ins/s"],
         help: "Rows inserted per second over every copy the member hosts.",
         read: Reader::Member(|stats| now(&stats.total.applied.inserts)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "updates",
@@ -446,6 +507,7 @@ pub const METRICS: &[Metric] = &[
         columns: &["update", "upd/s"],
         help: "Rows updated per second over every copy the member hosts.",
         read: Reader::Member(|stats| now(&stats.total.applied.updates)),
+        under_load: Expect::Quiet("the bench's workloads read and insert; nothing it sends updates"),
     },
     Metric {
         key: "deletes",
@@ -455,6 +517,7 @@ pub const METRICS: &[Metric] = &[
         columns: &["delete", "del/s"],
         help: "Rows deleted per second over every copy the member hosts.",
         read: Reader::Member(|stats| now(&stats.total.applied.deletes)),
+        under_load: Expect::Quiet("the bench's workloads read and insert; nothing it sends deletes"),
     },
     Metric {
         key: "led_writes",
@@ -467,6 +530,7 @@ pub const METRICS: &[Metric] = &[
                member does as a leader. The members' led rates sum to the cluster's rate. One \
                member far above the others leads more than its share of the busy groups.",
         read: Reader::Member(|stats| rows(&stats.total.led)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "bytes_in",
@@ -477,6 +541,7 @@ pub const METRICS: &[Metric] = &[
         help: "Bytes of write intents the member applied per second over every copy it \
                hosts: rows for inserts and updates, keys for deletes.",
         read: Reader::Member(|stats| row_bytes(&stats.total.applied)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "misses",
@@ -487,6 +552,7 @@ pub const METRICS: &[Metric] = &[
         help: "Updates and deletes per second that found no row to change. A steady rate \
                under an update load means clients are updating keys that do not exist.",
         read: Reader::Member(|stats| now(&stats.total.applied.misses)),
+        under_load: Expect::Quiet("only a write to a row that is gone moves it"),
     },
     // snapshot streams
     Metric {
@@ -500,6 +566,7 @@ pub const METRICS: &[Metric] = &[
                idle otherwise. A copy fed from the log shows little here, so a plan's steps \
                are then the better measure of its progress.",
         read: Reader::Member(|stats| now(&stats.stream_sent)),
+        under_load: Expect::Quiet("only a snapshot or a move streams, and those run between members"),
     },
     Metric {
         key: "stream_in",
@@ -510,6 +577,7 @@ pub const METRICS: &[Metric] = &[
         help: "Snapshot bytes per second the member receives: the other end of stream out, \
                on a member being rebalanced onto or rebuilt.",
         read: Reader::Member(|stats| now(&stats.stream_received)),
+        under_load: Expect::Quiet("only a snapshot or a move streams, and those run between members"),
     },
     // what each member holds
     Metric {
@@ -521,6 +589,7 @@ pub const METRICS: &[Metric] = &[
         help: "Tablet groups the member hosts a copy of. A group is one Raft group \
                replicating a set of one table's tablets.",
         read: Reader::Member(|stats| count(stats.total.groups)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "groups_led",
@@ -532,6 +601,7 @@ pub const METRICS: &[Metric] = &[
                replication, so leads should spread across the members in proportion to their \
                lead weights.",
         read: Reader::Member(|stats| count(stats.total.groups_led)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "tablets",
@@ -541,6 +611,7 @@ pub const METRICS: &[Metric] = &[
         columns: &["tablets/led"],
         help: "Tablets in the groups the member hosts a copy of.",
         read: Reader::Member(|stats| count(stats.total.tablets)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "tablets_led",
@@ -550,6 +621,7 @@ pub const METRICS: &[Metric] = &[
         columns: &["tablets/led"],
         help: "Tablets in the groups the member leads.",
         read: Reader::Member(|stats| count(stats.total.tablets_led)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "partitions",
@@ -561,6 +633,7 @@ pub const METRICS: &[Metric] = &[
                figures lag a write until the compactor merges it, and ephemeral tables have \
                no archive, so they report none.",
         read: Reader::Member(|stats| count(stats.total.partitions)),
+        under_load: Expect::Quiet("archived partitions are counted, and a write is counted only once the compactor merges it"),
     },
     Metric {
         key: "partitions_led",
@@ -571,6 +644,7 @@ pub const METRICS: &[Metric] = &[
         help: "Partitions the archives of the groups the member leads hold. Summed over the \
                members this counts each partition once.",
         read: Reader::Member(|stats| count(stats.total.partitions_led)),
+        under_load: Expect::Quiet("archived partitions are counted, and a write is counted only once the compactor merges it"),
     },
     Metric {
         key: "archived",
@@ -581,6 +655,7 @@ pub const METRICS: &[Metric] = &[
         help: "Bytes the member's archives hold over every copy it hosts. It lags a write \
                until the write is compacted, so a freshly fed member reads low until then.",
         read: Reader::Member(|stats| count(stats.total.bytes)),
+        under_load: Expect::Quiet("rows reach an archive only when a table flushes, which a short run may not reach"),
     },
     Metric {
         key: "free",
@@ -591,6 +666,7 @@ pub const METRICS: &[Metric] = &[
         help: "Free bytes on the member's storage. The rebalance planner and a move's \
                receiver check it against disk_reserve. Zero when the node could not read it.",
         read: Reader::Member(|stats| count(stats.free_bytes)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "chained",
@@ -603,6 +679,7 @@ pub const METRICS: &[Metric] = &[
                instead of being rewritten whole. Counted over every copy. An update, a full \
                chain or the archive pass folds a chain back into one record.",
         read: Reader::Member(|stats| count(stats.total.chained)),
+        under_load: Expect::Quiet("only a partition grown past its archive's record moves it"),
     },
     // memory
     Metric {
@@ -614,6 +691,7 @@ pub const METRICS: &[Metric] = &[
         help: "Bytes of rows the member's shards hold in memory, which their eviction budgets \
                bound. Reaching the budget evicts 40% of what is held.",
         read: Reader::Member(|stats| count(stats.memory_bytes)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "budget",
@@ -624,6 +702,7 @@ pub const METRICS: &[Metric] = &[
         help: "The shards' eviction budgets together: the node's configured memory. Rows \
                memory is read against it.",
         read: Reader::Member(|stats| count(stats.memory_budget)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "archive_maps",
@@ -635,6 +714,7 @@ pub const METRICS: &[Metric] = &[
                where every archived partition lives on disk. No budget counts them, so they \
                grow with the data held.",
         read: Reader::Member(|stats| count(stats.archive_map_bytes)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "table_maps",
@@ -644,6 +724,7 @@ pub const METRICS: &[Metric] = &[
         columns: &["table maps"],
         help: "Bytes the tables' in-memory partition indexes hold. No budget counts them.",
         read: Reader::Member(|stats| count(stats.table_index_bytes)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "wal_index",
@@ -654,6 +735,7 @@ pub const METRICS: &[Metric] = &[
         help: "Bytes the write-ahead log's index of its retained entries holds. No budget \
                counts it. It grows with the log each group keeps for a slow copy.",
         read: Reader::Member(|stats| count(stats.wal_index_bytes)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "lru",
@@ -664,6 +746,7 @@ pub const METRICS: &[Metric] = &[
         help: "Bytes the eviction lists hold, one entry per evictable partition. No budget \
                counts them.",
         read: Reader::Member(|stats| count(stats.lru_bytes)),
+        under_load: Expect::Quiet("only rows read back from an archive enter the cache"),
     },
     Metric {
         key: "resident",
@@ -675,6 +758,7 @@ pub const METRICS: &[Metric] = &[
                count, such as the maps, the logs' caches, the groups' state and every buffer. \
                Resident far above rows plus the indexes points at buffers or the allocator.",
         read: Reader::Member(|stats| count(stats.resident_bytes)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "volatile",
@@ -684,6 +768,7 @@ pub const METRICS: &[Metric] = &[
         columns: &[],
         help: "Bytes the logs of the ephemeral tables' groups hold in memory.",
         read: Reader::Member(|stats| count(stats.volatile_bytes)),
+        under_load: Expect::Quiet("only an ephemeral table's rows count, and the bench's workloads may not write one"),
     },
     // the storage pipeline
     Metric {
@@ -695,6 +780,7 @@ pub const METRICS: &[Metric] = &[
         help: "Write-ahead log batches written and synced per second, one fdatasync each. \
                Every committed write waits for one.",
         read: Reader::Member(|stats| stats.wal_syncs_per_sec),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "wal_bytes",
@@ -704,6 +790,7 @@ pub const METRICS: &[Metric] = &[
         columns: &["wal/s"],
         help: "Bytes written to the write-ahead log and synced per second.",
         read: Reader::Member(|stats| stats.wal_bytes_per_sec),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "sync_ms",
@@ -715,6 +802,7 @@ pub const METRICS: &[Metric] = &[
                cache on every sync shows here, and so does a failing one. Sync time rising \
                while syncs per second stay flat points at the device, not the load.",
         read: Reader::Member(|stats| stats.wal_sync_ms),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "per_sync",
@@ -726,6 +814,7 @@ pub const METRICS: &[Metric] = &[
                Near one means each write pays for a whole sync. wal_commit_delay trades \
                latency for larger batches.",
         read: Reader::Member(|stats| stats.wal_appends_per_sync),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "segments",
@@ -736,6 +825,7 @@ pub const METRICS: &[Metric] = &[
         help: "Segments the shards' write-ahead logs hold, sealed and open. Segments are kept \
                until every group has applied and purged past them.",
         read: Reader::Member(|stats| count(stats.wal_segments)),
+        under_load: Expect::Moves,
     },
     Metric {
         key: "compacting",
@@ -747,6 +837,7 @@ pub const METRICS: &[Metric] = &[
                them: the compactors' backlog. A steady climb means the archives cannot keep \
                up with the writes.",
         read: Reader::Member(|stats| count(stats.compacting_segments)),
+        under_load: Expect::Quiet("a segment compacts only once it is sealed and every group applied past it"),
     },
     Metric {
         key: "apply_lag",
@@ -758,6 +849,7 @@ pub const METRICS: &[Metric] = &[
                above zero for a moment under load. A lasting lag means a shard cannot apply as \
                fast as its groups commit.",
         read: Reader::Member(|stats| count(stats.apply_lag)),
+        under_load: Expect::Quiet("a node keeping up applies what it commits before the figures are read"),
     },
     Metric {
         key: "pending",
@@ -768,6 +860,7 @@ pub const METRICS: &[Metric] = &[
         help: "Bytes proposed through the member and not yet answered: the writes in flight. \
                Growing means the member takes writes faster than its groups commit them.",
         read: Reader::Member(|stats| count(stats.pending_bytes)),
+        under_load: Expect::Quiet("a gauge of the writes in flight at the instant of the read, which a read between bundles finds empty"),
     },
     Metric {
         key: "busiest_shard",
@@ -781,6 +874,7 @@ pub const METRICS: &[Metric] = &[
         read: Reader::Member(|stats| {
             stats.shard_writes_per_sec.iter().copied().fold(0.0, f64::max)
         }),
+        under_load: Expect::Moves,
     },
 ];
 

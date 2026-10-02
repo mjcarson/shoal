@@ -1,0 +1,28 @@
+[package]
+name = "shoal-loadgen"
+version = "0.1.0"
+edition = "2024"
+description = "Benchmark any Shoal schema against a dataset folder: the driver, the run plan and the results shoaladm bench is built on (F66)"
+publish = false
+
+# No engine. Everything here is a client of a schema it never names: it is generic over the
+# client type `#[shoal::db]` emits, and the per-table pieces come from the table derives. The
+# admin program a schema's project builds links it, so it must not reach glommio either:
+# `cargo tree -p shoal-loadgen | grep -c glommio` is 0
+[dependencies]
+shoal = { path = "../shoal", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+rkyv = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+# the dataset readers, the latency histograms and the digests, at the versions the lockfile
+# already resolves for the tmdb loader and shoaladm
+csv = "1"
+hdrhistogram = "7.5"
+sha2 = "0.10"
+
+[dev-dependencies]
+# the test schema is declared the way a client half is, with the two derives a schema writes
+deepsize2 = { workspace = true }
+tempfile = "3"

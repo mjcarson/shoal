@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use super::inventory::{Inventory, Node};
 use super::ops::step;
 use super::state::SchemaRecord;
-use crate::build::{self, Role, Target};
+use crate::build::{self, Flavor, Role, Target};
 use crate::config::Config;
 use crate::cpu;
 use crate::project::{Project, Schema};
@@ -26,7 +26,9 @@ pub struct ProjectHint {
     /// The project directory, or the one the command runs in
     pub dir: Option<PathBuf>,
     /// The database to deploy, when the project defines more than one
-    pub db: Option<String>,
+    pub db: Option<String>,    /// What the node is built to do beside serving: a plain build, or a benchmark's profile
+    /// build ([F66](../../../docs/src/features/dataset-benchmarks.md))
+    pub flavor: Flavor,
 }
 
 /// Where the node program comes from
@@ -44,6 +46,8 @@ pub enum Programs {
         config: Config,
         /// The program each node was built, by node name, once `prepare` has run
         built: RefCell<BTreeMap<String, PathBuf>>,
+        /// What the node is built to do beside serving
+        flavor: Flavor,
     },
 }
 
@@ -85,6 +89,7 @@ impl Programs {
             schema,
             config: Config::load()?,
             built: RefCell::new(BTreeMap::new()),
+            flavor: hint.flavor,
         })
     }
 
@@ -127,6 +132,7 @@ impl Programs {
             schema,
             config,
             built,
+            flavor,
         } = self
         else {
             return Ok(());
@@ -155,13 +161,14 @@ impl Programs {
         let total = classes.len();
         for (index, (target, names)) in classes.iter().enumerate() {
             let note = format!("{} of {total}", index + 1);
-            let program = build::program(
+            let program = build::program_with(
                 project,
                 schema,
                 Role::Node,
                 &Target::Cpu(target.clone()),
                 config,
                 Some(&note),
+                *flavor,
             )?;
             for name in names {
                 built.borrow_mut().insert(name.clone(), program.clone());
@@ -304,6 +311,7 @@ mod tests {
             },
             config: Config::default(),
             built: RefCell::new(BTreeMap::new()),
+            flavor: Flavor::Release,
         };
         assert_eq!(built.server_name().as_deref(), Some("demo-Demo-node"));
         assert_eq!(

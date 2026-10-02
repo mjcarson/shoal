@@ -14,6 +14,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::{Duration, Instant};
 
 use super::StatsModel;
+use super::bench::{BenchPane, Status};
 use super::history::History;
 use super::metrics::{GROUPS, HOME, METRICS, Metric, in_group, index_of};
 
@@ -32,17 +33,21 @@ pub const DEFAULT_WINDOW: usize = 1;
 const HELP_PAGE: u16 = 10;
 
 /// How many tabs there are: the home tab, then one per metric group
+///
+/// A benchmark's tab comes after these, at index `TABS`, and only while a benchmark is drawn
+/// ([F66](../../../../docs/src/features/dataset-benchmarks.md)).
 pub const TABS: usize = GROUPS.len() + 1;
 
 /// A tab's name as its label says it
 ///
 /// # Arguments
 ///
-/// * `tab` - The tab: zero is home, and the rest are [`GROUPS`] in order
+/// * `tab` - The tab: zero is home, then [`GROUPS`] in order, then a benchmark's
 #[must_use]
 pub fn tab_name(tab: usize) -> &'static str {
     match tab {
         0 => "home",
+        TABS => "bench",
         tab => GROUPS[(tab - 1).min(GROUPS.len() - 1)].0,
     }
 }
@@ -54,6 +59,8 @@ pub enum Outcome {
     Continue,
     /// Restore the terminal and leave
     Quit,
+    /// Ask the benchmark being drawn to stop and put everything back
+    Abort,
 }
 
 /// Everything the stats view shows
@@ -72,7 +79,7 @@ pub struct Screen {
     /// The tab shown: zero is home, and the rest are [`GROUPS`] in order
     pub tab: usize,
     /// Each tab's selected chart, as a position among its metrics
-    pub selected: [usize; TABS],
+    pub selected: [usize; TABS + 1],
     /// How many charts a row of the grid holds, as the last frame drew it
     pub columns: usize,
     /// The first row of the grid the last frame drew, when the grid does not fit
@@ -87,6 +94,8 @@ pub struct Screen {
     pub help: Option<u16>,
     /// The moment the picture was frozen at, while it is
     pub paused_at: Option<Instant>,
+    /// The benchmark drawn beside the figures, if one is running
+    pub bench: Option<BenchPane>,
 }
 
 impl Screen {
@@ -105,7 +114,7 @@ impl Screen {
             error: None,
             history: History::default(),
             tab: 0,
-            selected: [0; TABS],
+            selected: [0; TABS + 1],
             columns: 1,
             first_row: 0,
             fullscreen: false,
@@ -113,7 +122,35 @@ impl Screen {
             window: DEFAULT_WINDOW,
             help: None,
             paused_at: None,
+            bench: None,
         }
+    }
+
+    /// A screen drawing a benchmark beside the figures, on the home tab
+    ///
+    /// # Arguments
+    ///
+    /// * `title` - The cluster's name
+    /// * `every` - How often the figures are read
+    /// * `now` - When the benchmark started
+    #[must_use]
+    pub fn with_bench(title: impl Into<String>, every: Duration, now: Instant) -> Self {
+        Screen {
+            bench: Some(BenchPane::new(now)),
+            ..Screen::new(title, every)
+        }
+    }
+
+    /// How many tabs there are: the stats view's, and a benchmark's when one is drawn
+    #[must_use]
+    pub fn tab_count(&self) -> usize {
+        TABS + usize::from(self.bench.is_some())
+    }
+
+    /// Whether the benchmark's tab is shown
+    #[must_use]
+    pub fn is_bench(&self) -> bool {
+        self.bench.is_some() && self.tab == TABS
     }
 
     /// Take a read's result: sample an answer, or say why there is none
@@ -151,6 +188,8 @@ impl Screen {
     #[must_use]
     pub fn tab_metrics(&self) -> Vec<usize> {
         match self.tab {
+            // the benchmark's tab draws the run, not a metric
+            TABS => Vec::new(),
             // the home tab's are named by key, from several groups
             0 => HOME.iter().filter_map(|key| index_of(key)).collect(),
             tab => in_group(tab_name(tab)),
@@ -198,7 +237,7 @@ impl Screen {
     ///
     /// * `tab` - The tab: zero is home, and the rest are [`GROUPS`] in order
     fn show_tab(&mut self, tab: usize) {
-        self.tab = tab % TABS;
+        self.tab = tab % self.tab_count();
         self.first_row = 0;
     }
 
@@ -210,6 +249,10 @@ impl Screen {
     /// * `key` - The arrow pressed
     fn step(&mut self, key: KeyCode) {
         let count = self.tab_metrics().len();
+        // a tab with no charts has nothing to select
+        if count == 0 {
+            return;
+        }
         let at = self.position();
         let columns = self.columns.max(1);
         let next = if self.fullscreen {
@@ -242,7 +285,30 @@ impl Screen {
     /// * `now` - When it was pressed, which a freeze holds the picture at
     pub fn handle_key(&mut self, key: KeyEvent, now: Instant) -> Outcome {
         // ctrl-c leaves from anywhere
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        let ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c');
+        // a benchmark that is still running is stopped, after a second press, rather than left
+        // behind: leaving would strand its cluster and its hosts' changes
+        if let Some(pane) = self.bench.as_mut() {
+            let leaving = ctrl_c || matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) && !self.fullscreen;
+            match pane.status {
+                Status::Running if pane.confirm => {
+                    pane.confirm = false;
+                    if leaving || key.code == KeyCode::Char('y') {
+                        pane.status = Status::Stopping;
+                        return Outcome::Abort;
+                    }
+                    return Outcome::Continue;
+                }
+                Status::Running if leaving => {
+                    pane.confirm = true;
+                    return Outcome::Continue;
+                }
+                // a stopping run is waited for: it is putting the hosts back
+                Status::Stopping if leaving => return Outcome::Continue,
+                _ => (),
+            }
+        }
+        if ctrl_c {
             return Outcome::Quit;
         }
         // the help page takes the keys while it is open
@@ -263,7 +329,7 @@ impl Screen {
         // after space, the next key is a shortcut and nothing else, whatever it is
         if self.leader {
             self.leader = false;
-            if key.code == KeyCode::Char('f') {
+            if key.code == KeyCode::Char('f') && !self.is_bench() {
                 self.fullscreen = !self.fullscreen;
             }
             return Outcome::Continue;
@@ -276,7 +342,9 @@ impl Screen {
             KeyCode::Char(' ') => self.leader = true,
             // the tabs wrap both ways, and a number jumps to one
             KeyCode::Tab => self.show_tab(self.tab + 1),
-            KeyCode::BackTab => self.show_tab(self.tab + TABS - 1),
+            KeyCode::BackTab => self.show_tab(self.tab + self.tab_count() - 1),
+            // a benchmark's tab is 0, or b
+            KeyCode::Char('0' | 'b') if self.bench.is_some() => self.show_tab(TABS),
             KeyCode::Char(digit @ '1'..='9') => {
                 let tab = digit as usize - '1' as usize;
                 if tab < TABS {
@@ -480,6 +548,44 @@ mod tests {
             ..key(KeyCode::Char('c'))
         };
         assert_eq!(screen.handle_key(ctrl_c, now), Outcome::Quit);
+    }
+
+    /// A benchmark adds its tab after the rest, and a quit stops it only when pressed twice
+    #[test]
+    fn a_benchmark_adds_a_tab_and_asks_before_it_stops() {
+        let now = Instant::now();
+        let mut screen = Screen::with_bench("lab", Duration::from_secs(2), now);
+        let press = |screen: &mut Screen, code: KeyCode| screen.handle_key(key(code), now);
+        assert_eq!(screen.tab_count(), TABS + 1);
+        // the tab is reached by 0, b, and by cycling past the last group
+        press(&mut screen, KeyCode::Char('0'));
+        assert!(screen.is_bench());
+        assert_eq!(tab_name(screen.tab), "bench");
+        press(&mut screen, KeyCode::Tab);
+        assert!(screen.is_home());
+        press(&mut screen, KeyCode::BackTab);
+        assert!(screen.is_bench());
+        // nothing on it to select or fill the screen with
+        press(&mut screen, KeyCode::Right);
+        press(&mut screen, KeyCode::Char(' '));
+        press(&mut screen, KeyCode::Char('f'));
+        assert!(!screen.fullscreen);
+        // q asks, anything else carries on, and q again stops the run without leaving
+        assert_eq!(press(&mut screen, KeyCode::Char('q')), Outcome::Continue);
+        assert!(screen.bench.as_ref().unwrap().confirm);
+        assert_eq!(press(&mut screen, KeyCode::Char('x')), Outcome::Continue);
+        assert_eq!(press(&mut screen, KeyCode::Char('q')), Outcome::Continue);
+        assert_eq!(press(&mut screen, KeyCode::Char('q')), Outcome::Abort);
+        // a stopping run is waited for
+        assert_eq!(press(&mut screen, KeyCode::Char('q')), Outcome::Continue);
+        // and a finished one leaves
+        screen.bench.as_mut().unwrap().status = Status::Finished("x".into());
+        assert_eq!(press(&mut screen, KeyCode::Char('q')), Outcome::Quit);
+        // without a benchmark there is no such tab
+        let mut plain = Screen::new("lab", Duration::from_secs(2));
+        assert_eq!(plain.tab_count(), TABS);
+        press(&mut plain, KeyCode::Char('0'));
+        assert!(plain.is_home());
     }
 
     /// A frozen picture keeps its answer and its edge while samples keep arriving underneath

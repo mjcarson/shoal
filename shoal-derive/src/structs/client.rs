@@ -496,6 +496,52 @@ pub fn add(
             ),
         }
     });
+    // build each table's name paired with whether it opted in to datasets
+    let dataset_flags = tables.iter().map(|table| {
+        let inner_type = &table.inner_type;
+        let table_name_str = inner_type.to_string();
+        quote! {
+            (#table_name_str, <#inner_type as ::shoal::shared::dataset::DatasetTable<#query_ident>>::DATASET),
+        }
+    });
+    // build the dispatch from a table's name to its row type
+    let dataset_visit_arms = tables.iter().map(|table| {
+        let inner_type = &table.inner_type;
+        let table_name_str = inner_type.to_string();
+        quote! {
+            #table_name_str => <#inner_type as ::shoal::shared::dataset::DatasetTable<#query_ident>>::accept(visitor),
+        }
+    });
+    // let a benchmark find any table by name and load it from a dataset (F66)
+    stream.extend(quote! {
+        impl ::shoal::shared::dataset::DatasetSupport for #client_ident {
+            /// Every table in this database and whether it opted in, in field order
+            fn dataset_tables() -> &'static [(&'static str, bool)] {
+                // a const, so the flags read off each table are promoted to a static
+                const TABLES: &[(&str, bool)] = &[#(#dataset_flags)*];
+                TABLES
+            }
+
+            /// Call a visitor back with the row type of the table with this name
+            ///
+            /// # Arguments
+            ///
+            /// * `table` - The name of the table
+            /// * `visitor` - The visitor to call back
+            fn visit_table<V: ::shoal::shared::dataset::DatasetVisitor<Self::QueryKinds>>(
+                table: &str,
+                visitor: V,
+            ) -> Result<V::Output, ::shoal::shared::dataset::DatasetError> {
+                match table {
+                    #(#dataset_visit_arms)*
+                    _ => Err(::shoal::shared::dataset::DatasetError::unknown(
+                        table,
+                        <Self as ::shoal::shared::dataset::DatasetSupport>::dataset_tables(),
+                    )),
+                }
+            }
+        }
+    });
     // add our client struct and query support for the client
     stream.extend(quote! {
         pub struct #client_ident {}
