@@ -33,14 +33,14 @@ carrying the reasoning and the invariants the fix depends on. Item numbers are s
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at ~~15~~ ~~16~~ 19 and skips 25, 26, 27, 30, 31, 32, 33, 34, 36, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
 76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 120, 121, 122, 123 and 124, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ ~~item 132 is the newest entry and the newest number~~ ~~item 180 is the newest entry, with 182 the newest number, on the resolved page,~~ ~~item 142 is the newest open entry, with 187 the newest number, on the resolved page,~~ ~~item 196 is the newest entry and the newest number, with 191, 192, 194 and 195 filed and fixed in one change on the resolved page,~~ ~~item 142 is the newest open entry, with 197 the newest number, on the resolved page beside 193 and 196 (all three from round 16 of the cluster testing, 197 filed and fixed in one change),~~ ~~item 198 is the newest entry and the newest number (filed by [F66](../features/dataset-benchmarks.md), which found it),~~ ~~item 198 is the newest entry, with 200 the newest number, on the resolved page beside 199 (both filed and fixed in one change, from a user's `shoaladm bench` run whose ops/s by kind chart stayed empty),~~ item 198 is the newest entry, with 201 the newest number, on the resolved page beside 199 and 200 (all three filed and fixed in one change each, from a user's `shoaladm bench` runs), and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ ~~item 132 is the newest entry and the newest number~~ ~~item 180 is the newest entry, with 182 the newest number, on the resolved page,~~ ~~item 142 is the newest open entry, with 187 the newest number, on the resolved page,~~ ~~item 196 is the newest entry and the newest number, with 191, 192, 194 and 195 filed and fixed in one change on the resolved page,~~ ~~item 142 is the newest open entry, with 197 the newest number, on the resolved page beside 193 and 196 (all three from round 16 of the cluster testing, 197 filed and fixed in one change),~~ ~~item 198 is the newest entry and the newest number (filed by [F66](../features/dataset-benchmarks.md), which found it),~~ ~~item 198 is the newest entry, with 200 the newest number, on the resolved page beside 199 (both filed and fixed in one change, from a user's `shoaladm bench` run whose ops/s by kind chart stayed empty),~~ ~~item 198 is the newest entry, with 201 the newest number, on the resolved page beside 199 and 200 (all three filed and fixed in one change each, from a user's `shoaladm bench` runs)~~ item 206 is the newest entry and the newest number (202 to 206 were filed by the [object storage plan](../object-storage/prerequisites.md): four found by reading the code it would be built on, and the last by checking its own links; 199, 200 and 201 stay on the resolved page), and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120, 121, 122, 123, 124, 125, 126, 127 and 128 are on the resolved page, with 27, 32 and 36 beside them. **126 never appeared here**:
 it was filed and fixed in one change, from a user's run of `tmdb_dataset` on a host without
 `/opt/shoal` ([Resolved #126](resolved/storage-directory-unusable.md)). **127 never appeared here**
 either: it was filed and fixed in one change, from a user's bootstrap of a wizard-built inventory
 ([Resolved #127](resolved/wizard-loopback-address.md)). **128 never appeared here** either:
 it was found by the same user's TMDB load against the lab, reproduced by a fixture test, and
-fixed in the change that filed [item 129](#129-an-overloaded-group-answers-outcomeunknown-rather-than-shedding)
+fixed in the change that filed [item 129](resolved/overload-sheds.md)
 beside it ([Resolved #128](resolved/hop-deadline-margin.md)). **120 and 121 never appeared here**:
 they were found by reading the code around item 30 - the unsorted table's version of its arm
 charging the shard twice, and the duplicate read that let either arm be reached - reproduced by
@@ -373,6 +373,66 @@ references. Hashing the same values in the same order keeps every key where it w
 by reproducing it**: [F66](../features/dataset-benchmarks.md)'s `dataset_rows` test declared a
 `Stock` table keyed by `warehouse` and `item`. It failed with the error above whether or not the
 table opted in to datasets, and was taken out of the test until this is fixed.
+
+**This is [item 92](#92-a-table-with-two-shoalpartition-fields-does-not-compile) found a second
+time.** The two entries describe one defect and name one fix, and neither cited the other until
+the object storage plan read them together. Both numbers stay, since a number is never reused;
+one change closes both.
+
+**Must be fixed before object storage's M12.** The stripe table a bucket generates is keyed by
+an object id and a stripe index, and packing the two into one field to step round this would
+freeze the workaround into the persisted key of every stripe
+([S1](../object-storage/prerequisites.md#required),
+[S3](../object-storage/objects.md#the-two-rows)).
+
+### 202. Nothing bounds an append batch in bytes
+
+A tablet group feeds a member that is behind up to three hundred entries at a time, whatever
+they weigh.
+
+`group_config` (`shoal-core/src/server/shard/groups.rs:4430`) builds each group's openraft
+`Config` and sets no `max_payload_entries`, so the library's default stands, and the default
+is 300 (`openraft-0.10.0-alpha.34/src/config/config.rs:67`). `GroupPeer::send_append`
+(`shoal-core/src/server/replication/network.rs:1953`) encodes the whole request and hands it
+to `rpc`, which frames it against the link's `max_frame_bytes` (`:406-422`). A request past
+that bound is not sent, and openraft is told the member cannot be reached:
+
+```rust
+.map_err(|error| {
+    RpcFailure::Unreachable(format!("framing a replication request: {error:?}"))
+})?;
+```
+
+So a batch is bounded in entries and not in bytes. Three hundred entries fit a 64 MiB frame only
+while they average under about 220 KiB. A table of 256 KiB rows, written while one member is cut
+off, leaves that member owed batches of 75 MiB that cannot be framed, and nothing in Shoal makes
+the next attempt smaller. Whether openraft then sends fewer entries of its own accord was not
+established. If it does not, the member stays behind until its lag passes the purge point and a
+snapshot replaces the log it could not be sent.
+
+The bounds that exist do not cover it. A write is bounded by a frame, and
+`replication.pending_bytes` bounds what one group holds proposed and unanswered
+([item 203](#203-pending_bytes-bounds-a-group-and-the-configurations-own-comments-call-it-a-shards)).
+Entries that are committed and being replayed to a slow member are neither.
+
+Nothing is lost, and a group with a quorum goes on committing. What is at risk is a member's
+ability to catch up, which is the redundancy. It is narrow today because the cluster arms and
+the lab's dataset write rows of about a kibibyte, and the wide rows of
+[the row-size benchmarks](../features/row-size-benchmarks.md) run on one node.
+
+**Established by reading the source**, while planning
+[object storage](../object-storage/prerequisites.md#required), whose inline objects are rows of
+exactly that width. It has not been reproduced. The reproduction is a fixture test: cut one
+member's links, write a few hundred rows of 256 KiB to a group it belongs to, heal the links,
+and read that member's append counts.
+
+**Fix direction:** bound a batch in bytes where it is sent. openraft's limit is a count, so
+either derive `max_payload_entries` from the frame bound and the largest entry a group may hold,
+which is crude and safe, or have `send_append` send the longest prefix that fits and report it
+as `AppendEntriesResponse::PartialSuccess`
+(`openraft-0.10.0-alpha.34/src/raft/message/append_entries_response.rs:42`), which exists for an
+append that took only some of its entries. Write the reproduction first. **Must be fixed before
+object storage's M12** ([S1](../object-storage/prerequisites.md#required)).
 
 ### 132. `ephemeral_sorted_table` aborted once in glibc's thread-cache teardown
 
@@ -869,6 +929,13 @@ distinct error saying the directory predates the marker and no migration exists.
 directory is still claimed, which keeps first start working. Note this cannot be a `format`
 check — [item 45](resolved/storage-marker-format.md) covers a marker that is *wrong*, and this is
 one that is *absent*.
+
+**Must be fixed before object storage's M14.** A pool's device would be claimed the way a storage
+root is, and the case this item calls disposable becomes the ordinary one: a failed disk replaced
+by a new one at the same mount path is an empty directory, and a directory with files and no
+marker is somebody's data. The fix direction above is the claim with three outcomes that
+[S4](../object-storage/pools-and-devices.md#a-device-has-an-identity) needs, and
+[S1](../object-storage/prerequisites.md#required) lists this item as required for that reason.
 
 ### 47. A torn tail on the active log is counted as data loss
 
@@ -1876,6 +1943,11 @@ in declaration order, which is what `get_partition_key_from_values` does with th
 than building a tuple of references to pass through it. Then add the composite shape to the
 frozen key set, obtaining its literals the way the other eight were.
 
+[Item 198](#198-a-composite-partition-key-does-not-compile) is this defect found again, by
+[F66](../features/dataset-benchmarks.md), and filed without a reference to this entry. One fix
+closes both, and the object storage plan requires it before its M12
+([S1](../object-storage/prerequisites.md#required)).
+
 ### 93. The archived partition hash disagrees with the live one for every string key
 
 `shoal-derive/src/traits/partition_key.rs`, `add`: `hash_archived_stmts`
@@ -1896,6 +1968,11 @@ an error. **Established by reading the source** while writing the golden key tes
 what `Hash for str` writes - `write_str`, which the std hasher contract spells as the bytes then
 `0xff` - and freeze the archived hash beside the live one in `partition_keys.rs` so the two cannot
 drift again.
+
+The object storage plan generates a table keyed by a string, an object's path
+([S3](../object-storage/objects.md#paths)), which is the shape this would hit. It lists this
+item as optional and says why ([S1](../object-storage/prerequisites.md#optional)): the function
+still has no caller, and either fix changes no key that is persisted.
 
 ### 117. A restore under the fixture suite's load finds its target table not yet empty
 
@@ -1957,3 +2034,164 @@ needs a control quorum, and its kill can land before that quorum exists. The fix
 three voters before killing. **Established by running it**: it failed once in the
 whole-workspace run for [Resolved #115](resolved/retry-sidecar-crash-window.md) and passed
 alone at once.
+
+### 203. `pending_bytes` bounds a group, and the configuration's own comments call it a shard's
+
+**Low: a comment that states the wrong scope, with a consequence for sizing a node.**
+`cluster.replication.pending_bytes` is checked for one group at a time. `propose_write`
+(`shoal-core/src/server/shard/groups.rs:2073`) compares the proposing group's own count with
+the setting:
+
+```rust
+if group.pending_bytes + bytes > cluster.replication.pending_bytes {
+```
+
+The book says so: "proposed and unanswered bytes one shard holds per group"
+([Configuration](../getting-started/configuration.md)), "Bounds are per group and definite"
+([F40](../features/replication.md)). The configuration struct says otherwise, twice, in the
+comments a reader of the code meets first (`shoal-core/src/server/conf/cluster.rs:471`,
+`:564`): its default is "The default bound on bytes proposed and not yet answered, per shard",
+and the field is "The most bytes a shard holds proposed and unanswered before it sheds a
+write".
+
+The consequence is the reason to file it and not only to correct two comments. What a shard may
+hold proposed and unanswered is the setting times the groups it hosts, and nothing sums or caps
+that: the sum is computed for a status report (`groups.rs:3307`) and compared with nothing. At
+the default of 64 MiB, a shard hosting a dozen groups may hold 768 MiB of proposals, which is
+not what somebody sizing `node_memory` from the comment would expect. Every table adds groups,
+and a bucket would add two tables' worth ([S2](../object-storage/buckets.md#what-it-costs)).
+
+**Established by reading the source**, while planning object storage.
+
+**Fix direction:** correct the two comments, and decide whether a shard needs a bound of its own
+over the sum. If it does, it is one more comparison in `propose_write`.
+
+### 204. The stream budget is built for a shard and documented for a node
+
+**Low to medium: a budget that is larger than every page says it is.**
+`cluster.migration.stream_bytes_per_sec` is described as one token bucket for a node. The
+configuration's comment is "One bucket per node, not per device"
+(`shoal-core/src/server/conf/cluster.rs:836`); [C8](../distributed/rebalancing.md#transfer-budgets)
+says "one token bucket per sending node across every stream and group"; the
+[configuration page](../getting-started/configuration.md), the [glossary](glossary.md) and
+`CLAUDE.md` say the same.
+
+The bucket is built once for each shard. `ShardNetwork::new`
+(`shoal-core/src/server/replication/network.rs:856`) makes a `RateLimiter` from the whole
+setting, and each shard's start passes it the whole setting
+(`shoal-core/src/server/shard.rs:4149-4151`, "the byte budget every stream this shard sends
+draws on"):
+
+```rust
+limiter: RefCell::new(RateLimiter::new(stream_bytes_per_sec)),
+```
+
+The limiter's own comment has it right, "One per shard network" (`network.rs:487`), and so
+does one sentence of [F46](../features/capacity-rebalancing.md#budgets-and-the-reserve),
+"Every stream a shard sends draws chunks from one token bucket", further up the same page
+than its "One bucket per node, not per device".
+
+So a node of six executors may send six times the setting: 384 MiB/s at the default of 64 MiB/s,
+where its operator set 64. The bound that was meant to keep a move's cost away from the
+foreground is as loose as the node has cores. On the lab it is hidden by the network, since
+1 GbE carries about 117 MiB/s whatever the budget says.
+
+**Established by reading the source**, while planning object storage, whose recovery wants a
+budget for each device and had to learn first what the existing one is
+([S10](../object-storage/recovery.md#what-exists-today)). It has not been measured.
+
+**Fix direction:** one of two, and they are different decisions. Share one bucket between a
+node's shards, which makes the pages true and needs a bucket that more than one executor can
+draw on. Or divide the setting by the executor count where it is passed, which keeps a bucket
+for each shard and makes the node's total what was asked for, at the price of a shard that
+sends alone being held to a fraction of it. Then say on every page above which it is.
+
+### 205. A map whose only change is the control leader is published, and dropped by every shard
+
+**Low: a stale name, as far as it was traced.** `ControlPlane::publish`
+(`shoal-core/src/server/control/plane.rs:1300-1304`) rebuilds the tablet map from the applied
+state and pushes it when its version or its leader has moved, and says why in a comment:
+
+```rust
+// the leader is not part of the version, so a leader change alone still goes out
+let moved = map.version != self.map.version || map.leader != self.map.leader;
+```
+
+Every shard then refuses it. `Shard::install_map` (`shoal-core/src/server/shard.rs:1876`)
+returns as soon as `MapCell::install` declines, and `MapCell::install`
+(`shoal-core/src/server/map.rs:1237-1244`) ignores "one at or below the installed version":
+
+```rust
+if map.version <= inner.version && inner.version != 0 {
+    return false;
+}
+```
+
+A map with the installed version and a new leader is at the installed version. So a change of
+control leader that commits nothing else reaches no shard's map, and since `push_topology` is
+the last thing `install_map` does (`shard.rs:1924`), no subscribed client is pushed it either.
+Each goes on naming the old leader until something else moves the version: a member's health,
+a plan's step, a table's policy.
+
+[C4](../distributed/tablet-map.md#how-a-map-reaches-a-shard-and-a-client)'s diagram shows both
+halves, "version or leader moved" on the control thread and "only a newer version" on the
+shard, without remarking that the second undoes the first whenever only the leader moved.
+
+In most leader changes something else does move the version, since the old leader is usually
+called down. The case that leaves the name stale is an election that unseats a leader which
+stays up.
+
+What reads the stale name was not traced. `TabletMap::frame` copies `leader` into the frame a
+client is pushed, and `shoaladm` holds a leader in its model of a cluster, which `upgrade`
+uses to restart the leader last. Whether that model's leader comes from a pushed frame or
+from an admin read was not established, and that is what decides how much this matters.
+
+**Established by reading the source**, while planning object storage, whose pool map would be
+pushed the same way ([S5](../object-storage/placement.md#the-pool-map)). It has not been
+reproduced. The reproduction is a fixture test that moves the control leadership between two
+members that both stay up, and reads `TOPOLOGY` from a shard of a third.
+
+**Fix direction:** let a shard take a map of the installed version whose leader differs,
+replacing the cell and pushing the topology, and skipping the rebuild of rings and groups
+that nothing but a version change needs. The alternative, moving the version on a leader
+change, makes every control election a new map version for every shard and client to install.
+
+### 206. Forty-two links point at headings that are no longer there
+
+**Low: documentation drift.** A link to a heading is spelled from the heading's text, and a
+heading changes when its item is resolved, renamed or rewritten. `mdbook build` checks that a
+linked page exists and does not check the anchor, so such a link goes on building and drops
+its reader at the top of the page, or at the top of a page the item has left.
+
+Forty-two do, on twenty-eight pages. Fifteen targets account for all of them:
+
+| Target that no longer exists | Links | What became of it |
+| --- | --- | --- |
+| `optimizations.md#o2-every-returned-row-is-copied-at-least-twice` | 16 | The heading gained "the resident half is done" and then "done", and its id with them |
+| `known-issues.md#54-shoaldb-needs-three-crates-the-caller-has-never-heard-of` | 5 | Resolved as [macro-emits-three-crates](resolved/macro-emits-three-crates.md); the number's open remainder has another heading |
+| `known-issues.md#16-panics-on-the-hot-path` | 3 | [Resolved](resolved/hot-path-panics.md) |
+| `known-issues.md#180-a-first-write-queued-past-a-groups-identity-memory-is-refused-identityexpired` | 3 | On the [resolved page](resolved-issues.md) |
+| `known-issues.md#17-leftover-debug-printlns`, `#20-orphaned-source-files`, `#58-a-shard-that-dies-is-not-reported-to-whoever-started-the-pool` | 2 each | On the resolved page |
+| `known-issues.md#130-…` and `#131-…`, from one page | 2 | [Resolved](resolved/stream-connection-accounting.md) |
+| `known-issues.md#38-…`, `#80-…`, `#99-…`, `#193-…` | 1 each | On the resolved page |
+| `tables/row-size.md#what-it-settled--five-of-six-ran` | 1 | The heading now says six of six |
+| `operations/shoalctl.md#compiling-it-for-your-schema` | 1 | The heading gained "by hand" |
+| `direction/connection-pool.md#benchmark` | 1 | No heading of that name remains |
+
+The pages that hold them are under `appendix/` (seventeen links), `features/` (ten), `tables/`
+(six), `direction/` (four), `cluster-testing/` (two), and one each under `api/`,
+`architecture/` and `distributed/`.
+
+**Established by running a check**: the book was built, the ids on every built page were
+collected, and every relative link in `docs/src` was resolved against them. The check was a
+throwaway script written to verify the links of the
+[Object Storage](../object-storage/overview.md) part, where every link resolves; it was not
+kept. Seven more dangling links stood on the pages that change touched, and were retargeted
+there.
+
+**Fix direction:** retarget the forty-two, which is mechanical since each item's resolved
+page is named in its row of [Resolved Issues](resolved-issues.md). Then keep them from coming
+back: a test beside `shoal-bench/tests/acceptance_tables.rs` that resolves every link against
+the ids `mdbook` would give each heading, or a link checker run where the book is built. The
+rule that a number moves to the resolved page is what breaks these links, so it will go on
+breaking them.

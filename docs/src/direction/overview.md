@@ -156,7 +156,7 @@ taken under no subscriber and says what these spans cost in that configuration. 
 collector is a separate piece of work that step 0 turned up rather than one it was.
 
 1. **[D5](runtimes.md)'s crate split.** Independent of everything else, closes [item
-   54](../appendix/known-issues.md#54-shoaldb-needs-three-crates-the-caller-has-never-heard-of),
+   54](../appendix/resolved/macro-emits-three-crates.md),
    and changes no behaviour. The only item here with no design risk at all.
 2. **[D2](framing.md).** The keystone, and a flag day. Every later item becomes additive once it
    lands, and it is cheapest now, while the only deployments are tests, benchmarks, and `shoalctl`.
@@ -206,3 +206,7 @@ database feature and it is the one whose value is least established: the hop it 
 - [Distributed Shoal](../distributed/overview.md) — the multi-node half, which this chapter never
   claimed and which now has a part of its own; its [C4](../distributed/tablet-map.md) builds D7's
   step 1, the `Topology` frame, because the cluster needs it before the client does
+- [Object Storage](../object-storage/overview.md) — the other part of this book in which nothing
+  is built. It adds message types and more than one frame for a query to the wire this part
+  designed ([S12](../object-storage/wire-and-client.md)), and lists D7 as something it can do
+  without at first

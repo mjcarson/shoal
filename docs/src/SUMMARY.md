@@ -173,6 +173,30 @@
   - [Findings](cluster-testing/findings.md)
   - [What is left](cluster-testing/todo.md)
 
+# Object Storage
+
+- [Overview](object-storage/overview.md)
+  - [S1. What has to exist first](object-storage/prerequisites.md)
+  - [S2. Buckets in the schema](object-storage/buckets.md)
+  - [S3. Objects, stripes and their metadata](object-storage/objects.md)
+  - [S4. Storage pools and devices](object-storage/pools-and-devices.md)
+  - [S5. Placement and the pool map](object-storage/placement.md)
+  - [S6. The device store](object-storage/device-store.md)
+  - [S7. The write path](object-storage/write-path.md)
+  - [S8. Erasure coding](object-storage/erasure-coding.md)
+  - [S9. The read path](object-storage/read-path.md)
+  - [S10. Failure, recovery and rebalancing](object-storage/recovery.md)
+  - [S11. Scrubbing and repair](object-storage/scrub.md)
+  - [S12. The wire and the client](object-storage/wire-and-client.md)
+  - [S13. Sharing a node with tables](object-storage/isolation.md)
+  - [S14. Operating buckets and pools](object-storage/operations.md)
+  - [S15. Performance, and the benchmarks that judge it](object-storage/performance.md)
+  - [S16. Acceptance tests, the model and the fixture](object-storage/testing.md)
+  - [S17. Lessons from Ceph and other object stores](object-storage/prior-art.md)
+  - [S18. The contract and the questions](object-storage/contract.md)
+  - [Exploratory spikes](object-storage/spikes.md)
+  - [Milestones](object-storage/milestones.md)
+
 # Appendix
 
 - [Known Issues](appendix/known-issues.md)

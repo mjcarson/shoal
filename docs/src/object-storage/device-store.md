@@ -1,0 +1,279 @@
+# S6. The device store
+
+## Context
+
+A device holds pieces, and under [S7](write-path.md)'s preferred direction it does three
+things to them: it **stages** an update durably without disturbing the piece, it **applies** a
+staged update once the stripe's row says it committed, and it **reads** a range of a piece at
+a label a reader names. This page is how a directory on a filesystem does those three things
+so that a crash at any instant leaves either the old bytes or the new ones, verifiably.
+
+It is also where R16 lands. A rotational disk and an SSD run the same code; what differs is
+which of its costs dominate, and this page says which choices are made with that in mind.
+
+## What exists today
+
+The only storage engine that persists anything maps a `u64` key to one whole rkyv record
+(`StorageSupport`, `shoal-core/src/server/tables/storage.rs:726`).
+
+- **Records are appended and never changed in place.** `write_record` appends
+  `[size][gxhash64][payload]` to the active archive
+  (`shoal-core/src/server/tables/storage/fs/map.rs:135`); the map is repointed; a compaction
+  rewrites what is still live ([Compaction](../storage/compaction.md)).
+- **A read is one whole record.** `read_record` reads a record's every byte and verifies its
+  checksum (`map.rs:1434`). Nothing reads a range.
+- **Table files use direct I/O; the cluster's WAL does not.** Archives and intent logs go
+  through glommio's `DmaFile`. The shared WAL is a `BufferedFile`, through the page cache,
+  with one `fdatasync` a batch (`shoal-core/src/server/wal/mod.rs:64`).
+
+What the glommio fork offers under that (`glommio/src/io/dma_file.rs`, at `873fa44`):
+
+| Call | Line | Use here |
+| --- | --- | --- |
+| `write_at`, `read_at`, `read_at_aligned`, `read_many` | 389, 483, 463, 519 | Ranged direct I/O. Shoal calls `read_at` and nothing else |
+| `pre_allocate`, `hint_extent_size`, `truncate` | 628, 646, 654 | A piece written ahead to its full length |
+| `deallocate` | 618 | Punching a hole: a truncate inside a stripe |
+| `fdatasync`, `rename`, `remove` | 598, 662, 674 | Durability and replacement |
+| `copy_file_range_aligned` | 574 | A copy inside the kernel, "CoW linked" where the filesystem has reflinks. It is dispatched to the blocking pool |
+
+Three facts in the same file matter to a device. Alignment is the device's logical block
+size, at least 512 bytes (`:221-223`). A file on tmpfs has direct I/O **disabled**, in
+silence (`:225-226`). And a file on a rotational device, or one without I/O polling, is
+served from the ordinary ring and not the polled one (`:229-233`), which is the only place
+anything under Shoal asks whether a disk spins.
+
+What the lab has measured about a sync, on titan's ext4
+([F60](../features/shared-wal-flush.md),
+[cluster testing](../cluster-testing/performance.md)): six writers appending 16 KiB through
+the page cache and syncing, as the WAL does, took 6.1 ms at the median; six overwriting a
+file written ahead, with direct I/O, took 2.9 ms. "A sync of a file that has grown commits
+ext4's journal for its size." The 970 EVOs there flush their cache on every sync, 3 ms for
+one writer, where europa's Optane takes 0.2 ms.
+
+## The design
+
+### What is in a device's directory
+
+```
+<device>/
+├── shoal-device.json            # the marker: device id, node, cluster, class, format
+├── shoal.lock
+├── journal/                     # staged updates to parts of pieces
+│   ├── 000017                   # written ahead to a fixed size, overwritten in place
+│   └── 000018
+└── pieces/
+    └── <bucket>/<placement group>/<object id>/
+        ├── 000003.2             # stripe 3, position 2: one piece
+        └── 000003.2.<label>     # a whole piece staged beside it
+```
+
+A piece is one file. Its path names the bucket, the placement group and the object, so a
+directory listing is an inventory of a placement group, and removing an object's directory
+is removing its pieces.
+
+### A piece
+
+```
+┌───────────────────────────────┬──────────┬──────────┬─────┬──────────┐
+│ header                        │ unit 0   │ unit 1   │ ... │ unit n-1 │
+│ identity, geometry, label,    │          │          │     │          │
+│ length, a checksum for every  │          │          │     │          │
+│ unit, its own checksum        │          │          │     │          │
+└───────────────────────────────┴──────────┴──────────┴─────┴──────────┘
+  whole blocks                    each unit at an aligned offset
+```
+
+- **Identity**: bucket, object id, stripe index, position. It is in the header and it is
+  mixed into every unit's checksum, so bytes that verify at one place fail at another
+  ([P15](contract.md#the-contract)).
+- **Label**: the sequence and tag of the write this piece holds
+  ([S18](contract.md#identity-and-progress)).
+- **A checksum for every stripe unit**, in the header. The unit is the granule a read
+  verifies, so a read of one byte reads and checks one unit.
+- **The file is written ahead to its full length** when it is created. An overwrite then
+  never grows it, which is the cheap half of the lab's measurement above, and a unit never
+  written reads as zeros.
+
+Which checksum, and how large a unit, are [Q21](contract.md#questions-to-answer) and
+[Q20](contract.md#questions-to-answer).
+
+### Staging: two cases
+
+| | A whole piece | Part of a piece |
+| --- | --- | --- |
+| When | A put, or a write that covers the piece | Any smaller write |
+| Stage | A new file beside the old, named with the write's label, written and `fdatasync`ed | A record in the journal: identity, the label it makes, the label it expects, the units' new bytes, a checksum. `fdatasync`ed with whatever else was staged since the last sync |
+| Apply | Rename over the old piece, sync the directory | Verify the old unit, merge, write unit and header in place, `fdatasync`, then drop the record |
+| Discard | Remove the file | Drop the record |
+| Bytes written | Once | Twice: the journal, then the piece |
+
+**The journal is written ahead and overwritten.** It is a few files of fixed size, written
+with direct I/O, so that staging is the cheap sync and not the dear one. One `fdatasync`
+covers every record staged since the last, as the WAL's batch does.
+
+**A staged record holds new values and never a patch.** Parity is staged as the new parity
+bytes, not as the delta that would turn old parity into new. A record that is applied, then
+replayed after a crash that lost the fact of its application, writes the same bytes again
+and changes nothing. A patch replayed is parity corrupted under a label that says it is
+current, which is one of the schedules that shaped [S7](write-path.md#the-schedules-that-shaped-it).
+
+**The staged copy outlives the apply.** It is dropped only after the in-place write and the
+header carrying the new label are `fdatasync`ed. A torn apply leaves a unit that fails its
+checksum and a record that can write it again.
+
+**A stage names the label it expects**, when it changes part of a piece. A holder whose
+piece carries another label refuses it: a parity update computed against one state cannot be
+applied to a different one.
+
+**Space is taken at the stage.** A stage that would breach the device's reserve is refused,
+before any commit depends on it. Applying needs no new space: in place it needs none, and a
+whole piece took its space when it was staged.
+
+### Reads
+
+A read names a piece, a range and the label it wants. The holder answers with the bytes only
+if its piece carries that label, counting a staged update the reader's label says has
+committed, which it overlays on the piece. Otherwise it answers with the label it has, and
+the reader decides what that means ([S9](read-path.md)).
+
+Every unit a read touches is read whole and verified before a byte of it is returned. A read
+and an apply of the same piece never overlap: overlapping direct reads and writes are not
+atomic, so the piece's owner, one executor, runs them in turn.
+
+### What a rotational device changes
+
+The code is the same. The costs are not.
+
+| Operation | On an SSD | On a rotational disk |
+| --- | --- | --- |
+| Staging to the journal | A sync | A sync at the end of a sequential write: the best case a disk has |
+| Applying in place | A random write | A seek for each piece. Deferred and batched in offset order, it is the cost that can wait |
+| A sync | 0.2 ms to 3 ms on the lab's devices | A cache flush, not yet measured here |
+| A read during applies | Unaffected | Competes for the one arm |
+| Many small pieces | Fine | A seek to create each, and one to find it |
+
+Three choices follow, each a question and none decided:
+
+- **Where the journal lives.** On the device, or on an SSD of the same node named in the
+  device's configuration. Ceph says of its own log that it "is advantageous only if the WAL
+  device is faster than the primary device", and defers small writes on rotational media by
+  default where on an SSD it does not (`bluestore_prefer_deferred_size_hdd` is 64 KiB and its
+  SSD twin is zero, in `src/common/options/global.yaml.in` at `v20.2.0`). A journal on
+  another disk is also a second thing that can fail: losing it leaves every piece a
+  committed write had not yet reached stale, and several devices that share one journal
+  disk lose their staged writes together, so under a `device` failure domain they would
+  have to count as one ([S5](placement.md#failure-domains)).
+- **Who owns it.** Whether a disk gets an executor to itself ([S13](isolation.md)).
+- **How it is read.** Whole units, read ahead, through `read_many`, which Shoal has never
+  called.
+
+[Q23](contract.md#questions-to-answer) holds all three, and
+[X7](spikes.md#x7-the-device-store-on-hdd) cannot run until a disk is fitted.
+
+### Filesystems
+
+A device on tmpfs is refused, since direct I/O is silently off there. btrfs is recorded by
+this book as a poor host for a synced write path
+([Storage Overview](../storage/overview.md#limitations)), and it is what europa's devices
+are. XFS is the book's guidance and the lab has none. ext4 is what titan and hyperion run.
+Which are accepted, warned about or refused is
+[Q22](contract.md#questions-to-answer), and it is one reason
+[X6](spikes.md#x6-the-device-store-on-ssd) needs an XFS filesystem fitted.
+
+## Alternatives rejected
+
+**Pieces as records of the table engine.** An archive is appended and compacted, so every
+write in place would be rewritten whole later, and a record is read whole, so a seek would
+read a piece to return a byte. The engine is the right shape for rows and the wrong one for
+this.
+
+**Undo in place of redo.** Ceph applies at once and keeps what it overwrote: "the rollback
+information has the form of a sparse object containing the old values of the overwritten
+extents populated using clone_range", which its own page calls "a place-holder
+implementation" pending a store that can do it cheaply
+(`doc/dev/osd_internals/erasure_coding/ecbackend.rst` at `v20.2.0`). It saves a round and
+needs a cheap clone of a range, which a file on ext4 does not have. Redo needs nothing the
+filesystem may not offer.
+
+**A clone to apply**, splicing staged blocks into the piece with `copy_file_range`. It would
+make a partial write cost one write and not two. It works only where the filesystem shares
+blocks, the fork runs it on the blocking pool, and whether a cloned range's `fdatasync` is as
+cheap as an overwrite's is unmeasured. It is a candidate of
+[X6](spikes.md#x6-the-device-store-on-ssd), not a design.
+
+**Many pieces in one large file with an index.** Fewer inodes and sequential writes, which
+suits a disk and small pieces. It needs an index that survives a crash and a compaction for
+what is deleted, and a piece that changes in place fits a log badly. Also an X6 candidate.
+
+**A raw block device.** See [S4](pools-and-devices.md#alternatives-rejected).
+
+**The page cache.** The WAL uses it and the lab measured what its sync costs. Object bytes
+through the cache are held twice, counted by nobody, and written when the kernel chooses.
+
+## What it costs
+
+- **A partial write is written twice**, to the journal and then to the piece. A whole piece
+  is written once.
+- **A file and a header a piece.** At 4 MiB pieces a 16 TiB disk holds four million files,
+  and what it costs to create, find, list and remove them is
+  [X6](spikes.md#x6-the-device-store-on-ssd)'s first number.
+- **A sync a batch of stages and a sync a batch of applies.**
+- **A unit read whole for a byte.** A larger unit is a cheaper checksum table and a dearer
+  small read.
+
+## What it breaks
+
+- "Everything a shard writes is a log or an archive": a device holds a third kind of file,
+  changed in place.
+- "The only read is a whole record": a piece is read by range.
+- "`throughput_sensitive` governs the bulk writer"
+  ([item 71](../appendix/known-issues.md)): it governs nothing here. A device's writer is
+  configured with the device.
+
+## Invariants to uphold
+
+- A stage is durable before it is reported, holds new values only, and is refused if it
+  would breach the reserve.
+- A piece changes in place only by applying a staged write its row has committed, and the
+  staged copy is dropped only after that apply is `fdatasync`ed.
+- A header's label and a unit's checksum are written with the bytes they describe, inside
+  the same apply.
+- No unit that fails its checksum is returned, merged into, or used as a source.
+- A read and an apply of one piece never overlap.
+- Applying needs no new space.
+- A device's files are touched by one executor.
+
+## Prerequisites
+
+[S1](prerequisites.md#required): known issue 46, and the torn-write, full-disk and
+device-loss faults in the fixture, without which most of the invariants above have no test.
+[S4](pools-and-devices.md) for what a device is. A clone call in the fork, only if X6 picks
+it ([S1](prerequisites.md#optional)).
+
+## How it would be measured
+
+[X6](spikes.md#x6-the-device-store-on-ssd) on the lab's SSDs and an XFS filesystem: what it
+costs to create, sync and rename a piece from 64 KiB to 64 MiB; journal commits a second at
+one writer and at six; an overwrite of 4 KiB to 1 MiB by journal and apply against a clone;
+removing and listing pieces at a hundred thousand and a million.
+[X7](spikes.md#x7-the-device-store-on-hdd) repeats what matters on a rotational disk and
+adds the two things only a disk shows: what a read costs during applies, and what a scrub's
+reads cost a foreground write.
+
+## Acceptance tests
+
+| Test | Asserts | Milestone |
+| --- | --- | --- |
+| `staged_write_survives_a_crash_and_applies_once` | A process killed after a stage finds it on restart; applied twice, the piece is what applying once made it | M14 |
+| `torn_apply_is_written_again_from_the_journal` | A unit torn by an injected fault fails its checksum, is rewritten from the staged record, and is never returned torn | M14 |
+| `apply_needs_no_space` | A device filled after a stage still applies it; a stage past the reserve is refused before any commit | M14 |
+| `unit_checksum_binds_bytes_to_their_place` | A unit copied to another piece or another offset fails verification | M14 |
+| `read_and_apply_never_overlap` | A read racing an apply returns the old unit or the new one, verified, never a mix | M14 |
+
+## Related
+
+[S7](write-path.md) for what staging and applying are for; [S8](erasure-coding.md) for what
+a parity piece holds; [S11](scrub.md) for reading every unit on purpose;
+[S13](isolation.md) for the executor that owns a device;
+[Storage Overview](../storage/overview.md) for the engine this is not;
+[F60](../features/shared-wal-flush.md) for what the lab learnt about a sync.

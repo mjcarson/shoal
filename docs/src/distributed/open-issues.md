@@ -14,6 +14,13 @@ a second copy. A new defect goes to known issues at the next free number, never 
 
 | Item | What | Page |
 | --- | --- | --- |
+| 202 | Nothing bounds an append batch in bytes: a member that is behind is owed up to three hundred entries a request, and a request past the frame bound is not sent | [Known issues](../appendix/known-issues.md#202-nothing-bounds-an-append-batch-in-bytes) |
+| 203 | `replication.pending_bytes` bounds a group, and the configuration's own comments call it a shard's | [Known issues](../appendix/known-issues.md#203-pending_bytes-bounds-a-group-and-the-configurations-own-comments-call-it-a-shards) |
+| 204 | The stream budget is one bucket a shard, and every page says one a node | [Known issues](../appendix/known-issues.md#204-the-stream-budget-is-built-for-a-shard-and-documented-for-a-node) |
+| 205 | A map whose only change is the control leader is published and then dropped by every shard, so a shard and its clients go on naming the old leader | [Known issues](../appendix/known-issues.md#205-a-map-whose-only-change-is-the-control-leader-is-published-and-dropped-by-every-shard) |
+
+All four were found by reading, while [object storage](../object-storage/overview.md) was
+planned, and none has been reproduced.
 
 The [distributed cluster testing](../cluster-testing/overview.md) chapter ran the cluster on three
 physical hosts with a real dataset. What it found, fixed and left open is indexed on its
@@ -40,6 +47,13 @@ Closed by a decision that says no, with the supported path beside it.
 | Growing a node past the slots it claimed | A `Replace` onto a fresh identity claimed with more | [F47](../features/local-rehome.md#limitations) |
 | `One` writes | Refused at validation until an accepted-or-pending result API exists | [Q4 at M4](protocol.md#q2-q3-and-q4-at-m4) |
 
+The second row has a consequence the [object storage](../object-storage/overview.md) plan had
+to record. A restore carries rows and not object bytes, so on a cluster that held buckets a
+schema change would strand every object in it. That plan does not reopen Q10. It files the
+collision as [Q31](../object-storage/contract.md#questions-to-answer), with both ways out, and
+makes the answer a condition of its last gate
+([S14](../object-storage/operations.md#a-schema-change-a-backup-and-a-restore)).
+
 ## Not settled
 
 The remainders the decision record named, one line each.
@@ -52,7 +66,7 @@ The remainders the decision record named, one line each.
 | [Q4 at M6](protocol.md#q4-at-m6) | The reconnect backoff and floor are the transport's settings, not the policy's |
 | [Q4 at M9a](protocol.md#q4-and-q5-at-m9a) | The identity watermark is replica-local; the retry window is a node's setting |
 | [Q7 at M9b](protocol.md#q7-and-q8-at-m9b) | The grace is the policy's, not per member; there is no `SetPolicy`; a `Decommission` cannot be cancelled |
-| [Q8 at M9b](protocol.md#q7-and-q8-at-m9b) | Per-device and per-pair budgets; a budget that adapts to the foreground's tail; resident bytes as a weight |
+| [Q8 at M9b](protocol.md#q7-and-q8-at-m9b) | Per-device and per-pair budgets; a budget that adapts to the foreground's tail; resident bytes as a weight. The budget that exists is one bucket a shard and not one a node ([item 204](../appendix/known-issues.md#204-the-stream-budget-is-built-for-a-shard-and-documented-for-a-node)); a budget for each device is designed for storage pools in [S10](../object-storage/recovery.md#budgets) |
 | [Q9 at M7](protocol.md#q3-and-q9-at-m7) | No time budget; a budget per shard rather than per stream; a stream that cannot keep up is fed snapshots repeatedly rather than told to stop |
 | [Q11 at M10c](protocol.md#q11-at-m10c) | ~~Nothing issues or distributes a certificate~~ `shoaladm` (`shoalctl cluster` until [F63](../features/shoaladm.md)) does, for the nodes it deploys ([F51](../features/cluster-deployment.md)); a reload is per node; a shared leaf carries no identity |
 | [Q12 at M8](protocol.md#q12-at-m8) | The interval a scheduled scrub should default to, since the arm ran where every partition was resident |
@@ -93,8 +107,11 @@ the complete record; the ones an operator meets first:
   ([O55](../appendix/optimizations.md#o55-a-learner-inside-the-retained-log-is-fed-a-snapshot-when-the-leaders-cached-cut-is-newer-than-its-purge-point));
   a rehome that serves while it runs ([O59](../appendix/optimizations.md#o59-the-rehome-runs-on-one-core-and-blocks-the-start)).
 - A failure domain on a member, so voters and copies can be spread over one ([F46](../features/capacity-rebalancing.md)).
+  The object storage plan requires it before any piece is placed
+  ([S1](../object-storage/prerequisites.md#required)).
 - A frame-class fake transport in the fixture; disk-full and torn-archive-write faults
-  ([F36](../features/cluster-harness.md), [F44](../features/repair.md)).
+  ([F36](../features/cluster-harness.md), [F44](../features/repair.md)). The two storage
+  faults, and a lost device beside them, are required by the same page before its first gate.
 - A server binary and a `shoalctl` binary ([C14](deploying.md#limitations)).
 
 ## Found while rewriting this chapter
@@ -119,3 +136,5 @@ What the pass from a design to a description turned up, and what was done with e
 
 [Known issues](../appendix/known-issues.md), [TODOs](../appendix/todos.md#distribution),
 [Optimizations](../appendix/optimizations.md), [C13](protocol.md), [Milestones](milestones.md).
+[Object Storage](../object-storage/overview.md) for a planned part that is built on this
+cluster and needs several of the rows above closed first.

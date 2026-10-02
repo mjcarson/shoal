@@ -668,8 +668,13 @@ go through `shoal`.**
 
 ### Wire Protocol
 
-- Client→Server: `[8-byte length][rkyv-serialized Queries]`
-- Server→Client: `[16-byte UUID][8-byte length][rkyv-serialized ResponseKinds]`
+Every frame begins with an eight byte header - version, message type, two flag bytes and a
+32-bit length that counts every byte after it - and a connection opens with a handshake that
+carries the schema fingerprint ([F10](docs/src/features/framing-and-protocol-evolution.md),
+`docs/src/architecture/wire-protocol.md`).
+
+- Client→Server: `[8-byte header][26-byte trace context, if flagged][rkyv-serialized Queries]`
+- Server→Client: `[8-byte header][16-byte query id][rkyv-serialized ResponseKinds]`
 
 ## Configuration (shoal.yml)
 

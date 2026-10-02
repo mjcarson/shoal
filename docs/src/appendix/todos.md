@@ -48,6 +48,33 @@ all eight had drifted.
 
 Implied by the code's shape but not present.
 
+### Object storage
+
+Planned and not built, as a part of its own: [Object Storage](../object-storage/overview.md).
+Buckets declared beside tables in the `#[shoal::db]` struct, objects of any size reached by a
+path and writable at any offset, their metadata in generated unsorted tables and their bytes
+replicated or erasure coded over named pools of devices, scrubbed for bitrot, and benchmarked by
+`shoaladm bench`. Nothing of it exists in the tree.
+
+Three pages of that part are lists of work rather than design, and they are where to start:
+
+- [S1](../object-storage/prerequisites.md) is what Shoal has to gain first, each row labelled
+  required or optional with its reason. Ten rows are required, and five of them can start today
+  with no object store in sight: known issues 46, 198 and 202, the device faults in the cluster
+  fixture, and operation kinds and byte counters in `shoal-loadgen`. Several entries further down
+  this page are rows of that table now, and each says so where it stands.
+- [Exploratory spikes](../object-storage/spikes.md) is the fourteen spikes, X1 to X14, that
+  have to report before the milestones can be trusted: a model of the write protocol, a
+  placement simulation, measurements on the lab, and a reading of Ceph at its source. The
+  erasure coding crates are compared by X4.
+- [Milestones](../object-storage/milestones.md) is M11 to M21, provisional until the spikes
+  report.
+
+One collision with a decision this book has already taken is recorded there and not resolved: a
+schema change is a new cluster and a restore, a restore carries rows and not object bytes, so
+adding a table to a cluster that holds objects would strand them
+([Q31](../object-storage/contract.md#questions-to-answer)).
+
 ### Retiring `shoal-bench`
 
 [F66](../features/dataset-benchmarks.md)'s `shoaladm bench` is meant to become how Shoal is
@@ -79,10 +106,15 @@ Each of these was left out of [F66](../features/dataset-benchmarks.md) on purpos
 - **An open-loop load generator.** Every worker is closed loop, so a stall delays the queries
   behind it rather than piling them up. That is coordinated omission, written down rather than
   discovered. An offered rate (`--rate`) with latency measured from the scheduled send is the
-  fix.
+  fix. It matters more for a stream of object bytes than for a row
+  ([S15](../object-storage/performance.md#what-it-costs)).
 - **Update and delete workloads (~~mixes~~ until [F67](../features/bench-run-wizard.md)), and a
   partition scan of a sorted table.** A workload is reads and inserts. An update needs an update field's value to write, which a dataset row has, and a scan
-  needs a limit, which a spec would carry.
+  needs a limit, which a spec would carry. Operation kinds a schema supplies, and bytes counted
+  in every window, are now a required prerequisite of object storage, placed at the start of its
+  first gate ([S1](../object-storage/prerequisites.md#required),
+  [S15](../object-storage/performance.md#what-the-driver-gains)); update and delete would be two
+  more kinds of the same mechanism.
 - **`perf record` beside the heap profiles.** `--profile` builds with frame pointers, so a `perf`
   run on each node during an arm would attribute cpu as the heap dumps attribute memory.
 - **`--stages`, hotpath and OTel export.** The stage breakdown ([F6](../features/stage-breakdown.md))
@@ -385,6 +417,9 @@ rather than from the diff ([F53](../features/inventory-wizard.md)):
   latency and throughput paths. An inventory renders only the default pair per node, so every
   table of a node shares its two directories. A `tables:` map under each level's `storage` is
   the shape, and its roots would have to join `NodeStorage::roots` in the engine's order.
+  The object storage plan gives an inventory `devices`, `pools` and `buckets`
+  ([S4](../object-storage/pools-and-devices.md#inventories)), which is a different thing: a
+  device is not a table's path, and this entry stays open beside it.
 - **Moving a deployed node's storage.** Its directories are rendered at `bootstrap` or `add`,
   and an edited inventory describes directories the running node does not use. A
   `cluster restage <node>` that stops the node, moves its roots and renders the file again is
@@ -486,7 +521,12 @@ list rather than from the diff:
 - **Per-device and per-pair budgets.** `stream_bytes_per_sec` is one bucket per sending node
   across every stream; a node with two storage devices shares it, and a pair has no budget of
   its own beyond the destination shard's `concurrent_streams`. The device behind a table's path
-  is not something the configuration names.
+  is not something the configuration names. The bucket is in fact built for each shard and not
+  for the node:
+  [item 204](known-issues.md#204-the-stream-budget-is-built-for-a-shard-and-documented-for-a-node).
+  A budget for each device is designed for a storage pool's devices in
+  [S10](../object-storage/recovery.md#budgets); a table's streams would still share what they
+  share today.
 - **A budget that adapts to the foreground.** [C8](../distributed/rebalancing.md#transfer-budgets)
   asks for background work reduced when the foreground's tail or a replica's lag passes a
   threshold; the budget is a constant, and the envelope is what the arms measure under it.
@@ -502,7 +542,10 @@ list rather than from the diff:
 - **A plan preview.** The record's first steps and blocked reason are the preview; there is no
   dry run.
 - **The failure domain.** C8's placement priorities name it; a member has no domain and the
-  planner spreads by node alone.
+  planner spreads by node alone. Now a required prerequisite of object storage: a failure
+  domain on a member lands at the start of the gate that places pieces
+  ([S1](../object-storage/prerequisites.md#required)), and
+  [S5](../object-storage/placement.md#failure-domains) is the first thing that reads it.
 - **A hotspot threshold**, Q8's last half: a single hot partition is as indivisible as C8 says.
 
 **What F45 left undone, deliberately.** Recorded here so the next milestone starts from the
@@ -760,7 +803,7 @@ rather than from the diff:
 - ~~**`ShoalPool::transport()` across every shard**, not shard zero's view.~~ Built by
   [Resolved #95](resolved/transport-view-every-shard.md).
 - ~~**A consumer for `transport.ping_interval`** - the failure detector, M3's
-  ([item 96](known-issues.md#96-clustertransportping_interval-is-parsed-documented-and-consumed-by-nothing)).~~
+  ([item 96](resolved/ping-interval-consumer.md)).~~
   Built by [F39](../features/membership.md) as the control thread's pinger, beside the detector
   and not as it ([Resolved #96](resolved/ping-interval-consumer.md)).
 - ~~**Retrying a forward.** `attempt` is carried and always zero; a shed, a lost link and a
@@ -1116,7 +1159,7 @@ What this entry still holds:
 
 - ~~**The eight `storage.commit(..).unwrap()` sites.** This entry's original claim — that an error
   variant "would unlock replacing most hot-path panics with recoverable errors"
-  ([Known Issues #16](known-issues.md#16-panics-on-the-hot-path)) — is now true and untaken. A full
+  ([Known Issues #16](resolved/hot-path-panics.md)) — is now true and untaken. A full
   disk on an ordinary insert still panics the shard, and it now has somewhere to report instead.~~
   **Taken** — [Resolved #16](resolved/hot-path-panics.md). The claim was true; the full disk was
   not what reached those sites, and was item 122, since
@@ -1183,6 +1226,12 @@ out with a synchronous call. So without `Cancel` there is no leak, no hang and n
 only wasted server work and response bytes written to a socket whose reader discards them, which is
 a performance claim, and [Optimizations](optimizations.md) forbids acting on one before a benchmark
 exists that would show it. Nothing in `shoal-bench` abandons a stream.
+
+The object storage plan is the first design that could have needed it, and it is written so
+that it does not: a read is answered range by range as the caller asks, so a reader that seeks
+away stops by not asking for the next one
+([S12](../object-storage/wire-and-client.md#ranged-frames)). `Cancel` is listed there as an
+optional prerequisite, with that reason ([S1](../object-storage/prerequisites.md#optional)).
 
 There are two depths, and **the cheap one does not buy what the expensive one is for**:
 
@@ -1731,7 +1780,7 @@ Each entry below is struck through with what it turned out to cost, including th
 more than it said, and now with what it said. What none of the six closes is at the end.
 
 **What they came back with**, shortest form — the argument is on
-[Row size and what it costs](../tables/row-size.md#what-it-settled--five-of-six-ran):
+[Row size and what it costs](../tables/row-size.md#what-it-settled--six-of-six-in-the-end):
 
 | # | Verdict |
 | ---: | --- |
@@ -2266,7 +2315,7 @@ Covered and uncovered flows are catalogued in [Test Coverage](test-coverage.md),
 counts from an actual run. The short version: compaction and archive rotation, multi-log recovery,
 the streaming client APIs, and concurrency are the gaps worth closing first — and the suite's test
 binaries all bind the same ports, which
-[item 38](known-issues.md#38-integration-test-binaries-all-bind-the-same-ports) covers.
+[item 38](resolved/pool-readiness.md) covers.
 
 Multi-shard routing is no longer on that list; it gained coverage with
 [item 7](resolved/sorted-limit.md).
@@ -2435,6 +2484,12 @@ what squeezed the rows out that round: that was openraft's channels
 partitions keeps 1.2 GiB of rows under an 8 GiB budget. At a terabyte a node of this dataset,
 about 75 times the 13 GB those nodes held, the map would be about 45 GiB even at O83's size: the
 map, not the rows, is what an in-memory index cannot keep up with.
+
+It is also the ceiling on how many objects a bucket could hold, since an object is a row and a
+stripe written in place is another: about twenty million of them a GiB of memory a replica
+([S3](../object-storage/objects.md#what-it-costs)). The object storage plan lists paging the map
+as optional, because lifting the ceiling later changes no object format
+([S1](../object-storage/prerequisites.md#optional)).
 
 ## ~~Re-render a deployment's node files~~
 

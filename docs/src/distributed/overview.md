@@ -169,3 +169,6 @@ retry identity, reconnecting - is here, because the cluster's correctness needs 
 [Partitioning](../architecture/partitioning.md), [Storage](../storage/overview.md),
 [Direction](../direction/overview.md), [Configuration](../getting-started/configuration.md#cluster),
 the [runbooks](../operations/runbooks.md) and [C13](protocol.md).
+[Object Storage](../object-storage/overview.md) is a planned part built on this one: its
+metadata is rows in these tablet groups, its contract continues P1–P6 as P7–P19, and its
+questions, gates and requirements continue this part's numbering.
