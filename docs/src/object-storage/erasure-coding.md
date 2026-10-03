@@ -16,8 +16,11 @@ candidate.
 
 ## What exists today
 
-Nothing. There is no erasure code, no Galois field arithmetic and no such crate in
-`Cargo.lock`. What an implementation would have to live with is all elsewhere in the tree:
+~~Nothing.~~ No erasure code in the engine, no Galois field arithmetic and no such crate in
+the workspace's `Cargo.lock`: M18 adds one. What there is since 2026-10-03 is
+[X4's record](erasure-coding-crates.md), with the crate chosen, every candidate's properties and
+its speed on the lab, measured by a harness outside the workspace (`shoal-spike-erasure/`). What
+an implementation would have to live with is all elsewhere in the tree:
 
 - **One executor a core, and no thread pool.** A shard runs everything on its own thread
   ([Thread per Core](../architecture/thread-per-core.md)). A crate that hands work to a
@@ -26,7 +29,9 @@ Nothing. There is no erasure code, no Galois field arithmetic and no such crate 
   `target-cpu=native` (`.cargo/config.toml`), and a native build from europa "dies of SIGILL
   on the Zen1 hosts", so the lab's nodes are built `znver1` (`CLAUDE.md`). A crate that picks
   its SIMD at compile time gets Zen1's instructions everywhere; one that picks at run time
-  can use what europa has and titan lacks.
+  can use what europa has and titan lacks. X4 measured what that is worth: the crate chosen
+  finds GFNI from a `znver1` build and encodes 4+2 in cache at 97 GiB/s on europa, against 50
+  when held to AVX2 ([by target](erasure-coding-crates.md#by-target)).
 - **Direct I/O wants aligned buffers** that the caller owns (`alloc_dma_buffer`,
   `glommio/src/io/dma_file.rs:269`). A crate that returns a fresh `Vec` for each stripe chunk
   costs a copy into one.
@@ -76,7 +81,9 @@ using optimizations", and up to 256 KiB for loads that mostly read
 one contiguous quarter of the stripe, so a small read touches one holder and a long one
 reads each holder in one run. Ceph deals units round-robin, so a long read fans over every
 holder at once. The first suits a seek and a rotational disk; the second parallelises a
-stream. It is left to X4 and the read arms of [S15](performance.md).
+stream. It is left to ~~X4 and~~ the read arms of [S15](performance.md): X4 times a code over
+whole unit rows, and either way of dealing bytes encodes the same rows, so it could not tell
+them apart.
 
 ### What the code has to be
 
@@ -177,19 +184,34 @@ devices.
 
 With `m = 1` the parity is the XOR of the data, with no field arithmetic at all. That
 matters here because three hosts under a host failure domain allow only 2+1, so the first
-erasure coded pool the lab can run across hosts needs no crate, and gives the speed nothing
-else will beat.
+erasure coded pool the lab can run across hosts needs no crate, and gives the speed ~~nothing
+else will beat~~ of the memory: X4 found it the fastest code at one parity chunk on Zen1 (14.5
+to 16.9 GiB/s at 4+1 to 10+1 out of cache, against 11.8 to 12.5 for the field code), and on Zen4
+level with the field code, both at the rate memory feeds one core
+([one parity chunk](erasure-coding-crates.md#one-parity-chunk)).
 
 ### Which crate
 
-Not chosen. The candidates are pinned on [S18](contract.md#decision-record), and three
-things were learnt by reading their sources that their READMEs did not say:
+~~Not chosen.~~ **`rusty_erasure` 0.4.1**, a Rust port of ISA-L's erasure code, on ISA-L's
+Cauchy matrix, chosen by [X4](erasure-coding-crates.md) and recorded on
+[S18](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03). It has all three properties
+above, an update in its public API, writes into the caller's buffers, picks its SIMD at run
+time, and was the fastest candidate at every operation on both of the lab's
+microarchitectures. Its parity is byte for byte ISA-L's, so what it writes to a device is
+defined by ISA-L's matrix and not by this crate's release. The candidates were pinned on
+[S18](contract.md#decision-record), and three things were learnt by reading their sources that
+their READMEs did not say:
 
 - `reed-solomon-erasure`'s shard-by-shard encoding must run "in strict sequential order", so
   it is an incremental encode and not an update of one shard;
 - the `isa-l` crate binds no incremental update, while `rusty_erasure`, a port of the same
   library, has `ec_encode_data_update`;
 - `raptorq` sizes a packet with a `u16`, so its symbols stop at 64 KiB.
+
+X4 learnt more by running them, every one on its page: RaptorQ and random linear network
+coding both fail some sets of k chunks (4 of 1,001 patterns of 10+4, and 0.39% of k-sets), the
+`isa-l` crate cannot build the ISA-L it bundles with any `pkg-config` released since 2022, and
+`rlnc`'s recoder reaches undefined behaviour on a short buffer.
 
 ## Alternatives rejected
 
@@ -212,8 +234,11 @@ to reach every holder, which is [D7](../direction/shard-aware-routing.md).
 
 ## What it costs
 
-- **CPU on every write** and on every degraded read and rebuild. What a Zen1 core encodes in
-  a second is not known, and is X4's first number.
+- **CPU on every write** and on every degraded read and rebuild. ~~What a Zen1 core encodes in
+  a second is not known, and is X4's first number.~~ A Zen1 core encodes 4+2 at 7.6 GiB/s of
+  data with its bytes out of cache and 9.9 in it; a Zen4 core at 20 and 97
+  ([X4](erasure-coding-crates.md#by-target)). A degraded read of 4+2 with two chunks lost costs
+  the same, and a rebuild of one 64 KiB chunk takes about 20 µs on titan out of cache.
 - **A partial write is reads and then writes.** With one data chunk touched and `m = 2`:
   three reads and three stages, where a replicated write of the same bytes is three stages
   and no read.
@@ -227,7 +252,10 @@ to reach every holder, which is [D7](../direction/shard-aware-routing.md).
   of them proves nothing, which changes what a scrub can do ([S11](scrub.md)).
 - "The workspace has one dependency whose output is persisted", gxhash: an erasure code is a
   second. Its output is on disk for as long as a pool lives, so a crate whose encoding
-  changed between releases would be a format break.
+  changed between releases would be a format break. X4's answer is a definition outside the
+  crate: the chosen crate's parity equals ISA-L's C library's at every layout measured, and its
+  digests were the same on Zen1 and Zen4 and from three builds. The crate is pinned exactly at
+  M18, as gxhash is, and a change of it is judged against ISA-L's bytes.
 
 ## Invariants to uphold
 
@@ -243,7 +271,8 @@ to reach every holder, which is [D7](../direction/shard-aware-routing.md).
 
 ## Prerequisites
 
-An erasure coding crate, chosen by X4 ([S1](prerequisites.md#dependencies-to-choose)).
+~~An erasure coding crate, chosen by X4~~ ✅ An erasure coding crate: `rusty_erasure`, chosen by
+[X4](erasure-coding-crates.md) ([S1](prerequisites.md#dependencies-to-choose)).
 [S6](device-store.md) and [S7](write-path.md), which this page only adds a kind of chunk to.
 
 ## How it would be measured
@@ -253,7 +282,7 @@ candidate, the properties in the table above and its speed a core: encode, decod
 `m` losses, update and recode, at 2+1 through 10+4 and units from 4 KiB to 1 MiB, on titan
 and on europa, from a `znver1` build. Correctness comes first: every loss pattern of the
 small layouts decodes, and for a random code the fraction of sets of `k` that fail is
-counted.
+counted. **It has**, on 2026-10-03: [its record](erasure-coding-crates.md).
 
 In a running cluster the cost shows in three arms of [S15](performance.md): a write of part
 of a stripe against the same write to a replicated pool, a read with a holder down against

@@ -2,7 +2,7 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-03.
+after it. As of 2026-10-03, when X4 reported.
 
 **How to read them.**
 
@@ -31,7 +31,7 @@ flowchart LR
         XFS["Fit an XFS filesystem"]
         Disks["Fit rotational disks"]
         X2["X2 Placement simulation"]
-        X4["X4 Erasure coding crates"]
+        X4["✅ X4 Erasure coding crates"]:::done
         X5["X5 Checksums"]
         X6["X6 The device store on SSD"]
         X10["X10 What a stripe row costs"]

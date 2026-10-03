@@ -74,7 +74,8 @@ Three pages of that part are lists of work rather than design, and they are wher
 - [Exploratory spikes](../object-storage/spikes.md) is the fourteen spikes, X1 to X14, that
   have to report before the milestones can be trusted: a model of the write protocol, a
   placement simulation, measurements on the lab, and a reading of Ceph at its source. The
-  erasure coding crates are compared by X4.
+  erasure coding crates ~~are~~ were compared by X4, which chose `rusty_erasure`
+  ([its record](../object-storage/erasure-coding-crates.md)).
 - [Milestones](../object-storage/milestones.md) is M11 to M21, provisional until the spikes
   report.
 

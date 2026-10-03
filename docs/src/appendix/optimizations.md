@@ -3808,3 +3808,26 @@ second map that grew by doubling from a thousand.
 dataset, 11.8 million Movie partitions a node: the archive maps held 615 MiB a node, where the same
 data held 1.2 GiB before, and a node started again on it was 1.4 GiB resident, where it was 2.7 to
 2.9 GiB.
+
+### O84. An erasure code is run on bytes that have left the cache
+
+| | |
+| --- | --- |
+| **Rank** | **design input** for [M18](../object-storage/milestones.md#m18-erasure-coding): nothing is built that runs a code yet |
+| **Impact** | Measured by [X4](../object-storage/erasure-coding-crates.md): the chosen crate encodes 4+2 at 64 KiB units at 20 GiB/s on europa when the stripe has left the cache and 97 when it has not, and at 7.6 and 9.9 on titan |
+| **Difficulty** | M — the write path encodes a unit row as soon as its bytes are in, rather than once a chunk or a stripe has been gathered |
+| **Depends on** | M18's write path; [Q26](../object-storage/contract.md#questions-to-answer)'s frame size, which sets how much of a stripe arrives at once |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — encoding a row at a time holds the parity of a partial stripe in memory until the stripe is whole, and a short write still encodes once |
+| **Benchmark** | `shoal-spike-erasure` cold against hot; at M18, a Zen1 node's encode rate inside the write path against X4's two figures for the same crate |
+
+Filed from X4. X4 measured every code twice: once over rows taken in turn from an arena larger
+than any cache, which is what encoding a stripe gathered from a socket a while ago would see, and
+once over one row in cache, which is what encoding bytes that just arrived would see. On europa
+the fastest three Reed-Solomon crates and plain XOR all stopped at the same rate cold, about
+20 GiB/s, which is what memory feeds one Zen4 core; in cache the chosen crate's GFNI kernels ran
+almost five times as fast. On titan, with no GFNI, the gap is a third. A node that buffers a
+stripe and then encodes it pays the cold figure. One that encodes each unit row while its bytes
+are still in L2, which a frame of a few unit rows allows, pays the hot one. The same holds for a
+degraded read's decode and for a parity delta. The decision belongs to M18, and the number to
+hold it to is X4's.

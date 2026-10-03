@@ -27,7 +27,8 @@ day to do it is the day before the format exists.
 **Where it stands (2026-10-03).** Six of the ten required rows are done, each marked ✅ below:
 every one that waits on no open question. The four left - a member's failure domain, free bytes
 for every root, more than one frame a query, and the tablet walk - each wait on a question
-([The order](#the-order)), and the two dependencies wait on their spikes.
+([The order](#the-order)). Of the two dependencies, ~~both wait on their spikes~~ the erasure
+coding crate is chosen ✅ by [X4](erasure-coding-crates.md), and the checksum waits on X5.
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate
@@ -70,11 +71,12 @@ is built right the first time, and nothing required is skipped to reach a gate s
 ## Dependencies to choose
 
 Not gaps in the code, but nothing can be built without them, so both are **required**. Neither
-is chosen here.
+is chosen on this page: each is chosen by its spike and recorded on
+[S18](contract.md#decision-record).
 
 | Dependency | What exists today | Chosen by |
 | --- | --- | --- |
-| **An erasure coding crate** (R11) | None. No erasure coding crate is in `Cargo.lock` | [X4](spikes.md#x4-erasure-coding-crates-performance-and-tradeoffs), which compares code families and crates, before [M18](milestones.md#m18-erasure-coding). The candidates are pinned on [S18](contract.md#decision-record) |
+| ✅ **An erasure coding crate** (R11): `rusty_erasure` 0.4.1, Reed-Solomon over ISA-L's Cauchy matrix, chosen by [X4](erasure-coding-crates.md) | ~~None. No erasure coding crate is in `Cargo.lock`~~ Still none in the workspace's `Cargo.lock`, deliberately: [M18](milestones.md#m18-erasure-coding) adds it. X4 measured seven candidates in a harness outside the workspace (`shoal-spike-erasure/`), and the one chosen writes parity byte for byte the same as ISA-L's C library at every layout it was run at, so the format it fixes on a device is ISA-L's and not one crate's | ~~[X4](spikes.md#x4-erasure-coding-crates-performance-and-tradeoffs), which compares code families and crates, before [M18](milestones.md#m18-erasure-coding). The candidates are pinned on [S18](contract.md#decision-record)~~ Chosen by X4 on 2026-10-03 and recorded on [S18](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03), with what it did not settle |
 | **A checksum with a frozen definition** (R18) | gxhash 2.3 is the one hash in the workspace and is already pinned "as a persistence format" (`Cargo.toml:29-34`), a pin that exists because two majors once disagreed ([Resolved #65](../appendix/resolved/gxhash-pin.md)). `crc32fast` is in the lockfile through other crates' dependencies and nothing in Shoal calls it | [X5](spikes.md#x5-checksums), before [M13](milestones.md#m13-the-wire-and-the-baseline), since a frame that carries a unit's checksum fixes it on the wire. Keeping gxhash is a possible answer; so is a CRC, whose definition no crate's release can move |
 
 ## What the lab needs fitted
@@ -130,4 +132,4 @@ some of them wait on; [Known Issues](../appendix/known-issues.md) for items ~~46
 [Resolved #46](../appendix/resolved/unmarked-directory-refused.md) and
 [Resolved #202](../appendix/resolved/append-batch-bytes.md) for the four that are fixed;
 [TODOs](../appendix/todos.md) for the entries these rows were filed under before this part
-existed.
+existed; [X4's record](erasure-coding-crates.md) for the erasure coding crate.

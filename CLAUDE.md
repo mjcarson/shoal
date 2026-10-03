@@ -115,6 +115,22 @@ cargo run -p shoal-spike --release
 # the cluster grows, which is the Q13-at-M3 record on the same page
 cargo run -p shoal-spike --release -- fanout
 
+# the X4 spike: erasure coding crates fed the same buffers, checked and timed on one core. NOT a
+# workspace member - it is its own workspace with its own Cargo.lock, so no erasure coding crate
+# reaches the workspace's lockfile before M18 and no workspace build needs a C toolchain. isa-l
+# builds the ISA-L it bundles, which needs `sudo apt install nasm autoconf automake libtool
+# pkgconf`. Build it for the lab's Zen1 hosts in a target dir of its own, and natively for europa
+# with the C kernels of reed-solomon-erasure native too (from a clean target dir: its build script
+# does not rerun when that variable changes). The tables are on
+# docs/src/object-storage/erasure-coding-crates.md
+cd shoal-spike-erasure && CARGO_TARGET_DIR=../target/lab/x4/znver1 RUSTFLAGS="-C target-cpu=znver1" \
+    cargo build --release
+cd shoal-spike-erasure && RUST_REED_SOLOMON_ERASURE_ARCH=native CARGO_TARGET_DIR=../target/lab/x4/native \
+    cargo build --release
+target/lab/x4/native/release/shoal-spike-erasure --quick --core 8          # proves every adapter runs
+target/lab/x4/znver1/release/shoal-spike-erasure all --core 2 --out titan-znver1.json   # on the host
+target/lab/x4/native/release/shoal-spike-erasure report *.json            # the page's summaries
+
 # a cluster on real hosts from a project (F63): run in the project that defines the schema,
 # shoaladm finds the #[shoal::db] struct, probes every host's cpu over ssh, builds the node once
 # per cpu class and the schema's admin program, installs them under ~/.local/shoal/bin, and
@@ -590,6 +606,13 @@ go through `shoal`.**
   ([F39](docs/src/features/membership.md)) prices the topology push and the status reports
   instead. Depends on `shoal` with the engine, and
   is the one place the control store is driven with three members in a group
+- **shoal-spike-erasure** - The X4 spike ([erasure coding crates](docs/src/object-storage/erasure-coding-crates.md)):
+  every erasure coding candidate S18 pinned behind one trait, checked against every loss pattern
+  and timed on one pinned core. **Not a workspace member**: its manifest carries an empty
+  `[workspace]`, so it has its own `Cargo.lock`, the erasure crates stay out of the workspace's
+  until M18 adds the chosen one, and `isa-l`'s C build (nasm, autotools, a `pkg-config` pinned at
+  0.3.22 so libisal-sys's source fallback is reachable) never touches a workspace build. Deleted
+  when M18 lands
 - **shoal-model** - The deterministic protocol model ([F36](docs/src/features/cluster-harness.md)):
   the contract P1–P6 as executable checks over a Raft-shaped tablet group, with saved schedules
   under `shoal-model/schedules/`. Depends on `serde` and `serde_json` alone and names no shoal

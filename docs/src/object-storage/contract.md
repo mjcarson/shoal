@@ -201,6 +201,31 @@ Recorded 2026-10-03, on the tree that landed [F69](../features/driver-operation-
 **Not settled.** The object dataset (a folder of real files, or a seeded description), and how
 fast one core makes seeded bytes, which is X13's stub. Neither is needed before buckets exist.
 
+#### Q20, in part: the code and the crate (2026-10-03)
+
+Recorded 2026-10-03 by [X4](erasure-coding-crates.md), on the tree that adds
+`shoal-spike-erasure`. Measured on titan and hyperion (Zen1, a `znver1` build) and on europa
+(Zen4, `znver1`, `x86-64-v4` and native builds), one pinned core, the `performance` governor,
+no shoal unit running on any host. Every figure is GiB a second for one core, at 64 KiB units
+unless it says otherwise; *cold* is rows taken in turn from an arena larger than any cache,
+*hot* is one row over and over. The choice was the user's instruction to record X4's
+recommendation.
+
+| Decision | Evidence |
+| --- | --- |
+| **The code is Reed-Solomon over GF(2^8), systematic, on ISA-L's Cauchy matrix** (`gf_gen_cauchy1_matrix`), **with plain XOR at one parity chunk** | Every set of one to m lost chunks at every layout from 2+1 to 6+3, and at 8+3 and 10+4 (2,186 patterns), decoded byte for byte by all four Reed-Solomon candidates on every host and build. RaptorQ failed 4 of the 1,001 patterns of 10+4 that lose four chunks, and random linear network coding fails about 0.39% of sets of k, 1 in 255, as theory says (100,000 trials a layout), so neither can state [P11](#the-contract) for every k. The Cauchy matrix inverts at every k and m; ISA-L's Vandermonde one has a region where it does not. XOR at one parity chunk is the fastest code measured there on Zen1, 14.5 to 16.9 GiB/s cold at 4+1 to 10+1 against 11.8 to 12.5 |
+| **The crate is `rusty_erasure` `=0.4.1`**, pinned exactly as gxhash is, and added at M18 | The fastest candidate at encode, decode, rebuild and update on both microarchitectures: titan 4+2 encode 7.6 cold and 9.9 hot, europa 20 cold and 97 hot, where `isa-l` gives 5.0, 5.4, 20 and 35. It has an update in its public API (`Coder::update`), writes into the caller's buffers, starts no thread, picks GFNI, AVX2 or SSSE3 at run time (GFNI from a `znver1` build on europa), and needs no C toolchain. MIT OR Apache-2.0. **Its parity is byte for byte ISA-L 2.29's** at all five layouts, and its digests were the same on every host and build, so the format a pool writes is ISA-L's matrix and not this crate's release |
+| **A write of part of a stripe updates parity by delta** where it touches few data chunks | An update of one data chunk at 4+2 folds 3.25 GiB/s of change into parity on titan cold, where encoding the row again costs the equivalent of 1.9, and it reads 1 + m chunks where reconstruct-write reads k - 1 others; at 10+4, 1.94 against 0.53 |
+| **A Zen1 core does not make dedicated executors a requirement of an erasure coded pool** | X4's line was about a gibibyte a second; titan encodes 4+2 at 7.6. Whether object work may share an executor with tables is [X9](spikes.md#x9-table-latency-beside-object-work)'s, and is not settled by this |
+| **Recoding is not a reason to take random linear network coding** | Rebuilding one chunk reads k chunks either way. `rlnc`'s recoder rebuilds at 1.2 on titan where a Reed-Solomon rebuild of the one chunk runs at 3.0 |
+
+**Not settled.** The geometry: stripe size, chunk unit and how data is dealt across the data
+chunks. X4 says only that encoding reaches its rate from 16 KiB units on titan and 64 KiB on
+europa, and that a call on a 1 MiB unit row of 4+2 takes 0.5 ms on titan, which
+[S13](isolation.md)'s yield budget has to fit. Also not settled: [X14](spikes.md#x14-ceph-and-s3-at-the-source)'s reading
+of Ceph, a code inside a node (X9), and the crate's age: three weeks on the day it was read,
+with about a hundred lines of `unsafe` in its kernels that are read before M18 takes it.
+
 ## Alternatives rejected
 
 **A primary for each placement group, with a log on every holder and peering.** It is what
@@ -300,7 +325,7 @@ Q1–Q13.
 | Q17 | **How does a slice that missed writes learn what it is stale on**, at what granularity, and how does that record survive a checkpoint and reach a new replica? Preferred: a bounded record in the group for each placement group and chunk, derived at apply as the retry table is; past the bound, a backfill from a walk of the tablet's rows | M16. X1, [X10](spikes.md#x10-what-a-stripe-row-costs), [X12](spikes.md#x12-recovery-and-scrub-rates) |
 | Q18 | **Size and truncate across tablets.** Preferred: a truncate epoch in `ObjectMeta` that every stripe commit stamps, with a short stack of floors. The alternative keeps an object's rows in one tablet, which makes size atomic and confines an object to one group | Before M11. X1 |
 | Q19 | **Placement.** How many placement groups a tablet; the placement function; failure domains; how a commit checks a generation; the pool map's size and fanout | Before M11. [X2](spikes.md#x2-placement-simulation) |
-| Q20 | **Which code family, which crate, what geometry**: Reed-Solomon, random linear network coding, a fountain code, or plain XOR at one parity chunk; stripe and chunk unit sizes; parity delta or reconstruct-write. Preferred: a systematic code that decodes from any k, because a seek and a small write both lean on those two properties | M18. [X4](spikes.md#x4-erasure-coding-crates-performance-and-tradeoffs), [X14](spikes.md#x14-ceph-and-s3-at-the-source) |
+| Q20 | **Which code family, which crate, what geometry**: Reed-Solomon, random linear network coding, a fountain code, or plain XOR at one parity chunk; stripe and chunk unit sizes; parity delta or reconstruct-write. Preferred: a systematic code that decodes from any k, because a seek and a small write both lean on those two properties. **In part, 2026-10-03**: the family, the crate and parity delta are decided ([the record](#q20-in-part-the-code-and-the-crate-2026-10-03)); the geometry is not | M18. ✅ [X4](erasure-coding-crates.md), [X14](spikes.md#x14-ceph-and-s3-at-the-source) |
 | Q21 | **Which checksum**, at what granule, and whether the row keeps a digest of each stripe chunk to catch a write that was lost whole. Preferred: a definition no crate's release can move | M13, since a frame that carries a unit's checksum fixes it on the wire before any slice stores one. [X5](spikes.md#x5-checksums) |
 | Q22 | **The device store's layout**, its way of applying an update, its `fdatasync` strategy and the filesystems it accepts. Preferred: a journal written ahead for small updates and whole files for large ones | M14. [X6](spikes.md#x6-the-device-store-on-ssd) |
 | Q23 | **What a rotational device needs**: an executor of its own, a journal on an SSD, another layout | M19. [X7](spikes.md#x7-the-device-store-on-hdd) |

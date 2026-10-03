@@ -307,8 +307,12 @@ explains is reported, and removed at M20.
 ### M18. Erasure coding
 
 **Closed before it.** Q20, the code, the crate and the geometry
-([X4](spikes.md#x4-erasure-coding-crates-performance-and-tradeoffs), X14). The dependency
-is added here and not before.
+([X4](spikes.md#x4-erasure-coding-crates-performance-and-tradeoffs), X14). The code and the
+crate are closed ✅: Reed-Solomon on ISA-L's Cauchy matrix through `rusty_erasure`, with XOR at
+one parity chunk ([X4's record](erasure-coding-crates.md),
+[S18](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); the geometry and X14 are not.
+The dependency is added here and not before, pinned exactly, after its `unsafe` (about a
+hundred lines, all in `rusty_erasure-accel`) has been read.
 
 **Delivers**, in three steps that are each a place to stop:
 
@@ -422,8 +426,8 @@ The reason this page is provisional, spike by spike.
 | X1 | A violation the safe policy cannot be repaired for | Nothing after the first gate stands |
 | X2 | The rule balances the lab's shape badly | M14 carries exceptions from the start, and the planner's part of M16 comes forward |
 | X3, X8 | Rows within reach of the devices' own rate for a replicated pool | Replicated SSD pools stay rows. M15 to M17 are built for erasure coding and rotational disks first |
-| X4 | No candidate has an update form | M18 ends at its second step |
-| X4, X9 | A Zen1 core encodes below a device's rate, or shared executors move a table's tail past its budget | M14 delivers dedicated executors only, and a four-core node gives up a core or serves no pool |
+| ~~X4~~ | ~~No candidate has an update form~~ Three have one, the chosen crate in its public API ([X4](erasure-coding-crates.md)) | ~~M18 ends at its second step~~ M18 has all three steps |
+| ~~X4,~~ X9 | ~~A Zen1 core encodes below a device's rate, or~~ shared executors move a table's tail past its budget. X4 measured the first half: a Zen1 core encodes 4+2 at 7.6 GiB/s out of cache ([X4](erasure-coding-crates.md)) | M14 delivers dedicated executors only, and a four-core node gives up a core or serves no pool |
 | X5 | gxhash's output is not stable across builds | A second checksum is a new dependency before M13 |
 | X6 | A file a stripe chunk is not viable at small sizes, or a clone is worth requiring | M14's store changes layout; or a clone call lands in the glommio fork first and the filesystems M14 accepts narrow |
 | X7 | A disk needs a journal on an SSD, or an executor to itself | M19 grows by that, and a shared journal becomes a failure domain on S5 |

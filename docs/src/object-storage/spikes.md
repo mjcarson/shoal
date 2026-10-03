@@ -1,8 +1,9 @@
 # Exploratory spikes
 
-**Nothing here has been run.** This page is the list of what has to be learnt before the
-[milestones](milestones.md) of this part can be more than a guess, and how each thing would
-be learnt.
+~~**Nothing here has been run.**~~ **One spike has run**: X4, whose record is
+[its own page](erasure-coding-crates.md) (2026-10-03). This page is the list of what has to be
+learnt before the [milestones](milestones.md) of this part can be more than a guess, and how
+each thing would be learnt.
 
 A milestone plan is a set of claims: that one design is safe, that it is fast enough, that
 one part of the work comes before another. The pages before this one make those claims as
@@ -98,7 +99,7 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 | X1 | The stripe protocol as a model | Q14, Q15, Q16, Q18 | Nothing | Week |
 | X2 | Placement simulation | Q19 | Nothing | Days |
 | X3 | Bytes through the tablet groups | Q14 | The lab | Days |
-| X4 | Erasure coding crates: performance and tradeoffs | Q20 | titan, europa | Days |
+| ✅ X4 | Erasure coding crates: performance and tradeoffs, [reported](erasure-coding-crates.md) | Q20, in part | titan, europa | ~~Days~~ Done 2026-10-03 |
 | X5 | Checksums | Q21 | titan, europa | Afternoon |
 | X6 | The device store on SSD | Q22, Q27 | The lab; XFS for one leg | Week |
 | X7 | The device store on HDD | Q23 | Disks fitted | Days |
@@ -248,6 +249,17 @@ instead, and the spike says so if it does.
 two side by side.
 
 ### X4. Erasure coding crates: performance and tradeoffs
+
+**Reported 2026-10-03**, on [its own page](erasure-coding-crates.md), and recorded on S18 as
+[Q20, in part](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03). The code is
+Reed-Solomon over GF(2^8), systematic, on ISA-L's Cauchy matrix, through `rusty_erasure` 0.4.1,
+with plain XOR at one parity chunk. None of the four results below that would have moved S8's
+preference came out: a Zen1 core encodes 4+2 at 7.6 GiB/s out of cache, three candidates have an
+update of one data chunk, recoding saves nothing a Reed-Solomon rebuild of one chunk pays, and
+the codes without S8's properties are the slowest measured, not the fastest. The geometry is
+not settled by it. The method below is what was planned; what was run differs in four places,
+each on the page: a unit above 32 KiB is cut into RaptorQ columns, every cell is also measured
+hot, europa ran a third build for `x86-64-v4`, and hyperion repeated titan.
 
 **Question.** Which family of code, which crate, and what geometry
 ([Q20](contract.md#questions-to-answer))? Asked for by name on 2026-10-02, with `rlnc`
@@ -471,7 +483,9 @@ before-and-after procedure throughout.
 **Records.** For each arm, at 100 and 500 MiB/s of object work and at units of 64 KiB and
 1 MiB: the table's median and p99, and their ratio to the cell alone.
 
-**Depends on.** X4 and X5, so that the task's work is the real work. On titan's four cores the
+**Depends on.** X4 and X5, so that the task's work is the real work; X4 has reported, so the
+task encodes with `rusty_erasure` on ISA-L's Cauchy matrix
+([X4's record](erasure-coding-crates.md)). On titan's four cores the
 third arm has no core of its own to give the task: the scratch configuration's two shards, the
 coordinating core and the client's take all four, so one of them gives its core up, and the
 table says which. **Cost.** Days.
@@ -622,13 +636,14 @@ page that was wrong; a list of what the metadata must keep possible.
 
 ```mermaid
 flowchart LR
+    classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
     X1["X1 model"]
     X2["X2 placement"]
     X14["X14 sources"]
     X13["X13 bench shape"]
     X10["X10 row cost"]
     X3["X3 bytes through groups"]
-    X4["X4 erasure crates"]
+    X4["✅ X4 erasure crates"]:::done
     X5["X5 checksums"]
     X6["X6 device store, SSD"]
     X7["X7 device store, HDD"]
@@ -646,16 +661,16 @@ flowchart LR
 ```
 
 Nine depend on no other spike and on nothing that has to be fitted, and can start at once:
-X1, X2, X3, X4, X5, X10, X11, X13 and X14. X6 can start too, and needs an XFS filesystem for
-one of its legs. X8 follows X6, and X9 follows X4 and X5. X7 and the rotational half of X12
-wait for disks.
+X1, X2, X3, ~~X4,~~ X5, X10, X11, X13 and X14; X4 has run. X6 can start too, and needs an XFS
+filesystem for one of its legs. X8 follows X6, and X9 follows ~~X4 and~~ X5, since X4 has
+reported. X7 and the rotational half of X12 wait for disks.
 
 If there is one to do first it is X1. Every other spike measures the cost of a design, and
 X1 is the one that can say the design is wrong.
 
 The first gate, [before M11](milestones.md#before-m11-the-object-contract), waits on eight
 of them: X1 and X2 for the decisions themselves, and X3, X8 and X9 for what those decisions
-cost, which bring X4, X5 and X6 with them.
+cost, which bring X4, X5 and X6 with them. X4 has reported.
 
 ### What a spike needs first
 
@@ -704,7 +719,7 @@ its evidence and with what it did not settle:
 | --- | --- |
 | The write protocol: Q14, Q15, Q16 and Q18, and the contract agreed | X1; X3 and X8 for cost |
 | Placement: Q19 | X2 |
-| The code, the crate and the geometry: Q20. The checksum: Q21 | X4, X5, X14 |
+| The code, the crate and the geometry: Q20. The checksum: Q21 | ✅ X4 for the code and the crate ([Q20, in part](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); X5, X14, and the geometry |
 | The device store: Q22, and Q23 for the rotational gate | X6, X7 |
 | Where object work runs: Q24 | X9 |
 | Stripe size and the inline threshold: Q25. Small writes: Q27 | X10, X8 |

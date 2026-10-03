@@ -80,7 +80,7 @@ are decided rather than preferred.
 | Consumers | One storage pool serves several consumers at once and of mixed kinds: buckets now, and a file system or block volumes later. Nothing in the pool layer may assume its consumer is a bucket | [S4](pools-and-devices.md#pools-and-bindings-are-policy), [todos](../appendix/todos.md#storage-pools-for-a-file-system-and-block-volumes) |
 | Pools and redundancy | Bound in the deployment. The schema declares only the bucket; configuration and the inventory define the storage pools and bind each bucket to one | [S4](pools-and-devices.md) |
 | Write shape | Large streaming writes and many small random writes are both in scope. The spikes say what each costs before either is preferred | [Q27](contract.md#questions-to-answer) |
-| Erasure coding | A spike compares code families and the crates that implement them, `rlnc` among them, on performance and on tradeoffs | [X4](spikes.md#x4-erasure-coding-crates-performance-and-tradeoffs) |
+| Erasure coding | A spike compares code families and the crates that implement them, `rlnc` among them, on performance and on tradeoffs. It ran on 2026-10-03 and chose Reed-Solomon on ISA-L's Cauchy matrix through `rusty_erasure`, with XOR at one parity chunk | [X4](spikes.md#x4-erasure-coding-crates-performance-and-tradeoffs), [its record](erasure-coding-crates.md) |
 | Prerequisites | A page of their own, first, each labelled required or optional with its reason. Nothing required is skipped to reach a gate sooner | [S1](prerequisites.md) |
 | The lab | The spikes run on europa, titan and hyperion, the hosts of `tmdb_cluster.yaml`, and rotational disks can be fitted to them | [Spikes](spikes.md#where-a-spike-runs) |
 
