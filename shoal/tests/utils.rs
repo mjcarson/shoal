@@ -152,16 +152,21 @@ pub struct TestCertificate {
     pub cert: std::path::PathBuf,
     /// The PEM file holding its key
     pub key: std::path::PathBuf,
+    /// The directory both are in, removed when the certificate is dropped
+    ///
+    /// A directory of its own and never a server's storage root: a root holding files and no
+    /// marker is somebody's data, and the server refuses to claim it
+    /// ([Resolved #46](../../docs/src/appendix/resolved/unmarked-directory-refused.md)).
+    _dir: TempDir,
 }
 
 impl TestCertificate {
-    /// Generate a self signed certificate for `localhost` inside a temp dir
-    ///
-    /// # Arguments
-    ///
-    /// * `temp_dir` - The temp dir to write the certificate and key into
-    pub fn new(temp_dir: &TempDir) -> Self {
+    /// Generate a self signed certificate for `localhost` inside a temp dir of its own
+    pub fn new() -> Self {
         use std::io::Write;
+
+        // a directory of its own, apart from any server's storage
+        let temp_dir = test_dir();
 
         // one throwaway certificate, valid for the name and the address a test connects to
         let issued = rcgen::generate_simple_self_signed(vec![
@@ -179,7 +184,11 @@ impl TestCertificate {
             .expect("failed to create a key file")
             .write_all(issued.key_pair.serialize_pem().as_bytes())
             .expect("failed to write a key");
-        TestCertificate { cert, key }
+        TestCertificate {
+            cert,
+            key,
+            _dir: temp_dir,
+        }
     }
 
     /// The client options that trust this certificate

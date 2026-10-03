@@ -266,14 +266,12 @@ pub fn cluster_facts(
 /// * `conf` - The configuration being resolved, which names where this workload's storage is
 /// * `subdir` - This workload's own subdirectory
 fn write_certificate(conf: &Conf, subdir: &str) -> Result<TlsServerOptions> {
-    // put the pair beside the storage this workload already owns, so a run cleans up with it
-    let dir = conf
-        .storage
-        .default
-        .filesystem
-        .latency_sensitive
-        .path
-        .clone();
+    // put the pair beside the storage this workload already owns, so a run cleans up with it:
+    // in a sibling of its root and never inside it, since a root holding files and no marker is
+    // somebody's data and the server refuses to claim it
+    // ([Resolved #46](../../../../docs/src/appendix/resolved/unmarked-directory-refused.md))
+    let root = &conf.storage.default.filesystem.latency_sensitive.path;
+    let dir = root.with_file_name(format!("{subdir}-tls"));
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create {} for {subdir}", dir.display()))?;
     let issued =

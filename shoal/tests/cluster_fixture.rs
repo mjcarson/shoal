@@ -556,9 +556,12 @@ async fn node_identity_persists_and_wrong_cluster_is_refused() -> Result<(), Fix
 /// has - names the format, the formats this build reads, and that no migration exists yet.
 #[tokio::test(flavor = "multi_thread")]
 async fn unknown_configuration_and_storage_formats_are_refused() -> Result<(), FixtureError> {
-    // a misspelled key under the cluster block is refused, naming the key
+    // a misspelled key under the cluster block is refused, naming the key. the file is kept
+    // out of the storage root the rest of this test claims, since a root holding files and no
+    // marker is refused before anything in it is read (Resolved #46)
     let dir = utils::test_dir();
-    let path = dir.path().join("shoal.yml");
+    let conf_dir = utils::test_dir();
+    let path = conf_dir.path().join("shoal.yml");
     std::fs::write(
         &path,
         "resources:\n  memory: \"100MiB\"\ncluster:\n  bootstrap: true\n  replication_factr: 3\n",

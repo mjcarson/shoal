@@ -259,13 +259,14 @@ fn a_group_split_renders_the_roots_the_engine_claims() {
     slow.groups.get_mut("split").expect("the group").wal_commit_delay = Some("20ms".to_string());
     let refused = slow.validate().expect_err("20ms is refused");
     assert!(refused.to_string().contains("at most 10ms"), "{refused}");
-    // a claim marks the primary, the first root, which is what preflight finds on a node that
-    // was claimed and never started; a start mirrors it into the rest, which preflight also reads
+    // a claim marks every root, the primary and its mirrors, which is what preflight finds on
+    // a node that was claimed and never started; the first start is held to all of them
+    // (Resolved #46)
     shoal::server::node::claim(&conf).expect("a claim");
-    let roots = a.storage.roots();
-    assert!(
-        std::path::Path::new(&roots[0]).join("shoal-meta.json").is_file(),
-        "{} holds no marker after a claim",
-        roots[0]
-    );
+    for root in a.storage.roots() {
+        assert!(
+            std::path::Path::new(&root).join("shoal-meta.json").is_file(),
+            "{root} holds no marker after a claim"
+        );
+    }
 }

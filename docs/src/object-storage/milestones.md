@@ -36,7 +36,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 | M11 | The model, the fixture's faults, the driver's kinds | Q30 | Device faults in the fixture; operation kinds and byte counters in the driver |
 | M12 | Buckets in the schema and the tables they generate | Q25 | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); items 198 and 202 |
 | M13 | The wire, pool policy, inline objects, the baseline | Q21, Q26 | More than one frame for one query |
-| M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22, Q24 | Item 46; a failure domain on a member; free bytes for every root |
+| M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22, Q24 | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); a failure domain on a member; free bytes for every root |
 | M15 | Replicated pools: stage, commit, apply and read | Q27 | — |
 | M16 | Recovery and moves | Q17, Q29 | The walk of a tablet's rows |
 | M17 | Scrub and repair | Q28 | — |
@@ -175,8 +175,9 @@ bounds a stream is tested at M15, where bytes first leave as they arrive.
 ([X6](spikes.md#x6-the-device-store-on-ssd)). Q24, where object work runs
 ([X9](spikes.md#x9-table-latency-beside-object-work)).
 
-**Lands first.** Known issue 46, a claim that tells an empty directory from a marked one and
-refuses anything else. A failure domain on a member. Free bytes reported for every storage
+**Lands first.** ~~Known issue 46, a claim that tells an empty directory from a marked one and
+refuses anything else.~~ ✅ landed as
+[Resolved #46](../appendix/resolved/unmarked-directory-refused.md). A failure domain on a member. Free bytes reported for every storage
 root.
 
 **Delivers.**

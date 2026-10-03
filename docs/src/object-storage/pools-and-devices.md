@@ -24,8 +24,11 @@ today.
   names no device and carries no redundancy.
 - **Every root is claimed.** `Storage::roots` lists each distinct directory, and each is
   locked and carries the marker `shoal-meta.json` or a mirror of it (`conf.rs:743`,
-  `shoal-core/src/server/meta.rs:119`). A directory with no marker is claimed, which is
-  [item 46](../appendix/known-issues.md#46-an-unmarked-storage-directory-is-claimed-rather-than-refused).
+  `shoal-core/src/server/meta.rs:119`). ~~A directory with no marker is claimed, which is
+  item 46.~~ Since [Resolved #46](../appendix/resolved/unmarked-directory-refused.md) the claim
+  has the three outcomes this page's device claim needs: an empty root is claimed, a marked
+  one is held to its marker, and files with no marker are refused by name. An empty root the
+  primary lists as written to is refused as wiped; a device differs there, below.
 - **A member has no devices and no domain.** `MemberRecord` holds a node's addresses, slots
   and weights (`shoal-core/src/server/control/types.rs:85`). Its placement weight is the
   node's `cluster.weight`, the executor count by default (`:122`).
@@ -153,7 +156,10 @@ if it belongs to another. An **empty** one is new and is given a new id. Anythin
 and no marker, is refused. The second case is the one that matters: a failed disk replaced by
 a new one mounted at the same path is an empty directory, and it must come up as a new device
 whose slices hold nothing, whose chunks are then rebuilt, never as the old device with its
-chunks mysteriously gone ([S1](prerequisites.md#required), item 46).
+chunks mysteriously gone ([S1](prerequisites.md#required),
+[Resolved #46](../appendix/resolved/unmarked-directory-refused.md)). A table's root differs on
+exactly this point: an empty root the node's marker lists is refused rather than taken as new,
+because a table's root has no rebuild of its own and a device's chunks do.
 
 The number of slices is fixed once any slice of the device holds a chunk. Changing it is draining the
 device and adding it again, as changing a pool's geometry is a migration; a slice's id is in

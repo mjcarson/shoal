@@ -115,7 +115,8 @@ way a hash change does.
 ~~**Item 92**, the composite partition key that does not compile, and~~ **item 93**, the archived
 string hash that disagrees with the live one. Both were found by this fix and neither is part of
 it. Item 92 has since been fixed, with item 198, by
-[Resolved #92, #198](composite-partition-key.md). **Item 46**, an unmarked directory being claimed, is unaffected.
+[Resolved #92, #198](composite-partition-key.md). ~~**Item 46**, an unmarked directory being claimed, is unaffected.~~ Item 46 has since been
+fixed too, by [Resolved #46](unmarked-directory-refused.md), and is unrelated to this one.
 
 ## Tests
 

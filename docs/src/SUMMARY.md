@@ -236,6 +236,7 @@
   - [43. The storage marker only guarded the default storage root](appendix/resolved/marker-every-root.md)
   - [44. A compaction discarded a damaged log's tail in silence](appendix/resolved/compaction-tail-loss.md)
   - [45. The storage marker's format field was written and never read](appendix/resolved/storage-marker-format.md)
+  - [46. An unmarked storage directory was claimed rather than refused](appendix/resolved/unmarked-directory-refused.md)
   - [48. A query that does not parse was answered with silence](appendix/resolved/query-error-display.md)
   - [57. A missing archive was created empty rather than reported](appendix/resolved/missing-archive.md)
   - [56, 61. A response cannot say that a read failed](appendix/resolved/response-error-channel.md)

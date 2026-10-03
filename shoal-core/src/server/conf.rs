@@ -763,6 +763,26 @@ impl Storage {
         roots.extend(others);
         roots
     }
+
+    /// The first pair of roots where one is inside the other, if any is
+    ///
+    /// A root inside another holds the outer one's files, or the outer one holds its directory,
+    /// and either way one of them is somebody's data the claim refuses
+    /// ([Resolved #46](../../../docs/src/appendix/resolved/unmarked-directory-refused.md)), so
+    /// a configuration that nests them is refused by name before anything is claimed.
+    #[must_use]
+    pub fn nested_roots(&self) -> Option<(PathBuf, PathBuf)> {
+        // every ordered pair of distinct roots, checked component by component
+        let roots = self.roots();
+        for outer in &roots {
+            for inner in &roots {
+                if outer != inner && inner.starts_with(outer) {
+                    return Some((outer.clone(), inner.clone()));
+                }
+            }
+        }
+        None
+    }
 }
 
 /// The different levels to log tracing info at
@@ -1254,6 +1274,30 @@ mod tests {
         let conf = conf.expect("a config with a node budget loads");
         assert_eq!(conf.resources.node_memory, Some(6 * gib));
         assert_eq!(conf.resources.shard_budget(6), gib);
+    }
+
+    /// A root inside another is found, and roots side by side are not
+    ///
+    /// The claim refuses a configuration that nests one root in another
+    /// ([Resolved #46](../../../docs/src/appendix/resolved/unmarked-directory-refused.md)).
+    #[test]
+    fn nested_roots_are_found() {
+        // two roots side by side, one sharing the other's name as a prefix, are not nested
+        let (_dir, apart) = load(
+            "storage:\n  default:\n    filesystem:\n      latency_sensitive:\n        path: /opt/shoal\n      throughput_sensitive:\n        path: /opt/shoal-bulk\n",
+        );
+        assert_eq!(apart.expect("a config loads").storage.nested_roots(), None);
+        // a throughput path inside the latency one is
+        let (_dir, nested) = load(
+            "storage:\n  default:\n    filesystem:\n      latency_sensitive:\n        path: /opt/shoal\n      throughput_sensitive:\n        path: /opt/shoal/archives\n",
+        );
+        assert_eq!(
+            nested.expect("a config loads").storage.nested_roots(),
+            Some((
+                PathBuf::from("/opt/shoal"),
+                PathBuf::from("/opt/shoal/archives")
+            ))
+        );
     }
 
     /// Write a config file into a temp dir and load it

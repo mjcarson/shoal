@@ -173,6 +173,15 @@ pub struct StorageMeta {
     /// ([C1](../../../docs/src/distributed/node-identity.md), Q11). Zero in a format 2 marker.
     #[serde(default)]
     pub incarnation: u64,
+    /// Every other root this node has mirrored its marker onto, as the configuration named it
+    ///
+    /// Written by the claim once each of them carries its mirror, and read by the next claim
+    /// to tell an empty root this node wrote to - wiped, or a replaced disk - from one the
+    /// configuration has just added. Absent from every marker written before
+    /// [Resolved #46](../../../docs/src/appendix/resolved/unmarked-directory-refused.md), which
+    /// is read as no roots at all; the format stays 3, as it did for `physical`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<PathBuf>,
 }
 
 /// What kind of node a storage directory belongs to
@@ -419,6 +428,7 @@ impl StorageMeta {
             topology: 0,
             mode,
             incarnation: 1,
+            roots: Vec::new(),
         }
     }
 
@@ -521,27 +531,9 @@ impl StorageMeta {
         Ok(())
     }
 
-    /// Check this storage directory was written by the shard count and the mode we are starting with
+    /// Claim the storage directory of a node that writes under one root
     ///
-    /// A directory with no metadata is new to us and is claimed by writing it: a node identity is
-    /// minted, and a cluster identity too if the intent is to bootstrap one. This is called once,
-    /// before any shard is spawned, so it uses blocking IO deliberately: there is no glommio
-    /// executor yet, and doing it here rather than per shard is what keeps every shard from
-    /// racing to write the same file.
-    ///
-    /// An established directory is held to what it already says. Bootstrapping on top of one is
-    /// idempotent - the identities and everything under them are kept, and a second cluster is
-    /// never minted - because "bootstrap" in a configuration file is a statement about how the
-    /// cluster was created and not an instruction to create another every restart. Joining on
-    /// top of an admitted directory is a member restart for the same reason. Every reopen bumps
-    /// the incarnation and rewrites the marker before the identity is handed out, so a start
-    /// that is fenced by a later one has already recorded that it happened.
-    ///
-    /// A directory reopened at another core count is not refused since
-    /// [F47](../../../docs/src/features/local-rehome.md): the claim reports a pending rehome
-    /// and the pool moves the files before a shard starts. What is refused is a change to the
-    /// slots a cluster node was claimed with, more cores than slots, and a start under a third
-    /// count while a rehome towards a second is on disk.
+    /// [`StorageMeta::claim_roots`] with the primary root alone; see it for what is refused.
     ///
     /// # Arguments
     ///
@@ -552,200 +544,369 @@ impl StorageMeta {
     ///
     /// # Errors
     ///
-    /// This will fail if the directory was marked in a format we cannot read, if it was
-    /// written under a different layout, if it belongs to a cluster and the configuration is
-    /// standalone or the reverse, if it is a joiner's that was never admitted and the
-    /// configuration is anything but a joiner's, if its slots are changed or exceeded, if a
-    /// rehome towards another count is in progress, or if the metadata cannot be read or written.
-    #[instrument(name = "StorageMeta::claim", skip_all, err(Debug))]
+    /// Everything [`StorageMeta::claim_roots`] refuses for a primary root.
     pub fn claim(
         root: &Path,
         cores: usize,
         slots: Option<usize>,
         intent: ClusterIntent,
     ) -> Result<Identity, ServerError> {
-        // the whole claim is one read-modify-write of the marker
+        Self::claim_roots(&[root.to_path_buf()], cores, slots, intent)
+    }
+
+    /// Check every root a node writes under, and claim or reopen them as one
+    ///
+    /// The first root is the primary: the default latency path, whose marker is the one every
+    /// rewrite after the claim touches. Each of the others - a table's own root, or a
+    /// throughput path apart from the latency one - carries a mirror of it
+    /// ([Resolved #43](../../../docs/src/appendix/resolved/marker-every-root.md)).
+    ///
+    /// A root is one of three things, and the claim tells them apart before it writes anything
+    /// ([Resolved #46](../../../docs/src/appendix/resolved/unmarked-directory-refused.md)):
+    ///
+    /// - **Empty**, holding nothing but what a start writes for itself (the lock, a staged
+    ///   marker, and a filesystem's `lost+found`). An empty primary is claimed: a node identity
+    ///   is minted, and a cluster identity too if the intent is to bootstrap one. An empty
+    ///   other root is mirrored, unless the primary already lists it as one this node wrote to,
+    ///   in which case it was wiped or replaced and is refused.
+    /// - **Marked**. A marked primary is held to what it says. Bootstrapping on top of one is
+    ///   idempotent - the identities and everything under them are kept, and a second cluster
+    ///   is never minted - because "bootstrap" in a configuration file is a statement about how
+    ///   the cluster was created and not an instruction to create another every restart.
+    ///   Joining on top of an admitted directory is a member restart for the same reason. A
+    ///   marked other root has to name the same node, slot count and layout - and the same
+    ///   cluster, or none, since a joiner's mirror is written before it is admitted.
+    /// - **Anything else** is somebody's data with no marker, and is refused by name.
+    ///
+    /// Only then is anything written: the primary's marker, with every reopen bumping its
+    /// incarnation so a start that is fenced by a later one has already recorded that it
+    /// happened; then each mirror; then the primary again, once, if the list of roots it has
+    /// mirrored onto changed. The list is written last, so a crash before every mirror is
+    /// written leaves the roots still unlisted and the next claim finishes the job.
+    ///
+    /// This is called once, before any shard is spawned, so it uses blocking IO deliberately:
+    /// there is no glommio executor yet, and doing it here rather than per shard is what keeps
+    /// every shard from racing to write the same file.
+    ///
+    /// A directory reopened at another core count is not refused since
+    /// [F47](../../../docs/src/features/local-rehome.md): the claim reports a pending rehome
+    /// and the pool moves the files before a shard starts. What is refused is a change to the
+    /// slots a cluster node was claimed with, more cores than slots, and a start under a third
+    /// count while a rehome towards a second is on disk.
+    ///
+    /// # Arguments
+    ///
+    /// * `roots` - Every distinct root the node writes under, the primary first
+    /// * `cores` - The number of executors about to be started
+    /// * `slots` - The slots a cluster node asks to claim, or none for one per core
+    /// * `intent` - Whether the server is standalone, a cluster's creator or a joiner
+    ///
+    /// # Errors
+    ///
+    /// This will fail if a root holds files and no marker, if a root the primary lists is
+    /// empty, if another root was written by another server, if the primary was marked in a
+    /// format we cannot read, if it was written under a different layout, if it belongs to a
+    /// cluster and the configuration is standalone or the reverse, if it is a joiner's that was
+    /// never admitted and the configuration is anything but a joiner's, if its slots are
+    /// changed or exceeded, if a rehome towards another count is in progress, or if a marker
+    /// cannot be read or written. A refused claim writes nothing to any root.
+    #[instrument(name = "StorageMeta::claim_roots", skip_all, err(Debug))]
+    pub fn claim_roots(
+        roots: &[PathBuf],
+        cores: usize,
+        slots: Option<usize>,
+        intent: ClusterIntent,
+    ) -> Result<Identity, ServerError> {
+        // the whole claim is one read-modify-write of every marker
         let _marker = marker_lock();
-        // read whatever metadata this directory already carries, format settled first
-        match Self::read(root)? {
-            // this directory has been written before, so it has a shard count and an identity
-            // to honour
-            Some(mut found) => {
-                // a cluster node's slots are claimed once: every peer's identities are keyed by
-                // them, so a configuration naming another count is refused rather than obeyed
-                if intent != ClusterIntent::Standalone {
-                    if let Some(configured) = slots {
-                        if configured != found.shards {
-                            return Err(ServerError::Shoal(ShoalError::SlotsFixed {
-                                claimed: found.shards,
-                                configured,
-                            }));
-                        }
-                    }
-                    // and an executor with no slot to host would own nothing
-                    if cores > found.shards {
-                        return Err(ServerError::Shoal(ShoalError::CoresExceedSlots {
-                            cores,
-                            slots: found.shards,
-                        }));
-                    }
-                }
-                // a rehome on disk is resumed by the count it was planned for and refused by
-                // any other; without one, a changed count is a rehome to plan
-                let rehome = match super::rehome::manifest::Manifest::read(root)? {
-                    Some(manifest) if manifest.to != cores => {
-                        return Err(ServerError::Shoal(ShoalError::RehomeInProgress {
-                            from: manifest.from,
-                            to: manifest.to,
-                            configured: cores,
-                        }));
-                    }
-                    Some(manifest) => Some(PendingRehome {
-                        from: manifest.from,
-                        to: cores,
-                    }),
-                    None if found.physical() != cores => Some(PendingRehome {
-                        from: found.physical(),
-                        to: cores,
-                    }),
-                    None => None,
-                };
-                // the mode the directory was claimed in has to be the mode it is reopened in
-                match (intent, found.mode) {
-                    // a standalone directory reopened standalone, the ordinary restart
-                    (ClusterIntent::Standalone, MarkerMode::Standalone) => {}
-                    // a cluster member reopened as one, which keeps its cluster and never mints
-                    // another however the configuration spells bootstrap; a member restarted
-                    // with seeds is the same restart, since it no longer needs them
-                    (ClusterIntent::Bootstrap | ClusterIntent::Join, MarkerMode::Cluster) => {}
-                    // a joiner that never finished joining, started as a joiner again: the join
-                    // resumes under the identity it minted
-                    (ClusterIntent::Join, MarkerMode::Joining) => {}
-                    // a directory bootstrapped into a cluster, opened by a standalone config
-                    (ClusterIntent::Standalone, MarkerMode::Cluster) => {
-                        return Err(ServerError::Shoal(
-                            ShoalError::ClusterDirectoryInStandalone {
-                                // a cluster directory always names its cluster
-                                cluster: found.cluster.unwrap_or_default(),
-                            },
-                        ));
-                    }
-                    // a standalone directory opened by a cluster config, which an export
-                    // restored into a new cluster is for and nothing here can do
-                    (ClusterIntent::Bootstrap | ClusterIntent::Join, MarkerMode::Standalone) => {
-                        return Err(ServerError::Shoal(
-                            ShoalError::StandaloneDirectoryInCluster { node: found.node },
-                        ));
-                    }
-                    // a joiner's directory that was never admitted, asked to create a cluster of
-                    // its own: that would turn a node meant for one cluster into another
-                    (ClusterIntent::Bootstrap, MarkerMode::Joining) => {
-                        return Err(ServerError::Shoal(
-                            ShoalError::JoiningDirectoryBootstrapped { node: found.node },
-                        ));
-                    }
-                    // the same directory opened standalone, which is a node changing what it is
-                    (ClusterIntent::Standalone, MarkerMode::Joining) => {
-                        return Err(ServerError::Shoal(
-                            ShoalError::JoiningDirectoryInStandalone { node: found.node },
-                        ));
-                    }
-                }
-                // a different layout would too, even at the same count: a cluster directory
-                // at layout 1 was written by a build before the shared WAL, and its intent
-                // logs would be replayed by nothing (F40)
-                if found.layout != layout_for(intent) {
-                    return Err(ServerError::Shoal(ShoalError::ShardLayoutMismatch {
-                        found: found.layout,
-                        expected: layout_for(intent),
-                    }));
-                }
-                // this is one more start of the directory, and the marker says so before the
-                // identity is handed out: a start that is later fenced has already been counted
-                found.incarnation += 1;
-                found.write(root)?;
-                if let Some(pending) = &rehome {
-                    event!(
-                        Level::INFO,
-                        msg = "the executor count changed; the files will be rehomed before a shard starts",
-                        from = pending.from,
-                        to = pending.to,
-                        slots = found.shards,
-                    );
-                }
-                Ok(Identity {
-                    node: found.node,
-                    // a standalone node's slots are its executors: nobody records them, so
-                    // there is nothing to keep still
-                    slots: match intent {
-                        ClusterIntent::Standalone => cores,
-                        ClusterIntent::Bootstrap | ClusterIntent::Join => found.shards,
-                    },
-                    physical: cores,
-                    rehome,
-                    cluster: found.cluster,
-                    layout: found.layout,
-                    topology_at_claim: found.topology,
-                    fresh: false,
-                    mode: found.mode,
-                    incarnation: found.incarnation,
-                })
+        // the primary root and the ones that mirror it
+        let Some((primary, others)) = roots.split_first() else {
+            return Err(ServerError::IO(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a claim was given no storage root",
+            )));
+        };
+        // look at every root before anything is written to any of them
+        let primary_state = survey(primary)?;
+        let other_states = others
+            .iter()
+            .map(|root| survey(root))
+            .collect::<Result<Vec<_>, _>>()?;
+        // settle what the primary is: held to its marker, minted, or somebody else's files
+        let (mut meta, identity) = match primary_state {
+            RootState::Marked(found) => Self::reopen(primary, found, cores, slots, intent)?,
+            RootState::Empty => Self::mint(cores, slots, intent)?,
+            RootState::Unmarked { found, more } => {
+                return Err(ServerError::Shoal(ShoalError::StorageDirectoryNotEmpty {
+                    path: primary.clone(),
+                    found,
+                    more,
+                }));
             }
-            // this directory has never been written to, so claim it for this node
-            None => {
-                // the slots a cluster node claims: what it asked for, or one per core; a
-                // standalone node's slots are its cores, since nobody records them
-                let shards = match intent {
-                    ClusterIntent::Standalone => cores,
-                    ClusterIntent::Bootstrap | ClusterIntent::Join => slots.unwrap_or(cores),
-                };
-                // every executor hosts at least one slot
-                if shards < cores {
-                    return Err(ServerError::Shoal(ShoalError::SlotsBelowCores {
-                        slots: shards,
-                        cores,
+        };
+        // judge every other root against it, keeping the empty ones to name when they are claimed
+        let mut adopted = Vec::new();
+        for (root, state) in others.iter().zip(other_states) {
+            match state {
+                // a mirror has to be of this node
+                RootState::Marked(found) => check_mirror(root, &found, &meta)?,
+                // an empty root this node wrote to was wiped; one it never wrote to is new
+                RootState::Empty if !identity.fresh && meta.roots.contains(root) => {
+                    return Err(ServerError::Shoal(ShoalError::StorageRootEmptied {
+                        root: root.clone(),
+                        node: meta.node,
                     }));
                 }
-                // mint who this directory is going to be, and the cluster it starts if it does
-                let node = NodeId::mint();
-                let mut meta = match intent {
-                    ClusterIntent::Standalone => StorageMeta::new(shards, node, None),
-                    ClusterIntent::Bootstrap => {
-                        StorageMeta::new(shards, node, Some(ClusterId::mint()))
-                    }
-                    ClusterIntent::Join => StorageMeta::joining(shards, node),
-                };
-                // a node claiming headroom is laid out on fewer executors than it has slots
-                if shards != cores {
-                    meta.physical = Some(cores);
+                RootState::Empty => adopted.push(root),
+                // files with no marker are somebody's, whichever root they are under
+                RootState::Unmarked { found, more } => {
+                    return Err(ServerError::Shoal(ShoalError::StorageDirectoryNotEmpty {
+                        path: root.clone(),
+                        found,
+                        more,
+                    }));
                 }
-                // write it before any shard has had the chance to store anything
-                meta.write(root)?;
-                // say what we claimed, since it is what a later start is held to
-                event!(
-                    Level::INFO,
-                    msg = "Claimed a new storage directory",
-                    path = Self::path(root).display().to_string(),
-                    shards,
-                    cores,
-                    node = node.to_string(),
-                    cluster = meta.cluster.map(|cluster| cluster.to_string()),
-                    mode = ?meta.mode,
-                );
-                Ok(Identity {
-                    node,
-                    slots: shards,
-                    physical: cores,
-                    rehome: None,
-                    cluster: meta.cluster,
-                    layout: meta.layout,
-                    topology_at_claim: 0,
-                    fresh: true,
-                    mode: meta.mode,
-                    incarnation: meta.incarnation,
-                })
             }
         }
+        // the primary first, still listing only the roots it had already mirrored onto
+        meta.write(primary)?;
+        // then every mirror, refreshed so it follows the identity as it moves; the fields that
+        // move between claims are the primary's alone and are read from no mirror
+        let listed = others.to_vec();
+        let changed = meta.roots != listed;
+        meta.roots = listed;
+        for root in others {
+            meta.write(root)?;
+        }
+        // and the list last, so a crash before every mirror was written leaves them unlisted
+        if changed {
+            meta.write(primary)?;
+        }
+        // say what this claim did, since it is what a later start is held to
+        if identity.fresh {
+            event!(
+                Level::INFO,
+                msg = "Claimed a new storage directory",
+                path = Self::path(primary).display().to_string(),
+                shards = identity.slots,
+                cores,
+                node = identity.node.to_string(),
+                cluster = identity.cluster.map(|cluster| cluster.to_string()),
+                mode = ?identity.mode,
+            );
+        }
+        for root in adopted {
+            event!(
+                Level::INFO,
+                msg = "Claimed another storage root for this node",
+                path = Self::path(root).display().to_string(),
+                node = identity.node.to_string(),
+            );
+        }
+        if let Some(pending) = &identity.rehome {
+            event!(
+                Level::INFO,
+                msg = "the executor count changed; the files will be rehomed before a shard starts",
+                from = pending.from,
+                to = pending.to,
+                slots = identity.slots,
+            );
+        }
+        Ok(identity)
+    }
+
+    /// Hold a marked primary root to what it says, and count this start of it
+    ///
+    /// Writes nothing: the marker returned, with its incarnation bumped, is written by
+    /// [`StorageMeta::claim_roots`] once every other root has been judged.
+    ///
+    /// # Arguments
+    ///
+    /// * `root` - The primary root, whose rehome manifest is read
+    /// * `found` - The marker it carries
+    /// * `cores` - The number of executors about to be started
+    /// * `slots` - The slots a cluster node asks to claim, or none for one per core
+    /// * `intent` - Whether the server is standalone, a cluster's creator or a joiner
+    ///
+    /// # Errors
+    ///
+    /// Refuses a change of slots, more cores than slots, a rehome towards another count, a
+    /// change of mode and a change of layout.
+    fn reopen(
+        root: &Path,
+        mut found: StorageMeta,
+        cores: usize,
+        slots: Option<usize>,
+        intent: ClusterIntent,
+    ) -> Result<(StorageMeta, Identity), ServerError> {
+        // a cluster node's slots are claimed once: every peer's identities are keyed by them, so
+        // a configuration naming another count is refused rather than obeyed
+        if intent != ClusterIntent::Standalone {
+            if let Some(configured) = slots {
+                if configured != found.shards {
+                    return Err(ServerError::Shoal(ShoalError::SlotsFixed {
+                        claimed: found.shards,
+                        configured,
+                    }));
+                }
+            }
+            // and an executor with no slot to host would own nothing
+            if cores > found.shards {
+                return Err(ServerError::Shoal(ShoalError::CoresExceedSlots {
+                    cores,
+                    slots: found.shards,
+                }));
+            }
+        }
+        // a rehome on disk is resumed by the count it was planned for and refused by any
+        // other; without one, a changed count is a rehome to plan
+        let rehome = match super::rehome::manifest::Manifest::read(root)? {
+            Some(manifest) if manifest.to != cores => {
+                return Err(ServerError::Shoal(ShoalError::RehomeInProgress {
+                    from: manifest.from,
+                    to: manifest.to,
+                    configured: cores,
+                }));
+            }
+            Some(manifest) => Some(PendingRehome {
+                from: manifest.from,
+                to: cores,
+            }),
+            None if found.physical() != cores => Some(PendingRehome {
+                from: found.physical(),
+                to: cores,
+            }),
+            None => None,
+        };
+        // the mode the directory was claimed in has to be the mode it is reopened in
+        match (intent, found.mode) {
+            // a standalone directory reopened standalone, the ordinary restart
+            (ClusterIntent::Standalone, MarkerMode::Standalone) => {}
+            // a cluster member reopened as one, which keeps its cluster and never mints another
+            // however the configuration spells bootstrap; a member restarted with seeds is the
+            // same restart, since it no longer needs them
+            (ClusterIntent::Bootstrap | ClusterIntent::Join, MarkerMode::Cluster) => {}
+            // a joiner that never finished joining, started as a joiner again: the join resumes
+            // under the identity it minted
+            (ClusterIntent::Join, MarkerMode::Joining) => {}
+            // a directory bootstrapped into a cluster, opened by a standalone config
+            (ClusterIntent::Standalone, MarkerMode::Cluster) => {
+                return Err(ServerError::Shoal(
+                    ShoalError::ClusterDirectoryInStandalone {
+                        // a cluster directory always names its cluster
+                        cluster: found.cluster.unwrap_or_default(),
+                    },
+                ));
+            }
+            // a standalone directory opened by a cluster config, which an export restored into
+            // a new cluster is for and nothing here can do
+            (ClusterIntent::Bootstrap | ClusterIntent::Join, MarkerMode::Standalone) => {
+                return Err(ServerError::Shoal(
+                    ShoalError::StandaloneDirectoryInCluster { node: found.node },
+                ));
+            }
+            // a joiner's directory that was never admitted, asked to create a cluster of its
+            // own: that would turn a node meant for one cluster into another
+            (ClusterIntent::Bootstrap, MarkerMode::Joining) => {
+                return Err(ServerError::Shoal(
+                    ShoalError::JoiningDirectoryBootstrapped { node: found.node },
+                ));
+            }
+            // the same directory opened standalone, which is a node changing what it is
+            (ClusterIntent::Standalone, MarkerMode::Joining) => {
+                return Err(ServerError::Shoal(
+                    ShoalError::JoiningDirectoryInStandalone { node: found.node },
+                ));
+            }
+        }
+        // a different layout would too, even at the same count: a cluster directory at layout
+        // 1 was written by a build before the shared WAL, and its intent logs would be replayed
+        // by nothing (F40)
+        if found.layout != layout_for(intent) {
+            return Err(ServerError::Shoal(ShoalError::ShardLayoutMismatch {
+                found: found.layout,
+                expected: layout_for(intent),
+            }));
+        }
+        // this is one more start of the directory, and the marker will say so before the
+        // identity is handed out: a start that is later fenced has already been counted
+        found.incarnation += 1;
+        let identity = Identity {
+            node: found.node,
+            // a standalone node's slots are its executors: nobody records them, so there is
+            // nothing to keep still
+            slots: match intent {
+                ClusterIntent::Standalone => cores,
+                ClusterIntent::Bootstrap | ClusterIntent::Join => found.shards,
+            },
+            physical: cores,
+            rehome,
+            cluster: found.cluster,
+            layout: found.layout,
+            topology_at_claim: found.topology,
+            fresh: false,
+            mode: found.mode,
+            incarnation: found.incarnation,
+        };
+        Ok((found, identity))
+    }
+
+    /// Mint the marker of an empty primary root
+    ///
+    /// Writes nothing: the marker returned is written by [`StorageMeta::claim_roots`] once
+    /// every other root has been judged.
+    ///
+    /// # Arguments
+    ///
+    /// * `cores` - The number of executors about to be started
+    /// * `slots` - The slots a cluster node asks to claim, or none for one per core
+    /// * `intent` - Whether the server is standalone, a cluster's creator or a joiner
+    ///
+    /// # Errors
+    ///
+    /// Refuses fewer slots than cores.
+    fn mint(
+        cores: usize,
+        slots: Option<usize>,
+        intent: ClusterIntent,
+    ) -> Result<(StorageMeta, Identity), ServerError> {
+        // the slots a cluster node claims: what it asked for, or one per core; a standalone
+        // node's slots are its cores, since nobody records them
+        let shards = match intent {
+            ClusterIntent::Standalone => cores,
+            ClusterIntent::Bootstrap | ClusterIntent::Join => slots.unwrap_or(cores),
+        };
+        // every executor hosts at least one slot
+        if shards < cores {
+            return Err(ServerError::Shoal(ShoalError::SlotsBelowCores {
+                slots: shards,
+                cores,
+            }));
+        }
+        // mint who this directory is going to be, and the cluster it starts if it does
+        let node = NodeId::mint();
+        let mut meta = match intent {
+            ClusterIntent::Standalone => StorageMeta::new(shards, node, None),
+            ClusterIntent::Bootstrap => StorageMeta::new(shards, node, Some(ClusterId::mint())),
+            ClusterIntent::Join => StorageMeta::joining(shards, node),
+        };
+        // a node claiming headroom is laid out on fewer executors than it has slots
+        if shards != cores {
+            meta.physical = Some(cores);
+        }
+        let identity = Identity {
+            node,
+            slots: shards,
+            physical: cores,
+            rehome: None,
+            cluster: meta.cluster,
+            layout: meta.layout,
+            topology_at_claim: 0,
+            fresh: true,
+            mode: meta.mode,
+            incarnation: meta.incarnation,
+        };
+        Ok((meta, identity))
     }
 
     /// How many executors the files are laid out on
@@ -783,59 +944,6 @@ impl StorageMeta {
         // the same count as the layout's origin needs no field at all
         found.physical = (physical != found.shards).then_some(physical);
         found.write(root)
-    }
-
-    /// Mirror the primary root's marker onto another root this node writes under
-    ///
-    /// A table under its own `storage.tables` root, or a default throughput path apart from
-    /// the latency one, is guarded the way the primary is
-    /// ([Resolved #43](../../../docs/src/appendix/resolved/marker-every-root.md)): an unmarked
-    /// root takes a copy of the primary's marker, and a marked one has to name the same node,
-    /// the same slot count and the same layout - and the same cluster, or none, since a
-    /// joiner's mirror is written before it is admitted. The copy is refreshed on every claim;
-    /// the fields that move between claims - the topology, the incarnation, the mode, the
-    /// executor count - are the primary's alone and are read from no mirror.
-    ///
-    /// # Arguments
-    ///
-    /// * `root` - The other root
-    /// * `primary` - The primary root's marker, as claimed
-    ///
-    /// # Errors
-    ///
-    /// Refuses a root whose marker was written by another server, and fails if the marker
-    /// cannot be read or written.
-    #[instrument(name = "StorageMeta::mirror", skip_all, fields(root = %root.display()), err(Debug))]
-    pub fn mirror(root: &Path, primary: &StorageMeta) -> Result<(), ServerError> {
-        // one read-modify-write of the mirror, never interleaved with another
-        let _marker = marker_lock();
-        // whatever this root already says about itself
-        if let Some(found) = Self::read(root)? {
-            // the same node, slots and layout, and the same cluster unless the mirror was
-            // written before this node was admitted to one
-            let same_cluster = found.cluster.is_none() || found.cluster == primary.cluster;
-            if found.node != primary.node
-                || found.shards != primary.shards
-                || found.layout != primary.layout
-                || !same_cluster
-            {
-                return Err(ServerError::Shoal(ShoalError::StorageRootMismatch {
-                    root: root.to_path_buf(),
-                    found: Identity::describe(&found),
-                    expected: Identity::describe(primary),
-                }));
-            }
-        } else {
-            // say what this root is being claimed as, since it is what a later start is held to
-            event!(
-                Level::INFO,
-                msg = "Claimed another storage root for this node",
-                path = Self::path(root).display().to_string(),
-                node = primary.node.to_string(),
-            );
-        }
-        // write the primary's marker, so the mirror follows the identity as it moves
-        primary.write(root)
     }
 
     /// Fill in the cluster a joiner has been admitted to, once
@@ -940,6 +1048,113 @@ fn marker_lock() -> std::sync::MutexGuard<'static, ()> {
     MARKER_WRITES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The entries a start writes into a storage root for itself, which do not make it used
+///
+/// The lock is taken before the claim looks, a staged marker is what a crash during a marker's
+/// write leaves, and `lost+found` is what `mkfs` leaves at the top of every ext4 filesystem a
+/// root may be mounted at.
+const OWN_ENTRIES: &[&str] = &[LOCK_FILE, META_TEMP_FILE, "lost+found"];
+
+/// How many of an unmarked root's entries its refusal names
+const ENTRIES_NAMED: usize = 5;
+
+/// What a storage root holds, read before anything is written to it
+#[derive(Debug)]
+enum RootState {
+    /// Nothing but what a start writes for itself
+    Empty,
+    /// A marker in a format this build reads
+    Marked(StorageMeta),
+    /// Files and no marker: somebody's data
+    Unmarked {
+        /// The first few entries in it, by name
+        found: Vec<String>,
+        /// How many more there are
+        more: usize,
+    },
+}
+
+/// Look at what a storage root holds, without writing to it
+///
+/// # Arguments
+///
+/// * `root` - The storage root
+///
+/// # Errors
+///
+/// Refuses a marker in a format this build does not read, and fails naming the root if it
+/// cannot be listed.
+fn survey(root: &Path) -> Result<RootState, ServerError> {
+    // a marker settles it, whatever else is beside it
+    if let Some(found) = StorageMeta::read(root)? {
+        return Ok(RootState::Marked(found));
+    }
+    // a root that does not exist yet holds nothing
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(RootState::Empty),
+        Err(error) => return Err(unusable(root, error)),
+    };
+    // every entry but the ones a start writes for itself
+    let mut found = Vec::new();
+    for entry in entries {
+        let name = entry
+            .map_err(|error| unusable(root, error))?
+            .file_name()
+            .to_string_lossy()
+            .into_owned();
+        if !OWN_ENTRIES.contains(&name.as_str()) {
+            found.push(name);
+        }
+    }
+    // nothing left is an empty root
+    if found.is_empty() {
+        return Ok(RootState::Empty);
+    }
+    // otherwise name the first few, in an order that does not depend on the filesystem
+    found.sort_unstable();
+    let more = found.len().saturating_sub(ENTRIES_NAMED);
+    found.truncate(ENTRIES_NAMED);
+    Ok(RootState::Unmarked { found, more })
+}
+
+/// Check that a marked root other than the primary is a mirror of this node's marker
+///
+/// It has to name the same node, the same slot count and the same layout - and the same
+/// cluster, or none, since a joiner's mirror is written before it is admitted
+/// ([Resolved #43](../../../docs/src/appendix/resolved/marker-every-root.md)).
+///
+/// # Arguments
+///
+/// * `root` - The other root
+/// * `found` - The marker it carries
+/// * `primary` - The primary root's marker, as this claim settled it
+///
+/// # Errors
+///
+/// Refuses a root whose marker was written by another server.
+fn check_mirror(
+    root: &Path,
+    found: &StorageMeta,
+    primary: &StorageMeta,
+) -> Result<(), ServerError> {
+    // the same node, slots and layout, and the same cluster unless the mirror was written
+    // before this node was admitted to one
+    let same_cluster = found.cluster.is_none() || found.cluster == primary.cluster;
+    if found.node != primary.node
+        || found.shards != primary.shards
+        || found.layout != primary.layout
+        || !same_cluster
+    {
+        return Err(ServerError::Shoal(ShoalError::StorageRootMismatch {
+            root: root.to_path_buf(),
+            found: Identity::describe(found),
+            expected: Identity::describe(primary),
+        }));
+    }
+    Ok(())
 }
 
 /// The one field read before a marker's format is trusted
@@ -1517,7 +1732,8 @@ mod tests {
         std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o555))
             .expect("failed to make the parent read only");
         let other = parent.path().join("throughput");
-        let result = StorageMeta::mirror(&other, &meta);
+        let roots = [primary.path().to_path_buf(), other.clone()];
+        let result = StorageMeta::claim_roots(&roots, 2, None, ClusterIntent::Standalone);
         // give the permission back before asserting, so a failure still cleans up
         std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o755))
             .expect("failed to make the parent writable again");
@@ -1528,38 +1744,41 @@ mod tests {
                 assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
             }
             Err(other) => panic!("refused without naming the root: {other:?}"),
-            Ok(()) => panic!("a marker was mirrored under a read only parent"),
+            Ok(_) => panic!("a marker was mirrored under a read only parent"),
         }
     }
 
     /// A second root takes a mirror of the primary's marker, and keeps it across a claim
     ///
     /// Before [Resolved #43](../../../docs/src/appendix/resolved/marker-every-root.md) a root a
-    /// table was pointed at carried no marker at all, so nothing guarded it.
+    /// table was pointed at carried no marker at all, so nothing guarded it. Since
+    /// [Resolved #46](../../../docs/src/appendix/resolved/unmarked-directory-refused.md) the
+    /// primary lists the roots it mirrored onto.
     #[test]
     fn a_second_root_is_mirrored_with_the_same_identity() {
         let primary = tempfile::tempdir().expect("failed to build a temp dir");
         let other = tempfile::tempdir().expect("failed to build a temp dir");
+        let roots = [primary.path().to_path_buf(), other.path().to_path_buf()];
         // the primary is claimed, and the other root nothing has written takes a mirror
-        let identity = StorageMeta::claim(primary.path(), 2, None, ClusterIntent::Standalone)
+        let identity = StorageMeta::claim_roots(&roots, 2, None, ClusterIntent::Standalone)
             .expect("failed to claim");
         let claimed = StorageMeta::read(primary.path())
             .expect("no metadata")
             .expect("no marker");
-        StorageMeta::mirror(other.path(), &claimed).expect("failed to mirror a fresh root");
         let mirrored = StorageMeta::read(other.path())
             .expect("no metadata")
             .expect("no mirror written");
         assert_eq!(mirrored.node, identity.node);
         assert_eq!(mirrored, claimed);
+        // and the primary lists the root it mirrored onto
+        assert_eq!(claimed.roots, vec![other.path().to_path_buf()]);
         // a reclaim of the primary moves the incarnation; the mirror follows it
-        StorageMeta::claim(primary.path(), 2, None, ClusterIntent::Standalone)
+        StorageMeta::claim_roots(&roots, 2, None, ClusterIntent::Standalone)
             .expect("failed to reclaim");
         let reclaimed = StorageMeta::read(primary.path())
             .expect("no metadata")
             .expect("no marker");
         assert_eq!(reclaimed.incarnation, 2);
-        StorageMeta::mirror(other.path(), &reclaimed).expect("failed to refresh the mirror");
         let refreshed = StorageMeta::read(other.path())
             .expect("no metadata")
             .expect("no mirror");
@@ -1568,17 +1787,15 @@ mod tests {
         // the primary does
         let joiner = tempfile::tempdir().expect("failed to build a temp dir");
         let joiner_root = tempfile::tempdir().expect("failed to build a temp dir");
-        StorageMeta::claim(joiner.path(), 2, None, ClusterIntent::Join).expect("failed to join");
-        let joining = StorageMeta::read(joiner.path())
-            .expect("no metadata")
-            .expect("no marker");
-        StorageMeta::mirror(joiner_root.path(), &joining).expect("failed to mirror a joiner");
+        let joiner_roots = [
+            joiner.path().to_path_buf(),
+            joiner_root.path().to_path_buf(),
+        ];
+        StorageMeta::claim_roots(&joiner_roots, 2, None, ClusterIntent::Join)
+            .expect("failed to join");
         let cluster = ClusterId::mint();
         StorageMeta::adopt_cluster(joiner.path(), cluster).expect("failed to adopt");
-        let admitted = StorageMeta::read(joiner.path())
-            .expect("no metadata")
-            .expect("no marker");
-        StorageMeta::mirror(joiner_root.path(), &admitted)
+        StorageMeta::claim_roots(&joiner_roots, 2, None, ClusterIntent::Join)
             .expect("a mirror from before admission was refused");
         assert_eq!(
             StorageMeta::read(joiner_root.path())
@@ -1589,7 +1806,7 @@ mod tests {
         );
     }
 
-    /// A second root written by another server is refused, naming both
+    /// A second root written by another server is refused, naming both, and nothing is written
     #[test]
     fn a_second_root_written_by_another_node_is_refused() {
         let ours = tempfile::tempdir().expect("failed to build a temp dir");
@@ -1602,9 +1819,11 @@ mod tests {
         let claimed = StorageMeta::read(ours.path())
             .expect("no metadata")
             .expect("no marker");
+        let ours_before = std::fs::read(StorageMeta::path(ours.path())).expect("a marker");
         let before = std::fs::read(StorageMeta::path(theirs.path())).expect("a marker");
         // their root as our table's root: another node
-        let error = StorageMeta::mirror(theirs.path(), &claimed)
+        let roots = [ours.path().to_path_buf(), theirs.path().to_path_buf()];
+        let error = StorageMeta::claim_roots(&roots, 2, None, ClusterIntent::Standalone)
             .expect_err("another server's root was taken as ours");
         assert!(
             matches!(
@@ -1616,24 +1835,156 @@ mod tests {
             ),
             "{error:?}"
         );
-        // and the refusal wrote nothing over their marker
+        // and the refusal wrote nothing over their marker, nor bumped ours
         let after = std::fs::read(StorageMeta::path(theirs.path())).expect("a marker");
         assert_eq!(before, after);
+        let ours_after = std::fs::read(StorageMeta::path(ours.path())).expect("a marker");
+        assert_eq!(ours_before, ours_after);
         // the same node at another slot count is refused too: a cluster root laid out for
         // another count is another server's data
         let cluster = tempfile::tempdir().expect("failed to build a temp dir");
         let cluster_root = tempfile::tempdir().expect("failed to build a temp dir");
-        StorageMeta::claim(cluster.path(), 2, Some(4), ClusterIntent::Bootstrap)
+        let cluster_roots = [
+            cluster.path().to_path_buf(),
+            cluster_root.path().to_path_buf(),
+        ];
+        StorageMeta::claim_roots(&cluster_roots, 2, Some(4), ClusterIntent::Bootstrap)
             .expect("failed to bootstrap");
-        let mut narrower = StorageMeta::read(cluster.path())
+        let mut narrower = StorageMeta::read(cluster_root.path())
             .expect("no metadata")
-            .expect("no marker");
-        StorageMeta::mirror(cluster_root.path(), &narrower).expect("failed to mirror");
+            .expect("no mirror");
         narrower.shards = 2;
+        std::fs::write(
+            StorageMeta::path(cluster_root.path()),
+            serde_json::to_vec_pretty(&narrower).expect("a marker serializes"),
+        )
+        .expect("failed to stage the narrower mirror");
         assert!(matches!(
-            StorageMeta::mirror(cluster_root.path(), &narrower),
+            StorageMeta::claim_roots(&cluster_roots, 2, Some(4), ClusterIntent::Bootstrap),
             Err(ServerError::Shoal(ShoalError::StorageRootMismatch { .. }))
         ));
+    }
+
+    /// An empty directory is one holding only what a start writes for itself
+    ///
+    /// The lock is taken before the claim looks, a staged marker is what a crash during a
+    /// marker's write leaves, and `lost+found` is the top of a freshly made ext4 filesystem: a
+    /// directory holding those and nothing else is claimed.
+    #[test]
+    fn an_empty_directory_ignores_the_lock_the_staged_marker_and_lost_found() {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let _lock = DirectoryLock::acquire(dir.path()).expect("failed to lock");
+        std::fs::write(dir.path().join(META_TEMP_FILE), b"{").expect("a staged marker");
+        std::fs::create_dir(dir.path().join("lost+found")).expect("a lost+found");
+        let identity = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Standalone)
+            .expect("a directory holding only what a start writes was refused");
+        assert!(identity.fresh);
+    }
+
+    /// A root holding files and no marker is refused, naming what it holds, and is not written
+    ///
+    /// [Resolved #46](../../../docs/src/appendix/resolved/unmarked-directory-refused.md): "has
+    /// no marker" was taken to mean "has never been written to", so somebody's data was
+    /// claimed under a new identity.
+    #[test]
+    fn an_unmarked_root_is_refused_naming_what_it_holds() {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        for name in ["wal", "Note", "Shard-0-active", "a", "b", "c", "d"] {
+            std::fs::write(dir.path().join(name), b"data").expect("a file");
+        }
+        let error = StorageMeta::claim(dir.path(), 2, None, ClusterIntent::Standalone)
+            .expect_err("a directory of files with no marker was claimed");
+        match error {
+            ServerError::Shoal(ShoalError::StorageDirectoryNotEmpty { path, found, more }) => {
+                assert_eq!(path, dir.path());
+                assert_eq!(found, vec!["Note", "Shard-0-active", "a", "b", "c"]);
+                assert_eq!(more, 2);
+            }
+            other => panic!("refused for another reason: {other:?}"),
+        }
+        assert_eq!(StorageMeta::read(dir.path()).expect("a read"), None);
+        // the same refusal for a root other than the primary, and the primary is left unmarked
+        let primary = tempfile::tempdir().expect("failed to build a temp dir");
+        let roots = [primary.path().to_path_buf(), dir.path().to_path_buf()];
+        let error = StorageMeta::claim_roots(&roots, 2, None, ClusterIntent::Standalone)
+            .expect_err("another root of files with no marker was claimed");
+        assert!(matches!(
+            error,
+            ServerError::Shoal(ShoalError::StorageDirectoryNotEmpty { ref path, .. })
+                if path == dir.path()
+        ));
+        assert_eq!(StorageMeta::read(primary.path()).expect("a read"), None);
+    }
+
+    /// A root added to an established node's configuration is mirrored, and one it wrote to is
+    /// refused once it is found empty
+    ///
+    /// Both are empty directories under a marked primary; the primary's list of the roots it
+    /// mirrored onto is what tells a new root from a wiped one.
+    #[test]
+    fn a_root_added_to_an_established_node_is_mirrored() {
+        let primary = tempfile::tempdir().expect("failed to build a temp dir");
+        let first = tempfile::tempdir().expect("failed to build a temp dir");
+        let added = tempfile::tempdir().expect("failed to build a temp dir");
+        // an established node with one other root
+        let roots = [primary.path().to_path_buf(), first.path().to_path_buf()];
+        let identity = StorageMeta::claim_roots(&roots, 2, None, ClusterIntent::Standalone)
+            .expect("failed to claim");
+        // a root the configuration has just added is new, and is mirrored and listed
+        let grown = [
+            primary.path().to_path_buf(),
+            first.path().to_path_buf(),
+            added.path().to_path_buf(),
+        ];
+        StorageMeta::claim_roots(&grown, 2, None, ClusterIntent::Standalone)
+            .expect("an added root was refused");
+        let mirror = StorageMeta::read(added.path())
+            .expect("no metadata")
+            .expect("the added root was not mirrored");
+        assert_eq!(mirror.node, identity.node);
+        let listed = StorageMeta::read(primary.path())
+            .expect("no metadata")
+            .expect("no marker")
+            .roots;
+        assert_eq!(listed, grown[1..].to_vec());
+        // the first root wiped is refused by name, and nothing is written
+        std::fs::remove_file(StorageMeta::path(first.path())).expect("the mirror is there");
+        let before = std::fs::read(StorageMeta::path(primary.path())).expect("a marker");
+        let error = StorageMeta::claim_roots(&grown, 2, None, ClusterIntent::Standalone)
+            .expect_err("a wiped root was claimed again");
+        assert!(matches!(
+            error,
+            ServerError::Shoal(ShoalError::StorageRootEmptied { ref root, node })
+                if root == first.path() && node == identity.node
+        ));
+        let after = std::fs::read(StorageMeta::path(primary.path())).expect("a marker");
+        assert_eq!(before, after);
+    }
+
+    /// A claim stopped after the primary's marker and before its mirrors is finished by the next
+    ///
+    /// The list of roots is written last, so a crash between the primary's marker and a mirror
+    /// leaves the other root empty and unlisted, which the next claim takes as new.
+    #[test]
+    fn a_claim_stopped_before_its_mirrors_is_finished_by_the_next() {
+        let primary = tempfile::tempdir().expect("failed to build a temp dir");
+        let other = tempfile::tempdir().expect("failed to build a temp dir");
+        // the primary alone, as a claim stopped before its mirrors leaves it
+        let identity = StorageMeta::claim(primary.path(), 2, None, ClusterIntent::Standalone)
+            .expect("failed to claim the primary");
+        // the next claim, of both roots, mirrors the other and lists it
+        let roots = [primary.path().to_path_buf(), other.path().to_path_buf()];
+        let again = StorageMeta::claim_roots(&roots, 2, None, ClusterIntent::Standalone)
+            .expect("a claim stopped before its mirrors could not be finished");
+        assert_eq!(again.node, identity.node);
+        assert!(!again.fresh);
+        assert_eq!(
+            StorageMeta::read(other.path())
+                .expect("no metadata")
+                .expect("no mirror")
+                .node,
+            identity.node
+        );
     }
 
     /// A topology observed while a rehome finishes keeps the rehome's executor count, and the

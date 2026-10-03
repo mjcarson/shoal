@@ -84,7 +84,7 @@ async fn start_encrypted(
     TestError,
 > {
     // generate a certificate for this run and point a server at it
-    let cert = TestCertificate::new(temp_dir);
+    let cert = TestCertificate::new();
     let conf = utils::build_tls_config(temp_dir, &cert);
     let mut pool = ShoalPool::<TlsDb>::start(conf)?;
     let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
@@ -226,7 +226,7 @@ async fn a_mib_response_over_tls_matches_its_plaintext_bytes() -> Result<(), Tes
 async fn scram_over_tls_authenticates() -> Result<(), TestError> {
     skip_without_ktls!("scram_over_tls_authenticates");
     let temp_dir = utils::test_dir();
-    let cert = TestCertificate::new(&temp_dir);
+    let cert = TestCertificate::new();
     let conf = utils::build_tls_auth_config(&temp_dir, &cert, USER, PASSWORD);
     let mut pool = ShoalPool::<TlsDb>::start(conf)?;
     let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
@@ -251,7 +251,7 @@ async fn scram_over_tls_authenticates() -> Result<(), TestError> {
 async fn tls_does_not_authenticate_on_its_own() -> Result<(), TestError> {
     skip_without_ktls!("tls_does_not_authenticate_on_its_own");
     let temp_dir = utils::test_dir();
-    let cert = TestCertificate::new(&temp_dir);
+    let cert = TestCertificate::new();
     let conf = utils::build_tls_auth_config(&temp_dir, &cert, USER, PASSWORD);
     let mut pool = ShoalPool::<TlsDb>::start(conf)?;
     let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
@@ -279,7 +279,7 @@ async fn tls_does_not_authenticate_on_its_own() -> Result<(), TestError> {
 async fn a_plaintext_client_is_refused_by_a_tls_server() -> Result<(), TestError> {
     skip_without_ktls!("a_plaintext_client_is_refused_by_a_tls_server");
     let temp_dir = utils::test_dir();
-    let cert = TestCertificate::new(&temp_dir);
+    let cert = TestCertificate::new();
     let conf = utils::build_tls_config(&temp_dir, &cert);
     let mut pool = ShoalPool::<TlsDb>::start(conf)?;
     let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
@@ -300,7 +300,7 @@ async fn a_plaintext_client_is_refused_by_a_tls_server() -> Result<(), TestError
 async fn a_tls_client_is_refused_by_a_plaintext_server() -> Result<(), TestError> {
     skip_without_ktls!("a_tls_client_is_refused_by_a_plaintext_server");
     let temp_dir = utils::test_dir();
-    let cert = TestCertificate::new(&temp_dir);
+    let cert = TestCertificate::new();
     let conf = utils::build_config(&temp_dir);
     let mut pool = ShoalPool::<TlsDb>::start(conf)?;
     let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
@@ -325,8 +325,7 @@ async fn a_client_that_does_not_trust_the_certificate_is_refused() -> Result<(),
     let temp_dir = utils::test_dir();
     let (_client, _pool, addr, _cert) = start_encrypted(&temp_dir).await?;
     // a second, unrelated certificate that has nothing to do with the running server
-    let other_dir = utils::test_dir();
-    let other = TestCertificate::new(&other_dir);
+    let other = TestCertificate::new();
     let refused =
         Shoal::<TlsDbClient>::with_options(&addr, ClientOptions::new().tls(other.client_options()))
             .await;

@@ -31,7 +31,7 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at ~~15~~ ~~16~~ 19 and skips 25, 26, 27, 30, 31, 32, 33, 34, 36, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
+list starts at ~~15~~ ~~16~~ 19 and skips 25, 26, 27, 30, 31, 32, 33, 34, 36, 38, 39, 43, 44, 45, 46, 48, 51, 56, 57, 58, 61, 67, 68, 74,
 76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 92, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 120, 121, 122, 123 and 124, and
 why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ ~~item 132 is the newest entry and the newest number~~ ~~item 180 is the newest entry, with 182 the newest number, on the resolved page,~~ ~~item 142 is the newest open entry, with 187 the newest number, on the resolved page,~~ ~~item 196 is the newest entry and the newest number, with 191, 192, 194 and 195 filed and fixed in one change on the resolved page,~~ ~~item 142 is the newest open entry, with 197 the newest number, on the resolved page beside 193 and 196 (all three from round 16 of the cluster testing, 197 filed and fixed in one change),~~ ~~item 198 is the newest entry and the newest number (filed by [F66](../features/dataset-benchmarks.md), which found it),~~ ~~item 198 is the newest entry, with 200 the newest number, on the resolved page beside 199 (both filed and fixed in one change, from a user's `shoaladm bench` run whose ops/s by kind chart stayed empty),~~ ~~item 198 is the newest entry, with 201 the newest number, on the resolved page beside 199 and 200 (all three filed and fixed in one change each, from a user's `shoaladm bench` runs)~~ ~~item 206 is the newest entry and the newest number~~ item 207 is the newest number, filed by [Resolved #92, #198](resolved/composite-partition-key.md) beside item 42 that it belongs with (202 to 206 were filed by the [object storage plan](../object-storage/prerequisites.md): four found by reading the code it would be built on, and the last by checking its own links; 199, 200 and 201 stay on the resolved page, and 92 and 198, one defect filed twice, joined them in one change as [Resolved #92, #198](resolved/composite-partition-key.md)), and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120, 121, 122, 123, 124, 125, 126, 127 and 128 are on the resolved page, with 27, 32 and 36 beside them. **126 never appeared here**:
@@ -96,7 +96,7 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ ~~**1,674 tests**~~ ~~**1,685 tests**~~ ~~**1,691 tests**~~ ~~**1,715 tests**~~ ~~**1,725 tests**~~ ~~**1,726 tests**~~ ~~**1,728 tests**~~ ~~**1,782 tests**~~ ~~**1,785 tests**~~ ~~**1,790 tests** since [F65](../features/query-figures-home-tab.md), eleven ignored~~ ~~**1,892 tests** since [F67](../features/bench-run-wizard.md)~~ ~~**1,894 tests** since [Resolved #201](resolved/attached-read-order.md)~~ ~~**1,911 tests** since [F68](../features/conditional-writes.md)~~ **1,921 tests** since [Resolved #92, #198](resolved/composite-partition-key.md), twelve ignored (F66 took it to 1,873 without moving this line), plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ ~~**1,674 tests**~~ ~~**1,685 tests**~~ ~~**1,691 tests**~~ ~~**1,715 tests**~~ ~~**1,725 tests**~~ ~~**1,726 tests**~~ ~~**1,728 tests**~~ ~~**1,782 tests**~~ ~~**1,785 tests**~~ ~~**1,790 tests** since [F65](../features/query-figures-home-tab.md), eleven ignored~~ ~~**1,892 tests** since [F67](../features/bench-run-wizard.md)~~ ~~**1,894 tests** since [Resolved #201](resolved/attached-read-order.md)~~ ~~**1,911 tests** since [F68](../features/conditional-writes.md)~~ ~~**1,921 tests** since [Resolved #92, #198](resolved/composite-partition-key.md)~~ **1,930 tests** since [Resolved #46](resolved/unmarked-directory-refused.md), twelve ignored (F66 took it to 1,873 without moving this line), plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
@@ -112,7 +112,7 @@ fixture tests: two passed alone, and six could not bind ~~port 12000~~ ports 120
 because a deployed lab node held them on the same host ([Test Coverage](test-coverage.md)), since
 [resolved](resolved/fixture-default-peer-ports.md) as item 134. The
 [distributed cluster testing](../cluster-testing/overview.md) chapter's fixes (items 60, 130, 131,
-133 to 157, O61, O62, O63, O65 to O68) and its driver added 37 and took it to 1,656 ([Test Coverage](test-coverage.md)). [Resolved #158](resolved/runtime-waker-lists.md) added 5 `shoal-core` unit tests and took it to 1,661, every one passing at six threads. [Resolved #159](resolved/map-ahead-of-archive.md) added 2 and took it to 1,663. Its run at six threads failed two fixture tests from item 142's list, each of which passed alone three times. Items 160 to 168 and [F56](../features/cluster-rebuild.md) added 11 and took it to 1,674 ([Test Coverage](test-coverage.md)). Items 169 to 178 added 10 and took it to 1,685. #176, #179 and O74 added 6 and took it to 1,691. The distributed cluster testing chapter's round 11 (#129, #142's assertion, #143, #156, #181, #182, O57, O74, O76 and [F57](../features/cluster-reconfigure.md)) added 10 and took it to 1,701. Its workspace run at six threads passed every one. Rounds 12 to 14 took it to 1,728 ([Test Coverage](test-coverage.md)). Round 15 (F61, #191, #192, #194, #195, O81 to O83) added 14 and took it to 1,742; its workspace run at six threads on the final code passed every one. [Resolved #92, #198](resolved/composite-partition-key.md) added 10 and took it to 1,921. Its workspace run at six threads, with the build held to four jobs because europa's btrfs root stalled its linkers at full parallelism, passed 1,920: `single_node_data_has_a_verified_cluster_migration_path` failed with *267 against 400*, the #142 deadline, and passed alone three times.
+133 to 157, O61, O62, O63, O65 to O68) and its driver added 37 and took it to 1,656 ([Test Coverage](test-coverage.md)). [Resolved #158](resolved/runtime-waker-lists.md) added 5 `shoal-core` unit tests and took it to 1,661, every one passing at six threads. [Resolved #159](resolved/map-ahead-of-archive.md) added 2 and took it to 1,663. Its run at six threads failed two fixture tests from item 142's list, each of which passed alone three times. Items 160 to 168 and [F56](../features/cluster-rebuild.md) added 11 and took it to 1,674 ([Test Coverage](test-coverage.md)). Items 169 to 178 added 10 and took it to 1,685. #176, #179 and O74 added 6 and took it to 1,691. The distributed cluster testing chapter's round 11 (#129, #142's assertion, #143, #156, #181, #182, O57, O74, O76 and [F57](../features/cluster-reconfigure.md)) added 10 and took it to 1,701. Its workspace run at six threads passed every one. Rounds 12 to 14 took it to 1,728 ([Test Coverage](test-coverage.md)). Round 15 (F61, #191, #192, #194, #195, O81 to O83) added 14 and took it to 1,742; its workspace run at six threads on the final code passed every one. [Resolved #92, #198](resolved/composite-partition-key.md) added 10 and took it to 1,921. Its workspace run at six threads, with the build held to four jobs because europa's btrfs root stalled its linkers at full parallelism, passed 1,920: `single_node_data_has_a_verified_cluster_migration_path` failed with *267 against 400*, the #142 deadline, and passed alone three times. [Resolved #46](resolved/unmarked-directory-refused.md) added 9 and took it to 1,930.
 [Resolved #27](resolved/shql-quote-escape.md), [#32](resolved/client-gone-broadcast.md),
 [#36](resolved/staged-tail-deadline.md) and [#125](resolved/retry-unknown-outcome.md) added 11
 and took it to 1,587. There are two new binaries, `retry_outcome.rs` (3) and `staged_flush.rs`
@@ -895,50 +895,6 @@ the code. **The workspace is already mixed** — `shoal-bench` and `shoalctl` ar
 `shoal`, `shoal-core` and `shoal-derive` are 2021 — so the bump is a per-crate decision that has
 already been made three times without this being considered.
 
-### 46. An unmarked storage directory is claimed rather than refused
-
-`StorageMeta::claim` (`server/meta.rs:79`) treats a missing `shoal-meta.json` as a directory
-nothing has written to, creates one, and starts (`:105-111`):
-
-```rust
-// this directory has never been written to, so claim it for this shard count
-Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-    std::fs::create_dir_all(root)?;
-    std::fs::write(&path, serde_json::to_vec_pretty(&StorageMeta::new(shards))?)?;
-```
-
-"Has no marker" and "has never been written to" were the same statement for exactly as long as
-the marker has existed, which is one commit. Every directory written before
-[items 11 and 12](resolved/tablet-ring.md) has no marker and plenty of data, and that change also
-replaced the vnode ring with a tablet map — so ownership moved from a hash of the shard's *name*
-to `top-12-bits-of-key % shard_count`, and effectively every partition now belongs to a different
-shard than the one whose archive map holds it. A shard's data is stored under its own name, so
-each shard reads its own archives, finds none of the partitions it is now asked for, and the
-server comes up empty.
-
-This is the exact failure `StorageMeta` was built to prevent. It is missed because the marker is
-newer than the data it guards, and a guard that only fires when it recognises the directory
-cannot fire on the one case where it does not.
-
-The severity is bounded by who has such a directory: this is a pre-1.0 branch and the only known
-instances are disposable dev data, which is why this is filed rather than fixed. It is recorded
-because the reasoning generalises — the next on-disk marker will have the same blind spot on the
-day it ships.
-
-**Fix direction:** claiming is only safe for a directory that is genuinely empty. Before writing a
-marker, check the root for archives and `*-active` intent logs; if any exist, refuse with a
-distinct error saying the directory predates the marker and no migration exists. An empty
-directory is still claimed, which keeps first start working. Note this cannot be a `format`
-check — [item 45](resolved/storage-marker-format.md) covers a marker that is *wrong*, and this is
-one that is *absent*.
-
-**Must be fixed before object storage's M14.** A storage pool's device, and each slice of it,
-would be claimed the way a storage root is, and the case this item calls disposable becomes the ordinary one: a failed disk replaced
-by a new one at the same mount path is an empty directory, and a directory with files and no
-marker is somebody's data. The fix direction above is the claim with three outcomes that
-[S4](../object-storage/pools-and-devices.md#a-device-has-slices) needs, and
-[S1](../object-storage/prerequisites.md#required) lists this item as required for that reason.
-
 ### 47. A torn tail on the active log is counted as data loss
 
 `FileSystem::read_intent_log` (`.../storage/fs.rs:202-206`) counts a `truncated` reader
@@ -1062,8 +1018,11 @@ addressed to.
    already sent ([Resolved #94](resolved/disconnected-client-cleanup.md)) for ordinary clients
    too. The cost it was waiting on is one message per shard per disconnect, the same as
    `NewClient` per connect; the capture of a connection-churn workload is still owed.
-7. **Items 43 and 46** — the two remaining holes in the storage marker. Worth doing together,
-   since both are changes to what `StorageMeta::claim` looks at before it writes.
+7. ~~**Items 43 and 46** — the two remaining holes in the storage marker. Worth doing together,
+   since both are changes to what `StorageMeta::claim` looks at before it writes.~~ Both are
+   resolved: [43](resolved/marker-every-root.md), and
+   [46](resolved/unmarked-directory-refused.md) by a claim that judges every root before it
+   writes to any.
 
 ### 52. A resident hit in `exists` answers a query a blocked clone will answer again
 

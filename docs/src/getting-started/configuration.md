@@ -702,11 +702,19 @@ Every distinct root the storage section names is locked and carries the marker: 
 latency path is the primary, where the hosting file and the rehome manifest live, and every
 other path - a table's own `storage.tables` root, or a throughput path apart from the latency
 one - takes a mirror of it at the claim and is refused by name when another server wrote it
-([Resolved #43](../appendix/resolved/marker-every-root.md)). One hole remains in the guard: a
+([Resolved #43](../appendix/resolved/marker-every-root.md)). ~~One hole remains in the guard: a
 directory with *no* marker is claimed rather than refused — which includes every directory
-written before the marker existed
-([item 46](../appendix/known-issues.md#46-an-unmarked-storage-directory-is-claimed-rather-than-refused)).
-If you have a data directory older than the marker, start from an empty one.
+written before the marker existed (item 46). If you have a data directory older than the marker,
+start from an empty one.~~ A root is claimed only when it is empty - holding nothing but
+`shoal.lock`, a staged `shoal-meta.json.tmp` or a filesystem's `lost+found` - or marked by this
+node. A root holding files and no marker is somebody's data and is refused, naming it and what
+is in it. The primary's marker also lists every other root it mirrored onto, so one of those
+found empty later (wiped, or a replaced disk at the old path) is refused rather than served
+without its tables' rows, while a root just added to the configuration is mirrored. A root
+nested inside another is refused before anything is claimed
+([Resolved #46](../appendix/resolved/unmarked-directory-refused.md)). To start a node afresh on
+a directory that holds old data, empty it first: `shoaladm deploy --wipe` does that on a
+deployed node.
 
 Directories are created at startup by `setup_paths`, which walks each path component and
 calls `Directory::create` on it (`.../fs/conf.rs:158-171`, `:276-284`). The parent path

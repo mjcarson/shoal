@@ -248,8 +248,10 @@ starts earning its keep.
   node has none to keep.
 - ~~**The storage marker only covers the default storage root.** A per-table `storage.tables`
   override pointing elsewhere is unguarded~~ - every root carries a mirror of the marker since
-  [Resolved #43](../appendix/resolved/marker-every-root.md); a rehome still moves a second
-  root's files untested.
+  [Resolved #43](../appendix/resolved/marker-every-root.md), and a root holding files and no
+  marker, or one the marker lists found empty, is refused since
+  [Resolved #46](../appendix/resolved/unmarked-directory-refused.md); a rehome still moves a
+  second root's files untested.
 - ~~**Tablet assignment is derived, not persisted.** `Ring::new` recomputes it on every start, so
   a tablet is movable in principle only; nothing can move one and have it survive a restart.
   Persisting the map is the first half of rebalancing
