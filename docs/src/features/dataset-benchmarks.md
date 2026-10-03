@@ -327,6 +327,11 @@ deployment cannot be held across a spawn.
 
 ## Limitations
 
+- **An event arm's `converged` mark does not measure the node that was stopped.** It waits on
+  the lag the admin's own node reports, so it is marked about a second after the restart
+  whatever the victim's state
+  ([item 209](../appendix/known-issues.md#209-a-bench-event-arms-converged-mark-reads-the-wrong-nodes-lag)).
+  Judge a catch-up by the members' own figures in `shoaladm stats --basic` until it is fixed.
 - **Closed loop only.** A worker sends more as answers come back, so the load is set by the
   depth, not offered at a rate. Coordinated omission applies: a stall delays the queries behind
   it rather than piling them up. An open-loop generator is in the [todos](../appendix/todos.md).

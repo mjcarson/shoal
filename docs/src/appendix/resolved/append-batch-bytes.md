@@ -92,10 +92,35 @@ three values:
 
 ### On the lab
 
-On the lab cluster (`tmdb_cluster.yaml`), `shoaladm bench` runs an A/B on a side cluster of its
-own, every root and port moved. Each side runs one insert-only arm on `Movie` rows with 256 KiB
-overviews, with titan stopped from 10% to 60% of the arm and timed to its catch-up: the build
-before the fix, then the build with it. The outcome is recorded below as it is taken.
+The lab cluster (`tmdb_cluster.yaml`: europa, titan and hyperion, 1 GbE, the default 64 MiB
+frame) was deployed fresh, 2026-10-03, once on each build: `a877cd8`, before the fix, and
+`9b4167c`, with it. Each time titan's unit was stopped, and `tmdb-dataset-loader load` wrote
+6,000 new movies with 256 KiB overviews, about 1.5 GiB. Titan was then started and left for
+150 seconds, and `shoaladm stats --basic` read every member's figures:
+
+| | europa | hyperion | titan |
+| --- | --- | --- | --- |
+| **Before**, archived | 506.2 MiB | 997.4 MiB | 51.6 MiB |
+| **Before**, WAL segments | 278 | 156 | 12 |
+| **Before**, titan's apply lag | | | 5,012 entries, the same two minutes later |
+| **After**, archived | 1.4 GiB | 1.4 GiB | 1.4 GiB |
+| **After**, partitions | 11,757 | 11,756 | 11,880 |
+| **After**, WAL segments | 153 | 153 | 153 |
+| **After**, titan's apply lag | | | 0 |
+
+Before the fix titan applied nothing more once the leaders reached their first batch past the
+frame. With it, titan held what the others held when the 150 seconds were up.
+
+The load itself differed too. This was observed, not explained. On the build before the fix the
+loader failed three times with leases that lapsed ("no quorum acknowledged it within 5s") and
+writes answered `OutcomeUnknown`. Each attempt ran at 30 to 280 rows a second, and only 3,502 of
+the 6,000 movies landed. On the build with it, the whole load ran once at 573 rows a second with
+no failure. A plausible mechanism, established by reading and not by profiling: every retry to
+the stopped member read and encoded a batch of three hundred entries, 75 MiB, on the shard that
+also commits the group's writes. The bench's own catch-up mark could not be used to judge this:
+it reads the lag of the node the bench's admin client is connected to, never the node that was
+stopped
+([item 209](../known-issues.md#209-a-bench-event-arms-converged-mark-reads-the-wrong-nodes-lag)).
 
 ## Alternatives rejected
 
