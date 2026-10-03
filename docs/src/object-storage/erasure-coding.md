@@ -251,7 +251,9 @@ to reach every holder, which is [D7](../direction/shard-aware-routing.md).
 - "Redundancy is copies of the same bytes": the chunks of a stripe differ, so comparing two
   of them proves nothing, which changes what a scrub can do ([S11](scrub.md)).
 - "The workspace has one dependency whose output is persisted", gxhash: an erasure code is a
-  second. Its output is on disk for as long as a pool lives, so a crate whose encoding
+  second, and since [X5](checksums.md) the chunk unit's checksum, CRC-64/NVME, a third.
+  That one is pinned by its definition, six parameters and a check value, and not by its
+  crate. Its output is on disk for as long as a pool lives, so a crate whose encoding
   changed between releases would be a format break. X4's answer is a definition outside the
   crate: the chosen crate's parity equals ISA-L's C library's at every layout measured, and its
   digests were the same on Zen1 and Zen4 and from three builds. The crate is pinned exactly at

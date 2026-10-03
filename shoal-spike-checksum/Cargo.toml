@@ -1,0 +1,52 @@
+[package]
+name = "shoal-spike-checksum"
+version = "0.1.0"
+edition = "2024"
+description = "The X5 spike: checksum candidates fed the same buffers, checked for stability and timed."
+license = "MIT"
+publish = false
+
+# Not a library, not a benchmark and not a workspace member. This is the one-off measurement X5
+# owes S18's Q21 (`docs/src/object-storage/spikes.md#x5-checksums`): which checksum guards a chunk
+# unit, and whether its definition can ever move. It prints tables labelled by host, cpu, build and
+# governor, and its results are pasted into `docs/src/object-storage/checksums.md` by hand.
+#
+# The empty [workspace] below makes this crate its own workspace, with its own Cargo.lock, so that
+# no candidate reaches the workspace's lockfile before M13 adds the chosen one. gxhash 2.3.1 is the
+# workspace's own and is pinned to the same version here. Build it from this directory with its own
+# target dir (see CLAUDE.md).
+[workspace]
+
+[dependencies]
+# CRC-32C on the SSE4.2 crc32 instruction
+crc32c = "=0.6.8"
+# CRC-32C and CRC-64/NVME by PCLMULQDQ folding, VPCLMULQDQ where the cpu has it, chosen at run time
+crc-fast = "=1.10.0"
+# CRC-64/NVME, deprecated by its authors in favour of crc-fast
+crc64fast-nvme = "=1.2.1"
+# XXH3 at 64 and 128 bits; its SIMD is chosen at compile time
+xxhash-rust = { version = "=0.8.19", features = ["xxh3"] }
+# BLAKE3; its build script assembles its own x86 kernels with a C compiler when one is found
+blake3 = "=1.8.7"
+# the workspace's gxhash, and the next major beside it under another name
+gxhash = "=2.3.1"
+gxhash3 = { package = "gxhash", version = "=3.5.0" }
+# CRC-32 (IEEE), already in the workspace's lockfile through other crates and called by nothing
+crc32fast = "=1.5.1"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# gxhash 2.3.1's 256-bit path, which its README says gives other hashes; it needs nightly's
+# `stdsimd`, so whether it compiles at all is part of what X5 records
+gxhash2-avx2 = ["gxhash/avx2"]
+# gxhash 3.5.0's VAES + AVX2 path, which its README says gives the same hashes
+gxhash3-hybrid = ["gxhash3/hybrid"]
+
+[[bin]]
+name = "shoal-spike-checksum"
+path = "src/main.rs"
+
+[profile.release]
+debug = 1

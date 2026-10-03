@@ -131,6 +131,21 @@ target/lab/x4/native/release/shoal-spike-erasure --quick --core 8          # pro
 target/lab/x4/znver1/release/shoal-spike-erasure all --core 2 --out titan-znver1.json   # on the host
 target/lab/x4/native/release/shoal-spike-erasure report *.json            # the page's summaries
 
+# the X5 spike: every checksum candidate fed the same buffers, held to published check values,
+# compared across hosts, builds and ways of feeding it, and timed on one pinned core. NOT a
+# workspace member, for X4's reason: no candidate reaches the workspace's lockfile before M13 adds
+# the chosen one. An x86-64 level build needs `+aes`: the levels do not carry it and gxhash 3
+# refuses to compile without it. `--features gxhash3-hybrid` builds for znver1 and dies of SIGILL
+# on the Zen1 hosts, which is one of its findings. The tables are on
+# docs/src/object-storage/checksums.md
+cd shoal-spike-checksum && CARGO_TARGET_DIR=../target/lab/x5/znver1 RUSTFLAGS="-C target-cpu=znver1" \
+    cargo build --release
+cd shoal-spike-checksum && CARGO_TARGET_DIR=../target/lab/x5/x86-64-v3 \
+    RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+aes" cargo build --release
+target/lab/x5/znver1/release/shoal-spike-checksum --quick --core 8          # proves every adapter runs
+target/lab/x5/znver1/release/shoal-spike-checksum all --core 2 --out titan-znver1.json   # on the host
+target/lab/x5/znver1/release/shoal-spike-checksum report *.json            # the page's summaries
+
 # a cluster on real hosts from a project (F63): run in the project that defines the schema,
 # shoaladm finds the #[shoal::db] struct, probes every host's cpu over ssh, builds the node once
 # per cpu class and the schema's admin program, installs them under ~/.local/shoal/bin, and
@@ -613,6 +628,11 @@ go through `shoal`.**
   until M18 adds the chosen one, and `isa-l`'s C build (nasm, autotools, a `pkg-config` pinned at
   0.3.22 so libisal-sys's source fallback is reachable) never touches a workspace build. Deleted
   when M18 lands
+- **shoal-spike-checksum** - The X5 spike ([checksums](docs/src/object-storage/checksums.md)):
+  every checksum candidate S18 pinned behind one trait, held to published check values, compared
+  across hosts, builds and ways of feeding it, and timed on one pinned core, with a CRC combine of
+  its own written from zlib's method. **Not a workspace member**, for X4's reason: no candidate
+  reaches the workspace's lockfile until M13 adds the chosen one. Deleted when M13 lands
 - **shoal-model** - The deterministic protocol model ([F36](docs/src/features/cluster-harness.md)):
   the contract P1–P6 as executable checks over a Raft-shaped tablet group, with saved schedules
   under `shoal-model/schedules/`. Depends on `serde` and `serde_json` alone and names no shoal

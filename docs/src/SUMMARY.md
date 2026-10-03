@@ -201,6 +201,7 @@
   - [S18. The contract and the questions](object-storage/contract.md)
   - [Exploratory spikes](object-storage/spikes.md)
     - [X4. Erasure coding crates, measured](object-storage/erasure-coding-crates.md)
+    - [X5. Checksums, measured](object-storage/checksums.md)
   - [Milestones](object-storage/milestones.md)
   - [What's left to do](object-storage/whats-left-todo.md)
 

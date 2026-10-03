@@ -97,9 +97,15 @@ take back is the range in flight, which is bounded by the window.
 
 **A frame carries whole chunk units** where it can, and is read straight into a buffer
 aligned for direct I/O, so that the bytes a holder stages on this node are the bytes that
-came off the socket. Whether the checksum a client computes over a unit can be the one the
+came off the socket. ~~Whether the checksum a client computes over a unit can be the one the
 slice stores, so that a unit is checksummed once from the caller to the disk, is part of
-[Q21](contract.md#questions-to-answer).
+[Q21](contract.md#questions-to-answer).~~ The checksum a client computes over a unit can be the
+one the slice stores, so a unit is checksummed once from the caller to the disk.
+[X5](checksums.md) chose CRC-64/NVME because it can be: the slice binds the client's CRC of the
+bytes to the unit's place by combining it with the CRC of the place's identity, in about 78 ns
+on titan, and never reads the bytes to do it. A unit cut across frames gives the same CRC
+however it was cut, which gxhash, the hash the tree already has, does not
+([fed in pieces](checksums.md#fed-in-pieces)).
 
 ### Sharing a connection with queries
 

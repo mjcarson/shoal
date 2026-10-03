@@ -1,7 +1,9 @@
 # Exploratory spikes
 
-~~**Nothing here has been run.**~~ **One spike has run**: X4, whose record is
-[its own page](erasure-coding-crates.md) (2026-10-03). This page is the list of what has to be
+~~**Nothing here has been run.**~~ ~~**One spike has run**: X4, whose record is
+[its own page](erasure-coding-crates.md) (2026-10-03).~~ **Two spikes have run**, each with its
+record on a page of its own: X4, [the erasure coding crates](erasure-coding-crates.md), and X5,
+[the checksums](checksums.md) (both 2026-10-03). This page is the list of what has to be
 learnt before the [milestones](milestones.md) of this part can be more than a guess, and how
 each thing would be learnt.
 
@@ -100,7 +102,7 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 | X2 | Placement simulation | Q19 | Nothing | Days |
 | X3 | Bytes through the tablet groups | Q14 | The lab | Days |
 | ✅ X4 | Erasure coding crates: performance and tradeoffs, [reported](erasure-coding-crates.md) | Q20, in part | titan, europa | ~~Days~~ Done 2026-10-03 |
-| X5 | Checksums | Q21 | titan, europa | Afternoon |
+| ✅ X5 | Checksums, [reported](checksums.md) | Q21, in part | titan, europa | ~~Afternoon~~ Done 2026-10-03 |
 | X6 | The device store on SSD | Q22, Q27 | The lab; XFS for one leg | Week |
 | X7 | The device store on HDD | Q23 | Disks fitted | Days |
 | X8 | One small write, three ways | Q14, Q27 | The lab; X6 | Days |
@@ -333,6 +335,24 @@ recorded on S18 against them.
 
 ### X5. Checksums
 
+**Reported 2026-10-03**, on [its own page](checksums.md), and recorded on S18 as
+[Q21, in part](contract.md#q21-in-part-the-checksum-2026-10-03). The checksum is **CRC-64/NVME,
+through `crc-fast` 1.10.0, with a combine Shoal writes itself**. gxhash's output did not move
+across cpus or builds, but it did with the way it was fed. Its `Hasher` cut into pieces never
+equals its one-shot function, so the result named below came out for that one condition, and a
+CRC with a published definition is taken.
+
+The method below is what was planned. What was run differs in five places, each on the page:
+
+- XXH3 ran at both widths, with gxhash 3.5.0 and `crc32fast` beside the candidates as
+  references.
+- The builds were `znver1` and `x86-64-v3` on each Zen1 host, after the user allowed AVX2 as a
+  node requirement, and four builds on europa.
+- hyperion repeated titan.
+- The crates' combines took microseconds, so the harness gained a combine of its own to tell
+  the definition's cost from the crates'.
+- Every check and timing was also made with a unit fed in 4 KiB pieces.
+
 **Question.** Which checksum guards a chunk unit, and can its definition ever move
 ([Q21](contract.md#questions-to-answer))?
 
@@ -483,9 +503,13 @@ before-and-after procedure throughout.
 **Records.** For each arm, at 100 and 500 MiB/s of object work and at units of 64 KiB and
 1 MiB: the table's median and p99, and their ratio to the cell alone.
 
-**Depends on.** X4 and X5, so that the task's work is the real work; X4 has reported, so the
-task encodes with `rusty_erasure` on ISA-L's Cauchy matrix
-([X4's record](erasure-coding-crates.md)). On titan's four cores the
+**Depends on.** X4 and X5, so that the task's work is the real work. Both have reported:
+
+- the task encodes with `rusty_erasure` on ISA-L's Cauchy matrix
+  ([X4's record](erasure-coding-crates.md));
+- it checksums every unit, data and parity, with CRC-64/NVME through `crc-fast`
+  ([X5's record](checksums.md)). On Zen1 that costs as much CPU as the encode, so a task that
+  only encodes measures half the work. On titan's four cores the
 third arm has no core of its own to give the task: the scratch configuration's two shards, the
 coordinating core and the client's take all four, so one of them gives its core up, and the
 table says which. **Cost.** Days.
@@ -644,7 +668,7 @@ flowchart LR
     X10["X10 row cost"]
     X3["X3 bytes through groups"]
     X4["✅ X4 erasure crates"]:::done
-    X5["X5 checksums"]
+    X5["✅ X5 checksums"]:::done
     X6["X6 device store, SSD"]
     X7["X7 device store, HDD"]
     X8["X8 one small write"]
@@ -661,16 +685,17 @@ flowchart LR
 ```
 
 Nine depend on no other spike and on nothing that has to be fitted, and can start at once:
-X1, X2, X3, ~~X4,~~ X5, X10, X11, X13 and X14; X4 has run. X6 can start too, and needs an XFS
-filesystem for one of its legs. X8 follows X6, and X9 follows ~~X4 and~~ X5, since X4 has
-reported. X7 and the rotational half of X12 wait for disks.
+X1, X2, X3, ~~X4,~~ ~~X5,~~ X10, X11, X13 and X14; X4 and X5 have run. X6 can start too, and
+needs an XFS filesystem for one of its legs. X8 follows X6, and X9 ~~follows X5, since X4 has
+reported~~ can start: X4 and X5 have both reported. X7 and the rotational half of X12 wait
+for disks.
 
 If there is one to do first it is X1. Every other spike measures the cost of a design, and
 X1 is the one that can say the design is wrong.
 
 The first gate, [before M11](milestones.md#before-m11-the-object-contract), waits on eight
 of them: X1 and X2 for the decisions themselves, and X3, X8 and X9 for what those decisions
-cost, which bring X4, X5 and X6 with them. X4 has reported.
+cost, which bring X4, X5 and X6 with them. X4 and X5 have reported.
 
 ### What a spike needs first
 
@@ -719,7 +744,7 @@ its evidence and with what it did not settle:
 | --- | --- |
 | The write protocol: Q14, Q15, Q16 and Q18, and the contract agreed | X1; X3 and X8 for cost |
 | Placement: Q19 | X2 |
-| The code, the crate and the geometry: Q20. The checksum: Q21 | ✅ X4 for the code and the crate ([Q20, in part](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); X5, X14, and the geometry |
+| The code, the crate and the geometry: Q20. The checksum: Q21 | ✅ X4 for the code and the crate ([Q20, in part](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); ✅ X5 for the checksum ([Q21, in part](contract.md#q21-in-part-the-checksum-2026-10-03)); X14, the geometry, and the granule and chunk digest Q21 leaves |
 | The device store: Q22, and Q23 for the rotational gate | X6, X7 |
 | Where object work runs: Q24 | X9 |
 | Stripe size and the inline threshold: Q25. Small writes: Q27 | X10, X8 |

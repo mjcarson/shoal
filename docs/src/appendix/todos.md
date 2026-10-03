@@ -75,7 +75,8 @@ Three pages of that part are lists of work rather than design, and they are wher
   have to report before the milestones can be trusted: a model of the write protocol, a
   placement simulation, measurements on the lab, and a reading of Ceph at its source. The
   erasure coding crates ~~are~~ were compared by X4, which chose `rusty_erasure`
-  ([its record](../object-storage/erasure-coding-crates.md)).
+  ([its record](../object-storage/erasure-coding-crates.md)), and the checksums by X5, which
+  chose CRC-64/NVME through `crc-fast` ([its record](../object-storage/checksums.md)).
 - [Milestones](../object-storage/milestones.md) is M11 to M21, provisional until the spikes
   report.
 
@@ -2301,6 +2302,39 @@ happens exactly once per read, so it is the single point where a checksum would 
 and it is the only thing standing between a corrupt archive and an unchecked read, which is now a
 statement about one function rather than about thirteen call sites. The `access_unchecked`-everywhere
 form of [O3](optimizations.md), which F4 deliberately did not take, is still gated on this.
+
+### The tables keep gxhash
+
+Considered while [X5](../object-storage/checksums.md) chose the object store's checksum on
+2026-10-03, and deliberately not done then. The user's call was to choose and record only, as X4
+did.
+
+X5 found gxhash's `Hasher` gives a different answer for the same bytes cut differently, and
+chose CRC-64/NVME for chunk units for that and for its combine. Every gxhash the tables use
+still hashes pieces its own format fixes, and does so identically wherever it is checked:
+
+- WAL frames and the control store's frames, `gxhash32` of a whole frame;
+- archive records, `[size][gxhash64][payload]`;
+- the checkpoint file and the retry sidecar, `checksum_of`, one `write` of the whole;
+- a partition's replication digest, a row's length and then its bytes;
+- a snapshot stream's chunks.
+
+So nothing is wrong today. What moving them onto CRC-64/NVME would buy:
+
+- one checksum in the tree with a definition outside a crate, so a reader of Shoal's files in
+  another language needs no port of gxhash 2.3.1;
+- no copy in the snapshot stream: its `FileHasher` copies every byte into a fixed 64 KiB block
+  so that gxhash's answer does not depend on how the lane delivered it
+  (`shoal-core/src/server/replication/snapshot.rs:86-91`), and a CRC fed as the bytes come
+  needs no buffer;
+- a combine, where a digest is folded from many pieces, as the replication digest is.
+
+What it would cost: a format change to every file a node writes, and the WAL's frame on the
+wire. The partition key's gxhash is not part of this. It decides placement rather than
+integrity, and moving it re-homes every row ([Resolved #65](resolved/gxhash-pin.md)).
+
+Revisit when a file format is next changed for its own reasons, or when something outside Rust
+has to read a node's files.
 
 ### Quarantining a damaged intent log
 

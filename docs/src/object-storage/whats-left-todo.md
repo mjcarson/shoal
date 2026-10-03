@@ -2,7 +2,7 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-03, when X4 reported.
+after it. As of 2026-10-03, when X4 and X5 reported.
 
 **How to read them.**
 
@@ -17,7 +17,8 @@ after it. As of 2026-10-03, when X4 reported.
 
 ## Before the first gate
 
-Everything here can be worked on now except what an arrow points into. The spikes are on
+Everything here can be worked on now except what an arrow ~~points into~~ from an unfinished
+box points into: X9's arrows now come only from green ones, so it can start. The spikes are on
 [their page](spikes.md), and what each needed first on
 [What a spike needs first](spikes.md#what-a-spike-needs-first).
 
@@ -32,7 +33,7 @@ flowchart LR
         Disks["Fit rotational disks"]
         X2["X2 Placement simulation"]
         X4["✅ X4 Erasure coding crates"]:::done
-        X5["X5 Checksums"]
+        X5["✅ X5 Checksums"]:::done
         X6["X6 The device store on SSD"]
         X10["X10 What a stripe row costs"]
         X11["X11 Streamed bodies"]

@@ -76,7 +76,10 @@ on: it is the experiment this whole page waits for.
 Whichever it is, **no call runs long**. A megabyte encoded at a gibibyte a second is a
 millisecond, twice the high queue's latency goal. Checksumming and encoding are done a
 chunk unit at a time with a yield between units, which makes this the first code in the
-engine that yields in the middle of a computation.
+engine that yields in the middle of a computation. The checksum is the cheaper half:
+[X5](checksums.md) found CRC-64/NVME holds a Zen1 core 5.3 µs for a 64 KiB unit and 85 µs
+for 1 MiB. Fed in pieces, it keeps eight bytes of state between them, so a yield can fall
+inside a unit as well as between units.
 
 ### A lane for object bytes
 

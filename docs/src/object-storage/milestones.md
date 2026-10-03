@@ -35,7 +35,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 | Before M11 | The contract agreed | Q14, Q15, Q16, Q18, Q19 | — |
 | M11 | The model, the fixture's faults, the driver's kinds | Q30, in part ([recorded](contract.md#decision-record)) | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
 | M12 | Buckets in the schema and the tables they generate | Q25 | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
-| M13 | The wire, pool policy, inline objects, the baseline | Q21, Q26, the rest of Q30 | More than one frame for one query |
+| M13 | The wire, pool policy, inline objects, the baseline | Q21 (the checksum ✅ [X5](checksums.md)), Q26, the rest of Q30 | More than one frame for one query |
 | M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22, Q24 | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); a failure domain on a member; free bytes for every root |
 | M15 | Replicated pools: stage, commit, apply and read | Q27 | — |
 | M16 | Recovery and moves | Q17, Q29 | The walk of a tablet's rows |
@@ -141,7 +141,10 @@ tables and no others. X10's figures are taken again on the generated rows as bui
 
 **Closed before it.** Q26, streamed bodies ([X11](spikes.md#x11-streamed-bodies)). Q21, the
 checksum ([X5](spikes.md#x5-checksums)): a frame that carries a unit's checksum fixes it on
-the wire before any slice stores one, so the dependency is chosen here. The rest of Q30, the
+the wire before any slice stores one, so the dependency is chosen ~~here~~ before this gate.
+✅ It is: CRC-64/NVME through `crc-fast`, with a combine of Shoal's own
+([X5's record](checksums.md), [S18](contract.md#q21-in-part-the-checksum-2026-10-03)). The rest
+of Q21, the granule and the chunk digest, goes with Q20's geometry and X1. The rest of Q30, the
 object dataset and how fast one core makes seeded bytes, since this gate's object arms need both
 ([X13](spikes.md#x13-the-benchmarks-shape)).
 
@@ -161,6 +164,12 @@ object dataset and how fast one core makes seeded bytes, since this gate's objec
   since no pool has a device.
 - The driver's object arms and a described dataset in `shoaladm bench`, with every
   acknowledged byte read back ([S15](performance.md)).
+- A unit's checksum, from the client's side of the wire, in its final form:
+  - CRC-64/NVME through `crc-fast` `=1.10.0`, with default features off and its `unsafe`
+    read first;
+  - Shoal's own combine, with one multiplier for each unit length;
+  - X5's digests frozen as literals by `checksum_is_stable_across_builds`
+    ([X5's record](checksums.md#recommendation)).
 
 **Acceptance.** S12's capability, malformed-frame and retried-write rows. S3's path identity
 and inline rows. S4's two policy rows. S15's `object_arm_round_trips_against_one_node` and
@@ -428,7 +437,7 @@ The reason this page is provisional, spike by spike.
 | X3, X8 | Rows within reach of the devices' own rate for a replicated pool | Replicated SSD pools stay rows. M15 to M17 are built for erasure coding and rotational disks first |
 | ~~X4~~ | ~~No candidate has an update form~~ Three have one, the chosen crate in its public API ([X4](erasure-coding-crates.md)) | ~~M18 ends at its second step~~ M18 has all three steps |
 | ~~X4,~~ X9 | ~~A Zen1 core encodes below a device's rate, or~~ shared executors move a table's tail past its budget. X4 measured the first half: a Zen1 core encodes 4+2 at 7.6 GiB/s out of cache ([X4](erasure-coding-crates.md)) | M14 delivers dedicated executors only, and a four-core node gives up a core or serves no pool |
-| X5 | gxhash's output is not stable across builds | A second checksum is a new dependency before M13 |
+| ~~X5~~ | ~~gxhash's output is not stable across builds~~ It was stable across every cpu and build, but not across ways of feeding it ([X5](checksums.md)) | ~~A second checksum is a new dependency before M13~~ It is: CRC-64/NVME through `crc-fast`, added at M13 |
 | X6 | A file a stripe chunk is not viable at small sizes, or a clone is worth requiring | M14's store changes layout; or a clone call lands in the glommio fork first and the filesystems M14 accepts narrow |
 | X7 | A disk needs a journal on an SSD, or an executor to itself | M19 grows by that, and a shared journal becomes a failure domain on S5 |
 | X8 | A size below which bytes in the commit win | M15 gains the small-write path, and ~~item 202~~ the append batch bound ([Resolved #202](../appendix/resolved/append-batch-bytes.md)) and item 208 carry more weight |

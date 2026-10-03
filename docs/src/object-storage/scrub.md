@@ -190,7 +190,9 @@ nobody reads.
 ## Prerequisites
 
 [S1](prerequisites.md#required): the fixture's device faults, without which a flipped bit
-cannot be arranged, and a checksum with a frozen definition. [S6](device-store.md) and
+cannot be arranged (✅ [F70](../features/storage-faults.md), which arms a torn write, a full
+disk and a lost device but not yet a flipped bit), and a checksum with a frozen definition
+(✅ CRC-64/NVME, chosen by [X5](checksums.md)). [S6](device-store.md) and
 [S10](recovery.md).
 
 ## How it would be measured

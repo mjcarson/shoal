@@ -3831,3 +3831,42 @@ stripe and then encodes it pays the cold figure. One that encodes each unit row 
 are still in L2, which a frame of a few unit rows allows, pays the hot one. The same holds for a
 degraded read's decode and for a parity delta. The decision belongs to M18, and the number to
 hold it to is X4's.
+
+### O85. A CRC is combined by the general method
+
+| | |
+| --- | --- |
+| **Rank** | **design input** for [M13](../object-storage/milestones.md#m13-the-wire-and-the-baseline): nothing combines a checksum yet |
+| **Impact** | Measured by [X5](../object-storage/checksums.md#a-combine): `crc-fast`'s `checksum_combine` takes 124 to 236 µs for CRC-64/NVME on titan, and 23 to 40 µs on europa, by the length of the second part. Zlib's method with the multiplier for a unit's length made once takes 78 ns on titan and 50 ns on europa |
+| **Difficulty** | S. About sixty lines, the harness's `CrcMath` (`shoal-spike-checksum/src/sums.rs`), held to one call over the whole by the check X5 ran |
+| **Depends on** | M13 taking the checksum X5 chose |
+| **Blocks** | a chunk's digest made from its units' checksums, and a client's checksum bound to its unit's place, both of which are only worth doing at the cheap figure |
+| **Tradeoff** | None. It is the definition's arithmetic, so it cannot disagree with the crate except by a defect the check finds |
+| **Benchmark** | `shoal-spike-checksum`'s combine pass; at M13, a combine inside the write path against X5's 78 ns |
+
+Filed from X5. A CRC whose initial value equals its final xor combines as `crc(a ‖ b) = crc(a)
+· x^(8·|b|) mod P ⊕ crc(b)`. Every crate measured computes the multiplier `x^(8·|b|) mod P` on
+every call. `crc32c` and `crc-fast` do it by zlib's older method, squaring a GF(2) matrix as
+wide as the CRC (`crc32c` `src/combine.rs:39-85`, `crc-fast` `src/combine.rs:60`), which is why the
+call costs more than checksumming the bytes would. A chunk unit has one
+length, fixed by its pool, so the multiplier is made once a pool and a combine is one carry-less
+multiplication modulo P. The harness does that multiplication bit by bit; a PCLMULQDQ form would
+be faster still, and is not needed at 78 ns.
+
+### O86. A unit is checksummed after its bytes have left the cache
+
+| | |
+| --- | --- |
+| **Rank** | **design input** for [M13](../object-storage/milestones.md#m13-the-wire-and-the-baseline) and [M15](../object-storage/milestones.md#m15-replicated-pools-across-nodes): nothing checksums a unit yet |
+| **Impact** | Measured by [X5](../object-storage/checksums.md#against-the-code): CRC-64/NVME at 64 KiB runs at 40.5 GiB/s on europa with the unit out of cache and 75.0 with it in, and at 11.4 and 13.1 on titan. A 4+2 stripe checksums half as many bytes again as it encodes, which on titan costs as much CPU as the encode |
+| **Difficulty** | M. The unit is checksummed as its frames arrive, by the incremental interface, which X5 measured at 40.1 GiB/s cold and 62.1 hot on europa fed 4 KiB at a time, rather than in a pass over a buffered chunk |
+| **Depends on** | [Q26](../object-storage/contract.md#questions-to-answer)'s frame size; [O84](#o84-an-erasure-code-is-run-on-bytes-that-have-left-the-cache), which asks the same of the encode |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained. A unit's checksum is held as a running state until its last frame arrives; a CRC's state is eight bytes |
+| **Benchmark** | `shoal-spike-checksum` cold against hot; at M13, a node's checksum rate inside the write path against X5's two figures |
+
+Filed from X5, beside O84. On Zen1 the cache hardly matters: the CRC is bound by its own
+arithmetic, 11.4 against 13.1. On Zen4 it is bound by memory out of cache and runs nearly twice
+as fast in it. So the gain is a Zen4 node's, as O84's is. The parity units a code writes are in
+cache when the code finishes them, so checksumming each as it is produced is the same idea on
+the other side of the encode.

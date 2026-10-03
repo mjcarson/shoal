@@ -182,7 +182,7 @@ README was the source.
 | Candidate, Reed-Solomon: `isa-l` `0.2.0` (2020-06-25), BSD-3-Clause | Bindings through `libisal-sys 0.1`: `ec_init_tables`, `ec_encode_data`, `gf_gen_rs_matrix`, `gf_gen_cauchy1_matrix`, `gf_invert_matrix` (`src/lib.rs:22-302`). **It binds no `ec_encode_data_update`**, which the plan for this part had assumed it did. Its last release is six years old |
 | Candidate, Reed-Solomon: `rusty_erasure` `0.4.1` (2026-09-10), MIT OR Apache-2.0, MSRV 1.95 | A Rust port of ISA-L's erasure code: `ec_encode_data`, `ec_encode_data_update`, `gf_vect_mad`, and `xor_gen` and `pq_gen` beside them (`src/isal.rs:174-323`, `src/lib.rs:41-54`). Three weeks old on the day it was read, with seven hundred downloads |
 | Candidate, fountain: `raptorq` `2.0.1` (2026-03-09), Apache-2.0 | RFC 6330. `source_packets` and `repair_packets` (`src/encoder.rs:349`, `:361`), so it is systematic. A packet's size is a `u16` (`set_max_packet_size(bytes: u16)`, `:55`), so a symbol is at most 64 KiB |
-| Candidates, checksum: `crc32c` `0.6.8`, `crc-fast` `1.10.0`, `crc64fast-nvme` `1.2.1`, `xxhash-rust` `0.8.19`, `blake3` `1.8.7`, and gxhash `2.3.1` already in the tree | Versions from the registry on the day. None was read beyond its manifest; [X5](spikes.md#x5-checksums) reads them |
+| Candidates, checksum: `crc32c` `0.6.8`, `crc-fast` `1.10.0`, `crc64fast-nvme` `1.2.1`, `xxhash-rust` `0.8.19`, `blake3` `1.8.7`, and gxhash `2.3.1` already in the tree | Versions from the registry on the day. ~~None was read beyond its manifest; [X5](spikes.md#x5-checksums) reads them~~ [X5](checksums.md) read and ran every one, with gxhash `3.5.0` and `crc32fast` `1.5.1` beside them as references; the choice is [below](#q21-in-part-the-checksum-2026-10-03) |
 | What the spikes inherit | rustc 1.100.0-nightly (2026-09-04). glommio is the `../glommio` path dependency at 0.10.0, on `873fa44`; since [F70](../features/storage-faults.md) on `f4643f7`, whose two commits add an I/O hook that costs one relaxed atomic load an operation while no fault is armed and that does not cover `copy_file_range_aligned`. No erasure coding crate is in `Cargo.lock`. `.cargo/config.toml` builds for `target-cpu=native`, so a spike binary for the Zen1 hosts is built `znver1` by hand |
 
 **What this gate did not do.** It agreed no clause of the contract, selected no crate, wrote
@@ -225,6 +225,39 @@ europa, and that a call on a 1 MiB unit row of 4+2 takes 0.5 ms on titan, which
 [S13](isolation.md)'s yield budget has to fit. Also not settled: [X14](spikes.md#x14-ceph-and-s3-at-the-source)'s reading
 of Ceph, a code inside a node (X9), and the crate's age: three weeks on the day it was read,
 with about a hundred lines of `unsafe` in its kernels that are read before M18 takes it.
+
+#### Q21, in part: the checksum (2026-10-03)
+
+Recorded 2026-10-03 by [X5](checksums.md), on the tree that adds `shoal-spike-checksum`.
+Measured on titan and hyperion (Zen1; `znver1` and `x86-64-v3` builds) and on europa (Zen4;
+`znver1`, `x86-64-v3`, `x86-64-v4` and native builds, and native with gxhash 3's `hybrid`). One
+pinned core, the `performance` governor, no shoal unit running on any host. Every figure is GiB
+a second for one core at 64 KiB units, *cold* (units taken in turn from an arena larger than
+any cache) and *hot* (one unit over and over). The choice follows the user's instruction to
+complete S1's checksum prerequisite with X5's recommendation.
+
+| Decision | Evidence |
+| --- | --- |
+| **AVX2 may be required of a node** | The user's ruling on 2026-10-03, given while X5 was planned, so that a candidate needing AVX2, or gxhash's AVX2 path, would count as a build a node could be given. Nothing chosen below leans on it: `crc-fast` picks its kernels at run time. Nothing in the tree enforces it, and nothing needs to until something does lean on it |
+| **gxhash is not the checksum of a chunk unit** | Its `Hasher` fed in pieces equalled its one-shot function on 0 of 1,365 inputs and cuttings, in both majors, on every host and build. Two cuttings of the same bytes agree only when each arrived in one piece. Its definition is its crate's code: the two majors disagree, 2.3.1's `avx2` feature cannot be compiled by rustc 1.100, and 3.5.0's `hybrid` builds for `znver1` and dies of SIGILL on a Zen1 cpu. Its output did **not** move across cpus or builds, so the trigger X5 named fired for ways of feeding it alone. Shoal's existing uses of gxhash fix their pieces by their own formats and are unaffected |
+| **The checksum is CRC-64/NVME**: polynomial `0xAD93D23594C93659`, reflected, initial value and final xor all ones, check value `0xAE8B14860A799888` | A definition of six parameters in the RevEng catalogue, which two crates met on every host and build, along with every other published value tried. Of the candidates that give the same output however fed, only a CRC combines and resumes. So a chunk's checksum is made from its units' without a second pass, and a unit's checksum is carried to its place without its bytes, which lets a client's checksum be the one a slice stores ([S12](wire-and-client.md#ranged-frames)). It runs at 11.4 cold and 13.1 hot on titan, and 40.5 and 75.0 on europa from the `znver1` build. CRC-32C through the same crate is no faster on either cpu (11.1 and 12.4 on titan) and half as wide |
+| **The crate is `crc-fast` `=1.10.0`**, pinned exactly as gxhash is, added at M13 with its default features off | It chooses PCLMULQDQ, AVX-512VL or VPCLMULQDQ at run time and names its choice: VPCLMULQDQ on europa from a `znver1` build. No C, no allocation, no thread. MIT OR Apache-2.0. `crc64fast-nvme`, the other CRC-64/NVME crate, is deprecated for it and has no VPCLMULQDQ kernel on a stable compiler. Because the format is the definition and not the crate, the crate can be replaced without a format change |
+| **The combine is Shoal's own**, from zlib's method, with the multiplier for each unit length made once | It costs 78 ns on titan for CRC-64/NVME, and 50 ns on europa. `crc-fast`'s `checksum_combine` gives the same answer in 124 to 236 µs on titan, longer than checksumming the second part. Sixteen units combine into a chunk's checksum in about 1.2 µs, where reading the chunk again costs 85 µs |
+| **The checksum sets no floor under the chunk unit** | CRC-64/NVME is within 2% of its rate at 4 KiB cold on titan. The floor is X4's encode, at 16 to 64 KiB. A 1 MiB unit holds a Zen1 core for 85 µs |
+
+**Not settled.** These remain open:
+
+- **The granule**: Q20's geometry.
+- **Whether the row keeps each stripe chunk's digest**:
+  [X1](spikes.md#x1-the-stripe-protocol-as-a-model) and
+  [X10](spikes.md#x10-what-a-stripe-row-costs). X5 says it costs about 1.2 µs a chunk to make
+  and eight bytes to keep.
+- **The bytes of a unit's identity, and their place in the checksum**: [S6](device-store.md), at
+  M14.
+- **What checksumming costs a table beside it**: X9. On Zen1 it is as much CPU as encoding.
+- **S3's full-object checksums**: recalled to include CRC-64/NVME, and read by
+  [X14](spikes.md#x14-ceph-and-s3-at-the-source).
+- **`crc-fast`'s `unsafe`**: about 361 lines, read before M13 takes it.
 
 ## Alternatives rejected
 
@@ -326,7 +359,7 @@ Q1–Q13.
 | Q18 | **Size and truncate across tablets.** Preferred: a truncate epoch in `ObjectMeta` that every stripe commit stamps, with a short stack of floors. The alternative keeps an object's rows in one tablet, which makes size atomic and confines an object to one group | Before M11. X1 |
 | Q19 | **Placement.** How many placement groups a tablet; the placement function; failure domains; how a commit checks a generation; the pool map's size and fanout | Before M11. [X2](spikes.md#x2-placement-simulation) |
 | Q20 | **Which code family, which crate, what geometry**: Reed-Solomon, random linear network coding, a fountain code, or plain XOR at one parity chunk; stripe and chunk unit sizes; parity delta or reconstruct-write. Preferred: a systematic code that decodes from any k, because a seek and a small write both lean on those two properties. **In part, 2026-10-03**: the family, the crate and parity delta are decided ([the record](#q20-in-part-the-code-and-the-crate-2026-10-03)); the geometry is not | M18. ✅ [X4](erasure-coding-crates.md), [X14](spikes.md#x14-ceph-and-s3-at-the-source) |
-| Q21 | **Which checksum**, at what granule, and whether the row keeps a digest of each stripe chunk to catch a write that was lost whole. Preferred: a definition no crate's release can move | M13, since a frame that carries a unit's checksum fixes it on the wire before any slice stores one. [X5](spikes.md#x5-checksums) |
+| Q21 | **Which checksum**, at what granule, and whether the row keeps a digest of each stripe chunk to catch a write that was lost whole. Preferred: a definition no crate's release can move. **In part, 2026-10-03**: the checksum is CRC-64/NVME through `crc-fast`, with a combine of Shoal's own ([the record](#q21-in-part-the-checksum-2026-10-03)); the granule and the chunk digest are not decided | M13, since a frame that carries a unit's checksum fixes it on the wire before any slice stores one. ✅ [X5](checksums.md) |
 | Q22 | **The device store's layout**, its way of applying an update, its `fdatasync` strategy and the filesystems it accepts. Preferred: a journal written ahead for small updates and whole files for large ones | M14. [X6](spikes.md#x6-the-device-store-on-ssd) |
 | Q23 | **What a rotational device needs**: an executor of its own, a journal on an SSD, another layout | M19. [X7](spikes.md#x7-the-device-store-on-hdd) |
 | Q24 | **Where object work runs**: which executor owns a slice, whether object work shares executors with tables, the lane, the memory budget | M14. X9 |

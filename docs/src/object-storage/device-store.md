@@ -97,8 +97,15 @@ removing an object's directory is removing its chunks there.
   never grows it, which is the cheap half of the lab's measurement above, and a unit never
   written reads as zeros.
 
-Which checksum, and how large a unit, are [Q21](contract.md#questions-to-answer) and
-[Q20](contract.md#questions-to-answer).
+~~Which checksum, and how large a unit, are [Q21](contract.md#questions-to-answer) and
+[Q20](contract.md#questions-to-answer).~~ The checksum is **CRC-64/NVME**, chosen by
+[X5](checksums.md). It combines, so the identity is mixed in without reading the unit again:
+the checksum stored is the CRC of the unit's bytes followed by its identity, made from the CRC
+of the bytes and the CRC of the identity. That lets a client's checksum be the one stored. A
+chunk's own checksum in the header can likewise be made from its units' at about 78 ns a unit
+on titan. How large a unit is stays [Q20](contract.md#questions-to-answer)'s, and the checksum
+sets no floor under it: CRC-64/NVME is at its rate from 4 KiB. The identity's exact bytes are
+this page's to fix at M14.
 
 ### Staging: two cases
 
