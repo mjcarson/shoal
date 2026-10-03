@@ -39,7 +39,7 @@ pub struct TestRecord {
 
 | Attribute | Meaning |
 | --- | --- |
-| `#[shoal(partition)]` | Part of the partition key. At least one required. Multiple are combined into a tuple. |
+| `#[shoal(partition)]` | Part of the partition key. At least one required. Multiple are combined into a tuple, in declaration order, and the order is part of the key: the same values in other fields are another partition. SHQL cannot name a composite key ([item 41](../appendix/known-issues.md#41-shql-cannot-express-a-composite-partition-key)); typed queries can ([Resolved #92, #198](../appendix/resolved/composite-partition-key.md)). |
 | `#[shoal(sort)]` | Part of the sort key. Required for sorted tables, forbidden on unsorted. |
 | `#[shoal(filter)]` | Usable in a filter predicate and in a SHQL `WHERE`. |
 | `#[shoal(update)]` | Usable in an update query. |
@@ -126,7 +126,10 @@ Both kinds of get take a `Vec` of partition keys and read them in the order they
 which is the order their rows come back in
 ([Query Execution](../tables/query-execution.md#the-order-rows-come-back-in)). The partition key
 type is the field's type when there is one partition field, or a tuple when there are several,
-and the hashing to a `u64` happens inside.
+and the hashing to a `u64` happens inside. A row and a key hash the same bytes: each partition
+field's own `Hash`, in declaration order, into one `GxHasher`, so a get of `(a, b)` finds the row
+whose fields are `a` and `b`. The unsorted `Delete::new` takes the key's fields as separate
+arguments and the unsorted `Exists::new` takes the tuple.
 
 `limit` is generated on both, along with a `.limit(n)` builder. It spans every partition the get
 names and, when the get is split across shards, every shard

@@ -186,7 +186,10 @@ inside a conjunction.
   cannot constrain one field twice** unless the two conditions bound opposite ends of one range.
   See [`AND`, `OR`, and `IN`](#and-or-and-in) above.
 - **Composite partition keys are not reachable.** A table with several `#[shoal(partition)]`
-  fields has a tuple `PartitionKey`, and no SHQL literal can produce one.
+  fields has a tuple `PartitionKey`, and no SHQL literal can produce one. Such a table compiles
+  and every typed query reaches it
+  ([Resolved #92, #198](../appendix/resolved/composite-partition-key.md)); a SHQL query against it
+  is refused at the parse ([item 41](../appendix/known-issues.md#41-shql-cannot-express-a-composite-partition-key)).
 - **No `ORDER BY`, `GROUP BY`, `JOIN`, or aggregates.**
 - **No `INSERT`, `UPDATE`, or `DELETE`.** Writes must be built as typed queries.
 - ~~**No escape syntax in string literals.** A value containing a single quote cannot be
@@ -583,7 +586,8 @@ by `shoalctl/tests/completion.rs`.
 - A projection has to be a type the table declared. A name no table declared, or one belonging to
   another table, is a binding error rather than a query
   ([F2](../features/projections.md#what-it-does)).
-- Composite partition keys cannot be expressed, since no literal can produce a tuple.
+- Composite partition keys cannot be expressed, since no literal can produce a tuple. The table
+  itself works; only SHQL cannot name its key (item 41).
 - ~~String literals have no escape syntax, so they cannot contain a single quote.~~ A quote is
   written twice inside a literal, so a row whose partition key holds an apostrophe is reachable
   ([Resolved #27](../appendix/resolved/shql-quote-escape.md)).

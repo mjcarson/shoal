@@ -11,7 +11,7 @@ use super::utils;
 ///
 /// * `stream` - The stream to extend
 /// * `name` - The name of the type we are extending
-/// * `query_name` - The name of the query type
+/// * `partition_fields` - The fields that make up this type's partition key, in declaration order
 pub fn add(
     stream: &mut proc_macro2::TokenStream,
     name: &Ident,
@@ -29,18 +29,21 @@ pub fn add(
         let types: Vec<_> = partition_fields.iter().map(|(_, ty)| ty).collect();
         quote! { (#(#types),*) }
     };
-    // Build the arguments to pass to get_partition_key_from_values
-    let partition_key_args = if partition_fields.len() == 1 {
-        // get our single partition field ident
-        let (ident, _) = &partition_fields[0];
-        // we only need to pass a single argument
-        quote! { &self.#ident }
-    } else {
-        // get the idents for all of our partition fields
-        let idents: Vec<_> = partition_fields.iter().map(|(ident, _)| ident).collect();
-        // we have multiple fields to pass
-        quote! { &(#(&self.#idents),*) }
-    };
+    // Build hash statements for get_partition_key, one per field of this row in declaration order
+    //
+    // A row is hashed field by field rather than by building a tuple of its key to hand to
+    // get_partition_key_from_values: a tuple of references is not the key type, and a tuple of
+    // clones would copy every key on every insert. A tuple's Hash is its members' Hash in order
+    // with nothing between them, so this writes the same bytes the values path writes from the
+    // tuple, and for a single field it is exactly what that path did (items 92 and 198)
+    let hash_row_stmts: Vec<_> = partition_fields
+        .iter()
+        .map(|(ident, _)| {
+            quote! {
+                Self::hash_field(&mut hasher, &self.#ident);
+            }
+        })
+        .collect();
     // Build hash statements for get_partition_key_from_values
     let hash_values_stmts: Vec<_> = if partition_fields.len() == 1 {
         vec![quote! {
@@ -97,8 +100,16 @@ pub fn add(
             }
 
             /// Calculate the partition key for this row
+            ///
+            /// This hashes each partition field in declaration order, which is what
+            /// `get_partition_key_from_values` does with the members of the key's tuple, so a
+            /// row and the key naming it always hash to the same partition.
             fn get_partition_key(&self) -> u64 {
-                Self::get_partition_key_from_values(#partition_key_args)
+                use std::hash::Hasher;
+                // hash each of our partition fields in declaration order
+                let mut hasher = ::shoal::gxhash::GxHasher::default();
+                #(#hash_row_stmts)*
+                hasher.finish()
             }
 
             /// Calculate the partition key for this row

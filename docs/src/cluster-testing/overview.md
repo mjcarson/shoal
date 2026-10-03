@@ -34,8 +34,12 @@ voters, six cores and 8 GiB per node with a dedicated control core, since round 
 `lead_weight: 2` and the Zen1 hosts at a 2 ms `wal_commit_delay`, mutual TLS on the peer lanes,
 SCRAM for clients, and nodes running as the system user `shoal` under systemd with
 `Restart=on-failure`. The schema is [F54](../features/tmdb-dataset-deployment.md)'s: `Movie`
-(unsorted, by id) and `MovieByKeyword` (sorted, by keyword then title and id). The dataset is
-`TMDB_movie_dataset_v11.csv`, 1,188,548 movies, which the loader writes as 2,193,788 rows.
+(unsorted, by id) and `MovieByKeyword` (sorted, by keyword then title and id), and since
+2026-10-03 `MovieRelease` (unsorted, by a composite key of release year, month and id;
+[Resolved #92, #198](../appendix/resolved/composite-partition-key.md)). The dataset is
+`TMDB_movie_dataset_v11.csv`, 1,188,548 movies, which the loader writes as ~~2,193,788~~
+3,382,336 rows. Every round below ran before `MovieRelease` existed, so the row counts they
+quote are of the first two tables.
 
 Europa's group started on `/opt/shoal`, on a root device that was 98% full. It was moved to the
 Optane before the first test here. Everything below ran on the Optane unless it says otherwise.

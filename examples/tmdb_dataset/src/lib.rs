@@ -249,6 +249,72 @@ impl MovieByKeyword {
     }
 }
 
+/// The key a [`MovieRelease`] is partitioned by: its year, its month and the movie's id
+pub type ReleaseKey = (u64, u64, u64);
+
+/// A movie filed under when it was released, one per partition
+///
+/// Its partition key is three fields, the year, the month and the movie's id, which is the shape
+/// an object store's stripe row is keyed by: it is the table that holds a composite partition key
+/// to a deployed cluster ([Resolved #92, #198](../../docs/src/appendix/resolved/composite-partition-key.md)).
+/// The id is part of the key because every movie of a month would otherwise be one row.
+#[derive(
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalUnsortedTable, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Tmdb")]
+pub struct MovieRelease {
+    /// The year the movie was released in, or zero when the csv does not say
+    #[shoal(partition)]
+    pub year: u64,
+    /// The month the movie was released in, or zero when the csv does not say
+    #[shoal(partition)]
+    pub month: u64,
+    /// The movie's id, the partition its whole row is in
+    #[shoal(partition)]
+    pub id: u64,
+    /// The movie's title, which a get can filter on
+    #[shoal(filter)]
+    pub title: String,
+    /// The movie's popularity, which an update can change
+    #[shoal(update)]
+    pub popularity: f64,
+}
+
+impl MovieRelease {
+    /// The release row of a movie
+    ///
+    /// The csv's `release_date` is `YYYY-MM-DD`. A date that is empty or will not parse is filed
+    /// under year and month zero rather than skipped, since the movie itself was written: every
+    /// movie has exactly one release row, and an id on several csv rows has one for each date
+    /// those rows carry.
+    ///
+    /// # Arguments
+    ///
+    /// * `movie` - The movie to file
+    #[must_use]
+    pub fn from_movie(movie: &Movie) -> Self {
+        // the year and month are the first two fields of the date, each zero if it will not parse
+        let mut parts = movie.release_date.trim().splitn(3, '-');
+        let mut next = || parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
+        let year = next();
+        let month = next();
+        MovieRelease {
+            year,
+            month,
+            id: movie.id,
+            title: movie.title.clone(),
+            popularity: movie.popularity,
+        }
+    }
+
+    /// The composite key this row is filed under
+    #[must_use]
+    pub fn key(&self) -> ReleaseKey {
+        (self.year, self.month, self.id)
+    }
+}
+
 /// The database
 ///
 /// `#[shoal::db]` reads this struct and generates the client type, the query enum and the
@@ -259,4 +325,6 @@ pub struct Tmdb {
     pub movie: PersistentUnsortedTable<Movie, FileSystem>,
     /// Movies by keyword, many per partition
     pub movie_by_keyword: PersistentSortedTable<MovieByKeyword, FileSystem>,
+    /// Movies by when they were released, keyed by three fields
+    pub movie_release: PersistentUnsortedTable<MovieRelease, FileSystem>,
 }

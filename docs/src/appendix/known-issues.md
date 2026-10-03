@@ -32,8 +32,8 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at ~~15~~ ~~16~~ 19 and skips 25, 26, 27, 30, 31, 32, 33, 34, 36, 38, 39, 43, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 120, 121, 122, 123 and 124, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ ~~item 132 is the newest entry and the newest number~~ ~~item 180 is the newest entry, with 182 the newest number, on the resolved page,~~ ~~item 142 is the newest open entry, with 187 the newest number, on the resolved page,~~ ~~item 196 is the newest entry and the newest number, with 191, 192, 194 and 195 filed and fixed in one change on the resolved page,~~ ~~item 142 is the newest open entry, with 197 the newest number, on the resolved page beside 193 and 196 (all three from round 16 of the cluster testing, 197 filed and fixed in one change),~~ ~~item 198 is the newest entry and the newest number (filed by [F66](../features/dataset-benchmarks.md), which found it),~~ ~~item 198 is the newest entry, with 200 the newest number, on the resolved page beside 199 (both filed and fixed in one change, from a user's `shoaladm bench` run whose ops/s by kind chart stayed empty),~~ ~~item 198 is the newest entry, with 201 the newest number, on the resolved page beside 199 and 200 (all three filed and fixed in one change each, from a user's `shoaladm bench` runs)~~ item 206 is the newest entry and the newest number (202 to 206 were filed by the [object storage plan](../object-storage/prerequisites.md): four found by reading the code it would be built on, and the last by checking its own links; 199, 200 and 201 stay on the resolved page), and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 92, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 120, 121, 122, 123 and 124, and
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ ~~item 132 is the newest entry and the newest number~~ ~~item 180 is the newest entry, with 182 the newest number, on the resolved page,~~ ~~item 142 is the newest open entry, with 187 the newest number, on the resolved page,~~ ~~item 196 is the newest entry and the newest number, with 191, 192, 194 and 195 filed and fixed in one change on the resolved page,~~ ~~item 142 is the newest open entry, with 197 the newest number, on the resolved page beside 193 and 196 (all three from round 16 of the cluster testing, 197 filed and fixed in one change),~~ ~~item 198 is the newest entry and the newest number (filed by [F66](../features/dataset-benchmarks.md), which found it),~~ ~~item 198 is the newest entry, with 200 the newest number, on the resolved page beside 199 (both filed and fixed in one change, from a user's `shoaladm bench` run whose ops/s by kind chart stayed empty),~~ ~~item 198 is the newest entry, with 201 the newest number, on the resolved page beside 199 and 200 (all three filed and fixed in one change each, from a user's `shoaladm bench` runs)~~ ~~item 206 is the newest entry and the newest number~~ item 207 is the newest number, filed by [Resolved #92, #198](resolved/composite-partition-key.md) beside item 42 that it belongs with (202 to 206 were filed by the [object storage plan](../object-storage/prerequisites.md): four found by reading the code it would be built on, and the last by checking its own links; 199, 200 and 201 stay on the resolved page, and 92 and 198, one defect filed twice, joined them in one change as [Resolved #92, #198](resolved/composite-partition-key.md)), and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120, 121, 122, 123, 124, 125, 126, 127 and 128 are on the resolved page, with 27, 32 and 36 beside them. **126 never appeared here**:
 it was filed and fixed in one change, from a user's run of `tmdb_dataset` on a host without
 `/opt/shoal` ([Resolved #126](resolved/storage-directory-unusable.md)). **127 never appeared here**
@@ -96,7 +96,7 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ ~~**1,674 tests**~~ ~~**1,685 tests**~~ ~~**1,691 tests**~~ ~~**1,715 tests**~~ ~~**1,725 tests**~~ ~~**1,726 tests**~~ ~~**1,728 tests**~~ ~~**1,782 tests**~~ ~~**1,785 tests**~~ ~~**1,790 tests** since [F65](../features/query-figures-home-tab.md), eleven ignored~~ ~~**1,892 tests** since [F67](../features/bench-run-wizard.md)~~ ~~**1,894 tests** since [Resolved #201](resolved/attached-read-order.md)~~ **1,911 tests** since [F68](../features/conditional-writes.md), twelve ignored (F66 took it to 1,873 without moving this line), plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ ~~**1,674 tests**~~ ~~**1,685 tests**~~ ~~**1,691 tests**~~ ~~**1,715 tests**~~ ~~**1,725 tests**~~ ~~**1,726 tests**~~ ~~**1,728 tests**~~ ~~**1,782 tests**~~ ~~**1,785 tests**~~ ~~**1,790 tests** since [F65](../features/query-figures-home-tab.md), eleven ignored~~ ~~**1,892 tests** since [F67](../features/bench-run-wizard.md)~~ ~~**1,894 tests** since [Resolved #201](resolved/attached-read-order.md)~~ ~~**1,911 tests** since [F68](../features/conditional-writes.md)~~ **1,921 tests** since [Resolved #92, #198](resolved/composite-partition-key.md), twelve ignored (F66 took it to 1,873 without moving this line), plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
@@ -112,7 +112,7 @@ fixture tests: two passed alone, and six could not bind ~~port 12000~~ ports 120
 because a deployed lab node held them on the same host ([Test Coverage](test-coverage.md)), since
 [resolved](resolved/fixture-default-peer-ports.md) as item 134. The
 [distributed cluster testing](../cluster-testing/overview.md) chapter's fixes (items 60, 130, 131,
-133 to 157, O61, O62, O63, O65 to O68) and its driver added 37 and took it to 1,656 ([Test Coverage](test-coverage.md)). [Resolved #158](resolved/runtime-waker-lists.md) added 5 `shoal-core` unit tests and took it to 1,661, every one passing at six threads. [Resolved #159](resolved/map-ahead-of-archive.md) added 2 and took it to 1,663. Its run at six threads failed two fixture tests from item 142's list, each of which passed alone three times. Items 160 to 168 and [F56](../features/cluster-rebuild.md) added 11 and took it to 1,674 ([Test Coverage](test-coverage.md)). Items 169 to 178 added 10 and took it to 1,685. #176, #179 and O74 added 6 and took it to 1,691. The distributed cluster testing chapter's round 11 (#129, #142's assertion, #143, #156, #181, #182, O57, O74, O76 and [F57](../features/cluster-reconfigure.md)) added 10 and took it to 1,701. Its workspace run at six threads passed every one. Rounds 12 to 14 took it to 1,728 ([Test Coverage](test-coverage.md)). Round 15 (F61, #191, #192, #194, #195, O81 to O83) added 14 and took it to 1,742; its workspace run at six threads on the final code passed every one.
+133 to 157, O61, O62, O63, O65 to O68) and its driver added 37 and took it to 1,656 ([Test Coverage](test-coverage.md)). [Resolved #158](resolved/runtime-waker-lists.md) added 5 `shoal-core` unit tests and took it to 1,661, every one passing at six threads. [Resolved #159](resolved/map-ahead-of-archive.md) added 2 and took it to 1,663. Its run at six threads failed two fixture tests from item 142's list, each of which passed alone three times. Items 160 to 168 and [F56](../features/cluster-rebuild.md) added 11 and took it to 1,674 ([Test Coverage](test-coverage.md)). Items 169 to 178 added 10 and took it to 1,685. #176, #179 and O74 added 6 and took it to 1,691. The distributed cluster testing chapter's round 11 (#129, #142's assertion, #143, #156, #181, #182, O57, O74, O76 and [F57](../features/cluster-reconfigure.md)) added 10 and took it to 1,701. Its workspace run at six threads passed every one. Rounds 12 to 14 took it to 1,728 ([Test Coverage](test-coverage.md)). Round 15 (F61, #191, #192, #194, #195, O81 to O83) added 14 and took it to 1,742; its workspace run at six threads on the final code passed every one. [Resolved #92, #198](resolved/composite-partition-key.md) added 10 and took it to 1,921. Its workspace run at six threads, with the build held to four jobs because europa's btrfs root stalled its linkers at full parallelism, passed 1,920: `single_node_data_has_a_verified_cluster_migration_path` failed with *267 against 400*, the #142 deadline, and passed alone three times.
 [Resolved #27](resolved/shql-quote-escape.md), [#32](resolved/client-gone-broadcast.md),
 [#36](resolved/staged-tail-deadline.md) and [#125](resolved/retry-unknown-outcome.md) added 11
 and took it to 1,587. There are two new binaries, `retry_outcome.rs` (3) and `staged_flush.rs`
@@ -346,44 +346,6 @@ here before them are resolved, all in one change:
 [125](resolved/retry-unknown-outcome.md), a retried write whose unknown first outcome was
 reported as the last try's refusal. Item 125 was filed at the end of this page, with the
 entries that came after the triage order, and carried its severity in its first line.
-
-### 198. A composite partition key does not compile
-
-A table whose partition key is two or more fields fails the table derive's own expansion:
-
-```text
-error[E0308]: mismatched types
-  --> shoal/tests/dataset_rows.rs:74:9
-   |
-74 |         ShoalUnsortedTable,
-   |         ^^^^^^^^^^^^^^^^^^ expected `String`, found `&String`
-```
-
-`PartitionKeySupport::get_partition_key` (`shoal-derive/src/traits/partition_key.rs`, the
-`partition_key_args` built for more than one field) passes `&(&self.a, &self.b)` to
-`get_partition_key_from_values(&Self::PartitionKey)`, whose key is the tuple of the fields'
-own types, `(String, u64)`. A single partition field passes `&self.a`, which is the right
-type, so every table in the repository compiles. Two fields never do, so the multi-field
-branches of the get, update, delete and exists derives (which do build a tuple key) have no
-table to run on.
-
-The fix is to hash the fields one at a time in `get_partition_key`, as
-`get_partition_key_from_values` does with the tuple's members, rather than building a tuple of
-references. Hashing the same values in the same order keeps every key where it was. **Established
-by reproducing it**: [F66](../features/dataset-benchmarks.md)'s `dataset_rows` test declared a
-`Stock` table keyed by `warehouse` and `item`. It failed with the error above whether or not the
-table opted in to datasets, and was taken out of the test until this is fixed.
-
-**This is [item 92](#92-a-table-with-two-shoalpartition-fields-does-not-compile) found a second
-time.** The two entries describe one defect and name one fix, and neither cited the other until
-the object storage plan read them together. Both numbers stay, since a number is never reused;
-one change closes both.
-
-**Must be fixed before object storage's M12.** The stripe table a bucket generates is keyed by
-an object id and a stripe index, and packing the two into one field to step round this would
-freeze the workaround into the persisted key of every stripe
-([S1](../object-storage/prerequisites.md#required),
-[S3](../object-storage/objects.md#the-two-rows)).
 
 ### 202. Nothing bounds an append batch in bytes
 
@@ -845,6 +807,12 @@ place where `AND` across two fields is a conjunction *within* a key rather than 
 of one, and that `IN` over a composite key would need each field's values crossed with the
 others.
 
+**Reachable since [Resolved #92, #198](resolved/composite-partition-key.md).** Until then a table
+with a composite key did not compile, so this refusal had no table to be met on. It now has: a
+schema can declare one and every typed query reaches it, and only the SHQL path refuses. The
+refusal is pinned by `shql_refuses_a_composite_key` in `shoal-client-check`, which a fix to this
+item turns into the test of what it accepts.
+
 ### 42. SHQL cannot express a composite sort key
 
 The same defect as [41](#41-shql-cannot-express-a-composite-partition-key), one key over. Several
@@ -864,6 +832,40 @@ a composite sort key is a *range*, not a point, and although ranges exist now
 synthesized minimum and maximum values for the fields the prefix leaves out, which `Sort` does not
 name ([TODOs](todos.md#sort-key-range-predicates--built)).
 
+
+### 207. A sorted table with two `#[shoal(sort)]` fields does not compile
+
+`shoal-proto/src/shared/traits/sorted.rs`, `type Sort`; `shoal-proto/src/shared/traits.rs`,
+`impl RkyvSupport for String`
+
+Several sort fields make a tuple `Sort`, the same way several partition fields make a tuple
+`PartitionKey`. `Sort` is bound by `RkyvSupport`, which is implemented for `String` and nothing
+else, so the derive's expansion fails for any table with a second sort field:
+
+```text
+error[E0277]: the trait bound `(std::string::String, std::string::String): RkyvSupport` is not satisfied
+ --> shoal/tests/zz_scratch_sort.rs:5:57
+  |
+5 | #[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, Eq, DeepSizeOf)]
+  |                                                         ^^^^^^^^^^^^^^^^ the trait `RkyvSupport` is not implemented for `(std::string::String, std::string::String)`
+```
+
+[Item 42](#42-shql-cannot-express-a-composite-sort-key) describes a composite sort key as a SHQL
+gap, which assumes the table compiles; it does not. Nor does a single sort field of any type but
+`String`. [F54](../features/tmdb-dataset-deployment.md) met this and joined its title and id
+into one padded string, and the bench schema pads its `Event` sort key the same way. Neither was
+filed as a defect.
+
+**Established by reproducing it**, with a throwaway test binary written while fixing the
+partition key's version of the same shape
+([Resolved #92, #198](resolved/composite-partition-key.md)), which this is not part of: a sort
+key is ordered as well as hashed, and what order a tuple of fields has on disk, and how a range
+over a prefix of it is lowered (item 42, [TODOs](todos.md#sort-key-range-predicates--built)), is
+a design question the partition key does not have.
+
+**Fix direction:** implement `RkyvSupport` for the key types a sort field may be (the integers,
+and tuples of supported types), and check that the archived ordering a sorted partition relies on
+is the tuple's own `Ord`. Then item 42 is the SHQL half of it.
 ### 35. A `RefCell` borrow is held across three awaits in the compactor
 
 ```rust
@@ -1916,38 +1918,6 @@ installation, applied to the archive write and the map's re-pointing, after whic
 write can be retried by discarding the incomplete new; and a rotation that finds its compactor
 gone should say so rather than end the shard.
 
-### 92. A table with two `#[shoal(partition)]` fields does not compile
-
-`shoal-derive/src/traits/partition_key.rs`, `add`: the `partition_key_args` branch for several
-fields
-
-A composite partition key is a tuple: `type PartitionKey = (A, B)`. The generated
-`get_partition_key` calls `get_partition_key_from_values(&(&self.a, &self.b))`, which is a
-`&(&A, &B)` where the signature wants `&(A, B)`, so every table with more than one partition field
-fails to expand:
-
-```
-error[E0308]: mismatched types
-   |     Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, ...
-   |                                                    ^^^^^^^^^^^^^^^^^^ expected `u64`, found `&u64`
-```
-
-**Established by reproduction**, by the golden key test [F37](../features/node-identity-control-plane.md)
-wrote for [item 65](resolved/gxhash-pin.md): its third table, keyed by a `u64` and a `String`,
-was the first composite partition key in the workspace and did not build. The output above is
-what `cargo test -p shoal --test partition_keys` printed before the table was removed. Item 41
-already records that SHQL cannot express such a key; this says the derive cannot either.
-
-**Fix direction:** hash the fields directly in `get_partition_key` - one `hash_field` per field
-in declaration order, which is what `get_partition_key_from_values` does with the tuple - rather
-than building a tuple of references to pass through it. Then add the composite shape to the
-frozen key set, obtaining its literals the way the other eight were.
-
-[Item 198](#198-a-composite-partition-key-does-not-compile) is this defect found again, by
-[F66](../features/dataset-benchmarks.md), and filed without a reference to this entry. One fix
-closes both, and the object storage plan requires it before its M12
-([S1](../object-storage/prerequisites.md#required)).
-
 ### 93. The archived partition hash disagrees with the live one for every string key
 
 `shoal-derive/src/traits/partition_key.rs`, `add`: `hash_archived_stmts`
@@ -1973,6 +1943,11 @@ The object storage plan generates a table keyed by a string, an object's path
 ([S3](../object-storage/objects.md#paths)), which is the shape this would hit. It lists this
 item as optional and says why ([S1](../object-storage/prerequisites.md#optional)): the function
 still has no caller, and either fix changes no key that is persisted.
+
+Since [Resolved #92, #198](resolved/composite-partition-key.md) a composite key compiles, and
+the archived variant hashes each of its fields the way it hashes a single one, so a composite key
+with a string in it disagrees the same way. The golden key test froze the composite shapes' live
+hash alone, for the same reason it freezes only the live hash of a string.
 
 ### 117. A restore under the fixture suite's load finds its target table not yet empty
 

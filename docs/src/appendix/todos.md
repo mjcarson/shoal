@@ -1014,7 +1014,9 @@ reason — `AND` is already a transition out of `Continuation`. It buys nothing 
 not, which is why it was not built with them.
 
 **Prefix ranges over a composite sort key.** Several `#[shoal(sort)]` fields make a tuple `Sort`,
-and the typed API can already range over whole tuples since a tuple is `Ord`. What neither front
+and the typed API can already range over whole tuples since a tuple is `Ord` - ~~can~~ could, if
+such a table compiled: it does not, since a tuple is not `RkyvSupport`
+([item 207](known-issues.md#207-a-sorted-table-with-two-shoalsort-fields-does-not-compile)). What neither front
 end can do is bound a *prefix* — `(author, title) >= ('Le Guin', ..)` — which needs synthesized
 minimum and maximum values for the remaining elements, so `Sort` would have to name them. SHQL
 cannot reach a composite sort key at all

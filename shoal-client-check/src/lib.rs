@@ -72,6 +72,27 @@ pub struct MovieByKeyword {
     pub movie_id: u64,
 }
 
+/// An unsorted table keyed by three fields, so a composite partition key is covered too
+#[derive(
+    Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "CheckDb")]
+pub struct Release {
+    /// The year the movie was released in
+    #[shoal(partition)]
+    pub year: u64,
+    /// The month the movie was released in
+    #[shoal(partition)]
+    pub month: u64,
+    /// The id of the movie
+    #[shoal(partition)]
+    pub id: u64,
+    /// The title of the movie, which can be filtered on
+    #[shoal(filter)]
+    pub title: String,
+}
+
 // no `use shoal::tables::...` and no `use shoal::storage::...`, deliberately - see the module docs
 #[shoal::db(client)]
 pub struct CheckDb {
@@ -80,4 +101,6 @@ pub struct CheckDb {
     pub movies: PersistentUnsortedTable<Movie, FileSystem>,
     /// The same movies, by keyword
     pub movies_by_keyword: PersistentSortedTable<MovieByKeyword, FileSystem>,
+    /// The same movies, by when they were released
+    pub releases: PersistentUnsortedTable<Release, FileSystem>,
 }

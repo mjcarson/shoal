@@ -607,7 +607,7 @@ cost, which bring X4, X5 and X6 with them.
 ## Exploratory work that is not a spike
 
 - **The required prerequisites that depend on no question** ([S1](prerequisites.md#the-order)):
-  known issues 46, 198 and 202, the fixture's device faults, and the driver's operation
+  known issues 46, ~~198~~ (✅ [resolved](../appendix/resolved/composite-partition-key.md)) and 202, the fixture's device faults, and the driver's operation
   kinds and byte counters. Each is worth having with no object store at all, and each can
   be built and judged while the spikes run.
 - **Fitting the lab**: disks, and XFS.

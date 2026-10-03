@@ -59,7 +59,7 @@ next change to the major is the one that would move these, and it now cannot mov
 
 Two things the test found on the way, filed and not fixed here: a table with two
 `#[shoal(partition)]` fields does not compile, because the derive passes `&(&a, &b)` where
-`(A, B)` is expected ([item 92](../known-issues.md)), and
+`(A, B)` is expected (item 92, since [resolved](composite-partition-key.md) with item 198), and
 `get_partition_key_from_archived_insert` hashes a string's bytes without the `0xff` terminator
 `Hash for str` writes, so the archived and live paths would disagree for every string key if the
 archived path had a caller ([item 93](../known-issues.md)).
@@ -91,7 +91,9 @@ way a hash change does.
   reach `GxHasher::default()`. The word was doing nothing but reassuring the reader.
 - **A composite key in the golden set.** It does not compile; item 92. Fixing the derive is a
   small change to `partition_key.rs`, and it is a derive change that every schema in the workspace
-  re-expands under, so it is its own fix with its own page rather than a line in this one.
+  re-expands under, so it is its own fix with its own page rather than a line in this one. That
+  fix is [Resolved #92, #198](composite-partition-key.md), which added two composite shapes to
+  the set.
 - **Freezing the hash of an archived row too.** The archived path has no caller, and freezing a
   value nothing reads would pin the wrong answer (item 93) as the right one.
 
@@ -102,16 +104,18 @@ way a hash change does.
   filed in.
 - **`GxHasher::default()` is the hasher of every partition key**, on both peers. A seed, a
   `GxBuildHasher`, or a different hasher on either side is two peers hashing one key two ways.
-- **The eight literals in `partition_keys.rs` are a persistence format.** Changing them is a
+- **The ~~eight~~ sixteen literals in `partition_keys.rs` are a persistence format** - eight
+  more, of two composite shapes, since [Resolved #92, #198](composite-partition-key.md). Changing them is a
   migration and needs one; a build in which they fail cannot read an existing directory.
 - **The tablet is part of the frozen set.** `TABLET_BITS` is public so the test can derive it
   the way the ring does; a change there is the same event as a hash change.
 
 ## Still open
 
-**Item 92**, the composite partition key that does not compile, and **item 93**, the archived
+~~**Item 92**, the composite partition key that does not compile, and~~ **item 93**, the archived
 string hash that disagrees with the live one. Both were found by this fix and neither is part of
-it. **Item 46**, an unmarked directory being claimed, is unaffected.
+it. Item 92 has since been fixed, with item 198, by
+[Resolved #92, #198](composite-partition-key.md). **Item 46**, an unmarked directory being claimed, is unaffected.
 
 ## Tests
 

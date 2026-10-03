@@ -186,7 +186,7 @@ gets longer.
 ## Prerequisites
 
 [S1](prerequisites.md#required): the conditional write, which the generated rows' updates are
-built on (delivered, [F68](../features/conditional-writes.md)), and known issue 198, since `StripeMeta`'s key is more than one field.
+built on (delivered, [F68](../features/conditional-writes.md)), and known issue 198, since `StripeMeta`'s key is more than one field (delivered with item 92, [Resolved #92, #198](../appendix/resolved/composite-partition-key.md)).
 
 ## How it would be measured
 

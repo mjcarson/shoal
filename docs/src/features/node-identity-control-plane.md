@@ -254,8 +254,10 @@ A spike-only type configuration would have measured a harness.
 - **The spike ran on the development host under `powersave`**, so its numbers bound the shape of
   the Q13 answer rather than its value on the benchmark host. It measured no library under a
   *shard's* ownership.
-- **A composite partition key does not compile** ([item 92](../appendix/known-issues.md)), which
-  the golden test found and did not fix; the frozen shapes are the two that build.
+- ~~**A composite partition key does not compile** (item 92), which the golden test found and did
+  not fix; the frozen shapes are the two that build.~~ Fixed by
+  [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), which froze two composite
+  shapes beside these two.
 - **The benchmark arm has no page of its own.** It lives on *Every workload* with its family's
   four blocks ~~; a cluster page is for when there is a second node to draw~~ - and so do the
   three hop arms [F38](inter-node-transport.md) added beside it; the page waits on a committed

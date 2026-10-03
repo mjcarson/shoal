@@ -335,9 +335,10 @@ deployment cannot be held across a spawn.
 - **A sorted get of several keys** names each partition once and every sort key. It also returns
   a row whose sort key matches in another of the named partitions, so it can return more rows
   than keys.
-- **A table with a partition key of two or more fields does not compile**, with or without
-  `dataset`. That is an older defect of the partition key derive, filed as
-  [known issue 198](../appendix/known-issues.md#198-a-composite-partition-key-does-not-compile).
+- ~~**A table with a partition key of two or more fields does not compile**, with or without
+  `dataset`. That is an older defect of the partition key derive, filed as known issue 198.~~
+  Fixed by [Resolved #92, #198](../appendix/resolved/composite-partition-key.md): such a table
+  opts in like any other, and `dataset_rows.rs` has its `Stock` table back.
 - **Windows are cut at second resolution**, where `shoal-bench` cut at each operation's time.
 - **Catch up is the cluster's largest lag**, not the returning node's alone, sampled from when
   the node reports up again.

@@ -110,9 +110,10 @@ commit to a cold row costs ([X10](spikes.md#x10-what-a-stripe-row-costs)). A gen
 is persisted from the first object on, so its layout is fixed here.
 
 **Lands first.** ~~A conditional write on unsorted tables, with a typed refusal~~ ✅ landed
-as [F68](../features/conditional-writes.md), for sorted tables too. Known issue
-198, the partition key of two fields, which is also item 92. Known issue 202, a byte bound on
-an append batch.
+as [F68](../features/conditional-writes.md), for sorted tables too. ~~Known issue
+198, the partition key of two fields, which is also item 92.~~ ✅ landed as
+[Resolved #92, #198](../appendix/resolved/composite-partition-key.md). Known issue 202, a byte
+bound on an append batch.
 
 **Delivers.** `Bucket<Marker>` as a third kind of field in `#[shoal::db]`
 ([S2](buckets.md)): the two generated tables with their ids and tablet groups, the bucket
