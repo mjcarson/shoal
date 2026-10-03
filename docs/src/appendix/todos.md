@@ -145,11 +145,13 @@ Each of these was left out of [F66](../features/dataset-benchmarks.md) on purpos
   ([S15](../object-storage/performance.md#what-it-costs)).
 - **Update and delete workloads (~~mixes~~ until [F67](../features/bench-run-wizard.md)), and a
   partition scan of a sorted table.** A workload is reads and inserts. An update needs an update field's value to write, which a dataset row has, and a scan
-  needs a limit, which a spec would carry. Operation kinds a schema supplies, and bytes counted
+  needs a limit, which a spec would carry. ~~Operation kinds a schema supplies, and bytes counted
   in every window, are now a required prerequisite of object storage, placed at the start of its
-  first gate ([S1](../object-storage/prerequisites.md#required),
+  first gate~~ Operation kinds a schema supplies, and bytes counted in every window, were
+  delivered by [F69](../features/driver-operation-kinds.md) as a prerequisite of object storage
+  ([S1](../object-storage/prerequisites.md#required),
   [S15](../object-storage/performance.md#what-the-driver-gains)); update and delete would be two
-  more kinds of the same mechanism.
+  more kinds of the same mechanism, which no schema supplies yet.
 - **`perf record` beside the heap profiles.** `--profile` builds with frame pointers, so a `perf`
   run on each node during an arm would attribute cpu as the heap dumps attribute memory.
 - **`--stages`, hotpath and OTel export.** The stage breakdown ([F6](../features/stage-breakdown.md))
@@ -580,7 +582,9 @@ list rather than from the diff:
   planner spreads by node alone. Now a required prerequisite of object storage: a failure
   domain on a member lands at the start of the gate that places stripe chunks
   ([S1](../object-storage/prerequisites.md#required)), and
-  [S5](../object-storage/placement.md#failure-domains) is the first thing that reads it.
+  [S5](../object-storage/placement.md#failure-domains) is the first thing that reads it. Where
+  it comes from was decided on 2026-10-03 (`cluster.failure_domains: {host: <name>}`, the host
+  defaulting to the OS hostname); whether placement reads it waits on Q19.
 - **A hotspot threshold**, Q8's last half: a single hot partition is as indivisible as C8 says.
 
 **What F45 left undone, deliberately.** Recorded here so the next milestone starts from the

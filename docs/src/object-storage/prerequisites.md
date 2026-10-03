@@ -60,7 +60,7 @@ is built right the first time, and nothing required is skipped to reach a gate s
 | --- | --- | --- | --- |
 | **D7, client routing by topology** | A client is pushed every topology version and routes by none ([D7](../direction/shard-aware-routing.md)) | A client that picks the node holding what it wants | Only a client that writes or reads stripe chunks itself needs it. A node coordinates in every design here, so nothing built changes when D7 arrives, and D7's own rule is to measure the hop first ([Q15](contract.md#questions-to-answer)) |
 | **`Cancel` on the client wire** | Reserved as message type 12 and unwired (`shoal-proto/src/shared/protocol.rs:216`; [todos](../appendix/todos.md#cancel-and-what-it-would-actually-buy)) | A reader abandoning a range it no longer wants | With bounded ranged frames a reader stops by not asking for the next range; what a cancel saves is the tail of one. The type is reserved, so wiring it later changes nothing already on the wire |
-| **A clone call in the glommio fork** | `copy_file_range_aligned` exists (`glommio/src/io/dma_file.rs:574`); no `FICLONERANGE` | Splicing a staged range into a stripe chunk without copying it | Needed only if [X6](spikes.md#x6-the-device-store-on-ssd) picks that way of applying an update |
+| **A clone call in the glommio fork** | `copy_file_range_aligned` exists (`glommio/src/io/dma_file.rs:590` at `f4643f7`, `:574` before F70); no `FICLONERANGE` | Splicing a staged range into a stripe chunk without copying it | Needed only if [X6](spikes.md#x6-the-device-store-on-ssd) picks that way of applying an update |
 | **Handing an accepted connection to another executor** | Every shard accepts on the shared port, and a frame naming a slot is handed to the executor hosting it (`shoal-core/src/server/peer/listener.rs:181`). Nothing moves a connection | Bytes read by the executor that owns the slice they are for | Needed only if [X11](spikes.md#x11-streamed-bodies) finds the hop between executors too dear |
 | **A failure domain above the host** | None | Stripe chunks spread over racks | No deployment has a rack to name. The member's field is a list from the start, so a level is added without a format change |
 | **Paging the archive map** | The map holds an entry for every row in memory, about fifty bytes each, and nothing evicts it ([todos](../appendix/todos.md#a-nodes-archive-map-is-bounded-by-nothing)) | A bucket larger than memory allows | It is a ceiling, near twenty million objects a GiB of memory a replica, and not a correctness matter. It lifts inside the table engine without touching an object format. [S3](objects.md#what-it-costs) states it as a limit |
@@ -117,6 +117,10 @@ Obligations of the design itself, each on the page that owns it:
 | The tablet walk | [Q17](contract.md#questions-to-answer), which says what a driver asks it for |
 | The failure domain and free bytes for each root | [Q19](contract.md#questions-to-answer), which fixes what placement reads |
 | More than one frame a query | [Q26](contract.md#questions-to-answer) and [X11](spikes.md#x11-streamed-bodies) |
+
+None of these stands before a spike. What the spikes themselves need first, checked spike by
+spike, is on [the spikes page](spikes.md#what-a-spike-needs-first), and the whole order of the
+work, this page's rows among it, is drawn on [What's left to do](whats-left-todo.md).
 
 ## Related
 

@@ -100,14 +100,14 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 | X3 | Bytes through the tablet groups | Q14 | The lab | Days |
 | X4 | Erasure coding crates: performance and tradeoffs | Q20 | titan, europa | Days |
 | X5 | Checksums | Q21 | titan, europa | Afternoon |
-| X6 | The device store on SSD | Q22, Q27 | The lab, XFS | Week |
+| X6 | The device store on SSD | Q22, Q27 | The lab; XFS for one leg | Week |
 | X7 | The device store on HDD | Q23 | Disks fitted | Days |
 | X8 | One small write, three ways | Q14, Q27 | The lab; X6 | Days |
 | X9 | Table latency beside object work | Q15, Q24 | titan; X4, X5 | Days |
 | X10 | What a stripe row costs | Q17, Q25 | The lab | Days |
 | X11 | Streamed bodies | Q26 | europa, the lab | Days |
 | X12 | Recovery and scrub rates | Q17, Q28, Q29 | X4, X6, X7 | Days |
-| X13 | The benchmark's shape | Q30 | europa | Days |
+| X13 | The benchmark's shape | Q30 | europa | ~~Days~~ Mostly answered by [F69](../features/driver-operation-kinds.md); the rest days |
 | X14 | Ceph and S3 at the source | Q14, Q20, Q28, Q32 | Nothing | Days |
 
 ## The spikes
@@ -119,8 +119,9 @@ interleaving the failure model allows ([Q14](contract.md#questions-to-answer))? 
 three questions that are really parts of it: who stages (Q15), what the acknowledgement
 rule is (Q16), and whether truncate by epoch holds (Q18).
 
-**What would change the design.** Any violation of P8 to P16 under the safe policy. Three
-results are expected to be close and would each move a page:
+**What would change the design.** Any violation of ~~P8 to P16~~ a clause the model checks (P7
+to P13 and P15 to P17, [S16](testing.md#the-model)) under the safe policy. Three results are
+expected to be close and would each move a page:
 
 - a reader of a stripe that is written continuously cannot finish without a holder keeping
   a chunk's previous state, which would reopen
@@ -131,18 +132,32 @@ results are expected to be close and would each move a page:
   reservation part of the protocol and not an optimization.
 
 **Method.** A second model in `shoal-model`, held to that crate's rules: pure, seeded, serde
-alone. The actors, events, policy settings and oracle are on
+alone. The actors, events, layouts, policy settings, oracle and progress check are on
 [S16](testing.md#the-model). Every schedule of
-[S7](write-path.md#the-schedules-that-shaped-it) is saved, fourteen of them today; each
-unsafe setting of the policy has at least one that makes its check fire; and a generated run
-of the safe policy has to find nothing.
+[S7](write-path.md#the-schedules-that-shaped-it) is saved, ~~fourteen~~ sixteen of them today,
+fifteen of safety and one of progress; each unsafe setting of the policy has at least one that
+makes its check fire; and a generated run of the safe policy has to find nothing and finish
+within the progress check's bounds. Q16's open point and the two progress settings are each run
+both ways.
+
+The stripe model's schedules are saved under `shoal-model/schedules/stripe/`, never beside the
+tablet model's. `Schedule::load_all` reads every `*.json` directly in `schedules/` as a tablet
+schedule and panics on one that is not, and the tablet tests require every file there to record
+a violation (`shoal-model/src/schedule.rs`, `shoal-model/tests/protocol_model.rs`); it does not
+descend into a directory. Only the seeded generator, `SplitMix64` (`src/rng.rs`), is shared as it
+stands; the world, the minimizer and the checker are the tablet model's, as
+[S16](testing.md#what-exists-today) says.
 
 **Where.** Anywhere. It needs no engine and no hardware.
 
 **Records.** For each property, the schedules that violate it under which setting, and the
-count of generated schedules the safe policy survived.
+count of generated schedules the safe policy survived. For the progress check, the steps a
+reader and a stager took under each layout, with and without each progress setting.
 
-**Depends on.** The contract's draft. **Cost.** A week.
+**Depends on.** The contract's draft, and ~~nothing else~~ S16's model held to S7's schedules,
+which it was not until 2026-10-03: five schedules had no unsafe setting, two settings had no
+schedule, one schedule broke no clause, and the model's scope, events and actors could not
+express three of them ([What a spike needs first](#what-a-spike-needs-first)). **Cost.** A week.
 
 **It is kept.** Alone among these, its code is not thrown away.
 
@@ -177,7 +192,9 @@ is sized by extending `shoal-spike fanout`, which already prints a tablet map's.
 | The map | Bytes of a frame, microseconds to encode it, microseconds to push it to a thousand subscribers |
 | A lookup | Nanoseconds for one placement group |
 
-**Depends on.** Nothing. **Cost.** Days.
+**Depends on.** Nothing. Its first step is to run `shoal-spike fanout` again: the 13,493 bytes
+above were measured at F39, and [F45](../features/replica-migration.md) added a tablet map's
+configurations and moves to the frame since. **Cost.** Days.
 
 ### X3. Bytes through the tablet groups
 
@@ -217,7 +234,7 @@ vanished from its record
 open; a run that preloads every row says so in its log line). ~~It will meet item 202 if a replica falls behind
 at the larger sizes, and says so if it does.~~ Item 202 is
 [resolved](../appendix/resolved/append-batch-bytes.md): a replica behind at the larger sizes is
-fed batches of `replication.append_batch_bytes`. A row near a frame's size meets
+fed batches of `cluster.replication.append_batch_bytes`. A row near a frame's size meets
 [item 208](../appendix/known-issues.md#208-a-write-that-fits-a-client-frame-can-make-a-log-entry-no-peer-frame-carries)
 instead, and the spike says so if it does.
 **Cost.** Days.
@@ -361,9 +378,13 @@ costs.
 fitted. Device and filesystem are confounded across those three, and the page says so with
 every table; two filesystems on one device, where that can be arranged, separate them.
 
-**Depends on.** An XFS filesystem. A clone needs either `copy_file_range`, which the fork
-runs on its blocking pool, or a clone call added to it
-([S1](prerequisites.md#optional)). **Cost.** A week.
+**Depends on.** An XFS filesystem, for its XFS leg alone; the rest runs on the lab as it is, and
+europa's btrfs shares blocks, so a clone can be measured there with the device as a confound. A
+clone needs either `copy_file_range`, which the fork runs on its blocking pool, or a clone call
+added to it ([S1](prerequisites.md#optional)). Neither is needed to start: a `DmaFile` gives up
+its descriptor, so the spike can issue `FICLONERANGE` itself on glommio's `spawn_blocking`.
+It should, because `copy_file_range` falls back to a copy on a filesystem that cannot clone and
+does not say which it did. **Cost.** A week.
 
 ### X7. The device store on HDD
 
@@ -445,7 +466,10 @@ before-and-after procedure throughout.
 **Records.** For each arm, at 100 and 500 MiB/s of object work and at units of 64 KiB and
 1 MiB: the table's median and p99, and their ratio to the cell alone.
 
-**Depends on.** X4 and X5, so that the task's work is the real work. **Cost.** Days.
+**Depends on.** X4 and X5, so that the task's work is the real work. On titan's four cores the
+third arm has no core of its own to give the task: the scratch configuration's two shards, the
+coordinating core and the client's take all four, so one of them gives its core up, and the
+table says which. **Cost.** Days.
 
 ### X10. What a stripe row costs
 
@@ -476,7 +500,12 @@ latency against a resident row and a cold one; throughput against row size. And,
 rows and index memory for each tebibyte written in place at stripe sizes of 4, 16 and
 64 MiB.
 
-**Depends on.** Nothing. **Cost.** Days.
+**Depends on.** Nothing, with one caution. A commit to a cold stripe row is a write that reads
+its row first: an update, or a conditional write ([F68](../features/conditional-writes.md)). An
+insert replaces a row without reading it, and `shoaladm bench` drives only reads and inserts until
+a schema supplies a kind, which none can before buckets exist. So the cold commit is driven by
+the spike's own client, and the index's bytes are read from `shoaladm stats --json`, which the
+node reports and a capture does not keep. **Cost.** Days.
 
 ### X11. Streamed bodies
 
@@ -540,10 +569,20 @@ that operation kinds supplied by generated code do not fit, and a second driver 
 first is cheaper than generalizing. Or one core cannot make seeded bytes as fast as a pool
 takes them, so a driver needs several and the capture has to prove it had them.
 
-**Method.** Mostly reading: the five places the two kinds are written into
+**Mostly answered.** [F69](../features/driver-operation-kinds.md) did the reading and built the
+operation trait, `OperationKind<S>`, and S18 records the first half of Q30
+([Q30, in part](contract.md#decision-record)): the one driver is generalized. What is left is
+the other half: the object dataset, a folder of real files or a seeded description, and how
+fast one core makes seeded bytes. Neither is needed before buckets exist, so the rest of X13
+closes before [M13](milestones.md#m13-the-wire-and-the-baseline), where the driver's object
+arms arrive.
+
+**Method.** ~~Mostly reading: the five places the two kinds are written into
 (`shoal-loadgen/src/spec.rs`, `window.rs`, `pick.rs`, `feed.rs` and the dataset traits).
 Then a stub: an operation trait, a generator of seeded bytes, and a server that discards,
-to measure the driver alone.
+to measure the driver alone.~~ A stub: a generator of seeded bytes and a server that discards,
+to measure the driver alone, and the dataset's two shapes written down against what a capture
+would have to say of each.
 
 **Where.** europa.
 
@@ -612,13 +651,40 @@ The first gate, [before M11](milestones.md#before-m11-the-object-contract), wait
 of them: X1 and X2 for the decisions themselves, and X3, X8 and X9 for what those decisions
 cost, which bring X4, X5 and X6 with them.
 
+### What a spike needs first
+
+Checked against the tree on 2026-10-03, spike by spike, because S1 answers a different
+question: what Shoal has to gain before object storage *code* is written, and spike code is
+thrown away. **Nothing left on S1 stands before a spike.** Its four open rows each wait on a
+question a spike answers ([S1](prerequisites.md#the-order)), so they come after.
+
+The labels follow S1's rule, read for a spike. **Required**: run without it, the spike's answer
+would be wrong, or what it keeps would need rework. **Optional**: the spike can take it in code
+it throws away, or it only saves time.
+
+| Item | For | Label | Why | State |
+| --- | --- | --- | --- | --- |
+| [S16](testing.md#the-model)'s model held to [S7](write-path.md#the-schedules-that-shaped-it)'s schedules | X1 | Required | X1's model and schedules are the one spike output that is kept, as M11's acceptance test. Five of S7's fourteen schedules had no unsafe setting, two settings had no schedule, one schedule broke no clause, and the model had no event for a device filling, no rebuild, and one stripe where a truncate needs an object of several. Built to that, the model's actors and events would have been rebuilt afterwards | ✅ 2026-10-03 |
+| [Resolved #210](../appendix/resolved/bench-preload-frame.md): the bench's preload within the frame | X3 | Required | X3 is `shoaladm bench` at rows of 1 MiB and 4 MiB. Its preload sent bundles of sixty-four, past the frame, whenever the file outpaced the cluster, and the refused rows vanished from the record | ✅ 2026-10-03 |
+| An XFS filesystem | X6's XFS leg | Required | [What the lab needs fitted](prerequisites.md#what-the-lab-needs-fitted) | Not fitted |
+| Rotational disks | X7; X12's rotational half | Required | The same | Not fitted |
+| Device counters, node memory and index bytes in a bench capture | X3, X10 | Optional | Nothing in the tree reads the kernel's device counters, and a capture keeps neither `resident_bytes` nor `archive_map_bytes`, which every node reports. A script reading `/proc/diskstats` on each host before and after, and `shoaladm stats --json --watch` beside the run, take the same numbers. WAL and archive bytes apart need the two roots on separate devices, or a trace of writes by file name, as the cluster testing took for [O62](../cluster-testing/performance.md#o62-the-archive-map-rewrite) | — |
+| A paced neighbour stream, with windows by table, in the bench | X3 | Optional | A bench run is one closed loop whose windows are kept by kind, not by table, so it cannot drive a small table lightly beside a large one and report each. A second driver against the same cluster can. It is near the open-loop generator in [TODOs](../appendix/todos.md) | — |
+| An operation kind a schema supplies before buckets exist | X10 | Optional | X10's cold commit is a write that reads its row. `#[shoal::db]` emits `operation_kinds` empty, and buckets are what will fill it (M12). X10's own client drives it meanwhile | — |
+
+The rest is each spike's own work, written on its section: X2 measures the map's frame again
+before comparing with it; X6 issues its own clone call; X9 gives a core up on titan; X10 drives
+its cold commit itself; X11 adds tokio and a TLS stack to the spike's dependencies; X1 saves
+its schedules in a directory of their own.
+
 ## Exploratory work that is not a spike
 
 - **The required prerequisites that depend on no question** ([S1](prerequisites.md#the-order)):
   known issues ~~46~~ (✅ [resolved](../appendix/resolved/unmarked-directory-refused.md)), ~~198~~ (✅ [resolved](../appendix/resolved/composite-partition-key.md)) and ~~202~~ (✅ [resolved](../appendix/resolved/append-batch-bytes.md)), ~~the fixture's device faults~~ (✅ [F70](../features/storage-faults.md)), and ~~the driver's operation
   kinds and byte counters~~ (✅ [F69](../features/driver-operation-kinds.md)). Each is worth having with no object store at all, and each can
   be built and judged while the spikes run.
-- **Fitting the lab**: disks, and XFS.
+- **Fitting the lab**: disks, and XFS. Not yet done, and filed nowhere else but
+  [S1](prerequisites.md#what-the-lab-needs-fitted).
 - **Agreeing the contract**. P7 to P19 are a draft. They are agreed, or changed, when X1
   reports, at the gate before [M11](milestones.md#before-m11-the-object-contract).
 

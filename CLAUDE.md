@@ -501,6 +501,43 @@ rather than from the diff. This is not optional and does not need to be asked fo
 
 Code style is the same as for a fix.
 
+## Planning Docs
+
+**Every planning doc draws the order of its work as a mermaid diagram**, in the same change that
+writes the plan. A plan is a chapter or page that lays out work not yet done: prerequisites,
+spikes, milestones. It ends with a page that draws all of it, so a reader can see what can start
+now, what waits on what, and what is already done, without reading every page.
+[What's left to do](docs/src/object-storage/whats-left-todo.md) is the worked example.
+
+1. **Draw every piece of work, spikes included.** That means prerequisites, the lab or hardware
+   a step needs fitted, each spike, the decisions or gates, and the milestones. Split a spike
+   where only part of it waits on something, as X6's XFS leg and X12's rotational half are split.
+2. **An arrow points from a piece of work to what requires it.** Work with no arrow between it is
+   parallel and sits on one level. Draw an arrow only where no longer path already implies it,
+   and say on the page where the full list of requirements lives.
+3. **Keep the levels honest.** Mermaid's layout pulls a box with no inputs down beside the first
+   thing it feeds, which reads as "later". Hold a box that can start now on the first level with
+   the link's length: `X2 ---> Gate` spans two levels, and each extra dash is one more.
+4. **Mark what is done.** A done box is green with a ✅ at the start of its label:
+   `classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff` and
+   `F69["✅ F69 Operation kinds"]:::done`. **Whoever finishes a piece of work turns its box green
+   in the same change that finishes it**, the way a finished row on a prerequisites page gets
+   its ✅ and its old text struck through.
+5. **Mark what is optional.** An optional box says `(optional)` in its title and has a dashed
+   border: `classDef optional stroke-dasharray: 5 5` and `:::optional`. Its arrows are dashed too
+   (`-.->`), meaning *helps* rather than *requires*. Whether something is required or optional
+   follows the same rule as prerequisites, and the reason is written on the page that lists it.
+   Optional work that feeds nothing goes in a subgraph of its own, "Optional, any time".
+6. **Keep it readable at book width.** A level wider than about six boxes does not fit a top to
+   bottom diagram. Draw that part left to right (`flowchart LR`), or split the page into two
+   diagrams at a gate both share, rather than let one shrink. Keep labels short and wrap them
+   with `<br>`.
+7. **Never put `#` in a label.** Mermaid reads `#…;` as an entity: write "Item 202", not "#202".
+8. **Look at it rendered.** Run `mdbook build docs` and open the page in a browser. mdbook-mermaid
+   renders the fences there (`docs/mermaid.min.js`), so it is the only place a fence that does
+   not parse, or a layout that does not read, shows. Check the navy and the light theme; the
+   done colour is chosen to read in both.
+
 ## Architecture Overview
 
 Shoal is a high-performance, distributed database with persistence, built on three crates:

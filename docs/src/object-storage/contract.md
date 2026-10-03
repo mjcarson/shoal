@@ -183,7 +183,7 @@ README was the source.
 | Candidate, Reed-Solomon: `rusty_erasure` `0.4.1` (2026-09-10), MIT OR Apache-2.0, MSRV 1.95 | A Rust port of ISA-L's erasure code: `ec_encode_data`, `ec_encode_data_update`, `gf_vect_mad`, and `xor_gen` and `pq_gen` beside them (`src/isal.rs:174-323`, `src/lib.rs:41-54`). Three weeks old on the day it was read, with seven hundred downloads |
 | Candidate, fountain: `raptorq` `2.0.1` (2026-03-09), Apache-2.0 | RFC 6330. `source_packets` and `repair_packets` (`src/encoder.rs:349`, `:361`), so it is systematic. A packet's size is a `u16` (`set_max_packet_size(bytes: u16)`, `:55`), so a symbol is at most 64 KiB |
 | Candidates, checksum: `crc32c` `0.6.8`, `crc-fast` `1.10.0`, `crc64fast-nvme` `1.2.1`, `xxhash-rust` `0.8.19`, `blake3` `1.8.7`, and gxhash `2.3.1` already in the tree | Versions from the registry on the day. None was read beyond its manifest; [X5](spikes.md#x5-checksums) reads them |
-| What the spikes inherit | rustc 1.100.0-nightly (2026-09-04). glommio is the `../glommio` path dependency at 0.10.0, on `873fa44`. No erasure coding crate is in `Cargo.lock`. `.cargo/config.toml` builds for `target-cpu=native`, so a spike binary for the Zen1 hosts is built `znver1` by hand |
+| What the spikes inherit | rustc 1.100.0-nightly (2026-09-04). glommio is the `../glommio` path dependency at 0.10.0, on `873fa44`; since [F70](../features/storage-faults.md) on `f4643f7`, whose two commits add an I/O hook that costs one relaxed atomic load an operation while no fault is armed and that does not cover `copy_file_range_aligned`. No erasure coding crate is in `Cargo.lock`. `.cargo/config.toml` builds for `target-cpu=native`, so a spike binary for the Zen1 hosts is built `znver1` by hand |
 
 **What this gate did not do.** It agreed no clause of the contract, selected no crate, wrote
 no type, added no dependency and measured nothing. A version above is a pin for a spike to
@@ -316,8 +316,9 @@ Q1–Q13.
 
 ## How it would be measured
 
-The model ([X1](spikes.md#x1-the-stripe-protocol-as-a-model)) checks P8–P16 against generated
-schedules and holds one saved schedule for each unsafe policy. The fixture checks them against
+The model ([X1](spikes.md#x1-the-stripe-protocol-as-a-model)) checks ~~P8–P16~~ P7–P13 and
+P15–P17 against generated schedules and holds one saved schedule for each unsafe policy, and a
+progress check beside them ([S16](testing.md#the-model)). The fixture checks them against
 processes and real directories, with the device faults of [S16](testing.md). What the
 contract costs is [S15](performance.md)'s: completed durable bytes, latency tails and what is
 left staged or stale, never acknowledged throughput alone.

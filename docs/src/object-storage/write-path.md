@@ -250,26 +250,35 @@ the size at which the two paths cross on each kind of device.
 
 ### The schedules that shaped it
 
-Each is a schedule the model has to reject under the safe policy and reproduce under an
-unsafe one ([X1](spikes.md#x1-the-stripe-protocol-as-a-model)). The first five are the
-faults a review found in the first form of this design.
+~~Each is a schedule the model has to reject under the safe policy and reproduce under an
+unsafe one.~~ Each **safety** schedule is one the model has to reject under the safe policy and
+reproduce under the unsafe setting [S16](testing.md#the-model) names for it
+([X1](spikes.md#x1-the-stripe-protocol-as-a-model)). A **progress** schedule breaks no clause:
+the safe policy has to finish it within S16's progress check, and an unsafe setting makes it
+not. The first five are the faults a review found in the first form of this design. Schedule
+11 was held to the safety rule with the rest until 2026-10-03, when each schedule was looked for
+among S16's settings: what goes wrong in it is a rebuild that was not needed, which no clause
+forbids. Schedules 15 and 16 were added then, since the contract's own violations named them
+([P9 and P10](contract.md#the-contract)) and S7 did not.
 
-| Schedule | What goes wrong | What prevents it |
-| --- | --- | --- |
-| Two stagers on one base, by a second client or a leader change | Chunks of one stripe hold two writes under one number | Labels carry a tag; the row names one |
-| A parity delta built from a stale row, committed unconditionally | Parity describes a stripe that no longer exists | The commit is conditional on the sequence |
-| A slice returns after an hour | It cannot learn which chunks it missed | A placement group is inside a tablet, whose group recorded it ([S10](recovery.md)) |
-| A writer reads size 100 stripes; a truncate to 10 commits; the writer commits stripe 50; the object is later extended to 60 | Truncated bytes return | The commit stamps the epoch it read; the stripe is under a floor ([S3](objects.md#size-holes-and-truncate)) |
-| The pool map changes during a write | Chunks committed where no reader looks | The commit names its generation ([S5](placement.md#generations)) |
-| A stager times out and tells holders to drop, while its commit is in flight to the leader | An acknowledged write whose bytes are gone | Holders discard only on a committed fact |
-| A 4+2 write touching one data chunk is acknowledged after one stage; that slice's device dies | An acknowledged write is lost | The acknowledgement rule |
-| Parity staged as a patch; a crash after the apply; the record replayed | Parity corrupt under a current label | Staged records hold new values |
-| A crash during an apply in place | A torn unit | The staged copy outlives the apply; the unit's checksum finds it |
-| A stager paused for minutes resumes and proposes | Nothing: the condition refuses it | The condition |
-| A stage's acknowledgement is lost; the commit proceeds without that holder | The row calls a current chunk stale | A rebuild first asks the holder what it holds |
-| A disk swapped for an empty one at the same path | The row calls an empty directory current | The ids of a device and its slices ([S4](pools-and-devices.md#a-device-has-slices)) |
-| The disk fills between the stage and the apply | A failure after the commit | Space is taken at the stage |
-| A holder discards because a lagging replica shows no row | Bytes of a live stripe dropped | Absence on one replica is not a committed fact; only a state that cannot be undone is |
+| # | Schedule | What goes wrong | What prevents it | Kind |
+| --- | --- | --- | --- | --- |
+| 1 | Two stagers on one base, by a second client or a leader change | Chunks of one stripe hold two writes under one number | Labels carry a tag; the row names one | Safety |
+| 2 | A parity delta built from a stale row, committed unconditionally | Parity describes a stripe that no longer exists | The commit is conditional on the sequence | Safety |
+| 3 | A slice returns after an hour | It cannot learn which chunks it missed | A placement group is inside a tablet, whose group recorded it ([S10](recovery.md)) | Safety |
+| 4 | A writer reads size 100 stripes; a truncate to 10 commits; the writer commits stripe 50; the object is later extended to 60 | Truncated bytes return | The commit stamps the epoch it read; the stripe is under a floor ([S3](objects.md#size-holes-and-truncate)) | Safety |
+| 5 | The pool map changes during a write | Chunks committed where no reader looks | The commit names its generation ([S5](placement.md#generations)) | Safety |
+| 6 | A stager times out and tells holders to drop, while its commit is in flight to the leader | An acknowledged write whose bytes are gone | Holders discard only on a committed fact | Safety |
+| 7 | A 4+2 write touching one data chunk is acknowledged after one stage; that slice's device dies | An acknowledged write is lost | The acknowledgement rule | Safety |
+| 8 | Parity staged as a patch; a crash after the apply; the record replayed | Parity corrupt under a current label | Staged records hold new values | Safety |
+| 9 | A crash during an apply in place | A torn unit | The staged copy outlives the apply; the unit's checksum finds it | Safety |
+| 10 | A stager paused for minutes resumes and proposes | Nothing: the condition refuses it | The condition | Safety |
+| 11 | A stage's acknowledgement is lost; the commit proceeds without that holder | The row calls a current chunk stale | A rebuild first asks the holder what it holds | Progress |
+| 12 | A disk swapped for an empty one at the same path | The row calls an empty directory current | The ids of a device and its slices ([S4](pools-and-devices.md#a-device-has-slices)) | Safety |
+| 13 | The disk fills between the stage and the apply | A failure after the commit | Space is taken at the stage | Safety |
+| 14 | A holder discards because a lagging replica shows no row | Bytes of a live stripe dropped | Absence on one replica is not a committed fact; only a state that cannot be undone is | Safety |
+| 15 | A holder applies a stage before its commit; the commit is refused | Uncommitted bytes replace committed ones on that holder | A holder applies only what a commit made current | Safety |
+| 16 | A reader consults the row; a later write commits and is applied on one holder before the reader asks it | The reader decodes a chunk newer than the row it consulted beside chunks that are not | A chunk under another label is missing to the reader ([S9](read-path.md)) | Safety |
 
 ## Alternatives rejected
 

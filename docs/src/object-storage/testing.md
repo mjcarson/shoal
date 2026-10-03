@@ -54,39 +54,87 @@ came before any node could join another.
 A second model in the same crate, held to the same rules: pure, seeded, serde alone, no
 engine crate in its graph.
 
-**What it models.** One stripe, its row, its holders and its readers, with everything else
-abstracted to the property this part relies on.
+**What it models.** ~~One stripe, its row, its holders and its readers~~ One object: its
+`ObjectMeta` entry and two or three of its stripes, each with its row, its holders and its
+readers, with everything else abstracted to the property this part relies on. One stripe was
+the first scope, and it cannot hold [Q18](contract.md#questions-to-answer): a truncate commits in
+the object's entry and is checked by every stripe's commit, so the schedule that shaped it
+([S7](write-path.md#the-schedules-that-shaped-it), schedule 4) needs the entry and at least two
+stripes.
+
+**Its layouts.** Replicated three ways (`k = 1`, two copies more), 2+1 and 4+2, each at `f = 1`,
+with one stripe chunk a slice and the slices of a stripe on distinct devices. A saved schedule
+names its layout, and a generated run draws one.
 
 | Actor | State | Notes |
 | --- | --- | --- |
+| The object's entry | Size, the truncate epoch and its floors | An atomic object like a row. A truncate commits here, and a writer reads the epoch strongly before it stages ([S3](objects.md#size-holes-and-truncate)) |
 | The row | Sequence, a label for each stripe chunk, truncate epoch, the placement group's generation, who missed what | An atomic object that applies conditional commits in one order. The tablet group is **not** modelled again: P1 to P6 are the contract it is held to, and a leader change appears here as a stager losing its view |
 | A holder | A slice: a stripe chunk under a label; staged writes; what is durable and what is not | A crash loses what was not synced. Its device may be lost or replaced by an empty one, and every slice on it with it |
 | A stager | What it read, what it staged, whether it has proposed | Several may act on one stripe |
 | A reader | The row state it consulted, the chunks it was answered | At either read level |
 | The pool map | Generations, the slices at each and the device each slice is on | Changes at any time |
 | The reclaimer | Nothing of its own | Asks, and discards on what it is told |
+| A rebuilder | The chunk it is rebuilding, what it asked its holder, the chunks it read | Rebuilds a stripe chunk the row says a slice missed: asks the holder what it holds, reads `k` current chunks if it must, writes, and commits the chunk current. Schedules 3 and 11 need it |
 
 **Events** are what [S7](write-path.md#the-schedules-that-shaped-it)'s table is made of: a
 stage sent, delivered, lost or duplicated; a holder's sync; a crash and a restart; a commit
 proposed, applied or refused; an apply told or never told; a write torn; a device lost or
-replaced, with every slice on it; the map changed; a truncate; a question about a row
-answered by a replica that lags.
+replaced, with every slice on it; a device filled, or given space back; the map changed; a
+truncate; a rebuild asked, read, written or committed; a question about a row
+answered by a replica that lags. Filling and the rebuild's events were added when the settings
+below were held to S7's schedules one by one: schedule 13 cannot be written without the first,
+nor 3 and 11 without the second.
 
 **The policy** has a safe setting and one unsafe setting for each rule the design depends
 on, each with a saved schedule that makes the checker fire:
 
-| Unsafe setting | The clause it violates |
-| --- | --- |
-| A sequence number as the label | P9, P10 |
-| A commit with no condition | P8 |
-| A holder that discards on a timer | P16 |
-| An acknowledgement after one stage | P11 |
-| A parity staged as a patch | P15 |
-| An apply before the commit | P9 |
-| A reader that accepts a newer chunk | P10 |
-| A discard on a lagging replica's view | P16 |
-| A commit that ignores the generation | P8, P17 |
-| A commit that ignores the truncate epoch | P13 |
+| Unsafe setting | The clause it violates | [S7](write-path.md#the-schedules-that-shaped-it)'s schedules |
+| --- | --- | --- |
+| A sequence number as the label | P9, P10 | 1 |
+| A commit with no condition | P8 | 2, 10 |
+| A holder that discards on a timer | P16 | 6 |
+| An acknowledgement after one stage | P11 | 7 |
+| A parity staged as a patch | P15 | 8 |
+| An apply before the commit | P9 | 15 |
+| A reader that accepts a newer chunk | P10 | 16 |
+| A discard on a lagging replica's view | P16 | 14 |
+| A commit that ignores the generation | P8, P17 | 5 |
+| A commit that ignores the truncate epoch | P13 | 4 |
+| A returning slice taken as current, with no record of what it missed | P11, P17 | 3 |
+| The staged copy dropped when its apply starts | P7, P9 | 9 |
+| A device known by its path alone | P7, P17 | 12 |
+| Space taken at the apply, not the stage | P7, P11 | 13 |
+
+The last four, and schedules 15 and 16, were added on 2026-10-03, when each of S7's fourteen
+schedules was looked for in this table and five were not there, and two settings had no
+schedule. Every safety schedule of S7 now has a setting, and every setting a schedule.
+
+**Q16's open point is a setting, run both ways.** Whether a chunk the write did not touch, on a
+slice that is down, counts toward `k + f`. The safe policy is run with each answer. If counting
+it lets the checker fire for P11, the schedule that shows it is saved and the rule is settled as
+not counting it; if neither fires, Q16 is answered by cost.
+
+**A progress check beside the oracle.** The oracle checks safety, and two of
+[X1](spikes.md#x1-the-stripe-protocol-as-a-model)'s expected results are about progress: a
+reader of a stripe that is written continuously that cannot finish unless a holder keeps a
+chunk's previous state, and stagers that starve each other without a reservation. So, for a
+generated run whose faults stop at a step it names:
+
+- every reader that began after that step finishes within a bound of steps;
+- of several stagers on one stripe, one commits within a bound;
+- a rebuild rewrites only a chunk its holder does not hold current.
+
+A schedule that breaks one of these records the bound it exceeded, not a clause. One unsafe
+setting is held to the progress check alone:
+
+| Unsafe setting | What the progress check finds | S7's schedules |
+| --- | --- | --- |
+| A rebuild that does not ask the holder first | A current chunk rebuilt because the row called it stale | 11 |
+
+Whether a holder keeps a chunk's previous state, and whether the leader reserves a stripe for
+one stager, are settings of the safe policy that X1 runs both ways, and the progress check is
+what tells the two apart.
 
 **The oracle** is a sequential model of a stripe's bytes. An acknowledged write is in every
 strong read that begins after it. A read returns a committed state, never a mixture. A write
@@ -205,8 +253,10 @@ as the machine is busy, as the cluster fixture's already is.
 
 ## Prerequisites
 
-[S1](prerequisites.md#required): the three device faults. The contract's draft, since a
-model checks properties and has to be given them.
+~~[S1](prerequisites.md#required): the three device faults.~~ Delivered by
+[F70](../features/storage-faults.md). The contract's draft, since a model checks properties and
+has to be given them, and this page's model held to [S7](write-path.md)'s schedules, which it
+was on 2026-10-03 ([What a spike needs first](spikes.md#what-a-spike-needs-first)).
 
 ## How it would be measured
 

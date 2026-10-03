@@ -33,9 +33,9 @@ weakening a clause of [the contract](contract.md#the-contract).
 | Gate | In a line | Closed before it | Lands first |
 | --- | --- | --- | --- |
 | Before M11 | The contract agreed | Q14, Q15, Q16, Q18, Q19 | — |
-| M11 | The model, the fixture's faults, the driver's kinds | Q30 | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
+| M11 | The model, the fixture's faults, the driver's kinds | Q30, in part ([recorded](contract.md#decision-record)) | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
 | M12 | Buckets in the schema and the tables they generate | Q25 | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
-| M13 | The wire, pool policy, inline objects, the baseline | Q21, Q26 | More than one frame for one query |
+| M13 | The wire, pool policy, inline objects, the baseline | Q21, Q26, the rest of Q30 | More than one frame for one query |
 | M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22, Q24 | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); a failure domain on a member; free bytes for every root |
 | M15 | Replicated pools: stage, commit, apply and read | Q27 | — |
 | M16 | Recovery and moves | Q17, Q29 | The walk of a tablet's rows |
@@ -79,7 +79,10 @@ If X1 finds a violation that the safe policy cannot be repaired for, the gate do
 ### M11. Step 0: the harness and the facts
 
 **Closed before it.** Q30, how the driver gains object operations
-([X13](spikes.md#x13-the-benchmarks-shape)).
+([X13](spikes.md#x13-the-benchmarks-shape)), ~~whole~~ in part: the one driver is generalized,
+recorded on 2026-10-03 with [F69](../features/driver-operation-kinds.md)
+([S18](contract.md#decision-record)). Its rest, the object dataset and the rate of seeded bytes,
+is needed only once buckets exist and closes before M13.
 
 **Lands first.** ~~The torn-write, full-disk and device-loss faults in the fixture.~~ ✅ landed
 as [F70](../features/storage-faults.md). ~~Operation
@@ -96,8 +99,9 @@ operation kinds come from the schema, and whose windows count bytes both ways.
 **Acceptance.** S18's `object_model_preserves_acknowledged_bytes`. S16's schedule, fault,
 ledger and table-structure rows. S15's three driver rows.
 
-**Evidence/exit.** Every saved schedule replays to the violation it records, and a generated
-run of the safe policy finds none. Every fault's self-test shows it does what its name says.
+**Evidence/exit.** Every saved schedule replays to the violation, or for a progress schedule
+the bound, it records, and a generated run of the safe policy finds none and finishes within
+every bound. Every fault's self-test shows it does what its name says.
 A table capture taken before the driver's change and one taken after are accepted by
 `compare` as the same benchmark, and no arm id has moved. No durability claim is inferred
 from a kill.
@@ -137,7 +141,9 @@ tables and no others. X10's figures are taken again on the generated rows as bui
 
 **Closed before it.** Q26, streamed bodies ([X11](spikes.md#x11-streamed-bodies)). Q21, the
 checksum ([X5](spikes.md#x5-checksums)): a frame that carries a unit's checksum fixes it on
-the wire before any slice stores one, so the dependency is chosen here.
+the wire before any slice stores one, so the dependency is chosen here. The rest of Q30, the
+object dataset and how fast one core makes seeded bytes, since this gate's object arms need both
+([X13](spikes.md#x13-the-benchmarks-shape)).
 
 **Lands first.** More than one frame for one query on the client wire.
 
@@ -425,7 +431,7 @@ The reason this page is provisional, spike by spike.
 | X10 | A commit to a cold stripe row stalls its group | The rows of M12 change shape, or M15 keeps stripe rows resident and pays for it in memory |
 | X11 | A shared connection hurts small queries; a connection cannot be handed to another executor | M13 sets connections aside for object bytes; the hop between executors stays in M14 |
 | X12 | A rebuild inside a tolerable budget takes days | The defaults for `k + m` and `f` change before M18, and M16's budget has to adapt to the foreground |
-| X13 | The driver's kinds do not generalize | M11 builds a second driver beside the first |
+| X13 | ~~The driver's kinds do not generalize~~ (they do: [F69](../features/driver-operation-kinds.md)) One core cannot make seeded bytes as fast as a pool takes them | ~~M11 builds a second driver beside the first~~ M13's driver runs on several cores, and its capture proves it had them |
 | X14 | A mechanism taken from Ceph works otherwise | The page that leaned on it is corrected before its gate |
 
 ## The order is a claim

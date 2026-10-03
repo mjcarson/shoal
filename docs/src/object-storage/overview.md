@@ -5,8 +5,9 @@ declared beside tables in the `#[shoal::db]` struct, objects of any size reached
 their metadata in unsorted tables and their bytes replicated or erasure coded over named
 storage pools of devices. The `S` pages are design records. [S1](prerequisites.md) is what has to exist
 before any of it is written; the [spikes](spikes.md) are the exploratory work that has to
-report before a milestone plan can be trusted; and the [milestones](milestones.md) page is a
-draft order until they do. The contract that would gate the first milestone is drafted as
+report before a milestone plan can be trusted; the [milestones](milestones.md) page is a
+draft order until they do; and [What's left to do](whats-left-todo.md) draws the order of all
+of it, with what is done. The contract that would gate the first milestone is drafted as
 P7–P19 on [S18](contract.md#the-contract) and is agreed by nobody yet. What is settled is the
 set of decisions [below](#decisions-taken-on-2026-10-02).
 

@@ -199,6 +199,7 @@
   - [S18. The contract and the questions](object-storage/contract.md)
   - [Exploratory spikes](object-storage/spikes.md)
   - [Milestones](object-storage/milestones.md)
+  - [What's left to do](object-storage/whats-left-todo.md)
 
 # Appendix
 
