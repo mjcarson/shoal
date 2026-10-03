@@ -2341,6 +2341,32 @@ fn handle_command(
             },
             None => Err("FREE_BYTES needs a byte count or none".to_string()),
         },
+        // arm a storage fault for a directory under this node's storage, or lift it: `FAULT_DIR
+        // <dir> torn <bytes> | full <bytes> | lost | clear`, the directory relative to the node's
+        // own ([F70](../../docs/src/features/storage-faults.md))
+        "FAULT_DIR" => match parts.next() {
+            Some(target) => {
+                let target = dir.join(target);
+                let spec: Vec<&str> = parts.by_ref().collect();
+                match spec.as_slice() {
+                    ["clear"] => {
+                        shoal::server::faults::clear(&target);
+                        Ok(serde_json::json!({ "cleared": target.display().to_string() }))
+                    }
+                    spec => match shoal::server::faults::parse(&spec.join(" ")) {
+                        Ok(fault) => {
+                            shoal::server::faults::arm(&target, fault);
+                            Ok(serde_json::json!({
+                                "armed": target.display().to_string(),
+                                "fault": format!("{fault:?}"),
+                            }))
+                        }
+                        Err(error) => Err(error),
+                    },
+                }
+            }
+            None => Err("FAULT_DIR needs a directory and a fault".to_string()),
+        },
         // propose a scrub of a group through this node, which has to lead it, and poll every
         // member's digest ([F44](../../docs/src/features/repair.md))
         "SCRUB" => match parts
@@ -20056,6 +20082,103 @@ async fn a_node_whose_wal_cannot_be_written_stops() -> Result<(), FixtureError> 
     );
     // and the other two still take writes
     write_note_eventually(&addr, key, "after", Duration::from_secs(30)).await?;
+    Ok(())
+}
+
+/// Each storage fault does to a node what its name says, armed on a directory of its storage
+///
+/// The fixture's three device faults ([F70](../../docs/src/features/storage-faults.md)), each
+/// armed through `FAULT_DIR` on one node of three while writes run through another:
+///
+/// - **a full disk**, over the node's whole storage with a megabyte of budget, reads as a
+///   megabyte free, so the node is under the 512 MiB append reserve: it hands on what it leads
+///   and serves, as it would on a disk that is filling (Resolved #156);
+/// - **a lost device**, over the node's WAL, answers its next write with `EIO`, and the node
+///   stops as one whose WAL cannot be written does;
+/// - **a torn write**, over another node's WAL, ends that process with 137 once the write that
+///   crosses its mark is half on the device. Started again, both nodes recover and hold what the
+///   third does.
+#[tokio::test(flavor = "multi_thread")]
+async fn device_faults_do_what_they_say() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .segment_bytes(64 * 1024)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let through_one = cluster.node(1).endpoints.client.to_string();
+    write_note(&addr, 31_000, "before").await?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // a full disk: node one's storage has a megabyte left, under the reserve. it leads a group
+    // first, so that handing everything on is something it does
+    let (_led_key, _group) = key_led_by(&mut cluster, "Note", 1, 31_200)?;
+    assert!(groups_led_by(&mut cluster, 1)? > 0, "node one leads nothing to hand on");
+    let full = cluster.node_mut(1).command("FAULT_DIR . full 1048576")?;
+    assert!(full.get("ok").is_some(), "{full}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let led = groups_led_by(&mut cluster, 1)?;
+        if led == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node one still leads {led} groups on a full disk"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // and goes on serving: a write through it lands, and a read through it is answered
+    write_note_eventually(&through_one, 31_001, "filling", Duration::from_secs(15)).await?;
+    assert_eq!(
+        read_note(&through_one, 31_000).await?.as_deref(),
+        Some("before"),
+        "a read through node one on a full disk"
+    );
+    let cleared = cluster.node_mut(1).command("FAULT_DIR . clear")?;
+    assert!(cleared.get("ok").is_some(), "{cleared}");
+    // a lost device: node one's WAL answers nothing, and the node stops at its next write
+    let lost = cluster.node_mut(1).command("FAULT_DIR wal lost")?;
+    assert!(lost.get("ok").is_some(), "{lost}");
+    let wide = "x".repeat(4096);
+    let mut key = 31_100u64;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while cluster.node(1).failure().is_none() {
+        let _ = write_note(&addr, key, &wide).await;
+        key += 1;
+        assert!(
+            Instant::now() < deadline,
+            "node one's lost WAL took {} writes and the node is still up",
+            key - 31_100
+        );
+    }
+    eprintln!("node one stopped on a lost WAL: {:?}", cluster.node(1).failure());
+    // the other two still take writes
+    write_note_eventually(&addr, key, "after the loss", Duration::from_secs(30)).await?;
+    // a torn write: node two's WAL tears the write that passes 64 KiB, and the process ends
+    let torn = cluster.node_mut(2).command("FAULT_DIR wal torn 65536")?;
+    assert!(torn.get("ok").is_some(), "{torn}");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while cluster.node(2).failure().is_none() {
+        let _ = write_note(&addr, key, &wide).await;
+        key += 1;
+        assert!(
+            Instant::now() < deadline,
+            "node two's torn WAL took {} writes and the node is still up",
+            key - 31_100
+        );
+    }
+    let code = cluster.node_mut(2).exit_code();
+    assert_eq!(code, Some(137), "node two ended otherwise than a torn write ends it");
+    // both started again: the torn tail is cut at recovery, and every node holds the same rows
+    cluster.restart(1, NodeKind::Server)?;
+    cluster.restart(2, NodeKind::Server)?;
+    cluster.wait_joined(&[1, 2])?;
+    write_note_eventually(&addr, key, "after both", Duration::from_secs(30)).await?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(90))?;
     Ok(())
 }
 

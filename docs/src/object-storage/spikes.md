@@ -610,7 +610,7 @@ cost, which bring X4, X5 and X6 with them.
 ## Exploratory work that is not a spike
 
 - **The required prerequisites that depend on no question** ([S1](prerequisites.md#the-order)):
-  known issues ~~46~~ (✅ [resolved](../appendix/resolved/unmarked-directory-refused.md)), ~~198~~ (✅ [resolved](../appendix/resolved/composite-partition-key.md)) and ~~202~~ (✅ [resolved](../appendix/resolved/append-batch-bytes.md)), the fixture's device faults, and ~~the driver's operation
+  known issues ~~46~~ (✅ [resolved](../appendix/resolved/unmarked-directory-refused.md)), ~~198~~ (✅ [resolved](../appendix/resolved/composite-partition-key.md)) and ~~202~~ (✅ [resolved](../appendix/resolved/append-batch-bytes.md)), ~~the fixture's device faults~~ (✅ [F70](../features/storage-faults.md)), and ~~the driver's operation
   kinds and byte counters~~ (✅ [F69](../features/driver-operation-kinds.md)). Each is worth having with no object store at all, and each can
   be built and judged while the spikes run.
 - **Fitting the lab**: disks, and XFS.

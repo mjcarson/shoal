@@ -33,8 +33,12 @@ came before any node could join another.
   (`CrashPoint`, `shoal-core/src/server/replication/install.rs:217`). One hook fails a
   table's intent log write (`shoal-core/src/server/tables/storage.rs:900`). Three verbs
   damage an archive record (`CORRUPT`, `FORGET`, `ERASE`,
-  `shoal/tests/cluster_fixture.rs:2362`). There is no torn write, no full disk and no lost
-  device, and [C15](../distributed/open-issues.md#filed-as-unbuilt) says so.
+  `shoal/tests/cluster_fixture.rs:2362`). ~~There is no torn write, no full disk and no lost
+  device, and [C15](../distributed/open-issues.md#filed-as-unbuilt) says so.~~ Since
+  [F70](../features/storage-faults.md) a torn write, a full disk and a lost device are armed
+  for a directory a test names (`FAULT_DIR`, `shoal::server::faults`), and a root-only test
+  holds the full disk and the lost device to a real one behind device-mapper. An emptied device
+  and a flipped bit are not built; a child still has one storage directory.
 - **A kill proves nothing about durability.** "No storage durability claim is inferred from
   SIGKILL alone" ([M0](../distributed/milestones.md#m0-step-0-the-harness-and-the-facts)):
   the page cache survives a killed process.

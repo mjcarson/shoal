@@ -111,13 +111,15 @@ regenerates them after a model change; the tests only load. The model's oracle r
 | Traffic-class fault | A lane cut, delayed or throttled on its own; `DROP_REPLIES` for client responses; `HOLD_SHARES` for gather shares |
 | Duplicate and reorder | `HOLD_SHARES ... dup` and the model's schedules, never an assumption about TCP order |
 | Partial node failure | `STALL_SHARD`, `FAIL_SHARD`, `STALL_WAL` for a disk completion, a stalled data lane under a live control thread |
-| Storage faults | `STALL_WAL` for a delayed fsync; `CORRUPT`, `FORGET`, `ERASE` for the archives; `HOLD_COMPACTION` / `RELEASE_COMPACTION` to keep a node's checkpoint behind its sealed segments, then a segment deleted from the test process for a hole in a voter's log ([#176](../appendix/resolved/unreadable-voter-log.md)); a corrupt checkpoint or sidecar refused at open by its checksum (`checkpoint_and_retries_are_checksummed`); the control store's torn append |
+| Storage faults | `STALL_WAL` for a delayed fsync; `CORRUPT`, `FORGET`, `ERASE` for the archives; `HOLD_COMPACTION` / `RELEASE_COMPACTION` to keep a node's checkpoint behind its sealed segments, then a segment deleted from the test process for a hole in a voter's log ([#176](../appendix/resolved/unreadable-voter-log.md)); a corrupt checkpoint or sidecar refused at open by its checksum (`checkpoint_and_retries_are_checksummed`); the control store's torn append; since [F70](../features/storage-faults.md) `FAULT_DIR <dir> torn \| full \| lost` for a torn write, a full disk and a lost device under any directory of a node's storage |
 | Recovery faults | `CRASH_AT` at each of an install's seven points; `MOVE_CRASH_AT` at each move phase, beside the destination and the control leader killed as the phase is reached; the rehome's seven points |
 
 `kill` proves nothing about durability: SIGKILL does not lose OS or device caches, and bytes in
 a live file before an acknowledgement do not prove an fsync. Durability is judged by the
 protocol model's storage completions and by `STALL_WAL`, which holds a completion the way a
-slow disk does. Disk full and a torn write to an archive are not injected.
+slow disk does. ~~Disk full and a torn write to an archive are not injected.~~ A full disk, a
+torn write and a lost device are injected for a directory a test names since
+[F70](../features/storage-faults.md), and held to a real device by a root-only test.
 
 ### The write ledger and the oracle
 
@@ -206,7 +208,9 @@ suite at full parallelism fails on the host's io_uring limits);
 ~~a deferred node can lose its reserved port to an outbound connection~~ (the ports come from a
 block below the ephemeral floor since [Resolved #102](../appendix/resolved/fixture-port-block.md));
 the certificate test skips without kTLS; the previous-binary upgrade test runs only when a
-build is named. Disk full and torn archive writes are not injected. See [C15](open-issues.md).
+build is named. ~~Disk full and torn archive writes are not injected.~~ Since
+[F70](../features/storage-faults.md) they are (`FAULT_DIR`); the test that holds them to a real
+device needs passwordless `sudo` and is ignored by default. See [C15](open-issues.md).
 
 ## Invariants to uphold
 

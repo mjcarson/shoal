@@ -21,6 +21,7 @@ pub mod control;
 pub mod database;
 pub mod errors;
 pub mod export;
+pub mod faults;
 pub mod hosting;
 pub mod installing;
 pub mod map;

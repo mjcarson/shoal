@@ -90,6 +90,12 @@ SHOAL_CHILD_LOG=$PWD/target/child-logs cargo test -p shoal --test cluster_fixtur
 cargo test -p shoal --test conditional_writes
 cargo test -p shoal --test cluster_fixture -- --test-threads 6 conditional
 
+# the fixture's storage faults (F70): `FAULT_DIR <dir> torn <bytes> | full <bytes> | lost | clear`
+# arms one in a child, through the I/O hook the glommio fork gained for it. Their match to a real
+# device behind device-mapper needs passwordless sudo, losetup, dmsetup and mkfs.ext4, and is ignored
+cargo test -p shoal --test cluster_fixture -- --test-threads 6 device_faults
+cargo test -p shoal --test kernel_faults -- --ignored --nocapture
+
 # item 33's reproduction (F41): a standalone two shard get whose shares are held expires at the
 # bundle deadline. run against the tree with the gather sweep disabled it never returns
 cargo test -p shoal --test gather_expiry

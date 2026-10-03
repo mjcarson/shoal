@@ -360,7 +360,8 @@ impl DirectoryLock {
     pub fn acquire(root: &Path) -> Result<Self, ServerError> {
         // the lock file lives beside the marker, and is created if this is a fresh directory.
         // this is the first thing a start writes, so a root it may not write is refused here
-        // and has to say which root it was
+        // and has to say which root it was - a test's lost device included (F70)
+        super::faults::guard(root).map_err(|error| unusable(root, error))?;
         std::fs::create_dir_all(root).map_err(|error| unusable(root, error))?;
         let path = root.join(LOCK_FILE);
         let file = std::fs::OpenOptions::new()
@@ -474,6 +475,9 @@ impl StorageMeta {
     /// Refuses a format this build does not read, and fails if the file cannot be read or
     /// parsed.
     pub fn read(root: &Path) -> Result<Option<StorageMeta>, ServerError> {
+        // a lost device answers nothing, a test's included (F70)
+        super::faults::guard(&Self::path(root))
+            .map_err(|error| unusable(&Self::path(root), error))?;
         // read whatever metadata this directory already carries
         let raw = match std::fs::read(Self::path(root)) {
             Ok(raw) => raw,
@@ -516,6 +520,8 @@ impl StorageMeta {
     ///
     /// * `root` - The root of the storage directory
     pub fn write(&self, root: &Path) -> Result<(), ServerError> {
+        // a lost device answers nothing, a test's included (F70)
+        super::faults::guard(root).map_err(|error| unusable(root, error))?;
         // make sure the directory we are writing into exists, naming it if it cannot
         std::fs::create_dir_all(root).map_err(|error| unusable(root, error))?;
         // stage the new marker beside the old one

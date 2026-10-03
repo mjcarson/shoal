@@ -33,7 +33,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 | Gate | In a line | Closed before it | Lands first |
 | --- | --- | --- | --- |
 | Before M11 | The contract agreed | Q14, Q15, Q16, Q18, Q19 | — |
-| M11 | The model, the fixture's faults, the driver's kinds | Q30 | Device faults in the fixture; ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
+| M11 | The model, the fixture's faults, the driver's kinds | Q30 | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
 | M12 | Buckets in the schema and the tables they generate | Q25 | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
 | M13 | The wire, pool policy, inline objects, the baseline | Q21, Q26 | More than one frame for one query |
 | M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22, Q24 | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); a failure domain on a member; free bytes for every root |
@@ -81,7 +81,8 @@ If X1 finds a violation that the safe policy cannot be repaired for, the gate do
 **Closed before it.** Q30, how the driver gains object operations
 ([X13](spikes.md#x13-the-benchmarks-shape)).
 
-**Lands first.** The torn-write, full-disk and device-loss faults in the fixture. ~~Operation
+**Lands first.** ~~The torn-write, full-disk and device-loss faults in the fixture.~~ ✅ landed
+as [F70](../features/storage-faults.md). ~~Operation
 kinds beyond read and insert, and byte counters, in `shoal-loadgen`.~~ ✅ landed as
 [F69](../features/driver-operation-kinds.md).
 

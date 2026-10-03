@@ -110,9 +110,11 @@ the complete record; the ones an operator meets first:
 - A failure domain on a member, so voters and copies can be spread over one ([F46](../features/capacity-rebalancing.md)).
   The object storage plan requires it before any stripe chunk is placed
   ([S1](../object-storage/prerequisites.md#required)).
-- A frame-class fake transport in the fixture; disk-full and torn-archive-write faults
+- A frame-class fake transport in the fixture; ~~disk-full and torn-archive-write faults
   ([F36](../features/cluster-harness.md), [F44](../features/repair.md)). The two storage
-  faults, and a lost device beside them, are required by the same page before its first gate.
+  faults, and a lost device beside them, are required by the same page before its first gate.~~
+  the storage faults - a torn write, a full disk and a lost device, for a directory a test
+  names - are built since [F70](../features/storage-faults.md).
 - A server binary and a `shoalctl` binary ([C14](deploying.md#limitations)).
 
 ## Found while rewriting this chapter

@@ -133,6 +133,7 @@
   - [F67. shoaladm bench run names workloads, chooses a run in a wizard, and proves every stat moves](features/bench-run-wizard.md)
   - [F68. Conditional writes, with a typed refusal](features/conditional-writes.md)
   - [F69. Operation kinds a schema supplies, and bytes counted both ways, in the driver](features/driver-operation-kinds.md)
+  - [F70. Storage faults for a directory a test names: a torn write, a full disk and a lost device](features/storage-faults.md)
 
 # Direction
 

@@ -737,6 +737,18 @@ impl Node {
         }
     }
 
+    /// The code the child exited with, if it has exited by itself
+    ///
+    /// A crash point and a torn write end a child with 137, the code a kill leaves
+    /// ([F70](../../../docs/src/features/storage-faults.md)); a signal leaves none.
+    pub fn exit_code(&mut self) -> Option<i32> {
+        self.child
+            .try_wait()
+            .ok()
+            .flatten()
+            .and_then(|status| status.code())
+    }
+
     /// The names of every thread the child is running, from procfs
     ///
     /// What a test reads to say whether a control thread exists: glommio names an executor's
