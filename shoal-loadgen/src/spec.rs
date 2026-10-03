@@ -315,6 +315,113 @@ pub struct Override {
     pub set: BTreeMap<String, serde_yaml::Value>,
 }
 
+/// A second stream beside the main load: one table, driven at an offered rate
+/// ([F72](../../docs/src/features/bench-paced-stream.md))
+///
+/// The main load is a closed loop over every other table and sends as fast as answers come
+/// back. This stream sends on a schedule instead, so a stall shows as latency rather than as
+/// fewer operations, and its windows are its own: what a small table driven lightly beside a
+/// large one saw of it. It is called paced, not a neighbour, because `--allow-neighbours`
+/// already means other units on the hosts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Paced {
+    /// The table it drives, which the main load then leaves alone
+    pub table: String,
+    /// What it sends: reads, inserts, or both; never a supplied kind
+    #[serde(default = "Paced::default_workload")]
+    pub workload: Workload,
+    /// The operations a second it offers, over all its streams
+    #[serde(default = "Paced::default_per_sec")]
+    pub per_sec: f64,
+    /// How many streams it sends on, spread over the members as the main load's are
+    #[serde(default = "Paced::default_workers")]
+    pub workers: usize,
+}
+
+impl Paced {
+    /// A paced stream of reads of a table at the default rate
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table it drives
+    #[must_use]
+    pub fn new(table: impl Into<String>) -> Self {
+        Paced {
+            table: table.into(),
+            workload: Paced::default_workload(),
+            per_sec: Paced::default_per_sec(),
+            workers: Paced::default_workers(),
+        }
+    }
+
+    /// Reads alone, unless told otherwise: a light neighbour that changes nothing
+    fn default_workload() -> Workload {
+        "read100".parse().expect("a named workload parses")
+    }
+
+    /// Twenty operations a second, unless told otherwise
+    fn default_per_sec() -> f64 {
+        20.0
+    }
+
+    /// One stream, unless told otherwise
+    fn default_workers() -> usize {
+        1
+    }
+
+    /// How many operations one of its streams keeps outstanding at most: a second's worth
+    ///
+    /// An operation due while its stream is at the cap waits, and its latency still counts from
+    /// when it was due, so a stall is never hidden by the cap.
+    #[must_use]
+    pub fn in_flight(&self) -> usize {
+        // a second of each stream's share, and never less than one
+        (self.per_sec / self.workers.max(1) as f64).ceil().max(1.0) as usize
+    }
+
+    /// Every problem this paced stream has on its own, and with the main load's table weights
+    ///
+    /// Whether its table is in the dataset, and not the only one, is judged where the dataset
+    /// is known.
+    ///
+    /// # Arguments
+    ///
+    /// * `tables` - The main load's weight of each table
+    #[must_use]
+    pub fn problems(&self, tables: &BTreeMap<String, u32>) -> Vec<String> {
+        // each check says what to change
+        let mut problems = Vec::new();
+        if self.table.is_empty() {
+            problems.push("--paced needs a table to drive".to_string());
+        }
+        if !(self.per_sec.is_finite() && self.per_sec > 0.0) {
+            problems.push(format!("--paced-rate {} must be a rate above zero", self.per_sec));
+        }
+        if self.workers == 0 {
+            problems.push("--paced-workers must be at least 1".to_string());
+        }
+        // a supplied kind is the schema's, not a table's, so it has no table to be paced on
+        if !self.workload.kinds.is_empty() {
+            problems.push(format!(
+                "the paced workload {} names a supplied kind; a paced stream reads and inserts one table",
+                self.workload.name
+            ));
+        }
+        if self.workload.read == 0 && self.workload.insert == 0 {
+            problems.push(format!("the paced workload {} has nothing to send", self.workload.name));
+        }
+        // the main load never drives the paced table, so it cannot be weighted for it
+        if tables.contains_key(&self.table) {
+            problems.push(format!(
+                "{} is the paced stream's table, which the main load leaves alone; take it out of --tables",
+                self.table
+            ));
+        }
+        problems
+    }
+}
+
 /// Everything a benchmark run is asked to do
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -381,6 +488,11 @@ pub struct BenchSpec {
     pub event_table: Option<String>,
     /// Whether every acknowledged insert is read back after its arm
     pub verify_acks: bool,
+    /// A table driven at an offered rate beside the main load, if any; left out of a spec
+    /// without one, so its digest is what it was before
+    /// [F72](../../docs/src/features/bench-paced-stream.md)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paced: Option<Paced>,
 }
 
 impl Default for BenchSpec {
@@ -417,6 +529,7 @@ impl Default for BenchSpec {
             spare: None,
             event_table: None,
             verify_acks: true,
+            paced: None,
         }
     }
 }
@@ -538,7 +651,31 @@ impl BenchSpec {
         if self.events.iter().any(EventKind::needs_spare) && self.spare.is_none() {
             problems.push("rebalance and decommission need --spare, a node outside the inventory's bootstrap set".to_string());
         }
+        // a paced stream offers some rate of reads and inserts on a table the main load leaves
+        if let Some(paced) = &self.paced {
+            problems.extend(paced.problems(&self.tables));
+        }
         problems
+    }
+
+    /// Whether an arm of this run leaves the cluster other than it found it, counting what the
+    /// paced stream beside it inserted
+    ///
+    /// # Arguments
+    ///
+    /// * `arm` - The arm
+    #[must_use]
+    pub fn disturbs(&self, arm: &ArmPlan) -> bool {
+        // the arm's own writes and event, or a paced stream that inserts beside every arm
+        arm.disturbs() || self.paced.as_ref().is_some_and(|paced| paced.workload.writes())
+    }
+
+    /// Whether any arm of this run writes, the paced stream's operations included
+    #[must_use]
+    pub fn writes(&self) -> bool {
+        // a workload that writes, or a paced stream that inserts
+        self.workloads.iter().any(Workload::writes)
+            || self.paced.as_ref().is_some_and(|paced| paced.workload.writes())
     }
 
     /// How many queries a worker keeps outstanding at a bundle size
@@ -631,7 +768,7 @@ impl BenchSpec {
 
 #[cfg(test)]
 mod tests {
-    use super::{BenchSpec, EventKind, Mode, Override, Workload};
+    use super::{BenchSpec, EventKind, Mode, Override, Paced, Workload};
     use std::collections::BTreeMap;
 
     /// The named workloads and custom weights parse, and nonsense does not
@@ -819,5 +956,63 @@ mod tests {
         };
         assert_eq!(spec.digest(), moved.digest());
         assert_ne!(spec.digest(), longer.digest());
+    }
+
+    /// A paced stream is read from a spec with its defaults, moves the digest only when given,
+    /// and is refused when it could not run beside the main load
+    #[test]
+    fn a_paced_stream_reads_and_is_judged() {
+        let spec: BenchSpec = serde_yaml::from_str("dataset: data\npaced:\n  table: Review\n").unwrap();
+        let paced = spec.paced.clone().unwrap();
+        assert_eq!(paced, Paced::new("Review"));
+        assert_eq!(paced.workload.name, "read100");
+        assert_eq!((paced.per_sec, paced.workers, paced.in_flight()), (20.0, 1, 20));
+        assert!(spec.problems().is_empty(), "{:?}", spec.problems());
+        // without one the spec writes no paced key at all, so its digest is what it was
+        let plain = BenchSpec {
+            paced: None,
+            ..spec.clone()
+        };
+        assert!(!serde_json::to_string(&plain).unwrap().contains("paced"));
+        assert_ne!(plain.digest(), spec.digest());
+        // an unknown field of the stream is refused like one of the spec's
+        assert!(serde_yaml::from_str::<BenchSpec>("dataset: data\npaced:\n  table: A\n  rate: 5\n").is_err());
+        // a stream that offers nothing, sends a supplied kind, or is weighted for the main load
+        let bad = BenchSpec {
+            dataset: "data".into(),
+            tables: BTreeMap::from([("Review".to_string(), 1)]),
+            paced: Some(Paced {
+                per_sec: 0.0,
+                workers: 0,
+                workload: "read:1,lookup:1".parse().unwrap(),
+                ..Paced::new("Review")
+            }),
+            ..BenchSpec::default()
+        };
+        let problems = bad.problems().join("\n");
+        for expected in ["--paced-rate 0", "--paced-workers", "supplied kind", "take it out of --tables"] {
+            assert!(problems.contains(expected), "{expected} not in {problems}");
+        }
+        // a stream that inserts makes the run one that writes, though its workloads only read
+        let reads = BenchSpec {
+            workloads: vec!["read100".parse().unwrap()],
+            ..BenchSpec::default()
+        };
+        assert!(!reads.writes());
+        let inserting = BenchSpec {
+            paced: Some(Paced {
+                workload: "insert100".parse().unwrap(),
+                ..Paced::new("Review")
+            }),
+            ..reads
+        };
+        assert!(inserting.writes());
+        // two streams share the rate, and each keeps a second of its share outstanding
+        let shared = Paced {
+            per_sec: 5.0,
+            workers: 2,
+            ..Paced::new("Review")
+        };
+        assert_eq!(shared.in_flight(), 3);
     }
 }

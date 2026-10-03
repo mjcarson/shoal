@@ -163,6 +163,7 @@ async fn run(driver: &Driver<CatalogClient>, workload: &str) -> Window {
         retries: 0,
         picker,
         inserts: workload.inserts(),
+        pace: None,
     };
     let clock = ArmClock::start(settings.warmup + settings.duration);
     let outcome = driver.run_arm(&settings, clock, &Progress::none()).await;

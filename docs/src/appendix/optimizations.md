@@ -2842,7 +2842,7 @@ Filed by [F52](../features/cluster-stats.md).
 | **Depends on** | nothing |
 | **Blocks** | nothing |
 | **Tradeoff** | Latency for wear and CPU: every write on a node that delays waits up to the delay longer for that node's sync. On a node that is not the slowest of a write's quorum it may cost nothing, and on the slowest it costs the delay |
-| **Benchmark** | the lab's insert-only `bench` with `/proc/diskstats` and `/proc/<pid>/io` before and after ([cluster testing](../cluster-testing/performance.md#write-amplification-by-device-and-filesystem)); `macro/cluster/replication/durable` on the benchmark host for the latency side |
+| **Benchmark** | the lab's insert-only `bench` with `/proc/diskstats` and `/proc/<pid>/io` before and after ([cluster testing](../cluster-testing/performance.md#write-amplification-by-device-and-filesystem)); `macro/cluster/replication/durable` on the benchmark host for the latency side. Since [F71](../features/bench-device-memory.md) every `shoaladm bench` capture keeps the device counters of every run, so an insert arm of it shows this by itself |
 
 Found by the [distributed cluster testing](../cluster-testing/performance.md#write-amplification-by-device-and-filesystem)
 chapter. The WAL writer takes whatever frames arrived while the last batch was being written and

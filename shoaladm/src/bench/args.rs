@@ -8,7 +8,7 @@ use clap::{Args, Subcommand};
 use color_eyre::eyre::eyre;
 use shoal_loadgen::feed::Preload;
 use shoal_loadgen::keys::KeyDistribution;
-use shoal_loadgen::spec::{BenchSpec, EventKind, Mode, OnExhaust, ReadLevel, Reads, Workload};
+use shoal_loadgen::spec::{BenchSpec, EventKind, Mode, OnExhaust, Paced, ReadLevel, Reads, Workload};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -272,6 +272,20 @@ pub struct BenchRunArgs {
     /// The table a repair or backup acts on
     #[clap(long)]
     pub event_table: Option<String>,
+    /// Drive this table at an offered rate beside the main load, which then leaves it alone,
+    /// and keep its windows apart: what a light neighbour of the load sees
+    #[clap(long)]
+    pub paced: Option<String>,
+    /// The paced stream's rate, operations a second over its streams; 20 if not given
+    #[clap(long)]
+    pub paced_rate: Option<f64>,
+    /// The paced stream's workload: read100, insert100, rw50, read90 or read:N,insert:M; read100
+    /// if not given
+    #[clap(long)]
+    pub paced_workload: Option<Workload>,
+    /// How many streams the paced stream sends on, spread over the members; one if not given
+    #[clap(long)]
+    pub paced_workers: Option<usize>,
     /// Do not read back every acknowledged insert after its arm
     #[clap(long)]
     pub no_verify_acks: bool,
@@ -388,6 +402,21 @@ impl BenchRunArgs {
         if self.event_table.is_some() {
             spec.event_table.clone_from(&self.event_table);
         }
+        // a paced stream named by flag, or the file's, with whichever of its fields were given
+        if let Some(table) = &self.paced {
+            spec.paced.get_or_insert_with(|| Paced::new(table.clone())).table.clone_from(table);
+        }
+        if let Some(paced) = spec.paced.as_mut() {
+            if let Some(rate) = self.paced_rate {
+                paced.per_sec = rate;
+            }
+            if let Some(workload) = &self.paced_workload {
+                paced.workload = workload.clone();
+            }
+            if let Some(workers) = self.paced_workers {
+                paced.workers = workers;
+            }
+        }
         spec.preloaded |= self.preloaded;
         spec.dedupe |= self.dedupe;
         if self.no_verify_acks {
@@ -436,13 +465,19 @@ impl BenchRunArgs {
             // an attached run that is not --preloaded loads it before its first arm, whatever
             // order its workloads are in, so that is all a read needs (item 201)
             if !self.yes_write {
-                // a kind a schema supplies is taken to write, since only the schema knows (F69)
-                if spec.workloads.iter().any(Workload::writes) {
-                    problems.push(
-                        "a workload inserts into the attached cluster; pass --yes-write to allow it, knowing \
-                         a row it already holds is overwritten"
-                            .to_string(),
-                    );
+                // a kind a schema supplies is taken to write, since only the schema knows (F69),
+                // and a paced stream that inserts writes as a workload does (F72)
+                if spec.writes() {
+                    // named by what inserts, a workload first
+                    let what = if spec.workloads.iter().any(Workload::writes) {
+                        "a workload"
+                    } else {
+                        "the paced stream"
+                    };
+                    problems.push(format!(
+                        "{what} inserts into the attached cluster; pass --yes-write to allow it, knowing a row \
+                         it already holds is overwritten"
+                    ));
                 } else if !spec.preloaded {
                     problems.push(
                         "the run loads the preload into the attached cluster before its first arm, which \
@@ -470,6 +505,18 @@ impl BenchRunArgs {
         }
         if self.addr.is_some() && spec.events.iter().any(|event| *event != EventKind::None) {
             problems.push("--addr drives one node with no inventory, so no event can be run".to_string());
+        }
+        // the paced stream's settings mean nothing without a table to drive
+        if spec.paced.is_none() {
+            for (flag, given) in [
+                ("--paced-rate", self.paced_rate.is_some()),
+                ("--paced-workload", self.paced_workload.is_some()),
+                ("--paced-workers", self.paced_workers.is_some()),
+            ] {
+                if given {
+                    problems.push(format!("{flag} sets the paced stream, which needs --paced <table>"));
+                }
+            }
         }
         problems
     }
@@ -560,6 +607,38 @@ mod tests {
         assert_eq!(args.spec().unwrap().workloads.len(), 2);
         assert!(!parse(&["list"]).needs_schema());
         assert!(!parse(&["compare", "a", "b", "--allow", "dataset"]).needs_schema());
+    }
+
+    /// A paced stream is named by flag or by the spec file, its fields laid over the file's, and
+    /// its settings refused without a table (F72)
+    #[test]
+    fn a_paced_stream_is_named_by_flag_or_spec() {
+        let run = |args: &[&str]| match parse(args) {
+            BenchCommand::Run(args) => args,
+            other => panic!("not a run: {other:?}"),
+        };
+        // by flag, with the defaults it does not set
+        let args = run(&["run", "--dataset", "d", "--paced", "Review", "--paced-rate", "50"]);
+        let paced = args.spec().unwrap().paced.unwrap();
+        assert_eq!((paced.table.as_str(), paced.per_sec, paced.workers), ("Review", 50.0, 1));
+        assert_eq!(paced.workload.name, "read100");
+        // by file, with a flag laid over one of its fields
+        let dir = tempfile::tempdir().unwrap();
+        let spec = dir.path().join("bench.yml");
+        std::fs::write(&spec, "dataset: d\npaced:\n  table: Review\n  per_sec: 5\n  workers: 2\n").unwrap();
+        let spec_arg = spec.display().to_string();
+        let args = run(&["run", "--spec", &spec_arg, "--paced-workload", "insert100"]);
+        let paced = args.spec().unwrap().paced.unwrap();
+        assert_eq!((paced.per_sec, paced.workers, paced.workload.name.as_str()), (5.0, 2, "insert100"));
+        // a paced stream that inserts into an attached cluster needs --yes-write like a workload
+        let args = run(&["run", "--attach", "--dataset", "d", "--workloads", "read100", "--preloaded", "--paced", "R",
+            "--paced-workload", "rw50"]);
+        let problems = args.problems(&args.spec().unwrap()).join("\n");
+        assert!(problems.contains("the paced stream inserts"), "{problems}");
+        // and its settings without a table are refused by name
+        let args = run(&["run", "--dataset", "d", "--paced-rate", "5"]);
+        let problems = args.problems(&args.spec().unwrap()).join("\n");
+        assert!(problems.contains("--paced-rate sets the paced stream"), "{problems}");
     }
 
     /// An attached cluster refuses writes, events and host changes unless asked in words

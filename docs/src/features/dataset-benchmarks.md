@@ -257,7 +257,11 @@ dirty when allowed.
   - each feed's facts;
   - the read back of every acknowledged insert, where a miss is a lost write;
   - the event's marks, windows and catch up;
-  - the leader's own figures every two seconds;
+  - the leader's own figures every two seconds, with each member's resident set and index
+    bytes since [F71](bench-device-memory.md);
+  - each host's device counters over the run, read before and after it, since
+    [F71](bench-device-memory.md);
+  - the paced stream's windows, when the run has one, since [F72](bench-paced-stream.md);
   - the driver's busiest second.
 
 **`shoaladm bench compare <baseline> <candidate>` refuses** two captures that differ in the
@@ -335,9 +339,12 @@ deployment cannot be held across a spawn.
   whatever the victim's state
   ([item 209](../appendix/known-issues.md#209-a-bench-event-arms-converged-mark-reads-the-wrong-nodes-lag)).
   Judge a catch-up by the members' own figures in `shoaladm stats --basic` until it is fixed.
-- **Closed loop only.** A worker sends more as answers come back, so the load is set by the
-  depth, not offered at a rate. Coordinated omission applies: a stall delays the queries behind
-  it rather than piling them up. An open-loop generator is in the [todos](../appendix/todos.md).
+- **~~Closed loop only~~ The main load is a closed loop.** A worker sends more as answers come
+  back, so the load is set by the depth, not offered at a rate. Coordinated omission applies: a
+  stall delays the queries behind it rather than piling them up. Since
+  [F72](bench-paced-stream.md) the driver can pace an arm, latency counted from each
+  operation's slot, and a run can drive one table that way beside the main load (`--paced`); the
+  main load itself is not paced yet ([todos](../appendix/todos.md#what-f71-and-f72-left-undone)).
 - ~~**Reads and inserts only.** No update or delete workloads, and no partition scan of a sorted
   table.~~ Since [F69](driver-operation-kinds.md) a driver runs any kind a schema supplies beside
   read and insert, but no schema supplies one yet, so a dataset run is still reads and inserts:

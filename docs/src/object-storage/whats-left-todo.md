@@ -38,8 +38,8 @@ flowchart LR
         X11["X11 Streamed bodies"]
         X13["X13 The benchmark's shape,<br>what F69 left"]
         X14["X14 Ceph and S3 at the source"]
-        Counters["Device counters and node memory<br>in a bench capture (optional)"]:::optional
-        Neighbour["A paced neighbour stream<br>in the bench (optional)"]:::optional
+        Counters["✅ F71 Device counters and node memory<br>in a bench capture (optional)"]:::done
+        Neighbour["✅ F72 A paced neighbour stream<br>in the bench (optional)"]:::done
         Kinds["A kind a schema supplies,<br>for X10's cold commit (optional)"]:::optional
     end
     X1["X1 The stripe protocol as a model"]

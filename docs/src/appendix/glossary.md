@@ -62,6 +62,17 @@ named by the table's exact name. Each file splits into a **preload**, loaded bef
 measured and the only keys a read asks for, and an **insert pool**, streamed again for each arm
 that inserts ([F66](../features/dataset-benchmarks.md)).
 
+**Device counters** (`shoaladm bench`) — What a host's block device did over one run: the
+difference between two reads of `/proc/diskstats`, before the arm's clock started and after its
+last answer, for each device a node's storage root is on. The device's, not the cluster's: the
+operating system's writes are in it too ([F71](../features/bench-device-memory.md)).
+
+**Paced stream** (`shoaladm bench`) — One table driven at an offered rate beside a run's main
+load, which leaves that table alone: each operation has a slot fixed from the arm's start, and
+its latency counts from the slot, not from its send. Its windows are kept apart in every run
+([F72](../features/bench-paced-stream.md)). The spikes page calls it a *neighbour stream*; it is
+not what `--allow-neighbours` means, which is other shoal units on the hosts.
+
 **Blocked query** — A query parked in `blocked: HashMap<u64, Vec<...>>` waiting for a
 partition to be read from disk. Re-injected as a `ServerMsg::Released` when the read
 completes, rather than being resumed as a suspended future. It carries the query itself, unlike

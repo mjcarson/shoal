@@ -137,7 +137,9 @@ refused handshakes counted by lane and kind from every journal), `failover/run.s
 
 Each run is recorded by `target/lab/record.sh`, which runs `vmstat 1` on every host beside it. Disk
 writes are counted per device from `/proc/diskstats` before and after (`target/lab/diskstats.sh`).
-These scripts are scratch and are not committed. What they measured is on these pages.
+These scripts are scratch and are not committed. What they measured is on these pages. Since
+[F71](../features/bench-device-memory.md) a `shoaladm bench` run takes the device counters and
+each member's memory itself, into its capture.
 
 ## Reading a node's figures
 

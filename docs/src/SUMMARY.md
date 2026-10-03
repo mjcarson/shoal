@@ -134,6 +134,8 @@
   - [F68. Conditional writes, with a typed refusal](features/conditional-writes.md)
   - [F69. Operation kinds a schema supplies, and bytes counted both ways, in the driver](features/driver-operation-kinds.md)
   - [F70. Storage faults for a directory a test names: a torn write, a full disk and a lost device](features/storage-faults.md)
+  - [F71. Device counters and node memory in a bench capture](features/bench-device-memory.md)
+  - [F72. A paced stream beside the bench's load](features/bench-paced-stream.md)
 
 # Direction
 

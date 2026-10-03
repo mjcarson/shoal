@@ -92,6 +92,14 @@ async fn a_run_against_one_node_writes_a_capture_that_compares() {
             // a node that is no cluster member keeps no figures, which the run records
             assert!(run.server_series.is_empty(), "{}: {:?}", arm.id, run.server_series);
             assert!(run.figures_unread.is_some(), "{} does not say why it read no figures", arm.id);
+            // and a node started by hand has no host to read the devices of, which it says (F71)
+            assert!(run.devices.is_empty(), "{}: {:?}", arm.id, run.devices);
+            assert!(
+                run.devices_unread.as_deref().is_some_and(|why| why.contains("--addr")),
+                "{}: {:?}",
+                arm.id,
+                run.devices_unread
+            );
         }
     }
     assert_eq!(capture.provenance.schema.db, "Catalog");

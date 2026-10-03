@@ -166,6 +166,34 @@ pub struct SecondSample {
     pub driver_cpu_pct: f64,
 }
 
+/// One member's memory, as its own figures say ([F71](../../docs/src/features/bench-device-memory.md))
+///
+/// Every figure is what the member last reported to the control leader, so it is as old as
+/// that report, a few seconds at most.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberMemory {
+    /// The process's resident memory, everything included
+    pub resident_bytes: u64,
+    /// Bytes of rows the shards hold in memory, which their eviction budgets bound
+    pub memory_bytes: u64,
+    /// Bytes the shards' archive maps' indexes hold
+    pub archive_map_bytes: u64,
+    /// Bytes the shards' tables' partition indexes hold
+    pub table_index_bytes: u64,
+    /// Bytes the shards' WAL indexes of their retained entries hold
+    pub wal_index_bytes: u64,
+    /// Bytes the shards' eviction lists hold
+    pub lru_bytes: u64,
+}
+
+impl MemberMemory {
+    /// The bytes every index holds together: the archive maps', the tables' and the WAL's
+    #[must_use]
+    pub fn index_bytes(&self) -> u64 {
+        self.archive_map_bytes + self.table_index_bytes + self.wal_index_bytes
+    }
+}
+
 /// One second of a node's own figures, as `shoaladm stats` reads them (F65)
 ///
 /// Timed from when a bundle's frame arrived, not from its send, so a node's p99 is never
@@ -178,6 +206,10 @@ pub struct ServerSample {
     pub answers_per_sec: BTreeMap<String, f64>,
     /// The slowest member's p99, in milliseconds
     pub p99_ms: Option<f64>,
+    /// Each live member's memory, by the name the stats view gives it; empty in a capture from
+    /// before [F71](../../docs/src/features/bench-device-memory.md)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub memory: BTreeMap<String, MemberMemory>,
 }
 
 /// Why an arm ended before its time
@@ -198,6 +230,94 @@ pub struct VerifyFacts {
     pub lost: u64,
     /// How many reads failed, by code, and so proved nothing either way
     pub errors: BTreeMap<String, u64>,
+}
+
+/// What one block device did while a run ran, from the kernel's own counters
+/// ([F71](../../docs/src/features/bench-device-memory.md))
+///
+/// The difference between two reads of `/proc/diskstats`, one just before the arm's clock
+/// started and one once its last answer was in, so it counts the warmup and the drain as the
+/// driver's series does. It is the device's, not the cluster's: whatever else wrote to the
+/// device in that time is in it too.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DeviceCounters {
+    /// The device's kernel name, as `/proc/diskstats` spells it: `nvme0n1p2`, `dm-0`
+    pub device: String,
+    /// The storage roots on it, each as `<node> <role> <path>`; a role is `latency`, where the
+    /// WAL is, or `throughput`, where the archives are
+    pub roots: Vec<String>,
+    /// The seconds between the two reads, by the host's own clock
+    pub secs: f64,
+    /// Reads completed
+    pub reads: u64,
+    /// Bytes read
+    pub read_bytes: u64,
+    /// Writes completed
+    pub writes: u64,
+    /// Bytes written
+    pub written_bytes: u64,
+    /// Discards completed; zero on a kernel before 4.18
+    pub discards: u64,
+    /// Bytes discarded
+    pub discarded_bytes: u64,
+    /// Flush requests completed; zero on a kernel before 5.5
+    pub flushes: u64,
+    /// Milliseconds the device had I/O in flight
+    pub busy_ms: u64,
+}
+
+/// One host's devices while a run ran ([F71](../../docs/src/features/bench-device-memory.md))
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HostDevices {
+    /// The host, as the inventory reaches it
+    pub host: String,
+    /// The nodes it ran, by their names in the inventory
+    pub nodes: Vec<String>,
+    /// Every device a root of theirs is on, in name order
+    pub devices: Vec<DeviceCounters>,
+    /// The roots on no device the kernel counts - a tmpfs, an overlay - each as
+    /// `<node> <role> <path>`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved: Vec<String>,
+}
+
+/// What the paced stream did during one run ([F72](../../docs/src/features/bench-paced-stream.md))
+///
+/// A second driver against one table, at an offered rate rather than at a depth, with its own
+/// windows: what a table driven lightly beside the main load saw of it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PacedResult {
+    /// The table it drove
+    pub table: String,
+    /// Its workload, by name
+    pub workload: String,
+    /// The rate it offered, operations a second
+    pub per_sec: f64,
+    /// What it did while measured, latency counted from each operation's scheduled send
+    pub measured: WindowSummary,
+    /// What it did while the arm warmed up
+    pub warmup: WindowSummary,
+    /// Every second of it
+    pub series: Vec<SecondSample>,
+    /// What its insert feed did, if it inserted
+    pub feed: Option<FeedFacts>,
+    /// The read back of its acknowledged inserts
+    pub verify: Option<VerifyFacts>,
+}
+
+impl PacedResult {
+    /// The worst p99 of any measured second it answered in, in milliseconds
+    #[must_use]
+    pub fn worst_second_p99_ms(&self) -> Option<f64> {
+        // every measured second's slowest kind, read or insert
+        self.series
+            .iter()
+            .filter(|second| second.phase == SecondPhase::Measure)
+            .flat_map(|second| [&second.summary.read, &second.summary.insert])
+            .filter(|kind| kind.ok > 0)
+            .map(|kind| kind.latency.p99_ms)
+            .fold(None, |worst: Option<f64>, p99| Some(worst.map_or(p99, |worst| worst.max(p99))))
+    }
 }
 
 /// What an event did and what the client saw of it
@@ -262,6 +382,77 @@ pub struct RunResult {
     pub driver_cpu_peak_pct: f64,
     /// How many progress events were dropped because the screen fell behind
     pub progress_dropped: u64,
+    /// What each host's devices did while it ran
+    /// ([F71](../../docs/src/features/bench-device-memory.md))
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<HostDevices>,
+    /// Why the hosts' devices could not be read, if they could not
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices_unread: Option<String>,
+    /// What the paced stream did beside it, if the run had one
+    /// ([F72](../../docs/src/features/bench-paced-stream.md))
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paced: Option<PacedResult>,
+}
+
+impl RunResult {
+    /// The bytes the main stream's bundles took on the wire over the whole run: warmup, measured
+    /// time and drain, the same time its device counters cover
+    #[must_use]
+    pub fn bytes_sent(&self) -> u64 {
+        // every second, whatever phase it fell in
+        self.series.iter().map(|second| second.summary.bytes_sent).sum()
+    }
+
+    /// The bytes every host's devices wrote while it ran
+    #[must_use]
+    pub fn device_written_bytes(&self) -> u64 {
+        // every device of every host
+        self.devices
+            .iter()
+            .flat_map(|host| &host.devices)
+            .map(|device| device.written_bytes)
+            .sum()
+    }
+
+    /// The bytes the devices wrote for each byte the driver sent, when both were counted
+    ///
+    /// Each replica writes what it is sent and each node writes its WAL and then its archives,
+    /// so a cluster at a factor of three that rewrote nothing would read near six.
+    #[must_use]
+    pub fn device_bytes_per_sent_byte(&self) -> Option<f64> {
+        // a run that sent nothing, or read no device, has no ratio
+        let sent = self.bytes_sent();
+        if sent == 0 || self.devices.is_empty() {
+            return None;
+        }
+        Some(self.device_written_bytes() as f64 / sent as f64)
+    }
+
+    /// The largest resident set any member reported while it ran, by member
+    #[must_use]
+    pub fn peak_resident(&self) -> BTreeMap<String, u64> {
+        // the largest of every sample, member by member
+        let mut peaks = BTreeMap::new();
+        for sample in &self.server_series {
+            for (member, memory) in &sample.memory {
+                let peak = peaks.entry(member.clone()).or_insert(0);
+                *peak = (*peak).max(memory.resident_bytes);
+            }
+        }
+        peaks
+    }
+
+    /// Each member's memory in the last sample that had any
+    #[must_use]
+    pub fn last_memory(&self) -> Option<&BTreeMap<String, MemberMemory>> {
+        // the newest sample with figures in it
+        self.server_series
+            .iter()
+            .rev()
+            .map(|sample| &sample.memory)
+            .find(|memory| !memory.is_empty())
+    }
 }
 
 /// Every run of one arm
@@ -461,5 +652,82 @@ mod tests {
         // and is written back under the new name
         let written = serde_json::to_string(&arm).unwrap();
         assert!(written.contains("\"workload\":\"rw50\"") && !written.contains("\"mix\""), "{written}");
+    }
+
+    /// A run's devices, members' memory and paced stream round trip, and a run from before
+    /// them still reads, with none of each (F71, F72)
+    #[test]
+    fn devices_memory_and_the_paced_stream_round_trip() {
+        use super::{
+            DeviceCounters, HostDevices, MemberMemory, PacedResult, RunResult, SecondPhase, SecondSample,
+        };
+        use crate::window::WindowSummary;
+        use std::collections::BTreeMap;
+        // a run from before F71, as a capture of it holds one
+        let old = r#"{"run": 0, "order": 0, "started_at": "", "measured": {"secs": 1.0, "read": {"ok": 0,
+            "per_sec": 0.0, "latency": {"count": 0, "mean_ms": 0.0, "p50_ms": 0.0, "p90_ms": 0.0,
+            "p99_ms": 0.0, "p999_ms": 0.0, "max_ms": 0.0}, "misses": 0, "errors": {}, "samples": {}},
+            "insert": {"ok": 0, "per_sec": 0.0, "latency": {"count": 0, "mean_ms": 0.0, "p50_ms": 0.0,
+            "p90_ms": 0.0, "p99_ms": 0.0, "p999_ms": 0.0, "max_ms": 0.0}, "misses": 0, "errors": {},
+            "samples": {}}, "bundle": {"count": 0, "mean_ms": 0.0, "p50_ms": 0.0, "p90_ms": 0.0,
+            "p99_ms": 0.0, "p999_ms": 0.0, "max_ms": 0.0}, "feed_wait_ms": 0.0},
+            "warmup": {"secs": 1.0, "read": {"ok": 0, "per_sec": 0.0, "latency": {"count": 0,
+            "mean_ms": 0.0, "p50_ms": 0.0, "p90_ms": 0.0, "p99_ms": 0.0, "p999_ms": 0.0, "max_ms": 0.0},
+            "misses": 0, "errors": {}, "samples": {}}, "insert": {"ok": 0, "per_sec": 0.0, "latency":
+            {"count": 0, "mean_ms": 0.0, "p50_ms": 0.0, "p90_ms": 0.0, "p99_ms": 0.0, "p999_ms": 0.0,
+            "max_ms": 0.0}, "misses": 0, "errors": {}, "samples": {}}, "bundle": {"count": 0,
+            "mean_ms": 0.0, "p50_ms": 0.0, "p90_ms": 0.0, "p99_ms": 0.0, "p999_ms": 0.0, "max_ms": 0.0},
+            "feed_wait_ms": 0.0}, "series": [], "ended_early": null, "feeds": {}, "wrapped": false,
+            "verify": null, "event": null, "server_series": [{"at_ms": 0, "answers_per_sec": {},
+            "p99_ms": null}], "driver_cpu_peak_pct": 0.0, "progress_dropped": 0}"#;
+        let mut run: RunResult = serde_json::from_str(old).unwrap();
+        assert!(run.devices.is_empty() && run.devices_unread.is_none() && run.paced.is_none());
+        assert!(run.server_series[0].memory.is_empty());
+        assert_eq!(run.device_bytes_per_sent_byte(), None);
+        assert!(run.peak_resident().is_empty() && run.last_memory().is_none());
+        // and one with all three written back and read again
+        run.devices = vec![HostDevices {
+            host: "titan".to_string(),
+            nodes: vec!["titan".to_string()],
+            devices: vec![DeviceCounters {
+                device: "nvme0n1p2".to_string(),
+                roots: vec!["titan latency /optane/shoal".to_string()],
+                written_bytes: 4096,
+                ..DeviceCounters::default()
+            }],
+            unresolved: vec!["titan throughput /dev/shm/x".to_string()],
+        }];
+        run.server_series[0].memory = BTreeMap::from([(
+            "titan".to_string(),
+            MemberMemory {
+                resident_bytes: 1 << 30,
+                ..MemberMemory::default()
+            },
+        )]);
+        // a paced stream whose slowest measured second answered in 9 ms, past a 30 ms warmup
+        let second = |phase, p99_ms| {
+            let mut summary = WindowSummary::default();
+            summary.read.ok = 1;
+            summary.read.latency.p99_ms = p99_ms;
+            SecondSample {
+                at: 0,
+                phase,
+                summary,
+                driver_cpu_pct: 0.0,
+            }
+        };
+        run.paced = Some(PacedResult {
+            table: "Review".to_string(),
+            series: vec![
+                second(SecondPhase::Warmup, 30.0),
+                second(SecondPhase::Measure, 2.0),
+                second(SecondPhase::Measure, 9.0),
+            ],
+            ..PacedResult::default()
+        });
+        let again: RunResult = serde_json::from_str(&serde_json::to_string(&run).unwrap()).unwrap();
+        assert_eq!(again, run);
+        assert_eq!(again.paced.as_ref().unwrap().worst_second_p99_ms(), Some(9.0));
+        assert_eq!(again.peak_resident()["titan"], 1 << 30);
     }
 }

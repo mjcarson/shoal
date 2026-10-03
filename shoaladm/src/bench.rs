@@ -16,6 +16,7 @@
 //! - [`wizard`] chooses a run that names no workload, on a terminal.
 
 pub mod args;
+pub mod devices;
 pub mod events;
 pub mod headless;
 pub mod hosts;
@@ -114,7 +115,22 @@ fn dry_run(ctx: &Context) {
             arm.run,
             if reset { " (after a reset and preload)" } else { "" }
         );
-        disturbed = arm.disturbs();
+        disturbed = spec.disturbs(arm);
+    }
+    // the paced stream beside every arm, and the main load on the tables it leaves
+    if let Some(paced) = &spec.paced {
+        println!(
+            "beside every arm a paced stream offers {} {}/s on {} through {} stream{}, which the main load leaves alone",
+            paced.workload.name,
+            paced.per_sec,
+            paced.table,
+            paced.workers,
+            if paced.workers == 1 { "" } else { "s" }
+        );
+    }
+    // a node started by hand has no inventory, so no host whose devices could be read
+    if ctx.args.addr.is_none() {
+        println!("each run's device counters would be read on every host of the inventory before and after it");
     }
     let measured = arms.len() as u64 * (spec.warmup + spec.duration);
     println!(

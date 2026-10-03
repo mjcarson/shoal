@@ -142,7 +142,10 @@ Each of these was left out of [F66](../features/dataset-benchmarks.md) on purpos
   behind it rather than piling them up. That is coordinated omission, written down rather than
   discovered. An offered rate (`--rate`) with latency measured from the scheduled send is the
   fix. It matters more for a stream of object bytes than for a row
-  ([S15](../object-storage/performance.md#what-it-costs)).
+  ([S15](../object-storage/performance.md#what-it-costs)). **Half built by
+  [F72](../features/bench-paced-stream.md)**: the driver paces an arm with latency from each
+  slot (`ArmSettings::pace`), and a run drives one table that way beside its main load. The
+  main load's `--rate` is left, below.
 - **Update and delete workloads (~~mixes~~ until [F67](../features/bench-run-wizard.md)), and a
   partition scan of a sorted table.** A workload is reads and inserts. An update needs an update field's value to write, which a dataset row has, and a scan
   needs a limit, which a spec would carry. ~~Operation kinds a schema supplies, and bytes counted
@@ -168,6 +171,29 @@ Each of these was left out of [F66](../features/dataset-benchmarks.md) on purpos
   equivalent.
 - **Per-operation fault windows.** Windows are cut at second resolution. `shoal-bench` cut at
   each operation's time.
+
+### What F71 and F72 left undone
+
+Each of these was left out of [F71](../features/bench-device-memory.md) or
+[F72](../features/bench-paced-stream.md) on purpose:
+
+- **A paced main load, `--rate`.** The driver paces an arm already; the main load would set
+  `ArmSettings::pace` from a flag. What is left is the arm's name (a paced arm and a closed one at
+  the same bundle are different measurements and need different ids), and whether a paced arm's
+  rate is a fact `compare` refuses on or a metric it reads.
+- **More than one paced stream, or one on the wizard.** A list of `Paced` would drive several
+  tables at several rates. The wizard passes the one stream through and does not edit it.
+- **The paced stream cut into an event's windows.** An event's before, during and after are the
+  main load's. The paced stream's series shows an event second by second, with no ratio of its
+  own.
+- **`/proc/<pid>/io` beside the device counters.** It would split what a node's process asked to
+  write from what the device wrote, the filesystem's share, as the cluster testing's
+  [second table](../cluster-testing/performance.md#write-amplification-by-device-and-filesystem)
+  did. It needs each node's pid and root on its host.
+- **The preload's device counters.** Only arms are read.
+- **WAL and archive bytes apart on one device.** A trace of writes by file name, as
+  [O62](../cluster-testing/performance.md#o62-the-archive-map-rewrite) took with bpftrace, would
+  split them. On separate devices the capture already reports them apart.
 
 ### Retiring `render` in favour of the explorer
 

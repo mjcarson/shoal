@@ -208,11 +208,16 @@ A several times short, is what the preferred direction assumes, and it has never
 measured on a cluster at these sizes.
 
 **Method.** A bench schema with one unsorted table whose row is a key and a byte vector,
-at 64 KiB, 256 KiB, 1 MiB and 4 MiB. `shoaladm bench` runs insert, read and an even mix
-against its own cluster on the lab at a factor of three, and against one node. Beside the
-driver's figures, each run records what the device was asked to write, read from the
-kernel's counters before and after, as the cluster testing chapter did when it split
-[write amplification by device](../cluster-testing/performance.md#write-amplification-by-device-and-filesystem).
+at 64 KiB, 256 KiB, 1 MiB and 4 MiB, and a small table beside it. `shoaladm bench` runs insert,
+read and an even mix against its own cluster on the lab at a factor of three, and against one
+node, with the small table driven lightly throughout as a paced stream (`--paced`,
+[F72](../features/bench-paced-stream.md)). Beside the driver's figures, each run records what the
+device was asked to write, read from the kernel's counters before and after, as the cluster
+testing chapter did when it split
+[write amplification by device](../cluster-testing/performance.md#write-amplification-by-device-and-filesystem),
+and each member's resident set: ~~by a script beside the run~~ in the capture itself since
+[F71](../features/bench-device-memory.md). A node's two roots go on separate devices for the
+WAL's bytes and the archives' to be counted apart.
 
 **Where.** The lab, where it is bounded by 1 GbE and says so; and three nodes over loopback
 on europa, where it is bounded by cores and devices.
@@ -504,8 +509,9 @@ rows and index memory for each tebibyte written in place at stripe sizes of 4, 1
 its row first: an update, or a conditional write ([F68](../features/conditional-writes.md)). An
 insert replaces a row without reading it, and `shoaladm bench` drives only reads and inserts until
 a schema supplies a kind, which none can before buckets exist. So the cold commit is driven by
-the spike's own client, and the index's bytes are read from `shoaladm stats --json`, which the
-node reports and a capture does not keep. **Cost.** Days.
+the spike's own client, and the index's bytes are read from ~~`shoaladm stats --json`, which the
+node reports and a capture does not keep~~ the capture, which keeps every member's index bytes
+since [F71](../features/bench-device-memory.md). **Cost.** Days.
 
 ### X11. Streamed bodies
 
@@ -668,8 +674,8 @@ it throws away, or it only saves time.
 | [Resolved #210](../appendix/resolved/bench-preload-frame.md): the bench's preload within the frame | X3 | Required | X3 is `shoaladm bench` at rows of 1 MiB and 4 MiB. Its preload sent bundles of sixty-four, past the frame, whenever the file outpaced the cluster, and the refused rows vanished from the record | ✅ 2026-10-03 |
 | An XFS filesystem | X6's XFS leg | Required | [What the lab needs fitted](prerequisites.md#what-the-lab-needs-fitted) | Not fitted |
 | Rotational disks | X7; X12's rotational half | Required | The same | Not fitted |
-| Device counters, node memory and index bytes in a bench capture | X3, X10 | Optional | Nothing in the tree reads the kernel's device counters, and a capture keeps neither `resident_bytes` nor `archive_map_bytes`, which every node reports. A script reading `/proc/diskstats` on each host before and after, and `shoaladm stats --json --watch` beside the run, take the same numbers. WAL and archive bytes apart need the two roots on separate devices, or a trace of writes by file name, as the cluster testing took for [O62](../cluster-testing/performance.md#o62-the-archive-map-rewrite) | — |
-| A paced neighbour stream, with windows by table, in the bench | X3 | Optional | A bench run is one closed loop whose windows are kept by kind, not by table, so it cannot drive a small table lightly beside a large one and report each. A second driver against the same cluster can. It is near the open-loop generator in [TODOs](../appendix/todos.md) | — |
+| ✅ Device counters, node memory and index bytes in a bench capture: delivered by [F71](../features/bench-device-memory.md) | X3, X10 | Optional | ~~Nothing in the tree reads the kernel's device counters, and a capture keeps neither `resident_bytes` nor `archive_map_bytes`, which every node reports. A script reading `/proc/diskstats` on each host before and after, and `shoaladm stats --json --watch` beside the run, take the same numbers.~~ Since F71 every run of a capture keeps each host's device counters, read before and after it, and every member's resident set and index bytes every two seconds; `compare` reads device bytes written a byte sent, the resident peak and the index bytes. WAL and archive bytes apart still need the two roots on separate devices, which the capture then reports apart, or a trace of writes by file name, as the cluster testing took for [O62](../cluster-testing/performance.md#o62-the-archive-map-rewrite) | ✅ 2026-10-03 |
+| ✅ A paced neighbour stream, with windows by table, in the bench: delivered by [F72](../features/bench-paced-stream.md) as a *paced stream* | X3 | Optional | ~~A bench run is one closed loop whose windows are kept by kind, not by table, so it cannot drive a small table lightly beside a large one and report each. A second driver against the same cluster can. It is near the open-loop generator in [TODOs](../appendix/todos.md)~~ Since F72 `--paced <table> --paced-rate <N>` drives one table at an offered rate beside a main load that leaves it alone, its latency from each operation's slot, its windows and worst second's p99 kept apart in every run | ✅ 2026-10-03 |
 | An operation kind a schema supplies before buckets exist | X10 | Optional | X10's cold commit is a write that reads its row. `#[shoal::db]` emits `operation_kinds` empty, and buckets are what will fill it (M12). X10's own client drives it meanwhile | — |
 
 The rest is each spike's own work, written on its section: X2 measures the map's frame again

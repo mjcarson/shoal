@@ -21,11 +21,16 @@ about a network, and the page is explicit about that too.
   source know those two (`window.rs:20-25`, `pick.rs:22-35`, `feed.rs:305`).
 - **It counts operations and not bytes.** A second's window holds a latency histogram,
   misses, retries and errors (`window.rs:80-91`). The only bytes recorded are the server's
-  own figure for what it answered.
+  own figure for what it answered. ~~That was so until~~ Since
+  [F69](../features/driver-operation-kinds.md) every window counts bytes both ways, and since
+  [F71](../features/bench-device-memory.md) every run keeps each host's device counters and
+  each member's resident set and index bytes.
 - **It refuses a bundle it thinks will not fit a frame**, against a 64 MiB constant of its
   own (`shoaladm/src/bench/orchestrate.rs:65`).
 - **It is closed loop**: a worker sends more as answers come back, so a stall delays the
-  operations behind it and is not counted against them.
+  operations behind it and is not counted against them. ~~Wholly~~ Its main load still is; since
+  [F72](../features/bench-paced-stream.md) the driver can pace an arm, latency from each
+  operation's slot, and a run drives one table that way beside its main load.
 - **An arm is `{mix}/b{bundle}[/{override}]/{event}`**, never renamed, with events that
   kill, stop, remove, rebalance, decommission, repair and back up
   (`shoal-loadgen/src/spec.rs:135-153`), each cut into before, during and after, and a
@@ -164,7 +169,9 @@ next one reads.
 - **A reset between arms that wrote** is a bootstrap, minutes on the lab, as it is for
   tables.
 - **Closed loop.** A stream that stalls is not charged for the stall. An open-loop generator
-  is filed against F66 already and matters more here.
+  is filed against F66 already and matters more here. Its mechanism, a slot for each operation
+  and latency from it, was built by [F72](../features/bench-paced-stream.md); a paced main load
+  is [what is left](../appendix/todos.md#what-f71-and-f72-left-undone).
 
 ## What it breaks
 

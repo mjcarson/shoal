@@ -181,6 +181,12 @@ cd examples/tmdb_dataset && SHOAL_BIN_DIR=$PWD/../../target/lab/<f>/bin SHOAL_DE
 # leave --workloads out on a terminal and a wizard chooses the whole run, explaining each choice;
 # ctrl-s saves it as a spec that `--spec` runs again (F67). With no terminal the four defaults run
 ../../target/debug/shoaladm bench list | show <label> | compare <baseline> <candidate>
+# every run of a capture keeps each host's device counters (/proc/diskstats before and after, by
+# the device each root is on) and each member's memory (F71); `--paced <table> --paced-rate <N>`
+# drives one table at an offered rate beside the main load, with windows of its own (F72). The
+# script runs under `sh -c`: a login shell of zsh, europa's, ties `path` to PATH
+cd examples/bench_dataset && ../../target/debug/shoaladm bench run -i <inventory> --dataset dataset \
+    --workloads read100,insert100 --paced Review --paced-rate 50 --stop-unit shoal-tmdb
 # the driver, the dataset, the capture and compare, engine-free like shoaladm
 cargo test -p shoal-loadgen
 cargo tree -p shoal-loadgen | grep -c glommio     # 0
