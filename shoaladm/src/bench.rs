@@ -157,7 +157,11 @@ where
         .unwrap_or_default();
     // a spec is saved beside the project by default
     let save_path = project.dir()?.join("bench.yml");
-    let wizard = wizard::form::Wizard::new(spec, args, tables, save_path);
+    let kinds = S::operation_kinds()
+        .iter()
+        .map(|kind| kind.name().to_string())
+        .collect();
+    let wizard = wizard::form::Wizard::new(spec, args, tables, save_path).with_kinds(kinds);
     match wizard::run(wizard).await? {
         wizard::Choice::Run(spec, args) => Ok(Some((*spec, *args))),
         wizard::Choice::Quit => Ok(None),

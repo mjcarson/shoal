@@ -94,7 +94,8 @@ captures are compared on, so it is never renamed - [F67](bench-run-wizard.md)'s 
 axis left every id as it was.
 
 **Workloads** (`--workloads`) are `insert100`, `read100`, `rw50`, `read90`, or
-`read:N,insert:M`. ~~**Mixes** (`--mixes`)~~ was the name until [F67](bench-run-wizard.md): the
+`read:N,insert:M`, and since [F69](driver-operation-kinds.md) any kind the schema supplies
+beside them, `read:50,lookup:50`. ~~**Mixes** (`--mixes`)~~ was the name until [F67](bench-run-wizard.md): the
 flag still parses, and a spec's `mixes` or a capture's `mix` still reads. The defaults are the
 four named workloads at bundles 1, 16 and 64. A run that names no workload opens a wizard on a
 terminal that explains each one and chooses the whole run ([F67](bench-run-wizard.md)); with no
@@ -335,8 +336,11 @@ deployment cannot be held across a spawn.
 - **Closed loop only.** A worker sends more as answers come back, so the load is set by the
   depth, not offered at a rate. Coordinated omission applies: a stall delays the queries behind
   it rather than piling them up. An open-loop generator is in the [todos](../appendix/todos.md).
-- **Reads and inserts only.** No update or delete workloads, and no partition scan of a sorted
-  table. A sorted read names exact keys.
+- ~~**Reads and inserts only.** No update or delete workloads, and no partition scan of a sorted
+  table.~~ Since [F69](driver-operation-kinds.md) a driver runs any kind a schema supplies beside
+  read and insert, but no schema supplies one yet, so a dataset run is still reads and inserts:
+  no update or delete workload, and no partition scan of a sorted table. A sorted read names
+  exact keys.
 - **A sorted get of several keys** names each partition once and every sort key. It also returns
   a row whose sort key matches in another of the named partitions, so it can return more rows
   than keys.

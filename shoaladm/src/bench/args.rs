@@ -436,6 +436,7 @@ impl BenchRunArgs {
             // an attached run that is not --preloaded loads it before its first arm, whatever
             // order its workloads are in, so that is all a read needs (item 201)
             if !self.yes_write {
+                // a kind a schema supplies is taken to write, since only the schema knows (F69)
                 if spec.workloads.iter().any(Workload::writes) {
                     problems.push(
                         "a workload inserts into the attached cluster; pass --yes-write to allow it, knowing \

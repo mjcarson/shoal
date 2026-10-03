@@ -252,9 +252,20 @@ impl BenchPane {
         match self.last() {
             Some(last) => {
                 let summary = &last.summary;
+                // every kind the driver was handed, and the bytes both ways (F69)
+                let supplied: String = summary
+                    .kinds
+                    .iter()
+                    .map(|(name, stats)| format!(" {name} {:.0}/s", stats.per_sec))
+                    .collect();
+                let mib = |bytes: f64| bytes / (1024.0 * 1024.0);
                 lines.push(format!(
-                    "client (from send): read {:.0}/s insert {:.0}/s · driver {:.0}% cpu",
-                    summary.read.per_sec, summary.insert.per_sec, last.driver_cpu_pct
+                    "client (from send): read {:.0}/s insert {:.0}/s{supplied} · sent {:.2} MiB/s received {:.2} MiB/s · driver {:.0}% cpu",
+                    summary.read.per_sec,
+                    summary.insert.per_sec,
+                    mib(summary.sent_per_sec),
+                    mib(summary.received_per_sec),
+                    last.driver_cpu_pct
                 ));
                 lines.push(format!(
                     "client per query: read p50 {:.2}ms p99 {:.2}ms · insert p50 {:.2}ms p99 {:.2}ms · per bundle p99 {:.2}ms",
@@ -264,7 +275,7 @@ impl BenchPane {
                     summary.insert.latency.p99_ms,
                     summary.bundle.p99_ms
                 ));
-                let errors: u64 = summary.read.failed() + summary.insert.failed();
+                let errors: u64 = summary.every_kind().map(|(_, stats)| stats.failed()).sum();
                 lines.push(format!(
                     "errors {errors}{}{}",
                     if errors > 0 {

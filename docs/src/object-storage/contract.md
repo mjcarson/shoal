@@ -189,6 +189,18 @@ README was the source.
 no type, added no dependency and measured nothing. A version above is a pin for a spike to
 start from, not a choice.
 
+#### Q30, in part: the driver's shape (2026-10-03)
+
+Recorded 2026-10-03, on the tree that landed [F69](../features/driver-operation-kinds.md).
+
+| Decision | Evidence |
+| --- | --- |
+| The one driver is generalized; no second driver is written for objects | [X13](spikes.md#x13-the-benchmarks-shape)'s reading, done while building F69: read and insert are written into five places (`spec.rs`, `window.rs`, `pick.rs`, `feed.rs` and the driver's judge), and each took a third kind as one more case. The kind is `OperationKind<S>`, handed over through `DatasetSupport::operation_kinds`, and bytes are counted at the client where frames are written and read |
+| A table workload is unchanged | `table_arm_ids_are_unchanged` and `picks_of_read_insert_workloads_are_unchanged`, frozen on the tree before F69; on the lab, a capture before F69 and one after are joined arm by arm by `compare` with no fact refused ([F69](../features/driver-operation-kinds.md#performance)) |
+
+**Not settled.** The object dataset (a folder of real files, or a seeded description), and how
+fast one core makes seeded bytes, which is X13's stub. Neither is needed before buckets exist.
+
 ## Alternatives rejected
 
 **A primary for each placement group, with a log on every holder and peering.** It is what

@@ -2118,6 +2118,7 @@ impl<S: QuerySupport> Shoal<S> {
         };
         // wraap our result in a stream that supports queries and results
         let query_stream = ShoalQueryStream {
+            bytes_sent: 0,
             id,
             queries_sent: 0,
             pool: self.pool.clone(),
@@ -2173,6 +2174,7 @@ impl<S: QuerySupport> Shoal<S> {
         };
         // wraap our result in a stream that supports queries and results
         let query_stream = ShoalQueryStream {
+            bytes_sent: 0,
             id,
             queries_sent: 0,
             pool: self.pool.clone(),
@@ -2806,6 +2808,22 @@ where
 }
 
 impl<S: QuerySupport> ShoalResponse<S> {
+    /// How many bytes this response took on the wire, frame header included
+    ///
+    /// The preamble, the session token when one came with it, and the payload, which is exactly
+    /// what the frame's header counted. What a driver counts as received
+    /// ([F69](../../../docs/src/features/driver-operation-kinds.md)).
+    #[must_use]
+    pub fn wire_bytes(&self) -> u64 {
+        // the preamble every response frame starts with, the token if there was one, the archive
+        let token = if self.token.is_some() {
+            read::SESSION_TOKEN_LEN
+        } else {
+            0
+        };
+        (protocol::RESPONSE_PREAMBLE_LEN + token + self._buff.len()) as u64
+    }
+
     /// Wrap a response's bytes
     ///
     /// # Arguments
@@ -3635,6 +3653,11 @@ pub struct ShoalQueryStream<Q: QuerySupport> {
     pub id: Uuid,
     /// The number of messages that have been sent
     pub queries_sent: usize,
+    /// How many bytes every bundle sent on this stream took on the wire, frame header included
+    ///
+    /// What a driver counts as sent ([F69](../../../docs/src/features/driver-operation-kinds.md));
+    /// a bundle whose write failed is not counted.
+    pub bytes_sent: u64,
     // A pool of tcp connections to send messages over
     pool: bb8::Pool<ShoalConnectionManager>,
     /// The transmission side of the response stream channel
@@ -3764,6 +3787,8 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
         }
         // record that this bundle is now the sockets problem
         stamps.mark_written();
+        // and what it took on the wire, header and all
+        self.bytes_sent += (head.as_bytes().len() + archived.len()) as u64;
         // a connection that died between being handed out and being written to swept its
         // waiters before this bundle's was there to be failed; the read loop marks itself dead
         // before it sweeps, so checking after the write is what closes that window

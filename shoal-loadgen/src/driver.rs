@@ -14,10 +14,17 @@
 //!
 //! Everything here is generic over the schema's client type. The bounds every function repeats
 //! are the ones the client itself needs to read an answer and to hold a stream across a task.
+//!
+//! Since [F69](../../docs/src/features/driver-operation-kinds.md) a driver can be handed kinds of
+//! operation beside read and insert ([`OperationKind`]), which it weighs, picks, times and
+//! reports as it does its own two knowing nothing else about them, and every window counts the
+//! bytes its streams sent and received on the wire: each bundle a stream wrote, and each answer
+//! it read, its kind's and any it was not owed alike.
 
 use rkyv::Archive;
 use shoal::client::{SendOptions, ShoalQueryStream};
 use shoal::shared::protocol::error::ErrorCode;
+use shoal::shared::dataset::OperationKind;
 use shoal::shared::protocol::read::ReadLevel as WireReadLevel;
 use shoal::shared::queries::Queries;
 use shoal::shared::traits::QuerySupport;
@@ -234,6 +241,30 @@ impl<K> Clone for Work<K> {
     }
 }
 
+/// A kind of operation the driver was handed, as its workers use it
+///
+/// The [`OperationKind`] it came from, reduced to what a worker that knows only the query type
+/// needs: its name, how to build one operation's query, and what its answer has to show.
+struct Supplied<K> {
+    /// What the kind is called
+    name: Arc<str>,
+    /// Build one operation's query from its seed
+    build: Arc<dyn Fn(u64) -> K + Send + Sync>,
+    /// What an answer has to show to count as done rather than as a miss
+    expect: QuerySuceededOpts,
+}
+
+impl<K> Clone for Supplied<K> {
+    /// Clone the handle to the kind, not the kind
+    fn clone(&self) -> Self {
+        Supplied {
+            name: self.name.clone(),
+            build: self.build.clone(),
+            expect: self.expect,
+        }
+    }
+}
+
 /// What every worker of one arm shares
 struct Shared<K> {
     /// The arm's clock
@@ -252,9 +283,47 @@ struct Shared<K> {
     in_flight: usize,
     /// What the workers send
     work: Work<K>,
+    /// The kinds the driver was handed, in its order
+    kinds: Vec<Supplied<K>>,
 }
 
 impl<K> Shared<K> {
+    /// The window for the second it is now, of one worker, made if this is its first record
+    ///
+    /// # Arguments
+    ///
+    /// * `worker` - Which worker
+    /// * `record` - What to do with the window
+    fn with_window(&self, worker: usize, record: impl FnOnce(&mut Window)) {
+        let second = self.clock.second();
+        let mut windows = lock(&self.seconds[worker]);
+        if windows.len() <= second {
+            windows.resize_with(second + 1, Window::default);
+        }
+        record(&mut windows[second]);
+    }
+
+    /// Record the bytes a bundle took on the wire
+    ///
+    /// # Arguments
+    ///
+    /// * `worker` - Which worker
+    /// * `bytes` - How many, frame header included
+    fn record_sent(&self, worker: usize, bytes: u64) {
+        self.with_window(worker, |window| window.bytes_sent += bytes);
+    }
+
+    /// Record the bytes an answer took on the wire
+    ///
+    /// # Arguments
+    ///
+    /// * `worker` - Which worker
+    /// * `kind` - What it answered, if the stream owed it
+    /// * `bytes` - How many, frame header included
+    fn record_received(&self, worker: usize, kind: Option<&OpKind>, bytes: u64) {
+        self.with_window(worker, |window| window.record_received(kind, bytes));
+    }
+
     /// Record how an operation ended, in this second of this worker's windows
     ///
     /// # Arguments
@@ -262,14 +331,9 @@ impl<K> Shared<K> {
     /// * `worker` - Which worker
     /// * `kind` - What kind of operation
     /// * `outcome` - How it ended
-    fn record(&self, worker: usize, kind: OpKind, outcome: Outcome) {
+    fn record(&self, worker: usize, kind: &OpKind, outcome: Outcome) {
         // the window for the second it is now, made if this is its first answer
-        let second = self.clock.second();
-        let mut windows = lock(&self.seconds[worker]);
-        if windows.len() <= second {
-            windows.resize_with(second + 1, Window::default);
-        }
-        windows[second].record(kind, outcome);
+        self.with_window(worker, |window| window.record(kind, outcome));
     }
 
     /// Record that a query is being sent again
@@ -278,13 +342,8 @@ impl<K> Shared<K> {
     ///
     /// * `worker` - Which worker
     /// * `kind` - What kind of operation
-    fn record_retry(&self, worker: usize, kind: OpKind) {
-        let second = self.clock.second();
-        let mut windows = lock(&self.seconds[worker]);
-        if windows.len() <= second {
-            windows.resize_with(second + 1, Window::default);
-        }
-        windows[second].record(kind, Outcome::Retried);
+    fn record_retry(&self, worker: usize, kind: &OpKind) {
+        self.with_window(worker, |window| window.record(kind, Outcome::Retried));
     }
 
     /// Record a bundle whose answers are all in
@@ -464,6 +523,8 @@ pub struct Driver<S: QuerySupport> {
     options: SendOptions,
     /// How many streams drive the cluster
     workers: usize,
+    /// The kinds of operation it was handed beside read and insert
+    kinds: Vec<Supplied<S::QueryKinds>>,
 }
 
 impl<S> Driver<S>
@@ -512,7 +573,37 @@ where
             tables,
             options,
             workers,
+            kinds: Vec::new(),
         }
+    }
+
+    /// Hand the driver kinds of operation beside read and insert
+    ///
+    /// A workload names them by their names, and a picker built with [`Driver::kind_names`]
+    /// chooses them by their places in this list
+    /// ([F69](../../docs/src/features/driver-operation-kinds.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `kinds` - The kinds, in the order their places are counted
+    #[must_use]
+    pub fn with_kinds(mut self, kinds: Vec<Arc<dyn OperationKind<S>>>) -> Self {
+        // each kind as a worker uses it: a name, a builder and what its answer has to show
+        self.kinds = kinds
+            .into_iter()
+            .map(|kind| Supplied {
+                name: Arc::from(kind.name()),
+                expect: kind.expect(),
+                build: Arc::new(move |seed| kind.build(seed)),
+            })
+            .collect();
+        self
+    }
+
+    /// The names of the kinds the driver was handed, in its order, for a picker
+    #[must_use]
+    pub fn kind_names(&self) -> Vec<&str> {
+        self.kinds.iter().map(|kind| &*kind.name).collect()
     }
 
     /// The tables this driver reads and inserts
@@ -555,6 +646,7 @@ where
             bundle: settings.bundle,
             in_flight: settings.in_flight,
             work: Work::Arm(Arc::new(settings.picker.clone())),
+            kinds: self.kinds.clone(),
         });
         let warmup_secs = settings.warmup.as_secs() as usize;
         let measured_end = warmup_secs + settings.duration.as_secs() as usize;
@@ -611,6 +703,7 @@ where
             bundle,
             in_flight,
             work: Work::Load,
+            kinds: self.kinds.clone(),
         });
         let (seconds, _) = self.drive(shared, progress, None).await;
         for table in &self.tables {
@@ -671,6 +764,7 @@ where
             bundle,
             in_flight,
             work: Work::Queries(Arc::new(Mutex::new(queries))),
+            kinds: self.kinds.clone(),
         });
         let (seconds, _) = self.drive(shared, progress, None).await;
         Window::sum(&seconds)
@@ -879,6 +973,15 @@ fn stage<K: Clone>(
                         Err(false)
                     }
                 },
+                // a kind the driver was handed builds its own query from the operation's seed
+                Pick::Supplied { kind, seed } => {
+                    let supplied = &shared.kinds[kind];
+                    let query = (supplied.build)(seed);
+                    let copy = keep(&query);
+                    buffer.push(query);
+                    cursor.index += 1;
+                    Ok(staged(OpKind::Supplied(supplied.name.clone()), None, copy))
+                }
             }
         }
         Work::Load => {
@@ -916,6 +1019,7 @@ fn stage<K: Clone>(
 ///
 /// # Arguments
 ///
+/// * `shared` - What the workers share, where the bundle's bytes are recorded
 /// * `queries_tx` - The stream to send on
 /// * `buffer` - The staged queries
 /// * `staged` - What each one was
@@ -923,6 +1027,7 @@ fn stage<K: Clone>(
 /// * `bundles` - Where to remember the bundle
 /// * `cursor` - The worker's place, which numbers its bundles
 async fn flush<S: QuerySupport>(
+    shared: &Shared<S::QueryKinds>,
     queries_tx: &mut ShoalQueryStream<S>,
     buffer: &mut Vec<S::QueryKinds>,
     staged: &mut Vec<Staged<S::QueryKinds>>,
@@ -943,7 +1048,10 @@ async fn flush<S: QuerySupport>(
     cursor.bundles += 1;
     // latency counts from the send, so the send's own time is in it
     let at = Instant::now();
+    let before = queries_tx.bytes_sent;
     queries_tx.send(queries).await?;
+    // what the bundle took on the wire, which the stream counted as it wrote it
+    shared.record_sent(cursor.worker, queries_tx.bytes_sent - before);
     // every query is now owed an answer at its index in the stream
     bundles.insert(
         bundle,
@@ -1033,7 +1141,7 @@ where
                     Ok(sent) => staged.push(sent),
                     Err(true) => {
                         // a feed still parsing: send what is staged, then wait for it
-                        flush(&mut queries_tx, &mut buffer, &mut staged, &mut outstanding, &mut bundles, cursor).await?;
+                        flush(shared, &mut queries_tx, &mut buffer, &mut staged, &mut outstanding, &mut bundles, cursor).await?;
                         let waited = Instant::now();
                         tokio::time::sleep(FEED_POLL).await;
                         shared.record_wait(cursor.worker, waited.elapsed());
@@ -1049,11 +1157,11 @@ where
                     break;
                 }
                 if staged.len() >= shared.bundle {
-                    flush(&mut queries_tx, &mut buffer, &mut staged, &mut outstanding, &mut bundles, cursor).await?;
+                    flush(shared, &mut queries_tx, &mut buffer, &mut staged, &mut outstanding, &mut bundles, cursor).await?;
                 }
             }
             // a partial bundle goes out once nothing more will be added to it for now
-            flush(&mut queries_tx, &mut buffer, &mut staged, &mut outstanding, &mut bundles, cursor).await?;
+            flush(shared, &mut queries_tx, &mut buffer, &mut staged, &mut outstanding, &mut bundles, cursor).await?;
             // stop once there is nothing to send and every answer is in
             if outstanding.is_empty() {
                 if !shared.clock.live() || cursor.spent && retries.is_empty() {
@@ -1087,10 +1195,14 @@ where
                     continue;
                 }
             };
-            // an answer for a query this stream does not owe is ignored
+            // every answer took bytes on the wire, whatever it answered
+            let received = response.wire_bytes();
+            // an answer for a query this stream does not owe is counted and otherwise ignored
             let Some(sent) = outstanding.remove(&response.get_index()) else {
+                shared.record_received(cursor.worker, None, received);
                 continue;
             };
+            shared.record_received(cursor.worker, Some(&sent.kind), received);
             // a failure by its code, a read that found nothing as a miss, a success by its time
             let latency = bundles.get(&sent.bundle).map(|bundle| bundle.at.elapsed());
             let outcome = match response.error() {
@@ -1100,12 +1212,12 @@ where
                 {
                     retries.push_back(Retry {
                         query: sent.copy.clone().expect("a copy is kept"),
-                        kind: sent.kind,
+                        kind: sent.kind.clone(),
                         ack: sent.ack,
                         attempts: sent.attempts,
                         at: Instant::now() + backoff(sent.attempts),
                     });
-                    shared.record_retry(cursor.worker, sent.kind);
+                    shared.record_retry(cursor.worker, &sent.kind);
                     Outcome::Retried
                 }
                 Some(error) => Outcome::Failed {
@@ -1113,9 +1225,17 @@ where
                     message: error.msg().to_string(),
                 },
                 None => {
-                    let opts = QuerySuceededOpts {
-                        get: sent.kind == OpKind::Read,
-                        ..QuerySuceededOpts::default()
+                    // a read has to find its row, and a supplied kind says what it has to show
+                    let opts = match &sent.kind {
+                        OpKind::Supplied(name) => shared
+                            .kinds
+                            .iter()
+                            .find(|kind| kind.name == *name)
+                            .map_or_else(QuerySuceededOpts::default, |kind| kind.expect),
+                        kind => QuerySuceededOpts {
+                            get: *kind == OpKind::Read,
+                            ..QuerySuceededOpts::default()
+                        },
                     };
                     match response.suceeded(opts) {
                         Ok(()) => Outcome::Ok(latency.unwrap_or_default()),
@@ -1128,7 +1248,7 @@ where
                 shared.tables[table].ack(seq);
             }
             if outcome != Outcome::Retried {
-                shared.record(cursor.worker, sent.kind, outcome);
+                shared.record(cursor.worker, &sent.kind, outcome);
             }
             // the bundle is done when its last answer is in
             if let Some(bundle) = bundles.get_mut(&sent.bundle) {
@@ -1151,6 +1271,7 @@ where
         for (_, sent) in outstanding.drain() {
             match sent.copy {
                 Some(query) if sent.attempts <= shared.retries => {
+                    shared.record_retry(cursor.worker, &sent.kind);
                     retries.push_back(Retry {
                         query,
                         kind: sent.kind,
@@ -1158,11 +1279,10 @@ where
                         attempts: sent.attempts,
                         at: now + backoff(sent.attempts),
                     });
-                    shared.record_retry(cursor.worker, sent.kind);
                 }
                 _ => shared.record(
                     cursor.worker,
-                    sent.kind,
+                    &sent.kind,
                     Outcome::Failed {
                         code: code.clone(),
                         message: message.clone(),
@@ -1185,7 +1305,7 @@ where
             } else if item.ack.is_some() {
                 shared.record(
                     cursor.worker,
-                    item.kind,
+                    &item.kind,
                     Outcome::Failed {
                         code: code.clone(),
                         message: "never sent".to_string(),
@@ -1198,7 +1318,10 @@ where
     // close the stream and read it to its end, which releases its slot in the client
     queries_tx.close().await?;
     let _ = tokio::time::timeout(HUNG_AFTER, async {
-        while results_rx.next().await?.is_some() {}
+        // what is read here was still sent, so its bytes count too
+        while let Some(response) = results_rx.next().await? {
+            shared.record_received(cursor.worker, None, response.wire_bytes());
+        }
         Ok::<(), Errors>(())
     })
     .await;

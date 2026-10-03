@@ -132,6 +132,7 @@
   - [F66. shoaladm bench: benchmark any schema against a dataset folder](features/dataset-benchmarks.md)
   - [F67. shoaladm bench run names workloads, chooses a run in a wizard, and proves every stat moves](features/bench-run-wizard.md)
   - [F68. Conditional writes, with a typed refusal](features/conditional-writes.md)
+  - [F69. Operation kinds a schema supplies, and bytes counted both ways, in the driver](features/driver-operation-kinds.md)
 
 # Direction
 

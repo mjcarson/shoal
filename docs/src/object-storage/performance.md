@@ -61,7 +61,9 @@ isolating pairs. An arm that changed two would say something got slower and not 
 ### What the driver gains
 
 Three things, and the first two are prerequisites in their own right
-([S1](prerequisites.md#required)).
+([S1](prerequisites.md#required)). Both have landed, as
+[F69](../features/driver-operation-kinds.md): a driver is handed kinds through
+`DatasetSupport::operation_kinds` and counts bytes both ways. The third waits for buckets.
 
 - **Operation kinds a schema's buckets add**: put, get, a ranged read, a write in place,
   append, stat and delete. The driver stays generic over the schema, as it is for tables:
@@ -166,8 +168,9 @@ next one reads.
 
 ## What it breaks
 
-- "Reads and inserts only" ([F66](../features/dataset-benchmarks.md#limitations)).
-- "A window counts operations."
+- ~~"Reads and inserts only" ([F66](../features/dataset-benchmarks.md#limitations)).~~ Broken by
+  [F69](../features/driver-operation-kinds.md): a driver runs any kind it is handed.
+- ~~"A window counts operations."~~ A window counts bytes both ways since F69.
 - "A dataset is a file of rows for each table."
 
 What it does not break: an existing arm's id, the rule that nothing in the driver names a

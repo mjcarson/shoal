@@ -1225,17 +1225,30 @@ fn render_bench(frame: &mut Frame, area: Rect, pane: &BenchPane, now: Instant) {
     let series = |read: fn(&shoal_loadgen::window::WindowSummary) -> f64| -> Vec<(f64, f64)> {
         pane.seconds.iter().map(|sample| (sample.at as f64, read(&sample.summary))).collect()
     };
-    render_bench_chart(
-        frame,
-        rates,
-        pane,
-        "client ops/s (from send)",
-        Unit::PerSec,
-        vec![
-            ("read".to_string(), kind_color("get"), series(|summary| summary.read.per_sec)),
-            ("insert".to_string(), kind_color("insert"), series(|summary| summary.insert.per_sec)),
-        ],
-    );
+    // read and insert, then every kind the driver was handed, by name (F69)
+    let mut lines = vec![
+        ("read".to_string(), kind_color("get"), series(|summary| summary.read.per_sec)),
+        ("insert".to_string(), kind_color("insert"), series(|summary| summary.insert.per_sec)),
+    ];
+    let mut supplied: Vec<&String> = pane
+        .seconds
+        .iter()
+        .flat_map(|sample| sample.summary.kinds.keys())
+        .collect();
+    supplied.sort();
+    supplied.dedup();
+    for name in supplied {
+        let points = pane
+            .seconds
+            .iter()
+            .map(|sample| {
+                let rate = sample.summary.kinds.get(name).map_or(0.0, |stats| stats.per_sec);
+                (sample.at as f64, rate)
+            })
+            .collect();
+        lines.push((name.clone(), Color::Cyan, points));
+    }
+    render_bench_chart(frame, rates, pane, "client ops/s (from send)", Unit::PerSec, lines);
     render_bench_chart(
         frame,
         waits,

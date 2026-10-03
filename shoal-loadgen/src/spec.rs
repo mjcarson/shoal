@@ -13,9 +13,14 @@ use std::path::PathBuf;
 use crate::feed::Preload;
 use crate::keys::KeyDistribution;
 
-/// A workload: what share of an arm's operations are reads and what share inserts, by weight
+/// A workload: what share of an arm's operations are reads, inserts and each supplied kind, by weight
 ///
-/// Written as a name - `insert100`, `read100`, `rw50`, `read90` - or as `read:N,insert:M`.
+/// Written as a name - `insert100`, `read100`, `rw50`, `read90` - or as weights by kind,
+/// `read:N,insert:M`, with any kind the driver is handed beside them since
+/// [F69](../../docs/src/features/driver-operation-kinds.md): `read:50,lookup:50`. A workload of
+/// read and insert alone is named and written exactly as it was before F69, so its arms keep
+/// their ids and a spec naming it keeps its digest. Whether a supplied kind exists is judged
+/// when an arm is planned, where the schema's kinds are known, never here.
 /// Called a mix until F67; a spec or capture that says `mixes` or `mix` still reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -26,6 +31,8 @@ pub struct Workload {
     pub read: u32,
     /// The weight of inserts
     pub insert: u32,
+    /// The weight of each supplied kind, by name
+    pub kinds: BTreeMap<String, u32>,
 }
 
 impl Workload {
@@ -40,8 +47,31 @@ impl Workload {
     }
 
     /// Whether an arm of this workload writes
+    ///
+    /// A supplied kind is taken to write: only the schema that supplies it knows, so a caller
+    /// that does uses [`Workload::writes_with`].
     #[must_use]
     pub fn writes(&self) -> bool {
+        self.insert > 0 || self.kinds.values().any(|weight| *weight > 0)
+    }
+
+    /// Whether an arm of this workload writes, given which supplied kinds do
+    ///
+    /// # Arguments
+    ///
+    /// * `kind_writes` - Whether the supplied kind of this name writes
+    #[must_use]
+    pub fn writes_with(&self, kind_writes: impl Fn(&str) -> bool) -> bool {
+        self.insert > 0
+            || self
+                .kinds
+                .iter()
+                .any(|(name, weight)| *weight > 0 && kind_writes(name))
+    }
+
+    /// Whether an arm of this workload inserts rows from the insert pool
+    #[must_use]
+    pub fn inserts(&self) -> bool {
         self.insert > 0
     }
 
@@ -52,10 +82,25 @@ impl Workload {
     }
 }
 
+/// Whether a name can be a supplied kind's: lowercase letters and underscores, never one of the
+/// driver's own
+///
+/// # Arguments
+///
+/// * `name` - The name
+#[must_use]
+pub fn is_kind_name(name: &str) -> bool {
+    // a letter first, then letters and underscores, and not a kind the driver already has
+    name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+        && name != "read"
+        && name != "insert"
+}
+
 impl std::str::FromStr for Workload {
     type Err = String;
 
-    /// Parse a named workload, or `read:N,insert:M`
+    /// Parse a named workload, or weights by kind
     ///
     /// # Arguments
     ///
@@ -66,6 +111,7 @@ impl std::str::FromStr for Workload {
             name: raw.to_string(),
             read,
             insert,
+            kinds: BTreeMap::new(),
         };
         match raw {
             "insert100" => return Ok(named(0, 100)),
@@ -76,10 +122,11 @@ impl std::str::FromStr for Workload {
         }
         // otherwise weights by kind
         let (mut read, mut insert) = (0u32, 0u32);
+        let mut kinds: BTreeMap<String, u32> = BTreeMap::new();
         for entry in raw.split(',').filter(|entry| !entry.trim().is_empty()) {
             let (kind, weight) = entry
                 .split_once(':')
-                .ok_or_else(|| format!("{entry:?} is not kind:weight; a workload is insert100, read100, rw50, read90 or read:N,insert:M"))?;
+                .ok_or_else(|| format!("{entry:?} is not kind:weight; a workload is insert100, read100, rw50, read90 or read:N,insert:M with any supplied kind:N beside them"))?;
             let weight: u32 = weight
                 .trim()
                 .parse()
@@ -87,17 +134,24 @@ impl std::str::FromStr for Workload {
             match kind.trim() {
                 "read" => read += weight,
                 "insert" => insert += weight,
-                other => return Err(format!("{other:?} is not read or insert")),
+                other if is_kind_name(other) => *kinds.entry(other.to_string()).or_default() += weight,
+                other => return Err(format!("{other:?} is not read, insert or a kind's name (lowercase letters and underscores)")),
             }
         }
-        if read + insert == 0 {
+        if read + insert + kinds.values().sum::<u32>() == 0 {
             return Err(format!("the workload {raw:?} has no weight"));
         }
-        // a custom workload is named by its weights, so two spellings of one workload are one arm
+        // a custom workload is named by its weights, so two spellings of one workload are one
+        // arm; the supplied kinds follow read and insert in name order
+        let mut name = format!("read{read}-insert{insert}");
+        for (kind, weight) in &kinds {
+            name.push_str(&format!("-{kind}{weight}"));
+        }
         Ok(Workload {
-            name: format!("read{read}-insert{insert}"),
+            name,
             read,
             insert,
+            kinds,
         })
     }
 }
@@ -124,7 +178,11 @@ impl From<Workload> for String {
     fn from(workload: Workload) -> Self {
         // a custom workload's name is its weights, which parse back to it
         if workload.name.starts_with("read") && workload.name.contains("-insert") {
-            return format!("read:{},insert:{}", workload.read, workload.insert);
+            let mut written = format!("read:{},insert:{}", workload.read, workload.insert);
+            for (kind, weight) in &workload.kinds {
+                written.push_str(&format!(",{kind}:{weight}"));
+            }
+            return written;
         }
         workload.name
     }
@@ -586,9 +644,63 @@ mod tests {
         // a custom workload writes back as weights and reads back as itself
         let written: String = custom.clone().into();
         assert_eq!(written.parse::<Workload>().unwrap(), custom);
-        for bad in ["update:1", "read:x", "read:0", "both"] {
+        for bad in ["read:x", "read:0", "both", "Update:1", "lookup-x:1"] {
             assert!(bad.parse::<Workload>().is_err(), "{bad}");
         }
+        // a supplied kind parses beside them, is named after read and insert, and writes back;
+        // whether the schema supplies it is the plan's question, not the parse's (F69)
+        let supplied: Workload = "read:50,lookup:50".parse().unwrap();
+        assert_eq!(supplied.name, "read50-insert0-lookup50");
+        assert_eq!(supplied.kinds["lookup"], 50);
+        let written: String = supplied.clone().into();
+        assert_eq!(written, "read:50,insert:0,lookup:50");
+        assert_eq!(written.parse::<Workload>().unwrap(), supplied);
+        assert!(supplied.writes() && !supplied.inserts());
+        assert!(!supplied.writes_with(|_| false));
+    }
+
+    /// A table workload's arm ids and a spec's digest are what they were before supplied kinds
+    ///
+    /// An arm id is the key every comparison joins on, and the spec's digest is a fact
+    /// `compare` refuses to join across, so a capture taken before [F69](../../docs/src/features/driver-operation-kinds.md)
+    /// and one taken after are one benchmark only if both are unchanged for every workload
+    /// that names read and insert alone. Frozen on the tree before F69.
+    #[test]
+    fn table_arm_ids_are_unchanged() {
+        let spec = BenchSpec {
+            dataset: "data".into(),
+            workloads: ["read100", "insert100", "rw50", "read90", "read:7,insert:3"]
+                .into_iter()
+                .map(|name| name.parse().unwrap())
+                .collect(),
+            bundles: vec![1, 16],
+            overrides: vec![Override {
+                name: "fast".to_string(),
+                set: BTreeMap::new(),
+            }],
+            events: vec![EventKind::None, EventKind::Stop],
+            runs: 1,
+            ..BenchSpec::default()
+        };
+        let ids: Vec<String> = spec.arms().into_iter().map(|arm| arm.id.0).collect();
+        assert_eq!(ids.len(), 20);
+        for expected in [
+            "read100/b1/fast/none",
+            "insert100/b16/fast/none",
+            "rw50/b1/fast/stop",
+            "read90/b16/fast/stop",
+            "read7-insert3/b1/fast/none",
+            "read7-insert3/b16/fast/stop",
+        ] {
+            assert!(ids.iter().any(|id| id == expected), "{expected} is gone: {ids:?}");
+        }
+        // the workloads write back as they were spelled, and the digest has not moved
+        let written: Vec<String> = spec.workloads.iter().cloned().map(String::from).collect();
+        assert_eq!(
+            written,
+            vec!["read100", "insert100", "rw50", "read90", "read:7,insert:3"]
+        );
+        assert_eq!(spec.digest(), "95b060505630a0d20ebe958212e654470e9209fe42a349267e67fccee777d74f");
     }
 
     /// A spec of only a dataset takes every default, and an unknown field is refused

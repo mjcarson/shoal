@@ -477,9 +477,21 @@ where
     // every workload must have something to act on, checked before the cluster exists
     let scans: Vec<_> = tables.iter().map(|table| table.scan().clone()).collect();
     let scan_refs: Vec<_> = scans.iter().collect();
+    // and every kind a workload names has to be one the schema supplies (F69)
+    let kinds = S::operation_kinds();
+    let names: Vec<&str> = kinds.iter().map(|kind| kind.name()).collect();
     for workload in &spec.workloads {
-        Picker::new(workload, &scan_refs, &spec.tables, spec.distribution, spec.read_keys, spec.seed, "check")
-            .map_err(|error| eyre!(error))?;
+        Picker::new_with_kinds(
+            workload,
+            &scan_refs,
+            &spec.tables,
+            spec.distribution,
+            spec.read_keys,
+            spec.seed,
+            "check",
+            &names,
+        )
+        .map_err(|error| eyre!(error))?;
     }
     // a bundle has to fit the frame a node accepts, judged from the file's mean row with room to
     // spare, since a row's archived form is not its text and some rows are wider than the mean
@@ -530,12 +542,10 @@ where
         // the driver, over a client of every member
         if driver.is_none() {
             let clients = cluster.clients::<S>().await?;
-            driver = Some(Driver::new(
-                clients,
-                tables.clone(),
-                send_options(spec.read_level),
-                spec.workers,
-            ));
+            driver = Some(
+                Driver::new(clients, tables.clone(), send_options(spec.read_level), spec.workers)
+                    .with_kinds(S::operation_kinds()),
+            );
         }
         // the preload, or the check that an attached cluster holds it
         if !loaded {
@@ -566,12 +576,15 @@ where
             if spec.reads == Reads::Cold {
                 progress.send(BenchEvent::Phase(Phase::Restart));
                 restart_all::<S>(&cluster).await?;
-                driver = Some(Driver::new(
-                    cluster.clients::<S>().await?,
-                    tables.clone(),
-                    send_options(spec.read_level),
-                    spec.workers,
-                ));
+                driver = Some(
+                    Driver::new(
+                        cluster.clients::<S>().await?,
+                        tables.clone(),
+                        send_options(spec.read_level),
+                        spec.workers,
+                    )
+                    .with_kinds(S::operation_kinds()),
+                );
             }
             loaded = true;
         }
@@ -1276,7 +1289,7 @@ where
             Some(event_plan::<S>(ctx, cluster, arm, admin).await?)
         }
     };
-    let picker = Picker::new(
+    let picker = Picker::new_with_kinds(
         &arm.workload,
         &driver.tables().iter().map(|table| table.scan()).collect::<Vec<_>>(),
         &spec.tables,
@@ -1284,6 +1297,7 @@ where
         spec.read_keys,
         spec.seed,
         &format!("{}/{}", arm.id, arm.run),
+        &driver.kind_names(),
     )
     .map_err(|error| eyre!(error))?;
     let settings = ArmSettings {
@@ -1294,7 +1308,7 @@ where
         on_exhaust: spec.on_exhaust,
         retries: spec.retries,
         picker,
-        inserts: arm.workload.writes(),
+        inserts: arm.workload.inserts(),
     };
     progress.send(BenchEvent::ArmStarted {
         index,
@@ -1393,7 +1407,7 @@ where
     };
     watcher.abort();
     // every acknowledged insert read back
-    let verify = if arm.workload.writes() && spec.verify_acks {
+    let verify = if arm.workload.inserts() && spec.verify_acks {
         progress.send(BenchEvent::Phase(Phase::Verify));
         let bundle = arm.bundle.max(64);
         Some(driver.verify(bundle, bundle * 4, progress).await)
