@@ -27,7 +27,7 @@ use shoal::Shoal;
 use shoal_loadgen::dataset::Dataset;
 use shoal_loadgen::driver::{send_options, ArmClock, ArmOutcome, ArmSettings, Driver};
 use shoal_loadgen::events::{cut_background, cut_fault, p99_ratio_permille, Cut, Mark};
-use shoal_loadgen::feed::{prepare, ScanOptions, TableSource};
+use shoal_loadgen::feed::{prepare, ScanOptions, TableScan, TableSource};
 use shoal_loadgen::pick::Picker;
 use shoal_loadgen::progress::{BenchEvent, Control, Phase, Progress};
 use shoal_loadgen::results::{
@@ -66,6 +66,9 @@ const MAX_FRAME_BYTES: u64 = 64 << 20;
 
 /// How much wider than a file's mean row a bundle is judged, for rows wider than the mean
 const FRAME_HEADROOM: u64 = 4;
+
+/// The most rows the preload puts in a bundle, when a frame carries that many
+const PRELOAD_BUNDLE: usize = 64;
 
 /// Everything a run was asked for, decided before it starts
 #[derive(Clone)]
@@ -494,7 +497,8 @@ where
         .map_err(|error| eyre!(error))?;
     }
     // a bundle has to fit the frame a node accepts, judged from the file's mean row with room to
-    // spare, since a row's archived form is not its text and some rows are wider than the mean
+    // spare, since a row's archived form is not its text and some rows are wider than the mean;
+    // the preload's bundle is judged the same way where it is chosen (`preload_bundle`)
     let largest = spec.bundles.iter().copied().max().unwrap_or(1) as u64;
     for scan in &scans {
         let bytes = scan.mean_row_bytes() * largest * FRAME_HEADROOM;
@@ -553,7 +557,9 @@ where
             if spec.mode == Mode::Attach && spec.preloaded {
                 check_preloaded(current, progress).await?;
             } else {
-                let bundle = spec.bundles.iter().copied().max().unwrap_or(64).max(64);
+                // as many rows a bundle as a frame carries, up to the floor (item 210)
+                let widest = scans.iter().map(TableScan::mean_row_bytes).max().unwrap_or(0);
+                let bundle = preload_bundle(&spec.bundles, widest);
                 let started = Instant::now();
                 let (seconds, took) = current.preload(bundle, spec.in_flight_for(bundle), progress).await;
                 let window = Window::sum(&seconds);
@@ -1557,6 +1563,26 @@ fn event_facts(arm: &ArmPlan, seconds: &[Window], from: usize, run: EventRun) ->
     facts
 }
 
+/// How many rows the preload sends in a bundle
+///
+/// The run's largest bundle, or `PRELOAD_BUNDLE` where that is larger and a frame carries it. The
+/// run's own bundles were judged against the frame before the cluster existed, so only the floor
+/// is cut here. Until item 210 it was not, and rows of a mebibyte were preloaded in bundles no
+/// node accepts.
+///
+/// # Arguments
+///
+/// * `bundles` - The bundles the run measures at
+/// * `widest_row` - The largest mean row of any table's file, in bytes
+fn preload_bundle(bundles: &[usize], widest_row: u64) -> usize {
+    // how many of the widest rows a frame carries, with the headroom a run's bundles are given
+    let fits = (MAX_FRAME_BYTES / (widest_row.max(1) * FRAME_HEADROOM)).max(1);
+    // the floor, cut to what fits
+    let floor = PRELOAD_BUNDLE.min(usize::try_from(fits).unwrap_or(usize::MAX));
+    // the run's largest bundle already passed the frame check, so it is never cut
+    bundles.iter().copied().max().unwrap_or(1).max(floor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1616,5 +1642,19 @@ mod tests {
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[0].starts_with("no query figures from titan: a build from before F65"), "{lines:?}");
         assert!(lines[1].contains("(stats: NotClustered)"), "{lines:?}");
+    }
+
+    /// The preload's bundle is cut to what a frame carries, and never below the run's own (item 210)
+    #[test]
+    fn the_preload_bundle_fits_the_frame() {
+        // narrow rows keep the floor, or the run's own bundle where that is larger
+        assert_eq!(preload_bundle(&[1, 8], 1024), PRELOAD_BUNDLE);
+        assert_eq!(preload_bundle(&[128], 1024), 128);
+        // rows of 1.1 MiB fit fourteen to a frame with room to spare, not sixty four
+        assert_eq!(preload_bundle(&[1], 1_153_434), 14);
+        // a row too wide for even one with room to spare still loads, one at a time
+        assert_eq!(preload_bundle(&[1], 32 << 20), 1);
+        // an empty file, or a run with no bundles, keeps the floor
+        assert_eq!(preload_bundle(&[], 0), PRELOAD_BUNDLE);
     }
 }

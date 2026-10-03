@@ -78,7 +78,9 @@ The file then splits in file order:
 
 - **The preload**, by default the first half (`--preload 50%` or a row count). It is inserted
   before anything is measured, and its distinct keys are the only keys a read asks for, so
-  every read is of a row that exists.
+  every read is of a row that exists. It is inserted in bundles of the run's largest, or of
+  sixty-four rows where that is larger and a frame carries that many of the widest table's mean
+  row, judged as a run's bundles are ([Resolved #210](../appendix/resolved/bench-preload-frame.md)).
 - **The insert pool**, the rest. A reader thread streams it from the file again for each arm
   that inserts, so a dataset larger than memory is never held.
 

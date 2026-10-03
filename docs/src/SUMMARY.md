@@ -362,6 +362,7 @@
   - [200. A bench run by `--addr` never read the node's own figures](appendix/resolved/bench-addr-reads-no-figures.md)
   - [201. An attached run that read before it inserted was refused](appendix/resolved/attached-read-order.md)
   - [202. Nothing bounded an append batch in bytes](appendix/resolved/append-batch-bytes.md)
+  - [210. The bench preloaded wide rows in bundles no node accepts](appendix/resolved/bench-preload-frame.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

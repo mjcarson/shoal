@@ -209,7 +209,12 @@ on europa, where it is bounded by cores and devices.
 | Memory | The node's resident set at steady state |
 | A neighbour | The p99 of a second, small table driven lightly throughout |
 
-**Depends on.** Nothing: every part exists. ~~It will meet item 202 if a replica falls behind
+**Depends on.** ~~Nothing: every part exists.~~ [Resolved #210](../appendix/resolved/bench-preload-frame.md):
+until it, the bench preloaded rows of 1 MiB and 4 MiB in bundles past the frame whenever the
+file was read faster than the cluster took rows, as on the lab, and the rows of a refused bundle
+vanished from its record
+([item 211](../appendix/known-issues.md#211-a-bundle-refused-at-its-send-loses-its-queries-from-the-benchs-record),
+open; a run that preloads every row says so in its log line). ~~It will meet item 202 if a replica falls behind
 at the larger sizes, and says so if it does.~~ Item 202 is
 [resolved](../appendix/resolved/append-batch-bytes.md): a replica behind at the larger sizes is
 fed batches of `replication.append_batch_bytes`. A row near a frame's size meets
