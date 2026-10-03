@@ -94,6 +94,7 @@ impl MemoryWal {
         super::GroupStore {
             backend: super::Backend::Memory(self.clone()),
             group,
+            batch_bytes: super::DEFAULT_APPEND_BATCH_BYTES,
         }
     }
 
@@ -112,6 +113,43 @@ impl MemoryWal {
         match &entry.payload {
             openraft::EntryPayload::Normal(command) => command.encoded_len(),
             _ => 0,
+        }
+    }
+
+    /// Where a batch of a group's entries from an index ends, if it is to fit some bytes
+    ///
+    /// The index one past the longest run from `start` whose frames weigh no more than `budget`,
+    /// and never fewer than one entry. A volatile log has no frames, so each entry is weighed as
+    /// the frame a shared log would write for it ([`super::frame::frame_len`]). An index the log
+    /// does not hold ends the run there, and the read that follows says so.
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `start` - The first index of the batch
+    /// * `end` - The index one past the most the batch may hold
+    /// * `budget` - The most bytes the batch may weigh
+    pub(super) fn batch_end(&self, group: GroupId, start: u64, end: u64, budget: usize) -> u64 {
+        let inner = self.inner.borrow();
+        let Some(log) = inner.groups.get(&group) else {
+            return end;
+        };
+        // weigh entries in order until the next would pass the budget
+        let mut weight = 0usize;
+        let mut stop = start;
+        for (index, entry) in log.entries.range(start..end) {
+            let frame = super::frame::frame_len(entry);
+            if stop > start && weight + frame > budget {
+                break;
+            }
+            weight += frame;
+            stop = index + 1;
+        }
+        // a range the log does not hold is left whole, for the read to report
+        if stop == start {
+            end
+        } else {
+            stop
         }
     }
 

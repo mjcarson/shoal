@@ -195,6 +195,9 @@ pub struct StagedCluster {
     /// The bound on bytes proposed and unanswered per group, if the test lowered it
     #[serde(default)]
     pub pending_bytes: Option<usize>,
+    /// The largest frame the node sends or accepts, if the test lowered it
+    #[serde(default)]
+    pub max_frame_bytes: Option<u32>,
     /// How many entries a group commits between snapshots, if the test shortened it
     /// ([F43](../../../docs/src/features/node-recovery.md))
     #[serde(default)]

@@ -209,9 +209,12 @@ on europa, where it is bounded by cores and devices.
 | Memory | The node's resident set at steady state |
 | A neighbour | The p99 of a second, small table driven lightly throughout |
 
-**Depends on.** Nothing: every part exists. It will meet
-[item 202](../appendix/known-issues.md#202-nothing-bounds-an-append-batch-in-bytes) if a
-replica falls behind at the larger sizes, and says so if it does.
+**Depends on.** Nothing: every part exists. ~~It will meet item 202 if a replica falls behind
+at the larger sizes, and says so if it does.~~ Item 202 is
+[resolved](../appendix/resolved/append-batch-bytes.md): a replica behind at the larger sizes is
+fed batches of `replication.append_batch_bytes`. A row near a frame's size meets
+[item 208](../appendix/known-issues.md#208-a-write-that-fits-a-client-frame-can-make-a-log-entry-no-peer-frame-carries)
+instead, and the spike says so if it does.
 **Cost.** Days.
 
 **What it is not.** A measurement of B. Only [X8](#x8-one-small-write-three-ways) puts the
@@ -607,7 +610,7 @@ cost, which bring X4, X5 and X6 with them.
 ## Exploratory work that is not a spike
 
 - **The required prerequisites that depend on no question** ([S1](prerequisites.md#the-order)):
-  known issues 46, ~~198~~ (✅ [resolved](../appendix/resolved/composite-partition-key.md)) and 202, the fixture's device faults, and the driver's operation
+  known issues ~~46~~ (✅ [resolved](../appendix/resolved/unmarked-directory-refused.md)), ~~198~~ (✅ [resolved](../appendix/resolved/composite-partition-key.md)) and ~~202~~ (✅ [resolved](../appendix/resolved/append-batch-bytes.md)), the fixture's device faults, and the driver's operation
   kinds and byte counters. Each is worth having with no object store at all, and each can
   be built and judged while the spikes run.
 - **Fitting the lab**: disks, and XFS.

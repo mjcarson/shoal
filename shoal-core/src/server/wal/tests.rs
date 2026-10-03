@@ -1499,3 +1499,127 @@ fn a_lost_segment_is_a_hole_found_at_open() {
         again.close().await.expect("failed to close");
     });
 }
+
+/// A batch read for a member stops at its byte bound, on the shared log and in memory (item 202)
+///
+/// openraft asks for up to three hundred entries at a time whatever they weigh, and a request
+/// past the link's frame bound was never sent. The read is cut at the store's bound now, and a
+/// range that fits is returned whole
+/// ([Resolved #202](../../../../docs/src/appendix/resolved/append-batch-bytes.md)).
+#[test]
+fn a_limited_read_stops_at_its_byte_budget() {
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        use openraft::storage::RaftLogReader as _;
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let wal = ShardWal::open(&dir.path().join("wal"), 1 << 30, 2048)
+            .await
+            .expect("failed to open");
+        // twenty entries of 10 KB, and a bound of three and a half of their frames
+        let entries: Vec<Entry> = (1..=20).map(|index| normal(index, 10_000)).collect();
+        let frame = super::frame::frame_len(&entries[0]);
+        let bound = frame * 7 / 2;
+        let shared = wal.store(GroupId(1)).batch_bytes(bound);
+        let memory = MemoryWal::new().store(GroupId(1)).batch_bytes(bound);
+        for mut store in [shared, memory] {
+            let volatile = store.is_volatile();
+            append_durably(&mut store, entries.clone()).await;
+            // three fit and the fourth does not
+            let batch = store
+                .limited_get_log_entries(1, 21)
+                .await
+                .expect("failed to read");
+            let indexes: Vec<u64> = batch.iter().map(|entry| entry.log_id().index).collect();
+            assert_eq!(indexes, vec![1, 2, 3], "volatile {volatile}");
+            // a later start is cut the same way, and a range under the bound is returned whole
+            let batch = store
+                .limited_get_log_entries(17, 21)
+                .await
+                .expect("failed to read");
+            assert_eq!(batch.len(), 3, "volatile {volatile}");
+            let batch = store
+                .limited_get_log_entries(19, 21)
+                .await
+                .expect("failed to read");
+            assert_eq!(batch.len(), 2, "volatile {volatile}");
+        }
+        wal.close().await.expect("failed to close");
+    });
+}
+
+/// An entry larger than the bound is still sent, alone (item 202)
+///
+/// openraft treats an empty answer to a range that is not empty as a broken contract, and a
+/// member would be fed nothing at all, so a batch always carries one entry. Whether that entry
+/// fits a frame is the write's bound, not the batch's.
+#[test]
+fn a_limited_read_returns_one_entry_larger_than_its_budget() {
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        use openraft::storage::RaftLogReader as _;
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let wal = ShardWal::open(&dir.path().join("wal"), 1 << 30, 2048)
+            .await
+            .expect("failed to open");
+        let shared = wal.store(GroupId(1)).batch_bytes(1_000);
+        let memory = MemoryWal::new().store(GroupId(1)).batch_bytes(1_000);
+        for mut store in [shared, memory] {
+            let volatile = store.is_volatile();
+            append_durably(
+                &mut store,
+                (1..=5).map(|index| normal(index, 4_000)).collect(),
+            )
+            .await;
+            // each entry alone is past the bound, and each batch is one entry
+            for start in 1..=5u64 {
+                let batch = store
+                    .limited_get_log_entries(start, 6)
+                    .await
+                    .expect("failed to read");
+                let indexes: Vec<u64> = batch.iter().map(|entry| entry.log_id().index).collect();
+                assert_eq!(indexes, vec![start], "volatile {volatile}");
+            }
+        }
+        wal.close().await.expect("failed to close");
+    });
+}
+
+/// An entry never weighs more in an append than its frame does in the log (item 202)
+///
+/// The batch bound is checked against the frames a shared log records and the frames a memory
+/// log would write, and an append carries each entry behind a log id and a length rather than a
+/// frame's fixed part. If the append were the larger, a batch within its bound could still pass
+/// the frame it rides in.
+#[test]
+fn an_entry_never_weighs_more_on_the_wire_than_in_the_log() {
+    let membership = openraft::Membership::new(
+        vec![members(&[1, 2, 3])],
+        members(&[1, 2, 3, 4])
+            .into_iter()
+            .map(|addr| (addr, addr))
+            .collect::<std::collections::BTreeMap<_, _>>(),
+    )
+    .expect("a valid membership");
+    // every kind of entry, at the widths a group carries
+    let mut entries = vec![
+        Entry::new_blank(log_id(u64::MAX >> 1, u64::MAX >> 1)),
+        Entry::new_membership(log_id(9, 1 << 40), membership),
+    ];
+    entries.extend([0usize, 1, 300, 70_000, 1 << 20].map(|size| normal(u64::MAX >> 1, size)));
+    for entry in &entries {
+        // the frame the log writes is exactly what is weighed
+        let framed = super::frame::encode_entry(GroupId(u64::MAX), entry)
+            .expect("failed to frame")
+            .len();
+        let weighed = super::frame::frame_len(entry);
+        assert_eq!(framed, weighed, "{entry:?}");
+        // and the append carries no more than that
+        let sent = postcard::to_allocvec(entry)
+            .expect("failed to encode")
+            .len();
+        assert!(
+            sent <= weighed,
+            "an entry sent as {sent} bytes weighs {weighed} in the log"
+        );
+    }
+}

@@ -14,7 +14,8 @@ a second copy. A new defect goes to known issues at the next free number, never 
 
 | Item | What | Page |
 | --- | --- | --- |
-| 202 | Nothing bounds an append batch in bytes: a member that is behind is owed up to three hundred entries a request, and a request past the frame bound is not sent | [Known issues](../appendix/known-issues.md#202-nothing-bounds-an-append-batch-in-bytes) |
+| ~~202~~ | ~~Nothing bounds an append batch in bytes: a member that is behind is owed up to three hundred entries a request, and a request past the frame bound is not sent~~ Resolved: a batch stops at `replication.append_batch_bytes` | [Resolved #202](../appendix/resolved/append-batch-bytes.md) |
+| 208 | A write that fits a client frame can make a log entry no peer frame carries, and the group it is proposed to commits nothing after it while that leader leads | [Known issues](../appendix/known-issues.md#208-a-write-that-fits-a-client-frame-can-make-a-log-entry-no-peer-frame-carries) |
 | 203 | `replication.pending_bytes` bounds a group, and the configuration's own comments call it a shard's | [Known issues](../appendix/known-issues.md#203-pending_bytes-bounds-a-group-and-the-configurations-own-comments-call-it-a-shards) |
 | 204 | The stream budget is one bucket a shard, and every page says one a node | [Known issues](../appendix/known-issues.md#204-the-stream-budget-is-built-for-a-shard-and-documented-for-a-node) |
 | 205 | A map whose only change is the control leader is published and then dropped by every shard, so a shard and its clients go on naming the old leader | [Known issues](../appendix/known-issues.md#205-a-map-whose-only-change-is-the-control-leader-is-published-and-dropped-by-every-shard) |

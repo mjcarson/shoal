@@ -126,7 +126,12 @@ deadline, and a postcard body. A shard holds one link per peer node with its own
 table, bounded by `transport.replication_queue_bytes`; a refused append is one openraft
 retries. A request for a group the receiving shard does not host, or for a kind this build
 does not serve ~~- `Snapshot` is M7's -~~ is answered by name; `Snapshot` is served since
-[F43](node-recovery.md).
+[F43](node-recovery.md). An append to a member that is behind carries at most
+`max_payload_entries` entries, openraft's three hundred, and since
+[Resolved #202](../appendix/resolved/append-batch-bytes.md) at most
+`replication.append_batch_bytes` of log frames as well (always one entry): the group's store
+cuts the batch in `limited_get_log_entries`, because a batch past the frame bound was reported
+unreachable and asked for again, whole, for as long as the member stayed behind.
 
 **Configuration.** A `replication:` block under `cluster:`, node-local, with every default
 written on the [configuration page](../getting-started/configuration.md#cluster):

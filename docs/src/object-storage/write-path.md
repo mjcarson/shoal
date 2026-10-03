@@ -41,9 +41,11 @@ What that path costs when the payload is large is measured.
   fragmented partitions have since halved the archive half for sorted tables
   ([F61](../features/fragmented-partitions.md)).
 - **A write is bounded** by a 64 MiB frame and by 64 MiB of proposed and unanswered bytes a
-  group (`shoal-core/src/server/conf/cluster.rs:472`), and an append batch is bounded in
-  entries alone:
-  [item 202](../appendix/known-issues.md#202-nothing-bounds-an-append-batch-in-bytes).
+  group (`shoal-core/src/server/conf/cluster.rs:472`), and ~~an append batch is bounded in
+  entries alone (item 202)~~ an append batch by `replication.append_batch_bytes` as well as in
+  entries since [Resolved #202](../appendix/resolved/append-batch-bytes.md). A write near the
+  frame bound can still make an entry no append carries
+  ([item 208](../appendix/known-issues.md#208-a-write-that-fits-a-client-frame-can-make-a-log-entry-no-peer-frame-carries)).
 - **A row stays in memory** until the segment it was logged in is merged.
 
 And what it cannot do: an update carries no condition

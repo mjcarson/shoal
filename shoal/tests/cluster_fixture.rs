@@ -1467,6 +1467,10 @@ async fn cluster_server_child() {
             if let Some(ms) = staged.query_deadline_ms {
                 conf.networking.query_deadline = Duration::from_millis(ms).into();
             }
+            // the frame bound, which a replication request is framed against too
+            if let Some(bytes) = staged.max_frame_bytes {
+                conf.networking.max_frame_bytes = bytes;
+            }
             // the peer lanes' material, if the fixture minted it
             // ([F50](../../docs/src/features/cluster-operations.md))
             if let Some(tls) = &staged.tls {
@@ -6247,6 +6251,103 @@ async fn returning_node_catches_up_by_log_or_snapshot() -> Result<(), FixtureErr
         .expect("a duplicate answers with a token");
     assert_eq!(token.group, original_token.group);
     assert!(token.index >= original_token.index);
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A member behind a run of wide rows is fed them in batches that fit a frame (item 202)
+///
+/// openraft feeds a member that is behind up to `max_payload_entries` entries at a time, three
+/// hundred by default, whatever they weigh, and a request past the link's frame bound is not
+/// sent: the member is reported unreachable and the same range is asked for again. Node two is
+/// cut off while two hundred writes of 128 KiB land on one key of each table - one group of the
+/// persistent table and one of the ephemeral one, the shared WAL and the memory log - which is
+/// about 25 MiB a group behind a 16 MiB frame. Healed, it has to catch up from the log, with no
+/// snapshot installed, which it does only if a batch is bounded in bytes
+/// ([Resolved #202](../../docs/src/appendix/resolved/append-batch-bytes.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_behind_wide_rows_catches_up_by_appends() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    // a frame bound a few megabytes of rows can pass
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .max_frame_bytes(16 << 20)
+        .start()
+        .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0)
+        .await
+        .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    // setup writes retry: on a loaded host a commit can outlast the write timeout (item 142)
+    let seed = || SendOptions::new().retry(Duration::from_secs(30));
+    // one key every node holds, on both tables
+    client
+        .send_one_with(
+            Note {
+                key: 20200,
+                text: "base".to_string(),
+            },
+            &seed(),
+        )
+        .await
+        .map_err(ok)?;
+    client
+        .send_one_with(
+            Row {
+                key: 20200,
+                data: "base".to_string(),
+            },
+            &seed(),
+        )
+        .await
+        .map_err(ok)?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Row", Duration::from_secs(30))?;
+    // node two cut off on every link while a run of wide rows lands on that one key
+    cluster.isolate(2);
+    let wide = "x".repeat(128 << 10);
+    for round in 0..200usize {
+        let text = format!("{round:03}{wide}");
+        client
+            .send_one_with(
+                Note {
+                    key: 20200,
+                    text: text.clone(),
+                },
+                &seed(),
+            )
+            .await
+            .map_err(ok)?;
+        client
+            .send_one_with(
+                Row {
+                    key: 20200,
+                    data: text,
+                },
+                &seed(),
+            )
+            .await
+            .map_err(ok)?;
+    }
+    // healed, it is owed about 25 MiB a group, which no single frame of 16 MiB carries
+    cluster.heal(2);
+    let caught_up = wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))
+        .and_then(|_| wait_digests_equal(&mut cluster, &[0, 1, 2], "Row", Duration::from_secs(60)));
+    if let Err(error) = caught_up {
+        let groups = groups_of(&mut cluster, 2)?;
+        panic!("the member behind wide rows never caught up: {error:?}; its groups: {groups}");
+    }
+    // from the log: nothing was far enough behind for a snapshot
+    let snapshots = snapshots_of(&mut cluster, 2)?;
+    assert_eq!(
+        snapshots["installed"], 0,
+        "the member caught up by snapshot, not by appends: {snapshots}"
+    );
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }

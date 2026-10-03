@@ -33,7 +33,7 @@ carrying the reasoning and the invariants the fix depends on. Item numbers are s
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at ~~15~~ ~~16~~ 19 and skips 25, 26, 27, 30, 31, 32, 33, 34, 36, 38, 39, 43, 44, 45, 46, 48, 51, 56, 57, 58, 61, 67, 68, 74,
 76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 92, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 120, 121, 122, 123 and 124, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ ~~item 132 is the newest entry and the newest number~~ ~~item 180 is the newest entry, with 182 the newest number, on the resolved page,~~ ~~item 142 is the newest open entry, with 187 the newest number, on the resolved page,~~ ~~item 196 is the newest entry and the newest number, with 191, 192, 194 and 195 filed and fixed in one change on the resolved page,~~ ~~item 142 is the newest open entry, with 197 the newest number, on the resolved page beside 193 and 196 (all three from round 16 of the cluster testing, 197 filed and fixed in one change),~~ ~~item 198 is the newest entry and the newest number (filed by [F66](../features/dataset-benchmarks.md), which found it),~~ ~~item 198 is the newest entry, with 200 the newest number, on the resolved page beside 199 (both filed and fixed in one change, from a user's `shoaladm bench` run whose ops/s by kind chart stayed empty),~~ ~~item 198 is the newest entry, with 201 the newest number, on the resolved page beside 199 and 200 (all three filed and fixed in one change each, from a user's `shoaladm bench` runs)~~ ~~item 206 is the newest entry and the newest number~~ item 207 is the newest number, filed by [Resolved #92, #198](resolved/composite-partition-key.md) beside item 42 that it belongs with (202 to 206 were filed by the [object storage plan](../object-storage/prerequisites.md): four found by reading the code it would be built on, and the last by checking its own links; 199, 200 and 201 stay on the resolved page, and 92 and 198, one defect filed twice, joined them in one change as [Resolved #92, #198](resolved/composite-partition-key.md)), and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ ~~item 107~~ ~~item 109~~ ~~item 110~~ ~~item 112~~ ~~item 113~~ ~~item 119~~ ~~item 124~~ ~~item 125~~ ~~item 119 is the newest entry here again~~ ~~and the newest number~~ ~~with 114 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 121 the newest number, on the resolved page~~ ~~with 124 the newest number, on the resolved page~~ ~~and the newest number~~ ~~with 125 the newest number, on the resolved page~~ ~~with 126 the newest number, on the resolved page~~ ~~with 127 the newest number, on the resolved page~~ ~~item 129 is the newest entry and the newest number~~ ~~item 131 is the newest entry and the newest number~~ ~~item 132 is the newest entry and the newest number~~ ~~item 180 is the newest entry, with 182 the newest number, on the resolved page,~~ ~~item 142 is the newest open entry, with 187 the newest number, on the resolved page,~~ ~~item 196 is the newest entry and the newest number, with 191, 192, 194 and 195 filed and fixed in one change on the resolved page,~~ ~~item 142 is the newest open entry, with 197 the newest number, on the resolved page beside 193 and 196 (all three from round 16 of the cluster testing, 197 filed and fixed in one change),~~ ~~item 198 is the newest entry and the newest number (filed by [F66](../features/dataset-benchmarks.md), which found it),~~ ~~item 198 is the newest entry, with 200 the newest number, on the resolved page beside 199 (both filed and fixed in one change, from a user's `shoaladm bench` run whose ops/s by kind chart stayed empty),~~ ~~item 198 is the newest entry, with 201 the newest number, on the resolved page beside 199 and 200 (all three filed and fixed in one change each, from a user's `shoaladm bench` runs)~~ ~~item 206 is the newest entry and the newest number~~ ~~item 207 is the newest number, filed by [Resolved #92, #198](resolved/composite-partition-key.md) beside item 42 that it belongs with~~ item 208 is the newest number, filed by [Resolved #202](resolved/append-batch-bytes.md) in the place 202 left (207 was filed by [Resolved #92, #198](resolved/composite-partition-key.md) beside item 42 that it belongs with) (202 to 206 were filed by the [object storage plan](../object-storage/prerequisites.md): four found by reading the code it would be built on, and the last by checking its own links; 199, 200 and 201 stay on the resolved page, and 92 and 198, one defect filed twice, joined them in one change as [Resolved #92, #198](resolved/composite-partition-key.md), and 46 and 202 joined them as [Resolved #46](resolved/unmarked-directory-refused.md) and [Resolved #202](resolved/append-batch-bytes.md)), and why 16 and 112 are on the resolved page beside them, and why 17, 30, 33, 43, 78, 79, 80, 82,
 83, 84, 85, 86, 88, 89, 90, 94, 95, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 115, 116, 120, 121, 122, 123, 124, 125, 126, 127 and 128 are on the resolved page, with 27, 32 and 36 beside them. **126 never appeared here**:
 it was filed and fixed in one change, from a user's run of `tmdb_dataset` on a host without
 `/opt/shoal` ([Resolved #126](resolved/storage-directory-unusable.md)). **127 never appeared here**
@@ -96,7 +96,7 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ ~~**1,674 tests**~~ ~~**1,685 tests**~~ ~~**1,691 tests**~~ ~~**1,715 tests**~~ ~~**1,725 tests**~~ ~~**1,726 tests**~~ ~~**1,728 tests**~~ ~~**1,782 tests**~~ ~~**1,785 tests**~~ ~~**1,790 tests** since [F65](../features/query-figures-home-tab.md), eleven ignored~~ ~~**1,892 tests** since [F67](../features/bench-run-wizard.md)~~ ~~**1,894 tests** since [Resolved #201](resolved/attached-read-order.md)~~ ~~**1,911 tests** since [F68](../features/conditional-writes.md)~~ ~~**1,921 tests** since [Resolved #92, #198](resolved/composite-partition-key.md)~~ **1,930 tests** since [Resolved #46](resolved/unmarked-directory-refused.md), twelve ignored (F66 took it to 1,873 without moving this line), plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ ~~**1,674 tests**~~ ~~**1,685 tests**~~ ~~**1,691 tests**~~ ~~**1,715 tests**~~ ~~**1,725 tests**~~ ~~**1,726 tests**~~ ~~**1,728 tests**~~ ~~**1,782 tests**~~ ~~**1,785 tests**~~ ~~**1,790 tests** since [F65](../features/query-figures-home-tab.md), eleven ignored~~ ~~**1,892 tests** since [F67](../features/bench-run-wizard.md)~~ ~~**1,894 tests** since [Resolved #201](resolved/attached-read-order.md)~~ ~~**1,911 tests** since [F68](../features/conditional-writes.md)~~ ~~**1,921 tests** since [Resolved #92, #198](resolved/composite-partition-key.md)~~ ~~**1,930 tests** since [Resolved #46](resolved/unmarked-directory-refused.md)~~ **1,934 tests** since [Resolved #202](resolved/append-batch-bytes.md), twelve ignored (F66 took it to 1,873 without moving this line), plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
@@ -112,7 +112,7 @@ fixture tests: two passed alone, and six could not bind ~~port 12000~~ ports 120
 because a deployed lab node held them on the same host ([Test Coverage](test-coverage.md)), since
 [resolved](resolved/fixture-default-peer-ports.md) as item 134. The
 [distributed cluster testing](../cluster-testing/overview.md) chapter's fixes (items 60, 130, 131,
-133 to 157, O61, O62, O63, O65 to O68) and its driver added 37 and took it to 1,656 ([Test Coverage](test-coverage.md)). [Resolved #158](resolved/runtime-waker-lists.md) added 5 `shoal-core` unit tests and took it to 1,661, every one passing at six threads. [Resolved #159](resolved/map-ahead-of-archive.md) added 2 and took it to 1,663. Its run at six threads failed two fixture tests from item 142's list, each of which passed alone three times. Items 160 to 168 and [F56](../features/cluster-rebuild.md) added 11 and took it to 1,674 ([Test Coverage](test-coverage.md)). Items 169 to 178 added 10 and took it to 1,685. #176, #179 and O74 added 6 and took it to 1,691. The distributed cluster testing chapter's round 11 (#129, #142's assertion, #143, #156, #181, #182, O57, O74, O76 and [F57](../features/cluster-reconfigure.md)) added 10 and took it to 1,701. Its workspace run at six threads passed every one. Rounds 12 to 14 took it to 1,728 ([Test Coverage](test-coverage.md)). Round 15 (F61, #191, #192, #194, #195, O81 to O83) added 14 and took it to 1,742; its workspace run at six threads on the final code passed every one. [Resolved #92, #198](resolved/composite-partition-key.md) added 10 and took it to 1,921. Its workspace run at six threads, with the build held to four jobs because europa's btrfs root stalled its linkers at full parallelism, passed 1,920: `single_node_data_has_a_verified_cluster_migration_path` failed with *267 against 400*, the #142 deadline, and passed alone three times. [Resolved #46](resolved/unmarked-directory-refused.md) added 9 and took it to 1,930.
+133 to 157, O61, O62, O63, O65 to O68) and its driver added 37 and took it to 1,656 ([Test Coverage](test-coverage.md)). [Resolved #158](resolved/runtime-waker-lists.md) added 5 `shoal-core` unit tests and took it to 1,661, every one passing at six threads. [Resolved #159](resolved/map-ahead-of-archive.md) added 2 and took it to 1,663. Its run at six threads failed two fixture tests from item 142's list, each of which passed alone three times. Items 160 to 168 and [F56](../features/cluster-rebuild.md) added 11 and took it to 1,674 ([Test Coverage](test-coverage.md)). Items 169 to 178 added 10 and took it to 1,685. #176, #179 and O74 added 6 and took it to 1,691. The distributed cluster testing chapter's round 11 (#129, #142's assertion, #143, #156, #181, #182, O57, O74, O76 and [F57](../features/cluster-reconfigure.md)) added 10 and took it to 1,701. Its workspace run at six threads passed every one. Rounds 12 to 14 took it to 1,728 ([Test Coverage](test-coverage.md)). Round 15 (F61, #191, #192, #194, #195, O81 to O83) added 14 and took it to 1,742; its workspace run at six threads on the final code passed every one. [Resolved #92, #198](resolved/composite-partition-key.md) added 10 and took it to 1,921. Its workspace run at six threads, with the build held to four jobs because europa's btrfs root stalled its linkers at full parallelism, passed 1,920: `single_node_data_has_a_verified_cluster_migration_path` failed with *267 against 400*, the #142 deadline, and passed alone three times. [Resolved #46](resolved/unmarked-directory-refused.md) added 9 and took it to 1,930. [Resolved #202](resolved/append-batch-bytes.md) added 4 and took it to 1,934.
 [Resolved #27](resolved/shql-quote-escape.md), [#32](resolved/client-gone-broadcast.md),
 [#36](resolved/staged-tail-deadline.md) and [#125](resolved/retry-unknown-outcome.md) added 11
 and took it to 1,587. There are two new binaries, `retry_outcome.rs` (3) and `staged_flush.rs`
@@ -347,54 +347,34 @@ here before them are resolved, all in one change:
 reported as the last try's refusal. Item 125 was filed at the end of this page, with the
 entries that came after the triage order, and carried its severity in its first line.
 
-### 202. Nothing bounds an append batch in bytes
+### 208. A write that fits a client frame can make a log entry no peer frame carries
 
-A tablet group feeds a member that is behind up to three hundred entries at a time, whatever
-they weigh.
+A write is bounded by the client's frame, and the entry it becomes is bounded by nothing. The
+server reads a request against `networking.max_frame_bytes` (64 MiB by default), proposes the
+row as a `Command`, and the group's leader replicates that command inside an append framed
+against the peer link's bound, which is the same setting. The command carries the row's archived
+bytes behind its own heads (`COMMAND_HEAD_LEN`, `shoal-proto/src/shared/protocol/peer/replicate.rs`),
+and the append carries the entry behind a log id, a length and the request's heads. So a row
+that fills a client frame to within a few hundred bytes becomes an entry that no append can
+frame, even alone. Nothing checks it at the proposal (`shoal-core/src/server/shard/groups.rs`,
+`replication/admission.rs`). By reading, the leader appends it to its own log and can send it
+to no follower, so it never reaches a quorum: the write is answered unknown at its timeout, and
+every entry after it in that group waits behind it in every member's batch, so the group commits
+nothing more for as long as that leader leads. A new leader never held the entry, and would
+truncate it from the old one's log when it returns as a follower.
 
-`group_config` (`shoal-core/src/server/shard/groups.rs:4430`) builds each group's openraft
-`Config` and sets no `max_payload_entries`, so the library's default stands, and the default
-is 300 (`openraft-0.10.0-alpha.34/src/config/config.rs:67`). `GroupPeer::send_append`
-(`shoal-core/src/server/replication/network.rs:1953`) encodes the whole request and hands it
-to `rpc`, which frames it against the link's `max_frame_bytes` (`:406-422`). A request past
-that bound is not sent, and openraft is told the member cannot be reached:
+Since [Resolved #202](resolved/append-batch-bytes.md) a batch always carries one entry, so such
+an entry is sent alone and refused alone; before it, it was refused inside a batch of three
+hundred. Either way a member owed it is never fed past it.
 
-```rust
-.map_err(|error| {
-    RpcFailure::Unreachable(format!("framing a replication request: {error:?}"))
-})?;
-```
+**Established by reading the source**, while fixing item 202. It has not been reproduced. The
+reproduction is a fixture test: a cluster at a 4 MiB frame, one write of a row a few bytes under
+4 MiB, and the members' applied indexes.
 
-So a batch is bounded in entries and not in bytes. Three hundred entries fit a 64 MiB frame only
-while they average under about 220 KiB. A table of 256 KiB rows, written while one member is cut
-off, leaves that member owed batches of 75 MiB that cannot be framed, and nothing in Shoal makes
-the next attempt smaller. Whether openraft then sends fewer entries of its own accord was not
-established. If it does not, the member stays behind until its lag passes the purge point and a
-snapshot replaces the log it could not be sent.
-
-The bounds that exist do not cover it. A write is bounded by a frame, and
-`replication.pending_bytes` bounds what one group holds proposed and unanswered
-([item 203](#203-pending_bytes-bounds-a-group-and-the-configurations-own-comments-call-it-a-shards)).
-Entries that are committed and being replayed to a slow member are neither.
-
-Nothing is lost, and a group with a quorum goes on committing. What is at risk is a member's
-ability to catch up, which is the redundancy. It is narrow today because the cluster arms and
-the lab's dataset write rows of about a kibibyte, and the wide rows of
-[the row-size benchmarks](../features/row-size-benchmarks.md) run on one node.
-
-**Established by reading the source**, while planning
-[object storage](../object-storage/prerequisites.md#required), whose inline objects are rows of
-exactly that width. It has not been reproduced. The reproduction is a fixture test: cut one
-member's links, write a few hundred rows of 256 KiB to a group it belongs to, heal the links,
-and read that member's append counts.
-
-**Fix direction:** bound a batch in bytes where it is sent. openraft's limit is a count, so
-either derive `max_payload_entries` from the frame bound and the largest entry a group may hold,
-which is crude and safe, or have `send_append` send the longest prefix that fits and report it
-as `AppendEntriesResponse::PartialSuccess`
-(`openraft-0.10.0-alpha.34/src/raft/message/append_entries_response.rs:42`), which exists for an
-append that took only some of its entries. Write the reproduction first. **Must be fixed before
-object storage's M12** ([S1](../object-storage/prerequisites.md#required)).
+**Fix direction:** refuse a write whose command would not fit an append at the proposal, by name,
+before it is committed: the bound is the peer frame less the append's heads, known when the
+group is built. A write refused that way is one the client could split, which is the same answer
+a frame too large already gets.
 
 ### 132. `ephemeral_sorted_table` aborted once in glibc's thread-cache teardown
 

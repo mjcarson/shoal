@@ -933,12 +933,14 @@ where
                 event!(Level::WARN, msg = "the map names a table this schema does not have", table = %spec.table);
                 continue;
             };
-            // the store: the WAL for a persistent table, memory for an ephemeral one
+            // the store: the WAL for a persistent table, memory for an ephemeral one, either
+            // feeding a member batches bounded in bytes (Resolved #202)
             let store = if Self::is_persistent(table) {
                 replication.wal.store(spec.id)
             } else {
                 replication.volatile.store(spec.id)
-            };
+            }
+            .batch_bytes(cluster.replication.append_batch_bytes);
             // the checkpoint the group starts from, if its table's archives hold one, and the
             // retry table as of it, which the log above the checkpoint cannot rebuild
             let (checkpoint, membership, seed) = match replication.checkpoint.get(spec.id) {

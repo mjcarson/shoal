@@ -34,7 +34,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 | --- | --- | --- | --- |
 | Before M11 | The contract agreed | Q14, Q15, Q16, Q18, Q19 | — |
 | M11 | The model, the fixture's faults, the driver's kinds | Q30 | Device faults in the fixture; operation kinds and byte counters in the driver |
-| M12 | Buckets in the schema and the tables they generate | Q25 | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); items 198 and 202 |
+| M12 | Buckets in the schema and the tables they generate | Q25 | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
 | M13 | The wire, pool policy, inline objects, the baseline | Q21, Q26 | More than one frame for one query |
 | M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22, Q24 | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); a failure domain on a member; free bytes for every root |
 | M15 | Replicated pools: stage, commit, apply and read | Q27 | — |
@@ -112,8 +112,9 @@ is persisted from the first object on, so its layout is fixed here.
 **Lands first.** ~~A conditional write on unsorted tables, with a typed refusal~~ ✅ landed
 as [F68](../features/conditional-writes.md), for sorted tables too. ~~Known issue
 198, the partition key of two fields, which is also item 92.~~ ✅ landed as
-[Resolved #92, #198](../appendix/resolved/composite-partition-key.md). Known issue 202, a byte
-bound on an append batch.
+[Resolved #92, #198](../appendix/resolved/composite-partition-key.md). ~~Known issue 202, a byte
+bound on an append batch.~~ ✅ landed as
+[Resolved #202](../appendix/resolved/append-batch-bytes.md).
 
 **Delivers.** `Bucket<Marker>` as a third kind of field in `#[shoal::db]`
 ([S2](buckets.md)): the two generated tables with their ids and tablet groups, the bucket
@@ -418,7 +419,7 @@ The reason this page is provisional, spike by spike.
 | X5 | gxhash's output is not stable across builds | A second checksum is a new dependency before M13 |
 | X6 | A file a stripe chunk is not viable at small sizes, or a clone is worth requiring | M14's store changes layout; or a clone call lands in the glommio fork first and the filesystems M14 accepts narrow |
 | X7 | A disk needs a journal on an SSD, or an executor to itself | M19 grows by that, and a shared journal becomes a failure domain on S5 |
-| X8 | A size below which bytes in the commit win | M15 gains the small-write path, and item 202 carries more weight |
+| X8 | A size below which bytes in the commit win | M15 gains the small-write path, and ~~item 202~~ the append batch bound ([Resolved #202](../appendix/resolved/append-batch-bytes.md)) and item 208 carry more weight |
 | X10 | A commit to a cold stripe row stalls its group | The rows of M12 change shape, or M15 keeps stripe rows resident and pays for it in memory |
 | X11 | A shared connection hurts small queries; a connection cannot be handed to another executor | M13 sets connections aside for object bytes; the hop between executors stays in M14 |
 | X12 | A rebuild inside a tolerable budget takes days | The defaults for `k + m` and `f` change before M18, and M16's budget has to adapt to the foreground |

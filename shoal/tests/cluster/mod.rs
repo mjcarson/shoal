@@ -143,6 +143,8 @@ pub struct ClusterBuilder {
     write_timeout_ms: Option<u64>,
     /// The bound on bytes proposed and unanswered per group, if lowered
     pending_bytes: Option<usize>,
+    /// The largest frame a node sends or accepts, if lowered
+    max_frame_bytes: Option<u32>,
     /// How many entries a group commits between snapshots, if shortened
     checkpoint_entries: Option<u64>,
     /// How many entries a group keeps behind its snapshot, if shortened
@@ -442,6 +444,19 @@ impl ClusterBuilder {
     /// * `bytes` - The bound
     pub fn pending_bytes(mut self, bytes: usize) -> Self {
         self.pending_bytes = Some(bytes);
+        self
+    }
+
+    /// Lower the largest frame every node sends or accepts, `networking.max_frame_bytes`
+    ///
+    /// What bounds a replication request, so a test can put a batch past it with megabytes of
+    /// rows rather than hundreds ([Resolved #202](../../../docs/src/appendix/resolved/append-batch-bytes.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bound
+    pub fn max_frame_bytes(mut self, bytes: u32) -> Self {
+        self.max_frame_bytes = Some(bytes);
         self
     }
 
@@ -1047,6 +1062,7 @@ impl Cluster {
             durability: Vec::new(),
             write_timeout_ms: None,
             pending_bytes: None,
+            max_frame_bytes: None,
             checkpoint_entries: None,
             retained_entries: None,
             segment_bytes: None,
@@ -2148,6 +2164,7 @@ fn build_membership_cluster(
             failover_ms: Some(builder.failover_ms),
             write_timeout_ms: builder.write_timeout_ms,
             pending_bytes: builder.pending_bytes,
+            max_frame_bytes: builder.max_frame_bytes,
             checkpoint_entries: builder.checkpoint_entries,
             retained_entries: builder.retained_entries,
             segment_bytes: builder.segment_bytes,

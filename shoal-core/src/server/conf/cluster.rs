@@ -509,6 +509,15 @@ fn default_snapshot_chunk_bytes() -> usize {
     1024 * 1024
 }
 
+/// The default bound on the bytes of entries one append to a member carries
+///
+/// Small enough that a batch on a 1 GbE link holds the lane for about 70 ms, which a heartbeat
+/// sharing it waits out well inside an election timeout
+/// ([Resolved #202](../../../../docs/src/appendix/resolved/append-batch-bytes.md)).
+fn default_append_batch_bytes() -> usize {
+    crate::server::wal::DEFAULT_APPEND_BATCH_BYTES
+}
+
 /// The default deadline for one snapshot transfer
 fn default_snapshot_timeout() -> DurationSpec {
     DurationSpec(Duration::from_secs(300))
@@ -579,6 +588,18 @@ pub struct Replication {
     /// How many entries a group keeps behind its snapshot, for a slow member to catch up from
     #[serde(default = "default_retained_entries")]
     pub retained_entries: u64,
+    /// The most bytes of entries one append to a member carries
+    ///
+    /// openraft bounds a batch in entries alone, so a member behind a run of wide rows was owed
+    /// batches no frame could carry, and was asked for the same range again for as long as it
+    /// stayed behind. A batch stops at this many bytes of log frames, and always carries one
+    /// entry. Has to fit `networking.max_frame_bytes` and `transport.replication_queue_bytes`
+    /// with a request's heads ([Resolved #202](../../../../docs/src/appendix/resolved/append-batch-bytes.md)).
+    #[serde(
+        default = "default_append_batch_bytes",
+        deserialize_with = "utils::deserialize_byte_size"
+    )]
+    pub append_batch_bytes: usize,
     /// How many bytes of entries the WAL keeps in memory past its durable tail
     #[serde(
         default = "default_log_cache_bytes",
@@ -665,6 +686,7 @@ impl Default for Replication {
             segment_bytes: default_segment_bytes(),
             checkpoint_entries: default_checkpoint_entries(),
             retained_entries: default_retained_entries(),
+            append_batch_bytes: default_append_batch_bytes(),
             log_cache_bytes: default_log_cache_bytes(),
             volatile_log_bytes: default_volatile_log_bytes(),
             snapshot_chunk_bytes: default_snapshot_chunk_bytes(),
@@ -1335,6 +1357,20 @@ impl Cluster {
                 self.replication.snapshot_chunk_bytes
             ))));
         }
+        // an append batch rides one frame, so its bound has to fit one with the request's heads,
+        // and a batch of nothing is no bound at all
+        // ([Resolved #202](../../../../docs/src/appendix/resolved/append-batch-bytes.md))
+        if self.replication.append_batch_bytes == 0 {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.replication.append_batch_bytes is zero; a batch always carries one entry, so the bound has to be some bytes".to_string(),
+            )));
+        }
+        if self.replication.append_batch_bytes + 4096 > max_frame_bytes as usize {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                "cluster.replication.append_batch_bytes is {} bytes, which does not fit networking.max_frame_bytes ({max_frame_bytes}) with its heads",
+                self.replication.append_batch_bytes
+            ))));
+        }
         // the strong read level is Quorum; there is no read that waits on every replica
         // ([C6](../../../../docs/src/distributed/reads.md))
         if self.read_consistency == Consistency::All {
@@ -1461,6 +1497,12 @@ impl Cluster {
         if self.replication.write_timeout.duration() > self.transport.forward_timeout.duration() {
             return Err(ServerError::Shoal(ShoalError::InvalidConfig(
                 "cluster.replication.write_timeout is longer than cluster.transport.forward_timeout; a proposal that outlives the forward deadline answers nobody".to_string(),
+            )));
+        }
+        // a batch has to fit the replication queue, or the link sheds it every time it is sent
+        if self.replication.append_batch_bytes + 4096 > self.transport.replication_queue_bytes {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.replication.append_batch_bytes does not fit cluster.transport.replication_queue_bytes with its heads".to_string(),
             )));
         }
         // a chunk has to fit the bulk queue, or a stream waits for room that never comes
@@ -1838,6 +1880,31 @@ mod tests {
             format!("{error}").contains("snapshot_chunk_bytes"),
             "{error}"
         );
+        // an append batch rides one frame and one replication queue, and is some bytes
+        // ([Resolved #202](../../../../docs/src/appendix/resolved/append-batch-bytes.md))
+        let error = Cluster::default()
+            .bootstrap(true)
+            .validate("127.0.0.1", 4 * 1024 * 1024)
+            .expect_err("an append batch larger than a frame was accepted");
+        assert!(format!("{error}").contains("append_batch_bytes"), "{error}");
+        let mut over_queue = Cluster::default().bootstrap(true);
+        over_queue.replication.append_batch_bytes = over_queue.transport.replication_queue_bytes;
+        let error = over_queue
+            .validate("127.0.0.1", u32::MAX)
+            .expect_err("an append batch larger than the replication queue was accepted");
+        assert!(
+            format!("{error}").contains("replication_queue_bytes"),
+            "{error}"
+        );
+        let mut nothing = Cluster::default().bootstrap(true);
+        nothing.replication.append_batch_bytes = 0;
+        let error = nothing
+            .validate(
+                "127.0.0.1",
+                crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            )
+            .expect_err("an append batch bound of zero was accepted");
+        assert!(format!("{error}").contains("append_batch_bytes"), "{error}");
         let mut short_transfer = Cluster::default().bootstrap(true);
         short_transfer.replication.snapshot_timeout = DurationSpec(Duration::from_secs(1));
         let error = short_transfer
