@@ -146,6 +146,19 @@ target/lab/x5/znver1/release/shoal-spike-checksum --quick --core 8          # pr
 target/lab/x5/znver1/release/shoal-spike-checksum all --core 2 --out titan-znver1.json   # on the host
 target/lab/x5/znver1/release/shoal-spike-checksum report *.json            # the page's summaries
 
+# the X2 spike: S5's placement candidates simulated over generated pool maps, from the lab's three
+# hosts to fifty of twenty-four, for fill, movement, feasibility and exceptions. Pure and seeded, so
+# `placement` prints the same tables on every host (75 seconds on europa's 32 threads); `lookups`
+# times one answer a candidate on a pinned core, the only host-dependent figure, and `fanout` sizes
+# the pool map's frame beside the tablet map's. A subcommand of shoal-spike, so it builds the engine:
+# for the Zen1 hosts in a target dir of its own. The tables are on
+# docs/src/object-storage/placement-simulation.md, the raw ones in shoal-spike/results/
+cargo run -p shoal-spike --release -- placement > shoal-spike/results/x2-placement.md
+cargo run -p shoal-spike --release -- placement --only lab --per-tablet 1,4   # a quick look
+CARGO_TARGET_DIR=target/lab/x2/znver1 RUSTFLAGS="-C target-cpu=znver1" cargo build --release -p shoal-spike
+target/lab/x2/znver1/release/shoal-spike placement lookups --core 2 --label znver1   # on the host
+target/lab/x2/znver1/release/shoal-spike fanout                                      # on the host
+
 # a cluster on real hosts from a project (F63): run in the project that defines the schema,
 # shoaladm finds the #[shoal::db] struct, probes every host's cpu over ssh, builds the node once
 # per cpu class and the schema's admin program, installs them under ~/.local/shoal/bin, and
@@ -619,7 +632,9 @@ go through `shoal`.**
   binary, `publish = false`, that drives N openraft groups on one pinned glommio executor through
   a counting loopback network and prints what they cost; `fanout`
   ([F39](docs/src/features/membership.md)) prices the topology push and the status reports
-  instead. Depends on `shoal` with the engine, and
+  instead, and since X2 the pool map's frame beside it; `placement`
+  ([X2](docs/src/object-storage/placement-simulation.md)) simulates S5's placement candidates in
+  `src/placement/`, which is pure and names no engine type. Depends on `shoal` with the engine, and
   is the one place the control store is driven with three members in a group
 - **shoal-spike-erasure** - The X4 spike ([erasure coding crates](docs/src/object-storage/erasure-coding-crates.md)):
   every erasure coding candidate S18 pinned behind one trait, checked against every loss pattern

@@ -67,9 +67,10 @@ Three pages of that part are lists of work rather than design, and they are wher
   ([Resolved #46](resolved/unmarked-directory-refused.md)) and 202
   ([Resolved #202](resolved/append-batch-bytes.md)), the driver's kinds and byte counters
   ([F69](../features/driver-operation-kinds.md)) and the fixture's device faults
-  ([F70](../features/storage-faults.md)). The four left each wait on an open question: the
-  tablet walk, a member's failure domain, free bytes for every root, and more than one frame a
-  query. Several entries further down this page are rows of that table now, and each says so
+  ([F70](../features/storage-faults.md)). ~~The four left each wait on an open question~~ Of
+  the four left, a member's failure domain and free bytes for every root can start, since X2
+  settled what placement reads. The tablet walk and more than one frame a query wait on open
+  questions. Several entries further down this page are rows of that table now, and each says so
   where it stands.
 - [Exploratory spikes](../object-storage/spikes.md) is the fourteen spikes, X1 to X14, that
   have to report before the milestones can be trusted: a model of the write protocol, a
@@ -77,6 +78,9 @@ Three pages of that part are lists of work rather than design, and they are wher
   erasure coding crates ~~are~~ were compared by X4, which chose `rusty_erasure`
   ([its record](../object-storage/erasure-coding-crates.md)), and the checksums by X5, which
   chose CRC-64/NVME through `crc-fast` ([its record](../object-storage/checksums.md)).
+  Placement was simulated by X2, which chose weighted rendezvous for a placement group's set,
+  with its positions held by the tablet group
+  ([its record](../object-storage/placement-simulation.md)).
 - [Milestones](../object-storage/milestones.md) is M11 to M21, provisional until the spikes
   report.
 
@@ -612,7 +616,9 @@ list rather than from the diff:
   ([S1](../object-storage/prerequisites.md#required)), and
   [S5](../object-storage/placement.md#failure-domains) is the first thing that reads it. Where
   it comes from was decided on 2026-10-03 (`cluster.failure_domains: {host: <name>}`, the host
-  defaulting to the OS hostname); whether placement reads it waits on Q19.
+  defaulting to the OS hostname); ~~whether placement reads it waits on Q19~~ placement reads
+  it: X2 decided that a pool under a host domain never puts two chunks of a stripe on one host
+  ([Q19, in part](../object-storage/contract.md#q19-in-part-placement-2026-10-03)).
 - **A hotspot threshold**, Q8's last half: a single hot partition is as indivisible as C8 says.
 
 **What F45 left undone, deliberately.** Recorded here so the next milestone starts from the
@@ -2335,6 +2341,25 @@ integrity, and moving it re-homes every row ([Resolved #65](resolved/gxhash-pin.
 
 Revisit when a file format is next changed for its own reasons, or when something outside Rust
 has to read a node's files.
+
+### Growing a pool's placement groups
+
+Left by [X2](../object-storage/placement-simulation.md#what-x2-does-not-settle) on 2026-10-03.
+A pool's placement groups a tablet is a power of two fixed when the pool is made, chosen so one
+consumer puts about two thousand chunks on each device. A pool that grows from six devices to
+six hundred outgrows its number: the fullest device drifts further over the mean as the chunks a
+device fall, and exceptions take up the slack until they are many.
+
+Growing it is a split. Doubling the number halves every group's sub-range of its tablet, and
+rendezvous draws each half's set afresh, so a half keeps its parent's slices only where the new
+draw happens to agree. What a split moves, how the two halves' positions are seeded from the
+parent's, and whether a split can be done one tablet group at a time were not simulated. Until
+they are, the number is fixed at the pool's creation, and a pool that outgrows it is a
+migration to a new pool.
+
+The number also bounds the tablet: a placement group's prefix is the tablet's twelve bits and
+log2 of the number, so a tablet can split that many times under the pool before a split splits
+placement groups ([S5](../object-storage/placement.md#a-placement-group-is-a-sub-range-of-a-tablet)).
 
 ### Quarantining a damaged intent log
 

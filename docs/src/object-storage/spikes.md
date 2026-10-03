@@ -1,9 +1,10 @@
 # Exploratory spikes
 
 ~~**Nothing here has been run.**~~ ~~**One spike has run**: X4, whose record is
-[its own page](erasure-coding-crates.md) (2026-10-03).~~ **Two spikes have run**, each with its
-record on a page of its own: X4, [the erasure coding crates](erasure-coding-crates.md), and X5,
-[the checksums](checksums.md) (both 2026-10-03). This page is the list of what has to be
+[its own page](erasure-coding-crates.md) (2026-10-03).~~ ~~**Two spikes have run**~~ **Three
+spikes have run**, each with its record on a page of its own: X2,
+[placement](placement-simulation.md), X4, [the erasure coding crates](erasure-coding-crates.md),
+and X5, [the checksums](checksums.md) (all 2026-10-03). This page is the list of what has to be
 learnt before the [milestones](milestones.md) of this part can be more than a guess, and how
 each thing would be learnt.
 
@@ -99,7 +100,7 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 | # | Spike | Settles | Needs | Cost |
 | --- | --- | --- | --- | --- |
 | X1 | The stripe protocol as a model | Q14, Q15, Q16, Q18 | Nothing | Week |
-| X2 | Placement simulation | Q19 | Nothing | Days |
+| ✅ X2 | Placement simulation, [reported](placement-simulation.md) | Q19, in part | Nothing; timed on the lab | ~~Days~~ Done 2026-10-03 |
 | X3 | Bytes through the tablet groups | Q14 | The lab | Days |
 | ✅ X4 | Erasure coding crates: performance and tradeoffs, [reported](erasure-coding-crates.md) | Q20, in part | titan, europa | ~~Days~~ Done 2026-10-03 |
 | ✅ X5 | Checksums, [reported](checksums.md) | Q21, in part | titan, europa | ~~Afternoon~~ Done 2026-10-03 |
@@ -165,6 +166,25 @@ express three of them ([What a spike needs first](#what-a-spike-needs-first)). *
 **It is kept.** Alone among these, its code is not thrown away.
 
 ### X2. Placement simulation
+
+**Reported 2026-10-03**, on [its own page](placement-simulation.md), and recorded on S18 as
+[Q19, in part](contract.md#q19-in-part-placement-2026-10-03). **Weighted rendezvous picks a
+placement group's set, and the tablet group holds its positions.** Neither result named below
+came out. On lab-2 the fullest device is 3.7% over the mean at one placement group a tablet and
+0.9% at four. The pool map is 2.7 KB on the lab and 361 KB at fifty hosts, and it is pushed to no
+client. But S5's statement of the function did not keep positions, and no function of the map
+can, so positions became the tablet group's state.
+
+The method below is what was planned. What was run differs in six places, each on the page:
+
+- Four variants of rendezvous were added: by position, as CRUSH's `indep` mode draws; down the
+  hierarchy; with positions matched by an unweighted draw; and with positions kept as state.
+- The lab as fitted, with its real devices, was added to the shapes.
+- Exceptions were counted to three margins.
+- Placement weights were fitted to correct mixed sizes, and judged on a consumer they were not
+  fitted to.
+- A replacement was made two ways, under a new seat and under its predecessor's.
+- Groups a tablet ran at 64 as well as 1, 4 and 16.
 
 **Question.** Which placement function, how many placement groups a tablet, and how large
 is the pool map ([Q19](contract.md#questions-to-answer))?
@@ -662,7 +682,7 @@ page that was wrong; a list of what the metadata must keep possible.
 flowchart LR
     classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
     X1["X1 model"]
-    X2["X2 placement"]
+    X2["✅ X2 placement"]:::done
     X14["X14 sources"]
     X13["X13 bench shape"]
     X10["X10 row cost"]
@@ -685,7 +705,7 @@ flowchart LR
 ```
 
 Nine depend on no other spike and on nothing that has to be fitted, and can start at once:
-X1, X2, X3, ~~X4,~~ ~~X5,~~ X10, X11, X13 and X14; X4 and X5 have run. X6 can start too, and
+X1, ~~X2,~~ X3, ~~X4,~~ ~~X5,~~ X10, X11, X13 and X14; X2, X4 and X5 have run. X6 can start too, and
 needs an XFS filesystem for one of its legs. X8 follows X6, and X9 ~~follows X5, since X4 has
 reported~~ can start: X4 and X5 have both reported. X7 and the rotational half of X12 wait
 for disks.
@@ -695,7 +715,7 @@ X1 is the one that can say the design is wrong.
 
 The first gate, [before M11](milestones.md#before-m11-the-object-contract), waits on eight
 of them: X1 and X2 for the decisions themselves, and X3, X8 and X9 for what those decisions
-cost, which bring X4, X5 and X6 with them. X4 and X5 have reported.
+cost, which bring X4, X5 and X6 with them. X2, X4 and X5 have reported.
 
 ### What a spike needs first
 
@@ -718,9 +738,10 @@ it throws away, or it only saves time.
 | ✅ A paced neighbour stream, with windows by table, in the bench: delivered by [F72](../features/bench-paced-stream.md) as a *paced stream* | X3 | Optional | ~~A bench run is one closed loop whose windows are kept by kind, not by table, so it cannot drive a small table lightly beside a large one and report each. A second driver against the same cluster can. It is near the open-loop generator in [TODOs](../appendix/todos.md)~~ Since F72 `--paced <table> --paced-rate <N>` drives one table at an offered rate beside a main load that leaves it alone, its latency from each operation's slot, its windows and worst second's p99 kept apart in every run | ✅ 2026-10-03 |
 | An operation kind a schema supplies before buckets exist | X10 | Optional | X10's cold commit is a write that reads its row. `#[shoal::db]` emits `operation_kinds` empty, and buckets are what will fill it (M12). X10's own client drives it meanwhile | — |
 
-The rest is each spike's own work, written on its section: X2 measures the map's frame again
-before comparing with it; X6 issues its own clone call; X9 gives a core up on titan; X10 drives
-its cold commit itself; X11 adds tokio and a TLS stack to the spike's dependencies; X1 saves
+The rest is each spike's own work, written on its section: ~~X2 measures the map's frame again
+before comparing with it~~ (done: 16,555 bytes where F39 measured 13,493,
+[X2](placement-simulation.md#todays-tablet-frame-again)); X6 issues its own clone call; X9
+gives a core up on titan; X10 drives its cold commit itself; X11 adds tokio and a TLS stack to the spike's dependencies; X1 saves
 its schedules in a directory of their own.
 
 ## Exploratory work that is not a spike
@@ -743,7 +764,7 @@ its evidence and with what it did not settle:
 | Decided | From |
 | --- | --- |
 | The write protocol: Q14, Q15, Q16 and Q18, and the contract agreed | X1; X3 and X8 for cost |
-| Placement: Q19 | X2 |
+| Placement: Q19 | ✅ X2 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)); how a commit checks a generation and its positions is X1's |
 | The code, the crate and the geometry: Q20. The checksum: Q21 | ✅ X4 for the code and the crate ([Q20, in part](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); ✅ X5 for the checksum ([Q21, in part](contract.md#q21-in-part-the-checksum-2026-10-03)); X14, the geometry, and the granule and chunk digest Q21 leaves |
 | The device store: Q22, and Q23 for the rotational gate | X6, X7 |
 | Where object work runs: Q24 | X9 |

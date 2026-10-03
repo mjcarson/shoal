@@ -2,7 +2,7 @@
 name = "shoal-spike"
 version = "0.1.0"
 edition = "2021"
-description = "The Q1/Q13 spike: openraft groups on the glommio runtime, counted and timed."
+description = "The Q1/Q13 spike: openraft groups on the glommio runtime, counted and timed; and X2, placement simulated."
 license = "MIT"
 publish = false
 
@@ -11,6 +11,10 @@ publish = false
 # thread can hold, what each costs idle, and what a durable append costs. Its output is pasted
 # into the decision record by hand, labelled with the host and governor it ran under, and it
 # is never part of a capture - `shoal-bench` is for numbers that are compared across commits.
+#
+# `shoal-spike placement` is X2 (`docs/src/object-storage/spikes.md#x2-placement-simulation`): the
+# placement candidates of S5 simulated over generated pool maps, pure and seeded, and timed a
+# lookup at a time. Its tables are pasted into `docs/src/object-storage/placement-simulation.md`.
 [[bin]]
 name = "shoal-spike"
 path = "src/main.rs"
@@ -23,3 +27,6 @@ glommio = { workspace = true }
 futures = "0.3"
 libc = "0.2"
 tempfile = "3"
+# the X2 pool map sketch is sized as the JSON the topology frame is pushed as. serde is already in
+# the workspace's lockfile through shoal-proto, so this adds an edge and no crate
+serde = { version = "1", features = ["derive"] }

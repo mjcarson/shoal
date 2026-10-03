@@ -126,6 +126,11 @@ mounted at a path on one node. It has:
 - **an id**, minted the first time its path is claimed and kept in a marker at the path,
   beside the node and cluster that claimed it, its class and its format;
 - **a class, a size and a weight** ([below](#capacity-and-weight));
+- **a seat**: the key placement draws it and its slices by, minted with it and committed in
+  the pool map. A device the operator names as another's replacement takes over that device's
+  seat while keeping an identity of its own, so it is drawn for exactly the groups its
+  predecessor held and nothing else moves ([S5](placement.md#seats-and-placement-weights),
+  [X2](placement-simulation.md#a-replaced-device));
 - **one or more slices**, `slices: n`, one by default.
 
 A **slice**, `DeviceSlice` in code, is the part of a device one executor owns. On a
@@ -186,6 +191,12 @@ carries an equal share of it. Placement spreads chunks over slices by weight
 and a device that is nearly full has all of its slices skipped by the same reserve check a
 snapshot stream meets today, made for each device.
 
+Beside that weight, its capacity, a device has a **placement weight**, which is what placement
+draws by. It is the capacity unless the planner fits another, which it does only for a pool
+whose devices differ in weight: drawing several devices of unequal weight includes the heavy
+ones less than in proportion, and fitted weights correct that
+([S5](placement.md#seats-and-placement-weights), [X2](placement-simulation.md#exceptions-and-fitted-weights)).
+
 Several pools may select the same class, and then they share its devices and its space, as
 the consumers of one pool share its slices. A pool's fullness is its devices' fullness.
 
@@ -207,6 +218,11 @@ the shard's own intent log orders it, as it orders a standalone table's writes.
 - **The redundancy.** A pool that asks for more failure domains than its devices span cannot
   place a stripe. Readiness says so by name and writes to its buckets are refused, as
   `default_writes` is reported short today; the redundancy never shrinks on its own.
+- **The width against the domains.** A pool exactly as wide as its failure domains puts a chunk
+  of every placement group in every domain, so it fills at the pace of its smallest domain
+  whatever placement does. The lab as fitted, a pool three wide over europa's 1,192 GiB and
+  466 GiB on each Zen1 host, fills the Zen1 hosts 52% faster than the mean
+  ([X2](placement-simulation.md#the-lab)). Readiness names the capacity such a pool can use.
 
 ### Inventories
 
@@ -273,7 +289,8 @@ More configuration, and more ways to write it wrongly, which is why the unknown 
 
 ## Invariants to uphold
 
-- A device id and a slice id are each minted once, kept in a marker, and never reused.
+- A device id and a slice id are each minted once, kept in a marker, and never reused. A
+  device's seat is not its id: it passes to a device named as its replacement.
 - An empty directory is a new device, or a new slice. A non-empty directory with no marker is
   refused.
 - No two chunks of a stripe are on one device, however many slices it has. The failure domain
@@ -295,9 +312,12 @@ bytes reported for every root, which here means every device. The inventory's pa
 
 ## How it would be measured
 
-Nothing on this page has a speed. What it adds to a status report and to the pushed map is
+Nothing on this page has a speed. ~~What it adds to a status report and to the pushed map is
 sized by [X2](spikes.md#x2-placement-simulation), which extends the fanout tables
-`shoal-spike fanout` already prints.
+`shoal-spike fanout` already prints.~~ [X2](placement-simulation.md#what-the-map-holds-over-time)
+sized what it adds to the pool map: a device of one slice is 301 bytes of the frame, a slice
+beyond its first 64, and the lab's six devices 2,747 bytes in all. What it adds to a status
+report, a size and free bytes a device, is M14's to measure.
 
 ## Acceptance tests
 

@@ -2,7 +2,7 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-03, when X4 and X5 reported.
+after it. As of 2026-10-03, when X2, X4 and X5 reported.
 
 **How to read them.**
 
@@ -31,7 +31,7 @@ flowchart LR
         R2["✅ Item 210: the bench's<br>preload fits a frame"]:::done
         XFS["Fit an XFS filesystem"]
         Disks["Fit rotational disks"]
-        X2["X2 Placement simulation"]
+        X2["✅ X2 Placement simulation"]:::done
         X4["✅ X4 Erasure coding crates"]:::done
         X5["✅ X5 Checksums"]:::done
         X6["X6 The device store on SSD"]
@@ -80,6 +80,11 @@ flowchart LR
     X14 ---> Gate
 ```
 
+The failure domain and free bytes for every root waited on Q19, which said what placement reads.
+X2 decided that part of it: a device's id and its member's host, and each device's size,
+placement weight and free bytes ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)).
+Both can start now, though they land no later than M14.
+
 The gate waits on every spike because the [milestones](milestones.md) stop being provisional
 only once every decision is on the record
 ([spikes](spikes.md#what-has-to-be-on-the-record-before-the-milestones-are-real)), and a spike
@@ -102,8 +107,8 @@ flowchart TB
     I202["✅ Item 202: a byte bound<br>on an append batch"]:::done
     I46["✅ Item 46: an unmarked<br>directory refused"]:::done
     Frames["More than one frame for<br>one query (waits on Q26)"]
-    Domain["A failure domain on<br>a member (waits on Q19)"]
-    Free["Free bytes for every<br>root (waits on Q19)"]
+    Domain["A failure domain on<br>a member"]
+    Free["Free bytes for every<br>root"]
     Walk["The walk of one tablet's<br>rows (waits on Q17)"]
     Clone["A clone call in the glommio fork<br>(optional, if X6 picks a clone)"]:::optional
     Handoff["Handing a connection to another<br>executor (optional, if X11<br>finds the hop dear)"]:::optional

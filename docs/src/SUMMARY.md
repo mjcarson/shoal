@@ -200,6 +200,7 @@
   - [S17. Lessons from Ceph and other object stores](object-storage/prior-art.md)
   - [S18. The contract and the questions](object-storage/contract.md)
   - [Exploratory spikes](object-storage/spikes.md)
+    - [X2. Placement, simulated](object-storage/placement-simulation.md)
     - [X4. Erasure coding crates, measured](object-storage/erasure-coding-crates.md)
     - [X5. Checksums, measured](object-storage/checksums.md)
   - [Milestones](object-storage/milestones.md)

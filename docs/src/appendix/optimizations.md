@@ -3870,3 +3870,39 @@ arithmetic, 11.4 against 13.1. On Zen4 it is bound by memory out of cache and ru
 as fast in it. So the gain is a Zen4 node's, as O84's is. The parity units a code writes are in
 cache when the code finishes them, so checksumming each as it is produced is the same idea on
 the other side of the encode.
+
+### O87. A placement answer is computed again on every lookup
+
+| | |
+| --- | --- |
+| **Rank** | **design input** for [M14](../object-storage/milestones.md#m14-devices-and-pools-on-one-node): nothing places a chunk yet |
+| **Impact** | Measured by [X2](../object-storage/placement-simulation.md#a-lookup): weighted rendezvous over a pool's slices costs about ten nanoseconds a slice on a Zen1 core. That is 132 ns on the lab, 12 µs at fifty hosts of twenty-four devices, and 40 µs when each of those devices has four slices; europa takes about half as long |
+| **Difficulty** | S. A placement group's answer at a generation never changes, so a node keeps the answers it has computed, keyed by placement group and generation, and drops a generation's when no group it holds is at it |
+| **Depends on** | M14's pool map and its generations |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained. A cached answer is up to sixteen slice ids, 64 bytes, so the cache is bounded by the groups a node stages or reads for; a miss costs one lookup |
+| **Benchmark** | `shoal-spike placement lookups`; at M14, a stage's and a read's time spent placing, against X2's figures for the pool's shape |
+
+Filed from X2. The cheap lookup was drawing down the hierarchy, a host and then a device in
+it, which costs 3.9 µs on titan where flat costs 40. X2 rejected it because a device's change
+moves its host's weight and then moves chunks off devices that did not change, at 1.5 to 2.3
+times the least. A cache makes flat's cost a cost per map change and per group, where the
+hierarchy's cost is in bytes moved on every change. On the lab, with six slices, nothing needs
+caching: the lookup is 132 ns.
+
+### O88. A configured set lists its tablets one by one
+
+| | |
+| --- | --- |
+| **Rank** | **low**: the frame is pushed per topology version, not per query |
+| **Impact** | Measured by [X2](../object-storage/placement-simulation.md#todays-tablet-frame-again): at sixty-four members and sixteen tables the topology frame is 16,555 bytes, and 50,004 once sixty-four replica sets are configured. That is three times what it encodes and copies to every subscriber on every version: 88 µs to encode on titan where an unconfigured frame takes 30 |
+| **Difficulty** | S. `ConfiguredSet::tablets` (`shoal-proto/src/shared/protocol/admin.rs:424`) is a list of every tablet the set serves, which for a set the rule made is the tablets `t ≡ k (mod N)`. Written as the rule's residue and modulus, or as runs, a set is a few bytes. That is a wire change to the topology frame, so it rides a frame version |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained. A client that reads the frame expands the set, which is what `TabletMap` does with the rule already |
+| **Benchmark** | `shoal-spike fanout`'s table of configured sets |
+
+Filed from X2, which measured the tablet frame again before holding the pool map's against it.
+F45 publishes a configured set for every replica set a move changes, and a rebalance that moves
+every set leaves every set configured. A cluster that has been rebalanced pushes three times the
+frame of one that has not, for the same placement.

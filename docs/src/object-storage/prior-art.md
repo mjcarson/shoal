@@ -39,7 +39,7 @@ rather than one for each disk, and the failure domain is the device beneath it.
 | RADOS pools that RGW, CephFS and RBD store into at once, beside one another | Storage pools serving consumers of mixed kinds ([S4](pools-and-devices.md#pools-and-bindings-are-policy)) | Taken: a bucket is the first consumer, and a file system or a block volume can be bound to the same pool later |
 | An OSD, one for each disk, holding shards of many placement groups | A slice ([S4](pools-and-devices.md#a-device-has-slices)) | Changed: one for each executor, so a disk one core cannot drive is given several. The failure domain is the device, never the slice |
 | A device class, set automatically to `hdd`, `ssd` or `nvme`, with a shadow hierarchy for each | A class ([S4](pools-and-devices.md#pools-and-bindings-are-policy)) | Changed: a label an operator writes, so that two pools of like devices are possible |
-| A placement group; CRUSH; failure domains; `straw2`, which changes "mappings only to or from the bucket item whose weight has changed" | A placement group and a placement function ([S5](placement.md)) | Changed: a placement group is a sub-range of a tablet, so that it has a log. The function takes the property and not the hierarchy |
+| A placement group; CRUSH; failure domains; `straw2`, which changes "mappings only to or from the bucket item whose weight has changed" | A placement group and a placement function ([S5](placement.md)) | Changed: a placement group is a sub-range of a tablet, so that it has a log. The function takes the property and not the hierarchy. [X2](placement-simulation.md) measured both halves: the property holds for a set, the hierarchy costs 1.5 to 2.3 times the least on a device change, and positions are kept by the tablet group, since no function of the map keeps them. It also measured the bias of drawing several devices of unequal weight, which Ceph's balancer corrects, and took the balancer's two remedies: placement weights, and exceptions |
 | A primary for each placement group, a log on every shard, and peering to reconcile them | The row's tablet group and a conditional commit ([S7](write-path.md)) | **Not taken.** This is the largest difference, and [S18](contract.md#alternatives-rejected) is why |
 | A write as "a two-phase process: commit and rollforward", committed in place with what is needed to roll it back kept aside | Stage, commit, apply | Changed: redo and not undo. One more round, and no decision to make after a failure |
 | The proposal that a prepare writes "into a temporary object" and an apply "moves the data from the temporary object into the correct position" | A holder's stage and apply ([S6](device-store.md)) | Taken, from a document Ceph marks as a proposal |
@@ -73,7 +73,8 @@ in the design document shipped as written, and this page does not either.
 **Recalled, not read:** that an acknowledgement waits for every shard of the acting set;
 that monitors fence a primary by map epochs; that a placement group below `min_size` blocks
 reads as well as writes; that CRUSH keeps positions stable for an erasure coded pool by
-choosing independently for each; that RADOS carries a truncate sequence on every operation;
+choosing independently for each (X2 simulated that idea, and it moved 1.1 to 2.6 times the
+least, [positions](placement-simulation.md#positions)); that RADOS carries a truncate sequence on every operation;
 that RGW defers the deletion of a replaced object's tail for two hours (the default of
 `rgw_gc_obj_min_wait` was read; what it governs was not); that an OSD is deployed one for
 each disk; that RGW, CephFS and RBD store into RADOS pools side by side; and everything about

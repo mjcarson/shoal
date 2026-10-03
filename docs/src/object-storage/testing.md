@@ -69,7 +69,7 @@ names its layout, and a generated run draws one.
 | Actor | State | Notes |
 | --- | --- | --- |
 | The object's entry | Size, the truncate epoch and its floors | An atomic object like a row. A truncate commits here, and a writer reads the epoch strongly before it stages ([S3](objects.md#size-holes-and-truncate)) |
-| The row | Sequence, a label for each stripe chunk, truncate epoch, the placement group's generation, who missed what | An atomic object that applies conditional commits in one order. The tablet group is **not** modelled again: P1 to P6 are the contract it is held to, and a leader change appears here as a stager losing its view |
+| The row | Sequence, a label for each stripe chunk, truncate epoch, the placement group's generation and, since [X2](placement-simulation.md#positions), its positions, who missed what | An atomic object that applies conditional commits in one order. The tablet group is **not** modelled again: P1 to P6 are the contract it is held to, and a leader change appears here as a stager losing its view |
 | A holder | A slice: a stripe chunk under a label; staged writes; what is durable and what is not | A crash loses what was not synced. Its device may be lost or replaced by an empty one, and every slice on it with it |
 | A stager | What it read, what it staged, whether it has proposed | Several may act on one stripe |
 | A reader | The row state it consulted, the chunks it was answered | At either read level |
@@ -189,7 +189,7 @@ of their names.
 | [S2](buckets.md#acceptance-tests) | The generated tables, the fingerprint, the client half |
 | [S3](objects.md#acceptance-tests) | Path identity, inline objects, holes, truncate, replace |
 | [S4](pools-and-devices.md#acceptance-tests) | Device and slice identity, committed policy, readiness |
-| [S5](placement.md#acceptance-tests) | Failure domains, movement, generations |
+| [S5](placement.md#acceptance-tests) | Failure domains, movement, generations, positions, seats, the score on every build |
 | [S6](device-store.md#acceptance-tests) | Staging, applying, tearing, space, checksums |
 | [S7](write-path.md#acceptance-tests) | Atomicity, fencing, acknowledgement, retries |
 | [S8](erasure-coding.md#acceptance-tests) | Decoding, labels, partial overwrites |

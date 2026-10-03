@@ -48,7 +48,8 @@ lead is refused under the append reserve
   between restarts.
 - **Rendezvous, not a count to balance to.** Each shard decides for its own groups with only the
   map, as O63 does. There is no global tally of who leads what, nothing is committed, and every
-  node computes the same answer. A voter that goes down loses only the groups it would have
+  node computes the same answer, except where two libms round `ln` apart at a near tie ([item 212](../appendix/known-issues.md#212-a-leads-rendezvous-score-takes-libms-logarithm),
+  found by [X2](../object-storage/placement-simulation.md#the-logarithm)). A voter that goes down loses only the groups it would have
   led, and they come back when it returns.
 - **Equal weights short-circuit to the primary**, so a cluster with no weights behaves exactly
   as before, down to which member leads which group.

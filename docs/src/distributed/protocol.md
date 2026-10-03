@@ -234,6 +234,12 @@ ordered node list, so a frame grows with members and barely with tables:
 | 64 | 16 | 13493 | 7.7 |
 | 64 | 64 | 15099 | 8.4 |
 
+*Measured again by [X2](../object-storage/placement-simulation.md#todays-tablet-frame-again) on
+2026-10-03: 16,555 bytes at sixty-four members and sixteen tables, since F46 added a phase and a
+state to every member, and 50,004 once sixty-four replica sets are configured by F45's moves
+([O88](../appendix/optimizations.md#o88-a-configured-set-lists-its-tablets-one-by-one)). The
+table above is F39's, kept as recorded.*
+
 One version pushed to every subscriber of a sixty-four member, sixteen table cluster, encoded
 once and copied once per subscriber:
 

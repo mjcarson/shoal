@@ -134,7 +134,12 @@ stateDiagram-v2
 
 While the group is in `Both`, a write stages on the slices of both generations and its
 commit names both, so nothing written during the move is missing from either side
-([S5](placement.md#generations)). Reads use the old generation until the switch. The copy is
+([S5](placement.md#generations)). Reads use the old generation until the switch. The commit
+that switches also records the group's positions in the new set. Each slice that stays keeps
+its position, and each that arrives takes the position of one that left, so only the chunks
+whose slice changed are copied. [X2](placement-simulation.md#positions) found no function of
+the map that could promise that; held as the group's state, it costs a permutation of at most
+eight bytes for a group that has moved. The copy is
 the rebuild above with a holder to copy from, and a move whose old holder is gone is a
 rebuild.
 
@@ -210,8 +215,9 @@ The generation is the placement group's, and one commit moves it.
 
 ## What it costs
 
-- **State in each tablet group**: a generation and a bounded missed record for each of its
-  placement groups, persisted with the checkpoint and carried in a snapshot.
+- **State in each tablet group**: a generation, the positions of a group that has moved, and
+  a bounded missed record for each of its placement groups, persisted with the checkpoint and
+  carried in a snapshot.
 - **A commit for every chunk rebuilt**, since a rebuild makes a chunk current through its
   row. A stripe with no row gains one when a chunk of it is rebuilt.
 - **`k` reads for one chunk** under an erasure code, most of them over the network. On the
@@ -237,7 +243,7 @@ The generation is the placement group's, and one commit moves it.
 - A driver asks a holder what it holds before it moves a byte.
 - A corrupt or stale chunk is never a source.
 - A placement group's generation moves only after every chunk that changes place is current
-  on its new slice.
+  on its new slice, and its positions move with it, in the same commit.
 - A holder discards only on a committed fact, and absence is established behind a barrier.
 - A node that is down is not rebuilt around until its grace expires; a device that failed
   on a live node is.

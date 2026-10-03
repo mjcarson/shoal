@@ -5667,6 +5667,7 @@ dependencies = [
  "glommio",
  "libc",
  "openraft",
+ "serde",
  "shoal",
  "tempfile",
 ]

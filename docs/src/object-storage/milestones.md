@@ -32,7 +32,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 
 | Gate | In a line | Closed before it | Lands first |
 | --- | --- | --- | --- |
-| Before M11 | The contract agreed | Q14, Q15, Q16, Q18, Q19 | — |
+| Before M11 | The contract agreed | Q14, Q15, Q16, Q18, Q19 (in part ✅ [X2](placement-simulation.md)) | — |
 | M11 | The model, the fixture's faults, the driver's kinds | Q30, in part ([recorded](contract.md#decision-record)) | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
 | M12 | Buckets in the schema and the tables they generate | Q25 | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
 | M13 | The wire, pool policy, inline objects, the baseline | Q21 (the checksum ✅ [X5](checksums.md)), Q26, the rest of Q30 | More than one frame for one query |
@@ -57,10 +57,12 @@ when five questions are decided with evidence:
 - Q15, who stages;
 - Q16, the acknowledgement rule;
 - Q18, size and truncate across tablets;
-- Q19, placement.
+- Q19, placement: ✅ in part by [X2](placement-simulation.md)
+  ([recorded](contract.md#q19-in-part-placement-2026-10-03)), and what is left, how a commit
+  checks a generation and the positions beside it, is X1's.
 
 The evidence is [X1](spikes.md#x1-the-stripe-protocol-as-a-model) for safety,
-[X2](spikes.md#x2-placement-simulation) for placement, and
+✅ [X2](placement-simulation.md) for placement, and
 [X3](spikes.md#x3-bytes-through-the-tablet-groups),
 [X8](spikes.md#x8-one-small-write-three-ways) and
 [X9](spikes.md#x9-table-latency-beside-object-work) for cost. A clause the model contradicts
@@ -204,9 +206,12 @@ root.
   outcomes, the device's class as a label ([S4](pools-and-devices.md#a-device-has-slices)).
 - Devices and their slices reported when a node joins and in every status report, with each
   device's size and free bytes.
-- The pool map, committed and pushed: devices, slices and their states, generations
-  ([S5](placement.md#the-pool-map)). The placement function. Readiness that names what a
-  pool is short of.
+- The pool map, committed and ~~pushed~~ derived on every node: devices with their seats and
+  placement weights, slices and their states, generations kept as change records, exceptions
+  ([S5](placement.md#the-pool-map)). The placement function X2 chose, weighted rendezvous
+  for the set, with its score's table frozen, and each placement group's answer cached by
+  generation. The planner's fitted weights and exceptions. Readiness that names what a pool is
+  short of, and the capacity a pool as wide as its domains can use.
 - The device store ([S6](device-store.md)): stripe chunks, the journal, stage, apply, read
   and discard, a checksum for every chunk unit bound to its place, space taken at the stage.
 - The executor that owns each slice, the budget every object buffer is drawn from, and the
@@ -214,13 +219,14 @@ root.
 - Devices and their slices in the fixture and in an inventory, and a bench cluster that
   moves them.
 
-**Acceptance.** S4's device, slice, class and report rows. S5's two placement rows. S6's
+**Acceptance.** S4's device, slice, class and report rows. S5's ~~two~~ four placement rows. S6's
 five rows. S13's device-loss, ownership and budget rows. S14's readiness row. S15's inventory
 and capture rows.
 
 **Evidence/exit.** X6's figures taken again from the store as built: a stage's sync, an
 apply, a listing. The pool map's frame at the lab's shape and at sixty-four members, against
-what X2 predicted. The reference cell's p99 beside a synthetic load on a slice's executor,
+what X2 predicted: 2,747 bytes for lab-2's six devices, and 301 bytes a device
+([X2](placement-simulation.md#the-pool-maps-frame)). The reference cell's p99 beside a synthetic load on a slice's executor,
 against [S15](performance.md#the-acceptance-numbers)'s budget, labelled as sharing a disk
 with the tables where it does.
 
@@ -275,10 +281,11 @@ a checkpoint and a snapshot. Q29, the budgets for recovery and moves
 bounded, persisted beside the checkpoint and carried in a snapshot. The rebuild driver on
 the group's leader, its progress committed. Backfill from the tablet walk and the holders'
 inventories. A device failed on a live node rebuilt at once, and a node's devices held
-through its grace. Moves between generations, up to the switch, and the planner over
-placement groups. A byte budget for each device.
+through its grace. Moves between generations, up to the switch, whose commit records each
+placement group's positions, and the planner over placement groups. A byte budget for each device.
 
-**Acceptance.** S10's six recovery and move rows. S5's two generation rows.
+**Acceptance.** S10's six recovery and move rows. S5's ~~two~~ three generation and position
+rows.
 
 **Evidence/exit.** The event arms: a device killed, a node killed and returned inside its
 grace, a device added. Each records the foreground's distribution before, during and after,
@@ -433,7 +440,7 @@ The reason this page is provisional, spike by spike.
 | Spike | If it finds | Then |
 | --- | --- | --- |
 | X1 | A violation the safe policy cannot be repaired for | Nothing after the first gate stands |
-| X2 | The rule balances the lab's shape badly | M14 carries exceptions from the start, and the planner's part of M16 comes forward |
+| ~~X2~~ | ~~The rule balances the lab's shape badly~~ It does not: 3.7% over at one placement group a tablet, 0.9% at four ([X2](placement-simulation.md)). It found instead that no function keeps positions, that a replacement needs a seat, and that mixed sizes need fitted weights | ~~M14 carries exceptions from the start, and the planner's part of M16 comes forward~~ M14's pool map carries seats, placement weights and exceptions, and M16's switch records positions |
 | X3, X8 | Rows within reach of the devices' own rate for a replicated pool | Replicated SSD pools stay rows. M15 to M17 are built for erasure coding and rotational disks first |
 | ~~X4~~ | ~~No candidate has an update form~~ Three have one, the chosen crate in its public API ([X4](erasure-coding-crates.md)) | ~~M18 ends at its second step~~ M18 has all three steps |
 | ~~X4,~~ X9 | ~~A Zen1 core encodes below a device's rate, or~~ shared executors move a table's tail past its budget. X4 measured the first half: a Zen1 core encodes 4+2 at 7.6 GiB/s out of cache ([X4](erasure-coding-crates.md)) | M14 delivers dedicated executors only, and a four-core node gives up a core or serves no pool |
