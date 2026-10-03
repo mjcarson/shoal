@@ -59,10 +59,18 @@ replicated or erasure coded over named storage pools of devices, scrubbed for bi
 Three pages of that part are lists of work rather than design, and they are where to start:
 
 - [S1](../object-storage/prerequisites.md) is what Shoal has to gain first, each row labelled
-  required or optional with its reason. Ten rows are required, and five of them can start today
+  required or optional with its reason. Ten rows are required. ~~Five of them can start today
   with no object store in sight: known issues 46, 198 and 202, the device faults in the cluster
-  fixture, and operation kinds and byte counters in `shoal-loadgen`. Several entries further down
-  this page are rows of that table now, and each says so where it stands.
+  fixture, and operation kinds and byte counters in `shoal-loadgen`.~~ Six are done: the
+  conditional write ([F68](../features/conditional-writes.md)), items 198
+  ([Resolved #92, #198](resolved/composite-partition-key.md)), 46
+  ([Resolved #46](resolved/unmarked-directory-refused.md)) and 202
+  ([Resolved #202](resolved/append-batch-bytes.md)), the driver's kinds and byte counters
+  ([F69](../features/driver-operation-kinds.md)) and the fixture's device faults
+  ([F70](../features/storage-faults.md)). The four left each wait on an open question: the
+  tablet walk, a member's failure domain, free bytes for every root, and more than one frame a
+  query. Several entries further down this page are rows of that table now, and each says so
+  where it stands.
 - [Exploratory spikes](../object-storage/spikes.md) is the fourteen spikes, X1 to X14, that
   have to report before the milestones can be trusted: a model of the write protocol, a
   placement simulation, measurements on the lab, and a reading of Ceph at its source. The

@@ -26,7 +26,13 @@ torn write cutting one write once), and one is `cluster_fixture.rs`'s
 node what it says. The ignored one is a **new** binary, `kernel_faults.rs`, which needs
 passwordless `sudo` and holds the full disk and the lost device to a real one behind
 device-mapper; it passed on europa and titan. The glommio fork's own test of the hook,
-`a_hook_fails_and_tears_only_its_directory`, is the fork's and is not counted here.
+`a_hook_fails_and_tears_only_its_directory`, is the fork's and is not counted here. The
+workspace run at six threads that closed the object storage prerequisites (`--no-fail-fast`)
+passed 1,945 of 1,947. The two failures were fixture tests that pass alone:
+`single_node_data_has_a_verified_cluster_migration_path` at the #142 deadline (*250 against
+400*), and `node_transfer_budgets_bound_concurrent_sources`, which passed alone three times. A
+second run of the fixture failed `leads_follow_the_members_lead_weights` in its place, which
+passed alone twice. All were timing under load.
 
 **[F69](../features/driver-operation-kinds.md) added 8**, 1,934 → 1,942 with twelve ignored,
 counted from `--list`. Six are `shoal-loadgen` unit tests: two frozen on the tree before F69 and

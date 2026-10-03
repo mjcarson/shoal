@@ -15,11 +15,11 @@ on it.
 
 - **A frame is eight bytes of header and a body**: version, type, two flag bytes and a
   32-bit length ([Wire Protocol](../architecture/wire-protocol.md#the-header)). There are
-  twenty-six message types (`shoal-proto/src/shared/protocol.rs:172-235`). The flag `LAST`,
-  "This frame is the last one for its query", is reserved and nothing sets it (`:351`).
+  twenty-six message types (`shoal-proto/src/shared/protocol.rs:186-249`). The flag `LAST`,
+  "This frame is the last one for its query", is reserved and nothing sets it (`:365`).
 - **A body is read whole.** The server allocates the body's length and fills it before
   anything is routed (`shoal-core/src/server/request_body.rs:55-74`). A frame is bounded at
-  64 MiB (`protocol.rs:154`), and a client's hello always offers exactly that
+  64 MiB (`protocol.rs:168`), and a client's hello always offers exactly that
   (`shoal-client/src/client.rs:558`), so a response over 64 MiB is answered with
   `ResponseTooLarge` whatever the server is configured to
   (`shoal-core/src/server/shard.rs:784`).
