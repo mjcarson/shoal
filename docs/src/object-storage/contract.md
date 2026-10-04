@@ -291,6 +291,38 @@ X2 and record it.
 - **Racks**: no deployment has one.
 - **Ceph's own code** for `indep`, `upmap` and `crush-compat`: [X14](spikes.md#x14-ceph-and-s3-at-the-source)'s reading.
 
+#### Q22, in part: the device store on SSD (2026-10-04)
+
+Recorded 2026-10-04 by [X6](device-store-ssd.md), on the tree that adds `shoal-spike device`.
+Measured on europa (Zen4, an Intel Optane 900P under XFS) and on titan and hyperion (Zen1, a
+Samsung 970 EVO on one PCIe lane, under XFS, ext4 and btrfs side by side on one device). Four
+rounds a leg, from one `znver1` build, under the `performance` governor, with no shoal unit
+running. A difference counts where the rounds' intervals do not overlap. The 970 EVO flushes in
+two regimes, 0.9 ms rested and 3 ms after sustained synced writes, so its absolute figures
+carry their regime. The choice follows the user's instruction to complete X6 and record it.
+
+| Decision | Evidence |
+| --- | --- |
+| **A stripe chunk is a file of its own**, and a whole-chunk write goes into a file taken from **a pool the slice keeps written ahead with zeros**: overwritten, synced, renamed over the chunk, with one directory sync for the chunks of one object written together. A removed chunk's file returns to the pool | At six in flight a fresh file a chunk reached 0.51 of a slot in a shared file at 1 MiB on the 970 EVO's XFS (0.47 to 0.61 over the rounds), 0.85 on the Optane and 0.43 on ext4; X6's trigger was 0.5, so its floor is 1 MiB and it did not fire. A fresh file's `fdatasync` commits its allocation: 7.2 ms against 3.2 for the same bytes overwritten. From the pool it reached 0.71 at 1 MiB and 0.57 at 256 KiB on the 970 EVO's XFS, and 0.93 and 0.65 at 1 MiB and 64 KiB on the Optane. Shared files would need an index and a compaction S6 rejected, for at most 30% above 1 MiB |
+| **A partial update is journalled and applied in place, as S6 has it**: a journal written ahead with zeros and overwritten as a ring, a header block per record, one `fdatasync` for every record whose write completed, then units and header written in place and the chunk synced | Writing ahead committed 2.3 times an appended journal's records at one stager on the 970 EVO and sixteen times at 64 stagers on the Optane. A journal allocated ahead without zeros ran no faster than an appended one on the 970 EVO, so the zeros are written when it is made. A 4 KiB write in place cost 2.0 ms rested and 6.1 ms loaded on the 970 EVO, and 81 µs on the Optane |
+| **No clone.** The apply is never a `FICLONERANGE`, and the fork gains no clone call | Against the journal on XFS, the clone wrote fewer bytes only at 1 MiB (0.52 to 0.55 as many), cost 2.1 to 3.2 times as long on the 970 EVO at one in flight, and its sync three to eight times an overwrite's. After a thousand clones a 64 MiB chunk had about 1,500 extents and a cold unit read took 2.4 to 2.6 times a fresh chunk's. The journal's own writes into a chunk that had been cloned into got slower. Every one of X6's conditions but (a) at 1 MiB failed on every leg that clones |
+| **XFS is preferred and ext4 accepted. btrfs is refused for a device**, as tmpfs already is | On btrfs a 4 KiB write in place cost 17 ms and 81 bytes on the device for each byte, writing ahead bought nothing, and every overwrite is a new allocation, so S6's rule that applying needs no new space cannot hold. ext4 needs no clone and runs the journal as XFS does, but commits a rename at 17 KiB to XFS's 2 and lists a wide placement group of a million chunks in 154 s to XFS's 52 |
+| **The `fdatasync` strategy**: one sync for a batch of stages; one for each apply; one directory sync for a batch of whole chunks; never a sync with nothing new to make durable | On ext4 and XFS an `fdatasync` of a file with nothing to write still flushed the 970 EVO's cache. glommio's `Directory::sync`, an `fdatasync` on the directory, made a rename durable on all three filesystems: it wrote and flushed what an `fsync` did. A directory sync for six chunks raised the rate by 40% at 64 KiB on the 970 EVO's XFS |
+| **One slice for each SSD**, which the inventory wizard offers | Under XFS and ext4 one executor read 64 KiB units at fio's ceiling on both devices, and closed its gap on whole-chunk writes by holding four batches in flight. Only 4 KiB units needed two: a Zen1 core did about 123,000 random reads a second against the 970 EVO's 215,000, and two slices beat one by 43% at the same total depth. On btrfs, refused above, one slice fell short for 4 MiB chunks however many batches it held, with its thread 5% busy: a limit per slice that X6 did not trace |
+| **A light scrub walks the placement group's directories and reads each chunk's header.** The label stays in the header, and no index is kept for the scrub | A cold walk reading every header of a million chunks took 37.5 s on the 970 EVO's XFS and 15.8 s on the Optane, at the cost a chunk of a hundred thousand: X6's trigger was 60 s |
+
+**Not settled.** These remain open:
+
+- **The chunk size and the chunk unit**: Q20's geometry and Q25. X6 says a chunk below 1 MiB on a
+  device that flushes costs more than twice what a shared file would, and below 256 KiB even from
+  the pool.
+- **The pool and the journal**, their sizes and how they recover after a crash: M14.
+- **Q27's other half**, whether small writes ride the metadata log: [X8](spikes.md#x8-one-small-write-three-ways),
+  against the floor above.
+- **Rotational devices**: Q23, [X7](spikes.md#x7-the-device-store-on-hdd).
+- **Whether a slice keeps chunk files open**: a cold open cost 0.6 to 0.9 ms on the 970 EVO, more
+  than a 64 KiB read.
+
 ## Alternatives rejected
 
 **A primary for each placement group, with a log on every holder and peering.** It is what
@@ -392,12 +424,12 @@ Q1–Q13.
 | Q19 | **Placement.** How many placement groups a tablet; the placement function; failure domains; how a commit checks a generation; the pool map's size and fanout. **In part, 2026-10-03**: the function, positions as the tablet group's state, seats, fitted weights, the number of placement groups a pool's, the failure domains and the pool map are decided ([the record](#q19-in-part-placement-2026-10-03)); how a commit checks a generation and its positions is not | Before M11. ✅ [X2](placement-simulation.md); X1 for the commit |
 | Q20 | **Which code family, which crate, what geometry**: Reed-Solomon, random linear network coding, a fountain code, or plain XOR at one parity chunk; stripe and chunk unit sizes; parity delta or reconstruct-write. Preferred: a systematic code that decodes from any k, because a seek and a small write both lean on those two properties. **In part, 2026-10-03**: the family, the crate and parity delta are decided ([the record](#q20-in-part-the-code-and-the-crate-2026-10-03)); the geometry is not | M18. ✅ [X4](erasure-coding-crates.md), [X14](spikes.md#x14-ceph-and-s3-at-the-source) |
 | Q21 | **Which checksum**, at what granule, and whether the row keeps a digest of each stripe chunk to catch a write that was lost whole. Preferred: a definition no crate's release can move. **In part, 2026-10-03**: the checksum is CRC-64/NVME through `crc-fast`, with a combine of Shoal's own ([the record](#q21-in-part-the-checksum-2026-10-03)); the granule and the chunk digest are not decided | M13, since a frame that carries a unit's checksum fixes it on the wire before any slice stores one. ✅ [X5](checksums.md) |
-| Q22 | **The device store's layout**, its way of applying an update, its `fdatasync` strategy and the filesystems it accepts. Preferred: a journal written ahead for small updates and whole files for large ones | M14. [X6](spikes.md#x6-the-device-store-on-ssd) |
+| Q22 | **The device store's layout**, its way of applying an update, its `fdatasync` strategy and the filesystems it accepts. Preferred: a journal written ahead for small updates and whole files for large ones. **In part, 2026-10-04**: on SSDs, a file a chunk from a pool written ahead, the journal and the apply in place, no clone, XFS preferred, ext4 accepted and btrfs refused, one slice a device ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)); rotational devices are Q23's | M14. ✅ [X6](device-store-ssd.md) |
 | Q23 | **What a rotational device needs**: an executor of its own, a journal on an SSD, another layout | M19. [X7](spikes.md#x7-the-device-store-on-hdd) |
 | Q24 | **Where object work runs**: which executor owns a slice, whether object work shares executors with tables, the lane, the memory budget | M14. X9 |
 | Q25 | **The metadata rows**: the inline threshold, what a stripe row costs, the stall when a row a commit needs is not in memory, the scale a bucket is designed for | M12. X10 |
 | Q26 | **Streamed bodies**: bounded ranged frames, their size, and what a connection shared with small queries does under them | M13. [X11](spikes.md#x11-streamed-bodies) |
-| Q27 | **What one small in-place write costs, and whether small writes ride the metadata log** below a threshold, to be folded into stripe chunks later | M15. [X6](spikes.md#x6-the-device-store-on-ssd), X8 |
+| Q27 | **What one small in-place write costs, and whether small writes ride the metadata log** below a threshold, to be folded into stripe chunks later. **The device's half measured, 2026-10-04**: two flushes, 2 to 6 ms on the 970 EVO at 4 KiB, 81 µs on the Optane ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)) | M15. ✅ [X6](device-store-ssd.md#3-a-partial-write), X8 |
 | Q28 | **Scrub**: cadence, byte budgets, what a deep scrub of k+m verifies beyond each stripe chunk's own checksums | M17. X12, X14 |
 | Q29 | **Budgets for recovery and moves**, for each device | M16. X12 |
 | Q30 | **The benchmark**: how the driver gains object operations, byte metrics and an object dataset | M11. [X13](spikes.md#x13-the-benchmarks-shape) |

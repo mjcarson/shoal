@@ -1,10 +1,11 @@
 # Exploratory spikes
 
 ~~**Nothing here has been run.**~~ ~~**One spike has run**: X4, whose record is
-[its own page](erasure-coding-crates.md) (2026-10-03).~~ ~~**Two spikes have run**~~ **Three
-spikes have run**, each with its record on a page of its own: X2,
+[its own page](erasure-coding-crates.md) (2026-10-03).~~ ~~**Two spikes have run**~~ ~~**Three
+spikes have run**~~ **Four spikes have run**, each with its record on a page of its own: X2,
 [placement](placement-simulation.md), X4, [the erasure coding crates](erasure-coding-crates.md),
-and X5, [the checksums](checksums.md) (all 2026-10-03). This page is the list of what has to be
+and X5, [the checksums](checksums.md) (all 2026-10-03), and X6,
+[the device store on SSD](device-store-ssd.md) (2026-10-04). This page is the list of what has to be
 learnt before the [milestones](milestones.md) of this part can be more than a guess, and how
 each thing would be learnt.
 
@@ -58,8 +59,8 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 
 | Host | CPU | Memory | Devices | Network |
 | --- | --- | --- | --- | --- |
-| europa | Ryzen 9 7945HX (Zen4), 16 cores and 32 threads. Also the development host, so its numbers carry that noise | 43 GiB | Intel Optane 900P at `/optane`, btrfs. Samsung 990 PRO, the root device, btrfs | 1 GbE |
-| titan | Ryzen Embedded V1756B (Zen1), 4 cores and 8 threads | 14 GiB | Samsung 970 EVO, ext4 | 1 GbE |
+| europa | Ryzen 9 7945HX (Zen4), 16 cores and 32 threads. Also the development host, so its numbers carry that noise | 43 GiB | Intel Optane 900P at `/optane`, ~~btrfs~~ XFS since 2026-10-03. Samsung 990 PRO, the root device, btrfs | 1 GbE |
+| titan | Ryzen Embedded V1756B (Zen1), 4 cores and 8 threads | 14 GiB | Samsung 970 EVO on one PCIe lane, ext4 at the root; since X6 an XFS volume on it at `/xfs`. Its flush costs 0.9 ms rested and 3 ms after a minute of synced writes ([X6](device-store-ssd.md#two-things-about-the-labs-970-evos)) | 1 GbE |
 | hyperion | The same as titan | 14 GiB | The same as titan | 1 GbE |
 
 **The rules a spike inherits**, which are the lab's own
@@ -83,8 +84,10 @@ The lab is the three hosts of `tmdb_cluster.yaml`
   [X7](#x7-the-device-store-on-hdd). Two in each host let a 4+2 layout run over real disks
   under a device failure domain. The model, the capacity and whether the drive is shingled
   are recorded with every table, since a shingled drive answers a different question.
-- **An XFS filesystem.** The lab has ext4 and btrfs. XFS is what the book recommends, and
-  a clone of a range can only be measured where a filesystem shares blocks.
+- ✅ **An XFS filesystem.** ~~The lab has ext4 and btrfs.~~ Fitted for X6 on 2026-10-03:
+  europa's Optane was made XFS, and titan and hyperion each keep an XFS volume on their 970
+  EVO at `/xfs`, an LV in the space their volume group had free. XFS is what the book
+  recommends, and a clone of a range can only be measured where a filesystem shares blocks.
 
 **What the lab cannot say, and what stands in:**
 
@@ -104,7 +107,7 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 | X3 | Bytes through the tablet groups | Q14 | The lab | Days |
 | ✅ X4 | Erasure coding crates: performance and tradeoffs, [reported](erasure-coding-crates.md) | Q20, in part | titan, europa | ~~Days~~ Done 2026-10-03 |
 | ✅ X5 | Checksums, [reported](checksums.md) | Q21, in part | titan, europa | ~~Afternoon~~ Done 2026-10-03 |
-| X6 | The device store on SSD | Q22, Q27 | The lab; XFS for one leg | Week |
+| ✅ X6 | The device store on SSD, [reported](device-store-ssd.md) | Q22 in part, Q27's device half | The lab; XFS, fitted | ~~Week~~ Done 2026-10-04 |
 | X7 | The device store on HDD | Q23 | Disks fitted | Days |
 | X8 | One small write, three ways | Q14, Q27 | The lab; X6 | Days |
 | X9 | Table latency beside object work | Q15, Q24 | titan; X4, X5 | Days |
@@ -397,6 +400,13 @@ for stability under each condition; a yes or no for combining.
 
 ### X6. The device store on SSD
 
+**Reported 2026-10-04** on [its own page](device-store-ssd.md), and recorded on
+[S18](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04). None of the four results
+below came out, though a file a chunk sat at the line on the 970 EVO. The store stays S6's, with
+each whole chunk written into a file the slice keeps written ahead. No clone; XFS preferred,
+ext4 accepted, btrfs refused; one slice for each SSD. The plan as written follows, struck where
+the run departed from it.
+
 **Question.** How should stripe chunks lie on a slice, how is an update applied, and what
 does a sync cost ([Q22](contract.md#questions-to-answer))? How many slices does an SSD need
 for its cores to drive it, one core to a slice? And the half of
@@ -431,9 +441,12 @@ costs.
 | Fragmentation after a run of clones | Extents a chunk |
 | One device given one, two and four slices, each slice driven by its own executor | Throughput and the tail; the point past which another slice adds nothing |
 
-**Where.** titan and hyperion on ext4, europa on btrfs, and an XFS filesystem once one is
+**Where.** ~~titan and hyperion on ext4, europa on btrfs, and an XFS filesystem once one is
 fitted. Device and filesystem are confounded across those three, and the page says so with
-every table; two filesystems on one device, where that can be arranged, separate them.
+every table; two filesystems on one device, where that can be arranged, separate them.~~
+europa's Optane, which had become XFS, and titan's 970 EVO with XFS, ext4 and btrfs on three
+volumes of the one device, which separates the filesystem from the device. hyperion repeated
+titan's core measurements.
 
 **Depends on.** An XFS filesystem, for its XFS leg alone; the rest runs on the lab as it is, and
 europa's btrfs shares blocks, so a clone can be measured there with the device as a confound. A
@@ -689,7 +702,7 @@ flowchart LR
     X3["X3 bytes through groups"]
     X4["✅ X4 erasure crates"]:::done
     X5["✅ X5 checksums"]:::done
-    X6["X6 device store, SSD"]
+    X6["✅ X6 device store, SSD"]:::done
     X7["X7 device store, HDD"]
     X8["X8 one small write"]
     X9["X9 table latency"]
@@ -705,17 +718,18 @@ flowchart LR
 ```
 
 Nine depend on no other spike and on nothing that has to be fitted, and can start at once:
-X1, ~~X2,~~ X3, ~~X4,~~ ~~X5,~~ X10, X11, X13 and X14; X2, X4 and X5 have run. X6 can start too, and
-needs an XFS filesystem for one of its legs. X8 follows X6, and X9 ~~follows X5, since X4 has
-reported~~ can start: X4 and X5 have both reported. X7 and the rotational half of X12 wait
-for disks.
+X1, ~~X2,~~ X3, ~~X4,~~ ~~X5,~~ X10, X11, X13 and X14; X2, X4 and X5 have run. ~~X6 can start too, and
+needs an XFS filesystem for one of its legs.~~ X6 has run too, on an XFS filesystem fitted for it.
+~~X8 follows X6, and~~ X8 and X9 ~~follows X5, since X4 has
+reported~~ can start: X4, X5 and X6 have all reported. X7 and the rotational half of X12 wait
+for disks; X7 reuses X6's harness.
 
 If there is one to do first it is X1. Every other spike measures the cost of a design, and
 X1 is the one that can say the design is wrong.
 
 The first gate, [before M11](milestones.md#before-m11-the-object-contract), waits on eight
 of them: X1 and X2 for the decisions themselves, and X3, X8 and X9 for what those decisions
-cost, which bring X4, X5 and X6 with them. X2, X4 and X5 have reported.
+cost, which bring X4, X5 and X6 with them. X2, X4, X5 and X6 have reported.
 
 ### What a spike needs first
 
@@ -732,7 +746,7 @@ it throws away, or it only saves time.
 | --- | --- | --- | --- | --- |
 | [S16](testing.md#the-model)'s model held to [S7](write-path.md#the-schedules-that-shaped-it)'s schedules | X1 | Required | X1's model and schedules are the one spike output that is kept, as M11's acceptance test. Five of S7's fourteen schedules had no unsafe setting, two settings had no schedule, one schedule broke no clause, and the model had no event for a device filling, no rebuild, and one stripe where a truncate needs an object of several. Built to that, the model's actors and events would have been rebuilt afterwards | ✅ 2026-10-03 |
 | [Resolved #210](../appendix/resolved/bench-preload-frame.md): the bench's preload within the frame | X3 | Required | X3 is `shoaladm bench` at rows of 1 MiB and 4 MiB. Its preload sent bundles of sixty-four, past the frame, whenever the file outpaced the cluster, and the refused rows vanished from the record | ✅ 2026-10-03 |
-| An XFS filesystem | X6's XFS leg | Required | [What the lab needs fitted](prerequisites.md#what-the-lab-needs-fitted) | Not fitted |
+| ✅ An XFS filesystem: europa's Optane, and an LV on titan's and hyperion's 970 EVO | X6's XFS leg | Required | [What the lab needs fitted](prerequisites.md#what-the-lab-needs-fitted) | ✅ 2026-10-03 |
 | Rotational disks | X7; X12's rotational half | Required | The same | Not fitted |
 | ✅ Device counters, node memory and index bytes in a bench capture: delivered by [F71](../features/bench-device-memory.md) | X3, X10 | Optional | ~~Nothing in the tree reads the kernel's device counters, and a capture keeps neither `resident_bytes` nor `archive_map_bytes`, which every node reports. A script reading `/proc/diskstats` on each host before and after, and `shoaladm stats --json --watch` beside the run, take the same numbers.~~ Since F71 every run of a capture keeps each host's device counters, read before and after it, and every member's resident set and index bytes every two seconds; `compare` reads device bytes written a byte sent, the resident peak and the index bytes. WAL and archive bytes apart still need the two roots on separate devices, which the capture then reports apart, or a trace of writes by file name, as the cluster testing took for [O62](../cluster-testing/performance.md#o62-the-archive-map-rewrite) | ✅ 2026-10-03 |
 | ✅ A paced neighbour stream, with windows by table, in the bench: delivered by [F72](../features/bench-paced-stream.md) as a *paced stream* | X3 | Optional | ~~A bench run is one closed loop whose windows are kept by kind, not by table, so it cannot drive a small table lightly beside a large one and report each. A second driver against the same cluster can. It is near the open-loop generator in [TODOs](../appendix/todos.md)~~ Since F72 `--paced <table> --paced-rate <N>` drives one table at an offered rate beside a main load that leaves it alone, its latency from each operation's slot, its windows and worst second's p99 kept apart in every run | ✅ 2026-10-03 |
@@ -740,7 +754,8 @@ it throws away, or it only saves time.
 
 The rest is each spike's own work, written on its section: ~~X2 measures the map's frame again
 before comparing with it~~ (done: 16,555 bytes where F39 measured 13,493,
-[X2](placement-simulation.md#todays-tablet-frame-again)); X6 issues its own clone call; X9
+[X2](placement-simulation.md#todays-tablet-frame-again)); ~~X6 issues its own clone call~~ (done,
+on the blocking thread, [X6](device-store-ssd.md#the-harness)); X9
 gives a core up on titan; X10 drives its cold commit itself; X11 adds tokio and a TLS stack to the spike's dependencies; X1 saves
 its schedules in a directory of their own.
 
@@ -766,7 +781,7 @@ its evidence and with what it did not settle:
 | The write protocol: Q14, Q15, Q16 and Q18, and the contract agreed | X1; X3 and X8 for cost |
 | Placement: Q19 | ✅ X2 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)); how a commit checks a generation and its positions is X1's |
 | The code, the crate and the geometry: Q20. The checksum: Q21 | ✅ X4 for the code and the crate ([Q20, in part](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); ✅ X5 for the checksum ([Q21, in part](contract.md#q21-in-part-the-checksum-2026-10-03)); X14, the geometry, and the granule and chunk digest Q21 leaves |
-| The device store: Q22, and Q23 for the rotational gate | X6, X7 |
+| The device store: Q22, and Q23 for the rotational gate | ✅ X6 for SSDs ([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)); X7 for rotational disks |
 | Where object work runs: Q24 | X9 |
 | Stripe size and the inline threshold: Q25. Small writes: Q27 | X10, X8 |
 | The wire: Q26 | X11 |

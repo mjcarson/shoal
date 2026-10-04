@@ -162,7 +162,12 @@ nobody reads.
 - **A deep scrub reads every byte of every device once a cycle**, and a checksum's worth of
   CPU for each. On an SSD pool that is device time; on a rotational one it is the arm.
 - **A light scrub lists every placement group's directory on every holder** and compares it
-  with rows and with the other holders' listings.
+  with rows and with the other holders' listings. It reads each chunk's header for its label,
+  which [X6](device-store-ssd.md#5-listing-a-placement-group) measured: 37.5 s cold for a
+  million chunks on the 970 EVO under XFS and 15.8 s on the Optane, the same a chunk at a
+  hundred thousand. A 16 TiB device of 4 MiB chunks takes two and a half minutes, so the light
+  scrub needs no index of its own. On ext4 a placement group of a million one-chunk objects
+  took 154 s.
 - **A summary a chunk** for the parity check, and an encode of `k` of them a stripe.
 - **Space for a quarantined chunk** until its replacement is verified.
 

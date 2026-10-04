@@ -3906,3 +3906,20 @@ Filed from X2, which measured the tablet frame again before holding the pool map
 F45 publishes a configured set for every replica set a move changes, and a rebalance that moves
 every set leaves every set configured. A cluster that has been rebalanced pushes three times the
 frame of one that has not, for the same placement.
+
+### O89. A reactor waiting on a fast device does not sleep
+
+| | |
+| --- | --- |
+| **Rank** | **low** until a node shares cores: it costs power and a sibling's time, not throughput |
+| **Impact** | Measured by [X6](../object-storage/device-store-ssd.md#8-one-device-several-slices) on europa's Optane, one executor reading at depth one. With 4 KiB reads completing in 17 µs, the executor thread slept 0.03 times a read and was on its cpu 99% of the window, at 55,000 reads a second. With 64 KiB reads completing in 43 µs it slept once a read and was 46% busy, and on the 970 EVO, at 100 µs, it slept every read. glommio's own runtime, without its waiting, was a quarter to a half of the thread's time |
+| **Difficulty** | Unknown. The executor parks when no task is runnable (`glommio/src/executor/mod.rs:1520-1535`), and the reactor sleeps only when no ring has work and nothing woke (`glommio/src/sys/uring.rs:1795-1860`). Which condition keeps it awake with one read in flight was not traced |
+| **Depends on** | nothing |
+| **Blocks** | nothing; [S13](../object-storage/isolation.md)'s choice of executors for slices reads executor cpu, and should read it knowing this |
+| **Tradeoff** | Contained: a reactor that sleeps on a fast device pays a wake-up a completion, which may cost latency. The trade is measured, not argued |
+| **Benchmark** | `shoal-spike device slices`, its `depth-r4` rows: thread cpu and sleeps a read at depth one |
+
+Filed from X6. The thread's cpu time is therefore not what a slice needs: for 4 KiB reads at depth
+32 it was 100% of a core while glommio's own runtime was 32% on Zen1 and 51% on Zen4. The rate a
+slice reaches is the measure X6 judged by; a node that put a slice beside a table shard on one core
+would find this thread competing for it.

@@ -231,16 +231,23 @@ already has (the deployment, a group of nodes, a node), and `pools` and the cons
 bindings at the deployment's. The
 wizard, which already reports each root's free space, probes each host's block devices for
 size, filesystem and whether the kernel calls them rotational, and offers a class, and a
-number of slices once [X6](spikes.md#x6-the-device-store-on-ssd) has said what one core
-drives.
+number of slices ~~once [X6](spikes.md#x6-the-device-store-on-ssd) has said what one core
+drives~~: **one for an SSD**, which [X6](device-store-ssd.md#8-one-device-several-slices) found
+one core drives at its ceiling for 64 KiB units and whole chunks, on the Optane and on the 970
+EVO. A pool with 4 KiB units on a fast device would want two, and the wizard says so when it is
+offered one. It warns on ext4 for a pool of small objects and refuses btrfs
+([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)).
 
 ## Alternatives rejected
 
 **A raw block device with its own allocator**, as BlueStore is. It removes the filesystem
 from the write path and adds an allocator, a metadata store and a recovery procedure for
 both. Files on a filesystem come first, and [X6](spikes.md#x6-the-device-store-on-ssd) says
-what that costs. It is not precluded: a device is the disk whatever stores on it, and only a
-slice's form changes, from a directory to a range of the device.
+what that costs: on the lab's SSDs, a whole chunk from a pool of files written ahead runs within
+30% of a slot in one shared file above 1 MiB, and a small write in place costs the two flushes
+any store would pay ([X6](device-store-ssd.md)). It is not precluded: a device is the disk
+whatever stores on it, and only a slice's form changes, from a directory to a range of the
+device.
 
 **A directory a device**, each owned by one executor. It is what this page first said, and it
 names the unit of work and the unit of failure with one word: a disk two cores drive becomes

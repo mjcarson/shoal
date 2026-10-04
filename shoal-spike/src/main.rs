@@ -38,6 +38,10 @@
 //! the placement candidates of S5 simulated over generated pool maps, in [`placement`]. Since X2
 //! `fanout` also prints the tablet frame with configured sets and moves in it, which F45 added
 //! to the frame after F39 measured it, and the pool map's frame beside it.
+//!
+//! `shoal-spike device` is X6 (`docs/src/object-storage/spikes.md#x6-the-device-store-on-ssd`):
+//! S6's device store measured on a filesystem as a slice's executor would drive it, in
+//! [`device`].
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, Bound};
@@ -77,6 +81,7 @@ use shoal::shared::identity::{ClusterId, NodeId, ShardAddr, TableId};
 use shoal::shared::protocol::admin::{ConfiguredSet, MoveSummary};
 use shoal::shared::protocol::peer::StatusReport;
 
+mod device;
 mod placement;
 
 /// The group counts the idle cost is measured at
@@ -1115,6 +1120,12 @@ fn main() {
     // the fanout tables stand alone: no executor, no groups
     if std::env::args().nth(1).as_deref() == Some("fanout") {
         fanout();
+        return;
+    }
+    // X6's device store measurements run executors of their own
+    if std::env::args().nth(1).as_deref() == Some("device") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        device::main(&args);
         return;
     }
     // so does X2's placement simulation, which is pure

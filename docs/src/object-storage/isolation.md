@@ -57,7 +57,12 @@ other slices. A device one core cannot drive is given several slices, each owned
 executor of its own. That is why the failure domain is the device and not the slice: the
 slices of one disk fail together, however many cores drive them
 ([S5](placement.md#failure-domains)). How many slices a device is given, and which share an
-executor, are an operator's choices, informed by [X6](spikes.md#x6-the-device-store-on-ssd).
+executor, are an operator's choices, informed by [X6](device-store-ssd.md#8-one-device-several-slices):
+one slice drives the lab's SSDs for 64 KiB units and whole chunks. A slice's executor thread can
+show a whole core busy while it waits on a fast device, which says little about what it needs
+([O89](../appendix/optimizations.md#o89-a-reactor-waiting-on-a-fast-device-does-not-sleep)).
+Its blocking thread, where every rename and unlink goes, belongs on its core's sibling: glommio's
+`Placement::Fixed` puts it on the executor's own cpu.
 
 ### Shared executors or dedicated ones
 

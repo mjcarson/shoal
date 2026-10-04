@@ -107,7 +107,9 @@ ideas came from, and nothing on another page rests on it.
   for a write in place.
 - **Haystack, f4 and SeaweedFS** pack many small objects into large files with an index, and
   the last two erasure code a file once it is sealed. That is the "many chunks in one file"
-  candidate of [X6](spikes.md#x6-the-device-store-on-ssd), and "replicate now, encode later",
+  candidate of [X6](spikes.md#x6-the-device-store-on-ssd), ~~and~~ which X6 measured as a floor
+  and did not take: a file a chunk is within 30% of it above 1 MiB
+  ([X6](device-store-ssd.md#1-a-whole-chunk)), and "replicate now, encode later",
   which [S8](erasure-coding.md#alternatives-rejected) leaves out.
 - **HDFS** erasure coding stripes a file in cells and has the client encode. Both are
   options here: the round-robin layout of [S8](erasure-coding.md#geometry), and the client

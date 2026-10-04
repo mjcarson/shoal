@@ -159,6 +159,23 @@ CARGO_TARGET_DIR=target/lab/x2/znver1 RUSTFLAGS="-C target-cpu=znver1" cargo bui
 target/lab/x2/znver1/release/shoal-spike placement lookups --core 2 --label znver1   # on the host
 target/lab/x2/znver1/release/shoal-spike fanout                                      # on the host
 
+# the X6 spike: S6's device store measured on a filesystem as a slice's executor drives it - a
+# whole chunk against a slot of a shared file, the journal, a partial write journalled against
+# cloned (FICLONERANGE), removing, listing a placement group cold, a unit read cold, fragmentation
+# after clones, and one device under one to eight executors. A subcommand of shoal-spike. It runs
+# as root (it drops caches and locks memory), refuses tmpfs and the root filesystem, and writes
+# records that `report` merges across rounds and judges against the four triggers. The lab's run
+# is shoal-spike/results/x6-lab.sh: four rounds, the filesystems' order alternating, seven hours on
+# titan for three filesystems and forty minutes more for `--only chunk-recycle`. The 970 EVO's
+# flush has two regimes (0.9 ms rested, 3 ms after synced writes), so a figure that involves a
+# sync depends on what ran before it: x6-order.sh is the check. /xfs on titan and hyperion is the
+# lab's fitted XFS, an LV beside the root; europa's Optane at /optane is XFS since 2026-10-03.
+# The tables are on docs/src/object-storage/device-store-ssd.md
+CARGO_TARGET_DIR=target/lab/x6/znver1 RUSTFLAGS="-C target-cpu=znver1" cargo build --release -p shoal-spike
+sudo target/lab/x6/znver1/release/shoal-spike device quick --dir /optane/x6/quick   # proves every measurement runs
+sudo /var/tmp/x6/shoal-spike device all --dir /xfs/x6 --round 1 --out titan-xfs.json   # on the host
+target/lab/x6/znver1/release/shoal-spike device report shoal-spike/results/x6-*.json   # intervals and verdicts
+
 # a cluster on real hosts from a project (F63): run in the project that defines the schema,
 # shoaladm finds the #[shoal::db] struct, probes every host's cpu over ssh, builds the node once
 # per cpu class and the schema's admin program, installs them under ~/.local/shoal/bin, and

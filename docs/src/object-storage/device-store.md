@@ -27,21 +27,22 @@ The only storage engine that persists anything maps a `u64` key to one whole rky
   through glommio's `DmaFile`. The shared WAL is a `BufferedFile`, through the page cache,
   with one `fdatasync` a batch (`shoal-core/src/server/wal/mod.rs:64`).
 
-What the glommio fork offers under that (`glommio/src/io/dma_file.rs`, at `873fa44`):
+What the glommio fork offers under that (`glommio/src/io/dma_file.rs`, at `f4643f7`; ~~`873fa44`~~
+before F70 moved them):
 
 | Call | Line | Use here |
 | --- | --- | --- |
-| `write_at`, `read_at`, `read_at_aligned`, `read_many` | 389, 483, 463, 519 | Ranged direct I/O. Shoal calls `read_at` and nothing else |
-| `pre_allocate`, `hint_extent_size`, `truncate` | 628, 646, 654 | A chunk written ahead to its full length |
-| `deallocate` | 618 | Punching a hole: a truncate inside a stripe |
-| `fdatasync`, `rename`, `remove` | 598, 662, 674 | Durability and replacement |
-| `copy_file_range_aligned` | 574 | A copy inside the kernel, "CoW linked" where the filesystem has reflinks. It is dispatched to the blocking pool |
+| `write_at`, `read_at`, `read_at_aligned`, `read_many` | 389, 495, 471, 535 | Ranged direct I/O. Shoal calls `read_at` and nothing else |
+| `pre_allocate`, `hint_extent_size`, `truncate` | 710, 728, 736 | A chunk written ahead to its full length |
+| `deallocate` | 700 | Punching a hole: a truncate inside a stripe |
+| `fdatasync`, `rename`, `remove` | 680, 744, 756 | Durability and replacement. A rename and a remove go to the executor's blocking thread |
+| `copy_file_range_aligned` | 590 | A copy inside the kernel, "CoW linked" where the filesystem has reflinks. It is dispatched to the blocking pool. [X6](device-store-ssd.md) rejected the clone, so the store does not use it |
 
 Three facts in the same file matter to a device. Alignment is the device's logical block
-size, at least 512 bytes (`:221-223`). A file on tmpfs has direct I/O **disabled**, in
-silence (`:225-226`). And a file on a rotational device, or one without I/O polling, is
-served from the ordinary ring and not the polled one (`:229-233`), which is the only place
-anything under Shoal asks whether a disk spins.
+size, at least 512 bytes (`:224`). A file on tmpfs has direct I/O **disabled**, in
+silence (`:226`). And a file on a rotational device, or one without I/O polling, is
+served from the ordinary ring and not the polled one (`:229-235`), which is the only place
+anything under Shoal asks whether a disk spins. No device in the lab has I/O polling.
 
 What the lab has measured about a sync, on titan's ext4
 ([F60](../features/shared-wal-flush.md),
@@ -49,7 +50,10 @@ What the lab has measured about a sync, on titan's ext4
 the page cache and syncing, as the WAL does, took 6.1 ms at the median; six overwriting a
 file written ahead, with direct I/O, took 2.9 ms. "A sync of a file that has grown commits
 ext4's journal for its size." The 970 EVOs there flush their cache on every sync, 3 ms for
-one writer, where europa's Optane takes 0.2 ms.
+one writer, where europa's Optane takes 0.2 ms. [X6](device-store-ssd.md#two-things-about-the-labs-970-evos)
+found that the 970 EVO's flush costs 0.9 ms after a rest and 3 ms after a minute of synced
+writes, and that the Optane, whose cache writes through, needs no flush at all: a 4 KiB
+overwrite and its sync take 11 µs there.
 
 ## The design
 
@@ -64,15 +68,27 @@ one writer, where europa's Optane takes 0.2 ms.
     ├── journal/                     # staged updates to parts of chunks
     │   ├── 000017                   # written ahead to a fixed size, overwritten in place
     │   └── 000018
+    ├── free/                        # files written ahead with zeros, a chunk's length each
+    │   └── 004211
     └── chunks/
         └── <consumer>/<placement group>/<object id>/
             ├── 000003.2             # stripe 3, position 2: one stripe chunk
-            └── 000003.2.<label>     # a whole chunk staged beside it
+            └── 000003.2.<label>     # a whole chunk staged beside it, from a free file
 ```
 
 A stripe chunk is one file. Its path names the slice, the consumer, the placement group and
 the object, so a directory listing is an inventory of a placement group on a slice, and
 removing an object's directory is removing its chunks there.
+
+**A whole chunk is written into a file the slice wrote ahead**, taken from `free/`, never into a
+new one. A new file's `fdatasync` commits its allocation as well as its data, which on the lab's
+970 EVO cost 7.2 ms against 3.2 ms to overwrite the same bytes; from a file written ahead, a file
+a chunk reached 0.71 of a shared file's rate at 1 MiB where a new file reached 0.51
+([X6](device-store-ssd.md#1-a-whole-chunk)). X6 took its free files from the object's own
+directory, so its rename stayed within one directory; a pool in a directory of its own makes the
+rename a move between two, both changed in one journal commit on XFS and ext4. How large the
+pool is, how it is refilled off the write's path, and how a reclaimed chunk's file returns to it,
+are M14's to design.
 
 ### A stripe chunk
 
@@ -112,14 +128,19 @@ this page's to fix at M14.
 | | A whole chunk | Part of a chunk |
 | --- | --- | --- |
 | When | A put, or a write that covers the chunk | Any smaller write |
-| Stage | A new file beside the old, named with the write's label, written and `fdatasync`ed | A record in the journal: identity, the label it makes, the label it expects, the units' new bytes, a checksum. `fdatasync`ed with whatever else was staged since the last sync |
+| Stage | A file from the slice's pool, written ahead with zeros, overwritten with the chunk under the write's label and `fdatasync`ed | A record in the journal: identity, the label it makes, the label it expects, the units' new bytes, a checksum. `fdatasync`ed with whatever else was staged since the last sync |
 | Apply | Rename over the old chunk, sync the directory | Verify the old unit, merge, write unit and header in place, `fdatasync`, then drop the record |
-| Discard | Remove the file | Drop the record |
+| Discard | Return the file to the pool | Drop the record |
 | Bytes written | Once | Twice: the journal, then the chunk |
 
 **The journal is written ahead and overwritten.** It is a few files of fixed size, written
 with direct I/O, so that staging is the cheap sync and not the dear one. One `fdatasync`
-covers every record staged since the last, as the WAL's batch does.
+covers every record staged since the last, as the WAL's batch does. X6 measured why: written
+ahead, a journal committed 2.3 times an appending journal's records at one stager on the 970
+EVO, and sixteen times at 64 stagers on the Optane; allocated ahead without its zeros it ran no
+faster than appending, so the zeros are written when it is made
+([X6](device-store-ssd.md#2-the-journal)). A committer never syncs with nothing new to make
+durable: on ext4 and XFS that still flushes the device.
 
 **A staged record holds new values and never a patch.** Parity is staged as the new parity
 bytes, not as the delta that would turn old parity into new. A record that is applied, then
@@ -146,6 +167,11 @@ if its chunk carries that label, counting a staged update the reader's label say
 committed, which it overlays on the chunk. Otherwise it answers with the label it has, and
 the reader decides what that means ([S9](read-path.md)).
 
+A cold open costs more than the read it precedes: 0.6 ms on the 970 EVO under XFS for the
+directory and inode reads, against 0.3 ms to read a 64 KiB unit once open
+([X6](device-store-ssd.md#6-one-unit-at-a-random-offset)). Whether a slice keeps its hot
+chunks' files open is M14's to decide.
+
 Every unit a read touches is read whole and verified before a byte of it is returned. A read
 and an apply of the same chunk never overlap: overlapping direct reads and writes are not
 atomic, so the owner of the chunk's slice, one executor, runs them in turn.
@@ -158,7 +184,7 @@ The code is the same. The costs are not.
 | --- | --- | --- |
 | Staging to the journal | A sync | A sync at the end of a sequential write: the best case a disk has |
 | Applying in place | A random write | A seek for each chunk. Deferred and batched in offset order, it is the cost that can wait |
-| A sync | 0.2 ms to 3 ms on the lab's devices | A cache flush, not yet measured here |
+| A sync | 11 µs on the Optane, which needs no flush; 0.9 ms rested and 3 ms loaded on the 970 EVO ([X6](device-store-ssd.md#two-things-about-the-labs-970-evos)) | A cache flush, not yet measured here |
 | A read during applies | Unaffected | Competes for the one arm |
 | Many small chunks | Fine | A seek to create each, and one to find it |
 
@@ -184,13 +210,23 @@ Three choices follow, each a question and none decided:
 
 ### Filesystems
 
-A device on tmpfs is refused, since direct I/O is silently off there. btrfs is recorded by
+A device on tmpfs is refused, since direct I/O is silently off there. ~~btrfs is recorded by
 this book as a poor host for a synced write path
 ([Storage Overview](../storage/overview.md#limitations)), and it is what europa's devices
 are. XFS is the book's guidance and the lab has none. ext4 is what titan and hyperion run.
 Which are accepted, warned about or refused is
 [Q22](contract.md#questions-to-answer), and it is one reason
-[X6](spikes.md#x6-the-device-store-on-ssd) needs an XFS filesystem fitted.
+[X6](spikes.md#x6-the-device-store-on-ssd) needs an XFS filesystem fitted.~~
+[X6](device-store-ssd.md#the-comparison) measured all three on one device and decided
+([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)):
+
+- **XFS is preferred.** It commits a rename in 2 KiB and lists a wide placement group fastest.
+- **ext4 is accepted.** The store needs no clone, and the journal and the apply run as on XFS.
+  It commits a rename at 17 KiB, and lists a placement group of a million one-chunk objects in
+  154 s cold against XFS's 52, so a pool of small objects warns on it.
+- **btrfs is refused.** Every overwrite there is a new allocation: a 4 KiB write in place cost
+  17 ms and 81 bytes a byte, writing the journal ahead bought nothing, and the rule below that
+  applying needs no new space cannot hold.
 
 ## Alternatives rejected
 
@@ -207,15 +243,24 @@ implementation" pending a store that can do it cheaply
 needs a cheap clone of a range, which a file on ext4 does not have. Redo needs nothing the
 filesystem may not offer.
 
-**A clone to apply**, splicing staged blocks into the chunk with `copy_file_range`. It would
-make a partial write cost one write and not two. It works only where the filesystem shares
+**A clone to apply**, splicing staged blocks into the chunk with `FICLONERANGE`. It would
+make a partial write cost one write and not two. ~~It works only where the filesystem shares
 blocks, the fork runs it on the blocking pool, and whether a cloned range's `fdatasync` is as
 cheap as an overwrite's is unmeasured. It is a candidate of
-[X6](spikes.md#x6-the-device-store-on-ssd), not a design.
+[X6](spikes.md#x6-the-device-store-on-ssd), not a design.~~ [X6](device-store-ssd.md#3-a-partial-write)
+measured it and rejected it. It wrote fewer bytes only at 1 MiB. Its stage is an allocation, its
+apply a transaction, and the `fdatasync` after it cost three to eight times an overwrite's; the
+whole write took two to three times the journal's on the 970 EVO. After a thousand clones a
+chunk had fifteen hundred extents, and a cold read of one of its units took 2.4 to 2.6 times a
+fresh chunk's.
 
 **Many chunks in one large file with an index.** Fewer inodes and sequential writes, which
 suits a disk and small chunks. It needs an index that survives a crash and a compaction for
-what is deleted, and a chunk that changes in place fits a log badly. Also an X6 candidate.
+what is deleted, and a chunk that changes in place fits a log badly. ~~Also an X6 candidate.~~
+[X6](device-store-ssd.md#1-a-whole-chunk) measured its floor, a slot in a shared file written
+ahead with no index at all: above 1 MiB a file a chunk from the pool is within 30% of it, and
+within 10% from 4 MiB. Below 256 KiB on a device that flushes, a file a chunk costs more than
+twice the floor, and that is a bound on the chunk size, not a reason to share files.
 
 **A raw block device.** See [S4](pools-and-devices.md#alternatives-rejected).
 
@@ -226,9 +271,14 @@ through the cache are held twice, counted by nobody, and written when the kernel
 
 - **A partial write is written twice**, to the journal and then to the chunk. A whole chunk
   is written once.
-- **A file and a header a chunk.** At 4 MiB chunks a 16 TiB disk holds four million files,
-  and what it costs to create, find, list and remove them is
-  [X6](spikes.md#x6-the-device-store-on-ssd)'s first number.
+- **A file and a header a chunk.** At 4 MiB chunks a 16 TiB disk holds four million files.
+  [X6](device-store-ssd.md) measured what that costs on the lab's 970 EVO under XFS:
+  - a whole chunk from the pool is within 30% of a shared file's rate above 1 MiB;
+  - removing one takes 0.2 ms;
+  - a light scrub's cold walk, reading every header, takes 37.5 µs a chunk, which is two and a
+    half minutes for four million;
+  - a cold open, before the first read of a chunk, takes 0.6 ms.
+- **A pool of files written ahead**, a chunk's length each, of space that holds no chunk.
 - **A sync a batch of stages and a sync a batch of applies.**
 - **A unit read whole for a byte.** A larger unit is a cheaper checksum table and a dearer
   small read.
@@ -259,15 +309,18 @@ through the cache are held twice, counted by nobody, and written when the kernel
 
 [S1](prerequisites.md#required): known issue 46, and the torn-write, full-disk and
 device-loss faults in the fixture, without which most of the invariants above have no test.
-[S4](pools-and-devices.md) for what a device and a slice are. A clone call in the fork, only
-if X6 picks it ([S1](prerequisites.md#optional)).
+[S4](pools-and-devices.md) for what a device and a slice are. ~~A clone call in the fork, only
+if X6 picks it ([S1](prerequisites.md#optional)).~~ X6 did not pick it.
 
 ## How it would be measured
 
-[X6](spikes.md#x6-the-device-store-on-ssd) on the lab's SSDs and an XFS filesystem: what it
+~~[X6](spikes.md#x6-the-device-store-on-ssd) on the lab's SSDs and an XFS filesystem: what it
 costs to create, sync and rename a chunk from 64 KiB to 64 MiB; journal commits a second at
 one writer and at six; an overwrite of 4 KiB to 1 MiB by journal and apply against a clone;
-removing and listing chunks at a hundred thousand and a million.
+removing and listing chunks at a hundred thousand and a million.~~ Measured on SSDs by
+[X6](device-store-ssd.md), on the Optane under XFS and on the 970 EVO under XFS, ext4 and
+btrfs, with the decisions on [S18](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04).
+M14 takes X6's figures again from the store as built.
 [X7](spikes.md#x7-the-device-store-on-hdd) repeats what matters on a rotational disk and
 adds the two things only a disk shows: what a read costs during applies, and what a scrub's
 reads cost a foreground write.

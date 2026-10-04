@@ -2,7 +2,7 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-03, when X2, X4 and X5 reported.
+after it. As of 2026-10-04, when X6 reported; X2, X4 and X5 had reported the day before.
 
 **How to read them.**
 
@@ -18,7 +18,8 @@ after it. As of 2026-10-03, when X2, X4 and X5 reported.
 ## Before the first gate
 
 Everything here can be worked on now except what an arrow ~~points into~~ from an unfinished
-box points into: X9's arrows now come only from green ones, so it can start. The spikes are on
+box points into: ~~X9's arrows now come only from green ones, so it can start~~ X8's and X9's
+arrows now come only from green ones, so both can start. The spikes are on
 [their page](spikes.md), and what each needed first on
 [What a spike needs first](spikes.md#what-a-spike-needs-first).
 
@@ -29,12 +30,12 @@ flowchart LR
     subgraph now["Can start now, in parallel"]
         R1["✅ X1's model held<br>to S7's schedules"]:::done
         R2["✅ Item 210: the bench's<br>preload fits a frame"]:::done
-        XFS["Fit an XFS filesystem"]
+        XFS["✅ Fit an XFS filesystem"]:::done
         Disks["Fit rotational disks"]
         X2["✅ X2 Placement simulation"]:::done
         X4["✅ X4 Erasure coding crates"]:::done
         X5["✅ X5 Checksums"]:::done
-        X6["X6 The device store on SSD"]
+        X6["✅ X6 The device store on SSD"]:::done
         X10["X10 What a stripe row costs"]
         X11["X11 Streamed bodies"]
         X13["X13 The benchmark's shape,<br>what F69 left"]
@@ -45,7 +46,7 @@ flowchart LR
     end
     X1["X1 The stripe protocol as a model"]
     X3["X3 Bytes through the tablet groups"]
-    X6x["X6, its XFS leg"]
+    X6x["✅ X6, its XFS leg"]:::done
     X7["X7 The device store on HDD"]
     X8["X8 One small write, three ways"]
     X9["X9 Table latency beside object work"]
@@ -110,7 +111,6 @@ flowchart TB
     Domain["A failure domain on<br>a member"]
     Free["Free bytes for every<br>root"]
     Walk["The walk of one tablet's<br>rows (waits on Q17)"]
-    Clone["A clone call in the glommio fork<br>(optional, if X6 picks a clone)"]:::optional
     Handoff["Handing a connection to another<br>executor (optional, if X11<br>finds the hop dear)"]:::optional
     Rack["A failure domain above<br>the host (optional)"]:::optional
     X12r["X12, its rotational half"]
@@ -139,7 +139,6 @@ flowchart TB
     I46 --> M14
     Domain --> M14
     Free --> M14
-    Clone -.-> M14
     Handoff -.-> M14
     Domain -.-> Rack
     Walk --> M16
@@ -154,6 +153,10 @@ flowchart TB
         I93["Item 93: the archived hash<br>of a string key (optional)"]:::optional
     end
 ```
+
+~~A clone call in the glommio fork (optional, if X6 picks a clone)~~ fed M14 until 2026-10-04,
+and is dropped: [X6](device-store-ssd.md#3-a-partial-write) rejected the clone, so nothing waits
+on it.
 
 The chain is the claim [the milestones page](milestones.md#the-order-is-a-claim) argues for:
 the wire before the devices, the device store before distribution, replication before erasure
