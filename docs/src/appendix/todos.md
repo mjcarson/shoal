@@ -1407,7 +1407,9 @@ both. The object store's commits make a refusal rate a figure worth watching on 
 A [F68](../features/conditional-writes.md) condition is the table's filter: equality, or one of
 a list of values, on `#[shoal(filter)]` fields. The object store's commits need no more (a
 sequence, an epoch and a generation are each compared for equality), and
-[Q25](../object-storage/contract.md#questions-to-answer) is where more would be asked for. A
+[Q25](../object-storage/contract.md#questions-to-answer) is where more would be asked for.
+[X10](../object-storage/stripe-row-costs.md) drove both generated rows' commits on equality of one
+field each, and Q25 is recorded in part without asking for more. A
 `version < n` or a condition on a field that is not a filter would need its own predicate type
 beside `Filters`, judged in the same two functions.
 
@@ -2646,8 +2648,10 @@ about 75 times the 13 GB those nodes held, the map would be about 45 GiB even at
 map, not the rows, is what an in-memory index cannot keep up with.
 
 It is also the ceiling on how many objects a bucket could hold, since an object is a row and a
-stripe written in place is another: about twenty million of them a GiB of memory a replica
-([S3](../object-storage/objects.md#what-it-costs)). The object storage plan lists paging the map
+stripe written in place is another: ~~about twenty million of them a GiB of memory a replica~~
+27 million of them a GiB a replica, measured by
+[X10](../object-storage/stripe-row-costs.md#2-bytes-a-row) at 39.4 bytes a row with four million
+rows on a node ([S3](../object-storage/objects.md#what-it-costs)). The object storage plan lists paging the map
 as optional, because lifting the ceiling later changes no object format
 ([S1](../object-storage/prerequisites.md#optional)).
 
@@ -2773,6 +2777,13 @@ volume ([F61](../features/fragmented-partitions.md)) and the loads did not move,
 syncs nor the archive bytes have been shown to pace them. Nothing here is worth building until
 something names what does.
 
+[X10](../object-storage/stripe-row-costs.md#1-rows-a-second-a-group) saw the same from the object
+store's side, without a merge in the way: thirty-two writers spread over every group of a table
+committed 3,430 small rows a second and wrote 6.3 to 7.3 KB of device bytes a row, where thirty-two
+in one group committed 4,900 and wrote 1.9 to 3.9 KB. Spread out, each shard syncs its own small
+batch. That is a fact for how many groups a bucket's tables should have
+([S2](../object-storage/buckets.md#what-it-costs)), and still not a load this entry would move.
+
 ## ~~A large sorted partition written as fragments~~
 
 **Built in round 15 as [F61](../features/fragmented-partitions.md).** What this entry said a chain
@@ -2809,3 +2820,14 @@ Filed by [item 200](resolved/bench-addr-reads-no-figures.md). `--addr` drives an
 with no credentials, so a node started by hand with `auth.required` refuses both. A
 `--user`/`--password-file` pair, used by the driver's clients and the stats reader alike, would
 close it. Nobody has asked for it yet.
+
+## Time a parked apply
+
+Filed by [X10](../object-storage/stripe-row-costs.md#what-it-found-in-the-engine). A write whose
+row is not in memory parks its group's apply until the row is read, and nothing times the wait.
+`stage-profile`'s `set_loaded_from_disk` is never called, the loader's spans start traces of their
+own, and the shard loop has no span for the apply. So a write's trace cannot show its read, and
+X10 had to infer the stall from latencies of cold rows against resident ones. The shape: a counter
+and a histogram of parked time on `ShardReplication`, folded into `Stats`, and the write's span
+passed to the load it waits on.
+

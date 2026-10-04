@@ -3923,3 +3923,52 @@ Filed from X6. The thread's cpu time is therefore not what a slice needs: for 4 
 32 it was 100% of a core while glommio's own runtime was 32% on Zen1 and 51% on Zen4. The rate a
 slice reaches is the measure X6 judged by; a node that put a slice beside a table shard on one core
 would find this thread competing for it.
+
+### O90. The WAL keeps a hundred bytes of memory for every retained entry
+
+| | |
+| --- | --- |
+| **Rank** | **low** until a node holds many busy groups: it is bounded by retention, not by rows |
+| **Impact** | Measured by [X10](../object-storage/stripe-row-costs.md#2-bytes-a-row) on the lab. After a load of four million rows and a restart, every node's WAL index held 414 MB, about 100 bytes an entry, beside 159 MB of archive map for the same rows: the process held 204 bytes a cold row where the rows' own index was 39. The WAL on disk was 1.65 to 1.69 GB a node. Every entry of the load was still retained: a group keeps 100,000 entries behind its checkpoint ([O67](#o67-ten-thousand-retained-entries-is-seconds-of-a-busy-group)), up to 1 GiB of sealed WAL a shard |
+| **Difficulty** | M — the index of a sealed segment is read only to serve an append to a slow member or a snapshot, so it could be kept compact (an offset a segment and a dense array of lengths), or on disk beside the segment and read when a member falls behind |
+| **Depends on** | nothing |
+| **Blocks** | nothing; [S2](../object-storage/buckets.md#what-it-costs) counts a bucket's groups, and each busy one can hold up to 10 MB of this index |
+| **Tradeoff** | Contained: a lookup into a sealed segment for a member far behind would cost a read, which a snapshot already costs more than |
+| **Benchmark** | `x10 spike rows` (`shoal-spike-rows`), its `cold` side: `wal_index_bytes` against `archive_map_bytes` on every member |
+
+Filed from X10. The index is `(u64, wal::Slot)` an entry with a B-tree's fill
+(`shoal-core/src/server/wal/mod.rs`, `index_bytes`), and `Stats` reports it as `wal_index_bytes`.
+A cluster with few busy groups never notices: it is a few hundred megabytes at most on the lab's
+shape. A node hosting many groups, as buckets add two tables each, holds it for every busy group
+whose entries are inside the retention window.
+
+### O91. A merge reads the archived row an insert replaced whole
+
+| | |
+| --- | --- |
+| **Rank** | **low**: a background read, off the commit path |
+| **Impact** | Measured by [X10](../object-storage/stripe-row-costs.md#1-rows-a-second-a-group) on the lab, at depth 32 in one group: an overwrite of a resident row, a whole insert over it, read 139 to 254 device bytes a row while it ran, and an insert of a new key 23 to 49, on disjoint intervals. Within 15 s windows only part of a cell's segments were merged, so the whole cost is larger than the in-window figure |
+| **Difficulty** | S — the compactor gathers the keys a sealed segment changed and reads the base of every one the archive map names before folding (`compactor.rs`), whatever the first intent for it is. A key whose first intent in the segment is an insert needs no base |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained: the fold already throws such a base away (`unsorted.rs`, the merge's insert arm) |
+| **Benchmark** | `x10 spike rate`, the `overwrite` cells against the `insert` cells: device bytes read a row |
+
+Filed from X10, where the code reading had found it first. Object metadata is written by
+conditional updates, which do need their base, so the object store gains little from this; a table
+of whole-row overwrites gains a read a key a merge.
+
+### O92. A group reads the rows its parked batch needs one at a time
+
+| | |
+| --- | --- |
+| **Rank** | **medium** for the object store: a stripe row is cold whenever its stripe was last written long ago |
+| **Impact** | Measured by [X10](../object-storage/stripe-row-costs.md#thirty-two-at-a-time) on the lab: thirty-two writers committing cold stripe rows in one group committed 0.62× (0.47 to 0.63) the rows a second of thirty-two committing resident ones when a Zen1 host led it, and 0.91× when europa did, its archives on the Optane. At depth one a cold commit cost what a warm one did. A writer of resident rows beside eight writers of cold ones in its group had a p99 1.24× its p99 beside eight writers of resident ones |
+| **Difficulty** | M — `run_apply` parks the batch on the first command that needs a load and returns; `resume_parked` re-runs it when that one load lands, and the next cold command parks it again (`shoal-core/src/server/shard/groups.rs`). Requesting a load for every cold command of the batch at once, and resuming when all have landed, turns N reads in series into N in parallel. The loader already reads on a task each |
+| **Depends on** | nothing |
+| **Blocks** | nothing; [S7](../object-storage/write-path.md)'s read before a commit hides the leader's read from the commit either way |
+| **Tradeoff** | Contained: the batch still applies in committed order once every row is in |
+| **Benchmark** | `x10 spike rows`, its depth 32 `cold` and `warm` sides on the group a Zen1 host leads |
+
+Filed from X10. On the leader the read is on the client's path, since the proposer waits on its
+own apply; on a follower it delays only that follower's apply.

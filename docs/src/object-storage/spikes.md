@@ -2,10 +2,11 @@
 
 ~~**Nothing here has been run.**~~ ~~**One spike has run**: X4, whose record is
 [its own page](erasure-coding-crates.md) (2026-10-03).~~ ~~**Two spikes have run**~~ ~~**Three
-spikes have run**~~ **Four spikes have run**, each with its record on a page of its own: X2,
-[placement](placement-simulation.md), X4, [the erasure coding crates](erasure-coding-crates.md),
-and X5, [the checksums](checksums.md) (all 2026-10-03), and X6,
-[the device store on SSD](device-store-ssd.md) (2026-10-04). This page is the list of what has to be
+spikes have run**~~ ~~**Four spikes have run**~~ **Five spikes have run**, each with its record on a
+page of its own: X2, [placement](placement-simulation.md), X4,
+[the erasure coding crates](erasure-coding-crates.md), and X5, [the checksums](checksums.md) (all
+2026-10-03), and X6, [the device store on SSD](device-store-ssd.md), and X10,
+[what a stripe row costs](stripe-row-costs.md) (both 2026-10-04). This page is the list of what has to be
 learnt before the [milestones](milestones.md) of this part can be more than a guess, and how
 each thing would be learnt.
 
@@ -111,7 +112,7 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 | X7 | The device store on HDD | Q23 | Disks fitted | Days |
 | X8 | One small write, three ways | Q14, Q27 | The lab; X6 | Days |
 | X9 | Table latency beside object work | Q15, Q24 | titan; X4, X5 | Days |
-| X10 | What a stripe row costs | Q17, Q25 | The lab | Days |
+| ✅ X10 | What a stripe row costs, [reported](stripe-row-costs.md) | Q25 in part, Q17's group half | The lab | ~~Days~~ Done 2026-10-04 |
 | X11 | Streamed bodies | Q26 | europa, the lab | Days |
 | X12 | Recovery and scrub rates | Q17, Q28, Q29 | X4, X6, X7 | Days |
 | X13 | The benchmark's shape | Q30 | europa | ~~Days~~ Mostly answered by [F69](../features/driver-operation-kinds.md); the rest days |
@@ -549,6 +550,17 @@ table says which. **Cost.** Days.
 
 ### X10. What a stripe row costs
 
+**Reported 2026-10-04** on [its own page](stripe-row-costs.md), and recorded on S18 as
+[Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04). **Stripe rows are not kept
+resident; a stripe's commit follows the read of its row S7's coordinator already makes, and a
+pool's inline threshold defaults to 16 KiB.** T1 fired on its second clause: at depth one a cold
+commit cost what a warm one did, but under load a group's cold reads queued, 0.62× its warm rate
+on the 970 EVO, and a writer beside cold commits in its group waited 2.02× longer at its p99.
+A supplement under load showed the read S7 already makes, sent to the leader, removes it: the commit
+then costs 1.20× a warm one and a neighbour sees no stall. T2 did not fire: a cold row is 39 bytes of index. T3 fired at its line: the
+knee is between 16 and 32 KiB on the lab, where the benchmark host's was at 8 KiB. The plan as
+written follows, struck where the run departed from it.
+
 **Question.** What do the metadata rows cost, and what does that say about stripe size, the
 inline threshold and how many objects a bucket can hold
 ([Q25](contract.md#questions-to-answer))? And how much state a group can carry for
@@ -565,16 +577,18 @@ inline threshold and how many objects a bucket can hold
   was.
 
 **Method.** Rows shaped like the two generated ones, through the existing tables on the
-lab's cluster. Inserts and overwrites for the rate; a restart and then overwrites for cold
-rows; the node's own figure for its index's bytes; a sweep of row size from 1 KiB to 1 MiB
-for the inline threshold.
+lab's cluster. Inserts and overwrites for the rate; a restart and then ~~overwrites~~ conditional
+updates for cold rows (an overwrite is an insert, which never reads its row); the node's own figure
+for its index's bytes; a sweep of row size from 1 KiB to 1 MiB for the inline threshold. Added in
+the run: a stripe row with a digest a chunk, the reads S7 makes before a commit, and a supplement
+on those reads under load.
 
 **Where.** The lab.
 
 **Records.** Rows a second a group; bytes a row on disk and in the index; a commit's
 latency against a resident row and a cold one; throughput against row size. And, derived:
-rows and index memory for each tebibyte written in place at stripe sizes of 4, 16 and
-64 MiB.
+rows and index memory for each tebibyte written in place at stripe sizes of ~~4, 16 and
+64 MiB~~ 1, 4, 16 and 64 MiB, and for a node of 16 TiB, which T2 was judged on.
 
 **Depends on.** Nothing, with one caution. A commit to a cold stripe row is a write that reads
 its row first: an update, or a conditional write ([F68](../features/conditional-writes.md)). An
@@ -698,7 +712,7 @@ flowchart LR
     X2["✅ X2 placement"]:::done
     X14["X14 sources"]
     X13["X13 bench shape"]
-    X10["X10 row cost"]
+    X10["✅ X10 row cost"]:::done
     X3["X3 bytes through groups"]
     X4["✅ X4 erasure crates"]:::done
     X5["✅ X5 checksums"]:::done
@@ -718,7 +732,7 @@ flowchart LR
 ```
 
 Nine depend on no other spike and on nothing that has to be fitted, and can start at once:
-X1, ~~X2,~~ X3, ~~X4,~~ ~~X5,~~ X10, X11, X13 and X14; X2, X4 and X5 have run. ~~X6 can start too, and
+X1, ~~X2,~~ X3, ~~X4,~~ ~~X5,~~ ~~X10,~~ X11, X13 and X14; X2, X4, X5 and X10 have run. ~~X6 can start too, and
 needs an XFS filesystem for one of its legs.~~ X6 has run too, on an XFS filesystem fitted for it.
 ~~X8 follows X6, and~~ X8 and X9 ~~follows X5, since X4 has
 reported~~ can start: X4, X5 and X6 have all reported. X7 and the rotational half of X12 wait
@@ -750,13 +764,13 @@ it throws away, or it only saves time.
 | Rotational disks | X7; X12's rotational half | Required | The same | Not fitted |
 | ✅ Device counters, node memory and index bytes in a bench capture: delivered by [F71](../features/bench-device-memory.md) | X3, X10 | Optional | ~~Nothing in the tree reads the kernel's device counters, and a capture keeps neither `resident_bytes` nor `archive_map_bytes`, which every node reports. A script reading `/proc/diskstats` on each host before and after, and `shoaladm stats --json --watch` beside the run, take the same numbers.~~ Since F71 every run of a capture keeps each host's device counters, read before and after it, and every member's resident set and index bytes every two seconds; `compare` reads device bytes written a byte sent, the resident peak and the index bytes. WAL and archive bytes apart still need the two roots on separate devices, which the capture then reports apart, or a trace of writes by file name, as the cluster testing took for [O62](../cluster-testing/performance.md#o62-the-archive-map-rewrite) | ✅ 2026-10-03 |
 | ✅ A paced neighbour stream, with windows by table, in the bench: delivered by [F72](../features/bench-paced-stream.md) as a *paced stream* | X3 | Optional | ~~A bench run is one closed loop whose windows are kept by kind, not by table, so it cannot drive a small table lightly beside a large one and report each. A second driver against the same cluster can. It is near the open-loop generator in [TODOs](../appendix/todos.md)~~ Since F72 `--paced <table> --paced-rate <N>` drives one table at an offered rate beside a main load that leaves it alone, its latency from each operation's slot, its windows and worst second's p99 kept apart in every run | ✅ 2026-10-03 |
-| An operation kind a schema supplies before buckets exist | X10 | Optional | X10's cold commit is a write that reads its row. `#[shoal::db]` emits `operation_kinds` empty, and buckets are what will fill it (M12). X10's own client drives it meanwhile | — |
+| ~~An operation kind a schema supplies before buckets exist~~ **Not needed**: X10 drove its own | X10 | Optional | X10's cold commit is a write that reads its row. `#[shoal::db]` emits `operation_kinds` empty, and buckets are what will fill it (M12). ~~X10's own client drives it meanwhile~~ X10's driver, `x10` in `shoal-spike-rows`, aimed each write at one group's leader and timed a read before a commit, which no operation kind the bench drives could have done ([X10](stripe-row-costs.md#the-harness)) | Not needed |
 
 The rest is each spike's own work, written on its section: ~~X2 measures the map's frame again
 before comparing with it~~ (done: 16,555 bytes where F39 measured 13,493,
 [X2](placement-simulation.md#todays-tablet-frame-again)); ~~X6 issues its own clone call~~ (done,
 on the blocking thread, [X6](device-store-ssd.md#the-harness)); X9
-gives a core up on titan; X10 drives its cold commit itself; X11 adds tokio and a TLS stack to the spike's dependencies; X1 saves
+gives a core up on titan; ~~X10 drives its cold commit itself~~ (done, [X10](stripe-row-costs.md#the-harness)); X11 adds tokio and a TLS stack to the spike's dependencies; X1 saves
 its schedules in a directory of their own.
 
 ## Exploratory work that is not a spike
@@ -783,7 +797,7 @@ its evidence and with what it did not settle:
 | The code, the crate and the geometry: Q20. The checksum: Q21 | ✅ X4 for the code and the crate ([Q20, in part](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); ✅ X5 for the checksum ([Q21, in part](contract.md#q21-in-part-the-checksum-2026-10-03)); X14, the geometry, and the granule and chunk digest Q21 leaves |
 | The device store: Q22, and Q23 for the rotational gate | ✅ X6 for SSDs ([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)); X7 for rotational disks |
 | Where object work runs: Q24 | X9 |
-| Stripe size and the inline threshold: Q25. Small writes: Q27 | X10, X8 |
+| Stripe size and the inline threshold: Q25. Small writes: Q27 | ✅ X10 for Q25 ([Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04)); X8 for Q27's other half |
 | The wire: Q26 | X11 |
 | Budgets: Q28, Q29 | X12 |
 | The driver: Q30 | X13 |

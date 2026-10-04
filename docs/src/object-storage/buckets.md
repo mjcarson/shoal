@@ -157,6 +157,12 @@ cluster's, with a few hundred kibibytes of memory each
 ([Q1 and Q13 at M1](../distributed/protocol.md#q1-and-q13-at-m1)). A schema of many buckets
 pays that many times over, which is one reason
 [Q25](contract.md#questions-to-answer) asks whether the stripe table could be shared.
+[X10](stripe-row-costs.md#what-x10-does-not-settle) measured two more costs of a group, both of
+which favour fewer of them. Thirty-two writers spread over a table's eighteen groups on the lab
+committed 3,430 small rows a second, and thirty-two in one group 4,900, because spread out every
+shard syncs its own small batch. And a busy group can hold up to 10 MB of WAL index for the
+entries it retains ([O90](../appendix/optimizations.md#o90-the-wal-keeps-a-hundred-bytes-of-memory-for-every-retained-entry)).
+Whether the table is shared is still M12's to decide.
 
 The macro gains a field kind and a generator, and every expansion of a schema with a bucket
 gets longer.
@@ -194,7 +200,8 @@ There is no speed to measure here. What is checked is structure: the client half
 with no engine in its graph, the fingerprint moves when a bucket is declared and does not
 when its pool binding changes, and the count of groups a bucket adds is the count the map
 derives. What those groups cost idle is already measured, and what a stripe row costs is
-[X10](spikes.md#x10-what-a-stripe-row-costs).
+[X10](spikes.md#x10-what-a-stripe-row-costs), which has reported
+([the record](stripe-row-costs.md)).
 
 ## Acceptance tests
 

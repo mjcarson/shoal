@@ -175,9 +175,13 @@ The threshold belongs to the **storage pool**, and zero turns it off. That is de
 bucket bound to an erasure coded pool of rotational disks would otherwise keep its small
 objects on the metadata's devices at the cluster's replication factor, which is a different
 durability and a different cost from the one its operator chose, and nobody would have said
-so. Where the threshold should sit is
+so. ~~Where the threshold should sit is
 [X10](spikes.md#x10-what-a-stripe-row-costs)'s to measure; the row-size capture puts the
-knee of the persistent path between 1 KiB and 16 KiB.
+knee of the persistent path between 1 KiB and 16 KiB.~~ **A pool's threshold defaults to 16 KiB**,
+the bottom of the knee [X10](stripe-row-costs.md#4-an-object-held-inline) measured on the lab's
+cluster ([S18](contract.md#q25-in-part-the-metadata-rows-2026-10-04)). Puts and an even mixture
+of inline objects keep 0.84× of their 1 KiB rate at 8 KiB, fall to 0.54 to 0.72 at 16 KiB, and to
+0.31 to 0.55 at 32 KiB. The benchmark host's single node bent an octave sooner.
 
 An inline object that a write grows past the threshold is moved to stripes, once, and does
 not move back.
@@ -231,16 +235,23 @@ makes metadata linear in size for the workload that never overwrites.
 
 ## What it costs
 
-- **A row an object, and a row for every stripe written in place.** Each is about fifty
-  bytes of index in memory on every replica of its tablet, which today caps a bucket near
-  twenty million rows a GiB of memory a replica
-  ([S1](prerequisites.md#optional), paging the archive map).
+- **A row an object, and a row for every stripe written in place.** Each is ~~about fifty~~
+  39 bytes of index in memory on every replica of its tablet, measured by
+  [X10](stripe-row-costs.md#2-bytes-a-row) at four million rows, which today caps a bucket near
+  ~~twenty~~ 27 million rows a GiB of memory a replica
+  ([S1](prerequisites.md#optional), paging the archive map). On disk a stripe row is 272 bytes
+  and an object row with nothing inline 383; in the WAL, 331 and 468 a replica.
 - **Two commits for a whole object** (the registration and the commit), **one for each
   stripe written in place**, and one more when a write extends the object.
 - **A strong read of the object's entry before a write in place**, for the truncate epoch.
 - **A commit to a stripe whose row is not in memory waits for the row to be read**, and its
   group's batch waits with it. An object patched once a month pays that every time
-  ([X10](spikes.md#x10-what-a-stripe-row-costs)).
+  ([X10](spikes.md#x10-what-a-stripe-row-costs)). X10 measured it: at depth one the read hides in
+  the WAL's commit delay and the commit costs what a warm one does, but under load a group's cold
+  reads queue, to 0.62× its rate on the lab's 970 EVOs. S7's read of the row, sent to the group's
+  leader, keeps the leader off the disk, and the commit after it costs 1.20× a warm one under load
+  ([X10's record](stripe-row-costs.md#5-the-supplement-the-read-under-load)). The rows are not
+  kept resident.
 - **Inline objects are rows**, with everything the row-size page says about rows.
 
 ## What it breaks
@@ -277,7 +288,9 @@ the rows.
 
 [X10](spikes.md#x10-what-a-stripe-row-costs) is this page's spike: rows a second through a
 group for rows shaped like these two, bytes a row on disk and in the index, how long a commit
-waits on a row that is not in memory, and the inline threshold swept from 1 KiB to 1 MiB.
+waits on a row that is not in memory, and the inline threshold swept from 1 KiB to 1 MiB. It has
+reported ([the record](stripe-row-costs.md)), on stand-ins for these rows; M12 takes its figures
+again on the rows as generated.
 `metadata_cost_is_linear_and_published` holds the constant the page publishes to what a test
 counts.
 

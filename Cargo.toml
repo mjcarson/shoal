@@ -14,6 +14,9 @@ members = [
     "shoal-model",
     "shoal-proto",
     "shoal-spike",
+    # X10, what a stripe row costs: a schema shaped like the object store's two generated rows, its
+    # node program and the spike's own driver (docs/src/object-storage/stripe-row-costs.md)
+    "shoal-spike-rows",
     "shoal-top",
     # the admin program and the terminal UI, split in F63: shoalctl depends on shoaladm
     "shoaladm",

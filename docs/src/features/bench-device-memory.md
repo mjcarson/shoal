@@ -24,7 +24,9 @@ This is one of the two optional rows on
 - device bytes written for each byte stored, WAL and archives apart;
 - the node's resident set at steady state.
 
-X10 records the index's bytes for a row. Before this feature:
+X10 records the index's bytes for a row. (In the end X10 read them from every member's `Stats`
+itself, since its cold commit is an update the bench cannot drive; the figures are the same ones,
+[X10's record](../object-storage/stripe-row-costs.md#the-harness).) Before this feature:
 
 - **Nothing in the tree read the kernel's device counters.** The cluster testing took its write
   amplification by device from `/proc/diskstats` before and after each run, with
@@ -278,6 +280,7 @@ asks for.
 [F66](dataset-benchmarks.md), the capture this extends; [F72](bench-paced-stream.md), the other
 half of the same change; [cluster stats](cluster-stats.md), where the memory figures come from;
 [X3](../object-storage/spikes.md#x3-bytes-through-the-tablet-groups) and
-[X10](../object-storage/spikes.md#x10-what-a-stripe-row-costs), which asked for them;
+[X10](../object-storage/spikes.md#x10-what-a-stripe-row-costs), which asked for them
+([X10's record](../object-storage/stripe-row-costs.md) read them from `Stats` directly);
 [write amplification by device](../cluster-testing/performance.md#write-amplification-by-device-and-filesystem),
 the numbers this takes in a capture.

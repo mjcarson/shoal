@@ -185,7 +185,9 @@ identity is answered with the same refusal**, even after the row has come to mat
 
 - **Only `#[shoal(filter)]` fields, and only equality.** A condition cannot compare with `<` or
   `>`, or name a field that is not a filter. [Q25](../object-storage/contract.md#questions-to-answer)
-  settles whether the generated rows need more.
+  settles whether the generated rows need more. For the commits X10 drove, equality on
+  one field was all both rows needed: a stripe's sequence and an object row's version
+  ([Q25, in part](../object-storage/contract.md#q25-in-part-the-metadata-rows-2026-10-04)).
 - **No SHQL.** SHQL is SELECT only, so a conditional write is a typed query only
   ([todos](../appendix/todos.md#conditional-writes-in-shql)).
 - **A fresh cluster refuses conditional writes until wire 7 is activated.** This is by design,

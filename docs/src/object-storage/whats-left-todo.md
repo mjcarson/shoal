@@ -2,7 +2,7 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-04, when X6 reported; X2, X4 and X5 had reported the day before.
+after it. As of 2026-10-04, when X6 and X10 reported; X2, X4 and X5 had reported the day before.
 
 **How to read them.**
 
@@ -36,13 +36,12 @@ flowchart LR
         X4["✅ X4 Erasure coding crates"]:::done
         X5["✅ X5 Checksums"]:::done
         X6["✅ X6 The device store on SSD"]:::done
-        X10["X10 What a stripe row costs"]
+        X10["✅ X10 What a stripe row costs"]:::done
         X11["X11 Streamed bodies"]
         X13["X13 The benchmark's shape,<br>what F69 left"]
         X14["X14 Ceph and S3 at the source"]
         Counters["✅ F71 Device counters and node memory<br>in a bench capture (optional)"]:::done
         Neighbour["✅ F72 A paced neighbour stream<br>in the bench (optional)"]:::done
-        Kinds["A kind a schema supplies,<br>for X10's cold commit (optional)"]:::optional
     end
     X1["X1 The stripe protocol as a model"]
     X3["X3 Bytes through the tablet groups"]
@@ -80,6 +79,11 @@ flowchart LR
     X13 ---> Gate
     X14 ---> Gate
 ```
+
+~~An optional box, "a kind a schema supplies, for X10's cold commit", stood beside X10.~~ It is
+gone: X10 drove its commits with a driver of its own, which aimed each one at a group's leader
+and timed a read before it, and no operation kind the bench drives could have done that
+([X10](stripe-row-costs.md#the-harness)). Buckets still supply their kinds at M12.
 
 The failure domain and free bytes for every root waited on Q19, which said what placement reads.
 X2 decided that part of it: a device's id and its member's host, and each device's size,

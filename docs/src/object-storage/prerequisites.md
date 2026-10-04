@@ -32,7 +32,9 @@ failure domain and free bytes for every root. More than one frame a query and th
 each wait on a question ([The order](#the-order)). Of the two dependencies, ~~both wait on their spikes~~ the erasure
 coding crate is chosen ✅ by [X4](erasure-coding-crates.md), and the checksum ~~waits on X5~~ is
 chosen ✅ by [X5](checksums.md): both are chosen, and neither is in the workspace until its
-milestone adds it.
+milestone adds it. [X10](stripe-row-costs.md), which priced the metadata rows these prerequisites
+serve, reported on 2026-10-04 ✅ and changes no row of this page: the conditional write it drove was
+F68's, on equality alone.
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate
@@ -119,7 +121,7 @@ Obligations of the design itself, each on the page that owns it:
 | ✅ Item 202, resolved by [Resolved #202](../appendix/resolved/append-batch-bytes.md) | Done |
 | ✅ The fixture's storage faults, delivered by [F70](../features/storage-faults.md) | Done. An emptied device and a flipped bit, which S16 also asks for, are not prerequisites and are not built |
 | ✅ The driver's kinds and byte counters, delivered by [F69](../features/driver-operation-kinds.md) | Done. [Q30](contract.md#questions-to-answer) is recorded in part: the one driver is generalized; the object dataset and the seeded-bytes rate are left to [X13](spikes.md#x13-the-benchmarks-shape) |
-| ✅ The conditional write, delivered by [F68](../features/conditional-writes.md) | ~~Nothing, for a condition on one field.~~ Done, for equality on any of a row's filter fields. [Q25](contract.md#questions-to-answer) settles whether the generated rows need more, such as a comparison other than equality |
+| ✅ The conditional write, delivered by [F68](../features/conditional-writes.md) | ~~Nothing, for a condition on one field.~~ Done, for equality on any of a row's filter fields. [Q25](contract.md#questions-to-answer) settles whether the generated rows need more, such as a comparison other than equality. [X10](stripe-row-costs.md) drove both rows' commits on equality of one field each, and [Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04) asks for no more |
 | The tablet walk | [Q17](contract.md#questions-to-answer), which says what a driver asks it for |
 | The failure domain and free bytes for each root | ~~[Q19](contract.md#questions-to-answer), which fixes what placement reads~~ Nothing. [X2](placement-simulation.md) fixed what placement reads ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)), so both could start today, landing no later than [M14](milestones.md#m14-devices-and-pools-on-one-node) |
 | More than one frame a query | [Q26](contract.md#questions-to-answer) and [X11](spikes.md#x11-streamed-bodies) |

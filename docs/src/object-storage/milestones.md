@@ -34,7 +34,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 | --- | --- | --- | --- |
 | Before M11 | The contract agreed | Q14, Q15, Q16, Q18, Q19 (in part ✅ [X2](placement-simulation.md)) | — |
 | M11 | The model, the fixture's faults, the driver's kinds | Q30, in part ([recorded](contract.md#decision-record)) | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
-| M12 | Buckets in the schema and the tables they generate | Q25 | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
+| M12 | Buckets in the schema and the tables they generate | Q25 (in part ✅ [X10](stripe-row-costs.md)) | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
 | M13 | The wire, pool policy, inline objects, the baseline | Q21 (the checksum ✅ [X5](checksums.md)), Q26, the rest of Q30 | More than one frame for one query |
 | M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22 (on SSDs ✅ [X6](device-store-ssd.md)), Q24 | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); a failure domain on a member; free bytes for every root |
 | M15 | Replicated pools: stage, commit, apply and read | Q27 (the device's half ✅ [X6](device-store-ssd.md#3-a-partial-write)) | — |
@@ -115,7 +115,10 @@ exercised by a kind a test supplies.
 
 **Closed before it.** Q25, the metadata rows: their layout, the inline threshold, and what a
 commit to a cold row costs ([X10](spikes.md#x10-what-a-stripe-row-costs)). A generated row
-is persisted from the first object on, so its layout is fixed here.
+is persisted from the first object on, so its layout is fixed here. ✅ Recorded in part by X10 on
+2026-10-04 ([Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04)): stripe rows
+are not kept resident, the inline threshold defaults to 16 KiB, and the index sets no floor under
+the stripe above X6's. Whether buckets share one stripe table is left to this gate.
 
 **Lands first.** ~~A conditional write on unsorted tables, with a typed refusal~~ ✅ landed
 as [F68](../features/conditional-writes.md), for sorted tables too. ~~Known issue
@@ -135,7 +138,10 @@ door.
 **Evidence/exit.** Each prerequisite has its own page, with its reproduction, by the
 repository's rules for a fix or a feature. `shoal-client-check` compiles a schema with a
 bucket and no engine. A schema with one bucket has the groups the map derives for two more
-tables and no others. X10's figures are taken again on the generated rows as built.
+tables and no others. X10's figures are taken again on the generated rows as built, and
+read against the record's ([X10](stripe-row-costs.md#what-x10-does-not-settle)): 224 bytes a
+stripe row and 336 an object row archived, 39 bytes of index a cold row, about 4,900 commits a
+second a group on the lab, and a cold commit 1.00× a warm one at depth one and 0.62× at depth 32.
 
 *Not at this gate:* nothing can be put in a bucket. No operation reaches one.
 
@@ -453,7 +459,7 @@ The reason this page is provisional, spike by spike.
 | ~~X6~~ | ~~A file a stripe chunk is not viable at small sizes, or a clone is worth requiring~~ Neither: a file a chunk is viable from 1 MiB on a device that flushes, at the line, and from 256 KiB on the Optane; the clone failed every condition but one ([X6](device-store-ssd.md)) | ~~M14's store changes layout; or a clone call lands in the glommio fork first and the filesystems M14 accepts narrow~~ M14's store keeps S6's layout, with its whole chunks written into files a slice keeps written ahead. No clone call is added, and M14 accepts XFS and ext4 and refuses btrfs |
 | X7 | A disk needs a journal on an SSD, or an executor to itself | M19 grows by that, and a shared journal becomes a failure domain on S5 |
 | X8 | A size below which bytes in the commit win | M15 gains the small-write path, and ~~item 202~~ the append batch bound ([Resolved #202](../appendix/resolved/append-batch-bytes.md)) and item 208 carry more weight |
-| X10 | A commit to a cold stripe row stalls its group | The rows of M12 change shape, or M15 keeps stripe rows resident and pays for it in memory |
+| ~~X10~~ | ~~A commit to a cold stripe row stalls its group~~ It does, under load and not at depth one: 0.62× a group's rate on the 970 EVO. The read S7 already makes, sent to the group's leader, removes the stall ([X10](stripe-row-costs.md)) | ~~The rows of M12 change shape, or M15 keeps stripe rows resident and pays for it in memory~~ M12's rows keep S3's shape and stay cold; M15's commit reads its stripe row at the leader first, and the inline threshold defaults to 16 KiB |
 | X11 | A shared connection hurts small queries; a connection cannot be handed to another executor | M13 sets connections aside for object bytes; the hop between executors stays in M14 |
 | X12 | A rebuild inside a tolerable budget takes days | The defaults for `k + m` and `f` change before M18, and M16's budget has to adapt to the foreground |
 | X13 | ~~The driver's kinds do not generalize~~ (they do: [F69](../features/driver-operation-kinds.md)) One core cannot make seeded bytes as fast as a pool takes them | ~~M11 builds a second driver beside the first~~ M13's driver runs on several cores, and its capture proves it had them |

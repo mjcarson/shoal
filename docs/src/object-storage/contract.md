@@ -251,7 +251,8 @@ complete S1's checksum prerequisite with X5's recommendation.
 - **Whether the row keeps each stripe chunk's digest**:
   [X1](spikes.md#x1-the-stripe-protocol-as-a-model) and
   [X10](spikes.md#x10-what-a-stripe-row-costs). X5 says it costs about 1.2 µs a chunk to make
-  and eight bytes to keep.
+  and eight bytes to keep. X10 says six of them cost a stripe row 64 bytes archived and nothing in
+  its index ([Q25, in part](#q25-in-part-the-metadata-rows-2026-10-04)); whether it is kept is X1's.
 - **The bytes of a unit's identity, and their place in the checksum**: [S6](device-store.md), at
   M14.
 - **What checksumming costs a table beside it**: X9. On Zen1 it is as much CPU as encoding.
@@ -315,13 +316,47 @@ carry their regime. The choice follows the user's instruction to complete X6 and
 
 - **The chunk size and the chunk unit**: Q20's geometry and Q25. X6 says a chunk below 1 MiB on a
   device that flushes costs more than twice what a shared file would, and below 256 KiB even from
-  the pool.
+  the pool. [X10](#q25-in-part-the-metadata-rows-2026-10-04) says the
+  metadata sets no higher floor: a stripe row's index at 4 MiB stripes is 0.31 GiB for a node of
+  16 TiB.
 - **The pool and the journal**, their sizes and how they recover after a crash: M14.
 - **Q27's other half**, whether small writes ride the metadata log: [X8](spikes.md#x8-one-small-write-three-ways),
   against the floor above.
 - **Rotational devices**: Q23, [X7](spikes.md#x7-the-device-store-on-hdd).
 - **Whether a slice keeps chunk files open**: a cold open cost 0.6 to 0.9 ms on the 970 EVO, more
   than a 64 KiB read.
+
+#### Q25, in part: the metadata rows (2026-10-04)
+
+Recorded 2026-10-04 by [X10](stripe-row-costs.md), on the tree that adds `shoal-spike-rows`. Rows
+shaped like S3's two were driven through today's persistent unsorted tables on the lab's cluster:
+`tmdb_cluster.yaml`'s three nodes at a factor of three (europa, Zen4, an Optane 900P under XFS;
+titan and hyperion, Zen1, a 970 EVO under XFS), six shards a node, with WAL commit delays of 3 ms
+and 2 ms. Four rounds of three legs, each on a cluster bootstrapped for it, then four rounds of a
+supplement. One `znver1` build, under the `performance` governor, with no other shoal unit running.
+A difference counts where the rounds' intervals do not overlap. The choice follows the user's
+instruction to complete X10 and record it.
+
+| Decision | Evidence |
+| --- | --- |
+| **Stripe rows are not kept resident; a stripe's commit follows S7's read of its row, sent to the group's leader at `Quorum`** | T1 fired on its second clause. At depth one a cold commit cost 1.00× a warm one, its read hidden in the WAL's commit delay. Under load a group's cold reads queued: thirty-two writers of cold rows committed 0.62× the rows a second of thirty-two writers of resident ones on the 970 EVO, and 0.91× on the Optane, and a writer beside eight writers of cold rows had a p99 1.18× to 1.24× its p99 beside eight writers of resident ones. A read through the leader first leaves its copy resident, and under load the commit after it cost 1.20× (1.09 to 1.25) a warm one, with the neighbour's p99 0.95× its p99 beside warm writers. Keeping the rows resident instead would cost 484 bytes a row as the engine counts it, 4.1 GiB for a node of 16 TiB at 4 MiB stripes |
+| **The index sets no floor under the stripe size above X6's 4 MiB at 4+2** | A cold row is 39.4 bytes of memory a replica, its archive map entry, at four million rows. A node of 16 TiB at 4+2 replicating a row for every 4 MiB stripe holds 0.31 GiB of it. T2's line was 1 GiB. At 1 MiB stripes it would be 1.23 GiB |
+| **A pool's inline threshold defaults to 16 KiB** | T3 fired at its line. An even mixture of inline puts and gets at depth 32 kept 0.84× its 1 KiB rate at 8 KiB in every round, fell to 0.58 to 0.71 at 16 KiB and to 0.32 to 0.55 at 32 KiB, so the lab's knee is between 16 and 32 KiB, where the benchmark host's single node bent at 8 KiB. The network carried 41% of a link at 16 KiB and bound puts only from 128 KiB |
+| **A bucket is designed for about 27 million rows a GiB of archive map a replica** | 39.4 bytes a row, objects and stripes written in place alike. Paging the map stays optional ([S1](prerequisites.md#optional)). Every busy group also holds up to 10 MB of WAL index for the entries it retains ([O90](../appendix/optimizations.md#o90-the-wal-keeps-a-hundred-bytes-of-memory-for-every-retained-entry)) |
+| **A commit's condition is equality on one field** | Both rows' commits were F68 conditional updates on equality of one field: a stripe row's sequence, an object row's version. No write of any cell was refused or failed |
+| **The rows' sizes, which M12's generated rows are held to** | A stripe row of six labels is 176 bytes archived and 224 in its partition, 272 on disk and 331 in the WAL a replica. Six chunk digests add 64 archived and nothing to any index. An object row of one entry with nothing inline is 312 and 336, 383 on disk and 468 in the WAL. A group commits about 4,900 such rows a second at depth 32 when a Zen1 host leads it, and every write costs 4.9 ms at depth one |
+
+**Not settled.** These remain open:
+
+- **The generated rows' layout and whether buckets share one stripe table**: M12. X10 gives it two
+  facts: commits spread over eighteen groups ran at 3,430 a second against 4,900 in one, and every
+  busy group holds WAL index.
+- **Whether the row keeps a digest of each chunk**: X1's. X10 says it costs 64 bytes archived a row.
+- **What a group's own state costs** to carry Q17's record of what a slice missed. A row rewritten
+  whole costs its size every commit: 196 commits a second at 4 KiB, 30 at 1 MiB.
+- **Small writes in the metadata log**, Q27's other half: [X8](spikes.md#x8-one-small-write-three-ways).
+- **The followers' reads**, which still park their applies one at a time:
+  [O92](../appendix/optimizations.md#o92-a-group-reads-the-rows-its-parked-batch-needs-one-at-a-time).
 
 ## Alternatives rejected
 
@@ -419,7 +454,7 @@ Q1–Q13.
 | Q14 | **What orders a stripe's writes, and how do the bytes stay out of the log?** Preferred: the tablet group that owns the stripe's row, by a conditional commit; holders stage before it and apply after ([S7](write-path.md)). The alternatives are stripes as rows, a group among the holders, and redirect-on-write | Before M11. [X1](spikes.md#x1-the-stripe-protocol-as-a-model) for safety, [X3](spikes.md#x3-bytes-through-the-tablet-groups) and [X8](spikes.md#x8-one-small-write-three-ways) for cost |
 | Q15 | **Who stages?** Preferred: the node that received the client's bytes, with the group's leader only ordering commits and granting an advisory reservation under contention. The other answer is the leader, which serializes and costs a network crossing while clients do not route by topology | Before M11. X1; [X9](spikes.md#x9-table-latency-beside-object-work) for what a stager's work costs the shard it runs on |
 | Q16 | **The acknowledgement rule.** Preferred: `k + f` current stripe chunks with `f = 1` by default; whether an untouched chunk on a slice that is down counts as current is open. What a degraded write does when the rule cannot be met | Before M11. X1 |
-| Q17 | **How does a slice that missed writes learn what it is stale on**, at what granularity, and how does that record survive a checkpoint and reach a new replica? Preferred: a bounded record in the group for each placement group and chunk, derived at apply as the retry table is; past the bound, a backfill from a walk of the tablet's rows | M16. X1, [X10](spikes.md#x10-what-a-stripe-row-costs), [X12](spikes.md#x12-recovery-and-scrub-rates) |
+| Q17 | **How does a slice that missed writes learn what it is stale on**, at what granularity, and how does that record survive a checkpoint and reach a new replica? Preferred: a bounded record in the group for each placement group and chunk, derived at apply as the retry table is; past the bound, a backfill from a walk of the tablet's rows. X10 measured what a table can say of it: a group commits about 4,900 small rows a second on the lab, and a row rewritten whole costs its size every commit, 196 commits a second at 4 KiB and 30 at 1 MiB ([the record](stripe-row-costs.md#what-a-group-can-carry-q17)) | M16. X1, ✅ [X10](spikes.md#x10-what-a-stripe-row-costs) for a table's half, [X12](spikes.md#x12-recovery-and-scrub-rates) |
 | Q18 | **Size and truncate across tablets.** Preferred: a truncate epoch in `ObjectMeta` that every stripe commit stamps, with a short stack of floors. The alternative keeps an object's rows in one tablet, which makes size atomic and confines an object to one group | Before M11. X1 |
 | Q19 | **Placement.** How many placement groups a tablet; the placement function; failure domains; how a commit checks a generation; the pool map's size and fanout. **In part, 2026-10-03**: the function, positions as the tablet group's state, seats, fitted weights, the number of placement groups a pool's, the failure domains and the pool map are decided ([the record](#q19-in-part-placement-2026-10-03)); how a commit checks a generation and its positions is not | Before M11. ✅ [X2](placement-simulation.md); X1 for the commit |
 | Q20 | **Which code family, which crate, what geometry**: Reed-Solomon, random linear network coding, a fountain code, or plain XOR at one parity chunk; stripe and chunk unit sizes; parity delta or reconstruct-write. Preferred: a systematic code that decodes from any k, because a seek and a small write both lean on those two properties. **In part, 2026-10-03**: the family, the crate and parity delta are decided ([the record](#q20-in-part-the-code-and-the-crate-2026-10-03)); the geometry is not | M18. ✅ [X4](erasure-coding-crates.md), [X14](spikes.md#x14-ceph-and-s3-at-the-source) |
@@ -427,7 +462,7 @@ Q1–Q13.
 | Q22 | **The device store's layout**, its way of applying an update, its `fdatasync` strategy and the filesystems it accepts. Preferred: a journal written ahead for small updates and whole files for large ones. **In part, 2026-10-04**: on SSDs, a file a chunk from a pool written ahead, the journal and the apply in place, no clone, XFS preferred, ext4 accepted and btrfs refused, one slice a device ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)); rotational devices are Q23's | M14. ✅ [X6](device-store-ssd.md) |
 | Q23 | **What a rotational device needs**: an executor of its own, a journal on an SSD, another layout | M19. [X7](spikes.md#x7-the-device-store-on-hdd) |
 | Q24 | **Where object work runs**: which executor owns a slice, whether object work shares executors with tables, the lane, the memory budget | M14. X9 |
-| Q25 | **The metadata rows**: the inline threshold, what a stripe row costs, the stall when a row a commit needs is not in memory, the scale a bucket is designed for | M12. X10 |
+| Q25 | **The metadata rows**: the inline threshold, what a stripe row costs, the stall when a row a commit needs is not in memory, the scale a bucket is designed for. **In part, 2026-10-04**: stripe rows are not kept resident and a commit follows S7's read of its row; 39 bytes of index a cold row, so 27 million rows a GiB a replica and no floor under the stripe above 4 MiB; the inline threshold defaults to 16 KiB; equality on one field is all a commit's condition needs ([the record](#q25-in-part-the-metadata-rows-2026-10-04)); the rows' final layout and a shared stripe table are M12's | M12. ✅ [X10](stripe-row-costs.md) |
 | Q26 | **Streamed bodies**: bounded ranged frames, their size, and what a connection shared with small queries does under them | M13. [X11](spikes.md#x11-streamed-bodies) |
 | Q27 | **What one small in-place write costs, and whether small writes ride the metadata log** below a threshold, to be folded into stripe chunks later. **The device's half measured, 2026-10-04**: two flushes, 2 to 6 ms on the 970 EVO at 4 KiB, 81 µs on the Optane ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)) | M15. ✅ [X6](device-store-ssd.md#3-a-partial-write), X8 |
 | Q28 | **Scrub**: cadence, byte budgets, what a deep scrub of k+m verifies beyond each stripe chunk's own checksums | M17. X12, X14 |

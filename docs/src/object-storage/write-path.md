@@ -109,6 +109,9 @@ sequenceDiagram
 1. **Read.** The coordinating shard reads the object's entry with a strong read, for the
    truncate epoch ([S3](objects.md#size-holes-and-truncate)), then the row of each stripe
    the write touches and its placement group's generation ([S5](placement.md#generations)).
+   The stripe row is read at `Quorum` through its group's leader, so the leader's copy is
+   resident when the commit arrives and its apply, which the client waits on, never waits for
+   the disk ([X10](stripe-row-costs.md#5-the-supplement-the-read-under-load)).
 2. **Stage.** It computes the new bytes of every stripe chunk the write touches and sends each
    to the slice that holds it, under the write's label. A holder stages durably and answers
    ([S6](device-store.md#staging-two-cases)).

@@ -5673,6 +5673,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "shoal-spike-rows"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "color-eyre",
+ "deepsize2",
+ "hdrhistogram",
+ "mimalloc",
+ "rkyv 0.8.12",
+ "serde",
+ "shoal",
+ "shoal-loadgen",
+ "shoaladm",
+ "tokio",
+]
+
+[[package]]
 name = "shoal-top"
 version = "0.1.0"
 dependencies = [

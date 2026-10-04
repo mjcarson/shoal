@@ -176,6 +176,23 @@ sudo target/lab/x6/znver1/release/shoal-spike device quick --dir /optane/x6/quic
 sudo /var/tmp/x6/shoal-spike device all --dir /xfs/x6 --round 1 --out titan-xfs.json   # on the host
 target/lab/x6/znver1/release/shoal-spike device report shoal-spike/results/x6-*.json   # intervals and verdicts
 
+# the X10 spike: rows shaped like the object store's two generated rows (S3's ObjectMeta and
+# StripeMeta) through today's persistent unsorted tables on the lab's cluster - rows a second a
+# group, bytes a row on disk and in memory cold and resident, a commit to a row a restart left
+# cold, and an object held inline from 1 KiB to 1 MiB. Its own workspace crate, shoal-spike-rows
+# (a schema, a node program and `x10`, the driver with every shoaladm command flattened in), since
+# the cold commit is an update shoaladm bench cannot drive. Its inventory is tmdb_cluster.yaml
+# renamed x10 with its own ports and roots (titan and hyperion on /xfs). results/x10-lab.sh runs
+# four rounds of three legs (rate, rows, size), each on a cluster bootstrapped for it, under the
+# performance governor, the driver pinned clear of europa's node; about three and a half hours.
+# LEGS=remedy runs the supplement on the read before a commit, about an hour. The tables are on
+# docs/src/object-storage/stripe-row-costs.md
+CARGO_TARGET_DIR=target/lab/x10/znver1 RUSTFLAGS="-C target-cpu=znver1" cargo build --release -p shoal-spike-rows
+QUICK=1 ROUNDS=1 OUT=target/lab/x10/quick sh shoal-spike-rows/results/x10-lab.sh   # proves every leg runs
+sh shoal-spike-rows/results/x10-lab.sh                                              # the four rounds
+LEGS=remedy sh shoal-spike-rows/results/x10-lab.sh                                  # the supplement
+target/lab/x10/znver1/release/x10 report shoal-spike-rows/results/x10.json         # intervals and verdicts
+
 # a cluster on real hosts from a project (F63): run in the project that defines the schema,
 # shoaladm finds the #[shoal::db] struct, probes every host's cpu over ssh, builds the node once
 # per cpu class and the schema's admin program, installs them under ~/.local/shoal/bin, and
@@ -665,6 +682,13 @@ go through `shoal`.**
   across hosts, builds and ways of feeding it, and timed on one pinned core, with a CRC combine of
   its own written from zlib's method. **Not a workspace member**, for X4's reason: no candidate
   reaches the workspace's lockfile until M13 adds the chosen one. Deleted when M13 lands
+- **shoal-spike-rows** - The X10 spike ([what a stripe row costs](docs/src/object-storage/stripe-row-costs.md)):
+  a schema of four persistent unsorted tables shaped like S3's generated rows (`ObjectMeta`,
+  `StripeMeta`, a `StripeMeta` with a digest a chunk, and filler), its node program `x10-node`, and
+  `x10`, a driver that aims writes at one tablet group's tablets and at its leader, reads every
+  member's `Replication` and `Stats` and every host's device and network counters around each cell,
+  and carries every `shoaladm` command. A workspace member, since it adds no crate to the lockfile;
+  thrown away like every spike's code
 - **shoal-model** - The deterministic protocol model ([F36](docs/src/features/cluster-harness.md)):
   the contract P1–P6 as executable checks over a Raft-shaped tablet group, with saved schedules
   under `shoal-model/schedules/`. Depends on `serde` and `serde_json` alone and names no shoal
