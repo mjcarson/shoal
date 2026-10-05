@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use rustls::client::ClientConnectionData;
@@ -599,14 +600,17 @@ async fn write_loop<W: AsyncWrite + Unpin>(
 ) {
     let pattern = pattern();
     loop {
-        tokio::select! {
-            biased;
-            Some(bytes) = urgent.recv() => {
+        // take the next frame, small ones first, until both queues are closed
+        let Some(next) = next_out(&mut urgent, &mut data).await else {
+            return;
+        };
+        match next {
+            Out::Small(bytes) => {
                 if writer.write_all(&bytes).await.is_err() {
                     return;
                 }
             }
-            Some(out) = data.recv() => {
+            Out::Data(out) => {
                 let written = match out {
                     DataOut::Write { id, offset, len, last } => {
                         // a stream's first frame is preceded by its open
@@ -631,9 +635,46 @@ async fn write_loop<W: AsyncWrite + Unpin>(
                     return;
                 }
             }
-            else => return,
         }
     }
+}
+
+/// What a connection's writer takes next
+enum Out {
+    /// A small frame
+    Small(Vec<u8>),
+    /// A data frame
+    Data(DataOut),
+}
+
+/// The next frame for a connection's writer: a small one whenever one is queued
+///
+/// Polls both queues in one future rather than racing two receives, so nothing taken from a queue
+/// is ever dropped, and the workspace's raced receive scan has nothing to judge.
+///
+/// # Arguments
+///
+/// * `urgent` - Small frames
+/// * `data` - Data frames
+async fn next_out(
+    urgent: &mut mpsc::UnboundedReceiver<Vec<u8>>,
+    data: &mut mpsc::Receiver<DataOut>,
+) -> Option<Out> {
+    std::future::poll_fn(|cx| {
+        // a small frame goes first whenever one is waiting
+        let urgent_open = match urgent.poll_recv(cx) {
+            Poll::Ready(Some(bytes)) => return Poll::Ready(Some(Out::Small(bytes))),
+            Poll::Ready(None) => false,
+            Poll::Pending => true,
+        };
+        // then a data frame, and the end only once both queues are closed
+        match data.poll_recv(cx) {
+            Poll::Ready(Some(out)) => Poll::Ready(Some(Out::Data(out))),
+            Poll::Ready(None) if !urgent_open => Poll::Ready(None),
+            Poll::Ready(None) | Poll::Pending => Poll::Pending,
+        }
+    })
+    .await
 }
 
 /// The pattern every payload is cut from, made once a process
