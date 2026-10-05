@@ -2,7 +2,7 @@
 name = "shoal-spike"
 version = "0.1.0"
 edition = "2021"
-description = "The Q1/Q13 spike: openraft groups on the glommio runtime, counted and timed; X2, placement simulated; and X6, the device store on SSD measured."
+description = "The Q1/Q13 spike: openraft groups on the glommio runtime, counted and timed; X2, placement simulated; X6, the device store on SSD measured; X11, streamed bodies measured; and X13, the benchmark driver's bytes measured."
 license = "MIT"
 publish = false
 
@@ -26,6 +26,14 @@ publish = false
 # direct I/O buffers and a file, beside a small request, and a connection handed between executors.
 # Run on the lab by `results/x11-lab.sh`; its records are merged by `stream report` and its tables
 # are on `docs/src/object-storage/streamed-bodies.md`.
+#
+# `shoal-spike driver` is X13 (`docs/src/object-storage/spikes.md#x13-the-benchmarks-shape`): the
+# bench driver alone - seeded bytes made and checksummed on one core, streamed to X11's server where
+# it discards them or answers from memory, on several cores, and a folder of real files read cold.
+# Run on the lab by `results/x13-lab.sh`; its records are merged by `driver report` and its tables
+# are on `docs/src/object-storage/benchmark-shape.md`.
+build = "build.rs"
+
 [[bin]]
 name = "shoal-spike"
 path = "src/main.rs"
@@ -47,3 +55,12 @@ serde = { version = "1", features = ["derive"] }
 tokio = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["std", "aws-lc-rs", "logging"] }
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
+# X13 checksums every unit with the checksum X5 chose, pinned as M13 will pin it. It brings crc-fast
+# and spin 0.10 into the workspace's lockfile ahead of M13; `std` alone gives its run-time dispatch,
+# without the FFI and the panic handler its defaults add
+crc-fast = { version = "=1.10.0", default-features = false, features = ["std"] }
+# X13's ChaCha8 and AES-128-CTR generators, and F66's digest of a dataset's file. Each is already in
+# the workspace's lockfile, so these add edges and no crate
+rand_chacha = "0.3.1"
+aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sys"] }
+sha2 = "0.10.9"

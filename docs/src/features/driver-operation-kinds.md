@@ -140,7 +140,9 @@ never saw it.
   (`--yes-write`) runs before the schema is known, so any supplied kind counts as writing there.
   `Workload::writes_with` asks the kinds themselves where they are known.
 - **No seeded bytes.** Nothing here generates object contents, and how fast one core can is X13's
-  stub question, unanswered.
+  stub question, ~~unanswered~~ since answered: faster than any one lab device takes them, so a
+  stream makes its own bytes inline, from SplitMix64 in counter mode
+  ([X13](../object-storage/benchmark-shape.md)). M13 builds the described dataset.
 - **No schema supplies a kind yet.** `operation_kinds` returns none until buckets exist (M12).
   Until then a supplied kind reaches a run only through a test.
 - **The per-kind bytes are received bytes only.** A bundle mixes kinds and is written as one
@@ -206,4 +208,5 @@ committed dataset is two thousand rows.
 [F66](dataset-benchmarks.md) and [F67](bench-run-wizard.md), the driver and the run this extends.
 [S15](../object-storage/performance.md), which asks for both halves.
 [X13](../object-storage/spikes.md#x13-the-benchmarks-shape) and
-[Q30](../object-storage/contract.md#questions-to-answer), which this answers by reading.
+[Q30](../object-storage/contract.md#questions-to-answer), which this answers by reading; X13's
+[record](../object-storage/benchmark-shape.md) for the rest of Q30.

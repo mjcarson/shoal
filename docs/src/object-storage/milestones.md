@@ -33,9 +33,9 @@ weakening a clause of [the contract](contract.md#the-contract).
 | Gate | In a line | Closed before it | Lands first |
 | --- | --- | --- | --- |
 | Before M11 | The contract agreed | Q14, Q15, Q16, Q18, Q19 (in part ✅ [X2](placement-simulation.md)) | — |
-| M11 | The model, the fixture's faults, the driver's kinds | Q30, in part ([recorded](contract.md#decision-record)) | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
+| M11 | The model, the fixture's faults, the driver's kinds | Q30, ~~in part~~ ([recorded](contract.md#decision-record), ✅ with X13) | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
 | M12 | Buckets in the schema and the tables they generate | Q25 (in part ✅ [X10](stripe-row-costs.md)) | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
-| M13 | The wire, pool policy, inline objects, the baseline | Q21 (the checksum ✅ [X5](checksums.md)), Q26 (in part ✅ [X11](streamed-bodies.md)), the rest of Q30 | ~~More than one frame for one query~~ (✅ [F73](../features/bodies-across-frames.md)) |
+| M13 | The wire, pool policy, inline objects, the baseline | Q21 (the checksum ✅ [X5](checksums.md)), Q26 (in part ✅ [X11](streamed-bodies.md)), the rest of Q30 (✅ [X13](benchmark-shape.md)) | ~~More than one frame for one query~~ (✅ [F73](../features/bodies-across-frames.md)) |
 | M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22 (on SSDs ✅ [X6](device-store-ssd.md)), Q24 | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); a failure domain on a member; free bytes for every root |
 | M15 | Replicated pools: stage, commit, apply and read | Q27 (the device's half ✅ [X6](device-store-ssd.md#3-a-partial-write)) | — |
 | M16 | Recovery and moves | Q17, Q29 | The walk of a tablet's rows |
@@ -84,7 +84,8 @@ If X1 finds a violation that the safe policy cannot be repaired for, the gate do
 ([X13](spikes.md#x13-the-benchmarks-shape)), ~~whole~~ in part: the one driver is generalized,
 recorded on 2026-10-03 with [F69](../features/driver-operation-kinds.md)
 ([S18](contract.md#decision-record)). Its rest, the object dataset and the rate of seeded bytes,
-is needed only once buckets exist and closes before M13.
+is needed only once buckets exist and closes before M13. ✅ It closed on 2026-10-05
+([X13](benchmark-shape.md), [S18](contract.md#q30-the-object-dataset-and-seeded-bytes-2026-10-05)).
 
 **Lands first.** ~~The torn-write, full-disk and device-loss faults in the fixture.~~ ✅ landed
 as [F70](../features/storage-faults.md). ~~Operation
@@ -157,7 +158,10 @@ the wire before any slice stores one, so the dependency is chosen ~~here~~ befor
 ([X5's record](checksums.md), [S18](contract.md#q21-in-part-the-checksum-2026-10-03)). The rest
 of Q21, the granule and the chunk digest, goes with Q20's geometry and X1. The rest of Q30, the
 object dataset and how fast one core makes seeded bytes, since this gate's object arms need both
-([X13](spikes.md#x13-the-benchmarks-shape)).
+([X13](spikes.md#x13-the-benchmarks-shape)). ✅ Recorded by X13 on 2026-10-05
+([Q30](contract.md#q30-the-object-dataset-and-seeded-bytes-2026-10-05)): a stream makes its own
+bytes inline, from a description of integers whose bytes are SplitMix64 in counter mode, and
+read-back makes them again.
 
 **Lands first.** ~~More than one frame for one query on the client wire.~~ ✅ landed as
 [F73](../features/bodies-across-frames.md): openers, `Data` frames with `LAST` on the final one, a
@@ -177,7 +181,8 @@ receiver that judges each frame against its stream, and connections set apart fo
 - Objects at or under the inline threshold, end to end. Anything larger is refused by name,
   since no pool has a device.
 - The driver's object arms and a described dataset in `shoaladm bench`, with every
-  acknowledged byte read back ([S15](performance.md)).
+  acknowledged byte read back ([S15](performance.md)): a description's integers and its
+  generator, `splitmix64-ctr/1`, as [X13](benchmark-shape.md#recommendation) recorded them.
 - A unit's checksum, from the client's side of the wire, in its final form:
   - CRC-64/NVME through `crc-fast` `=1.10.0`, with default features off and its `unsafe`
     read first;
@@ -473,7 +478,7 @@ The reason this page is provisional, spike by spike.
 | ~~X10~~ | ~~A commit to a cold stripe row stalls its group~~ It does, under load and not at depth one: 0.62× a group's rate on the 970 EVO. The read S7 already makes, sent to the group's leader, removes the stall ([X10](stripe-row-costs.md)) | ~~The rows of M12 change shape, or M15 keeps stripe rows resident and pays for it in memory~~ M12's rows keep S3's shape and stay cold; M15's commit reads its stripe row at the leader first, and the inline threshold defaults to 16 KiB |
 | ~~X11~~ | ~~A shared connection hurts small queries; a connection cannot be handed to another executor~~ The first came out, ~~9 to 32~~ 4 to 29 times at 1 MiB ([item 213](../appendix/resolved/x11-setup-fifo.md) measured its reads again), and the second did not: a connection under kTLS is handed over at no cost, while bytes hopping cost 1.3 to 1.7 times the cpu ([X11](streamed-bodies.md)) | ~~M13 sets connections aside for object bytes; the hop between executors stays in M14~~ M13's client sets connections apart for object bytes (S1's prerequisite builds them for queries), and M14 hands the object lane's connections to the slice's executor |
 | X12 | A rebuild inside a tolerable budget takes days | The defaults for `k + m` and `f` change before M18, and M16's budget has to adapt to the foreground |
-| X13 | ~~The driver's kinds do not generalize~~ (they do: [F69](../features/driver-operation-kinds.md)) One core cannot make seeded bytes as fast as a pool takes them | ~~M11 builds a second driver beside the first~~ M13's driver runs on several cores, and its capture proves it had them |
+| ~~X13~~ | ~~The driver's kinds do not generalize~~ (they do: [F69](../features/driver-operation-kinds.md)) ~~One core cannot make seeded bytes as fast as a pool takes them~~ It can, for any one lab device: a Zen1 core put 1.8 GiB/s of made and checksummed frames against the 970 EVO's 722 MiB/s ([X13](benchmark-shape.md)) | ~~M11 builds a second driver beside the first~~ ~~M13's driver runs on several cores, and its capture proves it had them~~ M13's driver makes a stream's bytes on the stream's own task; its capture keeps each driver thread's busy share, since a pool of several devices takes more than one core |
 | X14 | A mechanism taken from Ceph works otherwise | The page that leaned on it is corrected before its gate |
 
 ## The order is a claim

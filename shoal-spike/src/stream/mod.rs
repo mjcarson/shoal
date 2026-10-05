@@ -207,6 +207,7 @@ fn server_conf(args: &[String], cores: &[usize]) -> ServerConf {
         file_bytes: FILE_BYTES,
         cert: certs.map(|dir| (dir.join("cert.pem"), dir.join("key.pem"))),
         seed: SEED,
+        patterns: Vec::new(),
     }
 }
 

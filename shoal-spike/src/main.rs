@@ -46,6 +46,11 @@
 //! `shoal-spike stream` is X11 (`docs/src/object-storage/spikes.md#x11-streamed-bodies`): frames
 //! of plain bytes between a glommio server and a tokio client, with and without kernel TLS,
 //! beside small requests and across executors, in [`stream`].
+//!
+//! `shoal-spike driver` is X13 (`docs/src/object-storage/spikes.md#x13-the-benchmarks-shape`): the
+//! bench driver alone, its seeded bytes made and checksummed on one core and on several, streamed
+//! to X11's server where it discards them or answers from memory, and a folder of real files read
+//! cold, in [`driver`].
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, Bound};
@@ -86,6 +91,7 @@ use shoal::shared::protocol::admin::{ConfiguredSet, MoveSummary};
 use shoal::shared::protocol::peer::StatusReport;
 
 mod device;
+mod driver;
 mod placement;
 mod stream;
 
@@ -1137,6 +1143,12 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("stream") {
         let args: Vec<String> = std::env::args().skip(2).collect();
         stream::main(&args);
+        return;
+    }
+    // X13's driver alone, its client tokio and its server X11's
+    if std::env::args().nth(1).as_deref() == Some("driver") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        driver::main(&args);
         return;
     }
     // so does X2's placement simulation, which is pure

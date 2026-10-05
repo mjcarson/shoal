@@ -83,7 +83,10 @@ trait has four calls, each used where the crate offers it:
 - a resume from a finished checksum.
 
 It is **not a workspace member**, for X4's reason: no candidate reaches the workspace's
-lockfile before M13 adds the chosen one. gxhash 2.3.1, the workspace's own, is pinned at the
+lockfile before M13 adds the chosen one. The chosen one reached it sooner, through a spike:
+[X13](benchmark-shape.md) checksums its seeded bytes with `crc-fast` 1.10.0, taken with only `std`
+as M13 will take it, so the lockfile holds it and `spin` 0.10.1 beside it, and no Shoal crate calls
+it until M13. gxhash 2.3.1, the workspace's own, is pinned at the
 same version. gxhash 3.5.0 sits beside it under another name.
 
 It runs three passes, in this order.

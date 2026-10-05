@@ -2,8 +2,9 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-05, when X11 reported and F73 delivered the frames it set; X6 and X10 had
-reported the day before, and X2, X4 and X5 the day before that.
+after it. As of 2026-10-05, when X11 reported and F73 delivered the frames it set, and X13 reported
+what F69 had left of the benchmark's shape; X6 and X10 had reported the day before, and X2, X4
+and X5 the day before that.
 
 **How to read them.**
 
@@ -39,7 +40,7 @@ flowchart LR
         X6["✅ X6 The device store on SSD"]:::done
         X10["✅ X10 What a stripe row costs"]:::done
         X11["✅ X11 Streamed bodies"]:::done
-        X13["X13 The benchmark's shape,<br>what F69 left"]
+        X13["✅ X13 The benchmark's shape,<br>what F69 left"]:::done
         X14["X14 Ceph and S3 at the source"]
         Counters["✅ F71 Device counters and node memory<br>in a bench capture (optional)"]:::done
         Neighbour["✅ F72 A paced neighbour stream<br>in the bench (optional)"]:::done

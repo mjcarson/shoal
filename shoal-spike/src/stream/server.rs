@@ -64,6 +64,9 @@ pub struct ServerConf {
     pub cert: Option<(PathBuf, PathBuf)>,
     /// The seed of the pattern every stream carries
     pub seed: u64,
+    /// Patterns beyond the seed's own, which a connection's setup names by number from one: a
+    /// read is answered from the one it names. X11 gives none; X13's generators give theirs
+    pub patterns: Vec<Arc<Vec<u8>>>,
 }
 
 /// The plaintext port of an executor
@@ -194,11 +197,28 @@ struct Exec {
     /// How large the file is
     file_bytes: u64,
     /// The pattern every stream carries
-    pattern: Rc<Vec<u8>>,
+    pattern: Arc<Vec<u8>>,
+    /// The patterns beyond it, which a setup names by number from one
+    patterns: Vec<Arc<Vec<u8>>>,
     /// Its counters
     counters: Counters,
     /// Where to ask the other executor to take something on
     other: RefCell<Option<ConnectedSender<Ctl>>>,
+}
+
+impl Exec {
+    /// The pattern a setup names: the seed's own at zero, or one of those beyond it
+    ///
+    /// # Arguments
+    ///
+    /// * `which` - The setup's pattern
+    fn pattern_for(&self, which: u8) -> Arc<Vec<u8>> {
+        // zero, or a number no pattern has, is the seed's own
+        match usize::from(which).checked_sub(1).and_then(|at| self.patterns.get(at)) {
+            Some(pattern) => pattern.clone(),
+            None => self.pattern.clone(),
+        }
+    }
 }
 
 /// Start the server's executors, each serving its ports until the process ends
@@ -247,7 +267,7 @@ async fn run_executor(
     to_other: Option<SharedSender<Ctl>>,
 ) {
     // the file every write lands in, written ahead with the pattern once
-    let pattern = Rc::new(wire::pattern(conf.seed));
+    let pattern = Arc::new(wire::pattern(conf.seed));
     let file = match &conf.dir {
         Some(dir) => Some(Rc::new(
             prepare_file(
@@ -264,6 +284,7 @@ async fn run_executor(
         file,
         file_bytes: conf.file_bytes,
         pattern,
+        patterns: conf.patterns.clone(),
         counters: Counters::default(),
         other: RefCell::new(None),
     });
@@ -487,7 +508,8 @@ async fn serve(
     // the writer, which every answer goes through
     let (reader, writer) = stream.split();
     let (tx, rx) = mpsc::unbounded::<Out>();
-    let writing = glommio::spawn_local(write_loop(exec.clone(), writer, rx, setup.fifo));
+    let served = exec.pattern_for(setup.pattern);
+    let writing = glommio::spawn_local(write_loop(exec.clone(), writer, rx, setup.fifo, served));
     // the socket's memory, read while the connection lives
     let alive = Rc::new(Cell::new(true));
     glommio::spawn_local(sample(exec.clone(), fd, alive.clone())).detach();
@@ -912,11 +934,13 @@ async fn hop_writer(exec: Rc<Exec>, rx: SharedReceiver<HopBuf>, back: SharedSend
 /// * `writer` - The connection's write half
 /// * `rx` - What to write
 /// * `fifo` - Whether frames go in the order they were queued, with no small frame first
+/// * `pattern` - The pattern a read of this connection is answered from
 async fn write_loop<W: AsyncWrite + Unpin>(
     exec: Rc<Exec>,
     mut writer: W,
     mut rx: mpsc::UnboundedReceiver<Out>,
     fifo: bool,
+    pattern: Arc<Vec<u8>>,
 ) {
     let mut urgent: VecDeque<Vec<u8>> = VecDeque::new();
     let mut data: VecDeque<Out> = VecDeque::new();
@@ -953,7 +977,7 @@ async fn write_loop<W: AsyncWrite + Unpin>(
                 }
             };
             let (bytes, held): (&[u8], usize) = match &payload {
-                Payload::Pattern(start, len) => (&exec.pattern[*start..*start + *len], 0),
+                Payload::Pattern(start, len) => (&pattern[*start..*start + *len], 0),
                 Payload::File(result) => (&result[..], result.len()),
             };
             if write_all_vectored(&mut writer, &[&head, bytes])

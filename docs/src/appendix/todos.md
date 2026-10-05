@@ -87,7 +87,9 @@ Three pages of that part are lists of work rather than design, and they are wher
   by X6 ([its record](../object-storage/device-store-ssd.md)), the metadata rows by X10
   ([its record](../object-storage/stripe-row-costs.md)), and the client wire's streams by X11,
   which put object bytes on connections of their own in 1 MiB frames
-  ([its record](../object-storage/streamed-bodies.md)).
+  ([its record](../object-storage/streamed-bodies.md)). The benchmark's object dataset was written
+  down and its seeded bytes measured by X13, which found one core makes them faster than any lab
+  device takes them ([its record](../object-storage/benchmark-shape.md)).
 - [Milestones](../object-storage/milestones.md) is M11 to M21, provisional until the spikes
   report.
 
@@ -207,6 +209,29 @@ Each of these was left out of [F71](../features/bench-device-memory.md) or
 - **WAL and archive bytes apart on one device.** A trace of writes by file name, as
   [O62](../cluster-testing/performance.md#o62-the-archive-map-rewrite) took with bpftrace, would
   split them. On separate devices the capture already reports them apart.
+
+### What X13 left for the driver
+
+[X13](../object-storage/benchmark-shape.md) wrote the object dataset down as types and measured the
+bytes a driver makes, and built none of it into the driver. M13 builds what it chose:
+
+- **The described dataset in `shoal-loadgen`**: `Description` (objects, sizes, seed, generator),
+  `SizeDistribution`, its digest in the capture's `DatasetFacts` beside F66's file digests, and the
+  description itself kept whole, since it is a few lines. X13's types are in
+  `shoal-spike/src/driver/dataset.rs`.
+- **SplitMix64 in counter mode as the generator, frozen by its digests.** `splitmix64-ctr/1`, with
+  X13's three digest cells held as literals by a test, as M13 freezes X5's checksum vectors. A
+  second generator is a new name, never a change to this one.
+- **A body made frame by frame on the stream's task**: a `BodySource` the object kinds read from,
+  filled into the frame buffer as each frame goes, and the unit's CRC-64/NVME taken as the client
+  takes it anyway. An object operation is a sequence of frames, which F69's one query an operation
+  cannot carry yet ([F69](../features/driver-operation-kinds.md#limitations)).
+- **Read-back by making each unit again**, beside the wire's own check, and a mismatch reported by
+  object and offset.
+- **Each driver thread's busy share in the capture**, every second, with the rate a fully busy core
+  would reach. The capture's `driver_cpu_pct` sums the process.
+- **A folder scanned with its SHA-256 beside the reads, several files at once.** On one thread the
+  hash cost a cold scan a third, and a file at a time a small file's scan half.
 
 ### Retiring `render` in favour of the explorer
 

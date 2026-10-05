@@ -214,6 +214,24 @@ target/lab/x11/znver1/release/shoal-spike stream report shoal-spike/results/x11-
 ONLY="--sections tail --streams read" OUT=target/lab/x11/rerun REMOTE=/var/tmp/x11-rerun \
     PHASES="tloop net-th" sh shoal-spike/results/x11-lab.sh
 
+# the X13 spike: the bench driver alone - seeded bytes made and checksummed (CRC-64/NVME, crc-fast)
+# by five generators on one core and on several, a put and a get of 1 MiB frames through X11's
+# server where it discards them or answers from memory, from one client core and from several, a
+# folder of real files read cold and hot, and the dataset's two shapes as types. A subcommand of
+# shoal-spike (`driver`), whose server is X11's on ports 13200 up (13216 up for TLS). The only
+# subcommand that adds crates to the workspace's lockfile: crc-fast and spin 0.10, ahead of M13.
+# results/x13-lab.sh runs four rounds: `zen1` (titan and hyperion at once), `europa` (its native
+# build, which the bench's admin program is there, and the znver1 build every node runs) and
+# `net` (europa driving titan), about two and a quarter hours: forty minutes for the Zen1 hosts,
+# seventy for europa and twenty for the network. Build the two binaries one after the
+# other. The tables are on docs/src/object-storage/benchmark-shape.md
+CARGO_TARGET_DIR=target/lab/x13/znver1 RUSTFLAGS="-C target-cpu=znver1" cargo build --release -p shoal-spike
+CARGO_TARGET_DIR=target/lab/x13/native RUSTFLAGS="-C target-cpu=native" cargo build --release -p shoal-spike
+target/lab/x13/native/release/shoal-spike driver quick --dir /optane/x13           # proves every section runs
+QUICK=1 ROUNDS=1 OUT=target/lab/x13/quick sh shoal-spike/results/x13-lab.sh       # every host, quickly
+sh shoal-spike/results/x13-lab.sh                                                   # the four rounds
+target/lab/x13/znver1/release/shoal-spike driver report shoal-spike/results/x13-*.json   # intervals and verdicts
+
 # a cluster on real hosts from a project (F63): run in the project that defines the schema,
 # shoaladm finds the #[shoal::db] struct, probes every host's cpu over ssh, builds the node once
 # per cpu class and the schema's admin program, installs them under ~/.local/shoal/bin, and
@@ -694,7 +712,10 @@ go through `shoal`.**
   `src/placement/`, which is pure and names no engine type; `device`
   ([X6](docs/src/object-storage/device-store-ssd.md)) drives S6's device store in `src/device/`;
   `stream` ([X11](docs/src/object-storage/streamed-bodies.md)) drives frames between glommio
-  executors and a tokio client in `src/stream/`, with the product's kTLS. Depends on `shoal` with
+  executors and a tokio client in `src/stream/`, with the product's kTLS; `driver`
+  ([X13](docs/src/object-storage/benchmark-shape.md)) measures the bench driver alone in
+  `src/driver/` - seeded bytes made and checksummed, streamed to X11's server, a folder read -
+  with the one dependency a spike here adds to the lockfile, crc-fast. Depends on `shoal` with
   the engine, and is the one place the control store is driven with three members in a group
 - **shoal-spike-erasure** - The X4 spike ([erasure coding crates](docs/src/object-storage/erasure-coding-crates.md)):
   every erasure coding candidate S18 pinned behind one trait, checked against every loss pattern

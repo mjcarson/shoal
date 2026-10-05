@@ -14,7 +14,8 @@ publish = false
 # The empty [workspace] below makes this crate its own workspace, with its own Cargo.lock, so that
 # no candidate reaches the workspace's lockfile before M13 adds the chosen one. gxhash 2.3.1 is the
 # workspace's own and is pinned to the same version here. Build it from this directory with its own
-# target dir (see CLAUDE.md).
+# target dir (see CLAUDE.md). The chosen one, crc-fast, reached the workspace's lockfile sooner than
+# M13 through X13's spike, which checksums its seeded bytes with it; no Shoal crate calls it.
 [workspace]
 
 [dependencies]

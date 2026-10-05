@@ -165,6 +165,9 @@ pub struct Setup {
     pub window: u32,
     /// `TCP_NOTSENT_LOWAT` for the server's socket, zero for the kernel's default
     pub lowat: u32,
+    /// Which of the server's patterns a read is answered from: zero for the seed's own, which
+    /// is all X11 asks for, or one X13 gave the server
+    pub pattern: u8,
 }
 
 /// Where a write's bytes go once the accepting executor has read them
@@ -219,7 +222,8 @@ impl Setup {
     #[must_use]
     pub fn encode(&self) -> [u8; SETUP_LEN] {
         // four flag bytes, the window, the low water mark, then the fifth flag in a byte of its
-        // own: it once shared the window's first byte, which overwrote it (item 213)
+        // own: it once shared the window's first byte, which overwrote it (item 213). The
+        // pattern a read is answered from comes last
         let mut body = [0u8; SETUP_LEN];
         body[0] = u8::from(self.file);
         body[1] = self.route as u8;
@@ -228,6 +232,7 @@ impl Setup {
         body[4..8].copy_from_slice(&self.window.to_le_bytes());
         body[8..12].copy_from_slice(&self.lowat.to_le_bytes());
         body[12] = u8::from(self.fifo);
+        body[13] = self.pattern;
         body
     }
 
@@ -250,6 +255,7 @@ impl Setup {
             fifo: body[12] != 0,
             window: u32::from_le_bytes(body[4..8].try_into().expect("four bytes")),
             lowat: u32::from_le_bytes(body[8..12].try_into().expect("four bytes")),
+            pattern: body[13],
         }
     }
 }
@@ -422,6 +428,7 @@ mod tests {
             fifo: true,
             window: 8,
             lowat: 131_072,
+            pattern: 3,
         };
         assert_eq!(Setup::decode(&setup.encode()), setup);
         let stats = Stats {

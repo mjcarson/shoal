@@ -198,8 +198,9 @@ Recorded 2026-10-03, on the tree that landed [F69](../features/driver-operation-
 | The one driver is generalized; no second driver is written for objects | [X13](spikes.md#x13-the-benchmarks-shape)'s reading, done while building F69: read and insert are written into five places (`spec.rs`, `window.rs`, `pick.rs`, `feed.rs` and the driver's judge), and each took a third kind as one more case. The kind is `OperationKind<S>`, handed over through `DatasetSupport::operation_kinds`, and bytes are counted at the client where frames are written and read |
 | A table workload is unchanged | `table_arm_ids_are_unchanged` and `picks_of_read_insert_workloads_are_unchanged`, frozen on the tree before F69; on the lab, a capture before F69 and one after are joined arm by arm by `compare` with no fact refused ([F69](../features/driver-operation-kinds.md#performance)) |
 
-**Not settled.** The object dataset (a folder of real files, or a seeded description), and how
-fast one core makes seeded bytes, which is X13's stub. Neither is needed before buckets exist.
+**Not settled.** ~~The object dataset (a folder of real files, or a seeded description), and how
+fast one core makes seeded bytes, which is X13's stub. Neither is needed before buckets exist.~~
+Both were settled by X13 on 2026-10-05, [below](#q30-the-object-dataset-and-seeded-bytes-2026-10-05).
 
 #### Q20, in part: the code and the crate (2026-10-03)
 
@@ -388,6 +389,37 @@ intervals do not overlap. The choice follows the user's instruction to complete 
   2.7 ms at its p99. Q24's, with [X9](spikes.md#x9-table-latency-beside-object-work).
 - **Why kTLS's rounds disagreed**, by up to half with nothing else on the host: not traced.
 
+#### Q30: the object dataset and seeded bytes (2026-10-05)
+
+Recorded 2026-10-05 by [X13](benchmark-shape.md), on the tree that adds `shoal-spike driver`, which
+closes Q30 with [the driver's shape](#q30-in-part-the-drivers-shape-2026-10-03) F69 recorded. Five
+generators made seeded bytes and their CRC-64/NVME on one pinned core and on several; a stub client
+put and got 1 MiB frames through X11's server, which discarded them or answered from memory,
+plaintext and under the product's kTLS; and a folder of real files was read cold and hot. On titan
+and hyperion (Zen1, a 970 EVO under XFS) from the `znver1` build every node runs, and on europa
+(Zen4, an Optane 900P under XFS) from its native build, which the bench's admin program is there,
+and the `znver1` one beside it; over loopback, and across 1 GbE from europa to titan. Four rounds a
+leg under the `performance` governor, with no shoal unit running. A trigger fires only where every
+round is past its line. The choice follows the user's instruction to complete X13 and record it.
+
+| Decision | Evidence |
+| --- | --- |
+| **A stream makes its own bytes, inline, on the task that sends them.** No generator pool and no bytes made ahead | T1 held on every judged leg. One Zen1 core put 1,837 to 1,860 MiB/s of made and checksummed 1 MiB frames to a server that discarded them, with AES-CTR, the legs' fastest (1,789 to 1,817 with SplitMix64), against the 970 EVO's 722; europa's core 6,892 with SplitMix64 against the Optane's 2,501. Two client cores on titan put 3,128 MiB/s, and four on europa 27,159, since a frame is made into a buffer that stays in cache |
+| **A capture still keeps each driver thread's busy share, and the rate it would reach fully busy.** A pool of several devices takes more than one core does, and S15 asks what the driver cost | A Zen1 core's put fills it at about 1.8 GiB/s, two and a half 970 EVOs. kTLS halves it: titan's kTLS put ran 588 to 705 MiB/s, under one device, though no end was saturated and a fully busy core would have moved 974 to 1,021 MiB/s |
+| **A description's bytes are SplitMix64 in counter mode**: word `i` of object `o` is `mix(seed ^ o·γ + (i + 1)·γ)`, little endian, named `splitmix64-ctr/1` | T3 held: the fastest published generator filled 1 MiB out of cache at 5,018 to 5,023 MiB/s on Zen1, seven times the device, and 23.3 GiB/s on europa, nine times. SplitMix64 was that generator on every leg in every round. It is the definition `shoal-loadgen` already seeds every draw with, needs no crate and no cpu feature, seeks to any 8 bytes, and gave the same digests on every host and build. AES-128-CTR is faster only into a hot buffer on Zen1 (6.7 GiB/s against 5.0) and slower out of cache and on Zen4; ChaCha8 is the slowest; xoshiro256++ gains nothing; a stamped copy repeats |
+| **Read-back makes each unit again and compares**, beside the CRC the client checks on the wire | T2 held: a Zen1 core got and regenerated 2,506 to 2,551 MiB/s with SplitMix64 and 3,257 to 3,304 with AES-CTR against the 970 EVO's read rate of 857, and europa 6,127 with SplitMix64 against 2,553. Comparing made bytes finds a unit served from the wrong object or offset, which a CRC kept from the write finds only for the unit it was kept for |
+| **A description is integers alone**: object count, a size distribution drawn without a float (fixed, uniform, doublings, or a weighted table), the seed and the generator's name with its definition's version. Its digest is SHA-256 of that text; paths are derived from the index | No libm reaches a size, which item 212 found a float can let move. A million objects expanded to paths and sizes at 3.1 to 4.0 million a second on Zen1 and 7.1 to 10.5 million on europa |
+| **A folder dataset keeps F66's SHA-256 a file, hashed beside the reads, and is read several files at once** | Hashing on the reading thread cost a cold scan of 1 MiB files a third on Zen1 (528 against 768 MiB/s) and half on europa (1,166 against 2,194), though SHA-256 alone runs at 1,441 and 2,209; a CRC cost under 5%. Files of 64 KiB read one at a time came at 393 MiB/s on the 970 EVO and 1,063 on the Optane, under half either device, from its latency |
+
+**Not settled.** These remain open:
+
+- **The object arms themselves**: put, get, a ranged read, a write in place, append, stat and delete
+  as operation kinds, each a sequence of frames, which F69's one query an operation cannot carry.
+  M13 builds them.
+- **The several-device pool's driver**: how many streams a run spreads over its cores, from these
+  rates and the pool's devices. M14.
+- **kTLS's half-rate rounds** on titan's loopback, which X11 found too and neither spike explained.
+
 ## Alternatives rejected
 
 **A primary for each placement group, with a log on every holder and peering.** It is what
@@ -497,7 +529,7 @@ Q1–Q13.
 | Q27 | **What one small in-place write costs, and whether small writes ride the metadata log** below a threshold, to be folded into stripe chunks later. **The device's half measured, 2026-10-04**: two flushes, 2 to 6 ms on the 970 EVO at 4 KiB, 81 µs on the Optane ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)) | M15. ✅ [X6](device-store-ssd.md#3-a-partial-write), X8 |
 | Q28 | **Scrub**: cadence, byte budgets, what a deep scrub of k+m verifies beyond each stripe chunk's own checksums | M17. X12, X14 |
 | Q29 | **Budgets for recovery and moves**, for each device | M16. X12 |
-| Q30 | **The benchmark**: how the driver gains object operations, byte metrics and an object dataset | M11. [X13](spikes.md#x13-the-benchmarks-shape) |
+| Q30 | **The benchmark**: how the driver gains object operations, byte metrics and an object dataset. **In part, 2026-10-03**: the one driver is generalized ([the record](#q30-in-part-the-drivers-shape-2026-10-03)). **The rest, 2026-10-05**: a stream makes its own bytes inline, a description's bytes are SplitMix64 in counter mode, read-back makes them again, and a description is integers alone ([the record](#q30-the-object-dataset-and-seeded-bytes-2026-10-05)); the object arms are M13's | ~~M11~~ M11 for the driver, M13 for the dataset. ✅ [F69](../features/driver-operation-kinds.md), ✅ [X13](benchmark-shape.md) |
 | Q31 | **What a schema change, a backup, a restore and `force_recover` mean for a cluster holding object bytes.** [Q10](../distributed/protocol.md#q10-at-m10a) settled that a schema change is a new cluster and a restore; a restore carries rows and not stripe chunks, so on a cluster with buckets it would strand every object. This part does not reopen Q10. The two ways out are a restore that carries or adopts chunks, and an additive schema change made rolling | M21. [S14](operations.md#a-schema-change-a-backup-and-a-restore); no spike |
 | Q32 | **What the later listing index needs the metadata to leave room for** | After M21. X14 |
 

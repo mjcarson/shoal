@@ -2,12 +2,13 @@
 
 ~~**Nothing here has been run.**~~ ~~**One spike has run**: X4, whose record is
 [its own page](erasure-coding-crates.md) (2026-10-03).~~ ~~**Two spikes have run**~~ ~~**Three
-spikes have run**~~ ~~**Four spikes have run**~~ ~~**Five spikes have run**~~ **Six spikes have
-run**, each with its record on a page of its own: X2, [placement](placement-simulation.md), X4,
-[the erasure coding crates](erasure-coding-crates.md), and X5, [the checksums](checksums.md) (all
-2026-10-03), X6, [the device store on SSD](device-store-ssd.md), and X10,
-[what a stripe row costs](stripe-row-costs.md) (both 2026-10-04), and X11,
-[streamed bodies](streamed-bodies.md) (2026-10-05). This page is the list of what has to be
+spikes have run**~~ ~~**Four spikes have run**~~ ~~**Five spikes have run**~~ ~~**Six spikes have
+run**~~ **Seven spikes have run**, each with its record on a page of its own: X2,
+[placement](placement-simulation.md), X4, [the erasure coding crates](erasure-coding-crates.md), and
+X5, [the checksums](checksums.md) (all 2026-10-03), X6, [the device store on SSD](device-store-ssd.md),
+and X10, [what a stripe row costs](stripe-row-costs.md) (both 2026-10-04), and X11,
+[streamed bodies](streamed-bodies.md), and X13, [the benchmark's shape](benchmark-shape.md) (both
+2026-10-05). This page is the list of what has to be
 learnt before the [milestones](milestones.md) of this part can be more than a guess, and how
 each thing would be learnt.
 
@@ -116,7 +117,7 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 | ✅ X10 | What a stripe row costs, [reported](stripe-row-costs.md) | Q25 in part, Q17's group half | The lab | ~~Days~~ Done 2026-10-04 |
 | ✅ X11 | Streamed bodies, [reported](streamed-bodies.md) | Q26 in part | europa, the lab | ~~Days~~ Done 2026-10-05 |
 | X12 | Recovery and scrub rates | Q17, Q28, Q29 | X4, X6, X7 | Days |
-| X13 | The benchmark's shape | Q30 | europa | ~~Days~~ Mostly answered by [F69](../features/driver-operation-kinds.md); the rest days |
+| ✅ X13 | The benchmark's shape, [reported](benchmark-shape.md) | Q30, with F69 | europa, the lab | ~~Days~~ Mostly answered by [F69](../features/driver-operation-kinds.md); the rest done 2026-10-05 |
 | X14 | Ceph and S3 at the source | Q14, Q20, Q28, Q32 | Nothing | Days |
 
 ## The spikes
@@ -671,6 +672,15 @@ budget; and the arithmetic: hours to rebuild and to scrub a device of 1, 4 and 1
 
 ### X13. The benchmark's shape
 
+**Reported 2026-10-05** on [its own page](benchmark-shape.md), and recorded on S18 as
+[Q30](contract.md#q30-the-object-dataset-and-seeded-bytes-2026-10-05), which it closes with F69.
+**A stream makes its own bytes inline; a description is integers alone, its bytes SplitMix64 in
+counter mode; read-back makes them again.** Neither result named below came out. One Zen1 core put
+1,860 MiB/s of made and checksummed frames, two and a half times the 970 EVO, and europa's 6,892
+against the Optane's 2,501; SplitMix64, not the AES-CTR the plan expected, was the fastest published
+generator out of cache everywhere. The plan as written follows, struck where the run departed from
+it.
+
 **Question.** How does the driver gain object operations
 ([Q30](contract.md#questions-to-answer))?
 
@@ -690,11 +700,13 @@ arms arrive.
 **Method.** ~~Mostly reading: the five places the two kinds are written into
 (`shoal-loadgen/src/spec.rs`, `window.rs`, `pick.rs`, `feed.rs` and the dataset traits).
 Then a stub: an operation trait, a generator of seeded bytes, and a server that discards,
-to measure the driver alone.~~ A stub: a generator of seeded bytes and a server that discards,
-to measure the driver alone, and the dataset's two shapes written down against what a capture
-would have to say of each.
+to measure the driver alone.~~ A stub: ~~a generator~~ five generators of seeded bytes and a server
+that discards, X11's, to measure the driver alone, and the dataset's two shapes written down against
+what a capture would have to say of each. Added with the user before the run: several cores, a
+folder of real files read cold, and a leg across the network.
 
-**Where.** europa.
+**Where.** europa, ~~only~~ and titan and hyperion over loopback, and europa driving titan across
+the network.
 
 **Records.** The types the driver would have; GiB a second of bytes one core generates and
 checksums; what a capture gains.
@@ -730,7 +742,7 @@ flowchart LR
     X1["X1 model"]
     X2["✅ X2 placement"]:::done
     X14["X14 sources"]
-    X13["X13 bench shape"]
+    X13["✅ X13 bench shape"]:::done
     X10["✅ X10 row cost"]:::done
     X3["X3 bytes through groups"]
     X4["✅ X4 erasure crates"]:::done
@@ -751,7 +763,7 @@ flowchart LR
 ```
 
 Nine depend on no other spike and on nothing that has to be fitted, and can start at once:
-X1, ~~X2,~~ X3, ~~X4,~~ ~~X5,~~ ~~X10,~~ ~~X11,~~ X13 and X14; X2, X4, X5, X10 and X11 have run. ~~X6 can start too, and
+X1, ~~X2,~~ X3, ~~X4,~~ ~~X5,~~ ~~X10,~~ ~~X11,~~ ~~X13~~ and X14; X2, X4, X5, X10, X11 and X13 have run. ~~X6 can start too, and
 needs an XFS filesystem for one of its legs.~~ X6 has run too, on an XFS filesystem fitted for it.
 ~~X8 follows X6, and~~ X8 and X9 ~~follows X5, since X4 has
 reported~~ can start: X4, X5 and X6 have all reported. X7 and the rotational half of X12 wait
@@ -820,7 +832,7 @@ its evidence and with what it did not settle:
 | Stripe size and the inline threshold: Q25. Small writes: Q27 | ✅ X10 for Q25 ([Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04)); X8 for Q27's other half |
 | The wire: Q26 | ✅ X11 ([Q26, in part](contract.md#q26-in-part-streamed-bodies-2026-10-05)) |
 | Budgets: Q28, Q29 | X12 |
-| The driver: Q30 | X13 |
+| The driver: Q30 | ✅ [F69](../features/driver-operation-kinds.md) for the driver's shape ([Q30, in part](contract.md#q30-in-part-the-drivers-shape-2026-10-03)); ✅ X13 for the dataset and the rate of seeded bytes ([Q30](contract.md#q30-the-object-dataset-and-seeded-bytes-2026-10-05)) |
 
 Q31 and Q32 are not waited for. Q31 blocks the last gate and is decided by design, not
 measurement; Q32 is for after it.

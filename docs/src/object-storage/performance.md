@@ -87,6 +87,20 @@ The folder is judged whole before a host is touched, as a table's is. The first 
 preloaded, and **reads and writes in place ask only for objects that were preloaded**, so a
 miss is a failure of the cluster and not a property of the data: F66's rule, kept.
 
+[X13](benchmark-shape.md) wrote both shapes down as the types the driver would have, and measured
+them ([Q30](contract.md#q30-the-object-dataset-and-seeded-bytes-2026-10-05)):
+
+- **A description is integers alone**: how many objects, a size distribution drawn without a float
+  (fixed, uniform, doublings, or a weighted table), a seed, and the generator by its definition's
+  name and version. Sizes and paths are derived from an object's index, so any object can be made
+  without the ones before it, and its digest is SHA-256 of that text.
+- **Its bytes are SplitMix64 in counter mode** (`splitmix64-ctr/1`): word `i` of object `o` is
+  `mix(seed ^ o·γ + (i + 1)·γ)`, the definition `shoal-loadgen` already seeds every draw with. It
+  makes the bytes at any offset, which a ranged read's check and a write in place need, and gave
+  the same bytes on every host and build.
+- **A folder keeps F66's SHA-256 a file**, hashed beside its reads rather than on the reading
+  thread, and is read several files at once.
+
 ### An arm
 
 An object arm is named by what it does, how large, how many at once, and its event:
@@ -102,7 +116,7 @@ What an arm records, each second:
 | Time to the first byte and to the last, for a read | A seek is the first; a stream is the second |
 | Latency for each operation, as a histogram | Tails, and never a mean |
 | What was left staged and undecided, and what was stale | Acknowledged throughput with a growing backlog is not sustainable throughput |
-| The driver's CPU and how fast it made bytes | A driver that cannot make bytes as fast as the cluster takes them is measuring itself |
+| The driver's CPU and how fast it made bytes | A driver that cannot make bytes as fast as the cluster takes them is measuring itself. Since [X13](benchmark-shape.md#what-a-capture-gains): each driver thread's busy share, and the rate a fully busy core would reach at the cost it paid a byte |
 | The read back of everything acknowledged | A byte acknowledged and not there, or there and wrong, is a failure of the run |
 
 Overrides vary one thing about the pool: its redundancy, its stripe size, its chunk unit, its
@@ -164,7 +178,11 @@ next one reads.
 ## What it costs
 
 - **A driver that makes bytes.** Seeded bytes at a device's rate take a core, and the
-  capture has to show the driver was not the limit.
+  capture has to show the driver was not the limit. [X13](benchmark-shape.md) measured what a
+  core gives: a Zen1 core made and checksummed 3.5 GiB/s out of cache and put 1.8 GiB/s of it on
+  the wire to a server that discarded it, two and a half 970 EVOs, and half that under kTLS. So a
+  stream makes its own bytes on its own task, and the capture keeps each driver thread's busy share
+  for a pool that takes more than one core.
 - **Reading back what was written** doubles an arm's I/O.
 - **A reset between arms that wrote** is a bootstrap, minutes on the lab, as it is for
   tables.
@@ -202,9 +220,11 @@ schema, and the rule that `dataset` never reaches the fingerprint.
 
 ## How it would be measured
 
-This page is how. Its own first measurement is
+This page is how. Its own first measurement ~~is~~ was
 [X13](spikes.md#x13-the-benchmarks-shape): whether the driver's kinds generalize or a second
-driver is needed, and how fast one core makes seeded bytes.
+driver is needed, and how fast one core makes seeded bytes. The kinds generalize
+([F69](../features/driver-operation-kinds.md)), and one core makes seeded bytes faster than any
+one lab device takes them ([X13's record](benchmark-shape.md)).
 
 ## Acceptance tests
 
