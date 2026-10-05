@@ -189,7 +189,10 @@ The read arms of [S15](performance.md): time to the first byte and bytes a secon
 whole object, for a range inside one stripe chunk, and for a range across chunks; each with every
 holder up and with one down; each on an SSD pool and, once a disk is fitted, a rotational
 one. The lookup for each stripe is priced by [X10](spikes.md#x10-what-a-stripe-row-costs)
-and the stream by [X11](spikes.md#x11-streamed-bodies). X10 has: a stripe row read cold at
+and the stream by [X11](spikes.md#x11-streamed-bodies). X11 has: one connection under kTLS
+receives about 650 MiB/s on a Zen1 core, below the 970 EVO's 857, so a read that has to run at a
+device's rate asks for its ranges over more than one connection; two 1 MiB ranges in flight reach
+either SSD in plaintext ([X11's record](streamed-bodies.md#2-the-window-and-what-a-stream-holds)). X10 has: a stripe row read cold at
 `Quorum` through its group's leader took 0.80 ms on a 970 EVO and 0.52 ms on the Optane, and at
 `One` through a member 0.51 ms, on the lab at depth one; a resident row of 1 KiB answered a get in
 0.13 ms at depth 32 ([X10's record](stripe-row-costs.md#3-the-cold-commit)).

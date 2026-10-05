@@ -3972,3 +3972,19 @@ of whole-row overwrites gains a read a key a merge.
 
 Filed from X10. On the leader the read is on the client's path, since the proposer waits on its
 own apply; on a follower it delays only that follower's apply.
+
+### O93. kTLS receivers are not told records carry no padding
+
+| | |
+| --- | --- |
+| **Rank** | **medium**: every byte a node or a client receives under TLS pays it, and object streams make that most bytes |
+| **Impact** | Measured by [X11](../object-storage/streamed-bodies.md#1-one-connection-rate-and-cpu-by-frame) over loopback: a 1 MiB read stream's receiving cpu a gibibyte fell from 943 to 796 ms on titan and from 347 to 288 on europa when the receiving socket was told TLS 1.3 records carry no padding, and the host's from 1,890 to 1,754 on titan; at 4 MiB frames 869 to 734 and 310 to 266. A read stream to europa's file rose from 1,876 to 2,559 MiB/s at 4 MiB frames |
+| **Difficulty** | S — one `setsockopt(SOL_TLS, TLS_RX_EXPECT_NO_PAD, 1)` after `ktls::enable` sets `TLS_RX` (`shoal-proto/src/shared/tls/ktls.rs`), on Linux 6.0 and later, where an older kernel's refusal is ignored. rustls never pads a TLS 1.3 record it sends. A peer that does pad is still read correctly: the kernel falls back for that record and counts it |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | None found; a padded record costs a retry of its decryption, and no Shoal peer sends one |
+| **Benchmark** | `shoal-spike stream` section 1, its `ktls` and `ktls-nopad` sides; for the product, the `f14-encryption` transport arms before and after |
+
+Filed from X11, which set it on both ends of its own connections and found the receiving side's
+cpu lower on reads, where the client receives, and within noise on writes, where the server's file
+was the bound.

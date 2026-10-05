@@ -193,6 +193,23 @@ sh shoal-spike-rows/results/x10-lab.sh                                          
 LEGS=remedy sh shoal-spike-rows/results/x10-lab.sh                                  # the supplement
 target/lab/x10/znver1/release/x10 report shoal-spike-rows/results/x10.json         # intervals and verdicts
 
+# the X11 spike: frames of plain bytes between a glommio server and a tokio client, plaintext and
+# under the product's own kTLS, into direct I/O buffers and a file and back - MiB/s a connection and
+# cpu a GiB by frame, the window, a small request's tail on the stream's connection and beside it,
+# and a connection handed between executors against its bytes hopping. A subcommand of shoal-spike
+# (`stream`), whose server listens on a port an executor (13100 up, 13116 up for TLS). `stream all`
+# runs both ends over loopback, `stream serve` and `stream drive --addr` across hosts.
+# results/x11-lab.sh runs four rounds: `tloop` (titan and hyperion over loopback), `eloop`
+# (europa's), `net-et` (europa driving titan) and `net-th` (titan driving hyperion), about two and
+# a half hours a loopback host and an hour a network pair, under the performance governor. Never
+# edit the script while it runs: sh reads it as it goes. The tables are on
+# docs/src/object-storage/streamed-bodies.md
+CARGO_TARGET_DIR=target/lab/x11/znver1 RUSTFLAGS="-C target-cpu=znver1" cargo build --release -p shoal-spike
+target/lab/x11/znver1/release/shoal-spike stream quick --dir /optane/x11            # proves every section runs
+QUICK=1 ROUNDS=1 OUT=target/lab/x11/quick sh shoal-spike/results/x11-lab.sh       # every placement, quickly
+sh shoal-spike/results/x11-lab.sh                                                   # the four rounds
+target/lab/x11/znver1/release/shoal-spike stream report shoal-spike/results/x11-*.json   # intervals and verdicts
+
 # a cluster on real hosts from a project (F63): run in the project that defines the schema,
 # shoaladm finds the #[shoal::db] struct, probes every host's cpu over ssh, builds the node once
 # per cpu class and the schema's admin program, installs them under ~/.local/shoal/bin, and
@@ -668,8 +685,11 @@ go through `shoal`.**
   ([F39](docs/src/features/membership.md)) prices the topology push and the status reports
   instead, and since X2 the pool map's frame beside it; `placement`
   ([X2](docs/src/object-storage/placement-simulation.md)) simulates S5's placement candidates in
-  `src/placement/`, which is pure and names no engine type. Depends on `shoal` with the engine, and
-  is the one place the control store is driven with three members in a group
+  `src/placement/`, which is pure and names no engine type; `device`
+  ([X6](docs/src/object-storage/device-store-ssd.md)) drives S6's device store in `src/device/`;
+  `stream` ([X11](docs/src/object-storage/streamed-bodies.md)) drives frames between glommio
+  executors and a tokio client in `src/stream/`, with the product's kTLS. Depends on `shoal` with
+  the engine, and is the one place the control store is driven with three members in a group
 - **shoal-spike-erasure** - The X4 spike ([erasure coding crates](docs/src/object-storage/erasure-coding-crates.md)):
   every erasure coding candidate S18 pinned behind one trait, checked against every loss pattern
   and timed on one pinned core. **Not a workspace member**: its manifest carries an empty

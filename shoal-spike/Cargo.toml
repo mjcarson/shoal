@@ -20,6 +20,12 @@ publish = false
 # device store measured on a filesystem as a slice's executor drives it, through the glommio fork's
 # `DmaFile` and `FICLONERANGE` by libc. Run as root on the lab by `results/x6-lab.sh`; its records
 # are merged by `device report` and its tables are on `docs/src/object-storage/device-store-ssd.md`.
+#
+# `shoal-spike stream` is X11 (`docs/src/object-storage/spikes.md#x11-streamed-bodies`): frames of
+# plain bytes between a glommio server and a tokio client, with and without kernel TLS, into
+# direct I/O buffers and a file, beside a small request, and a connection handed between executors.
+# Run on the lab by `results/x11-lab.sh`; its records are merged by `stream report` and its tables
+# are on `docs/src/object-storage/streamed-bodies.md`.
 [[bin]]
 name = "shoal-spike"
 path = "src/main.rs"
@@ -35,3 +41,9 @@ tempfile = "3"
 # the X2 pool map sketch is sized as the JSON the topology frame is pushed as. serde is already in
 # the workspace's lockfile through shoal-proto, so this adds an edge and no crate
 serde = { version = "1", features = ["derive"] }
+# X11's client is tokio, as the product's is, and its certificates are made the way the tests make
+# theirs. Both are already in the workspace's lockfile, so these add edges and no crate. The TLS
+# itself is the product's own, reached through the facade
+tokio = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "aws-lc-rs", "logging"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }

@@ -2,7 +2,8 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-04, when X6 and X10 reported; X2, X4 and X5 had reported the day before.
+after it. As of 2026-10-05, when X11 reported; X6 and X10 had reported the day before, and X2, X4
+and X5 the day before that.
 
 **How to read them.**
 
@@ -37,7 +38,7 @@ flowchart LR
         X5["✅ X5 Checksums"]:::done
         X6["✅ X6 The device store on SSD"]:::done
         X10["✅ X10 What a stripe row costs"]:::done
-        X11["X11 Streamed bodies"]
+        X11["✅ X11 Streamed bodies"]:::done
         X13["X13 The benchmark's shape,<br>what F69 left"]
         X14["X14 Ceph and S3 at the source"]
         Counters["✅ F71 Device counters and node memory<br>in a bench capture (optional)"]:::done
@@ -111,11 +112,11 @@ flowchart TB
     I198["✅ Items 92 and 198:<br>composite partition keys"]:::done
     I202["✅ Item 202: a byte bound<br>on an append batch"]:::done
     I46["✅ Item 46: an unmarked<br>directory refused"]:::done
-    Frames["More than one frame for<br>one query (waits on Q26)"]
+    Frames["More than one frame for<br>one query"]
     Domain["A failure domain on<br>a member"]
     Free["Free bytes for every<br>root"]
     Walk["The walk of one tablet's<br>rows (waits on Q17)"]
-    Handoff["Handing a connection to another<br>executor (optional, if X11<br>finds the hop dear)"]:::optional
+    Handoff["Handing a connection to another<br>executor (optional; X11<br>found the hop dear)"]:::optional
     Rack["A failure domain above<br>the host (optional)"]:::optional
     X12r["X12, its rotational half"]
     Q31["Q31 decided, by design"]
@@ -161,6 +162,13 @@ flowchart TB
 ~~A clone call in the glommio fork (optional, if X6 picks a clone)~~ fed M14 until 2026-10-04,
 and is dropped: [X6](device-store-ssd.md#3-a-partial-write) rejected the clone, so nothing waits
 on it.
+
+More than one frame for one query waited on Q26 until 2026-10-05, when
+[X11](streamed-bodies.md) answered the part it needed: object bytes travel on connections of
+their own, in frames of 1 MiB. The box handing a connection to another executor stays optional,
+since adding it later changes no format, and X11 is what makes it worth building at M14: a
+connection under kTLS can be handed over at no cost, while its bytes hopping between executors
+cost 1.3 to 1.7 times the cpu a gibibyte ([X11](streamed-bodies.md#4-a-connection-handed-over-and-bytes-that-hop)).
 
 The chain is the claim [the milestones page](milestones.md#the-order-is-a-claim) argues for:
 the wire before the devices, the device store before distribution, replication before erasure

@@ -2,11 +2,12 @@
 
 ~~**Nothing here has been run.**~~ ~~**One spike has run**: X4, whose record is
 [its own page](erasure-coding-crates.md) (2026-10-03).~~ ~~**Two spikes have run**~~ ~~**Three
-spikes have run**~~ ~~**Four spikes have run**~~ **Five spikes have run**, each with its record on a
-page of its own: X2, [placement](placement-simulation.md), X4,
+spikes have run**~~ ~~**Four spikes have run**~~ ~~**Five spikes have run**~~ **Six spikes have
+run**, each with its record on a page of its own: X2, [placement](placement-simulation.md), X4,
 [the erasure coding crates](erasure-coding-crates.md), and X5, [the checksums](checksums.md) (all
-2026-10-03), and X6, [the device store on SSD](device-store-ssd.md), and X10,
-[what a stripe row costs](stripe-row-costs.md) (both 2026-10-04). This page is the list of what has to be
+2026-10-03), X6, [the device store on SSD](device-store-ssd.md), and X10,
+[what a stripe row costs](stripe-row-costs.md) (both 2026-10-04), and X11,
+[streamed bodies](streamed-bodies.md) (2026-10-05). This page is the list of what has to be
 learnt before the [milestones](milestones.md) of this part can be more than a guess, and how
 each thing would be learnt.
 
@@ -113,7 +114,7 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 | X8 | One small write, three ways | Q14, Q27 | The lab; X6 | Days |
 | X9 | Table latency beside object work | Q15, Q24 | titan; X4, X5 | Days |
 | ✅ X10 | What a stripe row costs, [reported](stripe-row-costs.md) | Q25 in part, Q17's group half | The lab | ~~Days~~ Done 2026-10-04 |
-| X11 | Streamed bodies | Q26 | europa, the lab | Days |
+| ✅ X11 | Streamed bodies, [reported](streamed-bodies.md) | Q26 in part | europa, the lab | ~~Days~~ Done 2026-10-05 |
 | X12 | Recovery and scrub rates | Q17, Q28, Q29 | X4, X6, X7 | Days |
 | X13 | The benchmark's shape | Q30 | europa | ~~Days~~ Mostly answered by [F69](../features/driver-operation-kinds.md); the rest days |
 | X14 | Ceph and S3 at the source | Q14, Q20, Q28, Q32 | Nothing | Days |
@@ -600,6 +601,17 @@ since [F71](../features/bench-device-memory.md). **Cost.** Days.
 
 ### X11. Streamed bodies
 
+**Reported 2026-10-05** on [its own page](streamed-bodies.md), and recorded on S18 as
+[Q26, in part](contract.md#q26-in-part-streamed-bodies-2026-10-05). **Object bytes travel on
+connections of their own, in frames of 1 MiB, four to a window; the object lane hands a connection
+to the slice's executor; and a stream that has to run at a device's rate under kTLS is spread over
+connections.** All three results named below came out. A small request's p99 on a 1 MiB stream's
+connection was 9 to 32 times its p99 on one of its own, and neither `TCP_NOTSENT_LOWAT` nor writing
+small frames first brought it back. A connection under kTLS can be handed between executors, at no
+cost, while its bytes hopping cost 1.3 to 1.7 times the cpu a GiB in plaintext. And one kTLS
+connection reads below either SSD. The plan as written follows, struck where the run departed
+from it.
+
 **Question.** How do object bytes cross the wire: what frame, what window, and at what cost
 to a connection shared with small queries ([Q26](contract.md#questions-to-answer))?
 
@@ -616,9 +628,13 @@ to a connection shared with small queries ([Q26](contract.md#questions-to-answer
 from 64 KiB to 8 MiB, with and without TLS, reading straight into buffers aligned for direct
 I/O and writing them to a file. A small request and its answer are interleaved on the same
 connection, and then on another. A connection is accepted on one executor and passed to a
-second.
+second. Added in the run: kTLS with the receiver told records carry no padding,
+`TCP_NOTSENT_LOWAT` at two settings, a server writing first in first out, and a write's bytes
+crossing executors as buffers, with and without a copy, beside the connection handed over.
 
-**Where.** Loopback on europa for what it costs; across the lab for what 1 GbE carries.
+**Where.** Loopback on europa for what it costs; across the lab for what 1 GbE carries. Run over
+loopback on titan and hyperion as well, since a Zen1 core is what a node has, and across the lab
+from europa to titan and from titan to hyperion.
 
 **Records.** MiB a second a connection and CPU a gibibyte, by frame size and by TLS; memory
 held a stream at each window; the small request's tail in each arrangement; whether the
@@ -720,7 +736,7 @@ flowchart LR
     X7["X7 device store, HDD"]
     X8["X8 one small write"]
     X9["X9 table latency"]
-    X11["X11 streamed bodies"]
+    X11["✅ X11 streamed bodies"]:::done
     X12["X12 recovery, scrub"]
     X4 --> X9
     X5 --> X9
@@ -732,7 +748,7 @@ flowchart LR
 ```
 
 Nine depend on no other spike and on nothing that has to be fitted, and can start at once:
-X1, ~~X2,~~ X3, ~~X4,~~ ~~X5,~~ ~~X10,~~ X11, X13 and X14; X2, X4, X5 and X10 have run. ~~X6 can start too, and
+X1, ~~X2,~~ X3, ~~X4,~~ ~~X5,~~ ~~X10,~~ ~~X11,~~ X13 and X14; X2, X4, X5, X10 and X11 have run. ~~X6 can start too, and
 needs an XFS filesystem for one of its legs.~~ X6 has run too, on an XFS filesystem fitted for it.
 ~~X8 follows X6, and~~ X8 and X9 ~~follows X5, since X4 has
 reported~~ can start: X4, X5 and X6 have all reported. X7 and the rotational half of X12 wait
@@ -743,7 +759,8 @@ X1 is the one that can say the design is wrong.
 
 The first gate, [before M11](milestones.md#before-m11-the-object-contract), waits on eight
 of them: X1 and X2 for the decisions themselves, and X3, X8 and X9 for what those decisions
-cost, which bring X4, X5 and X6 with them. X2, X4, X5 and X6 have reported.
+cost, which bring X4, X5 and X6 with them. X2, X4, X5 and X6 have reported, and X10 and X11 beside
+them.
 
 ### What a spike needs first
 
@@ -770,7 +787,7 @@ The rest is each spike's own work, written on its section: ~~X2 measures the map
 before comparing with it~~ (done: 16,555 bytes where F39 measured 13,493,
 [X2](placement-simulation.md#todays-tablet-frame-again)); ~~X6 issues its own clone call~~ (done,
 on the blocking thread, [X6](device-store-ssd.md#the-harness)); X9
-gives a core up on titan; ~~X10 drives its cold commit itself~~ (done, [X10](stripe-row-costs.md#the-harness)); X11 adds tokio and a TLS stack to the spike's dependencies; X1 saves
+gives a core up on titan; ~~X10 drives its cold commit itself~~ (done, [X10](stripe-row-costs.md#the-harness)); ~~X11 adds tokio and a TLS stack to the spike's dependencies~~ (done: edges to tokio, rustls and rcgen and no crate, the TLS the product's own, [X11](streamed-bodies.md#the-harness)); X1 saves
 its schedules in a directory of their own.
 
 ## Exploratory work that is not a spike
@@ -798,7 +815,7 @@ its evidence and with what it did not settle:
 | The device store: Q22, and Q23 for the rotational gate | ✅ X6 for SSDs ([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)); X7 for rotational disks |
 | Where object work runs: Q24 | X9 |
 | Stripe size and the inline threshold: Q25. Small writes: Q27 | ✅ X10 for Q25 ([Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04)); X8 for Q27's other half |
-| The wire: Q26 | X11 |
+| The wire: Q26 | ✅ X11 ([Q26, in part](contract.md#q26-in-part-streamed-bodies-2026-10-05)) |
 | Budgets: Q28, Q29 | X12 |
 | The driver: Q30 | X13 |
 

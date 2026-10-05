@@ -42,6 +42,10 @@
 //! `shoal-spike device` is X6 (`docs/src/object-storage/spikes.md#x6-the-device-store-on-ssd`):
 //! S6's device store measured on a filesystem as a slice's executor would drive it, in
 //! [`device`].
+//!
+//! `shoal-spike stream` is X11 (`docs/src/object-storage/spikes.md#x11-streamed-bodies`): frames
+//! of plain bytes between a glommio server and a tokio client, with and without kernel TLS,
+//! beside small requests and across executors, in [`stream`].
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, Bound};
@@ -83,6 +87,7 @@ use shoal::shared::protocol::peer::StatusReport;
 
 mod device;
 mod placement;
+mod stream;
 
 /// The group counts the idle cost is measured at
 const IDLE_COUNTS: &[usize] = &[1, 64, 1024, 4096];
@@ -1126,6 +1131,12 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("device") {
         let args: Vec<String> = std::env::args().skip(2).collect();
         device::main(&args);
+        return;
+    }
+    // and X11's streams, whose server is executors and whose client is tokio
+    if std::env::args().nth(1).as_deref() == Some("stream") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        stream::main(&args);
         return;
     }
     // so does X2's placement simulation, which is pure

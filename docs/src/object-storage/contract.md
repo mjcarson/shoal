@@ -358,6 +358,36 @@ instruction to complete X10 and record it.
 - **The followers' reads**, which still park their applies one at a time:
   [O92](../appendix/optimizations.md#o92-a-group-reads-the-rows-its-parked-batch-needs-one-at-a-time).
 
+#### Q26, in part: streamed bodies (2026-10-05)
+
+Recorded 2026-10-05 by [X11](streamed-bodies.md), on the tree that adds `shoal-spike stream`.
+Frames of plain bytes between a glommio server and a tokio client, plaintext and under the
+product's kTLS, into a file with direct I/O and back, beside small requests: over loopback on
+europa (Zen4, an Optane 900P under XFS), titan and hyperion (Zen1, a 970 EVO under XFS), and across
+1 GbE from europa to titan and from titan to hyperion. Four rounds a leg, from one `znver1` build,
+under the `performance` governor, with no shoal unit running. A difference counts where the rounds'
+intervals do not overlap. The choice follows the user's instruction to complete X11 and record it.
+
+| Decision | Evidence |
+| --- | --- |
+| **Object bytes travel on connections of their own.** A client keeps connections apart for long streams - an object's frames, a query bundle past the frame, a send marked bulk - two by default | T1 fired on every leg. Across 1 GbE a small request's p99 beside a 1 MiB read stream on its connection was 34.6 ms against 1.1 ms on a connection of its own (21 to 32 times), and beside a write 27 to 36 ms. Over loopback 9.4 times on europa under kTLS, and 12 to 25 times beside writes. `TCP_NOTSENT_LOWAT` left reads where they were, narrowed writes to 3 to 12 times, and under kTLS on the sender reached seconds at 8 MiB frames; writing small frames first at a frame's boundary changed nothing measurable. `fq_codel` queues by flow, so a connection of its own does what neither setting can |
+| **A data frame is 1 MiB** | cpu a GiB falls steeply to 1 MiB and is nearly flat above it, plaintext and kTLS: on titan a GiB written to the file cost the server 1,028 ms of cpu at 64 KiB, 368 at 1 MiB and 311 at 8 MiB in plaintext, and a read under kTLS 1,603, 891 and 879 |
+| **A stream's window is four frames, and its memory is the window plus the kernel's buffers** | Two frames in flight reached the Optane and the 970 EVO in plaintext, and one 60 to 80% of them; under kTLS rates swung by half between rounds at every window, and europa's reads kept gaining to sixteen. A receiver held exactly window × frame of its own buffers, and the sending socket up to 4.1 MiB (`tcp_wmem`'s ceiling) and the receiving one up to 1.9 MiB beside it, whatever the window |
+| **The object lane hands each connection to the executor of the slice it names; a client connection's bytes hop** | A connection under kTLS was handed between executors by `dup` and `TcpStream::from_raw_fd` in every round on every host, checked byte for byte both ways, at 0.93 to 1.05 times a direct stream's rate and cpu. Its bytes hopping as owned buffers cost 1.30 to 1.72 times the cpu a GiB at 1 MiB in plaintext (T2 fired), and twice at 64 KiB; with the copy the fork's `!Send` buffers otherwise need, 1.8 to 2.1 times |
+| **A stream that has to run at a device's rate under kTLS is spread over connections** | T3 fired for reads: one connection received about 650 MiB/s on a Zen1 core against the 970 EVO's 857, and 1,730 on europa against the Optane's 2,553. Writes reached the device in some rounds and not others |
+| **A kTLS receiver says records carry no padding** | `TLS_RX_EXPECT_NO_PAD` took 10 to 20% off a read's receiving cpu: 943 against 796 ms a GiB on titan at 1 MiB ([O93](../appendix/optimizations.md#o93-ktls-receivers-are-not-told-records-carry-no-padding)) |
+
+**Not settled.** These remain open:
+
+- **The object lane's frames** between nodes, and who sends a stage: Q14 and Q15, X1.
+- **The window and the memory budget as settings**: M15 and [S13](isolation.md#memory), from these
+  figures.
+- **Ranges asked ahead on a read, and their spread over connections**: M15.
+- **What an executor encrypting a frame costs its other work**: a send of one 1 MiB frame under kTLS
+  held titan's executor about a millisecond, and a small request on another connection to it waited
+  2.7 ms at its p99. Q24's, with [X9](spikes.md#x9-table-latency-beside-object-work).
+- **Why kTLS's rounds disagreed**, by up to half with nothing else on the host: not traced.
+
 ## Alternatives rejected
 
 **A primary for each placement group, with a log on every holder and peering.** It is what
@@ -461,9 +491,9 @@ Q1–Q13.
 | Q21 | **Which checksum**, at what granule, and whether the row keeps a digest of each stripe chunk to catch a write that was lost whole. Preferred: a definition no crate's release can move. **In part, 2026-10-03**: the checksum is CRC-64/NVME through `crc-fast`, with a combine of Shoal's own ([the record](#q21-in-part-the-checksum-2026-10-03)); the granule and the chunk digest are not decided | M13, since a frame that carries a unit's checksum fixes it on the wire before any slice stores one. ✅ [X5](checksums.md) |
 | Q22 | **The device store's layout**, its way of applying an update, its `fdatasync` strategy and the filesystems it accepts. Preferred: a journal written ahead for small updates and whole files for large ones. **In part, 2026-10-04**: on SSDs, a file a chunk from a pool written ahead, the journal and the apply in place, no clone, XFS preferred, ext4 accepted and btrfs refused, one slice a device ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)); rotational devices are Q23's | M14. ✅ [X6](device-store-ssd.md) |
 | Q23 | **What a rotational device needs**: an executor of its own, a journal on an SSD, another layout | M19. [X7](spikes.md#x7-the-device-store-on-hdd) |
-| Q24 | **Where object work runs**: which executor owns a slice, whether object work shares executors with tables, the lane, the memory budget | M14. X9 |
+| Q24 | **Where object work runs**: which executor owns a slice, whether object work shares executors with tables, the lane, the memory budget. X11 found the lane can hand its connections to a slice's executor, and that a kTLS send of a 1 MiB frame holds an executor about a millisecond on Zen1 ([Q26, in part](#q26-in-part-streamed-bodies-2026-10-05)) | M14. X9, ✅ [X11](streamed-bodies.md) for the lane |
 | Q25 | **The metadata rows**: the inline threshold, what a stripe row costs, the stall when a row a commit needs is not in memory, the scale a bucket is designed for. **In part, 2026-10-04**: stripe rows are not kept resident and a commit follows S7's read of its row; 39 bytes of index a cold row, so 27 million rows a GiB a replica and no floor under the stripe above 4 MiB; the inline threshold defaults to 16 KiB; equality on one field is all a commit's condition needs ([the record](#q25-in-part-the-metadata-rows-2026-10-04)); the rows' final layout and a shared stripe table are M12's | M12. ✅ [X10](stripe-row-costs.md) |
-| Q26 | **Streamed bodies**: bounded ranged frames, their size, and what a connection shared with small queries does under them | M13. [X11](spikes.md#x11-streamed-bodies) |
+| Q26 | **Streamed bodies**: bounded ranged frames, their size, and what a connection shared with small queries does under them. **In part, 2026-10-05**: object bytes travel on connections of their own, in frames of 1 MiB, four to a window; the object lane hands a connection to the slice's executor; a stream at a device's rate under kTLS is spread over connections ([the record](#q26-in-part-streamed-bodies-2026-10-05)); the window and budget as settings and a read's ranges ahead are M15's | M13. ✅ [X11](streamed-bodies.md) |
 | Q27 | **What one small in-place write costs, and whether small writes ride the metadata log** below a threshold, to be folded into stripe chunks later. **The device's half measured, 2026-10-04**: two flushes, 2 to 6 ms on the 970 EVO at 4 KiB, 81 µs on the Optane ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)) | M15. ✅ [X6](device-store-ssd.md#3-a-partial-write), X8 |
 | Q28 | **Scrub**: cadence, byte budgets, what a deep scrub of k+m verifies beyond each stripe chunk's own checksums | M17. X12, X14 |
 | Q29 | **Budgets for recovery and moves**, for each device | M16. X12 |

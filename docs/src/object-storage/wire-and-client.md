@@ -79,8 +79,10 @@ trip.
 
 ### Ranged frames
 
-A frame of object bytes is bounded, at 1 MiB proposed, far under the frame bound. Nothing
-this page adds ever asks either peer to hold an object, or a stripe, in one buffer.
+A frame of object bytes is bounded, at ~~1 MiB proposed~~ 1 MiB, far under the frame bound:
+[X11](streamed-bodies.md#1-one-connection-rate-and-cpu-by-frame) found cpu a gibibyte flat from
+1 MiB up and 1.3 to 2.8 times as dear at 64 KiB. Nothing this page adds ever asks either peer to
+hold an object, or a stripe, in one buffer.
 
 - **A write** is an `ObjectOp` and then as many `ObjectData` frames as its bytes need. The
   server stages as it reads ([S7](write-path.md)) and stops reading the connection while
@@ -111,10 +113,18 @@ however it was cut, which gxhash, the hash the tree already has, does not
 
 An object frame of 1 MiB ahead of a small query's answer on the same connection delays it
 by the megabyte. Two things bound that: the frame's size, and the client's choice of
-connection. The client may keep some of its pooled connections for object bytes alone.
+connection. ~~The client may keep some of its pooled connections for object bytes alone.
 Whether it should, and what a shared connection really costs a small query's tail, is
 [X11](spikes.md#x11-streamed-bodies)'s to measure before it is designed
-([Q26](contract.md#questions-to-answer)).
+([Q26](contract.md#questions-to-answer)).~~ **The client keeps connections apart for object
+bytes.** X11 measured a small request's p99 on a connection carrying a 1 MiB stream at 9 to 32
+times its p99 on one of its own, 34.6 ms against 1.1 ms across the lab's 1 GbE; neither
+`TCP_NOTSENT_LOWAT` nor writing small frames first at a frame's boundary brought it back, since the
+bytes ahead of it were already in flight and in the NIC's queue
+([X11](streamed-bodies.md#3-a-small-request-beside-a-stream),
+[Q26, in part](contract.md#q26-in-part-streamed-bodies-2026-10-05)). S1's prerequisite for more
+than one frame a query builds the connections apart for queries longer than a frame, and an object
+operation always takes one.
 
 ### The client's handle
 
@@ -194,8 +204,9 @@ connection set aside in the client's connection pool gets most of the benefit.
   bundle, or a control frame".
 - **A second kind of body**, read into aligned buffers and never validated.
 - **A window of memory for each stream**, on both peers ([S13](isolation.md#memory)).
-- **A small query's tail** on a connection it shares with object frames, until X11 says
-  what that is.
+- ~~**A small query's tail** on a connection it shares with object frames, until X11 says
+  what that is.~~ **Connections set apart** for object bytes, which a client opens when it needs
+  them, since X11 found a shared connection's tail 9 to 32 times its own.
 - **The client grows**: a handle type, a stream's state, and the retry of a write that
   spans frames.
 
@@ -232,7 +243,10 @@ and under kTLS, at frame sizes from 64 KiB to 8 MiB; the memory one stream holds
 small query's tail does on a connection carrying object frames and on one that is not; and
 whether a connection can be handed to the executor that owns the slice its bytes are for.
 Loopback on europa for what a core costs; across the lab for what 1 GbE allows, labelled as
-the network's number and not the design's.
+the network's number and not the design's. **Measured 2026-10-05** ([its record](streamed-bodies.md)):
+the frame is 1 MiB and a window four of them, a shared connection is never used, one kTLS
+connection reads at about 650 MiB/s on a Zen1 core, below either SSD, and a connection under kTLS
+can be handed between executors.
 
 ## Acceptance tests
 

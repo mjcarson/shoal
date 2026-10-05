@@ -24,17 +24,21 @@ or larger later is optional, because skipping it costs nothing that has to be un
 whose absence would be baked into a key, a file or a frame is required, because the cheapest
 day to do it is the day before the format exists.
 
-**Where it stands (2026-10-03).** Six of the ten required rows are done, each marked ✅ below:
-every one that waits on no open question. Of the four left, ~~each waits on a question~~ two
-can start now. [X2](placement-simulation.md) settled what placement reads
+**Where it stands (~~2026-10-03~~ 2026-10-05).** Six of the ten required rows are done, each
+marked ✅ below: every one that waits on no open question. Of the four left, ~~each waits on a
+question~~ ~~two~~ three can start now. [X2](placement-simulation.md) settled what placement reads
 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)), and that frees a member's
-failure domain and free bytes for every root. More than one frame a query and the tablet walk
-each wait on a question ([The order](#the-order)). Of the two dependencies, ~~both wait on their spikes~~ the erasure
+failure domain and free bytes for every root. ~~More than one frame a query and the tablet walk
+each wait on a question~~ The tablet walk waits on a question ([The order](#the-order)); more than
+one frame a query waited on Q26 until X11, below. Of the two dependencies, ~~both wait on their spikes~~ the erasure
 coding crate is chosen ✅ by [X4](erasure-coding-crates.md), and the checksum ~~waits on X5~~ is
 chosen ✅ by [X5](checksums.md): both are chosen, and neither is in the workspace until its
 milestone adds it. [X10](stripe-row-costs.md), which priced the metadata rows these prerequisites
 serve, reported on 2026-10-04 ✅ and changes no row of this page: the conditional write it drove was
-F68's, on equality alone.
+F68's, on equality alone. [X11](streamed-bodies.md) reported on 2026-10-05 ✅ and answers the part
+of Q26 that more than one frame a query waited on, so that row can start: object bytes travel in
+frames of 1 MiB on connections a client keeps apart for long streams. It also found the hop between
+executors dear, which makes the optional row for handing a connection over worth building.
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate
@@ -68,7 +72,7 @@ is built right the first time, and nothing required is skipped to reach a gate s
 | **D7, client routing by topology** | A client is pushed every topology version and routes by none ([D7](../direction/shard-aware-routing.md)) | A client that picks the node holding what it wants | Only a client that writes or reads stripe chunks itself needs it. A node coordinates in every design here, so nothing built changes when D7 arrives, and D7's own rule is to measure the hop first ([Q15](contract.md#questions-to-answer)) |
 | **`Cancel` on the client wire** | Reserved as message type 12 and unwired (`shoal-proto/src/shared/protocol.rs:216`; [todos](../appendix/todos.md#cancel-and-what-it-would-actually-buy)) | A reader abandoning a range it no longer wants | With bounded ranged frames a reader stops by not asking for the next range; what a cancel saves is the tail of one. The type is reserved, so wiring it later changes nothing already on the wire |
 | ~~**A clone call in the glommio fork**~~ **Not needed**: [X6](device-store-ssd.md#3-a-partial-write) rejected the clone | `copy_file_range_aligned` exists (`glommio/src/io/dma_file.rs:590` at `f4643f7`, `:574` before F70); no `FICLONERANGE` | Splicing a staged range into a stripe chunk without copying it | ~~Needed only if [X6](spikes.md#x6-the-device-store-on-ssd) picks that way of applying an update~~ X6 did not: a clone's sync cost three to eight times an overwrite's and a cloned chunk read cold at 2.4 to 2.6 times a fresh one's. The journal and the apply in place stay ([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)) |
-| **Handing an accepted connection to another executor** | Every shard accepts on the shared port, and a frame naming a slot is handed to the executor hosting it (`shoal-core/src/server/peer/listener.rs:181`). Nothing moves a connection | Bytes read by the executor that owns the slice they are for | Needed only if [X11](spikes.md#x11-streamed-bodies) finds the hop between executors too dear |
+| **Handing an accepted connection to another executor** | Every shard accepts on the shared port, and a frame naming a slot is handed to the executor hosting it (`shoal-core/src/server/peer/listener.rs:181`). Nothing moves a connection. The fork's `TcpStream` has `FromRawFd` and no `IntoRawFd`; X11 handed one over with a `dup` | Bytes read by the executor that owns the slice they are for | ~~Needed only if [X11](spikes.md#x11-streamed-bodies) finds the hop between executors too dear~~ X11 did: bytes hopping as buffers cost 1.3 to 1.7 times the cpu a gibibyte at 1 MiB in plaintext, while a connection under kTLS was handed over at no cost ([X11](streamed-bodies.md#4-a-connection-handed-over-and-bytes-that-hop)). Still optional, since adding it changes no format; worth building for M14's object lane |
 | **A failure domain above the host** | None | Stripe chunks spread over racks | No deployment has a rack to name. The member's field is a list from the start, so a level is added without a format change |
 | **Paging the archive map** | The map holds an entry for every row in memory, about fifty bytes each, and nothing evicts it ([todos](../appendix/todos.md#a-nodes-archive-map-is-bounded-by-nothing)) | A bucket larger than memory allows | It is a ceiling, near twenty million objects a GiB of memory a replica, and not a correctness matter. It lifts inside the table engine without touching an object format. [S3](objects.md#what-it-costs) states it as a limit |
 | **Authorization** | Tables have none: an authenticated principal can read and write any table ([todos](../appendix/todos.md#per-table-authorization)) | A principal held to some buckets | A bucket is no less protected than a table is. It should be built once, for both |
@@ -124,7 +128,7 @@ Obligations of the design itself, each on the page that owns it:
 | ✅ The conditional write, delivered by [F68](../features/conditional-writes.md) | ~~Nothing, for a condition on one field.~~ Done, for equality on any of a row's filter fields. [Q25](contract.md#questions-to-answer) settles whether the generated rows need more, such as a comparison other than equality. [X10](stripe-row-costs.md) drove both rows' commits on equality of one field each, and [Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04) asks for no more |
 | The tablet walk | [Q17](contract.md#questions-to-answer), which says what a driver asks it for |
 | The failure domain and free bytes for each root | ~~[Q19](contract.md#questions-to-answer), which fixes what placement reads~~ Nothing. [X2](placement-simulation.md) fixed what placement reads ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)), so both could start today, landing no later than [M14](milestones.md#m14-devices-and-pools-on-one-node) |
-| More than one frame a query | [Q26](contract.md#questions-to-answer) and [X11](spikes.md#x11-streamed-bodies) |
+| More than one frame a query | ~~[Q26](contract.md#questions-to-answer) and [X11](spikes.md#x11-streamed-bodies)~~ Nothing. X11 answered the part of Q26 it needed ([Q26, in part](contract.md#q26-in-part-streamed-bodies-2026-10-05)): frames of 1 MiB, on connections set apart for long streams |
 
 None of these stands before a spike. What the spikes themselves need first, checked spike by
 spike, is on [the spikes page](spikes.md#what-a-spike-needs-first), and the whole order of the
@@ -140,4 +144,4 @@ some of them wait on; [Known Issues](../appendix/known-issues.md) for items ~~46
 [TODOs](../appendix/todos.md) for the entries these rows were filed under before this part
 existed; [X4's record](erasure-coding-crates.md) for the erasure coding crate; [X5's
 record](checksums.md) for the checksum; [X2's record](placement-simulation.md) for what placement
-reads.
+reads; [X11's record](streamed-bodies.md) for the frames.

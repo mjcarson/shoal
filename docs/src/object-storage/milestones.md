@@ -35,7 +35,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 | Before M11 | The contract agreed | Q14, Q15, Q16, Q18, Q19 (in part ✅ [X2](placement-simulation.md)) | — |
 | M11 | The model, the fixture's faults, the driver's kinds | Q30, in part ([recorded](contract.md#decision-record)) | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
 | M12 | Buckets in the schema and the tables they generate | Q25 (in part ✅ [X10](stripe-row-costs.md)) | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
-| M13 | The wire, pool policy, inline objects, the baseline | Q21 (the checksum ✅ [X5](checksums.md)), Q26, the rest of Q30 | More than one frame for one query |
+| M13 | The wire, pool policy, inline objects, the baseline | Q21 (the checksum ✅ [X5](checksums.md)), Q26 (in part ✅ [X11](streamed-bodies.md)), the rest of Q30 | More than one frame for one query |
 | M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22 (on SSDs ✅ [X6](device-store-ssd.md)), Q24 | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); a failure domain on a member; free bytes for every root |
 | M15 | Replicated pools: stage, commit, apply and read | Q27 (the device's half ✅ [X6](device-store-ssd.md#3-a-partial-write)) | — |
 | M16 | Recovery and moves | Q17, Q29 | The walk of a tablet's rows |
@@ -147,7 +147,10 @@ second a group on the lab, and a cold commit 1.00× a warm one at depth one and 
 
 ### M13. The wire and the baseline
 
-**Closed before it.** Q26, streamed bodies ([X11](spikes.md#x11-streamed-bodies)). Q21, the
+**Closed before it.** Q26, streamed bodies ([X11](spikes.md#x11-streamed-bodies)). ✅ Recorded in
+part by X11 on 2026-10-05 ([Q26, in part](contract.md#q26-in-part-streamed-bodies-2026-10-05)):
+object bytes travel on connections a client keeps apart for long streams, in data frames of
+1 MiB; the window and the memory budget as settings are M15's. Q21, the
 checksum ([X5](spikes.md#x5-checksums)): a frame that carries a unit's checksum fixes it on
 the wire before any slice stores one, so the dependency is chosen ~~here~~ before this gate.
 ✅ It is: CRC-64/NVME through `crc-fast`, with a combine of Shoal's own
@@ -187,8 +190,10 @@ and inline rows. S4's two policy rows. S15's `object_arm_round_trips_against_one
 measured through the product's own client and driver. Objects as rows, from 4 KiB to what a
 row carries, on one node and on the lab's three: bytes a second, the tails, and what the
 device was asked to write for each byte stored. Every object number at a later gate is read
-against it. And a small query's tail on a connection that also carries object frames,
-inside whatever Q26 set.
+against it. ~~And a small query's tail on a connection that also carries object frames,
+inside whatever Q26 set.~~ And a small query's tail on the client's other connections beside a
+stream, against its tail with none: Q26 set that object frames never share a connection with
+small queries ([X11](streamed-bodies.md#3-a-small-request-beside-a-stream)).
 
 *Not at this gate:* an object is still a row, so both peers hold one whole. The window that
 bounds a stream is tested at M15, where bytes first leave as they arrive.
@@ -223,7 +228,9 @@ root.
 - The device store ([S6](device-store.md)): stripe chunks, the pool of files written ahead that
   whole chunks are written into, the journal, stage, apply, read and discard, a checksum for every chunk unit bound to its place, space taken at the stage.
 - The executor that owns each slice, the budget every object buffer is drawn from, and the
-  order of work on a slice ([S13](isolation.md)).
+  order of work on a slice ([S13](isolation.md)). The budget counts a stream's window and the
+  kernel's socket buffers beside it, up to 4 MiB a side
+  ([X11](streamed-bodies.md#2-the-window-and-what-a-stream-holds)).
 - Devices and their slices in the fixture and in an inventory, and a bench cluster that
   moves them.
 
@@ -262,7 +269,8 @@ depends on it, and a command is persisted in a log.
 - The read path of [S9](read-path.md): default and strong reads, a reader moving its row
   forward, a stale chunk read around, holes, streams inside a window.
 - The object lane between nodes, behind its capability and an activated wire version
-  ([S13](isolation.md#a-lane-for-object-bytes)).
+  ([S13](isolation.md#a-lane-for-object-bytes)), each connection handed to the executor of the
+  slice it names ([X11](streamed-bodies.md#4-a-connection-handed-over-and-bytes-that-hop)).
 - The standalone node's path ([S4](pools-and-devices.md#the-standalone-node)).
 - Crash points for a stripe write in the fixture ([S16](testing.md#the-fixture)).
 - Every commit recording which holders missed it. Nothing acts on the record yet.
@@ -460,7 +468,7 @@ The reason this page is provisional, spike by spike.
 | X7 | A disk needs a journal on an SSD, or an executor to itself | M19 grows by that, and a shared journal becomes a failure domain on S5 |
 | X8 | A size below which bytes in the commit win | M15 gains the small-write path, and ~~item 202~~ the append batch bound ([Resolved #202](../appendix/resolved/append-batch-bytes.md)) and item 208 carry more weight |
 | ~~X10~~ | ~~A commit to a cold stripe row stalls its group~~ It does, under load and not at depth one: 0.62× a group's rate on the 970 EVO. The read S7 already makes, sent to the group's leader, removes the stall ([X10](stripe-row-costs.md)) | ~~The rows of M12 change shape, or M15 keeps stripe rows resident and pays for it in memory~~ M12's rows keep S3's shape and stay cold; M15's commit reads its stripe row at the leader first, and the inline threshold defaults to 16 KiB |
-| X11 | A shared connection hurts small queries; a connection cannot be handed to another executor | M13 sets connections aside for object bytes; the hop between executors stays in M14 |
+| ~~X11~~ | ~~A shared connection hurts small queries; a connection cannot be handed to another executor~~ The first came out, 9 to 32 times at 1 MiB, and the second did not: a connection under kTLS is handed over at no cost, while bytes hopping cost 1.3 to 1.7 times the cpu ([X11](streamed-bodies.md)) | ~~M13 sets connections aside for object bytes; the hop between executors stays in M14~~ M13's client sets connections apart for object bytes (S1's prerequisite builds them for queries), and M14 hands the object lane's connections to the slice's executor |
 | X12 | A rebuild inside a tolerable budget takes days | The defaults for `k + m` and `f` change before M18, and M16's budget has to adapt to the foreground |
 | X13 | ~~The driver's kinds do not generalize~~ (they do: [F69](../features/driver-operation-kinds.md)) One core cannot make seeded bytes as fast as a pool takes them | ~~M11 builds a second driver beside the first~~ M13's driver runs on several cores, and its capture proves it had them |
 | X14 | A mechanism taken from Ceph works otherwise | The page that leaned on it is corrected before its gate |

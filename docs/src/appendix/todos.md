@@ -69,8 +69,9 @@ Three pages of that part are lists of work rather than design, and they are wher
   ([F69](../features/driver-operation-kinds.md)) and the fixture's device faults
   ([F70](../features/storage-faults.md)). ~~The four left each wait on an open question~~ Of
   the four left, a member's failure domain and free bytes for every root can start, since X2
-  settled what placement reads. The tablet walk and more than one frame a query wait on open
-  questions. Several entries further down this page are rows of that table now, and each says so
+  settled what placement reads. ~~The tablet walk and more than one frame a query wait on open
+  questions.~~ More than one frame a query can start too, since X11 answered the part of Q26 it
+  waited on; the tablet walk waits on Q17. Several entries further down this page are rows of that table now, and each says so
   where it stands.
 - [Exploratory spikes](../object-storage/spikes.md) is the fourteen spikes, X1 to X14, that
   have to report before the milestones can be trusted: a model of the write protocol, a
@@ -80,7 +81,11 @@ Three pages of that part are lists of work rather than design, and they are wher
   chose CRC-64/NVME through `crc-fast` ([its record](../object-storage/checksums.md)).
   Placement was simulated by X2, which chose weighted rendezvous for a placement group's set,
   with its positions held by the tablet group
-  ([its record](../object-storage/placement-simulation.md)).
+  ([its record](../object-storage/placement-simulation.md)). The device store on SSD was measured
+  by X6 ([its record](../object-storage/device-store-ssd.md)), the metadata rows by X10
+  ([its record](../object-storage/stripe-row-costs.md)), and the client wire's streams by X11,
+  which put object bytes on connections of their own in 1 MiB frames
+  ([its record](../object-storage/streamed-bodies.md)).
 - [Milestones](../object-storage/milestones.md) is M11 to M21, provisional until the spikes
   report.
 
@@ -2820,6 +2825,16 @@ Filed by [item 200](resolved/bench-addr-reads-no-figures.md). `--addr` drives an
 with no credentials, so a node started by hand with `auth.required` refuses both. A
 `--user`/`--password-file` pair, used by the driver's clients and the stats reader alike, would
 close it. Nobody has asked for it yet.
+
+## Write object frames under kTLS in pieces
+
+Filed by [X11](../object-storage/streamed-bodies.md#3-a-small-request-beside-a-stream). Under kTLS
+the kernel encrypts a send inside the syscall, so one `write` of a 1 MiB frame holds the executor's
+core about a millisecond on Zen1, twice the high queue's 500 µs goal ([S13](../object-storage/isolation.md#shared-executors-or-dedicated-ones)).
+A small request on another connection to the same executor waited 2.7 ms at its p99 beside a 1 MiB
+stream on titan, against 0.36 ms beside 64 KiB frames and 0.16 ms on another executor. The frame
+stays 1 MiB on the wire; what changes is the write: an executor writing object frames under kTLS
+hands the socket at most a few hundred kilobytes a call, yielding between them.
 
 ## Time a parked apply
 

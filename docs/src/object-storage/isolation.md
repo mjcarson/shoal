@@ -79,7 +79,11 @@ Its blocking thread, where every rename and unlink goes, belongs on its core's s
 on: it is the experiment this whole page waits for.
 
 Whichever it is, **no call runs long**. A megabyte encoded at a gibibyte a second is a
-millisecond, twice the high queue's latency goal. Checksumming and encoding are done a
+millisecond, twice the high queue's latency goal. So is a megabyte sent under kTLS: the kernel
+encrypts a send inside the syscall, and X11 found a small request on another connection to the
+same Zen1 executor waiting 2.7 ms at its p99 beside 1 MiB frames, against 0.36 ms beside 64 KiB
+ones ([X11](streamed-bodies.md#3-a-small-request-beside-a-stream)); a frame is written in pieces
+short enough for the goal ([todos](../appendix/todos.md#write-object-frames-under-ktls-in-pieces)). Checksumming and encoding are done a
 chunk unit at a time with a yield between units, which makes this the first code in the
 engine that yields in the middle of a computation. The checksum is the cheaper half:
 [X5](checksums.md) found CRC-64/NVME holds a Zen1 core 5.3 µs for a 64 KiB unit and 85 µs
@@ -100,16 +104,26 @@ stage and its answer, apply, read and its bytes, and a slice's inventory of a pl
 group. Their layouts are left until [Q14](contract.md#questions-to-answer) and
 [Q15](contract.md#questions-to-answer) say who sends them.
 
-An accepted connection lands on whichever shard the kernel chose. A frame for a slice
+An accepted connection lands on whichever shard the kernel chose. ~~A frame for a slice
 owned elsewhere is handed across as an owned buffer, as a snapshot chunk is handed to its
 slot today. Handing the connection itself to the owner would save that hop for every
 frame; it is not something the glommio fork is known to allow, and
-[X11](spikes.md#x11-streamed-bodies) finds out ([S1](prerequisites.md#optional)).
+[X11](spikes.md#x11-streamed-bodies) finds out ([S1](prerequisites.md#optional)).~~ **The
+connection is handed to the executor of the slice it names**, since a lane's connection carries
+one slice's bytes. [X11](streamed-bodies.md#4-a-connection-handed-over-and-bytes-that-hop) handed
+one under kTLS between executors of the fork with a `dup` and `TcpStream::from_raw_fd`, every byte
+checked, at no cost against a direct stream; the same bytes crossing as owned buffers cost 1.3 to
+1.7 times the cpu a gibibyte at 1 MiB in plaintext, and twice at 64 KiB. A client connection,
+which carries many slices' bytes, still hands each frame across as an owned buffer
+([S1](prerequisites.md#optional)).
 
 ### Memory
 
 Object work holds memory that is not a row: a stream's window, a stage in flight, the units
-of a partial write, the `k` units of a rebuild, what is read ahead.
+of a partial write, the `k` units of a rebuild, what is read ahead. And the kernel's: a stream
+holds its window in buffers the executor allocated, and up to about 4 MiB a side more in its
+socket's buffers whatever the window, which a budget that counts only its own allocations misses
+([X11](streamed-bodies.md#2-the-window-and-what-a-stream-holds)).
 
 **It is budgeted, and the budget is the node's to check.** Each executor that does object
 work has a budget every such buffer is drawn from. An operation that cannot draw what it
@@ -196,7 +210,8 @@ about a task that does not.
 ## Prerequisites
 
 [S4](pools-and-devices.md) for devices and slices. Handing a connection to another executor,
-only if X11 says the hop costs too much ([S1](prerequisites.md#optional)).
+~~only if X11 says the hop costs too much~~ which X11 found worth building
+([S1](prerequisites.md#optional)).
 
 ## How it would be measured
 

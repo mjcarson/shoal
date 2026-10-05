@@ -5667,9 +5667,12 @@ dependencies = [
  "glommio",
  "libc",
  "openraft",
+ "rcgen",
+ "rustls",
  "serde",
  "shoal",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

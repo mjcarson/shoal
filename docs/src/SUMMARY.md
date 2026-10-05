@@ -205,6 +205,7 @@
     - [X5. Checksums, measured](object-storage/checksums.md)
     - [X6. The device store on SSD, measured](object-storage/device-store-ssd.md)
     - [X10. What a stripe row costs, measured](object-storage/stripe-row-costs.md)
+    - [X11. Streamed bodies, measured](object-storage/streamed-bodies.md)
   - [Milestones](object-storage/milestones.md)
   - [What's left to do](object-storage/whats-left-todo.md)
 
