@@ -89,7 +89,10 @@ Three pages of that part are lists of work rather than design, and they are wher
   which put object bytes on connections of their own in 1 MiB frames
   ([its record](../object-storage/streamed-bodies.md)). The benchmark's object dataset was written
   down and its seeded bytes measured by X13, which found one core makes them faster than any lab
-  device takes them ([its record](../object-storage/benchmark-shape.md)).
+  device takes them ([its record](../object-storage/benchmark-shape.md)). Ceph and S3 were read at
+  the source by X14, with a Ceph on the lab beside the reading. It corrected three pages that
+  leaned on recalled Ceph and recorded what the metadata leaves room for a later listing and
+  gateway ([its record](../object-storage/ceph-and-s3-sources.md)).
 - [Milestones](../object-storage/milestones.md) is M11 to M21, provisional until the spikes
   report.
 
@@ -97,6 +100,26 @@ One collision with a decision this book has already taken is recorded there and 
 schema change is a new cluster and a restore, a restore carries rows and not object bytes, so
 adding a table to a cluster that holds objects would strand them
 ([Q31](../object-storage/contract.md#questions-to-answer)).
+
+### A listing index and an S3 gateway
+
+Out of scope by the decisions of 2026-10-02, and not designed.
+[X14](../object-storage/ceph-and-s3-sources.md#what-the-metadata-must-keep-possible) recorded
+what the metadata leaves room for, and the shape each would take, so that neither needs a
+schema change later:
+
+- **A listing index**: a table ordered by the path's unnormalised bytes, beside `ObjectMeta`,
+  which is partitioned by a hash of the path and so lives in other tablets. S3 promises a
+  listing that sees a write as soon as it is acknowledged, and nothing here commits across
+  tablets, so it would be updated as RGW's is. An entry is marked pending before the object's
+  commit and completed after, and a lister that meets a pending entry asks `ObjectMeta`.
+- **A gateway's multipart**: the parts' numbers, sizes and checksums, up to 10,000 an object,
+  kept after completion as S3 keeps them. They go in a table of the gateway's own, keyed by the
+  object id, since `ObjectMeta` is bounded.
+- **MD5 ETags**: not computed. S3 itself serves ETags that are not MD5s, so a Shoal ETag is
+  derived from the object id and its content version; a gateway that wants MD5s for single PUTs
+  computes them as the bytes arrive.
+- **Versioning**: no old version of an object is kept, and nothing here designs keeping one.
 
 ### Storage pools for a file system and block volumes
 

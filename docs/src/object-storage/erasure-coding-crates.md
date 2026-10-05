@@ -25,7 +25,8 @@ settle is under [What X4 does not settle](#what-x4-does-not-settle).
 [Q20](contract.md#questions-to-answer) asks which family of code, which crate and what
 geometry. X4 is the half of it a measurement can answer: the family and the crate, with what
 the geometry can be told from a code's speed. [X14](spikes.md#x14-ceph-and-s3-at-the-source),
-the reading of Ceph, is the other half. The user asked for code families and not only
+the reading of Ceph, ~~is~~ was the other half, and it found nothing in Ceph's geometry that X4
+and X6 had not already bounded ([X14](ceph-and-s3-sources.md#3-partial-writes-and-the-shard-versions)). The user asked for code families and not only
 Reed-Solomon crates, with `rlnc` named as one to include, and on 2026-10-03 for a comparison of
 every option and its performance under each build target, so that a cluster of AVX-512 nodes
 knows what to expect.
@@ -526,7 +527,7 @@ The options side by side. The figures are 4+2 at 64 KiB; *cold / hot* where both
 | Option | Performance | Strengths | Weaknesses | Tradeoffs |
 | --- | --- | --- | --- | --- |
 | **`rusty_erasure`** (recommended) | Fastest everywhere. Encode titan 7.6 / 9.9, europa 20 / 97; decode the same as encode; update titan 3.3, europa 6.0 cold, 24 hot | Every requirement met. ISA-L's matrices byte for byte. Update and per-index recovery with reusable plans. GFNI at run time. Pure Rust, no C. Its facade and core forbid `unsafe` | Three weeks old with one author. No AVX-512 kernels, so an AVX-512 node without GFNI runs its AVX2 ones. About 100 lines of `unsafe` in its kernels to read | Youth against speed and API. Mitigated by the format being ISA-L's: another implementation reads the same bytes |
-| **`isa-l`** | Second on europa cold, third on titan; a third of `rusty_erasure` hot on europa. Encode titan 5.0 / 5.4, europa 20 / 35 | ISA-L is what Ceph defaults to, mature and widely deployed. AVX-512 kernels | A six-year-old binding of one maintainer that does not bind the update. Unchecked lengths into C from a safe function. Needs nasm and autotools, and a `pkg-config` of 2022 or a system `libisal`. No GFNI in the 2.29 it bundles | The library is right and the binding is not. Using it means maintaining a binding |
+| **`isa-l`** | Second on europa cold, third on titan; a third of `rusty_erasure` hot on europa. Encode titan 5.0 / 5.4, europa 20 / 35 | ISA-L is what Ceph defaults to, for clusters made since Tentacle (`global.yaml.in:2617-2621` at `v20.2.0`, [X14](ceph-and-s3-sources.md#where-and-on-what)), mature and widely deployed. AVX-512 kernels | A six-year-old binding of one maintainer that does not bind the update. Unchecked lengths into C from a safe function. Needs nasm and autotools, and a `pkg-config` of 2022 or a system `libisal`. No GFNI in the 2.29 it bundles | The library is right and the binding is not. Using it means maintaining a binding |
 | **`reed-solomon-erasure`** | Second on titan, third on europa. Encode titan 5.6 / 8.1, europa 12 / 33 | Mature, widely used, MIT. Writes into caller buffers. Decode cache built in | SIMD fixed at compile time (`haswell` unless told), so it never uses AVX-512 in a portable build, and needs AVX2 everywhere. Its C kernels are a C toolchain. No update in its API. Last released in 2022 | Stable and slow to change, which is also unmaintained |
 | **`reed-solomon-simd`** | Encode competitive (titan 4.8 / 7.5); decode a tenth of encode (titan 0.50, europa 1.4) | Pure Rust, maintained. Its O(n log n) FFT scales to thousands of shards | No update. Owns its buffers, so every call copies. GF(2^16) parity matches nothing else. No AVX-512 or GFNI | Built for wide codes and large shard counts, which an object store of k + m up to 14 does not have |
 | **`raptorq`** | Slowest: 0.16 on titan, 0.5 on europa, every operation | Systematic and rateless: any number of repair symbols | Fails 4 of 1,001 patterns of 10+4 at exactly k. Symbols stop at 64 KiB. Allocates megabytes a call. No decode plan, so every degraded read solves a matrix | A broadcast code: built for receivers that keep listening until they have enough, not for a stripe whose losses are fixed |
@@ -582,7 +583,10 @@ microarchitectures.
   a Zen1 core for half a millisecond. The rest is X6's, X12's and [S15](performance.md)'s.
 - **A code inside a node.** Bytes arriving off a socket, leaving for a device, and an executor
   shared with tables. That is [X9](spikes.md#x9-table-latency-beside-object-work).
-- **Ceph's reading of the same question**, which is [X14](spikes.md#x14-ceph-and-s3-at-the-source).
+- ~~**Ceph's reading of the same question**, which is [X14](spikes.md#x14-ceph-and-s3-at-the-source).~~
+  Read by [X14](ceph-and-s3-sources.md#3-partial-writes-and-the-shard-versions): Ceph deals 4 KiB
+  units round-robin over the data shards by default, advises 16 KiB with its optimizations, and
+  updates parity by delta only where the delta reads fewer shards than a reconstruction.
 
 ## What it did not measure
 

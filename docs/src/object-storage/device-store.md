@@ -195,7 +195,11 @@ Three choices follow, each a question and none decided:
   own log that it "is advantageous only if the WAL device is faster than the primary device",
   and defers small writes on rotational media by default where on an SSD it does not
   (`bluestore_prefer_deferred_size_hdd` is 64 KiB and its SSD twin is zero, in
-  `src/common/options/global.yaml.in` at `v20.2.0`). A journal on another disk is also a
+  `src/common/options/global.yaml.in` at `v20.2.0`). That threshold is for writes into new
+  space. An overwrite of written space under one allocation unit is journalled on any device
+  (`src/os/bluestore/BlueStore.cc:16340-16394`). A deferred write logs its new bytes and applies
+  them in place after the commit, which is this page's journal
+  ([X14](ceph-and-s3-sources.md#6-bluestores-deferred-writes-and-checksums)). A journal on another disk is also a
   second thing that can fail: losing it leaves every chunk a committed write had not yet
   reached stale, and several devices that share one journal disk lose their staged writes
   together, so under a `device` failure domain they would have to count as one

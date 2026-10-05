@@ -195,9 +195,12 @@ snapshot stream's is today. What the budgets should be is
 
 ## Alternatives rejected
 
-**A log on every slice**, as a RADOS placement group has one on every OSD. It is what makes Ceph's recovery
-local and fast, and it is a second replicated log to keep consistent with the first. The
-group already has the facts.
+**A log on every slice**, as a RADOS placement group has one on every OSD that holds a shard of
+it (`src/osd/PeeringState.h:1484` at `v20.2.0`). ~~It is what makes Ceph's recovery local and
+fast,~~ It makes Ceph's recovery local while an OSD was away for fewer writes than the log keeps,
+250 to 10,000 entries a PG, and a full backfill scan past that
+([X14](ceph-and-s3-sources.md#2-peering-fencing-and-min_size)); and it is a second replicated log
+to keep consistent with the first. The group already has the facts.
 
 **Finding stale chunks by walking every row.** No scan exists for a client, and the
 engine's walk is of a whole table on a shard. It is the fallback, not the method.

@@ -73,7 +73,13 @@ One sentence carries the difference between B and Ceph: **Ceph keeps undo and ap
 once; B keeps redo and applies after the decision.** Ceph's write is "a two-phase process:
 commit and rollforward", committed "in place, possibly leaving some information required for
 a rollback in a write-aside object" (`doc/dev/osd_internals/erasure_coding/ecbackend.rst` at
-`v20.2.0`). Deciding which writes to roll back after a failure is what peering is for. B
+`v20.2.0`). The code does as the document says, in both of Tentacle's back ends. Each written
+shard clones the range it is about to overwrite into an object named for the write's version,
+then writes in place (`src/osd/ECTransaction.cc:829-869`). The clone is removed once every shard
+has committed (`src/osd/PGBackend.cc:339-391`). Deciding which writes to roll back after a failure
+is what peering is for: it takes the oldest log among the shards as authoritative for an erasure
+coded pool and rolls the rest back to it (`src/osd/PeeringState.cc:1682-1710`,
+`src/osd/PGLog.h:1275-1313`; [X14](ceph-and-s3-sources.md#2-peering-fencing-and-min_size)). B
 moves the decision in front of the apply, makes it one commit in a group that already
 exists, and pays a round for it.
 
@@ -82,7 +88,9 @@ operation is performed, the new data is written into a temporary object", "The a
 operation moves the data from the temporary object into the correct position within the base
 object", and "an unapplied prepare operation can easily be rolled back simply by deleting
 the associated temporary object" (`doc/dev/osd_internals/erasure_coding/proposals.rst`, a
-proposal and marked as one). What B changes is who decides.
+proposal and marked as one). It was not built: in `v20.2.0` every write lands in place, with the
+old range kept aside as above ([X14](ceph-and-s3-sources.md#1-what-an-acknowledgement-waits-for)).
+What B changes is who decides.
 
 ### The preferred direction, step by step
 

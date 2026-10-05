@@ -8,8 +8,13 @@ in the deployment and not in the schema, which is Ceph's arrangement: a pool own
 redundancy and a failure domain rule, and what stores data in it is pointed at it.
 
 A storage pool is not the bucket's alone. A file system and block volumes are expected later,
-and one pool is to serve them beside buckets at the same time, as one RADOS pool serves RGW,
-CephFS and RBD. So a pool here serves **consumers**, of which a bucket is the first kind.
+and one pool is to serve them beside buckets at the same time, ~~as one RADOS pool serves RGW,
+CephFS and RBD~~ which goes further than Ceph. RGW, CephFS and RBD share a Ceph cluster, but each
+in pools of its own: a pool is tagged with the one application that uses it, and a second is
+refused without an override (`src/mon/OSDMonitor.cc:9484-9487` at `v20.2.0`,
+[X14](ceph-and-s3-sources.md#9-how-osds-are-deployed-whom-a-pool-serves-and-crimson)). So a
+pool here serves **consumers**, of which a bucket is the first kind, and that is this design's
+choice, not one copied.
 
 Shoal has nothing to build that on. Its configuration names two directories a node and
 nothing that could be called a device. This page says what a storage pool, a device and a
@@ -50,7 +55,11 @@ today.
 In Ceph, by contrast, a device carries a class, "By default, OSDs automatically set their
 class at startup to `hdd`, `ssd`, or `nvme` in accordance with the type of device they are
 backed by", and a rule can be held to one class (`doc/rados/operations/crush-map.rst` at
-`v20.2.0`). An erasure code profile belongs to a pool and "cannot be modified after the pool
+`v20.2.0`). The code is narrower than the document. An OSD on a kernel block device reports
+`hdd` or `ssd` from the device's rotational flag, so an NVMe drive is `ssd`, and only SPDK reports
+`nvme`. A class set when the OSD was made wins and is never reset
+(`src/os/ObjectStore.h:349`, `src/osd/OSD.cc:4968-4999`;
+[X14](ceph-and-s3-sources.md#the-comparison)). An erasure code profile belongs to a pool and "cannot be modified after the pool
 is created" (`doc/rados/operations/erasure-code.rst`).
 
 ## The design

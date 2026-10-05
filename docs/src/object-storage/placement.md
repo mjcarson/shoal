@@ -142,8 +142,10 @@ the group's key and the slice's key. That is a definition of five lines, not a c
 placement weight. The logarithm is read from a fixed-point table of `log2(1 + i/4096)` with
 linear interpolation, frozen as constants, and nothing after it is more than one IEEE multiply.
 libm's `ln` chose differently from the table for 4 of 39 million chunks at near ties, and any
-rate above zero is a chunk one node stages where another reads. Ceph's `crush_ln` exists for
-the same reason. The set is each domain's best slice and the `width` domains whose best slices
+rate above zero is a chunk one node stages where another reads. ~~Ceph's `crush_ln` exists for
+the same reason.~~ Ceph's `crush_ln` is a fixed-point logarithm from tables too, but its source
+gives no reason for it ([X14](ceph-and-s3-sources.md#5-placement-indep-upmap-and-crush-compat)):
+the reason is ours. The set is each domain's best slice and the `width` domains whose best slices
 score lowest, found in one pass over the pool's slices.
 
 #### Positions
@@ -169,7 +171,11 @@ No function of the map can keep positions. Take three members A, B and C and two
 The rules X2 tried that compute positions from the map all shuffled them. Drawing each position
 on its own, as CRUSH's `indep` mode does, moved 1.1 to 2.6 times the least. A matching that no
 weight enters moved 2 to 3 times once the set's domains changed. Held as state, positions moved
-exactly the least everywhere ([X2](placement-simulation.md#positions)).
+exactly the least everywhere ([X2](placement-simulation.md#positions)). Ceph's own `indep`, run
+by [X14](ceph-and-s3-sources.md#5-placement-indep-upmap-and-crush-compat) through `crushtool` on
+X2's shapes, moved 2.0 to 3.5 times the least for a device added, removed or reweighted, since it
+draws down the hierarchy. A device marked out moved the least wherever the pool was narrower than its domains,
+and removing that device afterwards moved 1.1 to 2.9 times the least again.
 
 #### Seats and placement weights
 
@@ -279,8 +285,12 @@ and a commit for every stripe a move touches.
 
 **CRUSH whole**, with its hierarchy of typed buckets and its rule language. Two levels are
 all a deployment here has. The function is small enough to write and to simulate, and
-[X14](spikes.md#x14-ceph-and-s3-at-the-source) reads how Ceph keeps positions stable for an
-erasure coded pool before this page claims to do the same.
+~~[X14](spikes.md#x14-ceph-and-s3-at-the-source) reads how Ceph keeps positions stable for an
+erasure coded pool before this page claims to do the same~~
+[X14](ceph-and-s3-sources.md#5-placement-indep-upmap-and-crush-compat) read how Ceph keeps
+positions for an erasure coded pool. Each position draws on its own, a position that finds
+nothing is left a hole rather than shifted (`src/crush/mapper.c:633-805`), and a change to a
+device's weight moves positions on its siblings too. This page keeps positions as state instead.
 
 **A record for each placement group on the pushed map.** It is the tablet chapter's decision
 again: at 4096 groups a consumer it multiplies a frame by three orders of magnitude.

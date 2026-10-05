@@ -325,7 +325,10 @@ move.
 ### M17. Scrub and repair
 
 **Closed before it.** Q28, a scrub's cadence, its budget, and what a deep scrub verifies
-(X12, [X14](spikes.md#x14-ceph-and-s3-at-the-source)).
+(X12, ✅ [X14](ceph-and-s3-sources.md)). X14 settled the last in part: a deep scrub checks a
+stripe's chunks against each other, which Ceph's does not for an overwritable pool
+([Q28, in part](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)).
+The cadence and the budget are X12's.
 
 **Delivers.** [S11](scrub.md) for replicated pools. A checksum failure on a read reported
 and not only refused. The light scrub: holders' inventories against the rows and against
@@ -353,7 +356,8 @@ explains is reported, and removed at M20.
 ([X4](spikes.md#x4-erasure-coding-crates-performance-and-tradeoffs), X14). The code and the
 crate are closed ✅: Reed-Solomon on ISA-L's Cauchy matrix through `rusty_erasure`, with XOR at
 one parity chunk ([X4's record](erasure-coding-crates.md),
-[S18](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); the geometry and X14 are not.
+[S18](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); the geometry ~~and X14 are~~ is
+not. ✅ [X14](ceph-and-s3-sources.md) has reported and took nothing of it from Ceph.
 The dependency is added here and not before, pinned exactly, after its `unsafe` (about a
 hundred lines, all in `rusty_erasure-accel`) has been read.
 
@@ -452,7 +456,7 @@ Named so that nothing above is read as including them.
 
 | Item | Waits on |
 | --- | --- |
-| An ordered listing of a bucket | [Q32](contract.md#questions-to-answer), and a decision of its own |
+| An ordered listing of a bucket | [Q32](contract.md#questions-to-answer), ~~and~~ recorded by X14 (an index updated pending then complete, as RGW's is, over paths as unnormalised bytes), and a decision of its own |
 | A gateway that speaks S3 | Listing, and a reason |
 | Clients that place, encode and write stripe chunks themselves | [D7](../direction/shard-aware-routing.md), and a measurement that the crossing is worth removing |
 | Changing a pool's redundancy; moving a bucket between pools | A migration between two pools, designed as one |
@@ -479,7 +483,7 @@ The reason this page is provisional, spike by spike.
 | ~~X11~~ | ~~A shared connection hurts small queries; a connection cannot be handed to another executor~~ The first came out, ~~9 to 32~~ 4 to 29 times at 1 MiB ([item 213](../appendix/resolved/x11-setup-fifo.md) measured its reads again), and the second did not: a connection under kTLS is handed over at no cost, while bytes hopping cost 1.3 to 1.7 times the cpu ([X11](streamed-bodies.md)) | ~~M13 sets connections aside for object bytes; the hop between executors stays in M14~~ M13's client sets connections apart for object bytes (S1's prerequisite builds them for queries), and M14 hands the object lane's connections to the slice's executor |
 | X12 | A rebuild inside a tolerable budget takes days | The defaults for `k + m` and `f` change before M18, and M16's budget has to adapt to the foreground |
 | ~~X13~~ | ~~The driver's kinds do not generalize~~ (they do: [F69](../features/driver-operation-kinds.md)) ~~One core cannot make seeded bytes as fast as a pool takes them~~ It can, for any one lab device: a Zen1 core put 1.8 GiB/s of made and checksummed frames against the 970 EVO's 722 MiB/s ([X13](benchmark-shape.md)) | ~~M11 builds a second driver beside the first~~ ~~M13's driver runs on several cores, and its capture proves it had them~~ M13's driver makes a stream's bytes on the stream's own task; its capture keeps each driver thread's busy share, since a pool of several devices takes more than one core |
-| X14 | A mechanism taken from Ceph works otherwise | The page that leaned on it is corrected before its gate |
+| ~~X14~~ | ~~A mechanism taken from Ceph works otherwise~~ Three did: the truncate sequence, a pool shared by Ceph's three clients, and what an acknowledgement waits for since Tentacle ([X14](ceph-and-s3-sources.md#what-would-have-changed-the-design)) | The page that leaned on it is corrected before its gate: ~~before its gate~~ S3, S4 and S17 on 2026-10-05, and no milestone changed |
 
 ## The order is a claim
 

@@ -75,12 +75,17 @@ Ceph's stripe unit is what this page calls a chunk unit. Its default is 4 KiB, a
 documentation recommends raising it: "For the
 majority of I/O workloads it is recommended to increase the stripe unit to at least 16K when
 using optimizations", and up to 256 KiB for loads that mostly read
-(`doc/rados/operations/erasure-code.rst` at `v20.2.0`).
+(`doc/rados/operations/erasure-code.rst` at `v20.2.0`). That is advice only: the default is
+`osd_pool_erasure_code_stripe_unit`, 4 KiB, for every pool, optimized or not, and it is fixed
+when the pool is made (`src/common/options/mon.yaml.in:16-27`, `src/mon/OSDMonitor.cc:7836-7844`;
+[X14](ceph-and-s3-sources.md#3-partial-writes-and-the-shard-versions)).
 
 **How data is laid across the data chunks** is a third choice. Above, each data chunk holds
 one contiguous quarter of the stripe, so a small read touches one holder and a long one
 reads each holder in one run. Ceph deals units round-robin, so a long read fans over every
-holder at once. The first suits a seek and a rotational disk; the second parallelises a
+holder at once: unit `i` of a stripe is data shard `i` (`src/osd/ECUtil.h:632-643` at
+`v20.2.0`), and a short read reads only the shards that hold it (`osd_ec_partial_reads`, on by
+default). The first suits a seek and a rotational disk; the second parallelises a
 stream. It is left to ~~X4 and~~ the read arms of [S15](performance.md): X4 times a code over
 whole unit rows, and either way of dealing bytes encodes the same rows, so it could not tell
 them apart.
@@ -147,7 +152,15 @@ Ceph reached the same place from the other side: its design keeps "a vector of v
 numbers" for each object and requires that "the log entry needs to be modified to include
 the set of shards that are being updated" (same document; a shard there is a chunk's holder
 here, a slice). There the vector lives with the holders and peering reconciles it; here it is one
-replicated row.
+replicated row. The code shipped it as two records
+([X14](ceph-and-s3-sources.md#3-partial-writes-and-the-shard-versions)):
+
+- each log entry names the shards it wrote (`written_shards`, `src/osd/osd_types.h:4510`);
+- the object's info keeps the version each untouched data shard was left at (`shard_versions`,
+  `:6263`), on the shards that can become primary: data shard 0 and the parity.
+
+A per-PG summary of which writes each shard skipped is merged at peering
+(`partial_writes_last_complete`, `:3061-3062`; `src/osd/PeeringState.cc:366-435`).
 
 ### The write hole
 
@@ -171,7 +184,9 @@ The last stripe of an object is usually short. Its data chunks hold what there i
 chunk is as long as the longest data chunk, and what is absent is zeros that are never
 stored. A small object in a 4+2 pool therefore costs three times its size and not six
 chunks of padding. Ceph's Tentacle release "eliminates padding which can save capacity" for
-the same reason (`doc/rados/operations/erasure-code.rst`).
+the same reason (`doc/rados/operations/erasure-code.rst`). Its optimized pools store each data
+shard only as long as its bytes, rounded to 4 KiB, and parity as long as shard 0
+(`src/osd/ECUtil.h:614-629` at `v20.2.0`). Its legacy pools pad every shard to a whole stripe.
 
 ### Decoding and rebuilding
 

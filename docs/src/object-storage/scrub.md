@@ -40,7 +40,10 @@ usually done daily. Deep scrubbing reads the data and uses checksums to ensure d
 integrity, and is usually done weekly" (`doc/rados/configuration/osd-config-ref.rst` at
 `v20.2.0`). The defaults behind "daily" and "weekly" are `osd_scrub_min_interval` of one
 day and `osd_deep_scrub_interval` of seven, with three scrubs at once for an OSD and reads
-of 512 KiB (`src/common/options/osd.yaml.in`).
+of 512 KiB (`src/common/options/osd.yaml.in`). Each PG's next scrub is drawn around them: a
+light one 1 to 1.5 days after the last, a deep one at 7 days with a deviation of 1.4
+(`src/osd/scrubber/scrub_job.cc:115-118`, `:251-255`;
+[X14](ceph-and-s3-sources.md#7-scrub-the-scheduler-and-what-a-deep-scrub-of-an-erasure-coded-pool-verifies)).
 
 ## The design
 
@@ -94,7 +97,12 @@ longitudinal summary value, then an encoding of the longitudinal summary values 
 shard should produce the same longitudinal summary values as are stored by the coding parity
 shards" (`doc/dev/osd_internals/erasure_coding/enhancements.rst`). It also names the cost:
 "There is a risk that by XORing the contents of a chunk together that a set of corruptions
-cancel each other out".
+cancel each other out". **It was not built.** In `v20.2.0` a deep scrub of an overwritable
+erasure coded pool reports a digest of zero for every shard and compares nothing between them
+(`src/osd/ECBackendL.cc:1831-1835`, `src/osd/ECBackend.cc:1223-1224`). Only a pool that never
+overwrites keeps a checksum a shard. [X14](ceph-and-s3-sources.md#7-scrub-the-scheduler-and-what-a-deep-scrub-of-an-erasure-coded-pool-verifies)
+corrupted a parity shard on the lab with its checksums intact, and nothing found it. The check
+below is this part's own.
 
 The preferred direction is that check: each holder folds its chunk's units into one unit's
 worth of summary, and the driver encodes the data summaries and compares them with the

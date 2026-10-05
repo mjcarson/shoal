@@ -3,12 +3,13 @@
 ~~**Nothing here has been run.**~~ ~~**One spike has run**: X4, whose record is
 [its own page](erasure-coding-crates.md) (2026-10-03).~~ ~~**Two spikes have run**~~ ~~**Three
 spikes have run**~~ ~~**Four spikes have run**~~ ~~**Five spikes have run**~~ ~~**Six spikes have
-run**~~ **Seven spikes have run**, each with its record on a page of its own: X2,
+run**~~ ~~**Seven spikes have run**~~ **Eight spikes have run**, each with its record on a page of its own: X2,
 [placement](placement-simulation.md), X4, [the erasure coding crates](erasure-coding-crates.md), and
 X5, [the checksums](checksums.md) (all 2026-10-03), X6, [the device store on SSD](device-store-ssd.md),
 and X10, [what a stripe row costs](stripe-row-costs.md) (both 2026-10-04), and X11,
-[streamed bodies](streamed-bodies.md), and X13, [the benchmark's shape](benchmark-shape.md) (both
-2026-10-05). This page is the list of what has to be
+[streamed bodies](streamed-bodies.md), X13, [the benchmark's shape](benchmark-shape.md), and X14,
+[Ceph and S3 at the source](ceph-and-s3-sources.md) (all three 2026-10-05). This page is the list
+of what has to be
 learnt before the [milestones](milestones.md) of this part can be more than a guess, and how
 each thing would be learnt.
 
@@ -118,7 +119,7 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 | ✅ X11 | Streamed bodies, [reported](streamed-bodies.md) | Q26 in part | europa, the lab | ~~Days~~ Done 2026-10-05 |
 | X12 | Recovery and scrub rates | Q17, Q28, Q29 | X4, X6, X7 | Days |
 | ✅ X13 | The benchmark's shape, [reported](benchmark-shape.md) | Q30, with F69 | europa, the lab | ~~Days~~ Mostly answered by [F69](../features/driver-operation-kinds.md); the rest done 2026-10-05 |
-| X14 | Ceph and S3 at the source | Q14, Q20, Q28, Q32 | Nothing | Days |
+| ✅ X14 | Ceph and S3 at the source, [reported](ceph-and-s3-sources.md) | Q14, Q20, Q28, Q32 | Nothing; a Ceph on the lab, taken down after | ~~Days~~ Done 2026-10-05 |
 
 ## The spikes
 
@@ -715,6 +716,24 @@ checksums; what a capture gains.
 
 ### X14. Ceph and S3 at the source
 
+**Reported 2026-10-05** on [its own page](ceph-and-s3-sources.md), and recorded on S18 as
+[Q32, and Q14, Q20, Q28 in part](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05).
+Of S17's nine recalled items four held, two held in part, two were wrong and one was a gap, and
+every page that leaned on one is corrected. The result named below came out for three of them:
+
+- the truncate sequence, which rides only CephFS's extent operations and clips a stale write
+  to the object's current size;
+- the RADOS pool RGW, CephFS and RBD were said to share, when they share a cluster and keep
+  pools of their own;
+- what an acknowledgement waits for, which since Tentacle skips the shards a partial write does
+  not touch.
+
+None moved a decision. A deep scrub of an overwritable erasure coded pool, it found, checks no
+shard against another, so Q28's parity check is this part's own. Q32 is recorded: an ETag derived
+and never hashed, a bounded attribute field, the path as unnormalised bytes, and a listing index
+updated in two phases, as RGW's is. The plan as written follows, struck where the run departed
+from it.
+
 **Question.** Do the mechanisms this design copies work the way these pages say? And what
 would a later listing or an S3 gateway need the metadata to have left room for
 ([Q32](contract.md#questions-to-answer))?
@@ -727,12 +746,21 @@ a truncate is fenced.
 **Method.** Reading, at the pinned release: the erasure coding back end and the peering
 code, the placement code for an erasure coded rule, the object store's deferred writes, the
 scrub scheduler. And the S3 reference for listing, multipart, conditional requests and
-checksums.
+checksums, read in AWS's Smithy model of the API at a pinned commit. Added with the user before
+the run: a small Ceph `v20.2.0` on the lab, to watch six of the things the reading claims. Below
+`min_size`; what an acknowledgement waits for; which shards a small overwrite writes; what a
+deep scrub of an erasure coded pool finds; RGW's tail after an overwrite; and Ceph's own CRUSH on
+X2's shapes, offline. Each prediction was written from the source before its run.
+
+**Where.** ~~Anywhere.~~ The reading anywhere; the cluster on europa (its monitor, manager and
+RGW), titan and hyperion (three OSDs each, on LVs), deployed by cephadm and taken down after.
 
 **Records.** Rows of S17 moved from recalled to read, each with a path; corrections to any
-page that was wrong; a list of what the metadata must keep possible.
+page that was wrong; a list of what the metadata must keep possible. And what the lab's Ceph
+did, beside each prediction.
 
-**Depends on.** Nothing. **Cost.** Days.
+**Depends on.** Nothing; ~~nothing~~ for the lab's half, a container engine on each host and
+LVs for the OSDs, all removed after. **Cost.** ~~Days.~~ A day.
 
 ## The order
 
@@ -741,7 +769,7 @@ flowchart LR
     classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
     X1["X1 model"]
     X2["✅ X2 placement"]:::done
-    X14["X14 sources"]
+    X14["✅ X14 sources"]:::done
     X13["✅ X13 bench shape"]:::done
     X10["✅ X10 row cost"]:::done
     X3["X3 bytes through groups"]
@@ -763,7 +791,7 @@ flowchart LR
 ```
 
 Nine depend on no other spike and on nothing that has to be fitted, and can start at once:
-X1, ~~X2,~~ X3, ~~X4,~~ ~~X5,~~ ~~X10,~~ ~~X11,~~ ~~X13~~ and X14; X2, X4, X5, X10, X11 and X13 have run. ~~X6 can start too, and
+X1, ~~X2,~~ X3, ~~X4,~~ ~~X5,~~ ~~X10,~~ ~~X11,~~ ~~X13~~ and ~~X14~~; X2, X4, X5, X10, X11, X13 and X14 have run. ~~X6 can start too, and
 needs an XFS filesystem for one of its legs.~~ X6 has run too, on an XFS filesystem fitted for it.
 ~~X8 follows X6, and~~ X8 and X9 ~~follows X5, since X4 has
 reported~~ can start: X4, X5 and X6 have all reported. X7 and the rotational half of X12 wait
@@ -775,7 +803,9 @@ X1 is the one that can say the design is wrong.
 The first gate, [before M11](milestones.md#before-m11-the-object-contract), waits on eight
 of them: X1 and X2 for the decisions themselves, and X3, X8 and X9 for what those decisions
 cost, which bring X4, X5 and X6 with them. X2, X4, X5 and X6 have reported, and X10 and X11 beside
-them.
+them. [What's left to do](whats-left-todo.md) draws every spike into that gate, because the
+milestones stop being provisional only when every decision is on the record, and X14 is among
+them: it read the alternative Q14 is measured against, and it has reported.
 
 ### What a spike needs first
 
@@ -794,6 +824,7 @@ it throws away, or it only saves time.
 | [Resolved #210](../appendix/resolved/bench-preload-frame.md): the bench's preload within the frame | X3 | Required | X3 is `shoaladm bench` at rows of 1 MiB and 4 MiB. Its preload sent bundles of sixty-four, past the frame, whenever the file outpaced the cluster, and the refused rows vanished from the record | ✅ 2026-10-03 |
 | ✅ An XFS filesystem: europa's Optane, and an LV on titan's and hyperion's 970 EVO | X6's XFS leg | Required | [What the lab needs fitted](prerequisites.md#what-the-lab-needs-fitted) | ✅ 2026-10-03 |
 | Rotational disks | X7; X12's rotational half | Required | The same | Not fitted |
+| ✅ A Ceph `v20.2.0` on the lab: cephadm, podman on titan and hyperion, three LVs on each, a user at uid 167 | X14's lab half | Required | Asked for with the user, and without a running Ceph nothing on X14's page could be *observed*. Ubuntu 26.04's uutils `install` refused cephadm's numeric owner until the user existed, and hyperion, with no route to the internet, was given titan's image ([X14](ceph-and-s3-sources.md#what-it-took)) | ✅ 2026-10-05, taken down the same day |
 | ✅ Device counters, node memory and index bytes in a bench capture: delivered by [F71](../features/bench-device-memory.md) | X3, X10 | Optional | ~~Nothing in the tree reads the kernel's device counters, and a capture keeps neither `resident_bytes` nor `archive_map_bytes`, which every node reports. A script reading `/proc/diskstats` on each host before and after, and `shoaladm stats --json --watch` beside the run, take the same numbers.~~ Since F71 every run of a capture keeps each host's device counters, read before and after it, and every member's resident set and index bytes every two seconds; `compare` reads device bytes written a byte sent, the resident peak and the index bytes. WAL and archive bytes apart still need the two roots on separate devices, which the capture then reports apart, or a trace of writes by file name, as the cluster testing took for [O62](../cluster-testing/performance.md#o62-the-archive-map-rewrite) | ✅ 2026-10-03 |
 | ✅ A paced neighbour stream, with windows by table, in the bench: delivered by [F72](../features/bench-paced-stream.md) as a *paced stream* | X3 | Optional | ~~A bench run is one closed loop whose windows are kept by kind, not by table, so it cannot drive a small table lightly beside a large one and report each. A second driver against the same cluster can. It is near the open-loop generator in [TODOs](../appendix/todos.md)~~ Since F72 `--paced <table> --paced-rate <N>` drives one table at an offered rate beside a main load that leaves it alone, its latency from each operation's slot, its windows and worst second's p99 kept apart in every run | ✅ 2026-10-03 |
 | ~~An operation kind a schema supplies before buckets exist~~ **Not needed**: X10 drove its own | X10 | Optional | X10's cold commit is a write that reads its row. `#[shoal::db]` emits `operation_kinds` empty, and buckets are what will fill it (M12). ~~X10's own client drives it meanwhile~~ X10's driver, `x10` in `shoal-spike-rows`, aimed each write at one group's leader and timed a read before a commit, which no operation kind the bench drives could have done ([X10](stripe-row-costs.md#the-harness)) | Not needed |
@@ -824,18 +855,20 @@ its evidence and with what it did not settle:
 
 | Decided | From |
 | --- | --- |
-| The write protocol: Q14, Q15, Q16 and Q18, and the contract agreed | X1; X3 and X8 for cost |
+| The write protocol: Q14, Q15, Q16 and Q18, and the contract agreed | X1; X3 and X8 for cost; ✅ X14 for the alternative Q14 is measured against, Ceph's write as `v20.2.0` has it ([the record](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) |
 | Placement: Q19 | ✅ X2 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)); how a commit checks a generation and its positions is X1's |
-| The code, the crate and the geometry: Q20. The checksum: Q21 | ✅ X4 for the code and the crate ([Q20, in part](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); ✅ X5 for the checksum ([Q21, in part](contract.md#q21-in-part-the-checksum-2026-10-03)); X14, the geometry, and the granule and chunk digest Q21 leaves |
+| The code, the crate and the geometry: Q20. The checksum: Q21 | ✅ X4 for the code and the crate ([Q20, in part](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); ✅ X5 for the checksum ([Q21, in part](contract.md#q21-in-part-the-checksum-2026-10-03)); ~~X14,~~ ✅ X14, which took nothing of the geometry from Ceph; the geometry, and the granule and chunk digest Q21 leaves |
 | The device store: Q22, and Q23 for the rotational gate | ✅ X6 for SSDs ([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)); X7 for rotational disks |
 | Where object work runs: Q24 | X9 |
 | Stripe size and the inline threshold: Q25. Small writes: Q27 | ✅ X10 for Q25 ([Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04)); X8 for Q27's other half |
 | The wire: Q26 | ✅ X11 ([Q26, in part](contract.md#q26-in-part-streamed-bodies-2026-10-05)) |
-| Budgets: Q28, Q29 | X12 |
+| Budgets: Q28, Q29 | X12; ✅ X14 for what a deep scrub of k+m verifies, which Ceph's does not ([Q28, in part](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) |
 | The driver: Q30 | ✅ [F69](../features/driver-operation-kinds.md) for the driver's shape ([Q30, in part](contract.md#q30-in-part-the-drivers-shape-2026-10-03)); ✅ X13 for the dataset and the rate of seeded bytes ([Q30](contract.md#q30-the-object-dataset-and-seeded-bytes-2026-10-05)) |
 
 Q31 and Q32 are not waited for. Q31 blocks the last gate and is decided by design, not
-measurement; Q32 is for after it.
+measurement; ~~Q32 is for after it~~ Q32 is for after it, and X14 recorded it anyway, since what
+the metadata leaves room for is cheapest to decide before M12 lays the rows out
+([Q32](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)).
 
 **Two of these wait on hardware.** X7 and the rotational half of X12 cannot run until disks
 are fitted. If the disks come late, every gate but

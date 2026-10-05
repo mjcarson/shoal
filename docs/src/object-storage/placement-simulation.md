@@ -107,8 +107,10 @@ slice's key, each mixed once. It is defined in five lines, not by any crate, whi
 for anything persisted. The weighted score is `-log2(u / 2^64) / w`, and the lowest wins. That is
 `straw2`'s comparison, `ln(u) / w` highest, written the other way round. The logarithm comes from
 a table of `log2(1 + i/4096)` in fixed point, with linear interpolation, and every operation after
-it is a plain IEEE multiply. This is Ceph's reason for `crush_ln`: libm's `ln` is not specified
-to the last bit, and two nodes on a near tie must not choose differently
+it is a plain IEEE multiply. ~~This is Ceph's reason for `crush_ln`:~~ Ceph's `crush_ln` is a
+fixed-point table too, though its source gives no reason
+([X14](ceph-and-s3-sources.md#5-placement-indep-upmap-and-crush-compat)). Ours is that libm's `ln`
+is not specified to the last bit, and two nodes on a near tie must not choose differently
 ([The logarithm](#the-logarithm)).
 
 **The candidates.** Each is a function of the placement group and one view of the map, which is
@@ -345,8 +347,11 @@ and the exception is a replacement under a new seat ([below](#a-replaced-device)
 
 **The hierarchy costs that property.** A device's change moves its host's weight, and a host's
 draw against every other host moves with it. So chunks leave the host from devices that did
-not change: 1.5 to 2.3 times the least. Ceph's operators know this as the second movement when
-an OSD is taken out of the CRUSH map. The window moves nearly everything whenever the list
+not change: 1.5 to 2.3 times the least. ~~Ceph's operators know this as the second movement when
+an OSD is taken out of the CRUSH map.~~ No Ceph document names a second movement, but Ceph's own
+CRUSH makes one: an OSD marked out moved 1.00 to 1.02 times the least where the pool is narrower than its
+domains, and removing it from the map afterwards moved 1.1 to 2.9 times the least again
+([X14](ceph-and-s3-sources.md#5-placement-indep-upmap-and-crush-compat)). The window moves nearly everything whenever the list
 changes length, as S5 expected.
 
 ### Positions
@@ -568,7 +573,8 @@ The four are near ties, where the table's error and libm's rounding fall on diff
 second libm, or the same one on another cpu, can disagree with the first the same way, though
 less often. Any rate above zero is a chunk that one node stages where another node reads.
 So the logarithm is the table's, frozen as constants and checked against published values when
-it is written. That is what Ceph does with `crush_ln` for the same reason. It is also the faster
+it is written. ~~That is what Ceph does with `crush_ln` for the same reason.~~ Ceph's `crush_ln` is a table
+too, for no reason its source states ([X14](ceph-and-s3-sources.md#5-placement-indep-upmap-and-crush-compat)). It is also the faster
 of the two.
 
 F58's lead score is weighted rendezvous over `f64::ln` too, and its docstring claims the same
@@ -656,9 +662,18 @@ score lowest are the set. One pass over the slices finds it.
 - **The planner's fitting**: when it runs, how often, and how it keeps a fit current as the map
   changes. X2 fits once over 24 rounds and refits once after an add.
 - **Racks.** No deployment has one ([S1](prerequisites.md#optional)).
-- **Ceph's own code.** How CRUSH keeps an erasure coded pool's positions, and what `upmap` and
+- ~~**Ceph's own code.** How CRUSH keeps an erasure coded pool's positions, and what `upmap` and
   `crush-compat` do exactly, is [X14](spikes.md#x14-ceph-and-s3-at-the-source)'s reading. X2
-  measured the ideas, not Ceph's implementation of them.
+  measured the ideas, not Ceph's implementation of them.~~ **Ceph's own code**, read and run by
+  [X14](ceph-and-s3-sources.md#5-placement-indep-upmap-and-crush-compat) on X2's shapes through
+  `crushtool`. Its `indep` moved 2.0 to 3.5 times the least for a device added, removed or
+  reweighted, more than `rendezvous by position`, because it draws down the hierarchy. It moved
+  1.00 to 1.02 times for a device marked out wherever the pool was narrower than its domains, and
+  1.30 to 1.57 where it was as wide, and removing that device then moved 1.1 to 2.9 times the least
+  again. Its straw2 filled within a few points of `rendezvous`. `upmap`
+  balances counts of placement groups against a target in proportion to weight, one pair at a
+  time inside the failure domain. `crush-compat` fits a second set of weights used only for
+  placement. Neither was run.
 
 ## What it did not measure
 

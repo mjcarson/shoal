@@ -175,8 +175,8 @@ Four rules every page agrees with:
 - **A storage pool serves many consumers at once, of mixed kinds.** A stripe's key and a
   chunk's identity name the consumer, so nothing below the binding asks what kind it is.
 
-This is md RAID's arrangement, a stripe being one chunk a disk combined by parity, with a
-stripe large enough to be the unit of placement. [S8](erasure-coding.md#geometry) says how the
+This is md RAID's arrangement (*recalled*, [S17](prior-art.md#other-stores)), a stripe being one
+chunk a disk combined by parity, with a stripe large enough to be the unit of placement. [S8](erasure-coding.md#geometry) says how the
 chunks' bytes are laid out; [S17](prior-art.md#ceph) says what each word is in Ceph.
 
 ## The constraint every page inherits
@@ -232,7 +232,7 @@ hypothesis until its spike reports.
 | S14 | [Operating buckets and pools](operations.md) | Admin operations, readiness, what a restore means |
 | S15 | [Performance](performance.md) | The object arms of `shoaladm bench` and the budgets |
 | S16 | [Testing](testing.md) | The protocol model, device faults, the acceptance index |
-| S17 | [Prior art](prior-art.md) | Ceph and the other stores, each claim marked read or recalled |
+| S17 | [Prior art](prior-art.md) | Ceph and the other stores, each claim marked read, observed or recalled |
 | S18 | [The contract and the questions](contract.md) | P7–P19, Q14–Q32, the decision record |
 | — | [Exploratory spikes](spikes.md) | X1–X14: what has to be learnt before the milestones are real |
 | — | [Milestones](milestones.md) | M11–M21, provisional |
@@ -280,8 +280,11 @@ design record.
 It is not compatible with S3, and it is not a file system: there are no directories, no
 rename, no links and no locks. It is not a block device service, though a stripe behaves much
 as a RADOS object does. Both are expected later, and **on the same storage pools as buckets**:
-one pool is to serve a bucket, a file system and a block volume at once, as one RADOS pool
-can serve RGW, CephFS and RBD. So the storage pool layer is designed for them now, with a
+one pool is to serve a bucket, a file system and a block volume at once, ~~as one RADOS pool
+can serve RGW, CephFS and RBD~~ which a RADOS pool does not: RGW, CephFS and RBD share a Ceph
+cluster, each in pools of its own
+([X14](ceph-and-s3-sources.md#9-how-osds-are-deployed-whom-a-pool-serves-and-crimson)). So the
+storage pool layer is designed for them now, with a
 consumer named in every key and nothing below a binding that knows what an object is, and
 nothing above it is designed ([todos](../appendix/todos.md#storage-pools-for-a-file-system-and-block-volumes)). It promises no listing at first, no versions of an object, no
 lifecycle rules or tiering between pools, no compression, no encryption at rest and no

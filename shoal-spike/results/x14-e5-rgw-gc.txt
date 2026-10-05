@@ -1,0 +1,29 @@
+put x14/six-mib 6 MiB acknowledged at 2026-10-05T15:43:21Z
+== data pool after the first PUT
+bf106bb8-dc37-4b74-acae-9251f8dabb8c.14276.1__shadow_.TlBv-0qYIWyfiOJJc9S0JYt324rvkgG_1
+bf106bb8-dc37-4b74-acae-9251f8dabb8c.14276.1_six-mib
+== gc list --include-all after the first PUT
+[]
+overwrite x14/six-mib 6 MiB acknowledged at 2026-10-05T15:43:24Z
+== data pool after the overwrite
+bf106bb8-dc37-4b74-acae-9251f8dabb8c.14276.1__shadow_.TlBv-0qYIWyfiOJJc9S0JYt324rvkgG_1
+bf106bb8-dc37-4b74-acae-9251f8dabb8c.14276.1__shadow_.tOc9KfZ1GhY__5tqU50mdak5qH60hZG_1
+bf106bb8-dc37-4b74-acae-9251f8dabb8c.14276.1_six-mib
+== gc list (due entries only) after the overwrite
+[]
+== gc list --include-all after the overwrite
+[
+    {
+        "tag": "bf106bb8-dc37-4b74-acae-9251f8dabb8c.14276.2338839219457310971\u0000",
+        "time": "2026-10-05T17:43:24.386710+0000",
+        "objs": [
+            {
+                "pool": "default.rgw.buckets.data",
+                "oid": "bf106bb8-dc37-4b74-acae-9251f8dabb8c.14276.1__shadow_.TlBv-0qYIWyfiOJJc9S0JYt324rvkgG_1",
+                "key": "",
+                "instance": ""
+            }
+        ]
+    }
+]
+== rgw_gc_obj_min_wait 7200 rgw_gc_processor_period 3600

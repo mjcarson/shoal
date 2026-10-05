@@ -162,8 +162,14 @@ makes that safe.
   short because floors are removed as fast as stripes are reclaimed, and a truncate that
   would push it past its bound waits.
 
-RADOS carries a truncate sequence on every operation for the same reason. That is recalled
-and was not read at source; [X14](spikes.md#x14-ceph-and-s3-at-the-source) reads it.
+~~RADOS carries a truncate sequence on every operation for the same reason. That is recalled
+and was not read at source; [X14](spikes.md#x14-ceph-and-s3-at-the-source) reads it.~~ RADOS
+carries a truncate sequence for the same reason, though not on every operation and not with
+this guarantee ([X14](ceph-and-s3-sources.md#4-a-truncate), read at `v20.2.0`). CephFS stamps it
+on the extent reads and writes it sends, and the OSD keeps one sequence and size an object
+(`src/osd/osd_types.h:6184`). It clips a stale write to the object's *current* size
+(`src/osd/PrimaryLogPG.cc:6765-6773`). So once a newer write has extended the object past the
+stale write's range, the stale bytes land. The OSD alone does not give P13; the floors here do.
 
 ### Small objects stay inline
 

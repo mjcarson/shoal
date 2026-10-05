@@ -44,7 +44,11 @@ and answers cross the client wire in bounded frames, over a stream layer M13's o
 carry bytes over. [X13](benchmark-shape.md) ✅ reported the same day too and finished what
 [F69](../features/driver-operation-kinds.md)'s row left of Q30: a stream makes its own seeded bytes
 on one core, faster than any lab device takes them, from a description whose generator is
-SplitMix64 in counter mode. It changes no row of this page.
+SplitMix64 in counter mode. It changes no row of this page. [X14](ceph-and-s3-sources.md) ✅ read Ceph
+and S3 at the source the same day, with a Ceph on the lab beside the reading, and changes no row
+either. It recorded [Q32](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05),
+what the metadata leaves room for, which M12's rows take up rather than a prerequisite. The
+conditional write it would need is F68's, on the ETag a commit derives.
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate

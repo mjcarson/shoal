@@ -223,8 +223,10 @@ recommendation.
 **Not settled.** The geometry: stripe size, chunk unit and how data is dealt across the data
 chunks. X4 says only that encoding reaches its rate from 16 KiB units on titan and 64 KiB on
 europa, and that a call on a 1 MiB unit row of 4+2 takes 0.5 ms on titan, which
-[S13](isolation.md)'s yield budget has to fit. Also not settled: [X14](spikes.md#x14-ceph-and-s3-at-the-source)'s reading
-of Ceph, a code inside a node (X9), and the crate's age: three weeks on the day it was read,
+[S13](isolation.md)'s yield budget has to fit. Also not settled: ~~[X14](spikes.md#x14-ceph-and-s3-at-the-source)'s reading
+of Ceph~~ (X14 read it and took nothing of the geometry from Ceph,
+[below](#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)), a code inside a node
+(X9), and the crate's age: three weeks on the day it was read,
 with about a hundred lines of `unsafe` in its kernels that are read before M18 takes it.
 
 #### Q21, in part: the checksum (2026-10-03)
@@ -257,8 +259,10 @@ complete S1's checksum prerequisite with X5's recommendation.
 - **The bytes of a unit's identity, and their place in the checksum**: [S6](device-store.md), at
   M14.
 - **What checksumming costs a table beside it**: X9. On Zen1 it is as much CPU as encoding.
-- **S3's full-object checksums**: recalled to include CRC-64/NVME, and read by
-  [X14](spikes.md#x14-ceph-and-s3-at-the-source).
+- ~~**S3's full-object checksums**: recalled to include CRC-64/NVME, and read by
+  [X14](spikes.md#x14-ceph-and-s3-at-the-source).~~ Read by X14: S3's default checksum is the
+  full object's CRC-64/NVME, made for a multipart object from its parts' CRCs, which is this
+  checksum and its combine ([below](#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)).
 - **`crc-fast`'s `unsafe`**: about 361 lines, read before M13 takes it.
 
 #### Q19, in part: placement (2026-10-03)
@@ -291,7 +295,10 @@ X2 and record it.
 - **Growing a pool's placement groups**, which splits every group and was not simulated.
 - **The planner's fitting**: when it runs and how often.
 - **Racks**: no deployment has one.
-- **Ceph's own code** for `indep`, `upmap` and `crush-compat`: [X14](spikes.md#x14-ceph-and-s3-at-the-source)'s reading.
+- ~~**Ceph's own code** for `indep`, `upmap` and `crush-compat`: [X14](spikes.md#x14-ceph-and-s3-at-the-source)'s reading.~~
+  Read and, for `indep`, run by X14 on X2's shapes: 2.0 to 3.5 times the least for a device's
+  change, which makes positions held as state the firmer choice
+  ([below](#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)).
 
 #### Q22, in part: the device store on SSD (2026-10-04)
 
@@ -420,12 +427,47 @@ round is past its line. The choice follows the user's instruction to complete X1
   rates and the pool's devices. M14.
 - **kTLS's half-rate rounds** on titan's loopback, which X11 found too and neither spike explained.
 
+#### Q32, and Q14, Q20, Q28 in part: Ceph and S3 at the source (2026-10-05)
+
+Recorded 2026-10-05 by [X14](ceph-and-s3-sources.md), on the tree that adds its record. Ceph was
+read at `v20.2.0` (commit `69f84cc`), the code and not only the documents. The S3 API was read in
+AWS's Smithy model at `a0767ac42e27`, and the User Guide only where the model is silent. A Ceph
+`v20.2.0` from the image the tag was released as ran on the lab: the monitor, manager and RGW on
+europa, three OSDs each on titan and hyperion. Each experiment's prediction was written from the
+source before it ran. The choice follows the user's instruction to complete X14 and record it.
+
+| Decision | Evidence |
+| --- | --- |
+| **Q32: the path is compared as unnormalised bytes, and a later listing orders by them** | S3 lists "lexicographically by their UTF-8 encoded byte values", case-sensitive, keys of at most 1,024 bytes (the User Guide's `object-keys`; `ListObjectsV2`, model line 39568). `ObjectMeta` already keeps the whole path for [path identity](objects.md#path-identity) |
+| **Q32: a later listing index is a table of its own, updated pending then complete, as RGW's is** | S3 promises a listing that sees a write once it is acknowledged (the guide's `Welcome`). A listing ordered by path cannot share a tablet with `ObjectMeta`, which is partitioned by a hash of the path, and [P6](../distributed/protocol.md#the-contract) has no commit across tablets. RGW has the same split between its head objects and its index. It writes a pending index entry before the head and completes it after, and a lister that meets a pending entry checks the head (`src/rgw/driver/rados/rgw_rados.cc:3400`, `:10209-10214`, `:10506-10518`; `src/cls/rgw/cls_rgw.cc:991-999`). The row needs only the object id and its version, which it has |
+| **Q32: an ETag is derived from the object id and the version a change of content bumps, and is never an MD5** | S3's ETag "reflects changes only to the contents of an object, not its metadata. The ETag may or may not be an MD5 digest", and is not one for a multipart or a KMS-encrypted object (`Object$ETag`, model line 40781). An MD5 cannot be combined or made later without a read, so taking one would put a hash on every write path for a gateway that does not exist. `If-Match` and `If-None-Match: *` are F68's `Matches` and `Absent` (model lines 44743-44750) |
+| **Q32: `ObjectMeta` keeps a bounded attribute field** for content type, encoding, cache control, user metadata and tags, rewritten by a change of tags without a new content version | S3 returns them on every HEAD, limits user metadata to 2 KB (the guide's `UsingMetadata`), allows ten tags, and changes neither the version nor the ETag for a change of tags. A field added later would be a schema change, which is [a new cluster](../distributed/protocol.md#q10-at-m10a) |
+| **Q32: a multipart object's parts are a gateway's own table, keyed by the object id; versions are not designed** | S3 keeps up to 10,000 parts' numbers, sizes and checksums after completion, for `GetObject` by `PartNumber` and `GetObjectAttributes` (model lines 35818, 35000-35111), which `ObjectMeta` cannot hold under [P18](#the-contract). Nothing here keeps an old version of an object |
+| **Q32, and Q21's open digest: a whole object's S3 checksum is X5's combine** | S3's default checksum is the full object's CRC-64/NVME, and S3 makes a multipart object's "from the part-level checksums" (the guide's `checking-object-integrity-upload`; `Checksum$ChecksumCRC64NVME`, line 28205). Shoal can make the same value without a read if its units' CRCs can be read without the bytes, which is one more use for the digest a chunk [Q21](#q21-in-part-the-checksum-2026-10-03) leaves open |
+| **Q28, in part: a deep scrub of an erasure coded pool checks a stripe's chunks against each other**, by [S11](scrub.md#what-a-deep-scrub-proves-and-what-it-does-not)'s summaries or by encoding again | Ceph's does not for any pool that can be overwritten. A legacy overwrite pool reports a digest of zero, "partial overwrites don't support deep-scrub yet" (`src/osd/ECBackendL.cc:1831-1835`), and an optimized pool the same (`src/osd/ECBackend.cc:1223-1224`). Only a pool that never overwrites keeps a checksum a shard (`ECBackendL.cc:1797-1818`), and the summary design in `enhancements.rst` was not built. E4, on the lab: one byte of a data shard and one of a parity shard changed with BlueStore's checksums kept valid. A deep scrub reported both on a plain pool and neither on a legacy or optimized one. There the parity corruption went unnoticed by any read, and the data corruption surfaced only as EIO on a whole-object read |
+| **Q20, in part: the geometry takes nothing from Ceph** | Ceph deals 4 KiB units round-robin over the data shards (`src/osd/ECUtil.h:632-643`; `src/common/options/mon.yaml.in:16-27`) and advises 16 KiB with its optimizations (`doc/rados/operations/erasure-code.rst:232-235`). That is where [X4](#q20-in-part-the-code-and-the-crate-2026-10-03) found encoding at full rate on Zen1, and X6 sets the chunk's floor above it. Ceph bounds nothing X4 and X6 had not |
+| **Q14, in part: the alternative B is measured against is Ceph as read** | One durable round: every shard sent a write commits its bytes, its log entry and an undo record (the old range cloned aside) together, and the client is answered when all have (`src/osd/ECCommon.cc:824-955`, `src/osd/ECTransaction.cc:829-869`). A partial write reads first. Since Tentacle an optimized pool writes only the touched data shard, shard 0 and the parity, and does not wait for the rest. E2, on the lab: with data shard 2's OSD stopped, an optimized pool acknowledged a 4 KiB write into shard 1's unit in 18.6 ms by parity delta. Every write that read or wrote the stopped shard, and every write on the legacy pool, waited 21 to 25 s, until the monitors marked it down. E3: a thousand 4 KiB writes into one data shard's unit wrote all six shards on the legacy pool. On the optimized pool they wrote that shard and the parity, and shard 0 its object info and log, and the other two data shards got no transaction at all |
+
+**Not settled.** These remain open:
+
+- **Which fields M12's rows carry**, and at what bounds: M12, from the decisions above.
+- **A listing index and a gateway**, which stay out of scope ([todos](../appendix/todos.md#a-listing-index-and-an-s3-gateway)).
+- **Versioning.**
+- **Q28's cadence and budgets**: [X12](spikes.md#x12-recovery-and-scrub-rates).
+- **The geometry**: Q20's rest.
+- **Q14 itself**: X1, X3 and X8.
+
 ## Alternatives rejected
 
 **A primary for each placement group, with a log on every holder and peering.** It is what
-Ceph does, and it does it in one durable round where the preferred direction pays two. It
-needs an authority that appoints and fences primaries (which
-[P5](../distributed/protocol.md#the-contract) forbids the control plane to be), a log on
+Ceph does, and it does it in one durable round where the preferred direction pays two: every
+shard sent the write commits its bytes, its log entry and an undo record together, and a
+partial write reads first, as here
+([X14](ceph-and-s3-sources.md#1-what-an-acknowledgement-waits-for)). It needs an authority that
+~~appoints and fences primaries~~ appoints primaries, by committing the map every party computes
+them from, and records which intervals could have written; the holders fence an old primary by
+epoch ([X14](ceph-and-s3-sources.md#2-peering-fencing-and-min_size)). That is a role
+[P5](../distributed/protocol.md#the-contract) forbids the control plane. It also needs a log on
 every slice, a rollback record for every overwrite, and a protocol that reconciles logs
 after a failure, with its own safety argument and its own model. C13 turned down a custom
 protocol for tablets on exactly those grounds. It stays the alternative
@@ -513,13 +555,13 @@ Q1–Q13.
 
 | ID | Question and preferred direction | Gate and evidence |
 | --- | --- | --- |
-| Q14 | **What orders a stripe's writes, and how do the bytes stay out of the log?** Preferred: the tablet group that owns the stripe's row, by a conditional commit; holders stage before it and apply after ([S7](write-path.md)). The alternatives are stripes as rows, a group among the holders, and redirect-on-write | Before M11. [X1](spikes.md#x1-the-stripe-protocol-as-a-model) for safety, [X3](spikes.md#x3-bytes-through-the-tablet-groups) and [X8](spikes.md#x8-one-small-write-three-ways) for cost |
+| Q14 | **What orders a stripe's writes, and how do the bytes stay out of the log?** Preferred: the tablet group that owns the stripe's row, by a conditional commit; holders stage before it and apply after ([S7](write-path.md)). The alternatives are stripes as rows, a group among the holders, and redirect-on-write. **The alternative read, 2026-10-05**: Ceph's write as `v20.2.0` has it ([the record](#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) | Before M11. [X1](spikes.md#x1-the-stripe-protocol-as-a-model) for safety, [X3](spikes.md#x3-bytes-through-the-tablet-groups) and [X8](spikes.md#x8-one-small-write-three-ways) for cost; ✅ [X14](ceph-and-s3-sources.md) for the alternative it is measured against |
 | Q15 | **Who stages?** Preferred: the node that received the client's bytes, with the group's leader only ordering commits and granting an advisory reservation under contention. The other answer is the leader, which serializes and costs a network crossing while clients do not route by topology | Before M11. X1; [X9](spikes.md#x9-table-latency-beside-object-work) for what a stager's work costs the shard it runs on |
 | Q16 | **The acknowledgement rule.** Preferred: `k + f` current stripe chunks with `f = 1` by default; whether an untouched chunk on a slice that is down counts as current is open. What a degraded write does when the rule cannot be met | Before M11. X1 |
 | Q17 | **How does a slice that missed writes learn what it is stale on**, at what granularity, and how does that record survive a checkpoint and reach a new replica? Preferred: a bounded record in the group for each placement group and chunk, derived at apply as the retry table is; past the bound, a backfill from a walk of the tablet's rows. X10 measured what a table can say of it: a group commits about 4,900 small rows a second on the lab, and a row rewritten whole costs its size every commit, 196 commits a second at 4 KiB and 30 at 1 MiB ([the record](stripe-row-costs.md#what-a-group-can-carry-q17)) | M16. X1, ✅ [X10](spikes.md#x10-what-a-stripe-row-costs) for a table's half, [X12](spikes.md#x12-recovery-and-scrub-rates) |
 | Q18 | **Size and truncate across tablets.** Preferred: a truncate epoch in `ObjectMeta` that every stripe commit stamps, with a short stack of floors. The alternative keeps an object's rows in one tablet, which makes size atomic and confines an object to one group | Before M11. X1 |
 | Q19 | **Placement.** How many placement groups a tablet; the placement function; failure domains; how a commit checks a generation; the pool map's size and fanout. **In part, 2026-10-03**: the function, positions as the tablet group's state, seats, fitted weights, the number of placement groups a pool's, the failure domains and the pool map are decided ([the record](#q19-in-part-placement-2026-10-03)); how a commit checks a generation and its positions is not | Before M11. ✅ [X2](placement-simulation.md); X1 for the commit |
-| Q20 | **Which code family, which crate, what geometry**: Reed-Solomon, random linear network coding, a fountain code, or plain XOR at one parity chunk; stripe and chunk unit sizes; parity delta or reconstruct-write. Preferred: a systematic code that decodes from any k, because a seek and a small write both lean on those two properties. **In part, 2026-10-03**: the family, the crate and parity delta are decided ([the record](#q20-in-part-the-code-and-the-crate-2026-10-03)); the geometry is not | M18. ✅ [X4](erasure-coding-crates.md), [X14](spikes.md#x14-ceph-and-s3-at-the-source) |
+| Q20 | **Which code family, which crate, what geometry**: Reed-Solomon, random linear network coding, a fountain code, or plain XOR at one parity chunk; stripe and chunk unit sizes; parity delta or reconstruct-write. Preferred: a systematic code that decodes from any k, because a seek and a small write both lean on those two properties. **In part, 2026-10-03**: the family, the crate and parity delta are decided ([the record](#q20-in-part-the-code-and-the-crate-2026-10-03)); the geometry is not | M18. ✅ [X4](erasure-coding-crates.md), ✅ [X14](ceph-and-s3-sources.md) |
 | Q21 | **Which checksum**, at what granule, and whether the row keeps a digest of each stripe chunk to catch a write that was lost whole. Preferred: a definition no crate's release can move. **In part, 2026-10-03**: the checksum is CRC-64/NVME through `crc-fast`, with a combine of Shoal's own ([the record](#q21-in-part-the-checksum-2026-10-03)); the granule and the chunk digest are not decided | M13, since a frame that carries a unit's checksum fixes it on the wire before any slice stores one. ✅ [X5](checksums.md) |
 | Q22 | **The device store's layout**, its way of applying an update, its `fdatasync` strategy and the filesystems it accepts. Preferred: a journal written ahead for small updates and whole files for large ones. **In part, 2026-10-04**: on SSDs, a file a chunk from a pool written ahead, the journal and the apply in place, no clone, XFS preferred, ext4 accepted and btrfs refused, one slice a device ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)); rotational devices are Q23's | M14. ✅ [X6](device-store-ssd.md) |
 | Q23 | **What a rotational device needs**: an executor of its own, a journal on an SSD, another layout | M19. [X7](spikes.md#x7-the-device-store-on-hdd) |
@@ -527,11 +569,11 @@ Q1–Q13.
 | Q25 | **The metadata rows**: the inline threshold, what a stripe row costs, the stall when a row a commit needs is not in memory, the scale a bucket is designed for. **In part, 2026-10-04**: stripe rows are not kept resident and a commit follows S7's read of its row; 39 bytes of index a cold row, so 27 million rows a GiB a replica and no floor under the stripe above 4 MiB; the inline threshold defaults to 16 KiB; equality on one field is all a commit's condition needs ([the record](#q25-in-part-the-metadata-rows-2026-10-04)); the rows' final layout and a shared stripe table are M12's | M12. ✅ [X10](stripe-row-costs.md) |
 | Q26 | **Streamed bodies**: bounded ranged frames, their size, and what a connection shared with small queries does under them. **In part, 2026-10-05**: object bytes travel on connections of their own, in frames of 1 MiB, four to a window; the object lane hands a connection to the slice's executor; a stream at a device's rate under kTLS is spread over connections ([the record](#q26-in-part-streamed-bodies-2026-10-05)); the window and budget as settings and a read's ranges ahead are M15's | M13. ✅ [X11](streamed-bodies.md) |
 | Q27 | **What one small in-place write costs, and whether small writes ride the metadata log** below a threshold, to be folded into stripe chunks later. **The device's half measured, 2026-10-04**: two flushes, 2 to 6 ms on the 970 EVO at 4 KiB, 81 µs on the Optane ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)) | M15. ✅ [X6](device-store-ssd.md#3-a-partial-write), X8 |
-| Q28 | **Scrub**: cadence, byte budgets, what a deep scrub of k+m verifies beyond each stripe chunk's own checksums | M17. X12, X14 |
+| Q28 | **Scrub**: cadence, byte budgets, what a deep scrub of k+m verifies beyond each stripe chunk's own checksums. **In part, 2026-10-05**: a deep scrub checks the chunks against each other, which Ceph's does not for an overwritable pool ([the record](#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)); cadence and budgets are X12's | M17. X12, ✅ [X14](ceph-and-s3-sources.md) |
 | Q29 | **Budgets for recovery and moves**, for each device | M16. X12 |
 | Q30 | **The benchmark**: how the driver gains object operations, byte metrics and an object dataset. **In part, 2026-10-03**: the one driver is generalized ([the record](#q30-in-part-the-drivers-shape-2026-10-03)). **The rest, 2026-10-05**: a stream makes its own bytes inline, a description's bytes are SplitMix64 in counter mode, read-back makes them again, and a description is integers alone ([the record](#q30-the-object-dataset-and-seeded-bytes-2026-10-05)); the object arms are M13's | ~~M11~~ M11 for the driver, M13 for the dataset. ✅ [F69](../features/driver-operation-kinds.md), ✅ [X13](benchmark-shape.md) |
 | Q31 | **What a schema change, a backup, a restore and `force_recover` mean for a cluster holding object bytes.** [Q10](../distributed/protocol.md#q10-at-m10a) settled that a schema change is a new cluster and a restore; a restore carries rows and not stripe chunks, so on a cluster with buckets it would strand every object. This part does not reopen Q10. The two ways out are a restore that carries or adopts chunks, and an additive schema change made rolling | M21. [S14](operations.md#a-schema-change-a-backup-and-a-restore); no spike |
-| Q32 | **What the later listing index needs the metadata to leave room for** | After M21. X14 |
+| Q32 | **What the later listing index needs the metadata to leave room for**. **Recorded 2026-10-05**: an ETag derived and never hashed, a bounded attribute field, the path as unnormalised bytes, and an index updated pending then complete, as RGW's is ([the record](#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)); M12 lays the rows out | After M21. ✅ [X14](ceph-and-s3-sources.md) |
 
 ## How it would be measured
 

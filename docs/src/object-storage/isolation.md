@@ -166,7 +166,9 @@ are among several holders of data the pool was sized to lose.
 **Object work on the queue that serves connections.** It is where a client's bytes arrive,
 and it is the queue with a 500 µs goal.
 
-**A process for each device**, as Ceph runs an OSD. Isolation by process is real, and it is
+**A process for each device**, as Ceph runs an OSD, one a device by default and several for a
+fast NVMe device ([X14](ceph-and-s3-sources.md#9-how-osds-are-deployed-whom-a-pool-serves-and-crimson)).
+Isolation by process is real, and it is
 a second program to build, deploy, upgrade and authenticate, speaking to the first over a
 socket. The executor is the unit this engine already has.
 

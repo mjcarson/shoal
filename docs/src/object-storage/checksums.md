@@ -551,9 +551,15 @@ wider of the two the lab can run fast, at no cost over CRC-32C.
   what the combine above makes cheap. [S6](device-store.md) owns it, at M14.
 - **A checksum inside a node**, beside a table, which is
   [X9](spikes.md#x9-table-latency-beside-object-work).
-- **S3's checksums.** S3 is recalled to offer full-object CRC-64/NVME and CRC-32C checksums,
+- ~~**S3's checksums.** S3 is recalled to offer full-object CRC-64/NVME and CRC-32C checksums,
   which a combine of Shoal's unit checksums could answer without reading an object. That is
-  recalled and not read; [X14](spikes.md#x14-ceph-and-s3-at-the-source) reads the S3 reference.
+  recalled and not read; [X14](spikes.md#x14-ceph-and-s3-at-the-source) reads the S3 reference.~~
+  **S3's checksums**, read by [X14](ceph-and-s3-sources.md#13-s3-checksums) in AWS's model of the
+  API. S3 offers full-object CRC-64/NVME, CRC-32C and CRC-32. CRC-64/NVME is its default for an
+  upload that names none, and for a multipart upload S3 computes it "from the part-level
+  checksums". That is this page's checksum and its combine. A Shoal object's S3 checksum can
+  be made without a read, if its units' CRCs can be had without the bytes, which is the digest
+  a chunk Q21 leaves open.
 - **The tables' own checksums.** WAL frames, archive records, the control store and snapshot
   chunks keep gxhash. X5 found nothing wrong with how they use it, and moving them is a format
   change with no defect behind it ([todos](../appendix/todos.md#the-tables-keep-gxhash)).

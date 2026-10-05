@@ -232,6 +232,30 @@ QUICK=1 ROUNDS=1 OUT=target/lab/x13/quick sh shoal-spike/results/x13-lab.sh     
 sh shoal-spike/results/x13-lab.sh                                                   # the four rounds
 target/lab/x13/znver1/release/shoal-spike driver report shoal-spike/results/x13-*.json   # intervals and verdicts
 
+# the X14 spike: Ceph and S3 read at the source, and a Ceph v20.2.0 on the lab to watch what the
+# reading claims. No Rust: the sources are pinned and read, and the lab half is shell and python
+# around cephadm. Fetch the pins into target/lab/x14/ (gitignored), sparse, and check the commit:
+#   Ceph v20.2.0 = 69f84cc2651aa259a15bc192ddaabd3baba07489, AWS's S3 model = a0767ac42e27.
+# The lab half stands a cluster up and takes it down again, recording every host change in
+# shoal-spike/results/x14-host-changes.txt; `verify` diffs each host against its snapshot. europa
+# runs the mon, mgr and RGW in docker; titan and hyperion three OSDs each on 20 GiB LVs in
+# ubuntu-vg, in podman. Never `--all-available-devices`, never `--zap-osds` (the LVs share a PV
+# with the root filesystem), and leave titan's kubelet, etcd and containerd alone. Two things it
+# met: Ubuntu 26.04's uutils install(1) refuses cephadm's numeric owner 167 until a user has that
+# uid, and hyperion has no route to the internet, so it gets titan's saved image under the tag.
+# Predictions go in x14-predictions.md before a run; the record is
+# docs/src/object-storage/ceph-and-s3-sources.md
+git clone --depth 1 --branch v20.2.0 --filter=blob:none --sparse https://github.com/ceph/ceph target/lab/x14/ceph
+sh shoal-spike/results/x14-lab.sh snapshot          # every host's state, before anything
+sh shoal-spike/results/x14-lab.sh setup-tools       # cephadm, podman, the uid 167 user, host checks
+sh shoal-spike/results/x14-lab.sh setup-image       # the pinned image on every host
+sh shoal-spike/results/x14-lab.sh setup-bootstrap   # mon and mgr on europa
+sh shoal-spike/results/x14-lab.sh setup-hosts       # titan and hyperion, LVs, an OSD spec a host, RGW
+sh shoal-spike/results/x14-lab.sh setup-pools       # one PG a pool: 4+2 and 2+1 plain, legacy, optimized; rep3
+sh shoal-spike/results/x14-lab.sh e1                # and e2 .. e5, one at a time
+sh shoal-spike/results/x14-crush.sh                 # E6, offline: Ceph's CRUSH on X2's shapes
+sh shoal-spike/results/x14-lab.sh teardown && sh shoal-spike/results/x14-lab.sh verify
+
 # a cluster on real hosts from a project (F63): run in the project that defines the schema,
 # shoaladm finds the #[shoal::db] struct, probes every host's cpu over ssh, builds the node once
 # per cpu class and the schema's admin program, installs them under ~/.local/shoal/bin, and
