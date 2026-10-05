@@ -35,7 +35,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 | Before M11 | The contract agreed | Q14, Q15, Q16, Q18, Q19 (in part ✅ [X2](placement-simulation.md)) | — |
 | M11 | The model, the fixture's faults, the driver's kinds | Q30, in part ([recorded](contract.md#decision-record)) | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
 | M12 | Buckets in the schema and the tables they generate | Q25 (in part ✅ [X10](stripe-row-costs.md)) | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
-| M13 | The wire, pool policy, inline objects, the baseline | Q21 (the checksum ✅ [X5](checksums.md)), Q26 (in part ✅ [X11](streamed-bodies.md)), the rest of Q30 | More than one frame for one query |
+| M13 | The wire, pool policy, inline objects, the baseline | Q21 (the checksum ✅ [X5](checksums.md)), Q26 (in part ✅ [X11](streamed-bodies.md)), the rest of Q30 | ~~More than one frame for one query~~ (✅ [F73](../features/bodies-across-frames.md)) |
 | M14 | Devices and their slices, the pool map, placement and the device store, on one node | Q22 (on SSDs ✅ [X6](device-store-ssd.md)), Q24 | ~~Item 46~~ (✅ [Resolved #46](../appendix/resolved/unmarked-directory-refused.md)); a failure domain on a member; free bytes for every root |
 | M15 | Replicated pools: stage, commit, apply and read | Q27 (the device's half ✅ [X6](device-store-ssd.md#3-a-partial-write)) | — |
 | M16 | Recovery and moves | Q17, Q29 | The walk of a tablet's rows |
@@ -159,11 +159,14 @@ of Q21, the granule and the chunk digest, goes with Q20's geometry and X1. The r
 object dataset and how fast one core makes seeded bytes, since this gate's object arms need both
 ([X13](spikes.md#x13-the-benchmarks-shape)).
 
-**Lands first.** More than one frame for one query on the client wire.
+**Lands first.** ~~More than one frame for one query on the client wire.~~ ✅ landed as
+[F73](../features/bodies-across-frames.md): openers, `Data` frames with `LAST` on the final one, a
+receiver that judges each frame against its stream, and connections set apart for long streams.
 
 **Delivers.**
 
-- The three object message types behind a capability bit, ranged frames in both directions,
+- The three object message types behind a capability bit, ranged frames in both directions
+  (`ObjectData` is F73's `Data`, so two of the three are new),
   and the client's bucket handle and seekable file ([S12](wire-and-client.md)).
 - Storage pools and bucket bindings as committed policy, with no device behind them yet: the
   policy half of [S4](pools-and-devices.md#pools-and-bindings-are-policy), and `pools` and

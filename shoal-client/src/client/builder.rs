@@ -128,6 +128,84 @@ impl Default for Deadlines {
     }
 }
 
+/// How a client's connections carry what is longer than one frame
+///
+/// A bundle longer than the server's frame bound is sent as an opener and data frames, and an
+/// answer longer than one of the server's data frames arrives as one; this is what this client
+/// says it takes and how it cuts what it sends
+/// ([F73](../../../../docs/src/features/bodies-across-frames.md)). A server built before streams
+/// grants none of it, and is sent and answers exactly what it always was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamConfig {
+    /// The largest frame this client accepts
+    ///
+    /// Told to the server at the hello. Before F73 every client offered exactly
+    /// `DEFAULT_MAX_FRAME_BYTES` whatever it could take.
+    pub max_frame_bytes: u32,
+    /// The longest answer this client assembles from a stream, a power of two
+    ///
+    /// An answer longer than this is refused by the server with `ResponseTooLarge` naming both
+    /// sizes, as one past the frame bound was before streams.
+    pub max_body_bytes: u64,
+    /// The payload bytes of each data frame of a bundle this client streams
+    pub request_frame_bytes: u32,
+    /// Connections set apart for long streams: a bundle past the server's frame, and a send
+    /// marked [`SendOptions::bulk`]
+    ///
+    /// X11 found a small request's p99 on a connection carrying a stream at 1 MiB frames 2.7 to
+    /// 32 times its p99 on a connection of its own, and `TCP_NOTSENT_LOWAT` did not close it, so
+    /// long streams travel apart ([X11](../../../../docs/src/object-storage/streamed-bodies.md)).
+    /// These are opened when first needed, and zero sends everything on the shared pool.
+    pub dedicated_connections: u32,
+}
+
+impl Default for StreamConfig {
+    /// The frame bound every client offered before, a gibibyte of answer, and X11's frame
+    fn default() -> Self {
+        StreamConfig {
+            max_frame_bytes: shoal_proto::shared::protocol::DEFAULT_MAX_FRAME_BYTES,
+            max_body_bytes: 1 << 30,
+            request_frame_bytes: 1 << 20,
+            dedicated_connections: 2,
+        }
+    }
+}
+
+impl StreamConfig {
+    /// Check that this describes streams a server can be told about
+    ///
+    /// # Errors
+    ///
+    /// A frame bound too small to carry a hello, a body bound that is not a power of two, or a
+    /// data frame smaller than a page.
+    pub fn validate(&self) -> Result<(), Errors> {
+        use shoal_proto::shared::protocol::stream;
+        // a frame that cannot hold a page of payload cannot carry anything worth sending
+        if self.max_frame_bytes < stream::MIN_STREAM_FRAME_BYTES {
+            return Err(Errors::Config(format!(
+                "a client that accepts frames of {} bytes cannot be sent a page",
+                self.max_frame_bytes
+            )));
+        }
+        // the hello carries the body bound as a power of two
+        if !self.max_body_bytes.is_power_of_two() {
+            return Err(Errors::Config(format!(
+                "the longest answer a client assembles is a power of two, not {}",
+                self.max_body_bytes
+            )));
+        }
+        // a data frame is never smaller than a page
+        if self.request_frame_bytes < stream::MIN_STREAM_FRAME_BYTES {
+            return Err(Errors::Config(format!(
+                "a data frame of {} bytes is smaller than the {} a stream's frame may be",
+                self.request_frame_bytes,
+                stream::MIN_STREAM_FRAME_BYTES
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Resolve a list of endpoints, in the order they were given
 ///
 /// A name is expanded to **every** address it resolves to rather than to the first one, which is
@@ -217,6 +295,8 @@ pub struct ShoalBuilder<S: QuerySupport> {
     options: ClientOptions,
     /// What every send says about its reads unless told otherwise
     read_options: SendOptions,
+    /// How this client's connections carry what is longer than one frame
+    streams: StreamConfig,
     /// The database kind this client will query
     phantom: PhantomData<S>,
 }
@@ -230,6 +310,7 @@ impl<S: QuerySupport> Default for ShoalBuilder<S> {
             deadlines: Deadlines::default(),
             options: ClientOptions::new(),
             read_options: SendOptions::default(),
+            streams: StreamConfig::default(),
             phantom: PhantomData,
         }
     }
@@ -306,6 +387,17 @@ impl<S: QuerySupport> ShoalBuilder<S> {
         self
     }
 
+    /// Say how this client's connections carry what is longer than one frame
+    ///
+    /// # Arguments
+    ///
+    /// * `streams` - The frame and body bounds this client takes, and how it cuts what it sends
+    #[must_use]
+    pub fn streams(mut self, streams: StreamConfig) -> Self {
+        self.streams = streams;
+        self
+    }
+
     /// Prove this client's identity with a username and password
     ///
     /// # Arguments
@@ -363,8 +455,10 @@ impl<S: QuerySupport> ShoalBuilder<S> {
                 >,
             >,
     {
-        // refuse a pool that cannot be satisfied before anything opens a socket for it
+        // refuse a pool that cannot be satisfied, or streams a server cannot be told about,
+        // before anything opens a socket for them
         self.pool.validate()?;
+        self.streams.validate()?;
         // work out every address this client may talk to
         let endpoints = resolve_endpoints(&self.endpoints).await?;
         // say so when encryption and several endpoints are going to disagree about names
@@ -391,6 +485,7 @@ impl<S: QuerySupport> ShoalBuilder<S> {
             self.pool,
             self.deadlines,
             self.read_options,
+            self.streams,
         )
         .await
     }
@@ -398,8 +493,38 @@ impl<S: QuerySupport> ShoalBuilder<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_endpoints, Deadlines, Errors, PoolConfig, SocketAddr};
+    use super::{resolve_endpoints, Deadlines, Errors, PoolConfig, SocketAddr, StreamConfig};
     use std::time::Duration;
+
+    /// Streams a server cannot be told about are refused before a socket opens, and the defaults
+    /// are what every client offered before streams plus a gibibyte of answer
+    /// ([F73](../../../../docs/src/features/bodies-across-frames.md))
+    #[test]
+    fn stream_config_refuses_what_a_server_cannot_be_told() {
+        let defaults = StreamConfig::default();
+        assert!(defaults.validate().is_ok());
+        assert_eq!(
+            defaults.max_frame_bytes,
+            shoal_proto::shared::protocol::DEFAULT_MAX_FRAME_BYTES
+        );
+        assert_eq!(defaults.max_body_bytes, 1 << 30);
+        // a body bound the hello cannot carry, a frame too small for a page, a data frame too small
+        let not_a_power = StreamConfig {
+            max_body_bytes: 3 << 20,
+            ..defaults
+        };
+        assert!(matches!(not_a_power.validate(), Err(Errors::Config(_))));
+        let tiny_frame = StreamConfig {
+            max_frame_bytes: 1024,
+            ..defaults
+        };
+        assert!(matches!(tiny_frame.validate(), Err(Errors::Config(_))));
+        let tiny_data = StreamConfig {
+            request_frame_bytes: 1024,
+            ..defaults
+        };
+        assert!(matches!(tiny_data.validate(), Err(Errors::Config(_))));
+    }
 
     /// Turn a list of string slices into what the resolver takes
     ///

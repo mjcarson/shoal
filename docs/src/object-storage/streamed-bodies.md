@@ -405,7 +405,7 @@ A write stream accepted by executor A for executor B's file, over the direct str
 
 - **A client keeps connections apart for long streams**: an object's frames, a query bundle past
   the frame, a send its caller marks bulk. Two by default; S1's prerequisite for more than one frame
-  a query builds them for queries, and M13's
+  a query ~~builds~~ built them for queries ([F73](../features/bodies-across-frames.md)), and M13's
   object operations use them.
 - **A data frame is 1 MiB**, the frame a stream is cut into and M13's `ObjectData` carries: where cpu a GiB
   flattens, S12's proposal, and X6's chunk floor.
@@ -465,7 +465,7 @@ None of these is a defect, so none is filed on [Known Issues](../appendix/known-
   for the decision; [Q26](contract.md#questions-to-answer).
 - [S12](wire-and-client.md) and [S13](isolation.md), the pages these figures move.
 - [S1](prerequisites.md#required), whose row for more than one frame a query is built to these
-  figures.
+  figures, and [F73](../features/bodies-across-frames.md), which built it.
 - [F14](../features/encryption-in-transit.md) for the kTLS measured here, and
   [X6's record](device-store-ssd.md) for the devices' rates T3 was judged against.
 - `shoal-spike/results/x11-report.md`, every figure merged across rounds;

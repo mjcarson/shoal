@@ -6,6 +6,7 @@ mod groups;
 pub use groups::membership_as_of;
 pub mod meter;
 pub mod migrate;
+mod outbox;
 mod reads;
 pub mod repair;
 pub mod restore;
@@ -59,11 +60,12 @@ use super::peer::{
     ShardTransportView,
 };
 use super::replication::ShardNetwork;
-use super::request_body::RequestBody;
+use super::request_body::{BodyAssembly, RequestBody};
 use super::ring::Ring;
 use super::routing::ArchivedShardRouting;
 use super::stage_profile::{self, StageStamps, Stamp};
 use meter::QueryMeter;
+use outbox::{Next, OutStream, Outbox};
 use super::tls;
 use super::trace;
 use super::{Comms, Conf, ServerError};
@@ -80,8 +82,11 @@ use crate::{
             auth::{self as proto_auth, AuthMechanism, AuthStatus},
             error::{self as proto_error, ErrorCode},
             handshake,
-            read::{ReadOptions, SessionToken, CLIENT_CAP_READ_OPTIONS, READ_OPTIONS_HEAD_LEN},
+            read::{
+                self, ReadOptions, SessionToken, CLIENT_CAP_READ_OPTIONS, READ_OPTIONS_HEAD_LEN,
+            },
             stats::query_op_index,
+            stream::{self, Hold, Inbound, Step},
             trace::{TraceContext, TRACE_CONTEXT_LEN},
             Flags, Header, MessageType, ProtocolError, CONDITIONAL_WIRE_VERSION,
         },
@@ -167,13 +172,15 @@ fn hex_trace_id(wire_trace: &TraceContext) -> String {
         .collect()
 }
 
-/// What one client connection's write relay has taken off its channel and not yet written
+/// What one client connection's write relay owes and has not started writing
 ///
 /// Shared by the connection's two relays, which run on the same executor, so it is cells rather
 /// than atomics. The read relay stops reading bundles while the answers owed to this connection
 /// are at `networking.max_queued_replies`, and the write relay wakes it as it drains them - the
 /// model the peer lanes' in-flight bound already used
-/// ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md)).
+/// ([Resolved #15](../../../docs/src/appendix/resolved/backlog-bounds.md)). Since
+/// [F73](../../../docs/src/features/bodies-across-frames.md) an answer the relay has begun to
+/// stream is no longer counted: it is being written, a frame at a time.
 #[derive(Default)]
 struct ReplyBacklog {
     /// Answers the write relay has taken off the channel and not yet started writing
@@ -185,22 +192,19 @@ struct ReplyBacklog {
 }
 
 impl ReplyBacklog {
-    /// Note how many answers the write relay just took off the channel
+    /// Note how many answers the write relay holds and has not started, waking the read relay
+    /// when that fell
     ///
     /// # Arguments
     ///
-    /// * `taken` - How many answers are in the batch it is about to write
-    fn taken(&self, taken: usize) {
-        self.unwritten.set(taken);
-    }
-
-    /// Note that the write relay has started on one more answer, and wake the read relay
-    fn started(&self) {
-        // one fewer answer is waiting behind the write relay
-        self.unwritten.set(self.unwritten.get().saturating_sub(1));
-        // and a read relay waiting for room may now have it
-        if let Some(waker) = self.waker.take() {
-            waker.wake();
+    /// * `unstarted` - The answers it holds and has not started writing
+    fn set_unstarted(&self, unstarted: usize) {
+        let before = self.unwritten.replace(unstarted);
+        // a read relay waiting for room may now have it
+        if unstarted < before {
+            if let Some(waker) = self.waker.take() {
+                waker.wake();
+            }
         }
     }
 
@@ -213,6 +217,116 @@ impl ReplyBacklog {
             waker.wake();
         }
     }
+}
+
+/// The bytes one shard's client connections hold in bundles still being assembled
+///
+/// A stream takes its whole declared length at its opener and gives it back when its bundle is
+/// routed or its connection ends, so the bytes a shard can be asked to hold for streams that are
+/// not done are bounded however many connections send them
+/// ([F73](../../../docs/src/features/bodies-across-frames.md)). Shard local, so cells.
+struct AssemblyBudget {
+    /// The bytes the shard's streams may hold at once
+    limit: u64,
+    /// The bytes they hold now
+    used: Cell<u64>,
+}
+
+impl AssemblyBudget {
+    /// A budget of so many bytes
+    ///
+    /// # Arguments
+    ///
+    /// * `limit` - The bytes this shard's streams may hold at once
+    fn new(limit: u64) -> Rc<Self> {
+        Rc::new(AssemblyBudget {
+            limit,
+            used: Cell::new(0),
+        })
+    }
+
+    /// Take some bytes of the budget, if they are there to take
+    ///
+    /// # Arguments
+    ///
+    /// * `budget` - The budget
+    /// * `bytes` - How many bytes
+    fn reserve(budget: &Rc<Self>, bytes: u64) -> Option<Reservation> {
+        let used = budget.used.get();
+        if used.saturating_add(bytes) > budget.limit {
+            return None;
+        }
+        budget.used.set(used + bytes);
+        Some(Reservation {
+            budget: budget.clone(),
+            bytes,
+        })
+    }
+}
+
+/// Bytes taken from a shard's assembly budget, given back when this is dropped
+struct Reservation {
+    /// The budget they came from
+    budget: Rc<AssemblyBudget>,
+    /// How many
+    bytes: u64,
+}
+
+impl Drop for Reservation {
+    /// Give the bytes back
+    fn drop(&mut self) {
+        self.budget
+            .used
+            .set(self.budget.used.get().saturating_sub(self.bytes));
+    }
+}
+
+/// What a connection that was granted streams needs to read them
+/// ([F73](../../../docs/src/features/bodies-across-frames.md))
+struct StreamLane {
+    /// The longest bundle this server assembles, as it advertised at the hello
+    bound: u64,
+    /// The bytes this shard's connections may hold in bundles being assembled
+    budget: Rc<AssemblyBudget>,
+    /// Where a refusal of one of this connection's streams is queued for its write relay
+    refusals: AsyncSender<Reply>,
+}
+
+/// A bundle being assembled from its stream, and what it is routed with once it is whole
+struct Assembling {
+    /// The bytes read so far
+    assembly: BodyAssembly,
+    /// The bundle's root span, opened at its opener
+    span: Span,
+    /// What the opener said about the bundle's reads
+    options: Option<ReadOptions>,
+    /// The shard's budget this bundle holds until it is routed
+    _reservation: Reservation,
+}
+
+/// What a connection's write relay needs to stream answers to a client that asked for them
+/// ([F73](../../../docs/src/features/bodies-across-frames.md))
+#[derive(Debug, Clone, Copy)]
+struct StreamOut {
+    /// The payload bytes of each data frame, cut to the client's frame
+    frame: usize,
+    /// The longest answer the client assembles, as it said at the hello
+    client_body: u64,
+}
+
+/// How many streamed answers one connection writes at once, taking turns
+const STREAM_INTERLEAVE: usize = 4;
+
+/// What a shard's client listener gives every connection that asks for streams
+/// ([F73](../../../docs/src/features/bodies-across-frames.md))
+#[derive(Clone)]
+struct StreamSettings {
+    /// The payload bytes of a streamed answer's data frames
+    frame: u32,
+    /// The longest bundle this server assembles from a stream
+    bound: u64,
+    /// The bytes this shard's connections may hold in bundles being assembled
+    budget: Rc<AssemblyBudget>,
 }
 
 /// A future that resolves once a client connection owes fewer answers than its bound
@@ -255,6 +369,13 @@ impl Future for ReplyRoom<'_> {
 /// other client it is serving alone, which is what it means for a relay to be a per connection
 /// task rather than a shared one.
 ///
+/// Since [F73](../../../docs/src/features/bodies-across-frames.md) a bundle longer than a frame
+/// arrives as an opener and data frames, on a connection that was granted streams. Its bytes are
+/// assembled as they arrive and it is routed, once whole, exactly as a bundle read in one frame
+/// is: the shards cannot tell the two apart. A stream this server will not take - longer than it
+/// advertised, or past the shard's assembly budget - is answered by name and drained, and the
+/// connection goes on; a stream whose frames break its rules ends the connection.
+///
 /// # Arguments
 ///
 /// * `peer` - The client this relay is reading from
@@ -266,6 +387,7 @@ impl Future for ReplyRoom<'_> {
 /// * `client_rx` - The channel this connection's answers wait on, read only for its length
 /// * `max_queued_replies` - The most answers this connection may owe before it stops being read
 /// * `meter` - Where this shard counts what its clients sent and were answered
+/// * `lane` - What reading streams needs, if this connection was granted them
 #[allow(clippy::too_many_arguments)]
 async fn client_rx_relay<S: ShoalDatabase>(
     peer: Uuid,
@@ -277,7 +399,10 @@ async fn client_rx_relay<S: ShoalDatabase>(
     client_rx: &AsyncReceiver<Reply>,
     max_queued_replies: usize,
     meter: &QueryMeter,
+    lane: Option<StreamLane>,
 ) {
+    // the bundles this connection is streaming, by their ids
+    let mut inbound: Inbound<Assembling> = Inbound::new(lane.as_ref().map_or(0, |lane| lane.bound));
     // keep waiting for messages until  our tcp socket closes
     loop {
         // a client that is not reading its answers is not read either: wait until this
@@ -316,9 +441,32 @@ async fn client_rx_relay<S: ShoalDatabase>(
                 break;
             }
         };
+        // a data frame carries bytes of a bundle this connection opened a stream for, and only a
+        // connection that was granted streams may send one
+        // ([F73](../../../docs/src/features/bodies-across-frames.md))
+        if header.kind == MessageType::Data {
+            if lane.is_none() {
+                event!(Level::ERROR, msg = "a data frame on a connection not granted streams", %peer);
+                break;
+            }
+            match read_data_frame(&mut tcp_rx, &header, &mut inbound).await {
+                // the bundle's last bytes: it is routed as a bundle read whole would be
+                Ok(Some(pending)) => {
+                    if !route_assembled(peer, pending, &kanal_tx, meter).await {
+                        break;
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    event!(Level::ERROR, msg = "refused a stream", %peer, %error);
+                    break;
+                }
+            }
+            continue;
+        }
         // a topology subscription or an admin request is a query id and some json, handed to
         // the accepting shard rather than routed anywhere
-        // ([F39](../../../docs/src/features/membership.md))
+        // ([F39](../../../../docs/src/features/membership.md))
         if header.kind != MessageType::Queries {
             let msg =
                 match read_control_frame(&mut tcp_rx, &header, peer, principal.as_deref()).await {
@@ -369,35 +517,38 @@ async fn client_rx_relay<S: ShoalDatabase>(
                 break;
             }
         };
+        // an opener: the bundle's archive follows in data frames, so what is left of this frame
+        // is its id and its length and nothing else
+        if header.flags.contains(Flags::STREAMED) {
+            let Some(lane) = &lane else {
+                event!(Level::ERROR, msg = "an opener on a connection not granted streams", %peer);
+                break;
+            };
+            if payload_len != stream::QUERIES_OPENER_LEN {
+                event!(Level::ERROR, msg = "an opener carried more than its id and length", %peer, payload_len);
+                break;
+            }
+            let mut raw = [0u8; stream::QUERIES_OPENER_LEN];
+            if let Err(error) = tcp_rx.read_exact(&mut raw).await {
+                event!(Level::ERROR, msg = "failed to read an opener", %peer, ?error);
+                break;
+            }
+            let (id, declared) = stream::decode_queries_opener(&raw);
+            // the bundle's root span opens now, since reading its frames is part of serving it
+            let span = request_span(peer, declared as usize, wire_trace.as_ref());
+            if let Err(error) = open_stream(lane, &mut inbound, id, declared, span, options).await {
+                event!(Level::ERROR, msg = "refused a stream", %peer, %error);
+                break;
+            }
+            continue;
+        }
         // open the root span every span this bundle produces hangs off
         //
         // here rather than after the body read, because this is the first instant the frame is
         // known to exist and the read of its body is part of serving it. the wait on the
         // preamble above is deliberately outside: that is idle time between requests, not time
         // this request spent anywhere
-        //
-        // `parent: None` is explicit rather than incidental. this task inherits nothing today,
-        // but a span opened contextually would silently join whatever the connection task
-        // happened to be in the day somebody instruments it
-        //
-        // it stays `parent: None` even when the client sent a trace context. that context is an
-        // *OpenTelemetry* parent, set below and resolved by the OTLP layer, and the two parenting
-        // mechanisms are independent - this one decides what the registry hangs this span off,
-        // and the registry has never heard of the other process
-        let span = info_span!(
-            parent: None,
-            "Shoal::request",
-            peer = %peer,
-            bytes = payload_len,
-            trace = tracing::field::Empty,
-        );
-        // join this request to the trace the client opened, if it sent one
-        if let Some(wire_trace) = &wire_trace {
-            // say on the span itself which trace it was joined to, so a run with no collector
-            // attached can still be followed in the console
-            span.record("trace", tracing::field::display(hex_trace_id(wire_trace)));
-            trace::adopt_remote_parent(&span, wire_trace);
-        }
+        let span = request_span(peer, payload_len, wire_trace.as_ref());
         // read this frame's body into a buffer that is exactly the right size
         //
         // the buffer is not zeroed first, because every byte of it is about to be overwritten.
@@ -440,6 +591,229 @@ async fn client_rx_relay<S: ShoalDatabase>(
             break;
         }
     }
+}
+
+/// Open the root span of one bundle, joined to the trace its client sent if it sent one
+///
+/// `parent: None` is explicit rather than incidental. The relay's task inherits nothing today,
+/// but a span opened contextually would silently join whatever the connection task happened to be
+/// in the day somebody instruments it. It stays `parent: None` even when the client sent a trace
+/// context: that context is an *OpenTelemetry* parent, set here and resolved by the OTLP layer,
+/// and the two parenting mechanisms are independent - this one decides what the registry hangs
+/// this span off, and the registry has never heard of the other process.
+///
+/// # Arguments
+///
+/// * `peer` - The client
+/// * `bytes` - The bundle's length
+/// * `wire_trace` - The trace context the client sent, if any
+fn request_span(peer: Uuid, bytes: usize, wire_trace: Option<&TraceContext>) -> Span {
+    let span = info_span!(
+        parent: None,
+        "Shoal::request",
+        peer = %peer,
+        bytes = bytes,
+        trace = tracing::field::Empty,
+    );
+    // join this request to the trace the client opened, if it sent one
+    if let Some(wire_trace) = wire_trace {
+        // say on the span itself which trace it was joined to, so a run with no collector
+        // attached can still be followed in the console
+        span.record("trace", tracing::field::display(hex_trace_id(wire_trace)));
+        trace::adopt_remote_parent(&span, wire_trace);
+    }
+    span
+}
+
+/// Open a stream for a bundle, or refuse it by name and drain it
+///
+/// A bundle longer than this server advertised is answered `RequestTooLarge`, one that would take
+/// the shard past its assembly budget `Shedding`, each as an error frame naming the bundle's id,
+/// and either way its data frames are read and dropped as they arrive.
+///
+/// # Arguments
+///
+/// * `lane` - What reading streams needs on this connection
+/// * `inbound` - The connection's open streams
+/// * `id` - The bundle's id
+/// * `declared` - Its archive's length
+/// * `span` - Its root span
+/// * `options` - What it said about its reads
+///
+/// # Errors
+///
+/// A stream whose opener breaks the rules every stream follows - its id already open, too many
+/// open, nothing declared - which ends the connection.
+async fn open_stream(
+    lane: &StreamLane,
+    inbound: &mut Inbound<Assembling>,
+    id: Uuid,
+    declared: u64,
+    span: Span,
+    options: Option<ReadOptions>,
+) -> Result<(), ServerError> {
+    // longer than this server said it takes: a client that read the bound would not send it
+    if declared > lane.bound {
+        inbound
+            .refuse(id, declared)
+            .map_err(ProtocolError::Stream)?;
+        let told = format!(
+            "this bundle is {declared} bytes, longer than the {} bytes this server assembles",
+            lane.bound
+        );
+        refuse(lane, id, ErrorCode::RequestTooLarge, &told).await;
+        return Ok(());
+    }
+    // the shard's budget for bundles being assembled, taken whole now
+    match AssemblyBudget::reserve(&lane.budget, declared) {
+        Some(reservation) => {
+            let pending = Assembling {
+                assembly: BodyAssembly::new(declared as usize),
+                span,
+                options,
+                _reservation: reservation,
+            };
+            inbound
+                .open(id, declared, Hold::Reserved, pending)
+                .map_err(ProtocolError::Stream)?;
+        }
+        None => {
+            inbound
+                .refuse(id, declared)
+                .map_err(ProtocolError::Stream)?;
+            let told = format!("this shard is assembling as many bundles as it holds, and this one is {declared} bytes");
+            refuse(lane, id, ErrorCode::Shedding, &told).await;
+        }
+    }
+    Ok(())
+}
+
+/// Queue a refusal of a stream for this connection's write relay
+///
+/// # Arguments
+///
+/// * `lane` - What reading streams needs on this connection
+/// * `id` - The stream's id
+/// * `code` - What class of refusal
+/// * `told` - What to say
+async fn refuse(lane: &StreamLane, id: Uuid, code: ErrorCode, told: &str) {
+    // the message's bytes, in the buffer every reply carries
+    let mut archived = AlignedVec::new();
+    archived.extend_from_slice(told.as_bytes());
+    let reply = Reply {
+        id,
+        index: 0,
+        end: true,
+        kind: ReplyKind::Refused { code },
+        span: Span::none(),
+        stamps: StageStamps::new(Stamp::now()),
+        archived,
+        attempt: 0,
+        slot: 0,
+        token: None,
+        op: None,
+    };
+    // a write relay that has gone ends the connection on its own
+    let _ = lane.refusals.send(reply).await;
+}
+
+/// Read one data frame: its bytes onto the bundle it belongs to, or nowhere for a refused one
+///
+/// Returns the bundle once its last bytes are in.
+///
+/// # Arguments
+///
+/// * `tcp_rx` - The connection, positioned after the frame's header
+/// * `header` - The frame's header
+/// * `inbound` - The connection's open streams
+///
+/// # Errors
+///
+/// A frame that breaks its stream, or a read that failed: either ends the connection.
+async fn read_data_frame(
+    tcp_rx: &mut ReadHalf<TcpStream>,
+    header: &protocol::Header,
+    inbound: &mut Inbound<Assembling>,
+) -> Result<Option<Assembling>, ServerError> {
+    // the stream the frame names and where its bytes go in it
+    let mut head = [0u8; stream::DATA_HEAD_LEN];
+    tcp_rx.read_exact(&mut head).await?;
+    let (id, offset) = stream::decode_data_head(&head);
+    let len = stream::data_payload_len(header)?;
+    let last = header.flags.contains(Flags::LAST);
+    match inbound
+        .data(id, offset, len as u64, last)
+        .map_err(ProtocolError::Stream)?
+    {
+        // onto the bundle, under its span, which is where the time reading it belongs
+        Step::Keep { sink, finished, .. } => {
+            let span = sink.span.clone();
+            sink.assembly
+                .read_next(tcp_rx, len)
+                .instrument(span)
+                .await?;
+            if finished {
+                return Ok(inbound.finish(&id));
+            }
+        }
+        // a refused stream's bytes are read and dropped, a piece at a time
+        Step::Discard { .. } => {
+            let mut scratch = vec![0u8; len.min(64 << 10)];
+            let mut left = len;
+            while left > 0 {
+                let take = left.min(scratch.len());
+                tcp_rx.read_exact(&mut scratch[..take]).await?;
+                left -= take;
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Route a bundle a stream assembled, exactly as one read in a single frame is routed
+///
+/// Returns whether the shard took it; a shard whose channel is gone ends the connection.
+///
+/// # Arguments
+///
+/// * `peer` - The client
+/// * `pending` - The assembled bundle
+/// * `kanal_tx` - The channel to forward bundles into this node on
+/// * `meter` - Where this shard counts what its clients sent
+async fn route_assembled<S: ShoalDatabase>(
+    peer: Uuid,
+    pending: Assembling,
+    kanal_tx: &AsyncSender<ServerMsg<S>>,
+    meter: &QueryMeter,
+) -> bool {
+    let Assembling {
+        assembly,
+        span,
+        options,
+        _reservation,
+    } = pending;
+    // every declared byte is in, which is what the stream's last frame said
+    let Ok(data) = assembly.finish() else {
+        event!(Level::ERROR, msg = "a stream ended short of its length", %peer);
+        return false;
+    };
+    // counted and clocked as a bundle read whole is, now that all of its bytes are here (F65)
+    meter.read(data.len());
+    let base = Stamp::now();
+    if let Err(error) = kanal_tx
+        .send(ServerMsg::Client {
+            peer,
+            span,
+            data,
+            base,
+            options,
+        })
+        .await
+    {
+        event!(Level::ERROR, msg = "failed to forward a bundle", %peer, ?error);
+        return false;
+    }
+    true
 }
 
 /// Read the body of a topology subscription or an admin request and say what it asks
@@ -647,14 +1021,17 @@ fn answer_op<S: ShoalDatabase>(archived: &[u8]) -> usize {
 /// * `tcp_tx` - The write half of this client's connection
 /// * `peer_max_frame_bytes` - The largest frame this client said it would accept
 /// * `caps` - The optional sections this client's hello asked for
+/// * `streams` - How to stream answers to this client, if it asked for streams
 /// * `backlog` - What this relay has taken and not yet written, which the read relay waits on
 /// * `client` - The client this relay writes to
 /// * `meter` - Where this shard counts what its clients were answered
+#[allow(clippy::too_many_arguments)]
 async fn client_tx_relay<S: ShoalDatabase>(
     client_rx: AsyncReceiver<Reply>,
     tcp_tx: WriteHalf<TcpStream>,
     peer_max_frame_bytes: u32,
     caps: u8,
+    streams: Option<StreamOut>,
     backlog: Rc<ReplyBacklog>,
     client: Uuid,
     meter: Rc<QueryMeter>,
@@ -665,6 +1042,7 @@ async fn client_tx_relay<S: ShoalDatabase>(
         tcp_tx,
         peer_max_frame_bytes,
         caps,
+        streams,
         &backlog,
         client,
         &meter,
@@ -674,7 +1052,20 @@ async fn client_tx_relay<S: ShoalDatabase>(
     backlog.close();
 }
 
+/// What became of one write to a client's socket
+enum Wrote {
+    /// It was written, or was impossible to frame and the client was told so
+    Done,
+    /// The socket failed, so the connection is over
+    Dead,
+}
+
 /// Write the replies queued to one client until its socket or its channel fails
+///
+/// Since [F73](../../../docs/src/features/bodies-across-frames.md) an answer longer than a data
+/// frame is streamed to a client that asked for streams: an opener, then data frames, with every
+/// whole frame queued on the connection written between two of them. [`outbox::Outbox`] decides
+/// which frame goes next; this writes it.
 ///
 /// # Arguments
 ///
@@ -682,178 +1073,417 @@ async fn client_tx_relay<S: ShoalDatabase>(
 /// * `tcp_tx` - The write half of this client's connection
 /// * `peer_max_frame_bytes` - The largest frame this client said it would accept
 /// * `caps` - The optional sections this client's hello asked for
+/// * `streams` - How to stream answers to this client, if it asked for streams
 /// * `backlog` - What this relay has taken and not yet written, which the read relay waits on
 /// * `client` - The client this relay writes to
 /// * `meter` - Where this shard counts what its clients were answered
+#[allow(clippy::too_many_arguments)]
 async fn write_replies<S: ShoalDatabase>(
     client_rx: &AsyncReceiver<Reply>,
     mut tcp_tx: WriteHalf<TcpStream>,
     peer_max_frame_bytes: u32,
     caps: u8,
+    streams: Option<StreamOut>,
     backlog: &ReplyBacklog,
     client: Uuid,
     meter: &QueryMeter,
 ) {
+    // what this connection owes, in the order it is written
+    let frame = streams.map_or(usize::MAX, |streams| streams.frame);
+    let mut outbox: Outbox<Reply> = Outbox::new(STREAM_INTERLEAVE, frame);
     // loop over messages to send back to our client
-    'relay: loop {
-        // wait for the next reply, then take everything else already queued behind it, so a
-        // run of topology frames can be folded to the newest before any of them is written
-        let first = match client_rx.recv().await {
-            Ok(msg) => msg,
-            // if this channel was closed then stop our task
-            // this should only happen exit/shutdown or when our client shutsdown
-            Err(_) => break,
-        };
-        let mut batch = vec![first];
+    loop {
+        // wait for the next reply when nothing is owed, then take everything else already
+        // queued, so a run of topology frames can be folded to the newest before any is written
+        let mut batch = Vec::new();
+        if outbox.is_empty() {
+            match client_rx.recv().await {
+                Ok(msg) => batch.push(msg),
+                // if this channel was closed then stop our task
+                // this should only happen exit/shutdown or when our client shutsdown
+                Err(_) => break,
+            }
+        }
         while let Ok(Some(next)) = client_rx.try_recv() {
             batch.push(next);
         }
         coalesce_topology(&mut batch);
-        // say how many answers this batch holds, which the read relay counts as owed
-        backlog.taken(batch.len());
+        // an answer longer than a data frame is a stream, to a client that takes streams and
+        // within what it assembles; everything else is a whole frame as it always was
         for reply in batch {
-            // this answer is no longer waiting behind the socket, whatever becomes of it
-            backlog.started();
-            let Reply {
-                id: query_id,
-                index,
-                kind,
-                span,
-                mut stamps,
-                archived,
-                token,
-                op,
-                ..
-            } = reply;
-            // enter this query's own span for the framing and the write
-            //
-            // this is what puts the end of the trace on the socket rather than at the reply that
-            // queued the bytes: `tracing-opentelemetry` timestamps a span when it is *exited*, so
-            // a span that is only ever held and never entered exports with no duration at all.
-            // entering it here is what makes `Coordinator::route` cover the whole query
-            let span_guard = span.enter();
-            // an answer is a response frame; a topology frame and an admin answer are their own
-            // kinds under the same preamble, and only an answer has a journey to profile
-            // ([F39](../../../docs/src/features/membership.md))
-            let (message, profiled) = match kind {
-                ReplyKind::Whole | ReplyKind::Share => (MessageType::Response, true),
-                ReplyKind::Topology { .. } => (MessageType::Topology, false),
-                ReplyKind::Admin => (MessageType::AdminResponse, false),
-                // a stale refusal is a peer's frame and never a client's; one queued here is
-                // a bug in the shard, not something the client can read
-                ReplyKind::Stale => {
-                    event!(Level::ERROR, msg = "a stale refusal was queued to a client relay", %query_id);
-                    continue;
+            let len = reply.archived.len() as u64;
+            match streams {
+                Some(out)
+                    if matches!(reply.kind, ReplyKind::Whole)
+                        && len > out.frame as u64
+                        && len <= out.client_body =>
+                {
+                    let id = reply.id;
+                    outbox.push_stream(OutStream::new(reply, id, len, out.frame));
                 }
+                _ => {
+                    let size = reply.archived.len();
+                    outbox.push_whole(reply, size);
+                }
+            }
+        }
+        // say how many answers wait unstarted, which the read relay counts as owed
+        backlog.set_unstarted(outbox.unstarted());
+        let Some(next) = outbox.next() else { continue };
+        let wrote = match next {
+            Next::Whole(reply) => {
+                write_whole::<S>(
+                    &mut tcp_tx,
+                    reply,
+                    peer_max_frame_bytes,
+                    caps,
+                    streams,
+                    client,
+                    meter,
+                )
+                .await
+            }
+            Next::Stream(mut stream) => {
+                let wrote = write_stream_frame::<S>(
+                    &mut tcp_tx,
+                    &mut stream,
+                    peer_max_frame_bytes,
+                    caps,
+                    client,
+                    meter,
+                )
+                .await;
+                outbox.put_back(stream);
+                wrote
+            }
+        };
+        backlog.set_unstarted(outbox.unstarted());
+        // stop relaying to a client we could not write to
+        if matches!(wrote, Wrote::Dead) {
+            break;
+        }
+    }
+}
+
+/// The message type a reply is framed as, and whether its journey is profiled
+///
+/// # Arguments
+///
+/// * `kind` - The reply's kind
+fn reply_message(kind: &ReplyKind) -> Option<(MessageType, bool)> {
+    // an answer is a response frame; a topology frame and an admin answer are their own kinds
+    // under the same preamble, and only an answer has a journey to profile
+    // ([F39](../../../docs/src/features/membership.md))
+    match kind {
+        ReplyKind::Whole | ReplyKind::Share => Some((MessageType::Response, true)),
+        ReplyKind::Topology { .. } => Some((MessageType::Topology, false)),
+        ReplyKind::Admin => Some((MessageType::AdminResponse, false)),
+        // a refusal is an error frame, and a stale refusal is a peer's frame and never a client's
+        ReplyKind::Refused { .. } | ReplyKind::Stale => None,
+    }
+}
+
+/// The session token a reply carries, for a connection whose hello asked for one
+///
+/// A token a write minted goes between the id and the payload, but only down a connection whose
+/// hello asked for one: a client that did not would read it as the first bytes of its archive
+/// ([F41](../../../docs/src/features/read-consistency.md)).
+///
+/// # Arguments
+///
+/// * `reply` - The reply
+/// * `caps` - The optional sections the connection asked for
+fn reply_token(reply: &Reply, caps: u8) -> Option<[u8; read::SESSION_TOKEN_LEN]> {
+    match reply.token {
+        Some(token) if caps & CLIENT_CAP_READ_OPTIONS != 0 => Some(token.encode()),
+        _ => None,
+    }
+}
+
+/// Count an answer as written and hand its journey to the profile
+///
+/// # Arguments
+///
+/// * `reply` - The answer, its last byte now the socket's
+/// * `bytes` - The answer's bytes, for the node's figures
+/// * `client` - The client it was written to
+/// * `meter` - Where this shard counts what its clients were answered
+fn answered<S: ShoalDatabase>(reply: Reply, bytes: usize, client: Uuid, meter: &QueryMeter) {
+    let Reply {
+        id,
+        index,
+        mut stamps,
+        archived,
+        op,
+        ..
+    } = reply;
+    // count this answer by its kind and time it against its bundle's arrival, now that its last
+    // byte is the socket's (F65)
+    let op = op.map_or_else(|| answer_op::<S>(&archived), usize::from);
+    meter.answered(client, id, index, op, bytes, Stamp::now());
+    // record that this responses last byte is now the sockets problem
+    stamps.mark_socket_written();
+    // hand this queries journey to the profile
+    //
+    // this is the last moment the server knows anything about the query, so it is the only
+    // place a record can be emitted with every server side stage filled in
+    stage_profile::emit(id, stamps);
+}
+
+/// Write every byte of some buffers to a client, or say the connection is over
+///
+/// # Arguments
+///
+/// * `tcp_tx` - The write half of the client's connection
+/// * `bufs` - What to write
+/// * `query_id` - The query the bytes belong to, for the log
+async fn write_all_slices(
+    tcp_tx: &mut WriteHalf<TcpStream>,
+    mut bufs: &mut [IoSlice<'_>],
+    query_id: &Uuid,
+) -> Wrote {
+    // keep sending until every byte has been sent
+    //
+    // a short write or a write error here means this client is gone, so this connection ends
+    while !bufs.is_empty() {
+        match tcp_tx.write_vectored(bufs).await {
+            Ok(0) => {
+                event!(Level::ERROR, msg = "wrote no bytes to a client", %query_id);
+                return Wrote::Dead;
+            }
+            Ok(n) => IoSlice::advance_slices(&mut bufs, n),
+            Err(error) => {
+                event!(Level::ERROR, msg = "failed to write a response", %query_id, ?error);
+                return Wrote::Dead;
+            }
+        }
+    }
+    Wrote::Done
+}
+
+/// Write one reply as a whole frame: a response, a topology frame, an admin answer or a refusal
+///
+/// # Arguments
+///
+/// * `tcp_tx` - The write half of the client's connection
+/// * `reply` - The reply
+/// * `peer_max_frame_bytes` - The largest frame the client accepts
+/// * `caps` - The optional sections the client asked for
+/// * `streams` - How answers are streamed to this client, if they are
+/// * `client` - The client
+/// * `meter` - Where this shard counts what its clients were answered
+async fn write_whole<S: ShoalDatabase>(
+    tcp_tx: &mut WriteHalf<TcpStream>,
+    reply: Reply,
+    peer_max_frame_bytes: u32,
+    caps: u8,
+    streams: Option<StreamOut>,
+    client: Uuid,
+    meter: &QueryMeter,
+) -> Wrote {
+    let query_id = reply.id;
+    // enter this query's own span for the framing and the write
+    //
+    // this is what puts the end of the trace on the socket rather than at the reply that queued
+    // the bytes: `tracing-opentelemetry` timestamps a span when it is *exited*, so a span that is
+    // only ever held and never entered exports with no duration at all. entering it here is what
+    // makes `Coordinator::route` cover the whole query
+    let span = reply.span.clone();
+    let _guard = span.enter();
+    // a refusal of a stream is an error frame naming it
+    if let ReplyKind::Refused { code } = reply.kind {
+        let told = String::from_utf8_lossy(&reply.archived);
+        return if write_error_frame(tcp_tx, &query_id, code, &told, peer_max_frame_bytes).await {
+            Wrote::Done
+        } else {
+            Wrote::Dead
+        };
+    }
+    let Some((message, profiled)) = reply_message(&reply.kind) else {
+        event!(Level::ERROR, msg = "a stale refusal was queued to a client relay", %query_id);
+        return Wrote::Done;
+    };
+    let token = reply_token(&reply, caps);
+    let (flags, token_len) = match &token {
+        Some(token) => (Flags::SESSION_TOKEN, token.len()),
+        None => (Flags::NONE, 0),
+    };
+    // build the header and query id that go ahead of this frame
+    //
+    // a response too large for this client to accept is answered with a failure naming the
+    // query and both sizes, rather than by closing a connection the client would never learn the
+    // reason for. every other query on this connection is unaffected
+    let framed = protocol::server_preamble(
+        message,
+        flags,
+        &query_id,
+        reply.archived.len() + token_len,
+        peer_max_frame_bytes,
+    );
+    let preamble = match framed {
+        Ok(preamble) => preamble,
+        Err(error) => {
+            event!(Level::ERROR, msg = "response too large to frame", %query_id, %error);
+            // say what happened in terms of sizes rather than of internals, naming the bound
+            // the client set: its frame, or the most it assembles from a stream
+            let told = match streams {
+                Some(out) => format!(
+                    "this response is {} bytes, larger than the {} bytes this connection assembles from a stream",
+                    reply.archived.len(),
+                    out.client_body
+                ),
+                None => format!(
+                    "this response is {} bytes, larger than the {peer_max_frame_bytes} byte frame this connection accepts",
+                    reply.archived.len()
+                ),
             };
-            // a token a write minted goes between the id and the payload, but only down a
-            // connection whose hello asked for one: a client that did not would read it as
-            // the first bytes of its archive ([F41](../../../docs/src/features/read-consistency.md))
-            let token = match token {
-                Some(token) if caps & CLIENT_CAP_READ_OPTIONS != 0 => Some(token.encode()),
-                _ => None,
-            };
-            let (flags, token_len) = match &token {
-                Some(token) => (Flags::SESSION_TOKEN, token.len()),
-                None => (Flags::NONE, 0),
-            };
-            // build the header and query id that go ahead of this frame
-            //
-            // a response too large for this client to accept is answered with a failure naming
-            // the query and both sizes, rather than by closing a connection the client would
-            // never learn the reason for. every other query on this connection is unaffected
-            let preamble = match protocol::server_preamble(
-                message,
-                flags,
+            // a client we cannot even tell is a client we cannot serve
+            if !write_error_frame(
+                tcp_tx,
                 &query_id,
-                archived.len() + token_len,
+                ErrorCode::ResponseTooLarge,
+                &told,
                 peer_max_frame_bytes,
-            ) {
-                Ok(preamble) => preamble,
-                Err(error) => {
-                    event!(Level::ERROR, msg = "response too large to frame", %query_id, %error);
-                    // say what happened in terms of sizes rather than of internals
-                    let told = format!(
-                        "this response is {} bytes, larger than the {peer_max_frame_bytes} byte frame this connection accepts",
-                        archived.len()
-                    );
-                    // a client we cannot even tell is a client we cannot serve
-                    if !write_error_frame(
-                        &mut tcp_tx,
-                        &query_id,
-                        ErrorCode::ResponseTooLarge,
-                        &told,
-                        peer_max_frame_bytes,
-                    )
-                    .await
-                    {
-                        drop(span_guard);
-                        break 'relay;
-                    }
-                    // this query's journey ended here, so hand it to the profile before it is
-                    // forgotten - the failure is the last thing this server knows about it
-                    if profiled {
-                        // and it was answered, with a failure, for the node's figures (F65)
-                        let op = query_op_index(&ResponseActionNames::Error);
-                        meter.answered(client, query_id, index, op, 0, Stamp::now());
-                        stamps.mark_socket_written();
-                        stage_profile::emit(query_id, stamps);
-                    }
-                    drop(span_guard);
-                    continue;
-                }
-            };
-            // build our vectored byte slices to send: the preamble, the token if there is
-            // one, and the archive
-            let token_slice: &[u8] = token.as_ref().map_or(&[], |token| token.as_slice());
-            let mut bufs = &mut [
-                IoSlice::new(&preamble),
-                IoSlice::new(token_slice),
-                IoSlice::new(&archived),
-            ][..];
-            // keep sending our data until all of this archive has been sent
-            //
-            // a short write or a write error here means this client is gone, so this connection
-            // ends
-            let mut failed = false;
-            while !bufs.is_empty() {
-                // send this data back to our client
-                match tcp_tx.write_vectored(bufs).await {
-                    Ok(0) => {
-                        event!(Level::ERROR, msg = "wrote no bytes to a client", %query_id);
-                        failed = true;
-                        break;
-                    }
-                    Ok(n) => IoSlice::advance_slices(&mut bufs, n),
-                    Err(error) => {
-                        event!(Level::ERROR, msg = "failed to write a response", %query_id, ?error);
-                        failed = true;
-                        break;
-                    }
-                }
+            )
+            .await
+            {
+                return Wrote::Dead;
             }
-            // stop relaying to a client we could not write to
-            if failed {
-                drop(span_guard);
-                break 'relay;
-            }
-            // a frame or an admin answer has no journey to record
+            // this query's journey ended here, so hand it to the profile before it is forgotten
+            // - the failure is the last thing this server knows about it
             if profiled {
-                // count this answer by its kind and time it against its bundle's arrival, now
-                // that its last byte is the socket's (F65)
-                let op = op.map_or_else(|| answer_op::<S>(&archived), usize::from);
-                meter.answered(client, query_id, index, op, archived.len(), Stamp::now());
-                // record that this responses last byte is now the sockets problem
+                // and it was answered, with a failure, for the node's figures (F65)
+                let op = query_op_index(&ResponseActionNames::Error);
+                let Reply {
+                    index, mut stamps, ..
+                } = reply;
+                meter.answered(client, query_id, index, op, 0, Stamp::now());
                 stamps.mark_socket_written();
-                // hand this queries journey to the profile
-                //
-                // this is the last moment the server knows anything about the query, so it is
-                // the only place a record can be emitted with every server side stage filled in
                 stage_profile::emit(query_id, stamps);
             }
-            // drop our span since we are done writting
-            drop(span_guard);
+            return Wrote::Done;
         }
+    };
+    // the preamble, the token if there is one, and the archive
+    let token_slice: &[u8] = token.as_ref().map_or(&[], |token| token.as_slice());
+    let mut bufs = [
+        IoSlice::new(&preamble),
+        IoSlice::new(token_slice),
+        IoSlice::new(&reply.archived),
+    ];
+    if let Wrote::Dead = write_all_slices(tcp_tx, &mut bufs[..], &query_id).await {
+        return Wrote::Dead;
+    }
+    // a frame or an admin answer has no journey to record
+    if profiled {
+        let bytes = reply.archived.len();
+        answered::<S>(reply, bytes, client, meter);
+    }
+    Wrote::Done
+}
+
+/// Write a streamed answer's next frame: its opener, or its next data frame
+///
+/// # Arguments
+///
+/// * `tcp_tx` - The write half of the client's connection
+/// * `stream` - The answer being streamed
+/// * `peer_max_frame_bytes` - The largest frame the client accepts
+/// * `caps` - The optional sections the client asked for
+/// * `client` - The client
+/// * `meter` - Where this shard counts what its clients were answered
+async fn write_stream_frame<S: ShoalDatabase>(
+    tcp_tx: &mut WriteHalf<TcpStream>,
+    stream: &mut OutStream<Reply>,
+    peer_max_frame_bytes: u32,
+    caps: u8,
+    client: Uuid,
+    meter: &QueryMeter,
+) -> Wrote {
+    let query_id = stream.id;
+    // every frame of an answer is written under its span, for the reason a whole one is
+    let span = stream.item.span.clone();
+    let _guard = span.enter();
+    // the opener: the query id, the token if there is one, and the answer's length
+    if !stream.opened {
+        let token = reply_token(&stream.item, caps);
+        let mut flags = Flags::STREAMED;
+        let token_len = token.as_ref().map_or(0, |token| token.len());
+        if token.is_some() {
+            flags = flags.union(Flags::SESSION_TOKEN);
+        }
+        let declared = (stream.item.archived.len() as u64).to_le_bytes();
+        let preamble = match protocol::server_preamble(
+            MessageType::Response,
+            flags,
+            &query_id,
+            token_len + stream::DECLARED_LEN,
+            peer_max_frame_bytes,
+        ) {
+            Ok(preamble) => preamble,
+            // an opener is tens of bytes, and a client whose frame cannot hold one cannot be served
+            Err(error) => {
+                event!(Level::ERROR, msg = "could not frame an opener", %query_id, %error);
+                return Wrote::Dead;
+            }
+        };
+        stream.opened = true;
+        let token_slice: &[u8] = token.as_ref().map_or(&[], |token| token.as_slice());
+        let mut bufs = [
+            IoSlice::new(&preamble),
+            IoSlice::new(token_slice),
+            IoSlice::new(&declared),
+        ];
+        return write_all_slices(tcp_tx, &mut bufs[..], &query_id).await;
+    }
+    // a data frame: the next piece of the archive, which is written straight from it
+    let Some(piece) = stream.next_piece() else {
+        return Wrote::Done;
+    };
+    let preamble = match stream::data_preamble(
+        &query_id,
+        piece.offset,
+        piece.len,
+        piece.last,
+        peer_max_frame_bytes,
+    ) {
+        Ok(preamble) => preamble,
+        Err(error) => {
+            event!(Level::ERROR, msg = "could not frame a data frame", %query_id, %error);
+            return Wrote::Dead;
+        }
+    };
+    let start = piece.offset as usize;
+    let payload = &stream.item.archived[start..start + piece.len];
+    let mut bufs = [IoSlice::new(&preamble), IoSlice::new(payload)];
+    if let Wrote::Dead = write_all_slices(tcp_tx, &mut bufs[..], &query_id).await {
+        return Wrote::Dead;
+    }
+    // the last frame: the answer is written, and counted as an answer is
+    if piece.last {
+        let bytes = stream.item.archived.len();
+        let reply = std::mem::replace(&mut stream.item, finished_placeholder());
+        answered::<S>(reply, bytes, client, meter);
+    }
+    Wrote::Done
+}
+
+/// What a streamed answer leaves in its slot once its last frame is written and it is counted
+///
+/// The outbox gives a finished stream back to be dropped, so this is never written.
+fn finished_placeholder() -> Reply {
+    Reply {
+        id: Uuid::nil(),
+        index: 0,
+        end: true,
+        kind: ReplyKind::Whole,
+        span: Span::none(),
+        stamps: StageStamps::new(Stamp::now()),
+        archived: AlignedVec::new(),
+        attempt: 0,
+        slot: 0,
+        token: None,
+        op: None,
     }
 }
 
@@ -962,10 +1592,12 @@ const MAX_HANDSHAKE_BODY: usize = 4096;
 ///
 /// * `stream` - The connection to shake hands over, before it has been split
 /// * `max_frame_bytes` - The largest frame this server will accept
+/// * `max_body` - The longest bundle this server assembles from a stream
 /// * `store` - The users this server will accept, and whether it requires one
 async fn server_handshake<S: ShoalDatabase>(
     stream: &mut TcpStream,
     max_frame_bytes: u32,
+    max_body: u64,
     store: &CredentialStore,
 ) -> Result<(handshake::Hello, Option<AuthMechanism>), ServerError> {
     // the fingerprint of the schema this server was built from
@@ -978,6 +1610,7 @@ async fn server_handshake<S: ShoalDatabase>(
         // filled in once we have read what this client can do
         mechanism: None,
         caps: 0,
+        max_body_log2: 0,
     };
     // read the header of whatever this client opened with
     let mut header_bytes = [0u8; protocol::HEADER_LEN];
@@ -1062,7 +1695,14 @@ async fn server_handshake<S: ShoalDatabase>(
     // ([F41](../../../docs/src/features/read-consistency.md))
     let accept = handshake::HelloAck {
         mechanism,
-        caps: hello.caps & CLIENT_CAP_READ_OPTIONS,
+        caps: hello.caps & stream::CLIENT_CAPS,
+        // the longest bundle this server assembles, said to a client that asked for streams
+        // ([F73](../../../docs/src/features/bodies-across-frames.md))
+        max_body_log2: if hello.caps & stream::CLIENT_CAP_STREAMS != 0 {
+            stream::log2_floor(max_body)
+        } else {
+            0
+        },
         ..accept
     };
     stream.write_all(&accept.frame(max_frame_bytes)?).await?;
@@ -1190,6 +1830,7 @@ async fn server_auth(
 /// * `tls` - What to encrypt connections with, if this listener is encrypted
 /// * `max_queued_replies` - The most answers one connection may owe before it stops being read
 /// * `meter` - Where this shard counts what its clients sent and were answered
+/// * `streams` - What every connection that asks for streams is given
 #[allow(clippy::future_not_send, clippy::too_many_arguments)]
 async fn client_acceptor<S: ShoalDatabase>(
     tcp_sock: TcpListener,
@@ -1200,6 +1841,7 @@ async fn client_acceptor<S: ShoalDatabase>(
     tls: Option<Arc<ServerConfig>>,
     max_queued_replies: usize,
     meter: Rc<QueryMeter>,
+    streams: StreamSettings,
 ) -> Result<(), ServerError> {
     loop {
         // try to read a single datagram from our udp socket
@@ -1220,6 +1862,8 @@ async fn client_acceptor<S: ShoalDatabase>(
         let tls = tls.clone();
         // and so is the meter, which only client connections are handed (F65)
         let meter = meter.clone();
+        // and the shard's stream settings and its assembly budget (F73)
+        let streams = streams.clone();
         // run this whole connection under one task that owns its lifetime
         //
         // the two halves of a split stream keep the stream alive between them, so a read relay
@@ -1253,8 +1897,14 @@ async fn client_acceptor<S: ShoalDatabase>(
                     None => None,
                 };
                 // shake hands next, which is what decides whether there is anything to prove
-                let (hello, mechanism) =
-                    match server_handshake::<S>(&mut stream, max_frame_bytes, &store).await {
+                let (hello, mechanism) = match server_handshake::<S>(
+                    &mut stream,
+                    max_frame_bytes,
+                    streams.bound,
+                    &store,
+                )
+                .await
+                {
                         Ok(accepted) => accepted,
                         Err(error) => return Ok(Err(error)),
                     };
@@ -1297,6 +1947,20 @@ async fn client_acceptor<S: ShoalDatabase>(
             let (tcp_rx, tcp_tx) = stream.split();
             // create a channel for all of our shards to give data to send back to clients
             let (client_tx, client_rx) = kanal::unbounded_async();
+            // a client that asked for streams is streamed answers past one data frame, up to what
+            // it assembles, and may stream bundles up to what this server does; the read relay
+            // queues its refusals of a stream on the same channel the shards answer on
+            // ([F73](../../../docs/src/features/bodies-across-frames.md))
+            let granted = hello.caps & stream::CLIENT_CAP_STREAMS != 0;
+            let stream_out = granted.then(|| StreamOut {
+                frame: stream::data_body(streams.frame, hello.max_frame_bytes),
+                client_body: stream::body_bound(hello.max_body_log2),
+            });
+            let lane = granted.then(|| StreamLane {
+                bound: streams.bound,
+                budget: streams.budget.clone(),
+                refusals: client_tx.clone(),
+            });
             // tell every shard about this client before anything can send a query on its behalf
             //
             // the read relay pushes onto the same channels this broadcast uses, so broadcasting
@@ -1319,6 +1983,7 @@ async fn client_acceptor<S: ShoalDatabase>(
                 tcp_tx,
                 hello.max_frame_bytes,
                 hello.caps & CLIENT_CAP_READ_OPTIONS,
+                stream_out,
                 backlog.clone(),
                 client,
                 meter.clone(),
@@ -1337,6 +2002,7 @@ async fn client_acceptor<S: ShoalDatabase>(
                 &owed,
                 max_queued_replies,
                 &meter,
+                lane,
             )
             .await;
             // stop writing to a client that is not reading, which drops the last half of the
@@ -2162,6 +2828,12 @@ where
                 tls,
                 self.conf.networking.max_queued_replies,
                 self.meter.clone(),
+                // one assembly budget for every connection this shard accepts (F73)
+                StreamSettings {
+                    frame: self.conf.networking.stream_frame(),
+                    bound: self.conf.networking.request_body_bound(),
+                    budget: AssemblyBudget::new(self.conf.networking.assembling_budget()),
+                },
             ),
             self.high_priority,
         )?;

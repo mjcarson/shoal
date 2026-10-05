@@ -973,6 +973,9 @@ where
 /// * `conf` - The configuration the node starts with
 #[instrument(name = "server::resolve_executors", skip_all, err(Debug))]
 fn resolve_executors(conf: &Conf) -> Result<(Option<ControlPlacement>, CpuSet), ServerError> {
+    // the client lane's stream settings, which a cluster node holds to its frame (item 208)
+    // ([F73](../../../docs/src/features/bodies-across-frames.md))
+    conf.networking.validate_streams(conf.cluster.is_some())?;
     // validate the cluster block and place its control core, if there is one
     let placement = match &conf.cluster {
         Some(cluster) => {

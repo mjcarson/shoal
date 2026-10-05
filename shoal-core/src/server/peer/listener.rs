@@ -454,7 +454,7 @@ async fn peer_tx_relay(
             // a refusal by a node that no longer serves the tablet: the bytes are already the
             // error payload ([F45](../../../../docs/src/features/replica-migration.md))
             ReplyKind::Stale => ForwardedKind::Error,
-            ReplyKind::Topology { .. } | ReplyKind::Admin => {
+            ReplyKind::Topology { .. } | ReplyKind::Admin | ReplyKind::Refused { .. } => {
                 event!(Level::ERROR, msg = "a control reply was queued to a peer relay", %id);
                 drop(guard);
                 continue;

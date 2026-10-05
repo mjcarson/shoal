@@ -57,6 +57,12 @@ spec and dataset digests and every run of every arm, under the project's
 `target/shoaladm-bench/<label>/` ([F66](../features/dataset-benchmarks.md)). `shoal-bench`'s
 captures are its own and live under `docs/perf/runs/`.
 
+**Data frame** — A frame of type `Data` carrying bytes of a stream: a sixteen byte id, the offset
+of its bytes in the stream, and the bytes, never an archive. The final one carries `LAST`. A
+receiver judges every one against its stream - in order, within the declared length, `LAST` exactly
+at the end - and one that breaks those rules ends its connection. See
+[F73](../features/bodies-across-frames.md).
+
 **Dataset** (`shoaladm bench`) — A folder of one `<Table>.csv`, `.json` or `.jsonl` per table,
 named by the table's exact name. Each file splits into a **preload**, loaded before anything is
 measured and the only keys a read asks for, and an **insert pool**, streamed again for each arm
@@ -177,6 +183,11 @@ directly.
 fact that they were validated when the read that produced them landed. Its only constructor
 validates and its accessor does not, so a query seeks an evicted partition rather than re-running
 rkyv's validator over the whole buffer first ([F4](../features/validated-archives.md)).
+
+**Opener** — A `Queries` or `Response` frame with `STREAMED` set: it carries what it always carried
+ahead of its payload, then the stream's declared length, and its payload follows in data frames
+under its id. Sent only between peers that granted `CLIENT_CAP_STREAMS` at the hello. See
+[F73](../features/bodies-across-frames.md).
 
 **Principal** — Who a connection belongs to: a name and the mechanism that proved it, produced by
 a completed authentication exchange. Logged by the connection task and consulted by **nothing** —
@@ -431,6 +442,11 @@ handed the sort key of the last row of a page it names the next page, which is h
 partition is paged through without reading all of it.
 
 **Sorted table** — `PersistentSortedTable`. Many rows per partition, ordered by sort key.
+
+**Stream (on the client wire)** — A body longer than one frame, carried as an opener and data
+frames: a bundle past the server's frame, or an answer past one data frame. Not a result stream,
+which is the client's sequence of answers to one bundle, nor the bench's paced stream. See
+[F73](../features/bodies-across-frames.md).
 
 **Staging buffer** — The one `DmaBuffer` a `StreamWriter` fills before writing it out. How many
 records share it is what the group commit below has to amortize an `fdatasync` across, which is why

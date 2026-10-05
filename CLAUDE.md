@@ -851,6 +851,15 @@ carries the schema fingerprint ([F10](docs/src/features/framing-and-protocol-evo
 
 - Client→Server: `[8-byte header][26-byte trace context, if flagged][rkyv-serialized Queries]`
 - Server→Client: `[8-byte header][16-byte query id][rkyv-serialized ResponseKinds]`
+- Since [F73](docs/src/features/bodies-across-frames.md) a body longer than a frame is a stream,
+  between peers that agreed to `CLIENT_CAP_STREAMS` at the hello: an opener (`Queries` or
+  `Response` with `Flags::STREAMED`, declaring the length), then `Data` frames
+  `[8-byte header][16-byte id][8-byte offset][bytes]` with `Flags::LAST` on the final one. Every
+  frame is judged by `stream::Inbound` in `shoal-proto`, and one that breaks its stream ends the
+  connection. A bundle that fits the server's frame is framed exactly as before, the server
+  routes a streamed bundle only once `BodyAssembly` holds all of it, and `shard/outbox.rs` writes
+  whole frames between a long answer's data frames. The client keeps
+  `StreamConfig::dedicated_connections` apart for long streams; never send one on the shared pool
 
 ## Configuration (shoal.yml)
 

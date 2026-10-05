@@ -97,6 +97,15 @@ async fn connect_to(&self, addr: SocketAddr) -> Result<ShoalConnection, ConnectE
 *which* endpoint to ask ([F16](../features/client-builder.md)); the connection carries an id so a
 dead read loop can name itself.
 
+**Longer than a frame.** Since [F73](../features/bodies-across-frames.md) a client asks for streams
+at its hello, and `StreamConfig` (`ShoalBuilder::streams`) says what it takes: its frame bound, the
+longest answer it assembles (1 GiB), the data frame it cuts its own bundles into (1 MiB), and how
+many connections it sets apart for long streams (two). A bundle past the server's frame is sent as
+an opener and data frames on one of those; an answer past a data frame arrives as one, assembled by
+the connection's reader into one aligned buffer, and nothing above the reader knows. A send whose
+answer the caller knows is long is marked `SendOptions::bulk` and goes on a connection set apart
+too. `Shoal::connections` says how many of each are open.
+
 ```
    Shoal::send  ──▶ pool.get() ──▶ OwnedWriteHalf ──▶ socket
                                                         │

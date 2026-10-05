@@ -155,6 +155,11 @@ admission: a query routed to a shard whose queue holds `networking.max_queued_qu
 messages is shed at once ([Resolved #15](../appendix/resolved/shard-mesh-admission.md)). A
 client connection is bounded the way a peer lane is: one owing `networking.max_queued_replies`
 answers is not read until they drain ([the remainder](../appendix/resolved/backlog-bounds.md)).
+A bundle a client streams across frames takes its whole declared length from its shard's
+`networking.max_assembling_bytes` at its opener and is refused `Shedding` by name, and drained,
+when the shard has no room; it is never waited for, since the bytes still to be read are its only
+way to finish ([F73](../features/bodies-across-frames.md)). Forwards and answers between nodes stay
+one peer frame each.
 
 ### Compatibility and the wire version
 

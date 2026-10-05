@@ -63,16 +63,22 @@ exact match is what keeps it out.
 | 13 – 22 | | node ↔ node | the peer protocol — [F38](../features/inter-node-transport.md) |
 | `Admin` | 23 | client → server | yes — [F39](../features/membership.md): an operation as JSON under a query id |
 | `AdminResponse` | 24 | server → client | yes — [F39](../features/membership.md): its answer under the same id |
+| 25 – 26 | | node ↔ node | the replication lane — [F40](../features/replication.md) |
+| `Data` | 27 | both | yes — [F73](../features/bodies-across-frames.md): a stream's bytes, after an opener, between peers that granted `CLIENT_CAP_STREAMS` |
 
 Starting at 1 rather than 0 is what stops a zeroed buffer decoding as a valid type. The five
 reserved entries exist so that the features that need them are a call site rather than a second
 flag day — which is what `Auth`, `AuthResponse` and `Error` turned out to be.
 
-`flags` is sixteen bits, five of which are claimed: `IS_ERROR` (1), `STALE_TOPOLOGY` (2), `LAST`
-(4), `REFUSED` (8), `TRACE_CONTEXT` (16). Three are set today: `REFUSED`, on a `HelloAck` that
-turns a client away; `IS_ERROR`, on every `Error` frame; and `TRACE_CONTEXT`, on a request frame
-from a client that is tracing ([F35](../features/wire-trace-context.md)) — the first of the free
-bits to be spent, and the demonstration that the mechanism below actually works. `IS_ERROR` is redundant against the type byte on that frame and
+`flags` is sixteen bits, ~~five~~ eight of which are claimed: `IS_ERROR` (1), `STALE_TOPOLOGY` (2),
+`LAST` (4), `REFUSED` (8), `TRACE_CONTEXT` (16), `READ_OPTIONS` (32), `SESSION_TOKEN` (64) and
+`STREAMED` (128). ~~Three are set today~~ All but `STALE_TOPOLOGY` are set today: `REFUSED`, on a
+`HelloAck` that turns a client away; `IS_ERROR`, on every `Error` frame; `TRACE_CONTEXT`, on a
+request frame from a client that is tracing ([F35](../features/wire-trace-context.md)) — the first
+of the free bits to be spent, and the demonstration that the mechanism below actually works;
+`READ_OPTIONS` and `SESSION_TOKEN` since [F41](../features/read-consistency.md); and since
+[F73](../features/bodies-across-frames.md) `STREAMED`, on a `Queries` or `Response` frame that opens
+a stream, and `LAST`, reserved since F10, on a stream's final `Data` frame. `IS_ERROR` is redundant against the type byte on that frame and
 is set anyway, so that "is this a failure" stays one uniform bit test when a `Response` frame
 carrying an error payload starts setting it too — **the type byte remains authoritative, and the
 flag is never the sole test**. **Unknown bits are preserved, never rejected** — that is the whole
@@ -136,7 +142,11 @@ is little-endian, so it assumes a little-endian peer and does no conversion.
 
 One frame per response, not one per bundle: a bundle of 100 queries produces 100 frames, each
 carrying the same query id. That is the argument for the length being a `u32` — it is paid *N*
-times per bundle rather than once.
+times per bundle rather than once. ~~One frame per response~~ Since
+[F73](../features/bodies-across-frames.md) a response longer than one data frame, to a client that
+asked for streams, is an opener and data frames under its query id, written between other answers
+rather than ahead of them; and a bundle past the server's frame is an opener and data frames too.
+A peer that did not ask for streams is sent one frame per response as before.
 
 ### What the framing does when it goes wrong
 
@@ -162,7 +172,10 @@ every one of those four was a way for one peer to kill the database for everybod
 **Every frame is bounded.** `Networking::max_frame_bytes` defaults to 64 MiB, is exchanged in the
 handshake, and is checked in a pure decoder before any allocation happens. Each side checks its own
 bound before it allocates and the peer's before it writes — the second is what turns "the
-connection died" into an error naming both sizes.
+connection died" into an error naming both sizes. **A stream is bounded too**, by the body bound
+each side says at the hello, and is judged frame by frame: in order, within its declared length,
+`LAST` exactly at its end ([F73](../features/bodies-across-frames.md)). A stream that breaks those
+rules ends its connection; one the receiver will not take is refused by name and drained.
 
 **A truncated frame is still indistinguishable from a slow one.** `read_exact` on the body waits
 for exactly as many bytes as the header claimed, with no deadline
@@ -177,9 +190,14 @@ it writes and then reads; the server reads and then writes. If both waited to re
 connection would deadlock and nothing in the frame layout would show it.
 
 ```
-Hello    body, 16 B, client → server : fingerprint u64 LE | max_frame_bytes u32 LE | mechanisms u16 LE | reserved [u8;2]
-HelloAck body, 16 B, server → client : fingerprint u64 LE | max_frame_bytes u32 LE | reason u8 | mechanism u8 | reserved [u8;2]
+Hello    body, 16 B, client → server : fingerprint u64 LE | max_frame_bytes u32 LE | mechanisms u16 LE | caps u8 | max body log2 u8
+HelloAck body, 16 B, server → client : fingerprint u64 LE | max_frame_bytes u32 LE | reason u8 | mechanism u8 | caps u8 | max body log2 u8
 ```
+
+~~`reserved [u8;2]`~~ The capability byte at offset 14 was spent by
+[F41](../features/read-consistency.md), and the last reserved byte, offset 15, by
+[F73](../features/bodies-across-frames.md): the longest body each side assembles from a stream, as
+a power of two, zero for none. No reserved byte is left in either body.
 
 The `mechanisms` and `mechanism` fields were cut out of the reserved tails by
 [F12](../features/authentication.md), not appended to the bodies — both are still 16 bytes and the
@@ -491,8 +509,9 @@ concatenated, on either direction of the connection. The encoders return stack a
   a dead peer ([D6](../direction/connection-pool.md#health-checks-that-work)). The message type it
   needs exists.
 - **A client learns one frame bound.** `peer_max_frame_bytes` is a single value shared across the
-  pool. Every connection in a pool goes to one address today, so this cannot bite yet; it becomes
-  real with [D7](../direction/shard-aware-routing.md)'s per-shard endpoints.
+  pool, and since [F73](../features/bodies-across-frames.md) so is the server's body bound. Every
+  connection in a pool goes to one address today, so this cannot bite yet; it becomes real with
+  [D7](../direction/shard-aware-routing.md)'s per-shard endpoints.
 
 **What the transport itself is not.** TCP is a decision rather than an inheritance, and the case
 for keeping it — including why QUIC's stream multiplexing is already implemented one layer up in

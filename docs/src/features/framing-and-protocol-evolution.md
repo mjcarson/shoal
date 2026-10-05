@@ -123,8 +123,10 @@ compile-time guarantee available to this system is a runtime handshake field.
 
 **The two bounds are exchanged, not configured.** `Shoal::new` takes an address and has no config
 object, so there is no place to configure a client-side bound. The server's bound comes from
-`conf.networking.max_frame_bytes`; the client's is a compile-time constant. Each side learns the
-other's in the handshake.
+`conf.networking.max_frame_bytes`; ~~the client's is a compile-time constant~~ the client's is
+`StreamConfig::max_frame_bytes` since [F73](bodies-across-frames.md), 64 MiB unless a builder sets
+it, where it was a compile-time constant until then. Each side learns the other's in the
+handshake.
 
 **`max_frame_bytes` has a serde default.** `shoal.yml` is committed and is the config every frozen
 benchmark was captured against. A required key would have invalidated that baseline for a setting

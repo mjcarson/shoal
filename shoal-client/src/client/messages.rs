@@ -51,6 +51,13 @@ pub struct SendOptions {
     /// an identity it forgot while the write queued, and would refuse it again
     /// ([#180](../../../../docs/src/appendix/resolved/first-write-past-identity-memory.md)).
     pub retry: Option<Duration>,
+    /// Whether the bundle is sent on a connection set apart for long streams
+    ///
+    /// A caller that knows a bundle's answer is long - many rows, or wide ones - marks it, so the
+    /// answer's data frames do not sit ahead of small answers on a connection other bundles share.
+    /// A bundle past the server's frame goes on one of those connections whatever this says.
+    /// Never on the wire ([F73](../../../../docs/src/features/bodies-across-frames.md)).
+    pub bulk: bool,
 }
 
 impl SendOptions {
@@ -112,6 +119,13 @@ impl SendOptions {
     #[must_use]
     pub fn retry(mut self, within: Duration) -> Self {
         self.retry = Some(within);
+        self
+    }
+
+    /// Send the bundle on a connection set apart for long streams
+    #[must_use]
+    pub fn bulk(mut self) -> Self {
+        self.bulk = true;
         self
     }
 
@@ -282,6 +296,33 @@ impl BatchStamps {
     pub fn mark_written(&mut self) {}
 }
 
+/// How a response arrived on the wire: in one frame, or as an opener and data frames
+///
+/// Carried beside the bytes so a response can say what it cost on the wire, which a driver
+/// counts as received ([F69](../../../../docs/src/features/driver-operation-kinds.md),
+/// [F73](../../../../docs/src/features/bodies-across-frames.md)).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Framing {
+    /// How many data frames carried it, zero for an answer in one frame
+    pub data_frames: u32,
+}
+
+impl Framing {
+    /// The bytes framing a streamed answer took beyond a whole frame's: the declared length in
+    /// its opener and every data frame's preamble
+    #[must_use]
+    pub fn overhead(&self) -> usize {
+        if self.data_frames == 0 {
+            0
+        } else {
+            shoal_proto::shared::protocol::stream::DECLARED_LEN
+                + self.data_frames as usize
+                    * shoal_proto::shared::protocol::stream::DATA_PREAMBLE_LEN
+        }
+    }
+}
+
+/// What a connection's reader hands the stream waiting on a bundle
 #[derive(Debug)]
 pub enum ClientMsg {
     /// A response from the server
@@ -290,7 +331,7 @@ pub enum ClientMsg {
     /// takes — ordered, unordered, and the reorder buffer's re-wrap — carries them without
     /// having to remember to. So does the session token a committed write's answer carries
     /// ([F41](../../../../docs/src/features/read-consistency.md)).
-    Response(AlignedVec, ClientStamps, Option<SessionToken>),
+    Response(AlignedVec, ClientStamps, Option<SessionToken>, Framing),
     /// A failure the server sent for this query instead of a response
     ///
     /// This carries no index, unlike a response. It arrives on a frame attached to a query id,

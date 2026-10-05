@@ -15,21 +15,28 @@ on it.
 
 - **A frame is eight bytes of header and a body**: version, type, two flag bytes and a
   32-bit length ([Wire Protocol](../architecture/wire-protocol.md#the-header)). There are
-  twenty-six message types (`shoal-proto/src/shared/protocol.rs:186-249`). The flag `LAST`,
-  "This frame is the last one for its query", is reserved and nothing sets it (`:365`).
-- **A body is read whole.** The server allocates the body's length and fills it before
-  anything is routed (`shoal-core/src/server/request_body.rs:55-74`). A frame is bounded at
-  64 MiB (`protocol.rs:168`), and a client's hello always offers exactly that
-  (`shoal-client/src/client.rs:558`), so a response over 64 MiB is answered with
-  `ResponseTooLarge` whatever the server is configured to
-  (`shoal-core/src/server/shard.rs:784`).
+  ~~twenty-six~~ twenty-seven message types (`shoal-proto/src/shared/protocol.rs`). ~~The flag
+  `LAST`, "This frame is the last one for its query", is reserved and nothing sets it.~~ Since
+  [F73](../features/bodies-across-frames.md) `Data`, type 27, carries a stream's bytes, and `LAST`
+  marks a stream's final data frame.
+- ~~**A body is read whole.** The server allocates the body's length and fills it before
+  anything is routed. A frame is bounded at 64 MiB, and a client's hello always offers exactly
+  that, so a response over 64 MiB is answered with `ResponseTooLarge` whatever the server is
+  configured to.~~ **A body longer than a frame is a stream**, since F73: a bundle past the
+  server's frame is an opener and data frames, assembled before it is routed, and an answer past
+  one data frame comes back the same way, between peers that agreed to it at the hello. A client
+  offers its own frame bound. What is still read whole is what is assembled: a bundle is routed
+  only once all of it is in, and an answer is handed on only once all of it is, so both peers still
+  hold a query's body whole. An object's bytes, handed on as they arrive, are this page's.
 - **An unknown type ends the connection.** A request that is not a bundle of queries is
   handed to `read_control_frame`, which knows a topology subscription and an admin
   operation and refuses anything else as `UnexpectedMessageType` (`shard.rs:457-493`). The
   client's reader is as strict (`client.rs:2368-2417`).
-- **One capability bit is spent.** `CLIENT_CAP_READ_OPTIONS` is bit zero of a byte in the
-  hello (`shoal-proto/src/shared/protocol/read.rs:63`). The client lane is otherwise exact
-  at `CLIENT_WIRE_VERSION`, 4.
+- ~~**One capability bit is spent.**~~ **Two capability bits are spent.**
+  `CLIENT_CAP_READ_OPTIONS` is bit zero of a byte in the hello
+  (`shoal-proto/src/shared/protocol/read.rs`), and `CLIENT_CAP_STREAMS` bit one, with the last
+  reserved byte holding each side's body bound (F73). The client lane is otherwise exact at
+  `CLIENT_WIRE_VERSION`, 4.
 - **A connection is shared.** The client holds a pool of ten to fifty connections
   (`shoal-client/src/client/builder.rs:63-64`), a reader task on each matches frames to
   waiters by the bundle's id, and any bundle may travel on any of them.
@@ -67,7 +74,10 @@ There is no list, by the decision of 2026-10-02, and no rename.
 | `ObjectData` | both | The operation's id, an offset, and bytes. `LAST` on the final one |
 | `ObjectAnswer` | server to client | The operation's id and its result: a stat, a count of bytes, or a typed refusal |
 
-They take the next discriminants, 27 to 29. Because an unknown type closes a connection, a
+~~They take the next discriminants, 27 to 29.~~ **`ObjectData` is F73's `Data`, type 27**: a
+sixteen byte id, an offset and bytes, `LAST` on the final one, judged frame by frame by the
+receiver's `Inbound` ([F73](../features/bodies-across-frames.md)). `ObjectOp` and `ObjectAnswer`
+take 28 and 29, and open a stream with `Flags::STREAMED` as a `Queries` or `Response` frame does. Because an unknown type closes a connection, a
 client sends them only to a server whose hello ack granted a new capability bit, the way
 read options are gated today. That makes the feature an addition and not a new client wire
 version: no existing frame changes.
@@ -123,8 +133,8 @@ times its p99 on one of its own, 34.6 ms against 1.1 ms across the lab's 1 GbE; 
 bytes ahead of it were already in flight and in the NIC's queue
 ([X11](streamed-bodies.md#3-a-small-request-beside-a-stream),
 [Q26, in part](contract.md#q26-in-part-streamed-bodies-2026-10-05)). S1's prerequisite for more
-than one frame a query builds the connections apart for queries longer than a frame, and an object
-operation always takes one.
+than one frame a query, [F73](../features/bodies-across-frames.md), built the connections apart
+for queries longer than a frame, and an object operation always takes one.
 
 ### The client's handle
 
@@ -217,8 +227,10 @@ connection set aside in the client's connection pool gets most of the benefit.
   many.
 - "Every body is an archive or a fixed layout": `ObjectData` is neither.
 - "The client's operations are bundles of queries."
-- "A response over the client's frame bound fails": still true of a query's, and no longer
-  a ceiling on what can be read.
+- ~~"A response over the client's frame bound fails": still true of a query's, and no longer
+  a ceiling on what can be read.~~ Since [F73](../features/bodies-across-frames.md) a query's
+  answer fails only past the body bound the client offered at the hello; an object's bytes are
+  under no such bound, since they are never assembled whole.
 
 ## Invariants to uphold
 
@@ -232,8 +244,8 @@ connection set aside in the client's connection pool gets most of the benefit.
 
 ## Prerequisites
 
-[S1](prerequisites.md#required): more than one frame for one query. [S2](buckets.md) for the
-generated client half. `Cancel`, only if ranges turn out not to be enough
+[S1](prerequisites.md#required): more than one frame for one query, ✅ delivered by
+[F73](../features/bodies-across-frames.md). [S2](buckets.md) for the generated client half. `Cancel`, only if ranges turn out not to be enough
 ([S1](prerequisites.md#optional)).
 
 ## How it would be measured

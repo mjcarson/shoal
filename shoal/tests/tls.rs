@@ -218,6 +218,42 @@ async fn a_mib_response_over_tls_matches_its_plaintext_bytes() -> Result<(), Tes
 }
 
 #[tokio::test(flavor = "multi_thread")]
+/// A bundle and an answer streamed across frames survive the record layer both ways
+///
+/// A server and a client of 64 KiB frames, so a row of 400 KiB is an opener and seven data frames
+/// each way, and the kernel's records cut every one of them somewhere a frame does not end
+/// ([F73](../../docs/src/features/bodies-across-frames.md)).
+async fn a_stream_round_trips_over_tls() -> Result<(), TestError> {
+    skip_without_ktls!("a_stream_round_trips_over_tls");
+    let temp_dir = utils::test_dir();
+    let cert = TestCertificate::new();
+    let mut conf = utils::build_tls_config(&temp_dir, &cert);
+    conf.networking = conf
+        .networking
+        .max_frame_bytes(64 << 10)
+        .max_request_body_bytes(1 << 20);
+    let mut pool = ShoalPool::<TlsDb>::start(conf)?;
+    let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
+    let streams = shoal::client::StreamConfig {
+        max_frame_bytes: 64 << 10,
+        ..Default::default()
+    };
+    let client = Shoal::<TlsDbClient>::builder()
+        .endpoint(&addr)
+        .tls(cert.client_options())
+        .streams(streams)
+        .build()
+        .await?;
+    // a payload whose bytes say where in it they came from, so a misordered frame is visible
+    let payload: String = (0..400 << 10)
+        .map(|i| ((i % 26) as u8 + b'a') as char)
+        .collect();
+    let rows = round_trip(&client, "streamed", payload.clone()).await?;
+    assert_eq!(rows, vec![payload]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 /// SCRAM runs over TLS, in that order
 ///
 /// The pair the two features are meant to be deployed as. It also pins the ordering: the TLS

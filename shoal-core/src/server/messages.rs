@@ -284,6 +284,15 @@ pub enum ReplyKind {
     /// origin can send the query to another holder; never queued to a client relay
     /// ([F45](../../../docs/src/features/replica-migration.md)).
     Stale,
+    /// A refusal of a client's stream by the connection that read its opener
+    ///
+    /// The bytes are the message and the id is the stream's; a client relay writes it as an error
+    /// frame naming that id, and it is never queued to a peer relay
+    /// ([F73](../../../docs/src/features/bodies-across-frames.md)).
+    Refused {
+        /// What class of refusal it is
+        code: crate::shared::protocol::error::ErrorCode,
+    },
 }
 
 /// An answer on its way to the relay that writes it

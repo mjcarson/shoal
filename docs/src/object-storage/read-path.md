@@ -22,7 +22,9 @@ read does, which state of a stripe it may return, and why it can never be handed
   across the shards and nodes that own them under one deadline, ten seconds by default.
 - **A miss is cheap.** "A get for a partition that has never been written costs one hash
   lookup and no IO" ([Storage Overview](../storage/overview.md#the-archive-map)).
-- **A row is read whole**, and an answer is one frame.
+- **A row is read whole**, and ~~an answer is one frame~~ an answer longer than one data frame
+  is streamed as an opener and data frames since [F73](../features/bodies-across-frames.md), but
+  still assembled whole by the client before it is handed on.
 
 Nothing reads a range of anything, and nothing is read from a device that is not a table's
 own archive.
@@ -165,7 +167,8 @@ tablets. [P6](../distributed/protocol.md#the-contract) already declines that for
 
 - "A read is answered from a shard's memory or its archives": most of an object read comes
   from slices the shard does not own.
-- "An answer is one frame": a read's answer is many ([S12](wire-and-client.md)).
+- "An answer is one frame": a read's answer is many ([S12](wire-and-client.md)). F73 already made
+  a long answer many frames; what is new is an answer handed on before all of it has arrived.
 - "A stale read is still an answer": see the contention item above.
 
 ## Invariants to uphold

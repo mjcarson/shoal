@@ -56,6 +56,13 @@ impl From<Errors> for TestError {
     }
 }
 
+impl From<shoal::shared::protocol::ProtocolError> for TestError {
+    /// A frame a test built by hand that could not be built, as the client would report it
+    fn from(e: shoal::shared::protocol::ProtocolError) -> Self {
+        TestError::Client(Errors::Protocol(e))
+    }
+}
+
 /// Create a temp dir for a test on a filesystem that supports direct IO
 ///
 /// `TempDir::new` uses `/tmp`, which is usually tmpfs. Glommio silently disables

@@ -61,17 +61,19 @@ Three pages of that part are lists of work rather than design, and they are wher
 - [S1](../object-storage/prerequisites.md) is what Shoal has to gain first, each row labelled
   required or optional with its reason. Ten rows are required. ~~Five of them can start today
   with no object store in sight: known issues 46, 198 and 202, the device faults in the cluster
-  fixture, and operation kinds and byte counters in `shoal-loadgen`.~~ Six are done: the
+  fixture, and operation kinds and byte counters in `shoal-loadgen`.~~ ~~Six~~ Seven are done: the
   conditional write ([F68](../features/conditional-writes.md)), items 198
   ([Resolved #92, #198](resolved/composite-partition-key.md)), 46
   ([Resolved #46](resolved/unmarked-directory-refused.md)) and 202
   ([Resolved #202](resolved/append-batch-bytes.md)), the driver's kinds and byte counters
-  ([F69](../features/driver-operation-kinds.md)) and the fixture's device faults
-  ([F70](../features/storage-faults.md)). ~~The four left each wait on an open question~~ Of
-  the four left, a member's failure domain and free bytes for every root can start, since X2
+  ([F69](../features/driver-operation-kinds.md)), the fixture's device faults
+  ([F70](../features/storage-faults.md)) and more than one frame a query
+  ([F73](../features/bodies-across-frames.md)). ~~The four left each wait on an open question~~ Of
+  the ~~four~~ three left, a member's failure domain and free bytes for every root can start, since X2
   settled what placement reads. ~~The tablet walk and more than one frame a query wait on open
-  questions.~~ More than one frame a query can start too, since X11 answered the part of Q26 it
-  waited on; the tablet walk waits on Q17. Several entries further down this page are rows of that table now, and each says so
+  questions.~~ ~~More than one frame a query can start too, since X11 answered the part of Q26 it
+  waited on;~~ More than one frame a query was built once X11 answered the part of Q26 it waited
+  on; the tablet walk waits on Q17. Several entries further down this page are rows of that table now, and each says so
   where it stands.
 - [Exploratory spikes](../object-storage/spikes.md) is the fourteen spikes, X1 to X14, that
   have to report before the milestones can be trusted: a model of the write protocol, a
@@ -2835,6 +2837,11 @@ A small request on another connection to the same executor waited 2.7 ms at its 
 stream on titan, against 0.36 ms beside 64 KiB frames and 0.16 ms on another executor. The frame
 stays 1 MiB on the wire; what changes is the write: an executor writing object frames under kTLS
 hands the socket at most a few hundred kilobytes a call, yielding between them.
+
+F73's reply writer already pays this: a streamed answer's data frames are 1 MiB, each written in
+one call, so under kTLS a shard writing a long answer holds its core about a millisecond a frame
+([F73](../features/bodies-across-frames.md#limitations)). Splitting the write there is the same
+change, made in `Outbox`'s caller in `write_replies`.
 
 ## Time a parked apply
 

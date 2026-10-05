@@ -88,6 +88,7 @@ async fn handshaken(addr: &str) -> Result<TcpStream, TestError> {
         max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
         mechanisms: AuthMechanisms::NONE,
         caps: 0,
+        max_body_log2: 0,
     };
     sock.write_all(
         &hello
@@ -318,6 +319,7 @@ async fn a_hello_of_an_unsupported_version_is_refused_with_an_ack() -> Result<()
         max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
         mechanisms: AuthMechanisms::NONE,
         caps: 0,
+        max_body_log2: 0,
     };
     let mut frame = hello
         .frame(protocol::DEFAULT_MAX_FRAME_BYTES)
@@ -367,6 +369,7 @@ async fn a_hello_naming_a_different_schema_is_refused_with_an_ack() -> Result<()
         max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
         mechanisms: AuthMechanisms::NONE,
         caps: 0,
+        max_body_log2: 0,
     };
     hostile
         .write_all(

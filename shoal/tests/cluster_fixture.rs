@@ -9974,6 +9974,7 @@ async fn session_token_lineage_is_checked_by_name() -> Result<(), FixtureError> 
             max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
             mechanisms: AuthMechanisms::NONE,
             caps,
+            max_body_log2: 0,
         };
         sock.write_all(
             &hello
@@ -21511,5 +21512,73 @@ async fn conditional_write_refused_below_wire_7() -> Result<(), FixtureError> {
         read_note(&addr, key).await.map_err(ok)?,
         Some("v1".to_string())
     );
+    Ok(())
+}
+
+/// An answer longer than a client's frame is streamed to it by whichever node it asked, its own
+/// rows and the ones it forwarded for alike ([F73](../../docs/src/features/bodies-across-frames.md))
+///
+/// At a factor of one most rows live on another node than the one asked, so most answers here are
+/// a peer's bytes handed to the client relay whole, and streamed from there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_answer_is_streamed_through_every_node() -> Result<(), FixtureError> {
+    use shoal::client::StreamConfig;
+    let cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(1)
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    // rows of 300 KiB, written whole through one node
+    let writer = Shoal::<TestDbClient>::new(&cluster.node(0).endpoints.client.to_string())
+        .await
+        .map_err(ok)?;
+    let data: String = (0..300 << 10)
+        .map(|i| char::from(b'a' + (i % 26) as u8))
+        .collect();
+    for key in 35_000u64..35_006 {
+        writer
+            .send_one(Row {
+                key,
+                data: data.clone(),
+            })
+            .await
+            .map_err(ok)?;
+    }
+    // read back through every node by clients that take frames of 64 KiB
+    for node in 0..3 {
+        let addr = cluster.node(node).endpoints.client.to_string();
+        let streams = StreamConfig {
+            max_frame_bytes: 64 << 10,
+            ..StreamConfig::default()
+        };
+        let reader = Shoal::<TestDbClient>::builder()
+            .endpoint(&addr)
+            .streams(streams)
+            .build()
+            .await
+            .map_err(ok)?;
+        for key in 35_000u64..35_006 {
+            let response = reader.send_one(RowGet::new(vec![key])).await.map_err(ok)?;
+            let rows = response
+                .access::<Row>()
+                .map_err(ok)?
+                .expect("the row is there");
+            assert_eq!(
+                rows.len(),
+                1,
+                "row {key} through node {node} was not one row"
+            );
+            assert_eq!(
+                rows[0].data.as_str(),
+                data,
+                "row {key} through node {node} came back changed"
+            );
+            assert!(
+                response.wire_bytes() > (300 << 10),
+                "the answer counted fewer bytes than it carried"
+            );
+        }
+    }
     Ok(())
 }

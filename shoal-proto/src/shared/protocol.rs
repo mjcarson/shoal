@@ -54,6 +54,7 @@ pub mod handshake;
 pub mod peer;
 pub mod read;
 pub mod stats;
+pub mod stream;
 pub mod trace;
 
 #[cfg(test)]
@@ -246,6 +247,13 @@ pub enum MessageType {
     Replicate = 25,
     /// The answer to a `Replicate` request, under the same correlation id
     ReplicateResponse = 26,
+    /// Bytes of a stream an opener began: an id, an offset, and bytes that are never an archive
+    ///
+    /// Both ways on the client lane, between peers that granted
+    /// [`stream::CLIENT_CAP_STREAMS`]; [`Flags::LAST`] marks a stream's final one
+    /// ([F73](../../../docs/src/features/bodies-across-frames.md)). M13's object frames carry their
+    /// bytes in these too.
+    Data = 27,
 }
 
 impl MessageType {
@@ -290,6 +298,7 @@ impl MessageType {
             24 => Ok(MessageType::AdminResponse),
             25 => Ok(MessageType::Replicate),
             26 => Ok(MessageType::ReplicateResponse),
+            27 => Ok(MessageType::Data),
             // anything else was written by a peer we do not understand, including a zeroed buffer
             unknown => Err(ProtocolError::UnknownMessageType(unknown)),
         }
@@ -325,6 +334,7 @@ impl MessageType {
             MessageType::AdminResponse => "AdminResponse",
             MessageType::Replicate => "Replicate",
             MessageType::ReplicateResponse => "ReplicateResponse",
+            MessageType::Data => "Data",
         }
     }
 }
@@ -361,7 +371,10 @@ impl Flags {
     /// The client's view of the cluster topology is stale - reserved for shard aware routing
     pub const STALE_TOPOLOGY: Flags = Flags(1 << 1);
 
-    /// This frame is the last one for its query - reserved
+    /// This data frame is the last of its stream
+    ///
+    /// Reserved from F10 until [F73](../../../docs/src/features/bodies-across-frames.md) spent it:
+    /// it is meaningful on a [`MessageType::Data`] frame alone and ignored on any other.
     pub const LAST: Flags = Flags(1 << 2);
 
     /// This frame refuses what the peer asked for, and the body says why
@@ -386,6 +399,14 @@ impl Flags {
     ///
     /// Written only to a connection whose hello asked for it, for the same reason.
     pub const SESSION_TOKEN: Flags = Flags(1 << 6);
+
+    /// This frame opens a stream: its payload follows in data frames under its id
+    ///
+    /// On a `Queries` frame the body is its trace context and read options, then the bundle's id
+    /// and the archive's length, and no archive; on a `Response` it is the query id and any token,
+    /// then the answer's length. Sent only between peers that granted
+    /// [`stream::CLIENT_CAP_STREAMS`] ([F73](../../../docs/src/features/bodies-across-frames.md)).
+    pub const STREAMED: Flags = Flags(1 << 7);
 
     /// Build a flag set from its raw bits
     ///
@@ -524,6 +545,15 @@ pub enum ProtocolError {
     /// Carries what was wrong in a sentence rather than a code, because every one of these ends
     /// the connection it arrived on and is logged once, and a person is the only reader.
     MalformedForward(&'static str),
+    /// A stream's frames broke its rules ([F73](../../../docs/src/features/bodies-across-frames.md))
+    Stream(stream::StreamFault),
+    /// A stream or a body is longer than the bound the peer advertised
+    BodyTooLarge {
+        /// The length it would have been
+        len: u64,
+        /// The bound
+        max: u64,
+    },
     /// A snapshot chunk's bytes do not hash to what its header says
     SnapshotChecksum {
         /// What the chunk said it hashed to
@@ -621,6 +651,11 @@ impl std::fmt::Display for ProtocolError {
             ProtocolError::SnapshotChecksum { claimed, computed } => write!(
                 f,
                 "a snapshot chunk claimed checksum {claimed:#010x} but hashed to {computed:#010x}"
+            ),
+            ProtocolError::Stream(fault) => write!(f, "a stream broke its frames' rules: {fault}"),
+            ProtocolError::BodyTooLarge { len, max } => write!(
+                f,
+                "a body of {len} bytes is past the {max} bytes the peer assembles"
             ),
         }
     }
@@ -1316,9 +1351,11 @@ pub const fn decode_request(
 
 /// Decode the header of any frame a client may send once it is connected
 ///
-/// A bundle of queries, a topology subscription or an admin request; anything else is refused
-/// naming `Queries`, since that is what a connection is for
-/// ([F39](../../../../docs/src/features/membership.md)).
+/// A bundle of queries, a topology subscription, an admin request, or a stream's data frame;
+/// anything else is refused naming `Queries`, since that is what a connection is for
+/// ([F39](../../../../docs/src/features/membership.md),
+/// [F73](../../../../docs/src/features/bodies-across-frames.md)). Whether a data frame was
+/// allowed on this connection is the reader's to judge, from what the hello granted.
 ///
 /// # Arguments
 ///
@@ -1335,7 +1372,10 @@ pub const fn decode_client_request(
     // check the header, then that the kind is one of the three a client sends
     match Header::decode(raw, max_frame_bytes) {
         Ok(header) => match header.kind {
-            MessageType::Queries | MessageType::Topology | MessageType::Admin => Ok(header),
+            MessageType::Queries
+            | MessageType::Topology
+            | MessageType::Admin
+            | MessageType::Data => Ok(header),
             _ => header.expect(MessageType::Queries),
         },
         Err(error) => Err(error),
