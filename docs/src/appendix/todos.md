@@ -2843,6 +2843,16 @@ one call, so under kTLS a shard writing a long answer holds its core about a mil
 ([F73](../features/bodies-across-frames.md#limitations)). Splitting the write there is the same
 change, made in `Outbox`'s caller in `write_replies`.
 
+## A workload with small queries beside a streamed answer
+
+Filed by [F73](../features/bodies-across-frames.md#performance). F73 writes small answers between
+a long answer's data frames, and sets connections apart for long streams, but no workload sends a
+small query on a connection carrying a long answer, so its before and after could show only that
+the change costs nothing. X11 measured the effect on its own harness, not on Shoal. The workload
+would be the reference get at depth one, paced, beside a stream of 16 MiB answers on the same
+client, once with the long sends marked `SendOptions::bulk` and once without, read for the small
+get's p99.
+
 ## Time a parked apply
 
 Filed by [X10](../object-storage/stripe-row-costs.md#what-it-found-in-the-engine). A write whose

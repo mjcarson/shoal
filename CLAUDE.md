@@ -393,7 +393,9 @@ and F65's page is the worked example:
 
 1. **Commit the change.** Build `shoal-workload` at it and at the commit before it, each in a
    worktree beside the repo (glommio is a sibling path dependency), with
-   `RUSTFLAGS="-C target-cpu=znver1"` and its own `CARGO_TARGET_DIR`. `scp` both to the host.
+   `RUSTFLAGS="-C target-cpu=znver1"` and its own `CARGO_TARGET_DIR`, **one after the other**:
+   glommio's build script runs liburing's `configure` in the shared checkout, and two builds at
+   once corrupt its `compat.h`. `scp` both to the host.
 2. **Use a scratch conf** under `target/lab/<feature>/`, sized for four cores: 2 shards,
    `exclude_cores: [3]`, storage on `/opt/shoal`, tracing at `Warn`, no remote sink.
 3. **Prepare the host**:

@@ -212,7 +212,65 @@ sinks that release as they consume; there is none yet, and M15's stager is the f
 
 ## Performance
 
-*Measured before and after on the lab once committed; see the follow-up.*
+Every answer now goes through the `Outbox`, so F73 is on every query's path, and it was compared
+before and after on the lab ([the procedure](../performance/benchmarking.md#before-and-after-on-the-lab)).
+The committed change (`09084c8`) was compared against `a12c91e`, the commit before it, both built
+for `znver1` and run by `shoal-workload` on hyperion. The conditions:
+
+- hyperion: Zen1 V1756B, 4 cores and 8 threads, kernel 7.0.0-34, `performance` governor;
+- the lab's tmdb node on that host stopped (it was already);
+- two shards, with physical core 3 (cpus 3 and 7) left to the client, and storage on `/opt/shoal`,
+  wiped before every run;
+- tracing at `Warn`;
+- four rounds, each running both sides back to back, with the side that went first alternating.
+
+**This is an A/B, not a capture.** The committed `shoal.yml` is sized for a sixteen-core host.
+
+| Workload | Figure | Before, median [range] | After, median [range] | |
+| --- | --- | ---: | ---: | --- |
+| `get_ephemeral` | ops/s | 51,594 [44,019–53,721] | 51,015 [47,476–55,218] | within noise |
+| `get_ephemeral` | get p99 | 571 µs [511–589] | 570 µs [479–631] | within noise |
+| `transport/send_one/small` | ops/s | 49,422 [43,246–52,804] | 47,808 [44,909–50,661] | within noise |
+| `transport/send_one/small` | get p99 | 584 µs [496–646] | 599 µs [549–637] | within noise |
+| `grid/unsorted/r50/1024` | ops/s | 8,157 [8,101–8,296] | 8,261 [8,222–8,320] | within noise |
+| `grid/unsorted/r50/1024` | read p99 | 487 µs [471–527] | 523 µs [480–566] | within noise |
+| `grid/unsorted/r50/1024` | write p99 | 14.9 ms [14.0–16.0] | 13.7 ms [13.4–14.2] | within noise |
+| `insert_ephemeral` | ops/s | 109,245 [94,247–126,326] | 110,715 [81,015–113,057] | within noise |
+| `insert_ephemeral` | insert p99 | 97.9 ms [73.1–102.9] | 87.9 ms [84.9–110.5] | within noise |
+| `encryption/depth/plain/1048576/8` | ops/s | 1,549 [1,452–1,602] | 1,418 [1,362–1,561] | within noise |
+| `encryption/depth/plain/1048576/8` | get p50 | 4.43 ms [4.12–4.96] | 5.20 ms [4.61–5.70] | within noise |
+| `encryption/depth/plain/1048576/8` | get p99 | 12.4 ms [10.3–14.1] | 11.8 ms [10.4–12.2] | within noise |
+| `encryption/depth/tls/1048576/8` | ops/s | 917 [847–954] | 908 [842–978] | within noise |
+| `encryption/depth/tls/1048576/8` | get p99 | 16.5 ms [13.3–16.9] | 15.5 ms [14.8–16.8] | within noise |
+
+Every other figure, each side's p50 per operation, was within noise too. Following the compare
+tool's rule for the macro layer, a difference counts only when the two sides' run intervals are
+disjoint.
+
+The two `encryption` arms are the ones that exercise the change: each get answers one 1 MiB row,
+whose archive is longer than one 1 MiB data frame, so after F73 every answer is an opener and two
+data frames written through the `Outbox`, where before it was one frame. That was established by
+reading the decision in `write_replies`, not by watching the frames: the server sends through
+io_uring, where `strace` cannot count its writes. The plaintext arm's first medians moved against
+F73 (0.92 times the ops/s, 1.17 times the p50) inside overlapping intervals, so both arms were
+repeated over eight rounds:
+
+| Workload, 8 rounds | Figure | Before, median [range] | After, median [range] | |
+| --- | --- | ---: | ---: | --- |
+| `encryption/depth/plain/1048576/8` | ops/s | 1,558 [1,407–1,608] | 1,518 [1,338–1,532] | within noise |
+| `encryption/depth/plain/1048576/8` | get p50 | 4.64 ms [4.21–5.51] | 4.65 ms [4.38–5.78] | within noise |
+| `encryption/depth/plain/1048576/8` | get p99 | 11.1 ms [9.7–15.5] | 11.7 ms [10.7–13.5] | within noise |
+| `encryption/depth/tls/1048576/8` | ops/s | 941 [833–960] | 914 [850–981] | within noise |
+| `encryption/depth/tls/1048576/8` | get p50 | 7.53 ms [6.78–10.00] | 7.93 ms [7.07–9.82] | within noise |
+| `encryption/depth/tls/1048576/8` | get p99 | 16.2 ms [15.2–20.0] | 16.8 ms [13.0–19.0] | within noise |
+
+The p50 came back to 1.00 times. **No cost was measured**, on small answers or on streamed ones.
+What this cannot show is the benefit: no workload sends a small query on a connection carrying a
+long answer, which is what the interleaving is for. That is covered by
+`a_small_answer_is_written_between_the_frames_of_a_large_one`, and was measured by X11 on its own
+harness ([X11, section 3](../object-storage/streamed-bodies.md#3-a-small-request-beside-a-stream)),
+not by a benchmark of Shoal. The workload that would is filed
+([todos](../appendix/todos.md#a-workload-with-small-queries-beside-a-streamed-answer)).
 
 ## Tests
 

@@ -520,7 +520,10 @@ captures came from. It is an A/B, not a capture:
 
 1. **Commit the change**, then build `shoal-workload` at it and at its parent, each in a
    worktree beside the repo, with `RUSTFLAGS="-C target-cpu=znver1"` and a target directory of
-   its own. A native build dies of `SIGILL` on the Zen1 hosts.
+   its own. A native build dies of `SIGILL` on the Zen1 hosts. Build the two **one after the
+   other**: both worktrees compile the one glommio checkout beside them, whose build script runs
+   liburing's `configure` in that source tree, and two at once wrote `compat.h` over each other
+   and failed with `'#endif' without '#if'` (F73's A/B). The next lone build writes it whole again.
 2. **Use a scratch configuration** sized for the host's four cores. The committed `shoal.yml` is
    sized for sixteen: cpu 0 coordinates, two shards, and one physical core left to the client.
    Storage goes on `/opt/shoal`, tracing at `Warn`, and there is no remote sink.
