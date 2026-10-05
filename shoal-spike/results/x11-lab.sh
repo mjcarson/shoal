@@ -5,6 +5,8 @@
 #   QUICK=1 ROUNDS=1 OUT=target/lab/x11/quick sh shoal-spike/results/x11-lab.sh   # prove it runs
 #   PHASES="tloop net-th" sh shoal-spike/results/x11-lab.sh  # the legs that leave europa idle
 #   PHASES="eloop net-et" START=3 sh shoal-spike/results/x11-lab.sh   # europa's, from round three
+#   ONLY="--sections tail --streams read" OUT=target/lab/x11/rerun PHASES="tloop net-th" \
+#       sh shoal-spike/results/x11-lab.sh                     # item 213's repeat of section 3's reads
 #
 # The phases: `tloop` is titan's and hyperion's loopback, `eloop` europa's, `net-et` europa driving
 # titan, `net-th` titan driving hyperion. Loopback phases named together run at once.
@@ -30,6 +32,9 @@ ROUNDS=${ROUNDS:-4}
 START=${START:-1}
 QUICK=${QUICK:-}
 PHASES=${PHASES:-tloop eloop net-et net-th}
+# a part of the run to repeat, in place of every leg's own sections; hyperion, which ran only rates
+# and routes, is skipped when it is set (item 213 repeated section 3's reads this way)
+ONLY=${ONLY:-}
 REMOTES="titan hyperion"
 TITAN=172.16.2.4
 HYPERION=172.16.2.5
@@ -125,7 +130,13 @@ fi
 # loopback: every host named at once, a round at a time
 LOOP_HOSTS=""
 case "$PHASES" in *eloop*) LOOP_HOSTS="europa" ;; esac
-case "$PHASES" in *tloop*) LOOP_HOSTS="$LOOP_HOSTS titan hyperion" ;; esac
+case "$PHASES" in *tloop*)
+    if [ -n "$ONLY" ]; then
+        LOOP_HOSTS="$LOOP_HOSTS titan"
+    else
+        LOOP_HOSTS="$LOOP_HOSTS titan hyperion"
+    fi
+;; esac
 if [ -n "$LOOP_HOSTS" ]; then
     round=$START
     while [ "$round" -le "$ROUNDS" ]; do
@@ -133,11 +144,11 @@ if [ -n "$LOOP_HOSTS" ]; then
         for host in $LOOP_HOSTS; do
             case $host in
                 europa)
-                    "$BIN" stream $MODE --dir /optane/x11 --round "$round" --leg "europa loopback" \
+                    "$BIN" stream $MODE --dir /optane/x11 $ONLY --round "$round" --leg "europa loopback" \
                         --out "$OUT/x11-europa-loop.json" > "$OUT/x11-europa-loop-r$round.md" 2> "$OUT/x11-europa-loop-r$round.err" &
                     ;;
                 titan)
-                    ssh -o BatchMode=yes titan "$REMOTE/shoal-spike stream $MODE --dir /xfs/x11 --round $round --leg 'titan loopback' --out $REMOTE/out/x11-titan-loop.json" \
+                    ssh -o BatchMode=yes titan "$REMOTE/shoal-spike stream $MODE --dir /xfs/x11 $ONLY --round $round --leg 'titan loopback' --out $REMOTE/out/x11-titan-loop.json" \
                         > "$OUT/x11-titan-loop-r$round.md" 2> "$OUT/x11-titan-loop-r$round.err" &
                     ;;
                 hyperion)
@@ -152,7 +163,7 @@ if [ -n "$LOOP_HOSTS" ]; then
     done
     case "$LOOP_HOSTS" in *titan*)
         scp -q titan:$REMOTE/out/x11-titan-loop.json "$OUT/"
-        scp -q hyperion:$REMOTE/out/x11-hyperion-loop.json "$OUT/"
+        [ -n "$ONLY" ] || scp -q hyperion:$REMOTE/out/x11-hyperion-loop.json "$OUT/"
     ;; esac
 fi
 
@@ -162,7 +173,7 @@ case "$PHASES" in *net-et*)
     while [ "$round" -le "$ROUNDS" ]; do
         echo "x11-lab: network round $round, europa to titan"
         ssh -o BatchMode=yes titan "$REMOTE/shoal-spike stream serve --dir /xfs/x11 --certs $REMOTE/certs" > /dev/null 2>&1 &
-        "$BIN" stream drive --addr $TITAN --certs "$CERTS" --server-file --net --sections rate,tail ${QUICK:+--quick} \
+        "$BIN" stream drive --addr $TITAN --certs "$CERTS" --server-file --net ${ONLY:---sections rate,tail} ${QUICK:+--quick} \
             --round "$round" --leg "europa to titan" --out "$OUT/x11-europa-titan.json" \
             > "$OUT/x11-europa-titan-r$round.md" 2> "$OUT/x11-europa-titan-r$round.err"
         on titan "pkill -f 'shoal-spike stream serve' || true"
@@ -176,7 +187,7 @@ case "$PHASES" in *net-th*)
     while [ "$round" -le "$ROUNDS" ]; do
         echo "x11-lab: network round $round, titan to hyperion"
         ssh -o BatchMode=yes hyperion "$REMOTE/shoal-spike stream serve --dir /xfs/x11 --certs $REMOTE/certs" > /dev/null 2>&1 &
-        ssh -o BatchMode=yes titan "$REMOTE/shoal-spike stream drive --addr $HYPERION --certs $REMOTE/certs --server-file --net --sections rate,tail ${QUICK:+--quick} --round $round --leg 'titan to hyperion' --out $REMOTE/out/x11-titan-hyperion.json" \
+        ssh -o BatchMode=yes titan "$REMOTE/shoal-spike stream drive --addr $HYPERION --certs $REMOTE/certs --server-file --net ${ONLY:---sections rate,tail} ${QUICK:+--quick} --round $round --leg 'titan to hyperion' --out $REMOTE/out/x11-titan-hyperion.json" \
             > "$OUT/x11-titan-hyperion-r$round.md" 2> "$OUT/x11-titan-hyperion-r$round.err"
         on hyperion "pkill -f 'shoal-spike stream serve' || true"
         wait

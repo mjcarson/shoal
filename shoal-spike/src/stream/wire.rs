@@ -218,15 +218,16 @@ impl Setup {
     /// The setup as its body
     #[must_use]
     pub fn encode(&self) -> [u8; SETUP_LEN] {
-        // five flag bytes, then the window and the low water mark
+        // four flag bytes, the window, the low water mark, then the fifth flag in a byte of its
+        // own: it once shared the window's first byte, which overwrote it (item 213)
         let mut body = [0u8; SETUP_LEN];
         body[0] = u8::from(self.file);
         body[1] = self.route as u8;
         body[2] = u8::from(self.nopad);
         body[3] = u8::from(self.verify);
-        body[4] = u8::from(self.fifo);
         body[4..8].copy_from_slice(&self.window.to_le_bytes());
         body[8..12].copy_from_slice(&self.lowat.to_le_bytes());
+        body[12] = u8::from(self.fifo);
         body
     }
 
@@ -246,7 +247,7 @@ impl Setup {
             route: Route::from_byte(body[1]),
             nopad: body[2] != 0,
             verify: body[3] != 0,
-            fifo: body[4] != 0,
+            fifo: body[12] != 0,
             window: u32::from_le_bytes(body[4..8].try_into().expect("four bytes")),
             lowat: u32::from_le_bytes(body[8..12].try_into().expect("four bytes")),
         }
@@ -433,5 +434,22 @@ mod tests {
             mismatches: 7,
         };
         assert_eq!(Stats::decode(&stats.encode()), stats);
+    }
+
+    /// A setup asking for small frames first comes back asking for them, at every window X11 ran
+    ///
+    /// Item 213: the flag and the window once shared a byte, so a window whose low byte was not
+    /// zero read back as first in first out.
+    #[test]
+    fn a_small_first_setup_round_trips() {
+        // every window section 2 and section 3 ran, with the server writing small frames first
+        for window in [1, 2, 4, 8, 16] {
+            let setup = Setup {
+                fifo: false,
+                window,
+                ..Setup::default()
+            };
+            assert_eq!(Setup::decode(&setup.encode()), setup, "window {window}");
+        }
     }
 }

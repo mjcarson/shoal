@@ -148,7 +148,10 @@ time, so splitting a bundle that fits buys no interleaving and costs a frame a m
 cannot be taken back ([C2](../distributed/transport.md#design-choices)); the frame boundary is
 where a writer can choose. X11 showed that this alone does not bound a small answer's wait, since
 the kernel's buffers hold megabytes ahead of it, which is why long streams also go on connections
-of their own.
+of their own. Its repeat with the server writing small frames first
+([item 213](../appendix/resolved/x11-setup-fifo.md)) found that a low water mark on the socket makes
+the order count, about three times across the network; a node sets none
+([O94](../appendix/optimizations.md#o94-a-nodes-sockets-set-no-tcp_notsent_lowat)).
 
 **Reserve, never wait, for an assembling stream.** An assembled bundle takes its whole length at
 its opener and is refused when the budget is short. Counting it against a window would let one

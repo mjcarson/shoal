@@ -606,8 +606,11 @@ since [F71](../features/bench-device-memory.md). **Cost.** Days.
 connections of their own, in frames of 1 MiB, four to a window; the object lane hands a connection
 to the slice's executor; and a stream that has to run at a device's rate under kTLS is spread over
 connections.** All three results named below came out. A small request's p99 on a 1 MiB stream's
-connection was 9 to 32 times its p99 on one of its own, and neither `TCP_NOTSENT_LOWAT` nor writing
-small frames first brought it back. A connection under kTLS can be handed between executors, at no
+connection was ~~9 to 32~~ 4 to 29 times its p99 on one of its own, and ~~neither
+`TCP_NOTSENT_LOWAT` nor writing small frames first brought it back~~ `TCP_NOTSENT_LOWAT` with small
+frames first narrowed it about three times without bringing it back: its reads were measured again
+once [item 213](../appendix/resolved/x11-setup-fifo.md) found the server had written first in first
+out throughout. A connection under kTLS can be handed between executors, at no
 cost, while its bytes hopping cost 1.3 to 1.7 times the cpu a GiB in plaintext. And one kTLS
 connection reads below either SSD. The plan as written follows, struck where the run departed
 from it.

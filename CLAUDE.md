@@ -209,6 +209,10 @@ target/lab/x11/znver1/release/shoal-spike stream quick --dir /optane/x11        
 QUICK=1 ROUNDS=1 OUT=target/lab/x11/quick sh shoal-spike/results/x11-lab.sh       # every placement, quickly
 sh shoal-spike/results/x11-lab.sh                                                   # the four rounds
 target/lab/x11/znver1/release/shoal-spike stream report shoal-spike/results/x11-*.json   # intervals and verdicts
+# part of a run again, in a directory and a remote of its own so no old record is appended to: how
+# item 213 repeated section 3's reads once the server wrote small frames first as it was asked
+ONLY="--sections tail --streams read" OUT=target/lab/x11/rerun REMOTE=/var/tmp/x11-rerun \
+    PHASES="tloop net-th" sh shoal-spike/results/x11-lab.sh
 
 # a cluster on real hosts from a project (F63): run in the project that defines the schema,
 # shoaladm finds the #[shoal::db] struct, probes every host's cpu over ssh, builds the node once

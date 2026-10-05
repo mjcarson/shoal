@@ -1,6 +1,11 @@
 # X11. Streamed bodies, measured
 
-**Reported 2026-10-05.** This is the record of spike [X11](spikes.md#x11-streamed-bodies). It sent
+**Reported 2026-10-05, and corrected the same day by
+[item 213](../appendix/resolved/x11-setup-fifo.md)**, which found that the server had written first
+in first out in every cell, whatever a connection asked for. Section 3's read cells were run again
+with it writing small frames first; every figure below that comes from them says so, and the
+claims they overturned are struck through beside what replaced them. This is the record of spike
+[X11](spikes.md#x11-streamed-bodies). It sent
 frames of plain bytes between a glommio server and a tokio client, plaintext and under the
 product's own kTLS, and measured:
 
@@ -22,14 +27,20 @@ under kTLS is spread over more than one connection.**
 All three triggers fired. Five facts decide it:
 
 - **A small request behind a stream on its own connection waits for the stream.** Across 1 GbE its
-  p99 beside a 1 MiB read stream was 34.6 ms against 1.1 ms on a connection of its own, 21 to 32
-  times, and beside a write stream 27 to 36 ms. Over loopback it was 9.4 times on europa under
-  kTLS and 12 to 25 times beside writes. That is T1, and it fired on every leg.
-- **Neither of the cheap remedies works.** `TCP_NOTSENT_LOWAT` left a read stream's neighbour where
-  it was, since the bytes ahead of it were already sent and queued in flight and in the NIC's
-  queue; on a write it narrowed the gap to 3 to 12 times; and under kTLS on the sending side it made
-  the tail far worse, to seconds at 8 MiB frames. Writing small frames first at a frame's boundary
-  changed nothing measurable. fq_codel schedules flows fairly, so a connection of its own does.
+  p99 beside a 1 MiB read stream was ~~34.6 ms against 1.1 ms on a connection of its own, 21 to 32
+  times~~ 28.7 to 31.2 ms with the server writing small frames first, against 1.1 to 1.6 ms on a
+  connection of its own, 18 to 26 times, and beside a write stream 27 to 36 ms. Over loopback it
+  was ~~9.4~~ 7.2 times on europa under kTLS, 4.3 on titan, and 12 to 25 times beside writes. That
+  is T1, and it fired on every leg.
+- **~~Neither of the cheap remedies works~~ The cheap remedies narrow the gap and do not close
+  it.** ~~`TCP_NOTSENT_LOWAT` left a read stream's neighbour where it was, since the bytes ahead of
+  it were already sent and queued in flight and in the NIC's queue~~ With the server writing small
+  frames first, `TCP_NOTSENT_LOWAT` at 16 KiB took a read stream's neighbour across 1 GbE from
+  34.6 ms to 10.1 to 10.4 ms at its p99, still 6 to 10 times a connection of its own; on a write it
+  narrowed the gap to 3 to 12 times; and under kTLS on the sending side it made the tail far worse,
+  to seconds at 8 MiB frames. Writing small frames first ~~at a frame's boundary changed nothing
+  measurable~~ helped by itself only over loopback, and not beside 1 MiB frames; its worth is that it
+  lets the low water mark work. fq_codel schedules flows fairly, so a connection of its own does.
 - **Handing the connection over is free; moving its bytes is not.** A connection under kTLS was
   handed between executors by `dup` and `TcpStream::from_raw_fd` in every round on every host, its
   bytes checked both ways, at 0.93 to 1.05 times the direct stream's rate and cpu. Moving the
@@ -207,6 +218,14 @@ Across the network, sections 1 and 3 ran, at frames of 64 KiB, 1 and 8 MiB (64 K
 - A key update after a handoff, which would show the kernel and rustls still agree on the session,
   was not sent: the product never sends one ([F14](../features/encryption-in-transit.md#limitations)).
 
+**Section 3's read cells were run again after the rounds**, four rounds on each of the four legs
+that ran them, once [item 213](../appendix/resolved/x11-setup-fifo.md) found that the setup frame had
+overwritten each connection's request for small frames first with its window, so the server had
+written first in first out throughout. The repeat used a `znver1` build of the same tree with the setup
+fixed, the same cores, the governor and the lab's rules; its records replace the old read records
+in `results/x11-*.json`, its tables are `results/x11-*-r*-tail-read.md`, and its facts
+`results/x11-facts-rerun-*.txt`.
+
 **Two things were changed after the quick run and before the rounds.** A quick run of every section
 on every leg found both:
 
@@ -308,32 +327,51 @@ At 1 MiB frames, to and from the file:
 ## 3. A small request beside a stream
 
 A small request's p99 in µs, with the ratio T1 judged, the stream's connection over a connection of
-its own to the same executor, round by round:
+its own to the same executor, round by round. The read rows are item 213's repeat, with the server
+writing small frames first as each connection asked; the figures X11 first recorded, every one of
+them taken first in first out, are struck beside them. A write's frames come from the client, whose
+writer always wrote small frames first, so the write rows stand:
 
-| Leg | Stream | Alone | On the stream's connection | With `TCP_NOTSENT_LOWAT` 16 KiB | Small first, or first in first out | Own connection, same executor | Own connection, other executor | Ratio |
+| Leg | Stream | Alone | On the stream's connection, small frames first | With `TCP_NOTSENT_LOWAT` 16 KiB | The same, first in first out | Own connection, same executor | Own connection, other executor | Ratio |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| europa loopback | read 1 MiB kTLS | 46 | 2,217 | 1,804 | 2,259 (FIFO) | 222 | 46 | **9.4** [7.5–10.1] |
+| europa loopback | read 1 MiB kTLS | 46 | ~~2,217~~ 2,036 | ~~1,804~~ 1,207 | ~~2,259~~ 2,021 | ~~222~~ 291 | 46 | **~~9.4~~ 7.2** [6.8–7.6] |
 | europa loopback | write 1 MiB kTLS | 46 | 2,872 | 34,522 | — | 213 | 47 | **13.5** [4.9–19.4] |
 | europa loopback | write 1 MiB plaintext | 37 | 2,978 | 1,665 | — | 120 | 37 | **24.7** [23.0–33.1] |
-| titan loopback | read 1 MiB kTLS | 123 | 3,525 | 3,073 | 4,756 (FIFO) | 2,682 | 155 | 1.46 [1.20–3.71] |
+| titan loopback | read 1 MiB kTLS | 123 | ~~3,525~~ 4,897 | ~~3,073~~ 2,016 | ~~4,756~~ 3,923 | ~~2,682~~ 851 | ~~155~~ 158 | ~~1.46 [1.20–3.71]~~ **4.25** [1.90–5.96] |
 | titan loopback | write 1 MiB kTLS | 123 | 6,944 | 6,325 | — | 586 | 156 | **11.9** [3.4–15.8] |
-| europa to titan | read 1 MiB kTLS | 185 | 34,602 | 34,954 | 34,614 (FIFO) | 1,583 | 1,090 | **21.9** [21.6–31.6] |
+| europa to titan | read 1 MiB kTLS | 185 | ~~34,602~~ 28,710 | ~~34,954~~ 10,127 | ~~34,614~~ 34,609 | ~~1,583~~ 1,613 | 1,089 | **~~21.9~~ 17.8** [16.8–29.7] |
 | europa to titan | write 1 MiB plaintext | 164 | 32,830 | 11,959 | — | 3,202 | 3,206 | **10.3** [9.4–11.5] |
-| titan to hyperion | read 1 MiB kTLS | 205 | 34,589 | 34,937 | 34,564 (FIFO) | 1,612 | 1,084 | **21.5** [16.4–21.7] |
+| titan to hyperion | read 1 MiB kTLS | 205 | ~~34,589~~ 31,244 | ~~34,937~~ 10,418 | ~~34,564~~ 34,600 | ~~1,612~~ 1,645 | 1,084 | **~~21.5~~ 18.2** [15.9–19.5] |
 | titan to hyperion | write 1 MiB kTLS | 205 | 31,916 | 10,490 | — | 1,089 | 1,106 | **29.5** [25.3–33.5] |
 
-- **T1 fires on every leg.** Across the network a read stream's neighbour waits about 34.5 ms at its
-  p99 whatever the frame above 256 KiB (8.6 ms at 256 KiB, 2.5 ms at 64 KiB), against 1.1 ms on a
-  connection of its own: the bytes queued ahead of it are three or four 1 MiB frames at 112 MiB/s.
-- **`TCP_NOTSENT_LOWAT` cannot help a read.** It bounds the bytes not yet sent, and the bytes ahead
-  of a read's small answer are already sent: in flight, in `fq_codel`'s queue and the NIC's. On a
+- **T1 fires on every leg.** Across the network a read stream's neighbour waits ~~about 34.5 ms~~
+  28.7 to 31.2 ms at its p99 beside 1 MiB frames, 8.6 ms at 256 KiB and 2.5 ms at 64 KiB, against
+  1.1 to 1.6 ms on a connection of its own: the bytes queued ahead of it are three or four 1 MiB
+  frames at 112 MiB/s. Over loopback titan's kTLS read now fires too, at 4.25 times, where X11 first
+  measured 1.46: its own connection's p99 was 851 µs in the repeat against 2,682 µs before, and
+  titan's kTLS rounds disagreed with each other in both runs.
+- **~~`TCP_NOTSENT_LOWAT` cannot help a read~~ With small frames first, `TCP_NOTSENT_LOWAT` helps
+  a read.** It bounds the bytes not yet sent, so once the server writes a small answer before the
+  frames still in its own queue, the answer waits behind only what the socket holds: 10.1 to
+  10.4 ms at 16 KiB across the network beside 1 MiB frames, against 34.6 ms first in first out and
+  28.7 to 31.2 ms small first alone; 3.6 to 3.8 ms beside 256 KiB frames against 8.6; over loopback
+  1.2 ms against 2.0 on europa and 2.0 against 4.9 on titan. It never reached a connection of its
+  own, 6 to 10 times it across the network. X11 first recorded that it could not help a read at
+  all, because the answer waited behind the window's frames in the server's own queue, which a
+  socket option does not reach ([item 213](../appendix/resolved/x11-setup-fifo.md)), and a node
+  sets none ([O94](../appendix/optimizations.md#o94-a-nodes-sockets-set-no-tcp_notsent_lowat)). On a
   write it bounds the client's own unsent bytes, and the gap narrowed to 3 to 12 times. Under kTLS on
   the sending side it was far worse than nothing: 34 ms at 1 MiB on europa's loopback, and seconds
   at 8 MiB (5.2 s at the p99 with 16 KiB). That looks like a record left half written until an ACK
   frees room for the rest; X11 did not trace it.
-- **Writing small frames first at a frame's boundary, against first in first out, changed little**:
-  a server's writer chooses only among frames it has not handed to the socket, and by then the
-  socket held megabytes.
+- **Writing small frames first at a frame's boundary, against first in first out, ~~changed little~~
+  helps where the server's own queue is what a small answer waits behind, and not where the socket
+  is.** Over loopback, under kTLS: 152 against 210 µs at the p99 beside 64 KiB frames and 346
+  against 500 beside 256 KiB on europa, 321 against 397 and 424 against 703 on titan, and 8.9
+  against 13.7 ms beside 8 MiB on europa; beside 1 MiB, 2.0 ms either way on europa and within
+  titan's noise. Across the network 28.7 to 31.2 ms against 34.6 beside 1 MiB, and the same below
+  it, because the socket held megabytes. X11 first recorded that it changed little from two
+  columns that had both run first in first out ([item 213](../appendix/resolved/x11-setup-fifo.md)).
 - **A connection of its own works because the queue is per flow.** `fq_codel` schedules flows
   fairly, so the neighbour's packets do not queue behind the stream's. Across the network a write
   stream still raised its neighbours' tail on the sending host (3.2 ms against 0.16 alone), where
@@ -377,7 +415,7 @@ A write stream accepted by executor A for executor B's file, over the direct str
 
 | Result named in advance | Found | So |
 | --- | --- | --- |
-| A small query's tail on a shared connection moves by more than its budget | **Fires.** 9 to 32 times at 1 MiB on every leg's reads or writes; `TCP_NOTSENT_LOWAT` and writing small frames first do not bring it back | Object bytes get connections of their own in the client's pool, and so does any query stream past a frame |
+| A small query's tail on a shared connection moves by more than its budget | **Fires.** ~~9 to 32~~ 4 to 29 times at 1 MiB, by the median, on every leg but plaintext reads over loopback; ~~`TCP_NOTSENT_LOWAT` and writing small frames first do not bring it back~~ `TCP_NOTSENT_LOWAT` with small frames first narrows a read's to 2.4 to 10.5 times and does not bring it back ([item 213](../appendix/resolved/x11-setup-fifo.md)) | Object bytes get connections of their own in the client's pool, and so does any query stream past a frame |
 | A connection cannot be handed to the executor that owns the slice, with kTLS on it | **Does not fire.** It can, with `dup` and `from_raw_fd`, in every round | The hop is a choice, not a cost every write has to pay |
 | The hop is dear, which would make handing the connection worth building | **Fires**, in plaintext: 1.30 to 1.72 times the cpu a GiB at 1 MiB, twice at 64 KiB | S13 hands a lane's connections to the slice's executor; S1's optional row is worth building at M14 |
 | kTLS bounds a stream below the device's rate | **Fires**, for reads: 650 MiB/s on a Zen1 core against 857, 1,730 against 2,553 | A stream that has to run at a device's rate under kTLS is spread over more than one connection |
@@ -386,8 +424,8 @@ A write stream accepted by executor A for executor B's file, over the direct str
 
 | Option | Small requests beside it | Memory | Cost | Verdict |
 | --- | --- | --- | --- | --- |
-| Object frames on any pooled connection | 9 to 32 times their p99 at 1 MiB | The window, and the kernel's buffers | Nothing more | Rejected by T1 |
-| The same with `TCP_NOTSENT_LOWAT` | Reads unchanged; writes 3 to 12 times; seconds under kTLS on the sender | Less kernel memory on the sender | A setting | Rejected |
+| Object frames on any pooled connection | ~~9 to 32~~ 4 to 29 times their p99 at 1 MiB | The window, and the kernel's buffers | Nothing more | Rejected by T1 |
+| The same with `TCP_NOTSENT_LOWAT` | ~~Reads unchanged~~ Reads 2.4 to 10.5 times, with the server writing small frames first; writes 3 to 12 times; seconds under kTLS on the sender | Less kernel memory on the sender | A setting, and 1.2 to 1.8 times a read's server cpu a GiB across the network | Rejected: it narrows the gap, a connection of its own closes it |
 | **Connections set apart for long streams (recommended)** | Unchanged: 1.1 ms across the network | The same, per connection | A few more connections a client | Taken |
 | Smaller frames on a shared connection | 64 KiB held the line on loopback, nothing held it across the network | Less | 1.3 to 2.8 times the cpu a GiB at 64 KiB | Rejected |
 | A separate port for object bytes | The same as connections set apart | The same | A second listener, its TLS and its auth | Rejected by S12, and nothing here argues for it |
@@ -420,6 +458,11 @@ A write stream accepted by executor A for executor B's file, over the direct str
   set apart.
 - **A kTLS receiver says records carry no padding**
   ([O93](../appendix/optimizations.md#o93-ktls-receivers-are-not-told-records-carry-no-padding)).
+- **A small answer on a shared connection is helped by a low water mark, not saved by it**: with the
+  server writing small frames first, `TCP_NOTSENT_LOWAT` cut a read's neighbour three times across
+  the network and left it 6 to 10 times a connection of its own. A node sets none
+  ([O94](../appendix/optimizations.md#o94-a-nodes-sockets-set-no-tcp_notsent_lowat)); it changes no
+  decision here.
 - **An executor writes object frames under kTLS in pieces short enough for its queue's goal**: one
   1 MiB send holds a Zen1 core about a millisecond
   ([todos](../appendix/todos.md#write-object-frames-under-ktls-in-pieces)).

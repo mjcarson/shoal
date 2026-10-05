@@ -127,10 +127,13 @@ connection. ~~The client may keep some of its pooled connections for object byte
 Whether it should, and what a shared connection really costs a small query's tail, is
 [X11](spikes.md#x11-streamed-bodies)'s to measure before it is designed
 ([Q26](contract.md#questions-to-answer)).~~ **The client keeps connections apart for object
-bytes.** X11 measured a small request's p99 on a connection carrying a 1 MiB stream at 9 to 32
-times its p99 on one of its own, 34.6 ms against 1.1 ms across the lab's 1 GbE; neither
-`TCP_NOTSENT_LOWAT` nor writing small frames first at a frame's boundary brought it back, since the
-bytes ahead of it were already in flight and in the NIC's queue
+bytes.** X11 measured a small request's p99 on a connection carrying a 1 MiB stream at ~~9 to 32~~
+4 to 29 times its p99 on one of its own, ~~34.6 ms against 1.1 ms~~ 28.7 to 31.2 ms against 1.1 to
+1.6 ms across the lab's 1 GbE; ~~neither `TCP_NOTSENT_LOWAT` nor writing small frames first at a
+frame's boundary brought it back, since the bytes ahead of it were already in flight and in the
+NIC's queue~~ writing small frames first and `TCP_NOTSENT_LOWAT` together cut it about three times
+and did not bring it back, since the bytes the socket holds are still ahead of it
+([item 213](../appendix/resolved/x11-setup-fifo.md) measured the pair again)
 ([X11](streamed-bodies.md#3-a-small-request-beside-a-stream),
 [Q26, in part](contract.md#q26-in-part-streamed-bodies-2026-10-05)). S1's prerequisite for more
 than one frame a query, [F73](../features/bodies-across-frames.md), built the connections apart
@@ -216,7 +219,7 @@ connection set aside in the client's connection pool gets most of the benefit.
 - **A window of memory for each stream**, on both peers ([S13](isolation.md#memory)).
 - ~~**A small query's tail** on a connection it shares with object frames, until X11 says
   what that is.~~ **Connections set apart** for object bytes, which a client opens when it needs
-  them, since X11 found a shared connection's tail 9 to 32 times its own.
+  them, since X11 found a shared connection's tail ~~9 to 32~~ 4 to 29 times its own.
 - **The client grows**: a handle type, a stream's state, and the retry of a write that
   spans frames.
 

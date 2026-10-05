@@ -3988,3 +3988,19 @@ own apply; on a follower it delays only that follower's apply.
 Filed from X11, which set it on both ends of its own connections and found the receiving side's
 cpu lower on reads, where the client receives, and within noise on writes, where the server's file
 was the bound.
+
+### O94. A node's sockets set no `TCP_NOTSENT_LOWAT`
+
+| | |
+| --- | --- |
+| **Rank** | **low**: long streams travel on connections of their own since [F73](../features/bodies-across-frames.md), so only a long answer on a pooled connection has small answers behind it |
+| **Impact** | Measured by item 213's repeat of [X11](../object-storage/streamed-bodies.md#3-a-small-request-beside-a-stream)'s section 3, with the server writing small frames first: across 1 GbE from titan to hyperion, a small request's p99 beside a 1 MiB kTLS read stream on the same connection fell from 31.2 ms to 10.4 ms with the sending socket's low water mark at 16 KiB, and from 8.6 to 3.8 ms beside 256 KiB frames. A connection of its own was 1.6 ms, so the low water mark narrows the gap and does not close it |
+| **Difficulty** | S — one `setsockopt(IPPROTO_TCP, TCP_NOTSENT_LOWAT, …)` on an accepted client connection, where the outbox (`shoal-core/src/server/shard/outbox.rs`) already writes every whole answer before the next data frame. Without the low water mark the kernel takes megabytes of a long answer at once, and the outbox's order decides nothing |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | More wakeups for the writer of a long answer: the repeat measured a 16 KiB mark costing a read stream's server 1.2 to 1.8 times its cpu a GiB across the network, more the larger the frame (1.70 to 1.77 at 1 MiB under kTLS). Under kTLS on the *sending* side of a write stream X11 also measured it making the tail far worse, so it is set on a node's answers only, never on a client's requests |
+| **Benchmark** | `shoal-spike stream` section 3, its `shared` and `shared-lowat-16K` read sides; for the product, a small query's tail beside a long answer on one pooled connection, which no arm drives yet |
+
+Filed from item 213's repeat of X11's section 3 ([Resolved #213](resolved/x11-setup-fifo.md)), which
+found that X11's "the low water mark cannot help a read" had measured a server writing first in
+first out: with small frames first the mark helps a read several times.

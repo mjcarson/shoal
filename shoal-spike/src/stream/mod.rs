@@ -13,6 +13,8 @@
 //!   and `shoal-spike stream drive --addr <host> --certs <dir>` runs the client against it
 //! - `shoal-spike stream certs --out <dir>` makes the certificate both ends use
 //! - `shoal-spike stream report <records.json…>` merges rounds and judges the three triggers
+//! - `--sections tail --streams read` repeats only the cells of the named sections whose stream
+//!   runs in a named direction, as item 213's repeat of section 3's reads did
 //!
 //! Its frames are its own and are thrown away with it; the product's are written by S1's
 //! prerequisite for more than one frame a query, and by M13.
@@ -297,6 +299,9 @@ fn drive(command: &str, args: &[String]) {
     };
     let sections: Vec<String> = list_of(args, "--sections")
         .unwrap_or_else(|| SECTIONS.iter().map(|s| (*s).to_string()).collect());
+    // only the streams of these directions, when a run repeats part of a section (item 213)
+    let streams: Option<Vec<String>> = list_of(args, "--streams");
+    let only = |cells: Vec<Vec<measure::Cell>>| keep_streams(cells, streams.as_deref());
     let mut next_id = 0u64;
     for round in rounds {
         for name in SECTIONS
@@ -308,21 +313,21 @@ fn drive(command: &str, args: &[String]) {
                 "rate" => measure::section(
                     &ctx,
                     "1. Rate and cpu by frame",
-                    &measure::rate_cells(&ctx),
+                    &only(measure::rate_cells(&ctx)),
                     round,
                     &mut next_id,
                 ),
                 "window" => measure::section(
                     &ctx,
                     "2. The window",
-                    &measure::window_cells(&ctx),
+                    &only(measure::window_cells(&ctx)),
                     round,
                     &mut next_id,
                 ),
                 "tail" => measure::section(
                     &ctx,
                     "3. A small request beside a stream",
-                    &measure::tail_cells(&ctx),
+                    &only(measure::tail_cells(&ctx)),
                     round,
                     &mut next_id,
                 ),
@@ -345,7 +350,7 @@ fn drive(command: &str, args: &[String]) {
                     records.extend(measure::section(
                         &ctx,
                         "4. Routes to the other executor",
-                        &measure::route_cells(&ctx),
+                        &only(measure::route_cells(&ctx)),
                         round,
                         &mut next_id,
                     ));
@@ -368,6 +373,29 @@ fn drive(command: &str, args: &[String]) {
         let _ = std::fs::remove_dir_all(&scratch_certs);
         std::process::exit(0);
     }
+}
+
+/// Keep the rows of a section whose stream runs in a direction asked for
+///
+/// A row with no stream, a small request alone, is kept only when nothing was asked for.
+///
+/// # Arguments
+///
+/// * `cells` - The section's rows, each a cell's sides
+/// * `streams` - The directions to keep, or every row when none were named
+fn keep_streams(cells: Vec<Vec<measure::Cell>>, streams: Option<&[String]>) -> Vec<Vec<measure::Cell>> {
+    // every row unless a run named the directions it repeats
+    let Some(streams) = streams else {
+        return cells;
+    };
+    cells
+        .into_iter()
+        .filter(|sides| {
+            sides.first().and_then(|cell| cell.dir).is_some_and(|dir| {
+                streams.iter().any(|want| want == dir.name())
+            })
+        })
+        .collect()
 }
 
 /// Wait until every executor accepts a connection
