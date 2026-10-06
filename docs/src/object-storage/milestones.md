@@ -41,7 +41,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 | M16 | Recovery and moves | Q17, Q29 | The walk of a tablet's rows |
 | M17 | Scrub and repair | Q28 | — |
 | M18 | Erasure coding | Q20 | — |
-| M19 | Rotational devices | Q23 | Disks, fitted to the lab |
+| M19 | Rotational devices | Q23 (✅ [X7](device-store-hdd.md)) | ~~Disks, fitted to the lab~~ (✅ fitted 2026-10-06) |
 | M20 | Reclamation and the life of a device | — | — |
 | M21 | Operations and the real cluster | Q31 | — |
 
@@ -390,24 +390,42 @@ or in the fixture, and every table says which.
 
 ### M19. Rotational devices
 
-**Closed before it.** Q23, what a rotational device needs
-([X7](spikes.md#x7-the-device-store-on-hdd)).
+**Closed before it.** ✅ Q23, what a rotational device needs
+([X7](device-store-hdd.md), recorded on [S18](contract.md#q23-what-a-rotational-device-needs-2026-10-06)
+2026-10-06).
 
-**Lands first.** Disks, fitted to the lab ([S1](prerequisites.md#what-the-lab-needs-fitted)).
+**Lands first.** ✅ Disks, fitted to the lab on 2026-10-06, one a host
+([S1](prerequisites.md#what-the-lab-needs-fitted)).
 
-**Delivers.** What Q23 decides among the three choices of
+**Delivers.** What Q23 decided ~~among the three choices of
 [S6](device-store.md#what-a-rotational-device-changes): where a disk's journal lives, with
 the failure domain a shared journal makes; whether a disk has an executor to itself; how a
-disk is read ahead. Applies deferred and batched in offset order. Budgets and a pool's
-defaults sized for a disk.
+disk is read ahead. Applies deferred and batched in offset order.~~, as
+[S6](device-store.md#what-a-rotational-device-changes) now has it:
 
-**Acceptance.** S13's `rotational_applies_are_batched_in_offset_order`, and every test of
-M14 to M18 that names a device, run again with the fixture's devices marked rotational.
-**This gate owns one named test today, and that is deliberate.** R16 is the same code under
-other costs, so most of its acceptance is the suites that already exist.
+- a rotational device runs with its write cache off, checked at start;
+- its journal on an SSD of the node, with the failure domain a shared journal makes;
+- its slice on an executor never shared with an SSD's;
+- applies deferred and issued a whole batch at a time, the batch bounded by its time, with no
+  offset order;
+- whole chunks of 4 MiB or more, read whole;
+- XFS only;
+- a deep scrub paced by the arm's idle time, under its byte budget.
 
-*Not at this gate, yet:* the rows that depend on Q23's answer. They are added to the device
-store's table, and named here, when the answer is given.
+Budgets and a pool's defaults sized for a disk, from X12.
+
+**Acceptance.** ~~S13's `rotational_applies_are_batched_in_offset_order`~~ S13's
+`rotational_applies_are_batched_and_bounded` and `rotational_slice_never_shares_an_ssd_executor`;
+S6's `rotational_device_with_its_cache_on_is_refused`, `rotational_device_needs_a_journal_device`
+and `rotational_stage_is_acknowledged_from_its_journal_device`; and every test of M14 to M18 that
+names a device, run again with the fixture's devices marked rotational. ~~**This gate owns one
+named test today, and that is deliberate.**~~ R16 is the same code under other costs, so most of
+its acceptance is still the suites that already exist; the five named tests are what Q23's
+answer added.
+
+~~*Not at this gate, yet:* the rows that depend on Q23's answer. They are added to the device
+store's table, and named here, when the answer is given.~~ The rows Q23's answer added are the
+five above, in S6's and S13's tables.
 
 **Evidence/exit.** This is the gate judged mostly by measurement. X7's and X12's figures
 taken again through a cluster, on the fitted disks. An SSD pool against a rotational pool on
@@ -483,7 +501,7 @@ The reason this page is provisional, spike by spike.
 | ~~X4,~~ X9 | ~~A Zen1 core encodes below a device's rate, or~~ shared executors move a table's tail past its budget. X4 measured the first half: a Zen1 core encodes 4+2 at 7.6 GiB/s out of cache ([X4](erasure-coding-crates.md)) | M14 delivers dedicated executors only, and a four-core node gives up a core or serves no pool |
 | ~~X5~~ | ~~gxhash's output is not stable across builds~~ It was stable across every cpu and build, but not across ways of feeding it ([X5](checksums.md)) | ~~A second checksum is a new dependency before M13~~ It is: CRC-64/NVME through `crc-fast`, added at M13 |
 | ~~X6~~ | ~~A file a stripe chunk is not viable at small sizes, or a clone is worth requiring~~ Neither: a file a chunk is viable from 1 MiB on a device that flushes, at the line, and from 256 KiB on the Optane; the clone failed every condition but one ([X6](device-store-ssd.md)) | ~~M14's store changes layout; or a clone call lands in the glommio fork first and the filesystems M14 accepts narrow~~ M14's store keeps S6's layout, with its whole chunks written into files a slice keeps written ahead. No clone call is added, and M14 accepts XFS and ext4 and refuses btrfs |
-| X7 | A disk needs a journal on an SSD, or an executor to itself | M19 grows by that, and a shared journal becomes a failure domain on S5 |
+| ~~X7~~ | ~~A disk needs a journal on an SSD, or an executor to itself~~ It needs both, and its write cache off: a stage on the disk took 42 to 251 ms beside applies, an SSD's slice on an executor shared with a disk's slowed a hundredfold, and the lab's disks with their cache on stalled a read behind a flush or acknowledged a sync before the platter could ([X7](device-store-hdd.md)) | M19 grows by that, and a shared journal ~~becomes~~ is a failure domain on S5, as S6 says. M19 also drops the offset order, reads whole chunks of 4 MiB or more, and refuses ext4 |
 | X8 | A size below which bytes in the commit win | M15 gains the small-write path, and ~~item 202~~ the append batch bound ([Resolved #202](../appendix/resolved/append-batch-bytes.md)) and item 208 carry more weight |
 | ~~X10~~ | ~~A commit to a cold stripe row stalls its group~~ It does, under load and not at depth one: 0.62× a group's rate on the 970 EVO. The read S7 already makes, sent to the group's leader, removes the stall ([X10](stripe-row-costs.md)) | ~~The rows of M12 change shape, or M15 keeps stripe rows resident and pays for it in memory~~ M12's rows keep S3's shape and stay cold; M15's commit reads its stripe row at the leader first, and the inline threshold defaults to 16 KiB |
 | ~~X11~~ | ~~A shared connection hurts small queries; a connection cannot be handed to another executor~~ The first came out, ~~9 to 32~~ 4 to 29 times at 1 MiB ([item 213](../appendix/resolved/x11-setup-fifo.md) measured its reads again), and the second did not: a connection under kTLS is handed over at no cost, while bytes hopping cost 1.3 to 1.7 times the cpu ([X11](streamed-bodies.md)) | ~~M13 sets connections aside for object bytes; the hop between executors stays in M14~~ M13's client sets connections apart for object bytes (S1's prerequisite builds them for queries), and M14 hands the object lane's connections to the slice's executor |
@@ -510,8 +528,8 @@ The reason this page is provisional, spike by spike.
   with the most ways to be subtly wrong and the one a pool can do without.
 
 Two places in the order are convenience and not dependency. Rotational devices follow
-erasure coding only because the lab has no disk yet: M19 depends on M14 to M17 and on
-nothing in M18. And reclamation waits until M20 only because nothing before it needs space
+erasure coding only because the lab ~~has no disk yet~~ had no disk when the order was drawn; it
+has one a host since 2026-10-06: M19 depends on M14 to M17 and on nothing in M18. And reclamation waits until M20 only because nothing before it needs space
 back: if devices fill during the testing of M15 to M18, it moves forward of them.
 
 ## Related

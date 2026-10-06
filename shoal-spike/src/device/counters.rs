@@ -33,6 +33,12 @@ pub struct Dev {
     pub flushes: u64,
     /// Milliseconds with a request in flight
     pub busy_ms: u64,
+    /// Reads the block layer merged into another
+    pub read_merges: u64,
+    /// Writes the block layer merged into another
+    pub write_merges: u64,
+    /// Milliseconds requests spent queued and in flight, summed over every request
+    pub queue_ms: u64,
 }
 
 /// Read a block device's counters
@@ -54,10 +60,13 @@ pub fn read_dev(name: &str) -> Dev {
     let field = |index: usize| fields.get(index).copied().unwrap_or(0);
     Dev {
         reads: field(0),
+        read_merges: field(1),
         read_sectors: field(2),
         writes: field(4),
+        write_merges: field(5),
         write_sectors: field(6),
         busy_ms: field(9),
+        queue_ms: field(10),
         discards: field(11),
         discard_sectors: field(13),
         flushes: field(15),
@@ -116,6 +125,10 @@ pub struct Delta {
     pub fs_flushes: u64,
     /// The process's CPU time, nanoseconds
     pub cpu_ns: u64,
+    /// Milliseconds the whole disk had a request in flight
+    pub busy_ms: u64,
+    /// Requests the whole disk's block layer merged into another
+    pub merges: u64,
 }
 
 impl Snap {
@@ -134,6 +147,9 @@ impl Snap {
             flushes: later.disk.flushes.saturating_sub(self.disk.flushes),
             fs_flushes: later.fs.flushes.saturating_sub(self.fs.flushes),
             cpu_ns: later.cpu_ns.saturating_sub(self.cpu_ns),
+            busy_ms: later.disk.busy_ms.saturating_sub(self.disk.busy_ms),
+            merges: (later.disk.read_merges + later.disk.write_merges)
+                .saturating_sub(self.disk.read_merges + self.disk.write_merges),
         }
     }
 }
@@ -157,6 +173,16 @@ impl Delta {
     #[must_use]
     pub fn flushes_per(&self, ops: usize) -> f64 {
         self.flushes as f64 / ops.max(1) as f64
+    }
+
+    /// The share of the time between the snapshots the whole disk had a request in flight
+    #[must_use]
+    pub fn busy(&self) -> f64 {
+        if self.secs > 0.0 {
+            self.busy_ms as f64 / 1e3 / self.secs
+        } else {
+            0.0
+        }
     }
 
     /// The process's CPU microseconds for each operation

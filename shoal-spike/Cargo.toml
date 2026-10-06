@@ -2,7 +2,7 @@
 name = "shoal-spike"
 version = "0.1.0"
 edition = "2021"
-description = "The Q1/Q13 spike: openraft groups on the glommio runtime, counted and timed; X2, placement simulated; X6, the device store on SSD measured; X11, streamed bodies measured; and X13, the benchmark driver's bytes measured."
+description = "The Q1/Q13 spike: openraft groups on the glommio runtime, counted and timed; X2, placement simulated; X6 and X7, the device store on SSD and on rotational disks measured; X11, streamed bodies measured; and X13, the benchmark driver's bytes measured."
 license = "MIT"
 publish = false
 
@@ -20,6 +20,10 @@ publish = false
 # device store measured on a filesystem as a slice's executor drives it, through the glommio fork's
 # `DmaFile` and `FICLONERANGE` by libc. Run as root on the lab by `results/x6-lab.sh`; its records
 # are merged by `device report` and its tables are on `docs/src/object-storage/device-store-ssd.md`.
+# X7 (`docs/src/object-storage/spikes.md#x7-the-device-store-on-hdd`) runs the same subcommand on
+# the lab's rotational disks, with `--ssd-dir` naming the host's SSD and its own measurements
+# beside X6's (`seq`, `sync`, `contend`, `scrub`, `shared`, `wcoff`). Run as root by
+# `results/x7-lab.sh`; its tables are on `docs/src/object-storage/device-store-hdd.md`.
 #
 # `shoal-spike stream` is X11 (`docs/src/object-storage/spikes.md#x11-streamed-bodies`): frames of
 # plain bytes between a glommio server and a tokio client, with and without kernel TLS, into

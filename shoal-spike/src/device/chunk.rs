@@ -6,6 +6,9 @@
 //! compaction are built for it, so it is the best a shared file could do, and a file a chunk is
 //! judged against it (T1). Six in flight means six chunks on one executor, because a slice is
 //! one executor; several executors are measurement 8's question.
+//!
+//! On a rotational disk X7 caps a side at twenty seconds whatever its count, since a count sized
+//! for an SSD's byte budget would take minutes of seeks; the chunks a side wrote are its count.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -293,6 +296,8 @@ async fn one_slot(shared: &Shared, index: usize, own_sync: bool) -> Steps {
 /// * `writers` - Chunks in flight
 /// * `count` - How many chunks
 /// * `side` - The side
+/// * `cap` - The longest it may write for, whatever its count
+#[allow(clippy::too_many_arguments)]
 async fn run_side(
     dir: PathBuf,
     devices: Devices,
@@ -301,6 +306,7 @@ async fn run_side(
     writers: usize,
     count: usize,
     side: Side,
+    cap: Option<Duration>,
 ) -> SideOut {
     io::wipe(&dir);
     let pg = dir.join("pg0");
@@ -355,11 +361,17 @@ async fn run_side(
     let before = devices.snap();
     let thread_before = sys::thread_cpu_ns();
     let start = Instant::now();
+    // past the cap no new chunk is begun
+    let deadline = cap.map(|cap| start + cap);
+    let over = move || deadline.is_some_and(|deadline| Instant::now() >= deadline);
     let steps: Vec<Steps> = match (side.batch, writers) {
         // one at a time, each acknowledging itself
         (false, 1) => {
             let mut all = Vec::with_capacity(count);
             for index in 0..count {
+                if over() {
+                    break;
+                }
                 all.push(match side.layout {
                     Layout::File | Layout::Recycled => one_file(&shared, side, index, true).await,
                     Layout::Shared => one_slot(&shared, index, true).await,
@@ -376,7 +388,7 @@ async fn run_side(
                     let mut mine = Vec::new();
                     loop {
                         let index = next.get();
-                        if index >= count {
+                        if index >= count || over() {
                             return mine;
                         }
                         next.set(index + 1);
@@ -393,6 +405,9 @@ async fn run_side(
         (true, _) => {
             let mut all = Vec::with_capacity(count);
             for batch in 0..count.div_ceil(BATCH) {
+                if over() {
+                    break;
+                }
                 let started = Instant::now();
                 let indices: Vec<usize> = (batch * BATCH..((batch + 1) * BATCH).min(count)).collect();
                 let mut done: Vec<Steps> = join_all(indices.iter().map(|&index| {
@@ -429,6 +444,8 @@ async fn run_side(
     let exec_ns = sys::thread_cpu_ns() - thread_before;
     let drain_ms = drain(&dir);
     let delta = before.delta(&devices.snap());
+    // the chunks a cap let through
+    let count = steps.len();
     // every step's samples
     let mut samples: [Samples; 8] = Default::default();
     for step in &steps {
@@ -535,9 +552,9 @@ fn run_with(ctx: &Ctx, round: u32, measurement: &str, sides: fn(u64, usize) -> V
             let count = count(ctx, size, writers);
             let mut outs = Vec::new();
             for side in ordered(&sides(size, writers), round) {
-                let (dir, devices, form) = (ctx.sub(measurement).join(side.name), ctx.facts.devices.clone(), ctx.dir_sync());
+                let (dir, devices, form, cap) = (ctx.sub(measurement).join(side.name), ctx.facts.devices.clone(), ctx.dir_sync(), ctx.side_cap());
                 outs.push(on_core(ctx.core, ctx.sibling, move || {
-                    run_side(dir, devices, form, size, writers, count, side)
+                    run_side(dir, devices, form, size, writers, count, side, cap)
                 }));
             }
             // the floor every file-a-chunk side is read against

@@ -2,8 +2,9 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-06, when X1 modelled the stripe protocol and found it safe once ten
-rules were repaired; and as of 2026-10-05 before it, when X11 reported and F73 delivered the frames it set, X13 reported
+after it. As of 2026-10-06, when rotational disks were fitted and X7 measured the device store on
+them, and X1 modelled the stripe protocol and found it safe once ten rules were repaired; and as
+of 2026-10-05 before it, when X11 reported and F73 delivered the frames it set, X13 reported
 what F69 had left of the benchmark's shape, and X14 read Ceph and S3 at the source; X6 and X10 had
 reported the day before, and X2, X4 and X5 the day before that.
 
@@ -34,7 +35,7 @@ flowchart LR
         R1["✅ X1's model held<br>to S7's schedules"]:::done
         R2["✅ Item 210: the bench's<br>preload fits a frame"]:::done
         XFS["✅ Fit an XFS filesystem"]:::done
-        Disks["Fit rotational disks"]
+        Disks["✅ Fit rotational disks"]:::done
         X2["✅ X2 Placement simulation"]:::done
         X4["✅ X4 Erasure coding crates"]:::done
         X5["✅ X5 Checksums"]:::done
@@ -49,7 +50,7 @@ flowchart LR
     X1["✅ X1 The stripe protocol as a model"]:::done
     X3["X3 Bytes through the tablet groups"]
     X6x["✅ X6, its XFS leg"]:::done
-    X7["X7 The device store on HDD"]
+    X7["✅ X7 The device store on HDD"]:::done
     X8["X8 One small write, three ways"]
     X9["X9 Table latency beside object work"]
     X12["X12 Recovery and scrub rates"]
@@ -98,8 +99,10 @@ only once every decision is on the record
 ([spikes](spikes.md#what-has-to-be-on-the-record-before-the-milestones-are-real)), and a spike
 that needs nothing is run before the plan is drawn. Each question also has a gate of its own,
 the last moment it can be answered; those are on the
-[milestones page's table](milestones.md#the-gates-at-a-glance). The rotational half of X12 and
-X7 are the exception: if the disks come late, only M19 waits for them.
+[milestones page's table](milestones.md#the-gates-at-a-glance). ~~The rotational half of X12 and
+X7 are the exception: if the disks come late, only M19 waits for them.~~ The disks came on
+2026-10-06 and X7 ran on them that day ([X7](device-store-hdd.md)); the rotational half of X12
+waits on X12 alone, and only M19 waits on it.
 
 ## The gates
 

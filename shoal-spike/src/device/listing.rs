@@ -9,13 +9,18 @@
 //! every cache dropped, and warm. The populations are a placement group of a hundred thousand
 //! and of a million chunks, deep (sixty-four chunks an object) and wide (one), each file one
 //! real header block and a forty-byte label attribute. T4 is judged on them.
+//!
+//! A disk walks a million chunks in hours, not seconds, so on a rotational disk X7 walks the two
+//! populations of a hundred thousand in every round, without the walk that reads one header at a
+//! time, and the two of a million once a filesystem (`listing-1m`). Every walk there stops after
+//! half an hour and says how far it got, and its cost a chunk is taken over what it walked.
 
 use std::ffi::{CStr, CString};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
 
@@ -29,6 +34,9 @@ use crate::placement::timing::pin;
 
 /// The label attribute's name
 const LABEL: &CStr = c"user.x6.label";
+
+/// The longest one walk runs on a rotational disk before it stops and says how far it got
+const WALK_CAP: Duration = Duration::from_secs(30 * 60);
 
 /// A placement group's population
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,11 +170,15 @@ impl Found {
 ///
 /// * `pg_fd` - The placement group's directory
 /// * `buffer` - Scratch for `getdents64`
-fn list(pg_fd: &OwnedFd, buffer: &mut [u8]) -> Vec<Found> {
+/// * `deadline` - When the listing stops, with what it has, if it has one
+fn list(pg_fd: &OwnedFd, buffer: &mut [u8], deadline: Option<Instant>) -> Vec<Found> {
     let mut found = Vec::new();
     for object in sys::read_dir(pg_fd.as_raw_fd(), buffer).expect("listed") {
         if !object.is_dir {
             continue;
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            break;
         }
         let fd = sys::open_dir(Some(pg_fd.as_raw_fd()), &object.name).expect("opened");
         for entry in sys::read_dir(fd.as_raw_fd(), buffer).expect("listed") {
@@ -176,37 +188,48 @@ fn list(pg_fd: &OwnedFd, buffer: &mut [u8]) -> Vec<Found> {
     found
 }
 
-/// Walk a placement group one way on this thread, returning how many chunks it found
+/// Walk a placement group one way on this thread, returning how many chunks it walked and
+/// whether the deadline stopped it
 ///
 /// # Arguments
 ///
 /// * `pg` - The placement group's directory
 /// * `walk` - The way
-fn walk_here(pg: &Path, walk: Walk) -> usize {
+/// * `deadline` - When the walk stops, if it has one
+fn walk_here(pg: &Path, walk: Walk, deadline: Option<Instant>) -> (usize, bool) {
+    let over = || deadline.is_some_and(|deadline| Instant::now() >= deadline);
     let mut buffer = vec![0_u8; 256 << 10];
     let pg_fd = sys::open_dir(None, &sys::cpath(pg)).expect("opened");
     match walk {
-        Walk::Names => list(&pg_fd, &mut buffer).len(),
+        Walk::Names => (list(&pg_fd, &mut buffer, deadline).len(), over()),
         Walk::Statx => {
             // each object's chunks stated as its directory lists them
             let mut count = 0;
             for object in sys::read_dir(pg_fd.as_raw_fd(), &mut buffer).expect("listed") {
+                if over() {
+                    return (count, true);
+                }
                 let fd = sys::open_dir(Some(pg_fd.as_raw_fd()), &object.name).expect("opened");
                 for entry in sys::read_dir(fd.as_raw_fd(), &mut buffer).expect("listed") {
                     sys::statx_size(fd.as_raw_fd(), &entry.name).expect("stated");
                     count += 1;
                 }
             }
-            count
+            (count, false)
         }
         Walk::StatxIno | Walk::Xattr | Walk::HeaderQd1 => {
             // every chunk, then in inode order, then each one asked
-            let mut found = list(&pg_fd, &mut buffer);
+            let mut found = list(&pg_fd, &mut buffer, deadline);
             found.sort_unstable_by_key(|chunk| chunk.ino);
             let mut label = [0_u8; 64];
             let mut head = sys::Aligned::new(4096);
             let prefix = pg.as_os_str().as_bytes();
+            let mut walked = 0;
             for chunk in &found {
+                if over() {
+                    return (walked, true);
+                }
+                walked += 1;
                 let relative = chunk.relative();
                 sys::statx_size(pg_fd.as_raw_fd(), &relative).expect("stated");
                 match walk {
@@ -221,7 +244,7 @@ fn walk_here(pg: &Path, walk: Walk) -> usize {
                     _ => {}
                 }
             }
-            found.len()
+            (walked, over())
         }
         Walk::HeaderQd32 => unreachable!("the executor walks thirty-two at a time"),
     }
@@ -232,19 +255,22 @@ fn walk_here(pg: &Path, walk: Walk) -> usize {
 /// # Arguments
 ///
 /// * `pg` - The placement group's directory
-async fn walk_qd32(pg: PathBuf) -> usize {
+/// * `deadline` - When the walk stops, if it has one
+async fn walk_qd32(pg: PathBuf, deadline: Option<Instant>) -> (usize, bool) {
     // the names on this thread, in inode order
     let mut buffer = vec![0_u8; 256 << 10];
     let pg_fd = sys::open_dir(None, &sys::cpath(&pg)).expect("opened");
-    let mut found = list(&pg_fd, &mut buffer);
+    let mut found = list(&pg_fd, &mut buffer, deadline);
     found.sort_unstable_by_key(|chunk| chunk.ino);
-    let count = found.len();
+    let walked = Rc::new(std::cell::Cell::new(0_usize));
     let pg = Rc::new(pg);
     // each opened, its header read, closed, thirty-two in flight
     stream::iter(found)
+        .take_while(|_| futures::future::ready(deadline.is_none_or(|deadline| Instant::now() < deadline)))
         .map(|chunk| {
-            let pg = pg.clone();
+            let (pg, walked) = (pg.clone(), walked.clone());
             async move {
+                walked.set(walked.get() + 1);
                 let path = pg
                     .join(std::ffi::OsStr::from_bytes(chunk.object.as_bytes()))
                     .join(std::ffi::OsStr::from_bytes(chunk.name.as_bytes()));
@@ -257,7 +283,7 @@ async fn walk_qd32(pg: PathBuf) -> usize {
         .buffer_unordered(32)
         .collect::<Vec<()>>()
         .await;
-    count
+    (walked.get(), deadline.is_some_and(|deadline| Instant::now() >= deadline))
 }
 
 /// One walk, timed, with the device counted
@@ -268,24 +294,26 @@ async fn walk_qd32(pg: PathBuf) -> usize {
 /// * `pg` - The placement group
 /// * `walk` - The way
 /// * `devices` - The devices
-fn timed(ctx: &Ctx, pg: &Path, walk: Walk, devices: &Devices) -> (usize, f64, f64, f64) {
+/// * `cap` - The longest the walk may run, if it is bounded
+fn timed(ctx: &Ctx, pg: &Path, walk: Walk, devices: &Devices, cap: Option<Duration>) -> (usize, f64, f64, f64, bool) {
     let before = devices.snap();
     let start = Instant::now();
-    let count = if walk == Walk::HeaderQd32 {
+    let deadline = cap.map(|cap| start + cap);
+    let (count, capped) = if walk == Walk::HeaderQd32 {
         let pg = pg.to_path_buf();
-        on_core(ctx.core, ctx.sibling, move || walk_qd32(pg))
+        on_core(ctx.core, ctx.sibling, move || walk_qd32(pg, deadline))
     } else {
         let (pg, core) = (pg.to_path_buf(), ctx.core);
         std::thread::spawn(move || {
             pin(core);
-            walk_here(&pg, walk)
+            walk_here(&pg, walk, deadline)
         })
         .join()
         .expect("the walk finishes")
     };
     let took = start.elapsed().as_secs_f64();
     let delta = before.delta(&devices.snap());
-    (count, took, delta.read as f64 / 1024.0, delta.written as f64 / 1024.0)
+    (count, took, delta.read as f64 / 1024.0, delta.written as f64 / 1024.0, capped)
 }
 
 /// Run measurement 5 for one round
@@ -297,6 +325,9 @@ fn timed(ctx: &Ctx, pg: &Path, walk: Walk, devices: &Devices) -> (usize, f64, f6
 pub fn run(ctx: &Ctx, round: u32) {
     let populations: Vec<Population> = if ctx.quick {
         vec![Population { chunks: 2000, per_object: 64 }, Population { chunks: 2000, per_object: 1 }]
+    } else if ctx.rotational() {
+        // a disk walks the millions once a filesystem, in listing-1m
+        vec![Population { chunks: 100_000, per_object: 64 }, Population { chunks: 100_000, per_object: 1 }]
     } else {
         vec![
             Population { chunks: 100_000, per_object: 64 },
@@ -305,6 +336,36 @@ pub fn run(ctx: &Ctx, round: u32) {
             Population { chunks: 1_000_000, per_object: 1 },
         ]
     };
+    run_with(ctx, round, &populations, "listing");
+}
+
+/// Run the walks of a million chunks, deep and wide, once: X7's on a disk
+///
+/// # Arguments
+///
+/// * `ctx` - The run
+/// * `round` - The round
+pub fn run_million(ctx: &Ctx, round: u32) {
+    let populations = if ctx.quick {
+        vec![Population { chunks: 4000, per_object: 64 }]
+    } else {
+        vec![Population { chunks: 1_000_000, per_object: 64 }, Population { chunks: 1_000_000, per_object: 1 }]
+    };
+    run_with(ctx, round, &populations, "listing-1m");
+}
+
+/// Build and walk a set of populations for one round, the walks a population gets chosen by its
+/// size and the device
+///
+/// # Arguments
+///
+/// * `ctx` - The run
+/// * `round` - The round
+/// * `populations` - The populations
+/// * `name` - The directory the populations are built under
+fn run_with(ctx: &Ctx, round: u32, populations: &[Population], name: &str) {
+    // a disk's walk is bounded, and skips the walk that reads one header at a time
+    let cap = (ctx.rotational() && !ctx.quick).then_some(WALK_CAP);
     let cores: Vec<usize> = ctx.order.iter().map(|(cpu, _)| *cpu).collect();
     let mut built = Table::new(&["population", "files", "built in s", "files/s"]);
     let mut table = Table::new(&[
@@ -312,8 +373,8 @@ pub fn run(ctx: &Ctx, round: u32) {
         "warm s", "warm µs/chunk", "warm dev KiB written", "hours/16 TiB at 1 MiB", "at 4 MiB",
     ]);
     let mut records = Vec::new();
-    let root = ctx.sub("listing");
-    for population in &populations {
+    let root = ctx.sub(name);
+    for population in populations {
         let dir = root.join(population.name());
         if let Some(took) = populate(&dir, *population, &cores) {
             built.row(vec![
@@ -329,23 +390,32 @@ pub fn run(ctx: &Ctx, round: u32) {
             ));
         }
         // the walks a population gets: every one at a hundred thousand, the telling ones at a million
-        let walks: Vec<Walk> = match (population.chunks >= 1_000_000, population.per_object == 1) {
+        let mut walks: Vec<Walk> = match (population.chunks >= 1_000_000, population.per_object == 1) {
             (false, _) => vec![Walk::Names, Walk::Statx, Walk::StatxIno, Walk::Xattr, Walk::HeaderQd1, Walk::HeaderQd32],
             (true, false) => vec![Walk::Names, Walk::StatxIno, Walk::Xattr, Walk::HeaderQd32],
             (true, true) => vec![Walk::Names, Walk::StatxIno, Walk::HeaderQd32],
         };
+        if ctx.rotational() {
+            walks.retain(|walk| *walk != Walk::HeaderQd1);
+        }
         let pg = dir.join("pg0");
         for walk in ordered(&walks, round) {
             // cold: every cache dropped, then the walk; warm: the same walk again at once
             let cold_ok = sys::drop_caches().is_ok();
-            let (count, cold_s, cold_read, _) = timed(ctx, &pg, walk, &ctx.facts.devices);
-            let (_, warm_s, _, warm_written) = timed(ctx, &pg, walk, &ctx.facts.devices);
+            let (count, cold_s, cold_read, _, capped) = timed(ctx, &pg, walk, &ctx.facts.devices, cap);
+            // a walk the cap stopped is not walked warm: only the part it reached is cached
+            let (warm_s, warm_written) = if capped {
+                (0.0, 0.0)
+            } else {
+                let (_, warm_s, _, warm_written, _) = timed(ctx, &pg, walk, &ctx.facts.devices, cap);
+                (warm_s, warm_written)
+            };
             let per = |seconds: f64| seconds * 1e6 / count.max(1) as f64;
             let hours = |chunk: f64| per(cold_s) * (16.0 * f64::from(1 << 30) * 1024.0 / chunk) / 3.6e9;
             table.row(vec![
                 population.name(),
                 walk.name().to_string(),
-                count.to_string(),
+                if capped { format!("{count} (stopped at the cap)") } else { count.to_string() },
                 if cold_ok { fmt(cold_s) } else { format!("{} (not cold: not root)", fmt(cold_s)) },
                 fmt(per(cold_s)),
                 fmt(cold_read / count.max(1) as f64),
@@ -363,6 +433,7 @@ pub fn run(ctx: &Ctx, round: u32) {
                     walk.name(),
                     &[
                         ("chunks", count as f64),
+                        ("capped", if capped { 1.0 } else { 0.0 }),
                         ("cold", if cold_ok { 1.0 } else { 0.0 }),
                         ("cold_s", cold_s),
                         ("cold_us", per(cold_s)),

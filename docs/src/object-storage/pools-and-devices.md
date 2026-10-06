@@ -107,10 +107,17 @@ storage:
     Posters: {pool: bulk}
     Thumbnails: {pool: bulk}
   devices:                      # this node's own, and the one part a node reads for itself
-    - {path: /mnt/hdd0/shoal, class: hdd}
-    - {path: /mnt/hdd1/shoal, class: hdd}
+    - {path: /mnt/hdd0/shoal, class: hdd, journal: /mnt/nvme0/shoal-journal}
+    - {path: /mnt/hdd1/shoal, class: hdd, journal: /mnt/nvme0/shoal-journal}
     - {path: /mnt/nvme0/shoal-objects, class: ssd, slices: 2}
 ```
+
+**A rotational device names its journal**, a directory on an SSD of the same node, since
+[X7](device-store-hdd.md#recommendation): a stage on the disk itself took 42 to 251 ms beside
+applies, where on the SSD it took a millisecond or less. Devices that name one journal device
+share its failure, and placement counts them as one under a `device` failure domain. A
+rotational device is also started only with its disk's write cache off, or with `write_cache:
+on` written beside it, which is then named in a warning, and only on XFS.
 
 **A class is a label, not a detection.** `hdd` and `ssd` are the conventional two, and an
 operator may write any other. That is how R17's second example is met: devices one to four
@@ -245,7 +252,10 @@ drives~~: **one for an SSD**, which [X6](device-store-ssd.md#8-one-device-severa
 one core drives at its ceiling for 64 KiB units and whole chunks, on the Optane and on the 970
 EVO. A pool with 4 KiB units on a fast device would want two, and the wizard says so when it is
 offered one. It warns on ext4 for a pool of small objects and refuses btrfs
-([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)).
+([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)). For a rotational
+device it offers one slice, an SSD of the host to journal on, XFS alone, and turning the disk's
+write cache off, kept off across a power cycle
+([Q23](contract.md#q23-what-a-rotational-device-needs-2026-10-06)).
 
 ## Alternatives rejected
 

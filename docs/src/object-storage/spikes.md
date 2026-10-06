@@ -3,8 +3,8 @@
 ~~**Nothing here has been run.**~~ ~~**One spike has run**: X4, whose record is
 [its own page](erasure-coding-crates.md) (2026-10-03).~~ ~~**Two spikes have run**~~ ~~**Three
 spikes have run**~~ ~~**Four spikes have run**~~ ~~**Five spikes have run**~~ ~~**Six spikes have
-run**~~ ~~**Seven spikes have run**~~ ~~**Eight spikes have run**~~ **Nine spikes have run**, each with its record on a page of its own: X1,
-[the stripe protocol, modelled](stripe-model.md) (2026-10-06), X2,
+run**~~ ~~**Seven spikes have run**~~ ~~**Eight spikes have run**~~ ~~**Nine spikes have run**~~ **Ten spikes have run**, each with its record on a page of its own: X1,
+[the stripe protocol, modelled](stripe-model.md), and X7, [the device store on HDD](device-store-hdd.md) (both 2026-10-06), X2,
 [placement](placement-simulation.md), X4, [the erasure coding crates](erasure-coding-crates.md), and
 X5, [the checksums](checksums.md) (all 2026-10-03), X6, [the device store on SSD](device-store-ssd.md),
 and X10, [what a stripe row costs](stripe-row-costs.md) (both 2026-10-04), and X11,
@@ -64,8 +64,8 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 
 | Host | CPU | Memory | Devices | Network |
 | --- | --- | --- | --- | --- |
-| europa | Ryzen 9 7945HX (Zen4), 16 cores and 32 threads. Also the development host, so its numbers carry that noise | 43 GiB | Intel Optane 900P at `/optane`, ~~btrfs~~ XFS since 2026-10-03. Samsung 990 PRO, the root device, btrfs | 1 GbE |
-| titan | Ryzen Embedded V1756B (Zen1), 4 cores and 8 threads | 14 GiB | Samsung 970 EVO on one PCIe lane, ext4 at the root; since X6 an XFS volume on it at `/xfs`. Its flush costs 0.9 ms rested and 3 ms after a minute of synced writes ([X6](device-store-ssd.md#two-things-about-the-labs-970-evos)) | 1 GbE |
+| europa | Ryzen 9 7945HX (Zen4), 16 cores and 32 threads. Also the development host, so its numbers carry that noise | 43 GiB | Intel Optane 900P at `/optane`, ~~btrfs~~ XFS since 2026-10-03. Samsung 990 PRO, the root device, btrfs. Since 2026-10-06 a WD6001FZWX (6 TB, 7200 rpm, CMR) at `/hdd`, XFS, whose cache acknowledges a sync before the platter could ([X7](device-store-hdd.md#three-things-about-the-labs-disks)) | 1 GbE |
+| titan | Ryzen Embedded V1756B (Zen1), 4 cores and 8 threads | 14 GiB | Samsung 970 EVO on one PCIe lane, ext4 at the root; since X6 an XFS volume on it at `/xfs`. Its flush costs 0.9 ms rested and 3 ms after a minute of synced writes ([X6](device-store-ssd.md#two-things-about-the-labs-970-evos)). Since 2026-10-06 a WD140EDFZ (14 TB, CMR) at `/hdd`, XFS, which says 5400 rpm and turns at 7200, and stalls a read behind a flush with its cache on ([X7](device-store-hdd.md#three-things-about-the-labs-disks)) | 1 GbE |
 | hyperion | The same as titan | 14 GiB | The same as titan | 1 GbE |
 
 **The rules a spike inherits**, which are the lab's own
@@ -85,10 +85,13 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 
 **What needs fitting** ([S1](prerequisites.md#what-the-lab-needs-fitted)):
 
-- **Rotational disks.** One in a Zen1 host is the least that answers
+- ✅ **Rotational disks.** One in a Zen1 host is the least that answers
   [X7](#x7-the-device-store-on-hdd). Two in each host let a 4+2 layout run over real disks
   under a device failure domain. The model, the capacity and whether the drive is shingled
   are recorded with every table, since a shingled drive answers a different question.
+  Fitted 2026-10-06, one in each host: a WD140EDFZ (14 TB; it says 5400 rpm and turns at 7200) in titan and hyperion and
+  a WD6001FZWX (6 TB, 7200 rpm) in europa, both CMR by their makers' lists and by the TRIM a
+  drive-managed shingled WD advertises and these do not. A second disk a host is still not fitted.
 - ✅ **An XFS filesystem.** ~~The lab has ext4 and btrfs.~~ Fitted for X6 on 2026-10-03:
   europa's Optane was made XFS, and titan and hyperion each keep an XFS volume on their 970
   EVO at `/xfs`, an LV in the space their volume group had free. XFS is what the book
@@ -100,8 +103,9 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 | --- | --- | --- |
 | Throughput across hosts above about 117 MiB/s | Several processes over loopback on europa | It measures a core and a protocol. It says nothing about a fast network's own costs |
 | k+m wider than 2+1 across hosts | Several directories a host under a device failure domain; or five children on europa | Failures and flushes are correlated within a host. The protocol is exercised, the independence is not |
-| A table's files and a pool's device on separate disks | Nothing, until disks are fitted | Until then every number that mixes the two is labelled as sharing a device |
-| A rotational disk, before one is fitted | **Nothing.** A device slowed by a fixed delay has no seek in it. It ranks an append to a journal and a random write in place the same, and telling those apart is what X7 is for | Not used |
+| ~~A table's files and a pool's device on separate disks~~ Within reach since 2026-10-06: each host has a disk beside its SSD | ~~Nothing, until disks are fitted~~ | ~~Until then every number that mixes the two is labelled as sharing a device~~ A number that mixes the two is still labelled, and one that puts a pool on the disk need not |
+| ~~A rotational disk, before one is fitted~~ Fitted 2026-10-06, one a host | ~~**Nothing.** A device slowed by a fixed delay has no seek in it. It ranks an append to a journal and a random write in place the same, and telling those apart is what X7 is for~~ | ~~Not used~~ |
+| Several disks a host | One disk a host, and what a disk's operation costs a core | A projection: no two disks shared an arm or an executor ([X7](device-store-hdd.md#12-one-executor-an-ssds-slice-and-a-disks)) |
 
 ## The spikes at a glance
 
@@ -113,7 +117,7 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 | ✅ X4 | Erasure coding crates: performance and tradeoffs, [reported](erasure-coding-crates.md) | Q20, in part | titan, europa | ~~Days~~ Done 2026-10-03 |
 | ✅ X5 | Checksums, [reported](checksums.md) | Q21, in part | titan, europa | ~~Afternoon~~ Done 2026-10-03 |
 | ✅ X6 | The device store on SSD, [reported](device-store-ssd.md) | Q22 in part, Q27's device half | The lab; XFS, fitted | ~~Week~~ Done 2026-10-04 |
-| X7 | The device store on HDD | Q23 | Disks fitted | Days |
+| ✅ X7 | The device store on HDD, [reported](device-store-hdd.md) | Q23 | ✅ Disks fitted | ~~Days~~ Done 2026-10-06 |
 | X8 | One small write, three ways | Q14, Q27 | The lab; X6 | Days |
 | X9 | Table latency beside object work | Q15, Q24 | titan; X4, X5 | Days |
 | ✅ X10 | What a stripe row costs, [reported](stripe-row-costs.md) | Q25 in part, Q17's group half | The lab | ~~Days~~ Done 2026-10-04 |
@@ -487,6 +491,24 @@ does not say which it did. **Cost.** A week.
 
 ### X7. The device store on HDD
 
+**Reported 2026-10-06** on [its own page](device-store-hdd.md), and recorded on S18 as
+[Q23](contract.md#q23-what-a-rotational-device-needs-2026-10-06). Two of the results named below
+came out, and the third did not on XFS:
+
+- a stage on the disk took 42 to 251 ms beside applies, so a rotational device journals on an SSD
+  of its node;
+- an SSD's slice on an executor shared with a disk's slowed a hundredfold on three legs of four,
+  so a disk's slice has an executor of its own;
+- a file a chunk keeps X6's floor of 1 MiB on XFS. But a random read reaches half the sequential
+  rate only at 4 MiB, so a rotational pool reads whole chunks of 4 MiB or more.
+
+What the plan did not foresee decided as much as what it did: the disk's write cache. On the
+14 TB disks it stalls a read behind a flush for a tenth of a second, and on europa's it
+acknowledges a sync before the platter could have it, so a rotational device runs with it off.
+Offset order bought nothing over the batch in flight. A scrub's byte budget did not protect the
+foreground on europa's disk, so a disk's scrub is paced by the arm's idle time. And ext4 is
+refused for a disk. The plan as written follows, struck where the run departed from it.
+
 **Question.** What does a rotational disk need that an SSD does not
 ([Q23](contract.md#questions-to-answer))?
 
@@ -508,12 +530,17 @@ does not say which it did. **Cost.** A week.
 | A sync: its cost, and whether several at once are merged into one flush | One to six writers |
 | A read's tail while applies run | Applies in arrival order, and in offset order |
 | A foreground write's tail while a scrub reads | Scrub budgets from 10 to 60 MiB/s |
-| One executor driving one, two and four disks | Total throughput, and each disk's |
+| ~~One executor driving one, two and four disks~~ One executor driving an SSD's slice and a disk's, against each on its own; and what a disk's operation costs its executor, as the projection for several | ~~Total throughput, and each disk's~~ The SSD's tail; the disk executor's cpu an operation |
 | The journal on the disk against the journal on the host's SSD | Small writes |
+| *Added after round 1:* the cells that share one arm with the disk's write cache on and off, and fio's reads beside synced writes with no harness | Four rounds a host, the order alternating |
 
-**Where.** A host with a disk fitted, on XFS and on ext4.
+**Where.** ~~A host with a disk fitted, on XFS and on ext4.~~ All three hosts, each with one disk
+fitted: titan (everything) and hyperion (the core, then the million-chunk listing) with a
+WD140EDFZ, europa (everything) with a WD6001FZWX; XFS and ext4 each made over the whole disk
+before every leg.
 
-**Depends on.** Disks. X6, for the harness. **Cost.** Days, once there is a disk.
+**Depends on.** ✅ Disks, fitted 2026-10-06. ✅ X6, for the harness. **Cost.** ~~Days, once there
+is a disk.~~ A day: about ten hours of rounds, the hosts at once, and an hour's supplement.
 
 ### X8. One small write, three ways
 
@@ -801,7 +828,7 @@ flowchart LR
     X4["✅ X4 erasure crates"]:::done
     X5["✅ X5 checksums"]:::done
     X6["✅ X6 device store, SSD"]:::done
-    X7["X7 device store, HDD"]
+    X7["✅ X7 device store, HDD"]:::done
     X8["X8 one small write"]
     X9["X9 table latency"]
     X11["✅ X11 streamed bodies"]:::done
@@ -819,8 +846,9 @@ Nine depend on no other spike and on nothing that has to be fitted, and can star
 ~~X1,~~ ~~X2,~~ X3, ~~X4,~~ ~~X5,~~ ~~X10,~~ ~~X11,~~ ~~X13~~ and ~~X14~~; X1, X2, X4, X5, X10, X11, X13 and X14 have run. ~~X6 can start too, and
 needs an XFS filesystem for one of its legs.~~ X6 has run too, on an XFS filesystem fitted for it.
 ~~X8 follows X6, and~~ X8 and X9 ~~follows X5, since X4 has
-reported~~ can start: X4, X5 and X6 have all reported. X7 and the rotational half of X12 wait
-for disks; X7 reuses X6's harness.
+reported~~ can start: X4, X5 and X6 have all reported. ~~X7 and the rotational half of X12 wait
+for disks; X7 reuses X6's harness.~~ The disks were fitted and X7 ran on X6's harness on
+2026-10-06; X12's rotational half waits on X12 alone.
 
 If there is one to do first it is X1. Every other spike measures the cost of a design, and
 X1 is the one that can say the design is wrong. ✅ It has run, and it did not: it found ten rules
@@ -850,7 +878,7 @@ it throws away, or it only saves time.
 | [S16](testing.md#the-model)'s model held to [S7](write-path.md#the-schedules-that-shaped-it)'s schedules | X1 | Required | X1's model and schedules are the one spike output that is kept, as M11's acceptance test. Five of S7's fourteen schedules had no unsafe setting, two settings had no schedule, one schedule broke no clause, and the model had no event for a device filling, no rebuild, and one stripe where a truncate needs an object of several. Built to that, the model's actors and events would have been rebuilt afterwards | ✅ 2026-10-03 |
 | [Resolved #210](../appendix/resolved/bench-preload-frame.md): the bench's preload within the frame | X3 | Required | X3 is `shoaladm bench` at rows of 1 MiB and 4 MiB. Its preload sent bundles of sixty-four, past the frame, whenever the file outpaced the cluster, and the refused rows vanished from the record | ✅ 2026-10-03 |
 | ✅ An XFS filesystem: europa's Optane, and an LV on titan's and hyperion's 970 EVO | X6's XFS leg | Required | [What the lab needs fitted](prerequisites.md#what-the-lab-needs-fitted) | ✅ 2026-10-03 |
-| Rotational disks | X7; X12's rotational half | Required | The same | Not fitted |
+| ✅ Rotational disks: one in each host, a 14 TB WD140EDFZ in titan and hyperion (it says 5400 rpm and turns at 7200), a 6 TB 7200 rpm WD6001FZWX in europa | X7; X12's rotational half | Required | The same | ~~Not fitted~~ ✅ 2026-10-06 |
 | ✅ A Ceph `v20.2.0` on the lab: cephadm, podman on titan and hyperion, three LVs on each, a user at uid 167 | X14's lab half | Required | Asked for with the user, and without a running Ceph nothing on X14's page could be *observed*. Ubuntu 26.04's uutils `install` refused cephadm's numeric owner until the user existed, and hyperion, with no route to the internet, was given titan's image ([X14](ceph-and-s3-sources.md#what-it-took)) | ✅ 2026-10-05, taken down the same day |
 | ✅ Device counters, node memory and index bytes in a bench capture: delivered by [F71](../features/bench-device-memory.md) | X3, X10 | Optional | ~~Nothing in the tree reads the kernel's device counters, and a capture keeps neither `resident_bytes` nor `archive_map_bytes`, which every node reports. A script reading `/proc/diskstats` on each host before and after, and `shoaladm stats --json --watch` beside the run, take the same numbers.~~ Since F71 every run of a capture keeps each host's device counters, read before and after it, and every member's resident set and index bytes every two seconds; `compare` reads device bytes written a byte sent, the resident peak and the index bytes. WAL and archive bytes apart still need the two roots on separate devices, which the capture then reports apart, or a trace of writes by file name, as the cluster testing took for [O62](../cluster-testing/performance.md#o62-the-archive-map-rewrite) | ✅ 2026-10-03 |
 | ✅ A paced neighbour stream, with windows by table, in the bench: delivered by [F72](../features/bench-paced-stream.md) as a *paced stream* | X3 | Optional | ~~A bench run is one closed loop whose windows are kept by kind, not by table, so it cannot drive a small table lightly beside a large one and report each. A second driver against the same cluster can. It is near the open-loop generator in [TODOs](../appendix/todos.md)~~ Since F72 `--paced <table> --paced-rate <N>` drives one table at an offered rate beside a main load that leaves it alone, its latency from each operation's slot, its windows and worst second's p99 kept apart in every run | ✅ 2026-10-03 |
@@ -870,8 +898,9 @@ tablet model's loader never reads, [X1](stripe-model.md#the-schedules)).
   known issues ~~46~~ (✅ [resolved](../appendix/resolved/unmarked-directory-refused.md)), ~~198~~ (✅ [resolved](../appendix/resolved/composite-partition-key.md)) and ~~202~~ (✅ [resolved](../appendix/resolved/append-batch-bytes.md)), ~~the fixture's device faults~~ (✅ [F70](../features/storage-faults.md)), and ~~the driver's operation
   kinds and byte counters~~ (✅ [F69](../features/driver-operation-kinds.md)). Each is worth having with no object store at all, and each can
   be built and judged while the spikes run.
-- **Fitting the lab**: disks, and XFS. Not yet done, and filed nowhere else but
-  [S1](prerequisites.md#what-the-lab-needs-fitted).
+- ~~**Fitting the lab**: disks, and XFS. Not yet done, and filed nowhere else but
+  [S1](prerequisites.md#what-the-lab-needs-fitted).~~ Done: XFS on 2026-10-03, a rotational
+  disk in each host on 2026-10-06 ([S1](prerequisites.md#what-the-lab-needs-fitted)).
 - **Agreeing the contract**. P7 to P19 are a draft. They are agreed, or changed, when X1
   reports, at the gate before [M11](milestones.md#before-m11-the-object-contract). X1 reported
   on 2026-10-06 and changed four of them, P8, P11, P12 and P13, each struck through and kept
@@ -888,7 +917,7 @@ its evidence and with what it did not settle:
 | The write protocol: Q14, Q15, Q16 and Q18, and the contract agreed | ✅ X1 for safety, Q15, Q16 and Q18 ([the record](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); X3 and X8 for cost; ✅ X14 for the alternative Q14 is measured against, Ceph's write as `v20.2.0` has it ([the record](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) |
 | Placement: Q19 | ✅ X2 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)); how a commit checks a generation and its positions ~~is X1's~~ ✅ X1 |
 | The code, the crate and the geometry: Q20. The checksum: Q21 | ✅ X4 for the code and the crate ([Q20, in part](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); ✅ X5 for the checksum ([Q21, in part](contract.md#q21-in-part-the-checksum-2026-10-03)); ~~X14,~~ ✅ X14, which took nothing of the geometry from Ceph; the geometry, and the granule ~~and chunk digest~~ Q21 leaves; the chunk digest ✅ X1, which keeps none ([X1](stripe-model.md#the-chunk-digest)) |
-| The device store: Q22, and Q23 for the rotational gate | ✅ X6 for SSDs ([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)); X7 for rotational disks |
+| The device store: Q22, and Q23 for the rotational gate | ✅ X6 for SSDs ([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)); ✅ X7 for rotational disks ([Q23](contract.md#q23-what-a-rotational-device-needs-2026-10-06)) |
 | Where object work runs: Q24 | X9 |
 | Stripe size and the inline threshold: Q25. Small writes: Q27 | ✅ X10 for Q25 ([Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04)); X8 for Q27's other half |
 | The wire: Q26 | ✅ X11 ([Q26, in part](contract.md#q26-in-part-streamed-bodies-2026-10-05)) |
@@ -900,11 +929,12 @@ measurement; ~~Q32 is for after it~~ Q32 is for after it, and X14 recorded it an
 the metadata leaves room for is cheapest to decide before M12 lays the rows out
 ([Q32](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)).
 
-**Two of these wait on hardware.** X7 and the rotational half of X12 cannot run until disks
+~~**Two of these wait on hardware.** X7 and the rotational half of X12 cannot run until disks
 are fitted. If the disks come late, every gate but
 [M19](milestones.md#m19-rotational-devices) and the defaults a rotational pool ships with
 can be fixed without them, and the milestones page says which of its lines are still
-guesses.
+guesses.~~ **Nothing waits on hardware now.** The disks were fitted on 2026-10-06 and X7 ran on
+them the same day; the rotational half of X12 needs only X12.
 
 **A question's gate is the backstop, not the schedule.** Each question on S18 names the gate
 it blocks, which is the last moment it can be answered. The order above is the first: a

@@ -184,6 +184,28 @@ sudo target/lab/x6/znver1/release/shoal-spike device quick --dir /optane/x6/quic
 sudo /var/tmp/x6/shoal-spike device all --dir /xfs/x6 --round 1 --out titan-xfs.json   # on the host
 target/lab/x6/znver1/release/shoal-spike device report shoal-spike/results/x6-*.json   # intervals and verdicts
 
+# the X7 spike: X6's harness (`shoal-spike device`) on the lab's rotational disks, a WD140EDFZ in
+# titan and hyperion (14 TB; it reports 5400 rpm and turns at 7200) and a WD6001FZWX in europa
+# (6 TB, 7200 rpm), each /dev/sda with one partition spanning it. Every leg makes XFS or ext4 over
+# the whole disk for itself, the order alternating by round, and --ssd-dir names the host's SSD for
+# the sides that journal or keep a slice there (/xfs/x7 on titan and hyperion, /optane/x7 on
+# europa). Its own measurements: seq (sequential and random by size and depth), sync, contend (a
+# read and a stage while applies run), scrub (a foreground under a scrub's budget), shared (one
+# executor driving an SSD's slice and the disk's), and wcoff, which x7-lab.sh runs after each XFS
+# leg with the disk's write cache off (hdparm -W0 and a rescan, so the kernel stops flushing) and
+# turns it on again. `cache` is the supplement that runs contend and scrub with the cache on and
+# off, and fio's reads beside synced writes. Each host runs as a systemd unit, x7-lab: about nine
+# hours for titan's full set and six for hyperion's core, the hosts at once. Never point it at a
+# disk with data: setup wipes /dev/sda, and finish leaves an empty XFS at /hdd for X12 and M19.
+# Never build on europa while its unit runs. The tables are on
+# docs/src/object-storage/device-store-hdd.md
+CARGO_TARGET_DIR=target/lab/x7/znver1 RUSTFLAGS="-C target-cpu=znver1" cargo build --release -p shoal-spike
+sudo target/lab/x7/znver1/release/shoal-spike device quick --dir /hdd/x7/quick --ssd-dir /optane/x7/quick   # proves every measurement runs
+sh shoal-spike/results/x7-lab.sh setup europa titan hyperion          # once: wipe and partition each disk
+sh shoal-spike/results/x7-lab.sh start titan full                      # and hyperion core, europa full
+sh shoal-spike/results/x7-lab.sh status titan                          # then extra (hyperion), cache, fetch, finish
+target/lab/x7/znver1/release/shoal-spike device report shoal-spike/results/x7-*-hdd-*.json   # intervals and verdicts
+
 # the X10 spike: rows shaped like the object store's two generated rows (S3's ObjectMeta and
 # StripeMeta) through today's persistent unsorted tables on the lab's cluster - rows a second a
 # group, bytes a row on disk and in memory cold and resident, a commit to a row a restart left

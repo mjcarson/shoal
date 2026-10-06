@@ -1,4 +1,4 @@
-//! X6: the device store on SSD, measured
+//! X6 and X7: the device store on SSD and on a rotational disk, measured
 //!
 //! [Q22](../../../docs/src/object-storage/contract.md) asks how stripe chunks lie on a slice,
 //! how an update is applied and what a sync costs, and which filesystems the store accepts;
@@ -7,29 +7,47 @@
 //! them by measuring S6's layout against its alternatives on the lab's SSDs and filesystems,
 //! with glommio's `DmaFile`, as a slice's executor would drive them.
 //!
+//! [Q23](../../../docs/src/object-storage/contract.md) asks what a rotational disk needs that an
+//! SSD does not: a journal on an SSD, an executor of its own, another layout, a way of reading
+//! ahead. X7 (`docs/src/object-storage/spikes.md#x7-the-device-store-on-hdd`) runs X6's
+//! measurements that matter on the lab's disks, bounded for a device that answers in
+//! milliseconds, and adds what only a disk shows: sequential and random rates by size and depth
+//! (`seq`), whether syncs merge (`sync`), a read and a stage while applies run (`contend`), a
+//! foreground under a scrub's budget (`scrub`), one executor driving an SSD and a disk
+//! (`shared`), and the disk with its write cache off (`wcoff`).
+//!
 //! - `shoal-spike device <measurement> --dir <scratch> [flags]` runs one measurement, or `all`
 //!   of them, on the filesystem `--dir` is on, after the probes
-//! - `shoal-spike device report <records.json…>` merges rounds and judges the four triggers
+//! - `--ssd-dir <scratch>` names a directory on the host's SSD, for the sides of X7 that put a
+//!   journal or a slice there
+//! - `shoal-spike device report <records.json…>` merges rounds and judges the triggers
 //! - `shoal-spike device slc --dir <scratch>` writes until an SSD's write cache runs out
 //!
 //! The measurements write bytes and never parse them back: there is no replay, no index and no
 //! format here, and like every spike's this code is thrown away. M14's store is written from
 //! the decision this records, not from this.
 
+pub mod arm;
 pub mod chunk;
+pub mod contend;
 pub mod counters;
 pub mod facts;
 pub mod frag;
 pub mod io;
 pub mod journal;
 pub mod listing;
+pub mod paced;
 pub mod partial;
 pub mod read;
 pub mod record;
 pub mod remove;
 pub mod report;
+pub mod scrub;
+pub mod seq;
+pub mod shared;
 pub mod slices;
 pub mod stats;
+pub mod sync;
 pub mod sys;
 pub mod table;
 
@@ -45,14 +63,30 @@ use self::io::DirSync;
 use self::record::Record;
 
 /// Every measurement `all` runs, in the order it runs them: reads before writes, so a read's
-/// population has aged and no write's debris is in its way
+/// population has aged and no write's debris is in its way. X7's sequential rates come first,
+/// on a filesystem nothing has fragmented yet, and its own measurements last
 pub const ALL: &[&str] = &[
-    "read", "listing", "frag", "partial", "journal", "chunk", "remove", "slices",
+    "seq", "read", "listing", "frag", "partial", "journal", "chunk", "remove", "slices", "sync",
+    "contend", "scrub", "shared",
 ];
 
-/// Measurements run only when named, after the plan's eight: the recycling supplement, added
-/// when the first rounds put a file a chunk at the edge of T1 on the 970 EVO
-pub const EXTRA: &[&str] = &["chunk-recycle"];
+/// Measurements run only when named, after the plan's: the recycling supplement, added when
+/// the first rounds put a file a chunk at the edge of T1 on the 970 EVO; X7's run with the
+/// disk's write cache off, which the lab script turns off around it; and X7's million-chunk
+/// listing, run once a filesystem since a disk takes hours to walk it
+pub const EXTRA: &[&str] = &["chunk-recycle", "wcoff", "listing-1m"];
+
+/// The longest a side of a write measurement runs on a rotational disk, whatever its count
+pub const SIDE_CAP: Duration = Duration::from_secs(20);
+
+/// A directory on the host's SSD, beside a rotational disk being measured
+#[derive(Debug, Clone)]
+pub struct Ssd {
+    /// The scratch directory on it
+    pub dir: PathBuf,
+    /// Where it is, and on what
+    pub facts: Facts,
+}
 
 /// What every measurement is given
 pub struct Ctx {
@@ -84,6 +118,11 @@ pub struct Ctx {
     pub out: Option<PathBuf>,
     /// Whether populations are kept for the next round
     pub keep: bool,
+    /// The host's SSD, for the sides that journal or keep a slice there, if one was named
+    pub ssd: Option<Ssd>,
+    /// What `contend` and `scrub` append to every side's name: the lab script's write cache
+    /// supplement names its sides `-wb` and `-wt`, so the two run under one leg
+    pub side_suffix: String,
 }
 
 impl Ctx {
@@ -177,6 +216,29 @@ impl Ctx {
     pub fn clones(&self) -> bool {
         self.probes.clone.is_ok()
     }
+
+    /// Whether the device measured spins
+    #[must_use]
+    pub fn rotational(&self) -> bool {
+        self.facts.rotational
+    }
+
+    /// The longest a write measurement's side may run: bounded on a rotational disk, where a
+    /// count sized for an SSD would take minutes, and unbounded elsewhere, as X6 ran
+    #[must_use]
+    pub fn side_cap(&self) -> Option<Duration> {
+        (self.rotational() && !self.quick).then_some(SIDE_CAP)
+    }
+
+    /// The SSD's directory for a measurement, if an SSD was named
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The measurement
+    #[must_use]
+    pub fn ssd_sub(&self, name: &str) -> Option<PathBuf> {
+        self.ssd.as_ref().map(|ssd| ssd.dir.join(name))
+    }
 }
 
 /// One side's results, as an executor hands them back
@@ -262,7 +324,7 @@ where
         .expect("the cpus are listed")
         .filter(|location| location.cpu == blocking)]);
     LocalExecutorBuilder::new(Placement::Fixed(cpu))
-        .name("x6")
+        .name("device")
         .io_memory(32 << 20)
         .ring_depth(256)
         .blocking_thread_pool_placement(pool)
@@ -393,6 +455,27 @@ fn raise_open_files() {
     }
 }
 
+/// Run X7's cells that ask what the disk's write cache costs, with it off
+///
+/// The lab script turns the cache off before and on again after; this refuses to run unless the
+/// kernel says the disk writes through, so a figure labelled `-wt` never comes from a disk that
+/// cached it.
+///
+/// # Arguments
+///
+/// * `ctx` - The run
+/// * `round` - The round
+fn run_wcoff(ctx: &Ctx, round: u32) {
+    // the kernel's view, read now, not when the facts were gathered
+    let cache = std::fs::read_to_string(format!("/sys/class/block/{}/queue/write_cache", ctx.facts.devices.disk))
+        .map(|text| text.trim().to_string())
+        .unwrap_or_default();
+    assert_eq!(cache, "write through", "wcoff runs only with the disk's write cache off");
+    sync::run(ctx, round, "-wt");
+    journal::run_wcoff(ctx, round);
+    partial::run_wcoff(ctx, round);
+}
+
 /// Run `shoal-spike device` with the arguments after the subcommand
 ///
 /// # Arguments
@@ -415,8 +498,11 @@ pub fn main(args: &[String]) {
                 "shoal-spike device <facts|quick|{}|all|slc|clean|report> --dir <scratch> \
                  [--core N] [--slices 1,2,4] [--round R | --rounds N] [--budget-mib M] \
                  [--only a,b] [--expect-fs xfs] [--leg <name>] [--out f.json] \
-                 [--keep-populations] [--allow-root-fs] [--crc-gibs X]",
-                ALL.join("|")
+                 [--keep-populations] [--allow-root-fs] [--crc-gibs X] [--ssd-dir <scratch>] \
+                 [--quick] [--side-suffix -wt]\n  measurements: {}\n  only when named: {}",
+                ALL.join("|"),
+                ALL.join(","),
+                EXTRA.join(",")
             );
             return;
         }
@@ -443,7 +529,7 @@ pub fn main(args: &[String]) {
         slices::slc_probe(&dir, core, sibling, &facts);
         return;
     }
-    let quick = command == "quick";
+    let quick = command == "quick" || args.iter().any(|arg| arg == "--quick");
     let rounds = match value_of(args, "--round") {
         Some(round) => vec![round.parse().expect("--round takes a number")],
         None => {
@@ -459,13 +545,27 @@ pub fn main(args: &[String]) {
         on_core(core, sibling, move || facts::probe(dir, devices, label))
     };
     print!("{}", probes.table);
+    // the host's SSD, when a side journals or keeps a slice there
+    let ssd = value_of(args, "--ssd-dir").map(|ssd_dir| {
+        let dir = PathBuf::from(ssd_dir);
+        std::fs::create_dir_all(&dir).expect("the SSD's scratch directory is made");
+        let ssd_facts = Facts::gather(&dir);
+        assert!(ssd_facts.fs != "tmpfs", "a tmpfs SSD directory has no direct I/O");
+        assert!(!ssd_facts.rotational, "the --ssd-dir directory is on a rotational disk");
+        Ssd { dir, facts: ssd_facts }
+    });
+    if let Some(ssd) = &ssd {
+        println!("SSD beside it: {}\n", ssd.facts.label());
+    }
+    // a disk is driven by one slice and two, never more: past two is one arm shared further
+    let default_slices: Vec<usize> = if facts.rotational { vec![1, 2] } else { vec![1, 2, 4, 8] };
     let ctx = Ctx {
         dir: dir.clone(),
         core,
         sibling,
         slices: list_of(args, "--slices").unwrap_or_else(|| {
             let cores = order.len();
-            [1, 2, 4, 8].into_iter().filter(|&n| n <= cores).collect()
+            default_slices.into_iter().filter(|&n| n <= cores).collect()
         }),
         order,
         rounds,
@@ -477,6 +577,8 @@ pub fn main(args: &[String]) {
         leg,
         out: value_of(args, "--out").map(PathBuf::from),
         keep: args.iter().any(|arg| arg == "--keep-populations"),
+        ssd,
+        side_suffix: value_of(args, "--side-suffix").unwrap_or_default(),
     };
     if command == "facts" {
         return;
@@ -486,7 +588,20 @@ pub fn main(args: &[String]) {
         "all" | "quick" => list_of(args, "--only").unwrap_or_else(|| ALL.iter().map(|name| (*name).to_string()).collect()),
         one => vec![one.to_string()],
     };
+    // a name nobody knows is a mistake, never a run that measures nothing
+    for name in &wanted {
+        assert!(
+            ALL.iter().chain(EXTRA).any(|known| known == name),
+            "no measurement is named {name}; the names are {} and {}",
+            ALL.join(", "),
+            EXTRA.join(", ")
+        );
+    }
     for round in ctx.rounds.clone() {
+        // the probes' figures, a record a round, so a report can read the idle sync, named by
+        // the write cache they ran under
+        let probe = if ctx.facts.write_cache == "write through" && ctx.rotational() { "probe-wt" } else { "probe" };
+        ctx.emit(&[ctx.record("probes", round, SideOut::new("idle", probe, &ctx.probes.figures))]);
         for name in ALL.iter().chain(EXTRA).filter(|name| wanted.iter().any(|want| want == *name)) {
             let started = Instant::now();
             match *name {
@@ -499,9 +614,16 @@ pub fn main(args: &[String]) {
                 "read" => read::run(&ctx, round),
                 "frag" => frag::run(&ctx, round),
                 "slices" => slices::run(&ctx, round),
-                _ => unreachable!("every name in ALL is matched"),
+                "seq" => seq::run(&ctx, round),
+                "sync" => sync::run(&ctx, round, ""),
+                "contend" => contend::run(&ctx, round),
+                "scrub" => scrub::run(&ctx, round),
+                "shared" => shared::run(&ctx, round),
+                "wcoff" => run_wcoff(&ctx, round),
+                "listing-1m" => listing::run_million(&ctx, round),
+                _ => unreachable!("every name in ALL and EXTRA is matched"),
             }
-            eprintln!("x6: {name} round {round} took {:.0} s", started.elapsed().as_secs_f64());
+            eprintln!("device: {name} round {round} took {:.0} s", started.elapsed().as_secs_f64());
         }
     }
     // a quick run leaves nothing behind

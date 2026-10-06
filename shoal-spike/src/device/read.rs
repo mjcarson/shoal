@@ -7,12 +7,18 @@
 //! costs, which is most of what an object store holds. Warm, the file is closed but its inode
 //! cached; open, the file is open and its header in memory, so one read. The population is
 //! aged before it is read, so that an SSD's write cache does not serve it.
+//!
+//! Its objects are spread over sixty-four placement groups, as a slice's are, and every record
+//! carries where the population lies on the device, since on a disk that span is the seek a read
+//! pays. Cold against open is X7's H5(b): what finding a chunk costs beyond reading it, which a
+//! shared file kept open would not pay.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use glommio::io::DmaFile;
 
+use super::arm::span_of_paths;
 use super::counters::Devices;
 use super::io::{self, Payloads, HEADER};
 use super::stats::{fmt, Rng, Samples};
@@ -53,14 +59,19 @@ impl Level {
     }
 }
 
-/// The path of chunk `index`
+/// The placement groups a population's objects are spread over
+const PGS: usize = 64;
+
+/// The path of chunk `index`, its object in one of the placement groups
 ///
 /// # Arguments
 ///
-/// * `pg` - The placement group
+/// * `root` - The population's directory
 /// * `index` - The chunk
-fn chunk_path(pg: &Path, index: usize) -> PathBuf {
-    pg.join(format!("{:016x}", index / PER_OBJECT))
+fn chunk_path(root: &Path, index: usize) -> PathBuf {
+    let object = index / PER_OBJECT;
+    root.join(format!("pg{:02}", object % PGS))
+        .join(format!("{object:016x}"))
         .join(format!("{:06}.{}", (index % PER_OBJECT) / 4, index % 4))
 }
 
@@ -75,10 +86,9 @@ async fn populate(root: PathBuf, count: usize, age: Duration) {
     let marker = root.join("complete");
     if !marker.exists() {
         io::wipe(&root);
-        let pg = root.join("pg0");
         let payloads = Payloads::new(0x7ead);
         for index in 0..count {
-            let path = chunk_path(&pg, index);
+            let path = chunk_path(&root, index);
             std::fs::create_dir_all(path.parent().expect("a parent")).expect("made");
             let file = io::open(&path, true).await;
             io::write_chunk(&file, &payloads, CHUNK, 0).await;
@@ -113,7 +123,7 @@ async fn populate(root: PathBuf, count: usize, age: Duration) {
 /// * `level` - How warm
 /// * `samples` - How many reads
 async fn sample(root: PathBuf, devices: Devices, count: usize, unit: u64, level: Level, samples: usize) -> SideOut {
-    let pg = root.join("pg0");
+    let pg = root.clone();
     let mut rng = Rng::new(unit ^ samples as u64);
     let wake = io::open_read(&root.join("wake")).await;
     // the open level holds every chunk open; the warm level opens each once first
@@ -211,6 +221,11 @@ pub fn run(ctx: &Ctx, round: u32) {
         let root = root.clone();
         on_core(ctx.core, ctx.sibling, move || populate(root, count, age));
     }
+    // where the population lies, which on a disk is the seek a read pays
+    let paths: Vec<PathBuf> = (0..count).map(|index| chunk_path(&root, index)).collect();
+    let span = span_of_paths(&paths, ctx.facts.fs_bytes);
+    // a disk takes a millisecond or more a read, so half the warm samples are as many as it needs
+    let warm_samples = if ctx.rotational() { 1000 } else { 2000 };
     let mut table = Table::new(&[
         "unit", "level", "n", "open p50", "open p99", "read p50", "read p99", "close p50",
         "total p50", "total p99", "total p99.9", "dev KiB read/sample",
@@ -221,10 +236,13 @@ pub fn run(ctx: &Ctx, round: u32) {
         for level in super::ordered(&[Level::Cold, Level::Warm, Level::Open], round) {
             let samples = match level {
                 Level::Cold => ctx.count(100, 5),
-                _ => ctx.count(2000, 20),
+                _ => ctx.count(warm_samples, 20),
             };
             let (root, devices) = (root.clone(), ctx.facts.devices.clone());
-            let out = on_core(ctx.core, ctx.sibling, move || sample(root, devices, count, unit, level, samples));
+            let mut out = on_core(ctx.core, ctx.sibling, move || sample(root, devices, count, unit, level, samples));
+            for (name, value) in span.figures() {
+                out.metrics.insert(name.to_string(), value);
+            }
             let cold = level != Level::Cold || out.get("cold") > 0.0;
             table.row(vec![
                 size_name(unit),
@@ -245,7 +263,7 @@ pub fn run(ctx: &Ctx, round: u32) {
     }
     print!(
         "{}",
-        table.render(&format!("6. One unit at a random offset, round {round} (µs; queue depth 1)"), &ctx.label())
+        table.render(&format!("6. One unit at a random offset, round {round} (µs; queue depth 1; {})", span.show()), &ctx.label())
     );
     ctx.emit(&records);
     if ctx.quick && !ctx.keep {

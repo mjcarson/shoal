@@ -173,6 +173,11 @@ async fn run_side(dir: PathBuf, size: u64, way: Way, ops: usize, cold: usize) ->
 /// * `ctx` - The run
 /// * `round` - The round
 pub fn run(ctx: &Ctx, round: u32) {
+    // a clone was rejected by X6, and a write in place leaves a chunk's extents as they were
+    if ctx.rotational() {
+        println!("### 7. Fragmentation, round {round}\n\nNot run on a rotational disk: X6 rejected the clone, and a write in place does not fragment.\n");
+        return;
+    }
     let ways: Vec<Way> = if ctx.clones() { vec![Way::Clone, Way::Overwrite] } else { vec![Way::Overwrite] };
     let (ops, cold) = (ctx.count(1000, 50), ctx.count(50, 5));
     let mut table = Table::new(&[

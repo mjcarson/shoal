@@ -193,39 +193,60 @@ atomic, so the owner of the chunk's slice, one executor, runs them in turn.
 
 ### What a rotational device changes
 
-The code is the same. The costs are not.
+The code is the same. The costs are not. The right-hand column was a forecast until
+[X7](device-store-hdd.md) measured it on the lab's disks on 2026-10-06; the forecast is struck and
+kept beside each measurement:
 
 | Operation | On an SSD | On a rotational disk |
 | --- | --- | --- |
-| Staging to the journal | A sync | A sync at the end of a sequential write: the best case a disk has |
-| Applying in place | A random write | A seek for each chunk. Deferred and batched in offset order, it is the cost that can wait |
-| A sync | 11 µs on the Optane, which needs no flush; 0.9 ms rested and 3 ms loaded on the 970 EVO ([X6](device-store-ssd.md#two-things-about-the-labs-970-evos)) | A cache flush, not yet measured here |
-| A read during applies | Unaffected | Competes for the one arm |
-| Many small chunks | Fine | A seek to create each, and one to find it |
+| Staging to the journal | A sync | ~~A sync at the end of a sequential write: the best case a disk has~~ One revolution, 8.4 ms, with nothing else on the arm; 42 to 251 ms beside applies, since the stage and the apply take turns on one arm. So it goes to an SSD of the node, where it is 0.9 ms (970 EVO) or 37 µs (Optane) |
+| Applying in place | A random write | ~~A seek for each chunk. Deferred and batched in offset order, it is the cost that can wait~~ A seek and a revolution for each chunk, about 9 ms. A whole batch in flight is ordered by the block layer and the disk's queue; offset order one at a time bought nothing |
+| A sync | 11 µs on the Optane, which needs no flush; 0.9 ms rested and 3 ms loaded on the 970 EVO ([X6](device-store-ssd.md#two-things-about-the-labs-970-evos)) | ~~A cache flush, not yet measured here~~ One revolution, 8.35 ms, with the write cache off. With it on, the WD140EDFZ stalled a read behind a flush for 100 ms and the WD6001FZWX answered in 0.4 ms, before its platter could have the block ([X7](device-store-hdd.md#three-things-about-the-labs-disks)). So a disk runs with its cache off |
+| A read during applies | Unaffected | ~~Competes for the one arm~~ Competes for the one arm, and waits up to one batch: a read's p99 rose with the batch, 0.2 to 0.8 s at 32 applies |
+| Many small chunks | Fine | ~~A seek to create each, and one to find it~~ A file a chunk from the pool keeps X6's floor of 1 MiB on XFS, and a cold find costs half a read again. But a random read reaches half of the platter's rate only at 4 MiB, so a disk reads whole chunks of 4 MiB or more |
 
-Three choices follow, each a question and none decided:
+~~Three choices follow, each a question and none decided:~~ Four choices follow, decided by
+[X7](device-store-hdd.md#recommendation) and recorded on
+[S18](contract.md#q23-what-a-rotational-device-needs-2026-10-06):
 
-- **Where the journal lives.** Each slice journals its own stages, in its directory on the
-  device, or on an SSD of the same node named in the device's configuration. Ceph says of its
-  own log that it "is advantageous only if the WAL device is faster than the primary device",
-  and defers small writes on rotational media by default where on an SSD it does not
-  (`bluestore_prefer_deferred_size_hdd` is 64 KiB and its SSD twin is zero, in
-  `src/common/options/global.yaml.in` at `v20.2.0`). That threshold is for writes into new
-  space. An overwrite of written space under one allocation unit is journalled on any device
-  (`src/os/bluestore/BlueStore.cc:16340-16394`). A deferred write logs its new bytes and applies
-  them in place after the commit, which is this page's journal
-  ([X14](ceph-and-s3-sources.md#6-bluestores-deferred-writes-and-checksums)). A journal on another disk is also a
-  second thing that can fail: losing it leaves every chunk a committed write had not yet
-  reached stale, and several devices that share one journal disk lose their staged writes
-  together, so under a `device` failure domain they would have to count as one
-  ([S5](placement.md#failure-domains)).
-- **Who owns it.** Whether a disk's slice gets an executor to itself, and how many slices a
-  disk is given ([S13](isolation.md#who-owns-a-slice)).
-- **How it is read.** Whole units, read ahead, through `read_many`, which Shoal has never
-  called.
+- **The disk's write cache is off.** Not one of the three questions this page posed, but the one
+  the disks answered first. With the cache on, the lab's 14 TB disks stall a read behind a flush
+  for a tenth of a second, and the WD Black acknowledges a sync before its platter could hold the
+  block. A rotational device's slices start only when the kernel says its disk writes through,
+  or when its configuration says the cache is on deliberately, which is named in a warning.
+- **Where the journal lives: on an SSD of the same node**, named in the device's configuration.
+  ~~Each slice journals its own stages, in its directory on the device, or on an SSD of the same
+  node named in the device's configuration.~~ A rotational device without one is refused.
+  - Ceph says of its own log that it "is advantageous only if the WAL device is faster than the
+    primary device", and defers small writes on rotational media by default where on an SSD it
+    does not (`bluestore_prefer_deferred_size_hdd` is 64 KiB and its SSD twin is zero, in
+    `src/common/options/global.yaml.in` at `v20.2.0`). That threshold is for writes into new
+    space. An overwrite of written space under one allocation unit is journalled on any device
+    (`src/os/bluestore/BlueStore.cc:16340-16394`). A deferred write logs its new bytes and applies
+    them in place after the commit, which is this page's journal
+    ([X14](ceph-and-s3-sources.md#6-bluestores-deferred-writes-and-checksums)).
+  - A journal on another disk is also a second thing that can fail. Losing it leaves stale every
+    chunk a committed write had not yet reached. Several devices that share one journal disk lose
+    their staged writes together, so under a `device` failure domain they count as one
+    ([S5](placement.md#failure-domains)).
+  - X7 measured the cost of not doing it: a small write's stage beside applies took 42 to 251 ms
+    on the disk and under a millisecond on the SSD.
+- **Who owns it: an executor of its own, never shared with an SSD's slice, and one slice a
+  disk.**
+  - On an executor shared with a disk's slice, an SSD slice's stage or read p99 rose about a
+    hundredfold on three legs of four.
+  - A disk's operation costs its executor under 1% of a core, so the cost is a core a node sets
+    aside for its disks.
+  - A second slice on one disk read 40% less ([S13](isolation.md#who-owns-a-slice)).
+- **How it is read: whole chunks.** ~~Whole units, read ahead, through `read_many`, which Shoal
+  has never called.~~ A random read across the platter reaches half the sequential rate at 4 MiB
+  and not before, so a rotational pool's chunk is 4 MiB or more and is read whole. The geometry
+  is Q20's.
 
-[Q23](contract.md#questions-to-answer) holds all three, and
-[X7](spikes.md#x7-the-device-store-on-hdd) cannot run until a disk is fitted.
+~~[Q23](contract.md#questions-to-answer) holds all three, and
+[X7](spikes.md#x7-the-device-store-on-hdd) cannot run until a disk is fitted.~~ What stays open
+is the apply batch's bound (M19), a disk's scrub budget (X12), and whether a rotational pool's
+light scrub keeps an index (M17).
 
 ### Filesystems
 
@@ -246,6 +267,11 @@ Which are accepted, warned about or refused is
 - **btrfs is refused.** Every overwrite there is a new allocation: a 4 KiB write in place cost
   17 ms and 81 bytes a byte, writing the journal ahead bought nothing, and the rule below that
   applying needs no new space cannot hold.
+- **On a rotational device, XFS only: ext4 is refused there**
+  ([X7](device-store-hdd.md#the-comparison)). On a disk, ext4 commits a rename in two revolutions
+  to XFS's one, holds a file a chunk below half a shared file's rate up to 4 MiB on the lab's
+  14 TB disks, and did not list a placement group of a million one-chunk objects in half an hour
+  where XFS took 87 s.
 
 ## Alternatives rejected
 
@@ -325,6 +351,9 @@ through the cache are held twice, counted by nobody, and written when the kernel
 - A read and an apply of one chunk never overlap.
 - Applying needs no new space.
 - A slice's files are touched by one executor.
+- A rotational device's slices start only when its disk writes through, or when its
+  configuration says the cache is on, by name ([X7](device-store-hdd.md#recommendation)); they
+  stage on an SSD journal and run on XFS.
 
 ## Prerequisites
 
@@ -342,9 +371,13 @@ removing and listing chunks at a hundred thousand and a million.~~ Measured on S
 [X6](device-store-ssd.md), on the Optane under XFS and on the 970 EVO under XFS, ext4 and
 btrfs, with the decisions on [S18](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04).
 M14 takes X6's figures again from the store as built.
-[X7](spikes.md#x7-the-device-store-on-hdd) repeats what matters on a rotational disk and
+~~[X7](spikes.md#x7-the-device-store-on-hdd) repeats what matters on a rotational disk and
 adds the two things only a disk shows: what a read costs during applies, and what a scrub's
-reads cost a foreground write.
+reads cost a foreground write.~~ Measured on rotational disks by [X7](device-store-hdd.md), on
+the lab's three under XFS and ext4, with what a read costs during applies, what a scrub's reads
+cost a foreground write, and what the disk's write cache does, and the decisions on
+[S18](contract.md#q23-what-a-rotational-device-needs-2026-10-06). M19 takes them again from the
+store as built.
 
 ## Acceptance tests
 
@@ -355,6 +388,9 @@ reads cost a foreground write.
 | `apply_needs_no_space` | A device filled after a stage still applies it; a stage past the reserve is refused before any commit | M14 |
 | `unit_checksum_binds_bytes_to_their_place` | A unit copied to another chunk or another offset fails verification | M14 |
 | `read_and_apply_never_overlap` | A read racing an apply returns the old unit or the new one, verified, never a mix | M14 |
+| `rotational_device_with_its_cache_on_is_refused` | A device the kernel calls rotational whose disk writes back is not started, unless its configuration says the cache is on, and then it is named in a warning | M19 |
+| `rotational_device_needs_a_journal_device` | A rotational device with no SSD journal named, or one on a filesystem other than XFS, is refused at start by name | M19 |
+| `rotational_stage_is_acknowledged_from_its_journal_device` | A stage for a rotational device's chunk is synced on its journal device and acknowledged before the disk is touched; a crash before the apply finds it there | M19 |
 
 ## Related
 

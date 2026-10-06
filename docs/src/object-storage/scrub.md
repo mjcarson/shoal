@@ -148,6 +148,16 @@ days. A weekly deep scrub of a large rotational disk is therefore most of that d
 time, and a budget small enough to leave the foreground alone may not finish in a week.
 Ceph's weekly default is a starting hypothesis here and nothing more.
 
+[X7](device-store-hdd.md#11-a-foreground-beside-a-scrub) put a budget to the lab's disks on
+2026-10-06, with a deep scrub reading whole chunks beside a small foreground write and reads.
+No budget of 10 MiB/s or more kept the write's p99 wholly within 1.25× of its p99 with no scrub
+on any XFS leg. On europa's disk 10 MiB/s raised it 1.7 to 2.7 times, wholly, with the write
+cache on or off. At 10 MiB/s a 14 TB disk takes fifteen and a half days to read anyway. So a
+disk's deep scrub is paced by the arm's idle time, issuing its reads when the slice has no
+foreground work outstanding, with the byte budget as its ceiling
+([Q23](contract.md#q23-what-a-rotational-device-needs-2026-10-06)). How it paces, and the
+ceiling a disk ships with, are X12's.
+
 ## Alternatives rejected
 
 **Comparing stripe chunks across holders.** Under an erasure code they differ by design. Under
@@ -212,7 +222,9 @@ disk and a lost device but not yet a flipped bit), and a checksum with a frozen 
 
 [X12](spikes.md#x12-recovery-and-scrub-rates): how fast a device can be read and verified,
 and what a foreground write's tail does while it is, at several byte budgets, on an SSD and
-on a rotational disk. In a running cluster, a background arm of [S15](performance.md) in the
+on a rotational disk. [X7](device-store-hdd.md#11-a-foreground-beside-a-scrub) took the
+foreground's tail at budgets from 10 to 60 MiB/s on the lab's disks, with the write cache on and
+off, and X12 starts from it. In a running cluster, a background arm of [S15](performance.md) in the
 shape of today's `macro/cluster/background/repair`: a scrub asked for a third of the way
 through, the foreground's distribution before, during and after, and what the scrub read.
 

@@ -205,6 +205,13 @@ A slice is never a failure domain. Its domains are its device's: two slices of o
 fail together, so they are never two failure domains, and a device given four slices so
 that four cores drive it still holds one chunk of a stripe at most.
 
+**Rotational devices that journal on one SSD fail together** under a `device` failure domain.
+Since [X7](device-store-hdd.md#recommendation), a rotational device stages on an SSD of its node
+([Q23](contract.md#q23-what-a-rotational-device-needs-2026-10-06)). Losing that SSD loses every
+staged write its devices had not yet applied, so placement gives each such group one `device`
+domain: the journal's. Under a `host` domain nothing changes, since the journal is on the same
+host.
+
 A pool that asks for more domains than its devices span cannot place anything, and says so
 ([S4](pools-and-devices.md#what-a-node-checks-before-it-serves-a-pool)). On three hosts a
 host domain allows a width of three and no more: `replicas: 3`, or 2+1.

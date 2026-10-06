@@ -1,0 +1,407 @@
+2026-10-06T05:49:27Z
+Linux europa 7.0.0-34-generic #34-Ubuntu SMP PREEMPT_DYNAMIC Wed Sep  2 14:29:37 UTC 2026 x86_64 GNU/Linux
+NAME                        SIZE TYPE FSTYPE      MOUNTPOINTS                  MODEL                                 ROTA
+loop0                         4K loop squashfs    /snap/bare/5                                                          0
+loop1                        74M loop squashfs    /snap/core22/2955                                                     0
+loop2                      91.7M loop squashfs    /snap/gtk-common-themes/1535                                          0
+loop3                     531.5M loop squashfs    /snap/gnome-42-2204/263                                               0
+loop4                      50.3M loop squashfs    /snap/snapd/27738                                                     0
+loop5                      44.7M loop squashfs    /snap/snapd/28254                                                     0
+sda                         5.5T disk                                          WDC WD6001FZWX-0                         1
+└─sda1                      5.5T part xfs                                                                               1
+nvme0n1                   931.5G disk                                          Samsung SSD 990 PRO with Heatsink 1TB    0
+├─nvme0n1p1                   1G part vfat        /boot/efi                                                             0
+├─nvme0n1p2                   2G part ext4        /boot                                                                 0
+└─nvme0n1p3               928.5G part LVM2_member                                                                       0
+  └─ubuntu--vg-ubuntu--lv 928.5G lvm  btrfs       /                                                                     0
+nvme1n1                   260.8G disk                                          INTEL SSDPED1D280GA                      0
+└─nvme1n1p1               260.8G part xfs         /optane                                                               0
+	Model Number:       WDC WD6001FZWX-00A2VA0                  
+	Firmware Revision:  01.01A01
+	Logical  Sector size:                   512 bytes
+	Physical Sector size:                  4096 bytes
+	device size with M = 1024*1024:     5723166 MBytes
+	device size with M = 1000*1000:     6001175 MBytes (6001 GB)
+	Nominal Media Rotation Rate: 7200
+	   *	Write cache
+none [mq-deadline] 
+64
+32
+TARGET  SOURCE         FSTYPE OPTIONS
+/optane /dev/nvme1n1p1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+-- europa xfs 2026-10-06T05:49:39Z disk 42 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+meta-data=/dev/sda1              isize=512    agcount=6, agsize=268435455 blks
+         =                       sectsz=4096  attr=2, projid32bit=1
+         =                       crc=1        finobt=1, sparse=1, rmapbt=1
+         =                       reflink=1    bigtime=1 inobtcount=1 nrext64=1
+         =                       exchange=0   metadir=0
+data     =                       bsize=4096   blocks=1465130385, imaxpct=5
+         =                       sunit=0      swidth=0 blks
+naming   =version 2              bsize=4096   ascii-ci=0, ftype=1, parent=0
+log      =internal log           bsize=4096   blocks=521728, version=2
+         =                       sectsz=4096  sunit=1 blks, lazy-count=1
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+         =                       rgcount=0    rgsize=0 extents
+         =                       zoned=0      start=0 reserved=0
+ write-caching =  1 (on)
+write back
+-- europa ext4 2026-10-06T05:58:38Z disk 44 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 ext4   rw,relatime
+tune2fs 1.47.2 (1-Jan-2025)
+Filesystem volume name:   x7
+Last mounted on:          <not available>
+Filesystem UUID:          2a9a756e-2f32-4a92-98b2-5fb038e44bf2
+Filesystem magic number:  0xEF53
+Filesystem revision #:    1 (dynamic)
+Filesystem features:      has_journal ext_attr resize_inode dir_index orphan_file filetype needs_recovery extent 64bit flex_bg metadata_csum_seed sparse_super large_file huge_file dir_nlink extra_isize metadata_csum orphan_present
+Filesystem flags:         signed_directory_hash 
+Default mount options:    user_xattr acl
+Filesystem state:         clean
+Errors behavior:          Continue
+Filesystem OS type:       Linux
+Inode count:              183144448
+Block count:              1465130385
+Reserved block count:     73256519
+Overhead clusters:        11836026
+Free blocks:              1453293840
+Free inodes:              183144436
+First block:              0
+Block size:               4096
+Fragment size:            4096
+Group descriptor size:    64
+Reserved GDT blocks:      1024
+Blocks per group:         32768
+Fragments per group:      32768
+Inodes per group:         4096
+Inode blocks per group:   256
+Flex block group size:    16
+Filesystem created:       Tue Oct  6 05:53:42 2026
+Last mount time:          Tue Oct  6 05:58:38 2026
+Last write time:          Tue Oct  6 05:58:38 2026
+Mount count:              1
+Maximum mount count:      -1
+Last checked:             Tue Oct  6 05:53:42 2026
+Check interval:           0 (<none>)
+Lifetime writes:          17 MB
+Reserved blocks uid:      0 (user root)
+Reserved blocks gid:      0 (group root)
+First inode:              11
+Inode size:               256
+Required extra isize:     32
+Desired extra isize:      32
+Journal inode:            8
+Default directory hash:   half_md4
+Directory Hash Seed:      d5b64413-2634-4e9d-9044-407bbdce566d
+ write-caching =  1 (on)
+write back
+-- europa xfs 2026-10-06T06:02:22Z disk 45 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+meta-data=/dev/sda1              isize=512    agcount=6, agsize=268435455 blks
+         =                       sectsz=4096  attr=2, projid32bit=1
+         =                       crc=1        finobt=1, sparse=1, rmapbt=1
+         =                       reflink=1    bigtime=1 inobtcount=1 nrext64=1
+         =                       exchange=0   metadir=0
+data     =                       bsize=4096   blocks=1465130385, imaxpct=5
+         =                       sunit=0      swidth=0 blks
+naming   =version 2              bsize=4096   ascii-ci=0, ftype=1, parent=0
+log      =internal log           bsize=4096   blocks=521728, version=2
+         =                       sectsz=4096  sunit=1 blks, lazy-count=1
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+         =                       rgcount=0    rgsize=0 extents
+         =                       zoned=0      start=0 reserved=0
+ write-caching =  1 (on)
+write back
+-- europa ext4 2026-10-06T07:00:23Z disk 50 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 ext4   rw,relatime
+tune2fs 1.47.2 (1-Jan-2025)
+Filesystem volume name:   x7
+Last mounted on:          <not available>
+Filesystem UUID:          9f3a9c5f-fa66-4b0d-ae5d-233f2a90410e
+Filesystem magic number:  0xEF53
+Filesystem revision #:    1 (dynamic)
+Filesystem features:      has_journal ext_attr resize_inode dir_index orphan_file filetype needs_recovery extent 64bit flex_bg metadata_csum_seed sparse_super large_file huge_file dir_nlink extra_isize metadata_csum orphan_present
+Filesystem flags:         signed_directory_hash 
+Default mount options:    user_xattr acl
+Filesystem state:         clean
+Errors behavior:          Continue
+Filesystem OS type:       Linux
+Inode count:              183144448
+Block count:              1465130385
+Reserved block count:     73256519
+Overhead clusters:        11836026
+Free blocks:              1453293840
+Free inodes:              183144436
+First block:              0
+Block size:               4096
+Fragment size:            4096
+Group descriptor size:    64
+Reserved GDT blocks:      1024
+Blocks per group:         32768
+Fragments per group:      32768
+Inodes per group:         4096
+Inode blocks per group:   256
+Flex block group size:    16
+Filesystem created:       Tue Oct  6 06:55:27 2026
+Last mount time:          Tue Oct  6 07:00:23 2026
+Last write time:          Tue Oct  6 07:00:23 2026
+Mount count:              1
+Maximum mount count:      -1
+Last checked:             Tue Oct  6 06:55:27 2026
+Check interval:           0 (<none>)
+Lifetime writes:          17 MB
+Reserved blocks uid:      0 (user root)
+Reserved blocks gid:      0 (group root)
+First inode:              11
+Inode size:               256
+Required extra isize:     32
+Desired extra isize:      32
+Journal inode:            8
+Default directory hash:   half_md4
+Directory Hash Seed:      c8aa6888-cd48-4739-a81e-58ac15c485c2
+ write-caching =  1 (on)
+write back
+-- europa ext4 2026-10-06T08:39:22Z disk 49 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 ext4   rw,relatime
+tune2fs 1.47.2 (1-Jan-2025)
+Filesystem volume name:   x7
+Last mounted on:          <not available>
+Filesystem UUID:          c2a53de5-e4a5-43d0-bf3c-b2dd23059e02
+Filesystem magic number:  0xEF53
+Filesystem revision #:    1 (dynamic)
+Filesystem features:      has_journal ext_attr resize_inode dir_index orphan_file filetype needs_recovery extent 64bit flex_bg metadata_csum_seed sparse_super large_file huge_file dir_nlink extra_isize metadata_csum orphan_present
+Filesystem flags:         signed_directory_hash 
+Default mount options:    user_xattr acl
+Filesystem state:         clean
+Errors behavior:          Continue
+Filesystem OS type:       Linux
+Inode count:              183144448
+Block count:              1465130385
+Reserved block count:     73256519
+Overhead clusters:        11836026
+Free blocks:              1453293840
+Free inodes:              183144436
+First block:              0
+Block size:               4096
+Fragment size:            4096
+Group descriptor size:    64
+Reserved GDT blocks:      1024
+Blocks per group:         32768
+Fragments per group:      32768
+Inodes per group:         4096
+Inode blocks per group:   256
+Flex block group size:    16
+Filesystem created:       Tue Oct  6 08:34:25 2026
+Last mount time:          Tue Oct  6 08:39:21 2026
+Last write time:          Tue Oct  6 08:39:21 2026
+Mount count:              1
+Maximum mount count:      -1
+Last checked:             Tue Oct  6 08:34:25 2026
+Check interval:           0 (<none>)
+Lifetime writes:          17 MB
+Reserved blocks uid:      0 (user root)
+Reserved blocks gid:      0 (group root)
+First inode:              11
+Inode size:               256
+Required extra isize:     32
+Desired extra isize:      32
+Journal inode:            8
+Default directory hash:   half_md4
+Directory Hash Seed:      c9b58603-a6d1-4bda-b4f4-68517ac05688
+ write-caching =  1 (on)
+write back
+-- europa xfs 2026-10-06T10:16:13Z disk 49 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+meta-data=/dev/sda1              isize=512    agcount=6, agsize=268435455 blks
+         =                       sectsz=4096  attr=2, projid32bit=1
+         =                       crc=1        finobt=1, sparse=1, rmapbt=1
+         =                       reflink=1    bigtime=1 inobtcount=1 nrext64=1
+         =                       exchange=0   metadir=0
+data     =                       bsize=4096   blocks=1465130385, imaxpct=5
+         =                       sunit=0      swidth=0 blks
+naming   =version 2              bsize=4096   ascii-ci=0, ftype=1, parent=0
+log      =internal log           bsize=4096   blocks=521728, version=2
+         =                       sectsz=4096  sunit=1 blks, lazy-count=1
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+         =                       rgcount=0    rgsize=0 extents
+         =                       zoned=0      start=0 reserved=0
+ write-caching =  1 (on)
+write back
+-- europa xfs 2026-10-06T11:09:34Z disk 50 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+meta-data=/dev/sda1              isize=512    agcount=6, agsize=268435455 blks
+         =                       sectsz=4096  attr=2, projid32bit=1
+         =                       crc=1        finobt=1, sparse=1, rmapbt=1
+         =                       reflink=1    bigtime=1 inobtcount=1 nrext64=1
+         =                       exchange=0   metadir=0
+data     =                       bsize=4096   blocks=1465130385, imaxpct=5
+         =                       sunit=0      swidth=0 blks
+naming   =version 2              bsize=4096   ascii-ci=0, ftype=1, parent=0
+log      =internal log           bsize=4096   blocks=521728, version=2
+         =                       sectsz=4096  sunit=1 blks, lazy-count=1
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+         =                       rgcount=0    rgsize=0 extents
+         =                       zoned=0      start=0 reserved=0
+ write-caching =  1 (on)
+write back
+-- europa ext4 2026-10-06T12:07:38Z disk 50 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 ext4   rw,relatime
+tune2fs 1.47.2 (1-Jan-2025)
+Filesystem volume name:   x7
+Last mounted on:          <not available>
+Filesystem UUID:          2e69404b-17ce-4ba4-af1f-e533a62d0e1e
+Filesystem magic number:  0xEF53
+Filesystem revision #:    1 (dynamic)
+Filesystem features:      has_journal ext_attr resize_inode dir_index orphan_file filetype needs_recovery extent 64bit flex_bg metadata_csum_seed sparse_super large_file huge_file dir_nlink extra_isize metadata_csum orphan_present
+Filesystem flags:         signed_directory_hash 
+Default mount options:    user_xattr acl
+Filesystem state:         clean
+Errors behavior:          Continue
+Filesystem OS type:       Linux
+Inode count:              183144448
+Block count:              1465130385
+Reserved block count:     73256519
+Overhead clusters:        11836026
+Free blocks:              1453293840
+Free inodes:              183144436
+First block:              0
+Block size:               4096
+Fragment size:            4096
+Group descriptor size:    64
+Reserved GDT blocks:      1024
+Blocks per group:         32768
+Fragments per group:      32768
+Inodes per group:         4096
+Inode blocks per group:   256
+Flex block group size:    16
+Filesystem created:       Tue Oct  6 12:02:42 2026
+Last mount time:          Tue Oct  6 12:07:38 2026
+Last write time:          Tue Oct  6 12:07:38 2026
+Mount count:              1
+Maximum mount count:      -1
+Last checked:             Tue Oct  6 12:02:42 2026
+Check interval:           0 (<none>)
+Lifetime writes:          17 MB
+Reserved blocks uid:      0 (user root)
+Reserved blocks gid:      0 (group root)
+First inode:              11
+Inode size:               256
+Required extra isize:     32
+Desired extra isize:      32
+Journal inode:            8
+Default directory hash:   half_md4
+Directory Hash Seed:      8bcd2e5e-c104-47b9-98d6-bd92be829478
+ write-caching =  1 (on)
+write back
+-- europa ext4 2026-10-06T13:45:19Z disk 49 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 ext4   rw,relatime
+tune2fs 1.47.2 (1-Jan-2025)
+Filesystem volume name:   x7
+Last mounted on:          <not available>
+Filesystem UUID:          47d85b1c-a78e-4f17-bdf0-2ad0a38aa736
+Filesystem magic number:  0xEF53
+Filesystem revision #:    1 (dynamic)
+Filesystem features:      has_journal ext_attr resize_inode dir_index orphan_file filetype needs_recovery extent 64bit flex_bg metadata_csum_seed sparse_super large_file huge_file dir_nlink extra_isize metadata_csum orphan_present
+Filesystem flags:         signed_directory_hash 
+Default mount options:    user_xattr acl
+Filesystem state:         clean
+Errors behavior:          Continue
+Filesystem OS type:       Linux
+Inode count:              183144448
+Block count:              1465130385
+Reserved block count:     73256519
+Overhead clusters:        11836026
+Free blocks:              1453293840
+Free inodes:              183144436
+First block:              0
+Block size:               4096
+Fragment size:            4096
+Group descriptor size:    64
+Reserved GDT blocks:      1024
+Blocks per group:         32768
+Fragments per group:      32768
+Inodes per group:         4096
+Inode blocks per group:   256
+Flex block group size:    16
+Filesystem created:       Tue Oct  6 13:40:23 2026
+Last mount time:          Tue Oct  6 13:45:19 2026
+Last write time:          Tue Oct  6 13:45:19 2026
+Mount count:              1
+Maximum mount count:      -1
+Last checked:             Tue Oct  6 13:40:23 2026
+Check interval:           0 (<none>)
+Lifetime writes:          17 MB
+Reserved blocks uid:      0 (user root)
+Reserved blocks gid:      0 (group root)
+First inode:              11
+Inode size:               256
+Required extra isize:     32
+Desired extra isize:      32
+Journal inode:            8
+Default directory hash:   half_md4
+Directory Hash Seed:      e08a672b-f965-488e-9bf2-8e260d01e8d2
+ write-caching =  1 (on)
+write back
+-- europa xfs 2026-10-06T15:28:28Z disk 48 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+meta-data=/dev/sda1              isize=512    agcount=6, agsize=268435455 blks
+         =                       sectsz=4096  attr=2, projid32bit=1
+         =                       crc=1        finobt=1, sparse=1, rmapbt=1
+         =                       reflink=1    bigtime=1 inobtcount=1 nrext64=1
+         =                       exchange=0   metadir=0
+data     =                       bsize=4096   blocks=1465130385, imaxpct=5
+         =                       sunit=0      swidth=0 blks
+naming   =version 2              bsize=4096   ascii-ci=0, ftype=1, parent=0
+log      =internal log           bsize=4096   blocks=521728, version=2
+         =                       sectsz=4096  sunit=1 blks, lazy-count=1
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+         =                       rgcount=0    rgsize=0 extents
+         =                       zoned=0      start=0 reserved=0
+ write-caching =  1 (on)
+write back
+-- europa xfs 2026-10-06T16:26:50Z disk 49 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+meta-data=/dev/sda1              isize=512    agcount=6, agsize=268435455 blks
+         =                       sectsz=4096  attr=2, projid32bit=1
+         =                       crc=1        finobt=1, sparse=1, rmapbt=1
+         =                       reflink=1    bigtime=1 inobtcount=1 nrext64=1
+         =                       exchange=0   metadir=0
+data     =                       bsize=4096   blocks=1465130385, imaxpct=5
+         =                       sunit=0      swidth=0 blks
+naming   =version 2              bsize=4096   ascii-ci=0, ftype=1, parent=0
+log      =internal log           bsize=4096   blocks=521728, version=2
+         =                       sectsz=4096  sunit=1 blks, lazy-count=1
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+         =                       rgcount=0    rgsize=0 extents
+         =                       zoned=0      start=0 reserved=0
+ write-caching =  1 (on)
+write back
+-- europa xfs 2026-10-06T17:30:37Z disk 50 C
+TARGET SOURCE    FSTYPE OPTIONS
+/hdd   /dev/sda1 xfs    rw,relatime,inode64,logbufs=8,logbsize=32k,noquota
+meta-data=/dev/sda1              isize=512    agcount=6, agsize=268435455 blks
+         =                       sectsz=4096  attr=2, projid32bit=1
+         =                       crc=1        finobt=1, sparse=1, rmapbt=1
+         =                       reflink=1    bigtime=1 inobtcount=1 nrext64=1
+         =                       exchange=0   metadir=0
+data     =                       bsize=4096   blocks=1465130385, imaxpct=5
+         =                       sunit=0      swidth=0 blks
+naming   =version 2              bsize=4096   ascii-ci=0, ftype=1, parent=0
+log      =internal log           bsize=4096   blocks=521728, version=2
+         =                       sectsz=4096  sunit=1 blks, lazy-count=1
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+         =                       rgcount=0    rgsize=0 extents
+         =                       zoned=0      start=0 reserved=0
+ write-caching =  1 (on)
+write back

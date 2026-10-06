@@ -15,6 +15,9 @@
 //! reactor finds one before it sleeps, so the thread stays on its cpu whatever the load. A
 //! checksum's cost is added to the runtime by arithmetic from X5's rate, since adding the
 //! checksum crate is M13's to do.
+//!
+//! On a rotational disk X7 runs one slice and two, never more, and fio one job: one arm is one
+//! queue, and more readers of it only reorder the same seeks.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -387,7 +390,8 @@ fn cell(ctx: &Ctx, name: &str, work: Work, slices: usize, count: usize) -> SideO
 fn fio(ctx: &Ctx) -> Vec<SideOut> {
     let dir = ctx.sub("fio");
     std::fs::create_dir_all(&dir).expect("made");
-    let jobs = ctx.order.len().to_string();
+    // one job on a disk, whose one arm sixteen sequential writers would only make seek
+    let jobs = if ctx.rotational() { "1".to_string() } else { ctx.order.len().to_string() };
     let runtime = if ctx.quick { "1" } else { "8" };
     let mut outs = Vec::new();
     for (name, rw, bs, depth, field) in [
@@ -424,7 +428,7 @@ fn fio(ctx: &Ctx) -> Vec<SideOut> {
                 ("mib_s", bytes / f64::from(1 << 20)),
                 ("ops_s", job["iops"].as_f64().unwrap_or(0.0)),
                 ("p99", p99),
-                ("jobs", ctx.order.len() as f64),
+                ("jobs", jobs.parse().unwrap_or(0.0)),
             ],
         ));
     }
@@ -473,7 +477,14 @@ pub fn run(ctx: &Ctx, round: u32) {
     }
     // one slice at every depth
     for (name, unit) in [("depth-r64", 64 << 10), ("depth-r4", 4 << 10)] {
-        let depths: Vec<usize> = if ctx.quick { vec![1, 32] } else { vec![1, 2, 4, 8, 16, 32, 64, 128] };
+        let depths: Vec<usize> = if ctx.quick {
+            vec![1, 32]
+        } else if ctx.rotational() {
+            // past the block layer's queue a disk's depth only waits longer
+            vec![1, 2, 4, 8, 16, 32, 64]
+        } else {
+            vec![1, 2, 4, 8, 16, 32, 64, 128]
+        };
         for depth in depths {
             let mut out = cell(ctx, name, Work::Read { unit, depth }, 1, count);
             out.cell = format!("{name} depth={depth}");

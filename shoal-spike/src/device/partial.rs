@@ -12,9 +12,14 @@
 //! its own, so a clone side's shared blocks never reach the journal side's chunks; J′ is the
 //! journal side on chunks that have been cloned into, which is what choosing the clone would
 //! leave every in-place write with afterwards.
+//!
+//! On a rotational disk X7 runs the journal's way alone, since X6 rejected the clone, and beside
+//! it J-ssd: the record journalled on the host's SSD and applied in place on the disk, which is the
+//! choice Q23 weighs. A side there stops after twenty seconds whatever its count, and the run with
+//! the disk's write cache off names its sides `-wt`.
 
 use std::cell::Cell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -59,6 +64,8 @@ enum Way {
     ClonePerSlot,
     /// The journal's way, on chunks that have been cloned into
     JournalCloned,
+    /// The journal on the host's SSD, the apply in place on the disk
+    JournalSsd,
 }
 
 impl Way {
@@ -70,6 +77,7 @@ impl Way {
             Way::CloneCow => "C-cow",
             Way::ClonePerSlot => "C-perslot",
             Way::JournalCloned => "J'",
+            Way::JournalSsd => "J-ssd",
         }
     }
 
@@ -81,6 +89,7 @@ impl Way {
             Way::CloneCow => "chunks-cc",
             Way::ClonePerSlot => "chunks-cs",
             Way::JournalCloned => "chunks-jc",
+            Way::JournalSsd => "chunks-js",
         }
     }
 }
@@ -164,7 +173,7 @@ async fn one_write(bench: &Bench, writer: usize, writers: usize, nth: usize, rng
     let offset = HEADER + rng.below(CHUNK / size) * size;
     let staged = Instant::now();
     match bench.way {
-        Way::Journal | Way::JournalCloned => {
+        Way::Journal | Way::JournalCloned | Way::JournalSsd => {
             // a record of header and units in the ring, durable through the group commit
             let at = bench.ring.take(HEADER + size).expect("the ring wraps");
             bench.journal.write_rc_at(bench.payloads.get(HEADER + size), at).await.expect("staged");
@@ -225,7 +234,8 @@ async fn one_write(bench: &Bench, writer: usize, writers: usize, nth: usize, rng
 /// * `writers` - Writes in flight
 /// * `count` - How many writes
 /// * `seed` - The seed of the offsets
-async fn writes(bench: &Rc<Bench>, writers: usize, count: usize, seed: u64) -> Vec<Parts> {
+/// * `deadline` - When no new write is begun, whatever the count
+async fn writes(bench: &Rc<Bench>, writers: usize, count: usize, seed: u64, deadline: Option<Instant>) -> Vec<Parts> {
     let next = Rc::new(Cell::new(0_usize));
     let tasks = (0..writers).map(|writer| {
         let (bench, next) = (bench.clone(), next.clone());
@@ -236,7 +246,7 @@ async fn writes(bench: &Rc<Bench>, writers: usize, count: usize, seed: u64) -> V
             // take the next write until there are none
             loop {
                 let index = next.get();
-                if index >= count {
+                if index >= count || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     return mine;
                 }
                 next.set(index + 1);
@@ -257,15 +267,18 @@ async fn writes(bench: &Rc<Bench>, writers: usize, count: usize, seed: u64) -> V
 /// * `devices` - The devices to count on
 /// * `writers` - Writes in flight
 /// * `count` - Writes timed
-async fn run_side(bench: Rc<Bench>, dir: &Path, devices: &Devices, writers: usize, count: usize) -> SideOut {
+/// * `cap` - The longest the timed writes may run
+async fn run_side(bench: Rc<Bench>, dir: &Path, devices: &Devices, writers: usize, count: usize, cap: Option<Duration>) -> SideOut {
     let size = bench.size;
     // one pass over every slot first, so each is in the state the side leaves it in
-    let _ = writes(&bench, writers, SLOTS, 0xfeed).await;
+    let _ = writes(&bench, writers, SLOTS, 0xfeed, None).await;
     settle(dir).await;
     let before = devices.snap();
     let thread_before = sys::thread_cpu_ns();
     let start = Instant::now();
-    let parts = writes(&bench, writers, count, size).await;
+    let parts = writes(&bench, writers, count, size, cap.map(|cap| start + cap)).await;
+    // the writes a cap let through
+    let count = parts.len();
     let wall = start.elapsed().as_secs_f64();
     let exec_ns = sys::thread_cpu_ns() - thread_before;
     let drain_ms = drain(dir);
@@ -319,14 +332,51 @@ async fn run_side(bench: Rc<Bench>, dir: &Path, devices: &Devices, writers: usiz
 /// * `ctx` - The run
 /// * `round` - The round
 pub fn run(ctx: &Ctx, round: u32) {
-    let dir = ctx.sub("partial");
-    let (devices, quick, budget, clones) = (ctx.facts.devices.clone(), ctx.quick, ctx.budget, ctx.clones());
-    let sizes: Vec<u64> = if quick { vec![4 << 10, 64 << 10] } else { SIZES.to_vec() };
-    let ways: Vec<Way> = if clones {
+    let sizes: Vec<u64> = if ctx.quick { vec![4 << 10, 64 << 10] } else { SIZES.to_vec() };
+    // a disk runs the journal alone, and the journal on the SSD beside it; X6 rejected the clone
+    let ways: Vec<Way> = if ctx.rotational() {
+        let mut ways = vec![Way::Journal];
+        if ctx.ssd.is_some() {
+            ways.push(Way::JournalSsd);
+        }
+        ways
+    } else if ctx.clones() {
         vec![Way::Journal, Way::ClonePunch, Way::CloneCow, Way::ClonePerSlot, Way::JournalCloned]
     } else {
         vec![Way::Journal]
     };
+    run_with(ctx, round, &sizes, &ways, "");
+}
+
+/// Run the journal's ways with the disk's write cache off, their sides named `-wt`
+///
+/// # Arguments
+///
+/// * `ctx` - The run
+/// * `round` - The round
+pub fn run_wcoff(ctx: &Ctx, round: u32) {
+    let sizes: Vec<u64> = if ctx.quick { vec![4 << 10] } else { vec![4 << 10, 16 << 10] };
+    let mut ways = vec![Way::Journal];
+    if ctx.ssd.is_some() {
+        ways.push(Way::JournalSsd);
+    }
+    run_with(ctx, round, &sizes, &ways, "-wt");
+}
+
+/// Run a set of ways at a set of sizes for one round
+///
+/// # Arguments
+///
+/// * `ctx` - The run
+/// * `round` - The round
+/// * `sizes` - The write sizes
+/// * `ways` - The ways
+/// * `suffix` - What every side's name ends with
+fn run_with(ctx: &Ctx, round: u32, sizes: &[u64], ways: &[Way], suffix: &str) {
+    let dir = ctx.sub("partial");
+    let ssd_dir: Option<PathBuf> = ctx.ssd_sub("partial");
+    let (devices, quick, budget, cap) = (ctx.facts.devices.clone(), ctx.quick, ctx.budget, ctx.side_cap());
+    let (sizes, ways, side_suffix) = (sizes.to_vec(), ways.to_vec(), suffix.to_string());
     let outs = on_core(ctx.core, ctx.sibling, move || async move {
         io::wipe(&dir);
         std::fs::create_dir_all(&dir).expect("made");
@@ -334,6 +384,17 @@ pub fn run(ctx: &Ctx, round: u32) {
         // the journal ring, the shared staging file and each writer's own, all written once
         let journal = Rc::new(io::open(&dir.join("journal"), true).await);
         io::zero_fill(&journal, if quick { 64 << 20 } else { RING }).await;
+        // the SSD's journal ring, when a way journals there
+        let ssd_journal = match (&ssd_dir, ways.contains(&Way::JournalSsd)) {
+            (Some(ssd_dir), true) => {
+                io::wipe(ssd_dir);
+                std::fs::create_dir_all(ssd_dir).expect("made");
+                let file = Rc::new(io::open(&ssd_dir.join("journal"), true).await);
+                io::zero_fill(&file, if quick { 64 << 20 } else { RING }).await;
+                Some(file)
+            }
+            _ => None,
+        };
         let stage = Rc::new(io::open(&dir.join("stage"), true).await);
         io::write_body(&stage, &payloads, SLOT * SLOTS as u64, 0).await;
         stage.fdatasync().await.expect("synced");
@@ -372,12 +433,17 @@ pub fn run(ctx: &Ctx, round: u32) {
                         continue;
                     }
                     let set = &sets[ways.iter().position(|known| *known == way).expect("a set")];
+                    // the journal the side stages in: the SSD's for J-ssd, the disk's otherwise
+                    let side_journal = match (way, &ssd_journal) {
+                        (Way::JournalSsd, Some(ssd)) => ssd.clone(),
+                        _ => journal.clone(),
+                    };
                     // the files a side shares, moved into its bench for the side and back
                     let bench = Rc::new(Bench {
                         chunks: set.iter().map(|chunk| chunk.dup().expect("duplicated")).collect(),
-                        journal: journal.clone(),
+                        journal: side_journal.clone(),
                         ring: Ring::wrapping(if quick { 64 << 20 } else { RING }),
-                        journal_sync: Committer::start(journal.clone()),
+                        journal_sync: Committer::start(side_journal),
                         stage: stage.clone(),
                         stage_sync: Committer::start(stage.clone()),
                         own: own.iter().map(|file| file.dup().expect("duplicated")).collect(),
@@ -385,7 +451,8 @@ pub fn run(ctx: &Ctx, round: u32) {
                         size,
                         way,
                     });
-                    let out = run_side(bench.clone(), &dir, &devices, writers, count).await;
+                    let mut out = run_side(bench.clone(), &dir, &devices, writers, count, cap).await;
+                    out.side.push_str(&side_suffix);
                     bench.journal_sync.stop().await;
                     bench.stage_sync.stop().await;
                     outs.push(out);
@@ -394,7 +461,11 @@ pub fn run(ctx: &Ctx, round: u32) {
         }
         drop(sets);
         drop(own);
+        drop(ssd_journal);
         io::wipe(&dir);
+        if let Some(ssd_dir) = &ssd_dir {
+            io::wipe(ssd_dir);
+        }
         outs
     });
     let mut table = Table::new(&[
@@ -428,13 +499,17 @@ pub fn run(ctx: &Ctx, round: u32) {
         records.push(ctx.record("partial", round, out));
     }
     let clone = match &ctx.probes.clone {
+        _ if ctx.rotational() => "the clone sides are not run on a disk: X6 rejected the clone; J-ssd journals on the host's SSD".to_string(),
         Ok(()) => "the filesystem clones".to_string(),
         Err(error) => format!("the clone sides are not run: FICLONERANGE refused, {error}"),
     };
     print!(
         "{}",
         table.render(
-            &format!("3. A partial write, round {round} (latencies µs; whole units, no read-modify-write; {clone})"),
+            &format!(
+                "3. A partial write{suffix}, round {round} (latencies µs; whole units, no read-modify-write; {clone}; write cache {})",
+                ctx.facts.write_cache
+            ),
             &ctx.label()
         )
     );

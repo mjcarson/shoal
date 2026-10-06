@@ -123,12 +123,25 @@ pub fn clone_range(
     Ok(())
 }
 
-/// Count a file's extents by kind, syncing it first
+/// One extent of a file, as FIEMAP maps it
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Extent {
+    /// Its first byte in the file
+    pub logical: u64,
+    /// Its first byte on the filesystem's device
+    pub physical: u64,
+    /// Its length
+    pub length: u64,
+    /// What kind of extent it is
+    pub flags: u32,
+}
+
+/// Map a file's extents, syncing it first
 ///
 /// # Arguments
 ///
 /// * `fd` - The file
-pub fn fiemap(fd: RawFd) -> io::Result<Extents> {
+pub fn extent_map(fd: RawFd) -> io::Result<Vec<Extent>> {
     // one call with no array to learn how many extents there are
     let mut head = Fiemap {
         fm_start: 0,
@@ -159,7 +172,7 @@ pub fn fiemap(fd: RawFd) -> io::Result<Extents> {
     // read the header back, then each extent it mapped
     // SAFETY: the kernel filled the header and `fm_mapped_extents` extents after it
     let mapped = unsafe { std::ptr::read(buffer.as_ptr().cast::<Fiemap>()) }.fm_mapped_extents;
-    let mut extents = Extents::default();
+    let mut extents = Vec::with_capacity(mapped as usize);
     for index in 0..mapped as usize {
         // SAFETY: index is below the count the kernel filled, which is below `count`
         let extent = unsafe {
@@ -171,15 +184,48 @@ pub fn fiemap(fd: RawFd) -> io::Result<Extents> {
                     .cast::<FiemapExtent>(),
             )
         };
+        extents.push(Extent {
+            logical: extent.fe_logical,
+            physical: extent.fe_physical,
+            length: extent.fe_length,
+            flags: extent.fe_flags,
+        });
+    }
+    Ok(extents)
+}
+
+/// Count a file's extents by kind, syncing it first
+///
+/// # Arguments
+///
+/// * `fd` - The file
+pub fn fiemap(fd: RawFd) -> io::Result<Extents> {
+    // every extent, then counted by its flags
+    let mut extents = Extents::default();
+    for extent in extent_map(fd)? {
         extents.total += 1;
-        if extent.fe_flags & FIEMAP_EXTENT_SHARED != 0 {
+        if extent.flags & FIEMAP_EXTENT_SHARED != 0 {
             extents.shared += 1;
         }
-        if extent.fe_flags & FIEMAP_EXTENT_UNWRITTEN != 0 {
+        if extent.flags & FIEMAP_EXTENT_UNWRITTEN != 0 {
             extents.unwritten += 1;
         }
     }
     Ok(extents)
+}
+
+/// Where a byte of a file lies on the filesystem's device, from its extent map
+///
+/// # Arguments
+///
+/// * `extents` - The file's extents
+/// * `offset` - The byte in the file
+#[must_use]
+pub fn physical_of(extents: &[Extent], offset: u64) -> Option<u64> {
+    extents
+        .iter()
+        .find(|extent| offset >= extent.logical && offset < extent.logical + extent.length)
+        .map(|extent| extent.physical + (offset - extent.logical))
 }
 
 /// Write back everything dirty, then drop the page, dentry and inode caches

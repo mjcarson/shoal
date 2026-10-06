@@ -64,6 +64,14 @@ show a whole core busy while it waits on a fast device, which says little about 
 Its blocking thread, where every rename and unlink goes, belongs on its core's sibling: glommio's
 `Placement::Fixed` puts it on the executor's own cpu.
 
+**A rotational device's slice never shares an executor with an SSD's**, and a disk has one slice
+([X7](device-store-hdd.md#12-one-executor-an-ssds-slice-and-a-disks)). On an executor it
+shared with a disk's slice, an SSD slice's stage or read p99 rose about a hundredfold on three of
+the lab's four disk legs. With the disk's slice on an executor of its own it did not rise, and
+that executor was under 1% busy. So a node sets a core aside for its disks; a core a disk is not
+needed. A second slice on one disk read 40% less than one. Whether disks' slices may share an
+executor among themselves, with no SSD's among them, X7 could not say with one disk a host.
+
 ### Shared executors or dedicated ones
 
 | | Object work on the table shards | Executors of its own |
@@ -140,15 +148,27 @@ theirs: the failure of item 191 again, with a different guest.
 One executor ordering one slice's work makes a priority order possible, and it is:
 
 1. reads and stages for foreground operations;
-2. applies of committed writes, batched, and on a rotational disk in offset order;
+2. applies of committed writes, batched, ~~and on a rotational disk in offset order~~ and on a
+   rotational disk a whole batch in flight at once, the batch bounded by the time it takes;
 3. rebuilds and moves, inside the device's byte budget ([S10](recovery.md#budgets));
 4. scrubs, inside the same budget, last ([S11](scrub.md#schedule-and-budget)).
 
 Applies are below stages on purpose. A staged write is already durable and already readable,
 so applying it late costs journal space and nothing else.
 
-**A table's files and a pool's device may be the same disk.** On the lab they are: each host
-has one device, so a stage's sync and the WAL's sync queue for the same flush. The promise
+**On a disk, the batch is what a read waits for.** [X7](device-store-hdd.md#10-reads-and-stages-beside-applies)
+put the order to the lab's disks. Applies issued one at a time in offset order, by FIEMAP or by
+inode, finished no sooner than in the order they arrived, and on the 14 TB disks with their cache
+on they kept only 8 of the 48 a second offered. A whole batch in flight is ordered by the block
+layer's scheduler and the disk's own queue, and kept its offer. A foreground read beside it waited
+less than one batch: its p99 was 0.16 to 0.71 of a batch's median plus an idle read's. That p99
+rose with the batch, from 176 to 353 ms at 32 applies to 441 to 694 ms at 128. So what M19 bounds
+is the batch, in time, and the offset order is dropped.
+
+**A table's files and a pool's device may be the same disk.** On the lab they ~~are: each host
+has one device~~ were until 2026-10-06, when each host was given a rotational disk beside its
+SSD; a pool on the SSD still shares it with the tables, so a stage's sync and the WAL's sync
+queue for the same flush. The promise
 about table latency is made for a node whose tables and whose pools are on different
 devices, and a node where they are not is measured and labelled as that.
 
@@ -234,7 +254,8 @@ since anything that adds work to a node's query path is measured that way
 | `object_work_past_its_budget_is_shed_by_name` | An operation that cannot draw its buffers is refused with a code its caller can retry on, and nothing grows | M14 |
 | `a_slice_is_served_by_one_executor` | Every read, stage and apply of a slice runs on the executor recorded as its owner | M14 |
 | `stalled_object_lane_leaves_the_others_answering` | A peer that stops reading object frames holds only that lane's queue; votes, forwards and snapshots proceed | M15 |
-| `rotational_applies_are_batched_in_offset_order` | On a device marked rotational, a batch of committed applies is written in offset order, and a foreground read waits for no more than one batch | M19 |
+| ~~`rotational_applies_are_batched_in_offset_order`~~ `rotational_applies_are_batched_and_bounded` | On a device marked rotational, committed applies are issued a whole batch at a time, ~~in offset order~~ the batch bounded by its time, and a foreground read waits for no more than one batch. X7 found offset order bought nothing ([X7](device-store-hdd.md#10-reads-and-stages-beside-applies)) | M19 |
+| `rotational_slice_never_shares_an_ssd_executor` | A node given an SSD's slice and a rotational device's puts them on different executors, whatever the inventory says, and says so | M19 |
 
 ## Related
 

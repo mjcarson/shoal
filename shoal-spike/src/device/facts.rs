@@ -6,6 +6,11 @@
 //! is direct, find which device counts a flush, find whether a directory's `fdatasync` makes a
 //! rename durable, and find whether the filesystem can clone. The measurements after them lean
 //! on those answers.
+//!
+//! X7 adds what a rotational disk's figures need beside them: its rotation rate from the disk's
+//! own characteristics page, its whole model from udev's name for it (the kernel's is cut at
+//! sixteen characters), whether it takes forced unit access, its scheduler and both queues. The
+//! probes' figures become a record too, so a report can read a disk's idle sync.
 
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -50,8 +55,25 @@ pub struct Facts {
     pub write_cache: String,
     /// The disk's logical block size
     pub logical_block: u64,
+    /// The disk's physical block size
+    pub physical_block: u64,
     /// The filesystem's block size
     pub block: u64,
+    /// Whether the kernel calls the disk rotational
+    pub rotational: bool,
+    /// The disk's rotation rate in rpm, from its block device characteristics page; zero if it
+    /// does not spin or does not say
+    pub rpm: u32,
+    /// Whether the disk takes a write with forced unit access, so a sync need not flush its cache
+    pub fua: bool,
+    /// The disk's I/O scheduler, the one in brackets
+    pub scheduler: String,
+    /// Requests the block layer queues for the disk
+    pub nr_requests: u64,
+    /// Commands the disk itself queues (NCQ on a SATA disk)
+    pub queue_depth: u64,
+    /// The filesystem device's size in bytes, which a physical offset is a fraction of
+    pub fs_bytes: u64,
 }
 
 impl Facts {
@@ -72,6 +94,11 @@ impl Facts {
                 .map(|text| text.trim().to_string())
                 .unwrap_or_else(|_| "unknown".to_string())
         };
+        // the filesystem device's size, in the block layer's 512 byte sectors
+        let fs_bytes = std::fs::read_to_string(format!("/sys/class/block/{fs_dev}/size"))
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .map_or(0, |sectors| sectors * 512);
         // SAFETY: a zeroed statvfs is a valid out parameter, filled by the call
         let mut vfs: libc::statvfs = unsafe { std::mem::zeroed() };
         unsafe { libc::statvfs(sys::cpath(&dir).as_ptr(), &mut vfs) };
@@ -87,28 +114,64 @@ impl Facts {
             options,
             source,
             devices: Devices { fs: fs_dev, disk: disk.clone() },
-            model: attr("device/model"),
-            firmware: attr("device/firmware_rev"),
+            model: full_model(&disk).unwrap_or_else(|| attr("device/model")),
+            // an NVMe controller names its firmware `firmware_rev`, a SCSI or SATA disk `rev`
+            firmware: match attr("device/firmware_rev").as_str() {
+                "unknown" => attr("device/rev"),
+                known => known.to_string(),
+            },
             write_cache: attr("queue/write_cache"),
             logical_block: attr("queue/logical_block_size").parse().unwrap_or(512),
+            physical_block: attr("queue/physical_block_size").parse().unwrap_or(512),
             block: vfs.f_bsize,
+            rotational: attr("queue/rotational") == "1",
+            rpm: rotation_rate(&disk),
+            fua: attr("queue/fua") == "1",
+            scheduler: bracketed(&attr("queue/scheduler")),
+            nr_requests: attr("queue/nr_requests").parse().unwrap_or(0),
+            queue_depth: attr("device/queue_depth").parse().unwrap_or(0),
+            fs_bytes,
+        }
+    }
+
+    /// The disk's kind in a few words: its rotation rate, or that it is solid state
+    #[must_use]
+    pub fn kind(&self) -> String {
+        match (self.rotational, self.rpm) {
+            (true, 0) => "rotational".to_string(),
+            (true, rpm) => format!("{rpm} rpm"),
+            (false, _) => "solid state".to_string(),
         }
     }
 
     /// The line every table carries
     #[must_use]
     pub fn label(&self) -> String {
+        // a disk's queue is worth naming when it spins, since the scheduler and NCQ order its seeks
+        let queue = if self.rotational {
+            format!(
+                ", {}, fua {}, {} queued, NCQ {}",
+                self.scheduler,
+                if self.fua { "yes" } else { "no" },
+                self.nr_requests,
+                self.queue_depth
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "{} · {} · governor {} · kernel {} · {} {} (fw {}, cache {}, {} B blocks) · {} at {} on {} = {} ({}) · fs block {} B",
+            "{} · {} · governor {} · kernel {} · {} {} ({}, fw {}, cache {}, {}/{} B blocks{queue}) · {} at {} on {} = {} ({}) · fs block {} B",
             self.host,
             self.cpu,
             self.governor,
             self.kernel,
             self.devices.disk,
             self.model,
+            self.kind(),
             self.firmware,
             self.write_cache,
             self.logical_block,
+            self.physical_block,
             self.fs,
             self.mount.display(),
             self.source,
@@ -154,6 +217,63 @@ fn mount_of(path: &Path) -> (PathBuf, String, String, String) {
         }
     }
     best.expect("the path is on a mount")
+}
+
+/// The text in brackets of a sysfs choice, such as the scheduler in `none [mq-deadline]`
+///
+/// # Arguments
+///
+/// * `text` - The attribute's text
+fn bracketed(text: &str) -> String {
+    text.split_once('[')
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map_or_else(|| text.to_string(), |(chosen, _)| chosen.to_string())
+}
+
+/// A SATA disk's whole model, from its link under `/dev/disk/by-id`
+///
+/// The kernel's `device/model` is the SCSI inquiry's sixteen characters, which cuts a SATA
+/// model short. udev names the disk `ata-<model>_<serial>`, spaces as underscores.
+///
+/// # Arguments
+///
+/// * `disk` - The disk as `/sys/class/block` names it
+fn full_model(disk: &str) -> Option<String> {
+    let entries = std::fs::read_dir("/dev/disk/by-id").ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // the whole disk's link, not a partition's
+        let Some(rest) = name.strip_prefix("ata-") else { continue };
+        if rest.contains("-part") {
+            continue;
+        }
+        let target = std::fs::canonicalize(entry.path()).ok()?;
+        if target.file_name().is_some_and(|file| file == disk) {
+            // the serial follows the last underscore
+            let model = rest.rsplit_once('_').map_or(rest, |(model, _)| model);
+            return Some(model.replace('_', " "));
+        }
+    }
+    None
+}
+
+/// A disk's rotation rate in rpm, from its block device characteristics page (VPD B1)
+///
+/// Bytes 4 and 5 are the medium rotation rate: 1 for a disk that does not spin, a rate in rpm
+/// otherwise, and 0 for one that does not say.
+///
+/// # Arguments
+///
+/// * `disk` - The disk as `/sys/class/block` names it
+fn rotation_rate(disk: &str) -> u32 {
+    let page = std::fs::read(format!("/sys/class/block/{disk}/device/vpd_pgb1")).unwrap_or_default();
+    match page.get(4..6) {
+        Some(&[high, low]) => match u32::from(u16::from_be_bytes([high, low])) {
+            1 => 0,
+            rpm => rpm,
+        },
+        _ => 0,
+    }
 }
 
 /// The name `/sys/class/block` gives the device a mount's source names
@@ -282,6 +402,8 @@ pub struct Probes {
     pub clone: Result<(), String>,
     /// The probes' table, for the run's output
     pub table: String,
+    /// The probes' figures, for a record a report can judge
+    pub figures: Vec<(&'static str, f64)>,
 }
 
 /// Run every probe on an executor, in a directory of their own under the scratch directory
@@ -323,6 +445,7 @@ pub async fn probe(dir: PathBuf, devices: Devices, label: String) -> Probes {
         syncs.push(start.elapsed());
     }
     let delta = before.delta(&devices.snap());
+    let overwrite = syncs.summary();
     table.row(vec![
         "flushes for 100 overwrites, each synced".into(),
         format!("disk {} · fs device {}", delta.flushes, delta.fs_flushes),
@@ -342,6 +465,7 @@ pub async fn probe(dir: PathBuf, devices: Devices, label: String) -> Probes {
         empty.push(start.elapsed());
     }
     let delta = before.delta(&devices.snap());
+    let clean = empty.summary();
     table.row(vec![
         "fdatasync of a clean file".into(),
         format!("p50 {} µs, p99 {} µs", fmt(empty.summary().p50), fmt(empty.summary().p99)),
@@ -354,6 +478,7 @@ pub async fn probe(dir: PathBuf, devices: Devices, label: String) -> Probes {
     std::fs::create_dir_all(&renames).expect("made");
     let directory = Rc::new(Directory::open(&renames).await.expect("opened"));
     let mut forms = Vec::new();
+    let mut rename_p50 = 0.0;
     for form in [DirSync::Fdatasync, DirSync::Fsync] {
         let mut written = 0;
         let mut flushes = 0;
@@ -376,6 +501,9 @@ pub async fn probe(dir: PathBuf, devices: Devices, label: String) -> Probes {
             file.close().await.expect("closed");
         }
         forms.push((form, written, flushes));
+        if form == DirSync::Fdatasync {
+            rename_p50 = took.summary().p50;
+        }
         table.row(vec![
             format!("rename, then the directory's {form:?}"),
             format!("{} KiB and {} flushes a rename", written / 1024 / 20, fmt(flushes as f64 / 20.0)),
@@ -444,5 +572,12 @@ pub async fn probe(dir: PathBuf, devices: Devices, label: String) -> Probes {
         dir_sync,
         clone,
         table: table.render("Probes", &label),
+        figures: vec![
+            ("overwrite_sync_p50", overwrite.p50),
+            ("overwrite_sync_p99", overwrite.p99),
+            ("clean_sync_p50", clean.p50),
+            ("rename_dir_sync_p50", rename_p50),
+            ("hop_p50", hops.summary().p50),
+        ],
     }
 }

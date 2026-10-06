@@ -135,9 +135,9 @@ object arm is ever pointed at the `tmdb` cluster's data.
 | It can | It cannot |
 | --- | --- |
 | What a core costs: checksums, encoding, the device store, the protocol. On loopback on europa | Throughput across hosts above about 117 MiB/s. Every such number is the network's and is labelled so |
-| Two durable rounds against one, on a consumer SSD that flushes on every sync and on an Optane that barely does | A table's files and a pool's device on separate disks, until disks are fitted: each host has one |
+| Two durable rounds against one, on a consumer SSD that flushes on every sync and on an Optane that barely does | ~~A table's files and a pool's device on separate disks, until disks are fitted: each host has one~~ A pool's SSD device apart from its tables' SSD: each host has one SSD and, since 2026-10-06, one disk |
 | Recovery and scrub on real devices | A k+m wider than 2+1 across hosts |
-| A rotational disk, once one is fitted | — |
+| A rotational disk: one a host, fitted 2026-10-06 ([X7](device-store-hdd.md)) | Several disks a host, or a disk that holds a lab's whole pool under a `device` failure domain |
 
 A number taken on the lab is an A/B and not a capture, as every lab number has been since
 the benchmarks moved there. It is quoted on the page that needed it, labelled by host, CPU

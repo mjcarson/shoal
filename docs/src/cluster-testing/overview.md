@@ -28,6 +28,17 @@ after the rounds below. They negotiate one PCIe lane, so a sequential write tops
 MB/s. And a cache flush costs 0.9 ms after a rest but 3 ms once the drive has taken a minute of
 synced writes, so a figure that involves a sync depends on what the drive did just before.
 
+**Each host has a rotational disk since 2026-10-06**, which no node uses: an empty XFS at `/hdd`,
+mounted with `nofail`. They are a WD140EDFZ of 14 TB in titan and in hyperion and a WD6001FZWX of
+6 TB in europa, fitted for [X7](../object-storage/device-store-hdd.md). Three facts about them:
+
+- The WD140EDFZ reports 5400 rpm and turns at 7200.
+- With its write cache on, the WD140EDFZ stalls a read behind a flush for about 100 ms.
+- The WD6001FZWX acknowledges a sync in 0.4 ms with its cache on, before its platter could hold
+  the block.
+
+All three have the cache on, as they shipped and as X7 left them.
+
 The hosts are unequal on purpose: that is the "physical capture on unequal hardware" that
 [C15](../distributed/open-issues.md#measured-at-smoke-scale-only) listed as having a launcher and no
 run. Round trip time between them is about 0.12 ms. Europa is also the development host, so it

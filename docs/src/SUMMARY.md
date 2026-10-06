@@ -206,6 +206,7 @@
     - [X4. Erasure coding crates, measured](object-storage/erasure-coding-crates.md)
     - [X5. Checksums, measured](object-storage/checksums.md)
     - [X6. The device store on SSD, measured](object-storage/device-store-ssd.md)
+    - [X7. The device store on HDD, measured](object-storage/device-store-hdd.md)
     - [X10. What a stripe row costs, measured](object-storage/stripe-row-costs.md)
     - [X11. Streamed bodies, measured](object-storage/streamed-bodies.md)
     - [X13. The benchmark's shape, measured](object-storage/benchmark-shape.md)
