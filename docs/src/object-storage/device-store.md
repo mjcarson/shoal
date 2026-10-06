@@ -150,11 +150,26 @@ current, which is one of the schedules that shaped [S7](write-path.md#the-schedu
 
 **The staged copy outlives the apply.** It is dropped only after the in-place write and the
 header carrying the new label are `fdatasync`ed. A torn apply leaves a unit that fails its
-checksum and a record that can write it again.
+checksum and a record that can write it again. That holds even once a committed fact excludes
+the record: X1's holder dropped one mid-apply on hearing a later write had committed, and a crash
+then left a torn chunk nothing could write again ([X1](stripe-model.md#what-the-search-found-and-the-repairs), P9).
 
-**A stage names the label it expects**, when it changes part of a chunk. A holder whose
-chunk carries another label refuses it: a parity update computed against one state cannot be
-applied to a different one.
+**A stage names the label it expects**, when it changes part of a chunk. A holder ~~whose
+chunk carries another label~~ that cannot make that label refuses it: a parity update computed
+against one state cannot be applied to a different one. It can make a label from its chunk, or
+from records it has staged over the chunk, each over the label the one beneath it makes. A holder
+that laid a record over whatever its chunk held, as X1's first did, took a stage over a label it
+could not make, and the row then called a chunk current that nobody held
+([X1](stripe-model.md#what-the-search-found-and-the-repairs), P17). For the same reason, staging the
+same write twice is staging it once only while the holder can make its label: a new stage of a
+label whose record has lost its base replaces the record. Answered as a repeat, a rebuild's whole
+chunk left the dead record in place and was committed current.
+
+**A record stays while a later one stands on it.** A committed change to part of a chunk that
+is not applied yet is beneath every later change staged over it, so it is kept until the chunk
+reaches it, whatever the row says of its own label. Dropping it because the row had moved past
+its base and named another label, as [S10](recovery.md#reclamation) first had it, lost a write
+that had been acknowledged ([X1](stripe-model.md#what-the-search-found-and-the-repairs), P17).
 
 **Space is taken at the stage.** A stage that would breach the device's reserve is refused,
 before any commit depends on it. Applying needs no new space: in place it needs none, and a
@@ -301,7 +316,9 @@ through the cache are held twice, counted by nobody, and written when the kernel
 - A stage is durable before it is reported, holds new values only, and is refused if it
   would breach the reserve.
 - A chunk changes in place only by applying a staged write its row has committed, and the
-  staged copy is dropped only after that apply is `fdatasync`ed.
+  staged copy is dropped only after that apply is `fdatasync`ed, whatever excludes it meanwhile.
+- A committed record is kept while a label the row names stands on it, and a holder counts a
+  label as held only if it can make it.
 - A header's label and a unit's checksum are written with the bytes they describe, inside
   the same apply.
 - No unit that fails its checksum is returned, merged into, or used as a source.

@@ -2,7 +2,8 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-05, when X11 reported and F73 delivered the frames it set, X13 reported
+after it. As of 2026-10-06, when X1 modelled the stripe protocol and found it safe once ten
+rules were repaired; and as of 2026-10-05 before it, when X11 reported and F73 delivered the frames it set, X13 reported
 what F69 had left of the benchmark's shape, and X14 read Ceph and S3 at the source; X6 and X10 had
 reported the day before, and X2, X4 and X5 the day before that.
 
@@ -45,7 +46,7 @@ flowchart LR
         Counters["✅ F71 Device counters and node memory<br>in a bench capture (optional)"]:::done
         Neighbour["✅ F72 A paced neighbour stream<br>in the bench (optional)"]:::done
     end
-    X1["X1 The stripe protocol as a model"]
+    X1["✅ X1 The stripe protocol as a model"]:::done
     X3["X3 Bytes through the tablet groups"]
     X6x["✅ X6, its XFS leg"]:::done
     X7["X7 The device store on HDD"]

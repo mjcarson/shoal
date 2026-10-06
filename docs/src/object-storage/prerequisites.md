@@ -24,7 +24,7 @@ or larger later is optional, because skipping it costs nothing that has to be un
 whose absence would be baked into a key, a file or a frame is required, because the cheapest
 day to do it is the day before the format exists.
 
-**Where it stands (~~2026-10-03~~ 2026-10-05).** ~~Six~~ Seven of the ten required rows are done, each
+**Where it stands (~~2026-10-03~~ ~~2026-10-05~~ 2026-10-06).** ~~Six~~ Seven of the ten required rows are done, each
 marked ✅ below: every one that waits on no open question. Of the ~~four~~ three left, ~~each waits on a
 question~~ ~~two~~ ~~three~~ two can start now. [X2](placement-simulation.md) settled what placement reads
 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)), and that frees a member's
@@ -49,6 +49,12 @@ and S3 at the source the same day, with a Ceph on the lab beside the reading, an
 either. It recorded [Q32](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05),
 what the metadata leaves room for, which M12's rows take up rather than a prerequisite. The
 conditional write it would need is F68's, on the ETag a commit derives.
+[X1](stripe-model.md) ✅ modelled the stripe protocol on 2026-10-06 and changes no row of this
+page either. The conditional write it needs is F68's as delivered: a stripe's commit compares
+the row's sequence and the placement group's generation, both by equality, since everything else
+a commit has to respect moves only with the sequence
+([the record](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)). The prerequisite S16's model was held to, S7's schedules, is now
+saved as its acceptance test.
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate

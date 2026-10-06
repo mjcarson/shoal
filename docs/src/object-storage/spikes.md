@@ -3,7 +3,8 @@
 ~~**Nothing here has been run.**~~ ~~**One spike has run**: X4, whose record is
 [its own page](erasure-coding-crates.md) (2026-10-03).~~ ~~**Two spikes have run**~~ ~~**Three
 spikes have run**~~ ~~**Four spikes have run**~~ ~~**Five spikes have run**~~ ~~**Six spikes have
-run**~~ ~~**Seven spikes have run**~~ **Eight spikes have run**, each with its record on a page of its own: X2,
+run**~~ ~~**Seven spikes have run**~~ ~~**Eight spikes have run**~~ **Nine spikes have run**, each with its record on a page of its own: X1,
+[the stripe protocol, modelled](stripe-model.md) (2026-10-06), X2,
 [placement](placement-simulation.md), X4, [the erasure coding crates](erasure-coding-crates.md), and
 X5, [the checksums](checksums.md) (all 2026-10-03), X6, [the device store on SSD](device-store-ssd.md),
 and X10, [what a stripe row costs](stripe-row-costs.md) (both 2026-10-04), and X11,
@@ -106,7 +107,7 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 
 | # | Spike | Settles | Needs | Cost |
 | --- | --- | --- | --- | --- |
-| X1 | The stripe protocol as a model | Q14, Q15, Q16, Q18 | Nothing | Week |
+| ✅ X1 | The stripe protocol as a model, [reported](stripe-model.md) | Q14, Q15, Q16, Q18 | Nothing; searched on the lab | ~~Week~~ Done 2026-10-06 |
 | ✅ X2 | Placement simulation, [reported](placement-simulation.md) | Q19, in part | Nothing; timed on the lab | ~~Days~~ Done 2026-10-03 |
 | X3 | Bytes through the tablet groups | Q14 | The lab | Days |
 | ✅ X4 | Erasure coding crates: performance and tradeoffs, [reported](erasure-coding-crates.md) | Q20, in part | titan, europa | ~~Days~~ Done 2026-10-03 |
@@ -124,6 +125,30 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 ## The spikes
 
 ### X1. The stripe protocol as a model
+
+**Reported 2026-10-06**, on [its own page](stripe-model.md), and recorded on S18 as
+[Q16 and Q18, and Q14, Q15, Q19 in part](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06).
+**S7's direction holds.** Ten rules the pages stated broke a clause, and each was repaired by a
+local rule; none needed a primary, a vote among holders, or undo. Q16 is settled stricter than it
+was asked: an untouched chunk counts only on its holder's confirmation in the write's round. A
+holder keeps a chunk's previous state, and the leader's reservation stays out of the protocol. A
+commit compares the sequence and the generation by equality, and the row keeps no chunk digest.
+It was searched on europa, 20,000 seeds of each of eighty-seven configurations and 100,000 of the
+safe policy's twelve, and on titan and hyperion from a `znver1` build, which found every seed they
+shared with europa the same to the step.
+
+The method below is what was planned. What was run differs in five places, each on the page:
+
+- The model holds two stripes of one object, the least S16's scope allowed.
+- Q16 was run three ways, not two. Both of S16's answers broke P11, the one expected to be safe,
+  counting an untouched chunk only while its holder is believed up, included; the third, its
+  holder's confirmation in the write's round, is the one that held.
+- The search ran 20,000 seeds of each configuration on europa: 3,000 had found nothing, and
+  20,000 found the last rule and two the pages left unstated.
+- Ten rules as written are kept beside S16's fourteen settings, each with its schedule, so
+  twenty-six schedules are saved where sixteen were planned.
+- A read that fails by name after its retries counts against the progress bound, as one that
+  never returns does.
 
 **Question.** Is the preferred direction of [S7](write-path.md) safe, under every
 interleaving the failure model allows ([Q14](contract.md#questions-to-answer))? And the
@@ -767,7 +792,7 @@ LVs for the OSDs, all removed after. **Cost.** ~~Days.~~ A day.
 ```mermaid
 flowchart LR
     classDef done fill:#2e7d32,stroke:#1b5e20,color:#ffffff
-    X1["X1 model"]
+    X1["✅ X1 model"]:::done
     X2["✅ X2 placement"]:::done
     X14["✅ X14 sources"]:::done
     X13["✅ X13 bench shape"]:::done
@@ -791,18 +816,20 @@ flowchart LR
 ```
 
 Nine depend on no other spike and on nothing that has to be fitted, and can start at once:
-X1, ~~X2,~~ X3, ~~X4,~~ ~~X5,~~ ~~X10,~~ ~~X11,~~ ~~X13~~ and ~~X14~~; X2, X4, X5, X10, X11, X13 and X14 have run. ~~X6 can start too, and
+~~X1,~~ ~~X2,~~ X3, ~~X4,~~ ~~X5,~~ ~~X10,~~ ~~X11,~~ ~~X13~~ and ~~X14~~; X1, X2, X4, X5, X10, X11, X13 and X14 have run. ~~X6 can start too, and
 needs an XFS filesystem for one of its legs.~~ X6 has run too, on an XFS filesystem fitted for it.
 ~~X8 follows X6, and~~ X8 and X9 ~~follows X5, since X4 has
 reported~~ can start: X4, X5 and X6 have all reported. X7 and the rotational half of X12 wait
 for disks; X7 reuses X6's harness.
 
 If there is one to do first it is X1. Every other spike measures the cost of a design, and
-X1 is the one that can say the design is wrong.
+X1 is the one that can say the design is wrong. ✅ It has run, and it did not: it found ten rules
+the pages stated that broke a clause, and repaired each without leaving S7's direction
+([X1](stripe-model.md)).
 
 The first gate, [before M11](milestones.md#before-m11-the-object-contract), waits on eight
 of them: X1 and X2 for the decisions themselves, and X3, X8 and X9 for what those decisions
-cost, which bring X4, X5 and X6 with them. X2, X4, X5 and X6 have reported, and X10 and X11 beside
+cost, which bring X4, X5 and X6 with them. X1, X2, X4, X5 and X6 have reported, and X10 and X11 beside
 them. [What's left to do](whats-left-todo.md) draws every spike into that gate, because the
 milestones stop being provisional only when every decision is on the record, and X14 is among
 them: it read the alternative Q14 is measured against, and it has reported.
@@ -833,8 +860,9 @@ The rest is each spike's own work, written on its section: ~~X2 measures the map
 before comparing with it~~ (done: 16,555 bytes where F39 measured 13,493,
 [X2](placement-simulation.md#todays-tablet-frame-again)); ~~X6 issues its own clone call~~ (done,
 on the blocking thread, [X6](device-store-ssd.md#the-harness)); X9
-gives a core up on titan; ~~X10 drives its cold commit itself~~ (done, [X10](stripe-row-costs.md#the-harness)); ~~X11 adds tokio and a TLS stack to the spike's dependencies~~ (done: edges to tokio, rustls and rcgen and no crate, the TLS the product's own, [X11](streamed-bodies.md#the-harness)); X1 saves
-its schedules in a directory of their own.
+gives a core up on titan; ~~X10 drives its cold commit itself~~ (done, [X10](stripe-row-costs.md#the-harness)); ~~X11 adds tokio and a TLS stack to the spike's dependencies~~ (done: edges to tokio, rustls and rcgen and no crate, the TLS the product's own, [X11](streamed-bodies.md#the-harness)); ~~X1 saves
+its schedules in a directory of their own~~ (done: `shoal-model/schedules/stripe/`, which the
+tablet model's loader never reads, [X1](stripe-model.md#the-schedules)).
 
 ## Exploratory work that is not a spike
 
@@ -845,7 +873,9 @@ its schedules in a directory of their own.
 - **Fitting the lab**: disks, and XFS. Not yet done, and filed nowhere else but
   [S1](prerequisites.md#what-the-lab-needs-fitted).
 - **Agreeing the contract**. P7 to P19 are a draft. They are agreed, or changed, when X1
-  reports, at the gate before [M11](milestones.md#before-m11-the-object-contract).
+  reports, at the gate before [M11](milestones.md#before-m11-the-object-contract). X1 reported
+  on 2026-10-06 and changed four of them, P8, P11, P12 and P13, each struck through and kept
+  beside its replacement ([the record](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); the gate agrees them.
 
 ## What has to be on the record before the milestones are real
 
@@ -855,9 +885,9 @@ its evidence and with what it did not settle:
 
 | Decided | From |
 | --- | --- |
-| The write protocol: Q14, Q15, Q16 and Q18, and the contract agreed | X1; X3 and X8 for cost; ✅ X14 for the alternative Q14 is measured against, Ceph's write as `v20.2.0` has it ([the record](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) |
-| Placement: Q19 | ✅ X2 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)); how a commit checks a generation and its positions is X1's |
-| The code, the crate and the geometry: Q20. The checksum: Q21 | ✅ X4 for the code and the crate ([Q20, in part](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); ✅ X5 for the checksum ([Q21, in part](contract.md#q21-in-part-the-checksum-2026-10-03)); ~~X14,~~ ✅ X14, which took nothing of the geometry from Ceph; the geometry, and the granule and chunk digest Q21 leaves |
+| The write protocol: Q14, Q15, Q16 and Q18, and the contract agreed | ✅ X1 for safety, Q15, Q16 and Q18 ([the record](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); X3 and X8 for cost; ✅ X14 for the alternative Q14 is measured against, Ceph's write as `v20.2.0` has it ([the record](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) |
+| Placement: Q19 | ✅ X2 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)); how a commit checks a generation and its positions ~~is X1's~~ ✅ X1 |
+| The code, the crate and the geometry: Q20. The checksum: Q21 | ✅ X4 for the code and the crate ([Q20, in part](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); ✅ X5 for the checksum ([Q21, in part](contract.md#q21-in-part-the-checksum-2026-10-03)); ~~X14,~~ ✅ X14, which took nothing of the geometry from Ceph; the geometry, and the granule ~~and chunk digest~~ Q21 leaves; the chunk digest ✅ X1, which keeps none ([X1](stripe-model.md#the-chunk-digest)) |
 | The device store: Q22, and Q23 for the rotational gate | ✅ X6 for SSDs ([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)); X7 for rotational disks |
 | Where object work runs: Q24 | X9 |
 | Stripe size and the inline threshold: Q25. Small writes: Q27 | ✅ X10 for Q25 ([Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04)); X8 for Q27's other half |

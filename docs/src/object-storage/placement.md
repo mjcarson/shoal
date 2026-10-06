@@ -254,8 +254,11 @@ and leave its chunks where no reader would look.
   positions beside it ([positions](#positions)). Its chunks are on the slices the function
   gives at that generation, each at the position the group records.
 - **A commit names the generation it was staged under** and is refused unless that is the
-  placement group's. This is the third condition of
-  [P8](contract.md#the-contract).
+  placement group's. This is the ~~third~~ second condition of
+  [P8](contract.md#the-contract), beside the sequence, and both are equality on a field of the
+  row ([X1](stripe-model.md#the-generation-and-positions-q19)). The positions need no condition
+  of their own: a switch records them in the commit that moves the generation, so a write that
+  names its generation has named them.
 - **A move changes the generation by a commit in that group**, after the chunks are where
   the new generation says, and the same commit records the positions. While a move is in flight the group holds both, a write stages on
   both sets of slices, and a commit names both ([S10](recovery.md#moves)).

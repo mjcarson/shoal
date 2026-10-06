@@ -32,7 +32,7 @@ weakening a clause of [the contract](contract.md#the-contract).
 
 | Gate | In a line | Closed before it | Lands first |
 | --- | --- | --- | --- |
-| Before M11 | The contract agreed | Q14, Q15, Q16, Q18, Q19 (in part ✅ [X2](placement-simulation.md)) | — |
+| Before M11 | The contract agreed | Q14 (safety ✅ [X1](stripe-model.md)), Q15 (✅ X1), Q16 (✅ X1), Q18 (✅ X1), Q19 (✅ [X2](placement-simulation.md), the commit ✅ X1) | — |
 | M11 | The model, the fixture's faults, the driver's kinds | Q30, ~~in part~~ ([recorded](contract.md#decision-record), ✅ with X13) | ~~Device faults in the fixture~~ (✅ [F70](../features/storage-faults.md)); ~~operation kinds and byte counters in the driver~~ (✅ [F69](../features/driver-operation-kinds.md)) |
 | M12 | Buckets in the schema and the tables they generate | Q25 (in part ✅ [X10](stripe-row-costs.md)) | ~~The conditional write~~ (✅ [F68](../features/conditional-writes.md)); ~~items 198 and 202~~ (✅ [Resolved #92, #198](../appendix/resolved/composite-partition-key.md), [Resolved #202](../appendix/resolved/append-batch-bytes.md)) |
 | M13 | The wire, pool policy, inline objects, the baseline | Q21 (the checksum ✅ [X5](checksums.md)), Q26 (in part ✅ [X11](streamed-bodies.md)), the rest of Q30 (✅ [X13](benchmark-shape.md)) | ~~More than one frame for one query~~ (✅ [F73](../features/bodies-across-frames.md)) |
@@ -53,15 +53,17 @@ weakening a clause of [the contract](contract.md#the-contract).
 numbered property each, beside the schedule that violates it and the test that owns it, and
 when five questions are decided with evidence:
 
-- [Q14](contract.md#questions-to-answer), what orders a stripe's writes;
-- Q15, who stages;
-- Q16, the acknowledgement rule;
-- Q18, size and truncate across tablets;
+- [Q14](contract.md#questions-to-answer), what orders a stripe's writes: ✅ for safety by
+  [X1](stripe-model.md) ([recorded](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)), for cost X3's and X8's;
+- Q15, who stages: ✅ X1;
+- Q16, the acknowledgement rule: ✅ X1;
+- Q18, size and truncate across tablets: ✅ X1;
 - Q19, placement: ✅ in part by [X2](placement-simulation.md)
-  ([recorded](contract.md#q19-in-part-placement-2026-10-03)), and what is left, how a commit
-  checks a generation and the positions beside it, is X1's.
+  ([recorded](contract.md#q19-in-part-placement-2026-10-03)), and ~~what is left, how a commit
+  checks a generation and the positions beside it, is X1's~~ the rest, how a commit checks a
+  generation and the positions beside it, ✅ by X1.
 
-The evidence is [X1](spikes.md#x1-the-stripe-protocol-as-a-model) for safety,
+The evidence is ✅ [X1](stripe-model.md) for safety,
 ✅ [X2](placement-simulation.md) for placement, and
 [X3](spikes.md#x3-bytes-through-the-tablet-groups),
 [X8](spikes.md#x8-one-small-write-three-ways) and
@@ -76,7 +78,9 @@ appointment of a primary an edit to the pool map, and it cannot pass on a latenc
 alone: a faster direction that X1 has not checked is not a candidate.
 
 If X1 finds a violation that the safe policy cannot be repaired for, the gate does not pass,
-[S7](write-path.md)'s preferred direction changes, and everything below is redrawn.
+[S7](write-path.md)'s preferred direction changes, and everything below is redrawn. ✅ It found
+none: every violation it found was repaired by a local rule, recorded with the rule it replaced,
+and the direction stands ([the record](stripe-model.md#recommendation)).
 
 ### M11. Step 0: the harness and the facts
 
@@ -94,7 +98,8 @@ kinds beyond read and insert, and byte counters, in `shoal-loadgen`.~~ ✅ lande
 
 **Delivers.** The stripe model in `shoal-model` as a test, with every schedule of
 [S7](write-path.md#the-schedules-that-shaped-it) saved and an unsafe setting for each rule
-the design depends on. Faults for a directory a test names, each tested against itself. A
+the design depends on: ✅ built ahead of the gate as [X1](stripe-model.md), with
+`object_model_preserves_acknowledged_bytes` and `every_unsafe_policy_has_a_saved_schedule`. Faults for a directory a test names, each tested against itself. A
 byte ledger that judges ranges and shares no code with what it judges. A driver whose
 operation kinds come from the schema, and whose windows count bytes both ways.
 `acceptance_tables.rs` extended to read this part and to know M11 to M21.
@@ -156,7 +161,8 @@ checksum ([X5](spikes.md#x5-checksums)): a frame that carries a unit's checksum 
 the wire before any slice stores one, so the dependency is chosen ~~here~~ before this gate.
 ✅ It is: CRC-64/NVME through `crc-fast`, with a combine of Shoal's own
 ([X5's record](checksums.md), [S18](contract.md#q21-in-part-the-checksum-2026-10-03)). The rest
-of Q21, the granule and the chunk digest, goes with Q20's geometry and X1. The rest of Q30, the
+of Q21, the granule ~~and the chunk digest~~, goes with Q20's geometry ~~and X1~~; the chunk digest
+✅ is not kept ([X1](stripe-model.md#the-chunk-digest)). The rest of Q30, the
 object dataset and how fast one core makes seeded bytes, since this gate's object arms need both
 ([X13](spikes.md#x13-the-benchmarks-shape)). ✅ Recorded by X13 on 2026-10-05
 ([Q30](contract.md#q30-the-object-dataset-and-seeded-bytes-2026-10-05)): a stream makes its own
@@ -470,7 +476,7 @@ The reason this page is provisional, spike by spike.
 
 | Spike | If it finds | Then |
 | --- | --- | --- |
-| X1 | A violation the safe policy cannot be repaired for | Nothing after the first gate stands |
+| ~~X1~~ | ~~A violation the safe policy cannot be repaired for~~ None: it found ten rules the pages stated broke a clause, each repaired by a local rule ([X1](stripe-model.md)) | ~~Nothing after the first gate stands~~ The gates stand. M15 builds the repaired rules: tags a try, the row's tombstones, the truncate's fence, a holder's confirmation for an untouched chunk, a previous state kept, and rows read at `Quorum` |
 | ~~X2~~ | ~~The rule balances the lab's shape badly~~ It does not: 3.7% over at one placement group a tablet, 0.9% at four ([X2](placement-simulation.md)). It found instead that no function keeps positions, that a replacement needs a seat, and that mixed sizes need fitted weights | ~~M14 carries exceptions from the start, and the planner's part of M16 comes forward~~ M14's pool map carries seats, placement weights and exceptions, and M16's switch records positions |
 | X3, X8 | Rows within reach of the devices' own rate for a replicated pool | Replicated SSD pools stay rows. M15 to M17 are built for erasure coding and rotational disks first |
 | ~~X4~~ | ~~No candidate has an update form~~ Three have one, the chosen crate in its public API ([X4](erasure-coding-crates.md)) | ~~M18 ends at its second step~~ M18 has all three steps |

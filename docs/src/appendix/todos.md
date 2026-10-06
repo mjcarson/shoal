@@ -92,7 +92,10 @@ Three pages of that part are lists of work rather than design, and they are wher
   device takes them ([its record](../object-storage/benchmark-shape.md)). Ceph and S3 were read at
   the source by X14, with a Ceph on the lab beside the reading. It corrected three pages that
   leaned on recalled Ceph and recorded what the metadata leaves room for a later listing and
-  gateway ([its record](../object-storage/ceph-and-s3-sources.md)).
+  gateway ([its record](../object-storage/ceph-and-s3-sources.md)). The write protocol was
+  modelled by X1, which found S7's direction safe once ten rules the pages stated were repaired;
+  its model and schedules are M11's acceptance tests already
+  ([its record](../object-storage/stripe-model.md)).
 - [Milestones](../object-storage/milestones.md) is M11 to M21, provisional until the spikes
   report.
 
@@ -255,6 +258,37 @@ bytes a driver makes, and built none of it into the driver. M13 builds what it c
   would reach. The capture's `driver_cpu_pct` sums the process.
 - **A folder scanned with its SHA-256 beside the reads, several files at once.** On one thread the
   hash cost a cold scan a third, and a file at a time a small file's scan half.
+
+### What X1 left for M15
+
+[X1](../object-storage/stripe-model.md) settled the stripe write's rules in a model and built none
+of them into the engine. M15 builds them, and the model's schedules are what each is held to:
+
+- **The commit's condition**: equality on the row's sequence and the placement group's generation,
+  F68's `if_matches` on two filter fields; the stager declines to propose on a row stamped or fenced
+  past the epoch it read.
+- **A tag a try**, with the row group's retry table answering a retry whose first try committed.
+- **An untouched holder's confirmation** in the write's round, counted toward `k + f` in place of
+  the row's word.
+- **The holder's rules**: a partial stage only over a label it can make, every committed record a
+  named label stands on kept, the staged copy kept until its apply is synced whatever excludes it,
+  one position a stripe, and a chunk's previous state kept until its next apply.
+- **The truncate's fence** on the stripe its cut falls inside, the `Advance` that moves the epoch
+  past a fence a dead truncate left, zeros for the units a floor hides, and tombstones for
+  reclaimed rows.
+- **The reader's rows at `Quorum` after its entry**, and its entry read again for a row stamped
+  past it.
+
+And three things it did not settle, each a design to write before M15 or M16 builds over it:
+
+- **A cheaper default read.** A row at `One` checked against a sequence the entry records for its
+  last extension would need no barrier; it was not modelled.
+- **What keeping a previous state costs a partial write in place**: a copy of the range it
+  overwrites, which [S6](../object-storage/device-store.md) has not priced.
+- **A move under continuous writes.** The model's move copies, then switches on condition nothing
+  committed meanwhile, and fails if something did. [S10](../object-storage/recovery.md#moves)'s
+  `Both` phase, staging on both generations, is what lets a move finish under writes, and it was
+  not modelled.
 
 ### Retiring `render` in favour of the explorer
 

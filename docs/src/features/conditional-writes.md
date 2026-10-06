@@ -188,6 +188,11 @@ identity is answered with the same refusal**, even after the row has come to mat
   settles whether the generated rows need more. For the commits X10 drove, equality on
   one field was all both rows needed: a stripe's sequence and an object row's version
   ([Q25, in part](../object-storage/contract.md#q25-in-part-the-metadata-rows-2026-10-04)).
+  [X1](../object-storage/stripe-model.md) found the whole protocol needs no more than equality
+  on two: the sequence and the placement group's generation. The truncate epoch a stripe's
+  commit must not fall behind is held in the row as a stamp and a fence, which change only
+  with the sequence, so a stager judges them on the row it read
+  ([the record](../object-storage/contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)).
 - **No SHQL.** SHQL is SELECT only, so a conditional write is a typed query only
   ([todos](../appendix/todos.md#conditional-writes-in-shql)).
 - **A fresh cluster refuses conditional writes until wire 7 is activated.** This is by design,

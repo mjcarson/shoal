@@ -651,7 +651,9 @@ score lowest are the set. One pass over the slices finds it.
 
 - **How a commit checks a generation, and now its positions.** That is X1's model
   ([S16](testing.md#the-model)). The model's row holds the placement group's generation; it now
-  also holds positions, and a move's commit is what changes both.
+  also holds positions, and a move's commit is what changes both. ✅ [X1](stripe-model.md#the-generation-and-positions-q19)
+  answered it: by equality on the generation, beside the sequence; the positions need no check
+  of their own, since the commit that moves them moves the generation.
 - **How a placement group's positions are written in a tablet group's state** and carried in its
   snapshot. That belongs to [S10](recovery.md#how-a-slice-learns-what-it-missed)'s record, at
   M14 and M16.

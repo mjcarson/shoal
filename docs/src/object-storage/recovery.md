@@ -72,7 +72,10 @@ because every commit said so.
    the holder what label it holds (a lost acknowledgement leaves a chunk that is current
    after all), copies or rebuilds the chunk if it is stale, and commits the chunk's label in
    the stripe's row, conditional on the row's sequence so that it never overwrites a newer
-   write. Its progress is committed as it goes, so a new leader resumes.
+   write, and on the generation and the label at its position, so that it never lands under
+   another map ([X1](stripe-model.md#the-generation-and-positions-q19)). A holder it cannot ask
+   is not rebuilt over: the rebuild stops and is tried again, since a chunk it could not ask
+   about may be current. Its progress is committed as it goes, so a new leader resumes.
 4. **The record is bounded.** Past the bound the position is marked as needing a backfill,
    and the record is dropped.
 
@@ -141,7 +144,11 @@ whose slice changed are copied. [X2](placement-simulation.md#positions) found no
 the map that could promise that; held as the group's state, it costs a permutation of at most
 eight bytes for a group that has moved. The copy is
 the rebuild above with a holder to copy from, and a move whose old holder is gone is a
-rebuild.
+rebuild. A position the row calls stale is not copied: the switch moves it and leaves it marked
+missed, for a rebuild to fill on its new slice. **A slice holds one position of a stripe**, and
+answers a stage, a read or a question for that position alone; a slice that two moves both
+chose would otherwise answer for a chunk it does not hold
+([X1](stripe-model.md#the-generation-and-positions-q19)).
 
 The planner decides which placement groups move and in what order, one move a device at a
 time, by the bytes each holds and the space each device has, as it plans replica sets today
@@ -154,9 +161,9 @@ Bytes that are no longer wanted:
 
 | What | The committed fact that allows it |
 | --- | --- |
-| A staged write that lost | The stripe's row names another tag at a higher sequence |
+| A staged write that lost | The stripe's row names another tag at a higher sequence, and no label the row names stands on it. A write that committed and is not applied yet is beneath every later change to part of its chunk, and the row's moving past it is no fact against it ([X1](stripe-model.md#what-the-search-found-and-the-repairs), P17) |
 | The chunks of a replaced or deleted object, or of a put that was abandoned | The consumer names the owner id as retired, or names it nowhere: for a bucket, the path's `ObjectMeta` entry |
-| The stripes past a truncate | The owner's floor covers them: for a bucket, the entry's |
+| The stripes past a truncate | The owner's floor covers them: for a bucket, the entry's. The row is left a tombstone a sequence past it, never deleted ([S3](objects.md#size-holes-and-truncate)) |
 | The chunks left behind by a move | The group's generation has moved past the one they sit under |
 | A chunk nothing explains | The same facts, asked for by a light scrub ([S11](scrub.md)) |
 
@@ -248,6 +255,7 @@ The generation is the placement group's, and one commit moves it.
 - A placement group's generation moves only after every chunk that changes place is current
   on its new slice, and its positions move with it, in the same commit.
 - A holder discards only on a committed fact, and absence is established behind a barrier.
+- A slice holds one position of a stripe, and answers only for it.
 - A node that is down is not rebuilt around until its grace expires; a device that failed
   on a live node is.
 - The reserve is checked where the bytes land.

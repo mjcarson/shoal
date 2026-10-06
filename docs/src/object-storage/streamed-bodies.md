@@ -470,6 +470,8 @@ A write stream accepted by executor A for executor B's file, over the direct str
 ## What X11 does not settle
 
 - **The object lane's frames** between nodes: who sends a stage is Q14's and Q15's, and X1's.
+  ✅ [X1](stripe-model.md) answered the second: the node the client's bytes arrived at, so stages
+  leave every node and the lane carries them from any one.
 - **The window as a setting and the memory budget's size**: M15, with S13, from this page's figures.
 - **Ranges asked ahead on a read and their spread over connections**: M15's, against T3.
 - **Whether kTLS's rounds disagree for a reason**: a cell ran at half its rate in one round and full

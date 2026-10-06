@@ -101,6 +101,8 @@ under `shoal-model/schedules/` each replay to the violation they record
 `strong_read_from_cached_leader` - each the schedule that violates one clause of
 [P1–P6](protocol.md#the-contract). `cargo run -p shoal-model --example regenerate_schedules`
 regenerates them after a model change; the tests only load. The model's oracle reads at `One`.
+A second model, the object store's stripe protocol, lives beside it in `src/stripe/` with its
+schedules under `schedules/stripe/` ([X1](../object-storage/stripe-model.md)).
 
 ### Faults
 

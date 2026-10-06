@@ -24,7 +24,11 @@ came before any node could join another.
   serde alone and names no shoal crate, which is what lets it run while the engine does not
   build ([C11](../distributed/testing.md#the-protocol-model)).
 - **It has no seam for a second protocol.** Its world drives its Raft node directly. A new
-  protocol brings its own events, state machine, checker and oracle.
+  protocol brings its own events, state machine, checker and oracle. The stripe model brought
+  exactly that: since [X1](stripe-model.md)
+  (2026-10-06) it lives in `shoal-model/src/stripe/` with its own world, events, checker, oracle,
+  schedules and minimizer, sharing the seeded generator, the operation and node identifiers and
+  the `Property` numbers, with twenty-six schedules saved under `schedules/stripe/`.
 - **The fixture** runs real servers as children of one test binary, each allocated whole
   cores, with every link between them through a proxy that can be cut, delayed, throttled or
   blackholed (`shoal/tests/cluster/link.rs:102-144`), and children that can be paused,
@@ -110,10 +114,36 @@ The last four, and schedules 15 and 16, were added on 2026-10-03, when each of S
 schedules was looked for in this table and five were not there, and two settings had no
 schedule. Every safety schedule of S7 now has a setting, and every setting a schedule.
 
+Since [X1](stripe-model.md) each is one knob of `StripePolicy` (`shoal-model/src/stripe/policy.rs`),
+named for what it does, and its schedule is saved as `schedules/stripe/sNN_*.json` with the
+violation it records. Each fires a clause this table names for it.
+
+**Ten rules the pages stated did not hold.** X1's search broke each under the safe policy,
+and each was repaired by a local rule: none needs a primary, a vote among holders, or undo. Each
+is a knob too, whose first variant is the repair and whose second is the rule as written, saved
+with the schedule that breaks it, so a repair reverted is a test that fails:
+
+| The rule as written | The clause it broke | The repair | Page |
+| --- | --- | --- | --- |
+| An untouched chunk counted on the row's word while its holder is believed up | P11 | Counted only on its holder's confirmation in the write's round | [S7](write-path.md#the-acknowledgement-rule) |
+| The same, while its holder is down | P11 | The same | S7 |
+| A stamp that moves to whatever its writer read | P13 | A stager does not commit on a row stamped past its epoch | [S3](objects.md#size-holes-and-truncate) |
+| A write leaves the units a floor hides as they were | P13 | It writes them as zeros | S3 |
+| A reclaimed row deleted | P17 | Left a tombstone a sequence past it | S3 |
+| A reader hides by the entry it read | P12 | It reads the entry again when a row is stamped past it | [S9](read-path.md#which-state-a-read-returns) |
+| A default read takes its row at `One` | P12 | At `Quorum`, after the entry | S9 |
+| A tag from the request identity alone | P9 | A tag a try; the retry table recognises a retry | [S7](write-path.md#labels-not-numbers) |
+| A truncate commits to the entry alone | P12 | It fences the stripe its cut falls inside first | S3 |
+| A staged write discarded once the row moves past its base and names another label | P17 | Kept while a label the row names stands on it, until the chunk reaches that label | [S10](recovery.md#reclamation) |
+
 **Q16's open point is a setting, run both ways.** Whether a chunk the write did not touch, on a
 slice that is down, counts toward `k + f`. The safe policy is run with each answer. If counting
 it lets the checker fire for P11, the schedule that shows it is saved and the rule is settled as
-not counting it; if neither fires, Q16 is answered by cost.
+not counting it; if neither fires, Q16 is answered by cost. **Settled by X1, stricter than it
+was asked**: both answers fired. Not counting it while its holder is down still counts it on the
+row's word while its holder is believed up, and a disk can fail without a word. An untouched chunk
+counts only when its holder confirms, in the write's round, that it holds the label, a third
+answer ([X1](stripe-model.md#q16-both-ways)).
 
 **A progress check beside the oracle.** The oracle checks safety, and two of
 [X1](spikes.md#x1-the-stripe-protocol-as-a-model)'s expected results are about progress: a
@@ -134,7 +164,10 @@ setting is held to the progress check alone:
 
 Whether a holder keeps a chunk's previous state, and whether the leader reserves a stripe for
 one stager, are settings of the safe policy that X1 runs both ways, and the progress check is
-what tells the two apart.
+what tells the two apart. **X1 kept the previous state and left the reservation out**: without
+the first, readers failed by name or ran past their bound as writers were added; without the
+second, no stripe's stagers starved each other
+([X1](stripe-model.md#progress-the-previous-state-and-the-reservation)).
 
 **The oracle** is a sequential model of a stripe's bytes. An acknowledged write is in every
 strong read that begins after it. A read returns a committed state, never a mixture. A write
@@ -148,7 +181,8 @@ as the existing checker computes what is committed.
 It is [X1](spikes.md#x1-the-stripe-protocol-as-a-model), and it is the one spike whose
 output is kept: the model and its schedules become M11's first acceptance test,
 `object_model_preserves_acknowledged_bytes`, which [S18](contract.md#acceptance-tests) owns
-as C13 owns the tablet model's.
+as C13 owns the tablet model's. ✅ X1 reported on 2026-10-06 ([its record](stripe-model.md)),
+and both of this part's model tests exist, in `shoal-model/tests/stripe_model.rs`.
 
 ### The fixture
 
@@ -261,7 +295,8 @@ was on 2026-10-03 ([What a spike needs first](spikes.md#what-a-spike-needs-first
 ## How it would be measured
 
 The model is judged by what it catches: each row of the unsafe table above replays to its
-violation, and a generated run of the safe policy finds none. The fixture's faults are
+violation, and a generated run of the safe policy finds none. X1's search ran each, at every
+layout ([the record](stripe-model.md#what-was-run)). The fixture's faults are
 judged by self-tests that show each does what its name says.
 
 ## Acceptance tests

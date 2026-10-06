@@ -17,7 +17,12 @@ use crate::ids::{Attempt, Key, LogIndex, NodeId, TabletId, Term};
 use crate::raft::{Node, Role, Status};
 use crate::world::World;
 
-/// The six clauses of the contract
+/// The clauses of the contract a model checks
+///
+/// P1-P6 are the tablet contract (`docs/src/distributed/protocol.md`), which the tablet model
+/// checks. P7-P17 are the object contract's (`docs/src/object-storage/contract.md`), which the
+/// stripe model in [`crate::stripe`] checks; P14 (path identity) is a matter of keys and not of
+/// interleavings, and no model checks it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Property {
     /// The failure model: correctness under crashes, loss, duplication, reordering and pauses
@@ -32,6 +37,26 @@ pub enum Property {
     P5,
     /// No cross-tablet transaction promise
     P6,
+    /// The object failure model: devices fail alone, fill, tear and are swapped for empty ones
+    P7,
+    /// One authority: only the stripe row's conditional commit makes bytes current
+    P8,
+    /// Stripe-atomic writes: uncommitted bytes never replace committed ones on any holder
+    P9,
+    /// No mixed labels: a reader takes only chunks whose labels are one committed row state
+    P10,
+    /// Durable at acknowledgement: `k + f` current chunks in distinct failure domains
+    P11,
+    /// Read levels: a default read is a committed state, a strong one sees every acknowledged write
+    P12,
+    /// Size and truncate: cut bytes never return, and a later write is never hidden
+    P13,
+    /// Integrity: no bytes that fail their checksum, and no checksum laundered over old bytes
+    P15,
+    /// Reclamation: a holder discards only on a committed fact that cannot be undone
+    P16,
+    /// The pool map says where, never what is current
+    P17,
     /// A strong read observes every write acknowledged before it began (C6)
     Linearizable,
 }

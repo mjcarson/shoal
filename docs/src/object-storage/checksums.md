@@ -543,7 +543,8 @@ wider of the two the lab can run fast, at no cost over CRC-32C.
   [S15](performance.md)'s read arms.
 - **Whether the row keeps a digest of each stripe chunk.** X5 says it costs about 1.2 µs a chunk
   to make and eight bytes to keep. Whether a lost whole write is caught that way or by the
-  labels is [X1](spikes.md#x1-the-stripe-protocol-as-a-model)'s, and what a row can carry is
+  labels is [X1](spikes.md#x1-the-stripe-protocol-as-a-model)'s, ✅ answered: by the labels, and the
+  row keeps no digest ([X1](stripe-model.md#the-chunk-digest)). What a row can carry is
   [X10](spikes.md#x10-what-a-stripe-row-costs)'s. X10 measured it: six digests cost a stripe row
   64 bytes archived, 61 on disk and 65 in the WAL, and nothing in any index, since an index entry
   is the key's ([X10's record](stripe-row-costs.md#2-bytes-a-row)).

@@ -156,11 +156,38 @@ makes that safe.
   hole. So a writer that read the size before a truncate and commits a stripe past the cut
   after it has written a stripe no reader will ever be shown, even if the object is later
   extended over it: [P13](contract.md#the-contract).
+- **A stamp never moves backwards.** A stager that finds its stripe's row stamped past the
+  epoch it read does not commit; it reads the entry again. The stamp alone, as this page first
+  had it, let a writer that read the epoch before a truncate commit after a write made since,
+  and stamp the stripe back below the floor: the newer write,
+  acknowledged after the truncate, was then hidden by it
+  ([X1](stripe-model.md#truncate-q18), P13).
+- **A cut inside a stripe fences it.** A stripe a floor falls inside has units on both sides of
+  the cut, so a write to it is cut in part. The truncate first commits a fence to that stripe's
+  row, at the epoch it is about to commit, which moves the row's sequence; then it commits the
+  entry only at the epoch and the size it read, and reads and fences again if either moved. The
+  size decides where the floor falls, and an extension moves the size and not the epoch: a
+  truncate that read a size whose cut fell between stripes fenced nothing, an extension then
+  moved the cut inside one, and the commit landed there unfenced. A writer that
+  read an earlier epoch finds the fence and does not commit. Without it, such a writer committed
+  after the truncate, and a reader that had seen the truncate without the write was later shown
+  the write's units below the cut but not those above it: a state no order of the two gives
+  ([X1](stripe-model.md#truncate-q18), P12). A truncate that dies after fencing leaves the fence;
+  the next writer moves the epoch past it in the entry, changing nothing else.
+- **A write into a stripe a floor hides writes the hidden units as zeros.** Its stamp moves the
+  stripe past the floor, so every unit of it is shown again, the ones it did not write
+  included. Units the truncate cut would return ([X1](stripe-model.md#truncate-q18), P13).
 - **The writer's read of the epoch is a strong read.** A stale one would stamp a new write
   with an old epoch and hide an acknowledged write behind a floor.
-- **A floor is removed** once reclamation has deleted the stripes it hides. The list stays
-  short because floors are removed as fast as stripes are reclaimed, and a truncate that
-  would push it past its bound waits.
+- **A floor is removed** once reclamation has ~~deleted~~ reclaimed the stripes it hides. The
+  list stays short because floors are removed as fast as stripes are reclaimed, and a truncate
+  that would push it past its bound waits.
+- **A reclaimed stripe's row is a tombstone, never deleted.** It is committed a sequence past
+  the row it replaces, stamped with the floor's epoch, and every chunk marked missed; a later
+  floor reclaims it again. Deleting the row set its sequence back to a stripe's with no row,
+  and the next write's labels then repeated sequences its holders had already passed: a
+  holder never applies a label at or below its chunk's, so the row called current a chunk
+  nobody held ([X1](stripe-model.md#what-the-search-found-and-the-repairs), P17).
 
 ~~RADOS carries a truncate sequence on every operation for the same reason. That is recalled
 and was not read at source; [X14](spikes.md#x14-ceph-and-s3-at-the-source) reads it.~~ RADOS
@@ -281,6 +308,8 @@ makes metadata linear in size for the workload that never overwrites.
 - A stripe is committed before the size that reveals it; a truncate's epoch is committed
   before any stripe it hides is reclaimed.
 - A stripe stamped below a floor that covers it is a hole.
+- A stripe's stamp and its sequence never move backwards: a reclaimed row is a tombstone.
+- A truncate whose cut falls inside a stripe fences that stripe's row before it commits.
 - An object's geometry never changes.
 - A time in a row is for people. Nothing is decided by it.
 

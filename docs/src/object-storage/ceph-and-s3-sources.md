@@ -931,7 +931,9 @@ records:
 4. **Q14, in part: the alternative B is measured against is Ceph as read.** One durable round of
    sub-writes to every shard written, undo on each of them, and a read round first for a partial
    write. Since Tentacle a partial write writes only the touched data chunk, chunk 0 and the
-   parity. X1, X3 and X8 still decide Q14.
+   parity. X1, X3 and X8 still decide Q14. ✅ X1 has since recorded its safety
+   ([X1](stripe-model.md)): B holds under the model with redo alone, so undo is not what it
+   needs.
 
 ## What X14 does not settle
 

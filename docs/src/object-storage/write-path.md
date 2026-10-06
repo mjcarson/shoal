@@ -102,11 +102,11 @@ sequenceDiagram
     participant G as the row's tablet group
     C->>N: write_at(path, offset, bytes), under an identity
     N->>G: read the object's entry (strong), the stripe's row,<br/>the placement group's generation
-    Note over N: label = (sequence + 1, tag of this identity)<br/>new bytes for each stripe chunk the write touches
+    Note over N: label = (sequence + 1, tag of this identity and try)<br/>new bytes for each stripe chunk the write touches
     N->>H: stage(chunk, label, the label it expects, bytes)
     H-->>N: staged, after fdatasync
     Note over N: are k + f chunks current or staged?
-    N->>G: commit, if sequence, epoch and generation are as read
+    N->>G: commit, if sequence and generation are as read
     Note over G: applied in committed order,<br/>the condition judged there
     G-->>N: applied, or refused and why
     N-->>C: acknowledged
@@ -119,26 +119,42 @@ sequenceDiagram
    the write touches and its placement group's generation ([S5](placement.md#generations)).
    The stripe row is read at `Quorum` through its group's leader, so the leader's copy is
    resident when the commit arrives and its apply, which the client waits on, never waits for
-   the disk ([X10](stripe-row-costs.md#5-the-supplement-the-read-under-load)).
+   the disk ([X10](stripe-row-costs.md#5-the-supplement-the-read-under-load)). A row stamped or
+   fenced past the epoch it read means a truncate has committed since, or is committing: it
+   reads the entry again, and moves the epoch past a fence a truncate left and never committed
+   ([X1](stripe-model.md#truncate-q18)).
 2. **Stage.** It computes the new bytes of every stripe chunk the write touches and sends each
    to the slice that holds it, under the write's label. A holder stages durably and answers
-   ([S6](device-store.md#staging-two-cases)).
+   ([S6](device-store.md#staging-two-cases)). A write into a stripe a truncate's floor hides
+   writes the units the floor hides as zeros, in the same write
+   ([X1](stripe-model.md#truncate-q18)). It asks the holder of each chunk it counts and did not
+   touch to confirm that it holds the label the row names
+   ([below](#the-acknowledgement-rule)).
 3. **Commit.** With enough chunks staged ([below](#the-acknowledgement-rule)) it proposes
    one command to the row's group: move the sequence, set the labels of the touched chunks,
-   record which holders did not stage, **if** the row's sequence, the object's truncate
-   epoch and the placement group's generation are the ones this write read.
+   record which holders did not stage, stamp the truncate epoch the write read, **if**
+   ~~the row's sequence, the object's truncate epoch and the placement group's generation are
+   the ones this write read~~ the row's sequence and the placement group's generation are the
+   ones this write read. The epoch is the entry's, in another tablet, and no apply can read it.
+   What the row holds of it, its stamp and a truncate's fence, moves only with the sequence, so
+   the stager judges them on the row it read and the group compares two fields by equality,
+   which is what [F68](../features/conditional-writes.md) offers
+   ([X1](stripe-model.md#the-generation-and-positions-q19)).
 4. **Acknowledge.** The client is answered when that command has applied on a durable
    majority, as any table write is.
 5. **Apply.** Holders are told and fold the staged bytes into their chunks. A holder that
    is not told learns from the next read, or asks the row.
 6. **If refused**, the row has moved under another write. This write's staged bytes are now
    excluded by a committed fact, and holders drop them when they learn of it. The
-   coordinator reads again and tries again, or fails by name.
+   coordinator reads again and tries again, under a new tag
+   ([labels](#labels-not-numbers)), or fails by name.
 7. **If the coordinator dies** between staging and proposing, the staged bytes are
    undecided: the row never moved, so nothing excludes them. The group's leader, prompted by
    a timer, commits a no-op that moves the sequence without changing a label. That commit is
    the fact that lets holders discard; the timer only asked
-   ([P16](contract.md#the-contract)).
+   ([P16](contract.md#the-contract)). On a stripe with no row the no-op makes one, at its
+   object's labels: a first write staged against no row is excluded only by a row that exists
+   ([X1](stripe-model.md#what-the-search-found-and-the-repairs)).
 
 ### What breaks without the condition
 
@@ -159,9 +175,17 @@ the next sequence had committed would apply whichever it had staged, and the chu
 stripe would then hold two different writes under one number.
 
 So a chunk is labelled by the sequence **and a tag derived from the write's request
-identity**, the row keeps a label for each chunk, and a holder applies a staged write only
-when the row names that write's tag for its chunk. The loser of a race needs no abort: the
-committed row naming another tag is the fact that excludes it.
+identity** ~~,~~ **and its try**, the row keeps a label for each chunk, and a holder applies a
+staged write only when the row names that write's tag for its chunk. The loser of a race needs
+no abort: the committed row naming another tag is the fact that excludes it.
+
+~~A tag derived from the identity alone made a retry the same write.~~ X1 found that it made two
+writes one label: a retry against the same row, after a truncate had committed between its tries,
+staged other bytes than its first try had, under the same label, and a holder that held the
+first try's took it for the retry's
+([X1](stripe-model.md#what-the-search-found-and-the-repairs), P9). A tag a try is new, and the
+row's group says whether a write already committed, from the retry table every tablet group
+keeps ([C5](../distributed/replication.md#retry-identity)).
 
 ### Who stages
 
@@ -180,6 +204,11 @@ writers keep meeting on one stripe. For that the leader can grant an **advisory
 reservation** of a stripe: it orders who tries next and promises nothing, so losing it or
 ignoring it is slow and never unsafe.
 
+**X1 ran it both ways** ([the record](stripe-model.md#progress-the-previous-state-and-the-reservation)).
+Without a reservation no stripe's stagers starved each other within the progress bound at any
+layout. With one, about half as many stages were wasted, and a writer waited longer for its
+turn. It stays an optimization, never part of the protocol.
+
 ### The acknowledgement rule
 
 There is no single number of stages that is "enough". The rule is about what is true after
@@ -197,6 +226,15 @@ The third row is the one that is easy to get wrong. A 4+2 write that touches one
 touches three chunks. Acknowledged after one stage, it is held by one slice, and losing that
 slice's device loses an acknowledged write, though four chunks of the stripe are "current"
 by their old labels. Chunks already stale before the write count against the same budget.
+
+**A chunk the write did not touch counts only on its holder's word in the write's round**
+([Q16](contract.md#questions-to-answer)): a confirmation that it holds the label the row names.
+~~Whether an untouched chunk on a slice that is down counts is open.~~ X1 ran both ways of counting
+one on the row's word and both broke P11. Counted while its holder was believed up, it sat on a
+disk that had failed silently, which [P7](contract.md#the-contract) allows; counted while its node
+was down, the disk had been swapped meanwhile
+([X1](stripe-model.md#q16-both-ways)). The row says what should be there, never what a device
+still holds.
 
 A read, by contrast, needs no quorum: any `k` chunks the row calls current, each confirming
 its label ([S9](read-path.md)). The row arbitrates, so `W + R > N` has no part here.
@@ -232,10 +270,13 @@ A write over several stripes is several stripe writes, sent in parallel, each at
 whole not ([P19](contract.md#the-contract)). A reader in between can see some stripes new
 and some old. A crash leaves some done.
 
-What keeps that tolerable is identity: each stripe's tag is derived from the write's request
+What keeps that tolerable is identity: ~~each stripe's tag is derived from the write's request
 identity and the stripe's index, so the retry of a write restages the same bytes under the
-same tags. A stripe whose row already carries that tag answers as it did the first time, and
-the retry finishes the rest.
+same tags. A stripe whose row already carries that tag answers as it did the first time~~ each
+stripe's commit carries the write's request identity, and the row's group keeps it in its retry
+table. A stripe whose commit already applied answers the retry as it did the first try, and
+the retry finishes the rest, under tags of its own
+([labels](#labels-not-numbers)).
 
 ### Extending and appending
 
@@ -262,7 +303,9 @@ the size at which the two paths cross on each kind of device.
 ### The schedules that shaped it
 
 ~~Each is a schedule the model has to reject under the safe policy and reproduce under an
-unsafe one.~~ Each **safety** schedule is one the model has to reject under the safe policy and
+unsafe one.~~ **All sixteen are saved** since 2026-10-06, one file each under
+`shoal-model/schedules/stripe/`, beside ten more for the rules X1 found did not hold
+([the record](stripe-model.md#the-sixteen-schedules)). Each **safety** schedule is one the model has to reject under the safe policy and
 reproduce under the unsafe setting [S16](testing.md#the-model) names for it
 ([X1](spikes.md#x1-the-stripe-protocol-as-a-model)). A **progress** schedule breaks no clause:
 the safe policy has to finish it within S16's progress check, and an unsafe setting makes it
@@ -337,14 +380,23 @@ built to avoid.
 ## Invariants to uphold
 
 - A holder applies a staged write only when the row names its tag for that chunk, and
-  discards one only when a committed row state excludes it.
-- The commit is conditional on the row's sequence, the object's truncate epoch and the
-  placement group's generation, judged at apply.
-- A staged record holds new values, and staging the same write twice is staging it once.
+  discards one only when a committed row state excludes it and no label the row names stands
+  on it.
+- ~~The commit is conditional on the row's sequence, the object's truncate epoch and the
+  placement group's generation, judged at apply.~~ The commit is conditional on the row's
+  sequence and the placement group's generation, judged at apply; a stager that finds the row
+  stamped or fenced past the epoch it read does not propose.
+- A row's sequence and its stamp never move backwards.
+- A chunk the write did not touch counts toward `k + f` only on its holder's answer in the
+  write's round.
+- A write into a stripe a floor hides writes the hidden units as zeros.
+- A staged record holds new values, and staging the same write twice is staging it once, while
+  the holder can make its label ([X1](stripe-model.md#rules-the-model-made-precise)).
 - No acknowledgement precedes `k + f` current stripe chunks and a durable majority.
 - A partial write never makes a stale chunk current; only a write of the whole chunk does.
 - Nothing is decided by a timer. A timer may cause a commit.
-- A write's tags are a function of its request identity, so its retry is the same write.
+- ~~A write's tags are a function of its request identity, so its retry is the same write.~~ A
+  write's tag is new for each try, and the group's retry table makes a retry the same write.
 
 ## Prerequisites
 
@@ -355,8 +407,8 @@ and [S6](device-store.md). [S16](testing.md#the-model)'s model before any of it.
 
 ## How it would be measured
 
-- [X1](spikes.md#x1-the-stripe-protocol-as-a-model): every schedule above, saved, against
-  the contract.
+- ✅ [X1](stripe-model.md): every schedule above, saved, against the contract, and a generated
+  search of the safe policy at every layout.
 - [X3](spikes.md#x3-bytes-through-the-tablet-groups): candidate A as it is today, with wide
   rows standing in for stripes. Bytes a second, bytes written to the device for each byte
   stored, memory held, and a neighbouring table's tail.

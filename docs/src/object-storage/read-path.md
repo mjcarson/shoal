@@ -67,9 +67,18 @@ sequenceDiagram
 
 [P12](contract.md#the-contract), in the terms of this page:
 
-- **A default read** takes each row at `One`. It returns, for each stripe, a committed state
-  at or after the row it read. It may be stale by as much as a metadata replica lags, as a
-  default read of a table may.
+- **A default read** takes ~~each row at `One`~~ the entry at `One`, and then each stripe's
+  row at `Quorum`, after the entry. It returns, for each stripe, a committed state at or after
+  the row it read. It may be stale by as much as the entry's replica lags, as a default read of
+  a table may. A row at `One` could be older than the entry: an extension commits after the
+  write it extends over, so an entry showing the new size beside a row without the write is
+  no state the object was ever in ([X1](stripe-model.md#what-the-search-found-and-the-repairs),
+  P12). A cold row at `Quorum` cost 0.80 ms on a 970 EVO against 0.51 ms at `One`
+  ([X10](stripe-row-costs.md#3-the-cold-commit)).
+- **A reader hides by an entry at least as new as its row.** A row stamped past the epoch of
+  the entry the reader took means a truncate committed in between; the reader takes the entry
+  again before it hides anything by its floors. Hiding by the entry it had read showed bytes no
+  committed state holds ([X1](stripe-model.md#what-the-search-found-and-the-repairs), P12).
 - **A strong read** takes a barrier on the entry and on each stripe's row first. It returns
   a state at least as new as every write acknowledged before it began.
 - **A session token** from a write bounds a later read of the same stripe, as it bounds a
@@ -98,8 +107,12 @@ of it.**
 
 A stripe written continuously can make a reader try again more than once, since an apply in
 place replaces what the reader was about to ask for. The retries are bounded and the read
-then fails by name. Whether a holder should keep a chunk's previous state for a moment, so
+then fails by name. ~~Whether a holder should keep a chunk's previous state for a moment, so
 that a reader in flight can finish, is not designed and is noted under
+[What it costs](#what-it-costs).~~ **A holder keeps a chunk's previous state until its next
+apply**, and answers a reader whose label names it. X1 ran both ways: without it, readers began
+to fail by name or run past the progress bound as writers were added, and with it they did not
+([X1](stripe-model.md#progress-the-previous-state-and-the-reservation)). Its cost is under
 [What it costs](#what-it-costs).
 
 ### Degraded reads
@@ -157,10 +170,16 @@ tablets. [P6](../distributed/protocol.md#the-contract) already declines that for
 - **A lookup for every stripe read**, batched, and cheap when it misses.
 - **Two network crossings** for every byte read.
 - **A decode on a degraded read**, and `k` reads where a healthy one makes one.
-- **Retries under contention**, bounded, and a refusal past the bound. A reader of a stripe
+- **Retries under contention**, bounded, and a refusal past the bound. ~~A reader of a stripe
   that is being rewritten continuously can fail where a reader of a row would be served a
   stale row. That is a real difference from tables and it is deliberate for now: the
-  alternative is to keep two states of a chunk on a slice.
+  alternative is to keep two states of a chunk on a slice.~~ Since X1 a holder keeps a chunk's
+  previous state until its next apply, so a reader one write behind is served. That keeps two
+  states of a chunk on a slice: free where a whole chunk is replaced by a rename, whose old file
+  is kept until the next apply; for a partial write applied in place, a copy of the range it
+  overwrites, which [S6](device-store.md) has not priced.
+- **A row at `Quorum` for every stripe read**, a default one included, where a table's default
+  read is served at `One`.
 - **A unit read whole for a byte** ([S6](device-store.md#what-it-costs)).
 
 ## What it breaks
@@ -176,6 +195,9 @@ tablets. [P6](../distributed/protocol.md#the-contract) already declines that for
 - A reader asks a holder for a label and combines only chunks that answered with the labels
   one row state names.
 - A reader never accepts a chunk newer than its row. It moves the row forward.
+- A reader takes its rows after its entry, at `Quorum`, and hides by an entry at least as new
+  as the stamps of the rows it hides in.
+- A holder keeps a chunk's previous state until its next apply.
 - No unit that fails its checksum reaches a client or a decoder.
 - A holder serves staged bytes only for a label a reader names.
 - A hole is zeros, and reading one touches no slice.
