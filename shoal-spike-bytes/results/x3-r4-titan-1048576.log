@@ -1,0 +1,12 @@
+titan 1048576: settling the leaders
+titan 1048576: preloading 24576 rows
+titan 1048576: preload 111.8 MiB/s acknowledged, 107.0 sustained, settled in 10s, 0 retried, 0 failed
+titan 1048576: overwrite
+titan 1048576: overwrite 111.7 MiB/s, failures 0, paced p99 57.34 ms
+titan 1048576: mix
+titan 1048576: mix 214.6 MiB/s, failures 0, paced p99 121.79 ms
+titan 1048576: get
+titan 1048576: get 112.5 MiB/s, failures 0, paced p99 16.05 ms
+titan 1048576: put
+titan 1048576: put 105.3 MiB/s, failures 0, paced p99 163.33 ms
+titan 1048576: the paced stream alone

@@ -191,6 +191,9 @@ are rows by design (an object small enough to live inline, and whatever
 [Q27](contract.md#questions-to-answer) decides for small writes). A failing device stops no
 tablet group. What object work may cost a table's tail is a budget on
 [S15](performance.md), measured by [X9](spikes.md#x9-table-latency-beside-object-work).
+[X3](bytes-through-groups.md) measured what breaking this rule costs: object bytes as rows moved
+a small table's read p99 126 to 165 times over loopback, and wrote each byte about twice to reach
+a fifth to a quarter of a replicated pool's device.
 
 **The bytes are touched as few times as they can be**: checksummed once on the way in,
 verified once on the way out. [Row size and what it costs](../tables/row-size.md) counts about

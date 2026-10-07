@@ -1,0 +1,12 @@
+loopback 65536: settling the leaders
+loopback 65536: preloading 294912 rows
+loopback 65536: preload 276.0 MiB/s acknowledged, 243.0 sustained, settled in 9s, 0 retried, 0 failed
+loopback 65536: overwrite
+loopback 65536: overwrite 222.3 MiB/s, failures 0, paced p99 231.94 ms
+loopback 65536: mix
+loopback 65536: mix 469.9 MiB/s, failures 0, paced p99 140.41 ms
+loopback 65536: get
+loopback 65536: get 2932.6 MiB/s, failures 0, paced p99 62.91 ms
+loopback 65536: put
+loopback 65536: put 247.5 MiB/s, failures 0, paced p99 177.79 ms
+loopback 65536: the paced stream alone

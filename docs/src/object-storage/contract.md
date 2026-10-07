@@ -53,7 +53,7 @@ order and refused with a typed reason); anything across two tablets
 | --- | --- |
 | Objects are mutable in place | Taken 2026-10-02 ([overview](overview.md#decisions-taken-on-2026-10-02)) |
 | Metadata is in unsorted tables replicated by the tablet groups, never erasure coded | Taken: R10 and R11 |
-| The bytes of an object are not rows | Preferred, with two named exceptions: an inline object, and whatever [Q27](#questions-to-answer) decides for small writes. Candidate A of [S7](write-path.md#the-candidates) is the alternative and the baseline |
+| The bytes of an object are not rows | Preferred, with two named exceptions: an inline object, and whatever [Q27](#questions-to-answer) decides for small writes. Candidate A of [S7](write-path.md#the-candidates) is the alternative and the baseline. [X3](bytes-through-groups.md) measured A on 2026-10-07 and the preference stands: A writes a byte about twice, reaches a fifth to a quarter of a replicated pool's device, and slows every table on its nodes ([the record](#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)) |
 | A stripe's writes are ordered by the tablet group that owns its row | Preferred ([Q14](#questions-to-answer)). No second consensus protocol is introduced for objects |
 | A write is staged, then committed, then applied: redo, never undo | Preferred ([S7](write-path.md)) |
 | A placement group is a sub-range of one tablet | Preferred ([Q19](#questions-to-answer)), because it gives every placement group a log it already has. [X2](placement-simulation.md) simulated placement under it and leaned on it: the tablet group that is the log is also where a placement group's positions are kept |
@@ -463,8 +463,9 @@ source before it ran. The choice follows the user's instruction to complete X14 
 - **Versioning.**
 - **Q28's cadence and budgets**: [X12](spikes.md#x12-recovery-and-scrub-rates).
 - **The geometry**: Q20's rest.
-- **Q14 itself**: ~~X1,~~ X3 and X8. X1 has recorded its safety
-  ([below](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)).
+- **Q14 itself**: ~~X1,~~ ~~X3~~ and X8. X1 has recorded its safety
+  ([below](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)), and X3
+  what A costs ([below](#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)).
 
 #### Q16 and Q18, and Q14, Q15, Q19 in part: the stripe protocol, modelled (2026-10-06)
 
@@ -494,7 +495,8 @@ the schedule that breaks it. The choice follows the user's instruction to comple
 
 **Not settled.** These remain open:
 
-- **What any of it costs**: Q14's cost is X3's and X8's, the stager's X9's, a previous state kept
+- **What any of it costs**: Q14's cost is ~~X3's and~~ X8's, now that X3 has priced A
+  ([below](#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)), the stager's X9's, a previous state kept
   in place S6's, at M15.
 - **A cheaper default read**, a row at `One` checked against a sequence the entry records: not
   modelled.
@@ -535,6 +537,39 @@ the user's instruction to complete X7 and record it.
 - **A rotational pool's light scrub**: T4 fired on a disk. A header walk of a million chunks
   took 217 s on XFS, minutes for a whole disk. Whether it needs an index is M17's.
 - **The geometry**, Q20 and Q25, now with a floor of 4 MiB under a rotational pool's chunk.
+
+#### Q14, in part: the cost of stripes as rows (2026-10-07)
+
+Recorded 2026-10-07 by [X3](bytes-through-groups.md), on the tree that adds `shoal-spike-bytes`.
+Candidate A, a stripe's bytes as a row of a persistent unsorted table replicated by its tablet
+group, was driven through today's engine with no new code in it, at rows of 64 KiB to 4 MiB:
+puts, gets, an even mixture and overwrites, beside a small table paced at 50 operations a second,
+through shoal-loadgen's own driver. Four legs, each size on a cluster of its own: the lab's three
+hosts at a factor of three, `tmdb_cluster.yaml`'s nodes, with titan's and hyperion's WAL and
+archives on two volumes of their 970 EVO; three nodes on europa over loopback at a factor of
+three, on its Optane; and one node on titan and one on europa. Four rounds, the order reversing by
+round, from one `znver1` build under the `performance` governor, with no other shoal unit running.
+The triggers were set before the harness and agreed with the user. The choice follows the user's
+instruction to complete X3 and record it.
+
+| Decision | Evidence |
+| --- | --- |
+| **Replicated SSD pools are not tables: B stays the preferred direction**, and A the baseline it is read against | T1 did not fire. Three nodes on one Optane at a factor of three acknowledged 0.27 of the device's sequential rate a copy at 1 MiB and 0.20 at 4 MiB, in every round, against a line of 0.5, which is what writing every byte twice allows at best; sustained over their merges, 0.22 and 0.17. The device was 47 to 75% busy; the nodes' cpu bound it, at 16 MiB/s of rows a core against 150 a core on one node alone ([1](bytes-through-groups.md#1-bytes-a-second-and-t1)) |
+| **A writes every byte about twice, once to a WAL and once to an archive** | T2 fired at 4 MiB, 2.04 on every host of both factor-three legs in every round, and straddled its line at 1 MiB by one host in one round: 2.54 on europa's lab node, where refused writes that had landed were sent again and stored twice. Every other host and round was 2.06 to 2.40. On titan and hyperion the WAL's volume wrote 1.03 to 1.16 and the archives' 1.03 to 1.15 a byte ([3](bytes-through-groups.md#3-bytes-written-for-each-byte-stored-and-t2)) |
+| **A's object work does not keep a table's latency**, which S13's executors and lane exist to keep | Beside A's puts on the loopback leg, a small table's read p99 was 126 to 165 times its p99 alone, and its write p99 0.6 to 0.9 s; on the lab a small write waited 1.3 to 3.2 s at its p99 ([6](bytes-through-groups.md#6-a-small-table-beside-the-stripes)) |
+| **A's gets are the device's**, through any replica | Three in four bytes answered were read from an archive, at 2.2 to 2.6 GB/s off the Optane, the device's read rate ([2](bytes-through-groups.md#2-gets-a-mixture-and-overwrites)) |
+
+**Not settled.** These remain open:
+
+- **The small write**, Q27, and whether a write under a threshold rides the commit: X8, which
+  runs one small write through A, through B and through B with its bytes in the commit.
+- **B's own cost**, which nothing built yet measures: X8 for one write, M15 for the whole path.
+- **Where A's cpu goes** beyond the profile on X3's page, which an optimization could narrow
+  without changing that A writes a byte twice through every table's cores.
+- **The two defects A met on the way**: a busy replication lane judged silent
+  ([item 215](../appendix/known-issues.md#215-a-replication-lane-busy-with-wide-rows-is-judged-silent-and-refuses-forwarded-writes)),
+  and a node past its memory budget when its writes outrun its merges
+  ([item 216](../appendix/known-issues.md#216-writes-faster-than-a-nodes-merges-hold-it-past-its-memory-budget)).
 
 ## Alternatives rejected
 
@@ -638,7 +673,7 @@ Q1–Q13.
 
 | ID | Question and preferred direction | Gate and evidence |
 | --- | --- | --- |
-| Q14 | **What orders a stripe's writes, and how do the bytes stay out of the log?** Preferred: the tablet group that owns the stripe's row, by a conditional commit; holders stage before it and apply after ([S7](write-path.md)). The alternatives are stripes as rows, a group among the holders, and redirect-on-write. **The alternative read, 2026-10-05**: Ceph's write as `v20.2.0` has it ([the record](#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)). **Safe, 2026-10-06**: the direction holds with ten rules repaired ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)) | Before M11. ✅ [X1](stripe-model.md) for safety, [X3](spikes.md#x3-bytes-through-the-tablet-groups) and [X8](spikes.md#x8-one-small-write-three-ways) for cost; ✅ [X14](ceph-and-s3-sources.md) for the alternative it is measured against |
+| Q14 | **What orders a stripe's writes, and how do the bytes stay out of the log?** Preferred: the tablet group that owns the stripe's row, by a conditional commit; holders stage before it and apply after ([S7](write-path.md)). The alternatives are stripes as rows, a group among the holders, and redirect-on-write. **The alternative read, 2026-10-05**: Ceph's write as `v20.2.0` has it ([the record](#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)). **Safe, 2026-10-06**: the direction holds with ten rules repaired ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)). **A priced, 2026-10-07**: stripes as rows write a byte about twice and reach a fifth to a quarter of a replicated pool's device, so replicated SSD pools are not tables ([the record](#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)) | Before M11. ✅ [X1](stripe-model.md) for safety, ✅ [X3](bytes-through-groups.md) and [X8](spikes.md#x8-one-small-write-three-ways) for cost; ✅ [X14](ceph-and-s3-sources.md) for the alternative it is measured against |
 | Q15 | **Who stages?** Preferred: the node that received the client's bytes, with the group's leader only ordering commits and granting an advisory reservation under contention. The other answer is the leader, which serializes and costs a network crossing while clients do not route by topology. **Recorded 2026-10-06**: the node that received the bytes, with no reservation in the protocol ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)) | Before M11. ✅ X1; [X9](spikes.md#x9-table-latency-beside-object-work) for what a stager's work costs the shard it runs on |
 | Q16 | **The acknowledgement rule.** Preferred: `k + f` current stripe chunks with `f = 1` by default; ~~whether an untouched chunk on a slice that is down counts as current is open~~. What a degraded write does when the rule cannot be met. **Recorded 2026-10-06**: an untouched chunk counts only on its holder's confirmation in the write's round, down or up ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); a write that cannot meet the rule is refused by name | Before M11. ✅ X1 |
 | Q17 | **How does a slice that missed writes learn what it is stale on**, at what granularity, and how does that record survive a checkpoint and reach a new replica? Preferred: a bounded record in the group for each placement group and chunk, derived at apply as the retry table is; past the bound, a backfill from a walk of the tablet's rows. X10 measured what a table can say of it: a group commits about 4,900 small rows a second on the lab, and a row rewritten whole costs its size every commit, 196 commits a second at 4 KiB and 30 at 1 MiB ([the record](stripe-row-costs.md#what-a-group-can-carry-q17)) | M16. ✅ X1 for the rule: a missed mark a position in the row, cleared only by a commit of what its holder holds ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); ✅ [X10](spikes.md#x10-what-a-stripe-row-costs) for a table's half, [X12](spikes.md#x12-recovery-and-scrub-rates) |

@@ -54,7 +54,7 @@ numbered property each, beside the schedule that violates it and the test that o
 when five questions are decided with evidence:
 
 - [Q14](contract.md#questions-to-answer), what orders a stripe's writes: ✅ for safety by
-  [X1](stripe-model.md) ([recorded](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)), for cost X3's and X8's;
+  [X1](stripe-model.md) ([recorded](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)), for cost ✅ X3's for stripes as rows ([recorded](contract.md#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)) and X8's for the small write;
 - Q15, who stages: ✅ X1;
 - Q16, the acknowledgement rule: ✅ X1;
 - Q18, size and truncate across tablets: ✅ X1;
@@ -65,7 +65,7 @@ when five questions are decided with evidence:
 
 The evidence is ✅ [X1](stripe-model.md) for safety,
 ✅ [X2](placement-simulation.md) for placement, and
-[X3](spikes.md#x3-bytes-through-the-tablet-groups),
+✅ [X3](bytes-through-groups.md),
 [X8](spikes.md#x8-one-small-write-three-ways) and
 [X9](spikes.md#x9-table-latency-beside-object-work) for cost. A clause the model contradicts
 is changed with a recorded cause, and the page that leaned on it is changed with it.
@@ -496,7 +496,7 @@ The reason this page is provisional, spike by spike.
 | --- | --- | --- |
 | ~~X1~~ | ~~A violation the safe policy cannot be repaired for~~ None: it found ten rules the pages stated broke a clause, each repaired by a local rule ([X1](stripe-model.md)) | ~~Nothing after the first gate stands~~ The gates stand. M15 builds the repaired rules: tags a try, the row's tombstones, the truncate's fence, a holder's confirmation for an untouched chunk, a previous state kept, and rows read at `Quorum` |
 | ~~X2~~ | ~~The rule balances the lab's shape badly~~ It does not: 3.7% over at one placement group a tablet, 0.9% at four ([X2](placement-simulation.md)). It found instead that no function keeps positions, that a replacement needs a seat, and that mixed sizes need fitted weights | ~~M14 carries exceptions from the start, and the planner's part of M16 comes forward~~ M14's pool map carries seats, placement weights and exceptions, and M16's switch records positions |
-| X3, X8 | Rows within reach of the devices' own rate for a replicated pool | Replicated SSD pools stay rows. M15 to M17 are built for erasure coding and rotational disks first |
+| ~~X3,~~ X8 | Rows within reach of the devices' own rate for a replicated pool. ~~X3~~ found them several times short: stripes as rows wrote a byte about twice and stored 0.20 to 0.27 of a replicated pool's device rate a copy, bound by the nodes' cpu, and slowed a table beside them a hundredfold ([X3](bytes-through-groups.md)). X8 asks it again for one small write | ~~Replicated SSD pools stay rows. M15 to M17 are built for erasure coding and rotational disks first~~ Replicated SSD pools are not rows, and M15 to M17 are built in the order they stand. X8 can still move small writes into the commit |
 | ~~X4~~ | ~~No candidate has an update form~~ Three have one, the chosen crate in its public API ([X4](erasure-coding-crates.md)) | ~~M18 ends at its second step~~ M18 has all three steps |
 | ~~X4,~~ X9 | ~~A Zen1 core encodes below a device's rate, or~~ shared executors move a table's tail past its budget. X4 measured the first half: a Zen1 core encodes 4+2 at 7.6 GiB/s out of cache ([X4](erasure-coding-crates.md)) | M14 delivers dedicated executors only, and a four-core node gives up a core or serves no pool |
 | ~~X5~~ | ~~gxhash's output is not stable across builds~~ It was stable across every cpu and build, but not across ways of feeding it ([X5](checksums.md)) | ~~A second checksum is a new dependency before M13~~ It is: CRC-64/NVME through `crc-fast`, added at M13 |

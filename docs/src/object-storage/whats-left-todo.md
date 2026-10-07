@@ -2,7 +2,8 @@
 
 **The order of the work, drawn.** The pages before this one say what has to be done and why;
 this one says in what order, on two diagrams: the work up to the first gate, and the gates
-after it. As of 2026-10-06, when rotational disks were fitted and X7 measured the device store on
+after it. As of 2026-10-07, when X3 measured stripes as rows through today's tablet groups; and
+as of 2026-10-06 before it, when rotational disks were fitted and X7 measured the device store on
 them, and X1 modelled the stripe protocol and found it safe once ten rules were repaired; and as
 of 2026-10-05 before it, when X11 reported and F73 delivered the frames it set, X13 reported
 what F69 had left of the benchmark's shape, and X14 read Ceph and S3 at the source; X6 and X10 had
@@ -23,7 +24,8 @@ reported the day before, and X2, X4 and X5 the day before that.
 
 Everything here can be worked on now except what an arrow ~~points into~~ from an unfinished
 box points into: ~~X9's arrows now come only from green ones, so it can start~~ X8's and X9's
-arrows now come only from green ones, so both can start. The spikes are on
+arrows now come only from green ones, so both can start. With X3 green, they and X12 are the
+spikes the gate still waits on. The spikes are on
 [their page](spikes.md), and what each needed first on
 [What a spike needs first](spikes.md#what-a-spike-needs-first).
 
@@ -48,7 +50,7 @@ flowchart LR
         Neighbour["✅ F72 A paced neighbour stream<br>in the bench (optional)"]:::done
     end
     X1["✅ X1 The stripe protocol as a model"]:::done
-    X3["X3 Bytes through the tablet groups"]
+    X3["✅ X3 Bytes through the tablet groups"]:::done
     X6x["✅ X6, its XFS leg"]:::done
     X7["✅ X7 The device store on HDD"]:::done
     X8["X8 One small write, three ways"]

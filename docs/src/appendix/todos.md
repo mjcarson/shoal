@@ -2945,3 +2945,28 @@ X10 had to infer the stall from latencies of cold rows against resident ones. Th
 and a histogram of parked time on `ShardReplication`, folded into `Stats`, and the write's span
 passed to the load it waits on.
 
+
+## Several nodes of one deployment on one host
+
+Filed by [X3](../object-storage/bytes-through-groups.md#the-harness). An inventory's ports, unit
+name and remote directory belong to a deployment, so `shoaladm bootstrap` cannot place three
+nodes on one host, and neither can `shoaladm bench`, which deploys through it. X3 stood in for a
+fast network with three nodes over loopback on europa and had to write `x3 local up` to start
+them: shoaladm's own render of each node, given a loopback address of its own for every
+listener, a control core of its own and a directory of its own for its leaf, claimed and run in a
+transient unit. The shape in shoaladm: a node entry may carry `interface`, `control_core` and a
+unit suffix, every path on the host is taken under the node's name, and the checks that refuse
+two nodes on one host refuse instead two that share a listener address, a core or a root. It is
+the only way the lab measures a protocol above 1 GbE, and nobody but a spike has needed it yet.
+
+## Settle a bench step before reading its device counters
+
+Filed by [X3](../object-storage/bytes-through-groups.md#the-harness). `shoaladm bench` reads a
+run's device counters when its last answer is in
+([F71](../features/bench-device-memory.md#limitations)), before the merges the run caused, so a
+capture's device bytes a byte undercount a write arm by whatever is still merging and charge it to
+the next arm. X3 counted from before a step until every shard had drained its compactors, every
+group's copies had applied alike and the WAL's segments had stopped falling for 10 s, which was 6
+to 16 s after an arm on three nodes and up to 18 s more on a single fast one. The shape in the
+bench: an optional settle after each write arm with those three conditions read from every
+member's `Replication`, its time recorded beside the arm, and the device counters read after it.

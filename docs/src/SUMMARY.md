@@ -203,6 +203,7 @@
   - [Exploratory spikes](object-storage/spikes.md)
     - [X1. The stripe protocol, modelled](object-storage/stripe-model.md)
     - [X2. Placement, simulated](object-storage/placement-simulation.md)
+    - [X3. Bytes through the tablet groups, measured](object-storage/bytes-through-groups.md)
     - [X4. Erasure coding crates, measured](object-storage/erasure-coding-crates.md)
     - [X5. Checksums, measured](object-storage/checksums.md)
     - [X6. The device store on SSD, measured](object-storage/device-store-ssd.md)

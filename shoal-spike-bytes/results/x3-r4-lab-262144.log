@@ -1,0 +1,12 @@
+lab 262144: settling the leaders
+lab 262144: preloading 98304 rows
+lab 262144: preload 48.9 MiB/s acknowledged, 47.8 sustained, settled in 11s, 24885 retried, 0 failed
+lab 262144: overwrite
+lab 262144: overwrite 56.1 MiB/s, failures 2, paced p99 28.37 ms
+lab 262144: mix
+lab 262144: mix 110.9 MiB/s, failures 11, paced p99 25.39 ms
+lab 262144: get
+lab 262144: get 3253.3 MiB/s, failures 0, paced p99 27.45 ms
+lab 262144: put
+lab 262144: put 55.5 MiB/s, failures 9, paced p99 21.58 ms
+lab 262144: the paced stream alone

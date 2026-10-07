@@ -20,8 +20,8 @@ coordinated it ([Resolved #133](../appendix/resolved/read-plan-rc-across-shards.
 | Host | CPU | Memory | Storage the node uses | Network |
 | --- | --- | --- | --- | --- |
 | europa (172.16.2.10) | AMD Ryzen 9 7945HX, 16 cores / 32 threads, `powersave` governor | 43 GiB | Intel Optane SSD 900P (`SSDPED1D280GA`), ~~btrfs~~ XFS since 2026-10-03, `/optane/shoal-tmdb` | 1 GbE |
-| titan (172.16.2.4) | AMD Ryzen Embedded V1756B (Zen1), 4 cores / 8 threads, `schedutil` | 14 GiB | Samsung 970 EVO on one PCIe lane, ext4, `/optane/shoal` (a directory on the root device); an XFS volume beside it at `/xfs` since 2026-10-04 | 1 GbE |
-| hyperion (172.16.2.5) | AMD Ryzen Embedded V1756B (Zen1), 4 cores / 8 threads, `schedutil` | 14 GiB | Samsung 970 EVO on one PCIe lane, ext4, `/optane/shoal` (a directory on the root device); an XFS volume beside it at `/xfs` since 2026-10-04 | 1 GbE |
+| titan (172.16.2.4) | AMD Ryzen Embedded V1756B (Zen1), 4 cores / 8 threads, `schedutil` | 14 GiB | Samsung 970 EVO on one PCIe lane, ext4, `/optane/shoal` (a directory on the root device); an XFS volume beside it at `/xfs` since 2026-10-04, and a second at `/x3-archives` for X3 on 2026-10-07, removed the same day | 1 GbE |
+| hyperion (172.16.2.5) | AMD Ryzen Embedded V1756B (Zen1), 4 cores / 8 threads, `schedutil` | 14 GiB | Samsung 970 EVO on one PCIe lane, ext4, `/optane/shoal` (a directory on the root device); an XFS volume beside it at `/xfs` since 2026-10-04, and a second at `/x3-archives` for X3 on 2026-10-07, removed the same day | 1 GbE |
 
 Two facts about the 970 EVOs were measured by [X6](../object-storage/device-store-ssd.md#two-things-about-the-labs-970-evos)
 after the rounds below. They negotiate one PCIe lane, so a sequential write tops out near 725

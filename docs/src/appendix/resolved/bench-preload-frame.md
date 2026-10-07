@@ -14,7 +14,12 @@ missing keys as misses, and the run finished with no error. A run of 100 rows of
 Whether it happened depended on timing. A bundle fills only when the file is read faster than
 the cluster takes rows. On the lab's 1 GbE a release build reads several times faster than the
 link carries, so [X3](../../object-storage/spikes.md#x3-bytes-through-the-tablet-groups), which
-benchmarks rows of 1 MiB and 4 MiB through the tablet groups, would have met it on every run.
+benchmarks rows of 1 MiB and 4 MiB through the tablet groups, would have met it on every run. (X3
+in the end drove shoal-loadgen's driver from a spike crate and preloaded with its own loop, so it
+never went through this preload; the reasons are on
+[its record](../../object-storage/bytes-through-groups.md#the-harness), and one of them is
+[item 214](../known-issues.md#214-a-bench-feed-keeps-4096-rows-ahead-whatever-their-size), the
+feed's bound in rows that this fix's frame check sits beside.)
 That is how it was found: checking what the object storage spikes need before they start
 ([S1](../../object-storage/prerequisites.md#the-order)).
 

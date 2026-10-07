@@ -3,7 +3,8 @@
 ~~**Nothing here has been run.**~~ ~~**One spike has run**: X4, whose record is
 [its own page](erasure-coding-crates.md) (2026-10-03).~~ ~~**Two spikes have run**~~ ~~**Three
 spikes have run**~~ ~~**Four spikes have run**~~ ~~**Five spikes have run**~~ ~~**Six spikes have
-run**~~ ~~**Seven spikes have run**~~ ~~**Eight spikes have run**~~ ~~**Nine spikes have run**~~ **Ten spikes have run**, each with its record on a page of its own: X1,
+run**~~ ~~**Seven spikes have run**~~ ~~**Eight spikes have run**~~ ~~**Nine spikes have run**~~ ~~**Ten spikes have run**~~ **Eleven spikes have run**, each with its record on a page of its own: X3,
+[bytes through the tablet groups](bytes-through-groups.md) (2026-10-07), X1,
 [the stripe protocol, modelled](stripe-model.md), and X7, [the device store on HDD](device-store-hdd.md) (both 2026-10-06), X2,
 [placement](placement-simulation.md), X4, [the erasure coding crates](erasure-coding-crates.md), and
 X5, [the checksums](checksums.md) (all 2026-10-03), X6, [the device store on SSD](device-store-ssd.md),
@@ -65,7 +66,7 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 | Host | CPU | Memory | Devices | Network |
 | --- | --- | --- | --- | --- |
 | europa | Ryzen 9 7945HX (Zen4), 16 cores and 32 threads. Also the development host, so its numbers carry that noise | 43 GiB | Intel Optane 900P at `/optane`, ~~btrfs~~ XFS since 2026-10-03. Samsung 990 PRO, the root device, btrfs. Since 2026-10-06 a WD6001FZWX (6 TB, 7200 rpm, CMR) at `/hdd`, XFS, whose cache acknowledges a sync before the platter could ([X7](device-store-hdd.md#three-things-about-the-labs-disks)) | 1 GbE |
-| titan | Ryzen Embedded V1756B (Zen1), 4 cores and 8 threads | 14 GiB | Samsung 970 EVO on one PCIe lane, ext4 at the root; since X6 an XFS volume on it at `/xfs`. Its flush costs 0.9 ms rested and 3 ms after a minute of synced writes ([X6](device-store-ssd.md#two-things-about-the-labs-970-evos)). Since 2026-10-06 a WD140EDFZ (14 TB, CMR) at `/hdd`, XFS, which says 5400 rpm and turns at 7200, and stalls a read behind a flush with its cache on ([X7](device-store-hdd.md#three-things-about-the-labs-disks)) | 1 GbE |
+| titan | Ryzen Embedded V1756B (Zen1), 4 cores and 8 threads | 14 GiB | Samsung 970 EVO on one PCIe lane, ext4 at the root; since X6 an XFS volume on it at `/xfs`, and for X3 on 2026-10-07 a second of 80 GiB at `/x3-archives`, removed the same day. Its flush costs 0.9 ms rested and 3 ms after a minute of synced writes ([X6](device-store-ssd.md#two-things-about-the-labs-970-evos)). Since 2026-10-06 a WD140EDFZ (14 TB, CMR) at `/hdd`, XFS, which says 5400 rpm and turns at 7200, and stalls a read behind a flush with its cache on ([X7](device-store-hdd.md#three-things-about-the-labs-disks)) | 1 GbE |
 | hyperion | The same as titan | 14 GiB | The same as titan | 1 GbE |
 
 **The rules a spike inherits**, which are the lab's own
@@ -113,7 +114,7 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 | --- | --- | --- | --- | --- |
 | ✅ X1 | The stripe protocol as a model, [reported](stripe-model.md) | Q14, Q15, Q16, Q18 | Nothing; searched on the lab | ~~Week~~ Done 2026-10-06 |
 | ✅ X2 | Placement simulation, [reported](placement-simulation.md) | Q19, in part | Nothing; timed on the lab | ~~Days~~ Done 2026-10-03 |
-| X3 | Bytes through the tablet groups | Q14 | The lab | Days |
+| ✅ X3 | Bytes through the tablet groups, [reported](bytes-through-groups.md) | Q14, its cost in part | The lab | ~~Days~~ Done 2026-10-07 |
 | ✅ X4 | Erasure coding crates: performance and tradeoffs, [reported](erasure-coding-crates.md) | Q20, in part | titan, europa | ~~Days~~ Done 2026-10-03 |
 | ✅ X5 | Checksums, [reported](checksums.md) | Q21, in part | titan, europa | ~~Afternoon~~ Done 2026-10-03 |
 | ✅ X6 | The device store on SSD, [reported](device-store-ssd.md) | Q22 in part, Q27's device half | The lab; XFS, fitted | ~~Week~~ Done 2026-10-04 |
@@ -257,6 +258,17 @@ configurations and moves to the frame since. **Cost.** Days.
 
 ### X3. Bytes through the tablet groups
 
+**Reported 2026-10-07** on [its own page](bytes-through-groups.md), and recorded on S18 as
+[Q14, in part](contract.md#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07). **Replicated SSD
+pools are not tables; B stays the preferred direction.** The opposite of the result named below
+came out. A writes a byte about twice, so T2 fired at 4 MiB, and at 1 MiB straddled its line by
+one round, where refused writes that had landed were sent again. But T1 did not fire. Three nodes
+on europa's Optane stored 0.27 of the device's rate a copy at 1 MiB and 0.20 at 4 MiB, bound by
+their cpu, a small table beside them read a hundredfold slower at its p99, and on the lab 1 GbE
+held every size to about 60 MiB/s. It also found two defects: a busy replication lane judged
+silent, and a node past its memory budget while its writes outrun its merges. The plan as written
+follows, struck where the run departed from it.
+
 **Question.** What does candidate A cost, today, with no new code: a stripe as a row,
 replicated by its tablet group ([Q14](contract.md#questions-to-answer))?
 
@@ -266,20 +278,27 @@ coding and rotational disks only, and replicated SSD pools are tables. The oppos
 A several times short, is what the preferred direction assumes, and it has never been
 measured on a cluster at these sizes.
 
-**Method.** A bench schema with one unsorted table whose row is a key and a byte vector,
-at 64 KiB, 256 KiB, 1 MiB and 4 MiB, and a small table beside it. `shoaladm bench` runs insert,
-read and an even mix against its own cluster on the lab at a factor of three, and against one
-node, with the small table driven lightly throughout as a paced stream (`--paced`,
-[F72](../features/bench-paced-stream.md)). Beside the driver's figures, each run records what the
+**Method.** A ~~bench~~ schema with one unsorted table whose row is a key and a byte vector,
+at 64 KiB, 256 KiB, 1 MiB and 4 MiB, and a small table beside it. ~~`shoaladm bench` runs~~
+shoal-loadgen's own driver, handed kinds by a spike crate (`shoal-spike-bytes`, decided with the
+user: the bench cannot place three nodes on one host and reads a run's counters before its merges
+finish), runs insert, read and an even mix, and overwrites, ~~against its own cluster~~ on a
+cluster brought up for each size on the lab at a factor of three, ~~and against one node~~ on
+three nodes over loopback on europa, and on one node on titan and one on europa, with the small
+table driven lightly throughout as a paced stream (~~`--paced`~~ the pacing of
+[F72](../features/bench-paced-stream.md), on connections of its own). Beside the driver's figures, each run records what the
 device was asked to write, read from the kernel's counters before and after, as the cluster
 testing chapter did when it split
 [write amplification by device](../cluster-testing/performance.md#write-amplification-by-device-and-filesystem),
-and each member's resident set: ~~by a script beside the run~~ in the capture itself since
-[F71](../features/bench-device-memory.md). A node's two roots go on separate devices for the
-WAL's bytes and the archives' to be counted apart.
+and each member's resident set: ~~by a script beside the run~~ ~~in the capture itself since
+[F71](../features/bench-device-memory.md)~~ through F71's script, read around steps let settle
+until every merge finished. A node's two roots go on separate devices for the WAL's bytes and the
+archives' to be counted apart: on titan and hyperion, two volumes of the one 970 EVO, decided with
+the user; europa's share its Optane and are told apart by the WAL's own counters.
 
 **Where.** The lab, where it is bounded by 1 GbE and says so; and three nodes over loopback
-on europa, where it is bounded by cores and devices.
+on europa, where it is bounded by cores and devices. Added: one node on titan and one on europa,
+which is what "against one node" became.
 
 **Records.**
 
@@ -300,8 +319,8 @@ at the larger sizes, and says so if it does.~~ Item 202 is
 [resolved](../appendix/resolved/append-batch-bytes.md): a replica behind at the larger sizes is
 fed batches of `cluster.replication.append_batch_bytes`. A row near a frame's size meets
 [item 208](../appendix/known-issues.md#208-a-write-that-fits-a-client-frame-can-make-a-log-entry-no-peer-frame-carries)
-instead, and the spike says so if it does.
-**Cost.** Days.
+instead, and the spike says so if it does. It did not: a row of 4 MiB is far below the frame.
+**Cost.** ~~Days.~~ A day: about ten hours of rounds and an hour's supplement.
 
 **What it is not.** A measurement of B. Only [X8](#x8-one-small-write-three-ways) puts the
 two side by side.
@@ -824,7 +843,7 @@ flowchart LR
     X14["✅ X14 sources"]:::done
     X13["✅ X13 bench shape"]:::done
     X10["✅ X10 row cost"]:::done
-    X3["X3 bytes through groups"]
+    X3["✅ X3 bytes through groups"]:::done
     X4["✅ X4 erasure crates"]:::done
     X5["✅ X5 checksums"]:::done
     X6["✅ X6 device store, SSD"]:::done
@@ -843,7 +862,7 @@ flowchart LR
 ```
 
 Nine depend on no other spike and on nothing that has to be fitted, and can start at once:
-~~X1,~~ ~~X2,~~ X3, ~~X4,~~ ~~X5,~~ ~~X10,~~ ~~X11,~~ ~~X13~~ and ~~X14~~; X1, X2, X4, X5, X10, X11, X13 and X14 have run. ~~X6 can start too, and
+~~X1,~~ ~~X2,~~ ~~X3,~~ ~~X4,~~ ~~X5,~~ ~~X10,~~ ~~X11,~~ ~~X13~~ and ~~X14~~; all nine have run. ~~X6 can start too, and
 needs an XFS filesystem for one of its legs.~~ X6 has run too, on an XFS filesystem fitted for it.
 ~~X8 follows X6, and~~ X8 and X9 ~~follows X5, since X4 has
 reported~~ can start: X4, X5 and X6 have all reported. ~~X7 and the rotational half of X12 wait
@@ -857,8 +876,8 @@ the pages stated that broke a clause, and repaired each without leaving S7's dir
 
 The first gate, [before M11](milestones.md#before-m11-the-object-contract), waits on eight
 of them: X1 and X2 for the decisions themselves, and X3, X8 and X9 for what those decisions
-cost, which bring X4, X5 and X6 with them. X1, X2, X4, X5 and X6 have reported, and X10 and X11 beside
-them. [What's left to do](whats-left-todo.md) draws every spike into that gate, because the
+cost, which bring X4, X5 and X6 with them. X1, X2, X3, X4, X5 and X6 have reported, and X10 and X11
+beside them; X8 and X9 are what is left of it. [What's left to do](whats-left-todo.md) draws every spike into that gate, because the
 milestones stop being provisional only when every decision is on the record, and X14 is among
 them: it read the alternative Q14 is measured against, and it has reported.
 
@@ -876,12 +895,13 @@ it throws away, or it only saves time.
 | Item | For | Label | Why | State |
 | --- | --- | --- | --- | --- |
 | [S16](testing.md#the-model)'s model held to [S7](write-path.md#the-schedules-that-shaped-it)'s schedules | X1 | Required | X1's model and schedules are the one spike output that is kept, as M11's acceptance test. Five of S7's fourteen schedules had no unsafe setting, two settings had no schedule, one schedule broke no clause, and the model had no event for a device filling, no rebuild, and one stripe where a truncate needs an object of several. Built to that, the model's actors and events would have been rebuilt afterwards | ✅ 2026-10-03 |
-| [Resolved #210](../appendix/resolved/bench-preload-frame.md): the bench's preload within the frame | X3 | Required | X3 is `shoaladm bench` at rows of 1 MiB and 4 MiB. Its preload sent bundles of sixty-four, past the frame, whenever the file outpaced the cluster, and the refused rows vanished from the record | ✅ 2026-10-03 |
+| [Resolved #210](../appendix/resolved/bench-preload-frame.md): the bench's preload within the frame | X3 | Required | ~~X3 is `shoaladm bench` at rows of 1 MiB and 4 MiB~~ X3 was planned as `shoaladm bench` at rows of 1 MiB and 4 MiB. Its preload sent bundles of sixty-four, past the frame, whenever the file outpaced the cluster, and the refused rows vanished from the record. X3 in the end drove shoal-loadgen's driver from a spike crate with a preload of its own, for the reasons [on its record](bytes-through-groups.md#the-harness), so it never met this path | ✅ 2026-10-03 |
 | ✅ An XFS filesystem: europa's Optane, and an LV on titan's and hyperion's 970 EVO | X6's XFS leg | Required | [What the lab needs fitted](prerequisites.md#what-the-lab-needs-fitted) | ✅ 2026-10-03 |
+| ✅ A second XFS volume on titan's and hyperion's 970 EVO, 80 GiB at `/x3-archives`, for the archive roots | X3 | Optional | A node's WAL bytes and archive bytes apart. A device of their own to the kernel splits them in `/proc/diskstats`; europa, with no free space in its volume group, split them by its members' WAL counters instead, which is what makes it optional. Made by `x3-lab.sh setup` and removed by `teardown`, every change in `shoal-spike-bytes/results/x3-host-changes.txt` ([X3](bytes-through-groups.md#where-and-on-what)) | ✅ 2026-10-07, removed the same day |
 | ✅ Rotational disks: one in each host, a 14 TB WD140EDFZ in titan and hyperion (it says 5400 rpm and turns at 7200), a 6 TB 7200 rpm WD6001FZWX in europa | X7; X12's rotational half | Required | The same | ~~Not fitted~~ ✅ 2026-10-06 |
 | ✅ A Ceph `v20.2.0` on the lab: cephadm, podman on titan and hyperion, three LVs on each, a user at uid 167 | X14's lab half | Required | Asked for with the user, and without a running Ceph nothing on X14's page could be *observed*. Ubuntu 26.04's uutils `install` refused cephadm's numeric owner until the user existed, and hyperion, with no route to the internet, was given titan's image ([X14](ceph-and-s3-sources.md#what-it-took)) | ✅ 2026-10-05, taken down the same day |
-| ✅ Device counters, node memory and index bytes in a bench capture: delivered by [F71](../features/bench-device-memory.md) | X3, X10 | Optional | ~~Nothing in the tree reads the kernel's device counters, and a capture keeps neither `resident_bytes` nor `archive_map_bytes`, which every node reports. A script reading `/proc/diskstats` on each host before and after, and `shoaladm stats --json --watch` beside the run, take the same numbers.~~ Since F71 every run of a capture keeps each host's device counters, read before and after it, and every member's resident set and index bytes every two seconds; `compare` reads device bytes written a byte sent, the resident peak and the index bytes. WAL and archive bytes apart still need the two roots on separate devices, which the capture then reports apart, or a trace of writes by file name, as the cluster testing took for [O62](../cluster-testing/performance.md#o62-the-archive-map-rewrite) | ✅ 2026-10-03 |
-| ✅ A paced neighbour stream, with windows by table, in the bench: delivered by [F72](../features/bench-paced-stream.md) as a *paced stream* | X3 | Optional | ~~A bench run is one closed loop whose windows are kept by kind, not by table, so it cannot drive a small table lightly beside a large one and report each. A second driver against the same cluster can. It is near the open-loop generator in [TODOs](../appendix/todos.md)~~ Since F72 `--paced <table> --paced-rate <N>` drives one table at an offered rate beside a main load that leaves it alone, its latency from each operation's slot, its windows and worst second's p99 kept apart in every run | ✅ 2026-10-03 |
+| ✅ Device counters, node memory and index bytes in a bench capture: delivered by [F71](../features/bench-device-memory.md) | X3, X10 | Optional | ~~Nothing in the tree reads the kernel's device counters, and a capture keeps neither `resident_bytes` nor `archive_map_bytes`, which every node reports. A script reading `/proc/diskstats` on each host before and after, and `shoaladm stats --json --watch` beside the run, take the same numbers.~~ Since F71 every run of a capture keeps each host's device counters, read before and after it, and every member's resident set and index bytes every two seconds; `compare` reads device bytes written a byte sent, the resident peak and the index bytes. WAL and archive bytes apart still need the two roots on separate devices, which the capture then reports apart, or a trace of writes by file name, as the cluster testing took for [O62](../cluster-testing/performance.md#o62-the-archive-map-rewrite). X3 read the devices through F71's script around steps it let settle, with titan's and hyperion's two roots on two volumes of one SSD ([X3](bytes-through-groups.md#where-and-on-what)) | ✅ 2026-10-03 |
+| ✅ A paced neighbour stream, with windows by table, in the bench: delivered by [F72](../features/bench-paced-stream.md) as a *paced stream* | X3 | Optional | ~~A bench run is one closed loop whose windows are kept by kind, not by table, so it cannot drive a small table lightly beside a large one and report each. A second driver against the same cluster can. It is near the open-loop generator in [TODOs](../appendix/todos.md)~~ Since F72 `--paced <table> --paced-rate <N>` drives one table at an offered rate beside a main load that leaves it alone, its latency from each operation's slot, its windows and worst second's p99 kept apart in every run. X3 used its pacing in shoal-loadgen's driver, on connections of the stream's own ([X3](bytes-through-groups.md#the-harness)) | ✅ 2026-10-03 |
 | ~~An operation kind a schema supplies before buckets exist~~ **Not needed**: X10 drove its own | X10 | Optional | X10's cold commit is a write that reads its row. `#[shoal::db]` emits `operation_kinds` empty, and buckets are what will fill it (M12). ~~X10's own client drives it meanwhile~~ X10's driver, `x10` in `shoal-spike-rows`, aimed each write at one group's leader and timed a read before a commit, which no operation kind the bench drives could have done ([X10](stripe-row-costs.md#the-harness)) | Not needed |
 
 The rest is each spike's own work, written on its section: ~~X2 measures the map's frame again
@@ -914,7 +934,7 @@ its evidence and with what it did not settle:
 
 | Decided | From |
 | --- | --- |
-| The write protocol: Q14, Q15, Q16 and Q18, and the contract agreed | ✅ X1 for safety, Q15, Q16 and Q18 ([the record](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); X3 and X8 for cost; ✅ X14 for the alternative Q14 is measured against, Ceph's write as `v20.2.0` has it ([the record](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) |
+| The write protocol: Q14, Q15, Q16 and Q18, and the contract agreed | ✅ X1 for safety, Q15, Q16 and Q18 ([the record](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); ✅ X3 for what A, stripes as rows, costs ([the record](contract.md#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)), and X8 for the small write; ✅ X14 for the alternative Q14 is measured against, Ceph's write as `v20.2.0` has it ([the record](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) |
 | Placement: Q19 | ✅ X2 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)); how a commit checks a generation and its positions ~~is X1's~~ ✅ X1 |
 | The code, the crate and the geometry: Q20. The checksum: Q21 | ✅ X4 for the code and the crate ([Q20, in part](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); ✅ X5 for the checksum ([Q21, in part](contract.md#q21-in-part-the-checksum-2026-10-03)); ~~X14,~~ ✅ X14, which took nothing of the geometry from Ceph; the geometry, and the granule ~~and chunk digest~~ Q21 leaves; the chunk digest ✅ X1, which keeps none ([X1](stripe-model.md#the-chunk-digest)) |
 | The device store: Q22, and Q23 for the rotational gate | ✅ X6 for SSDs ([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)); ✅ X7 for rotational disks ([Q23](contract.md#q23-what-a-rotational-device-needs-2026-10-06)) |

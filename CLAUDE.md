@@ -223,6 +223,31 @@ sh shoal-spike-rows/results/x10-lab.sh                                          
 LEGS=remedy sh shoal-spike-rows/results/x10-lab.sh                                  # the supplement
 target/lab/x10/znver1/release/x10 report shoal-spike-rows/results/x10.json         # intervals and verdicts
 
+# the X3 spike: candidate A of the write path, a stripe's bytes as a row (a u64 key and 64 KiB to
+# 4 MiB of SplitMix64 bytes made on the sending stream), through today's persistent unsorted table,
+# with a small table beside it paced at 50 operations a second on connections of its own. Its own
+# workspace crate, shoal-spike-bytes (a schema, a node program and `x3`, the driver with every
+# shoaladm command flattened in), whose arms run shoal-loadgen's own Driver handed supplied kinds;
+# not `shoaladm bench`, which cannot put three nodes on one host and reads rows only from a file.
+# Four legs: `lab` (inventory.yml, the three hosts at factor 3), `loopback` (three nodes on europa
+# over 127.0.0.11-13, which `x3 local up` renders with shoaladm's own renderer and runs in
+# transient units: no inventory can deploy them), `titan` and `europa` (one node each). titan's
+# and hyperion's archive root is an XFS LV of its own beside /xfs on the 970 EVO, which
+# `x3-lab.sh setup` makes and `teardown` removes, so the device counters split WAL from archives.
+# Every leg's cell settles every merge before it reads the counters. results/x3-lab.sh runs fio,
+# then each leg at each size on a cluster of its own, four rounds, the order reversing by round;
+# about eight hours. The tables are on docs/src/object-storage/bytes-through-groups.md
+CARGO_TARGET_DIR=target/lab/x3/znver1 RUSTFLAGS="-C target-cpu=znver1" cargo build --release -p shoal-spike-bytes
+sh shoal-spike-bytes/results/x3-lab.sh setup                                        # the archive LVs, once
+QUICK=1 ROUNDS=1 OUT=target/lab/x3/quick sh shoal-spike-bytes/results/x3-lab.sh   # proves every leg runs
+sh shoal-spike-bytes/results/x3-lab.sh                                              # the four rounds
+LEGS=loopback SIZES=1048576 START=2 ROUNDS=2 sh shoal-spike-bytes/results/x3-lab.sh  # one cell again
+sh shoal-spike-bytes/results/x3-lab.sh teardown                                     # every cluster down, the LVs gone
+target/lab/x3/znver1/release/x3 report shoal-spike-bytes/results/x3.json           # intervals and verdicts
+# the supplement: pidstat and perf around the put arm, loopback at 1 MiB and europa at 1 and 4 MiB,
+# on europa only and with the lab free; its summaries are committed beside the rounds' (O95)
+sh shoal-spike-bytes/results/x3-supplement.sh
+
 # the X11 spike: frames of plain bytes between a glommio server and a tokio client, plaintext and
 # under the product's own kTLS, into direct I/O buffers and a file and back - MiB/s a connection and
 # cpu a GiB by frame, the window, a small request's tail on the stream's connection and beside it,

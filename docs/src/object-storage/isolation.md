@@ -84,7 +84,10 @@ executor among themselves, with no SSD's among them, X7 could not say with one d
 **Dedicated executors are preferred** where a node has the cores, and
 [Q24](contract.md#questions-to-answer) is whether a small node can do without them.
 [X9](spikes.md#x9-table-latency-beside-object-work) measures both before either is built
-on: it is the experiment this whole page waits for.
+on: it is the experiment this whole page waits for. [X3](bytes-through-groups.md#6-a-small-table-beside-the-stripes)
+measured the worst case of the first column already, object bytes as rows on the table shards
+with nothing yielding and the WAL shared: a small table paced beside them read with a p99 126 to
+165 times its p99 alone on three nodes over loopback, and wrote with one of up to a second.
 
 Whichever it is, **no call runs long**. A megabyte encoded at a gibibyte a second is a
 millisecond, twice the high queue's latency goal. So is a megabyte sent under kTLS: the kernel
@@ -237,7 +240,9 @@ about a task that does not.
 
 ## How it would be measured
 
-[X9](spikes.md#x9-table-latency-beside-object-work) is this page's experiment. It runs the
+✅ [X3](bytes-through-groups.md#6-a-small-table-beside-the-stripes) measured the case this page
+exists to prevent, object bytes as rows on the table shards and in their WAL, and found a small
+table's tail moved a hundredfold. [X9](spikes.md#x9-table-latency-beside-object-work) is this page's experiment. It runs the
 workload grid's reference cell, `macro/grid/unsorted/r50/1024`, beside a task that does
 what object work does (checksums, encodes and direct writes at a set rate), once on the
 table shards' own executors and once on a core of its own, and reports the table's p99 in

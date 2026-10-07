@@ -19,7 +19,10 @@ This is the second of the two optional rows on
 [X3](../object-storage/spikes.md#x3-bytes-through-the-tablet-groups). One of X3's records is a
 neighbour: the p99 of a second, small table driven lightly throughout, beside rows of 64 KiB to
 4 MiB through the tablet groups. It answers whether a stripe stored as a row hurts every table
-on the node, which is what [S13](../object-storage/isolation.md) is about.
+on the node, which is what [S13](../object-storage/isolation.md) is about. (X3 in the end drove
+its own arms through shoal-loadgen's driver rather than the bench, and its paced stream is this
+feature's pacing in that driver, `ArmSettings::pace`, on connections of its own:
+[X3's record](../object-storage/bytes-through-groups.md#the-harness).)
 
 Before this feature a bench run could not take that record:
 
@@ -232,6 +235,7 @@ The first capture, an hour earlier, showed the same shape: 3.56 ms and 1.53 ms o
 
 [F66](dataset-benchmarks.md), the bench this adds to; [F71](bench-device-memory.md), the other
 half of the same change; [X3](../object-storage/spikes.md#x3-bytes-through-the-tablet-groups),
-which asked for it; [S13](../object-storage/isolation.md), the question its numbers bear on;
+which asked for it, and [its record](../object-storage/bytes-through-groups.md), which used its
+pacing; [S13](../object-storage/isolation.md), the question its numbers bear on;
 the open-loop generator in the [todos](../appendix/todos.md#what-f66-left-undone), which this
 built half of.

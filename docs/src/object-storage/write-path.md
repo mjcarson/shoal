@@ -35,7 +35,10 @@ A table write on a cluster node is one path.
 What that path costs when the payload is large is measured.
 
 - **Every byte is written at least twice**: to the shard's WAL, then into the archives by a
-  merge that rewrites the partition whole. Under a whole load on the lab one host wrote
+  merge that rewrites the partition whole. For rows of 64 KiB to 4 MiB that is close to all of
+  it: [X3](bytes-through-groups.md#3-bytes-written-for-each-byte-stored-and-t2) counted 2.03 to
+  2.31 device bytes a byte stored a copy, settled, the WAL's volume and the archives' each about
+  one. Under a whole load on the lab one host wrote
   114 MB/s to its archives and 24.5 MB/s to its WAL while applying about 15 MiB/s of rows
   ([O79](../appendix/optimizations.md#o79-a-merge-rewrites-every-partition-it-touches-whole));
   fragmented partitions have since halved the archive half for sorted tables
@@ -65,7 +68,10 @@ not choose the node it writes to ([D7](../direction/shard-aware-routing.md)).
 
 **B is preferred. A is the baseline every measurement is read against**, and a candidate in
 its own right for small writes ([below](#small-writes)). C stays the alternative Q14 is
-judged against. D is rejected for the reasons in its row, with one part kept: a whole stripe
+judged against. [X3](bytes-through-groups.md) measured A as it stands on 2026-10-07, at rows of
+64 KiB to 4 MiB: near two device bytes a byte, but a fifth to a quarter of the device a copy at a
+factor of three, its nodes' cpu the bound, and every table on those nodes waiting behind it. So
+replicated SSD pools are not tables, and B stays preferred. D is rejected for the reasons in its row, with one part kept: a whole stripe
 chunk replaced is written beside the old one and renamed, which is redirect on write at the
 size where it is free ([S6](device-store.md#staging-two-cases)).
 
@@ -409,9 +415,12 @@ and [S6](device-store.md). [S16](testing.md#the-model)'s model before any of it.
 
 - ✅ [X1](stripe-model.md): every schedule above, saved, against the contract, and a generated
   search of the safe policy at every layout.
-- [X3](spikes.md#x3-bytes-through-the-tablet-groups): candidate A as it is today, with wide
+- ✅ [X3](bytes-through-groups.md): candidate A as it is today, with wide
   rows standing in for stripes. Bytes a second, bytes written to the device for each byte
-  stored, memory held, and a neighbouring table's tail.
+  stored, memory held, and a neighbouring table's tail. Reported 2026-10-07: A wrote a byte
+  2.0 to 2.3 times, reached 0.20 to 0.27 of a replicated pool's device a copy on europa's Optane,
+  bound by its nodes' cpu, and slowed a small table beside it a hundredfold at the p99, so B stays
+  preferred ([Q14, in part](contract.md#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)).
 - [X8](spikes.md#x8-one-small-write-three-ways): one small write through A, through B, and
   through B with the bytes in the commit.
 - The object arms of [S15](performance.md), which record bytes completed and durable, what

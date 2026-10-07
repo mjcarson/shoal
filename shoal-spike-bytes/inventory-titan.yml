@@ -1,0 +1,27 @@
+# Spike X3's one-node leg on titan: one node of the lab's Zen1 shape at a factor of one, so what
+# the replication itself costs is read against the lab's factor of three. Its WAL root and archive
+# root are on titan's two XFS volumes on the 970 EVO, as in `inventory.yml`. The driver runs on
+# europa, so its client traffic crosses the 1 GbE link as the lab's does.
+#
+#   target/lab/x3/znver1/release/x3 bootstrap -i shoal-spike-bytes/inventory-titan.yml
+name: x3-titan
+server: ../target/lab/x3/znver1/release/x3-node
+ports:
+  client: 12620
+  peer: 12621
+  control: 12622
+replication_factor: 1
+control_voters: 1
+resources:
+  cores: 6
+  memory: 8Gi
+  control_core_shared: false
+storage:
+  latency: /xfs/shoal-x3-titan
+  throughput: /x3-archives/shoal-x3-titan
+wal_commit_delay: 2ms
+tracing: Info
+user: shoal
+admin: admin
+nodes:
+- name: titan

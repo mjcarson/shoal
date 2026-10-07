@@ -96,7 +96,7 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ ~~**1,674 tests**~~ ~~**1,685 tests**~~ ~~**1,691 tests**~~ ~~**1,715 tests**~~ ~~**1,725 tests**~~ ~~**1,726 tests**~~ ~~**1,728 tests**~~ ~~**1,782 tests**~~ ~~**1,785 tests**~~ ~~**1,790 tests** since [F65](../features/query-figures-home-tab.md), eleven ignored~~ ~~**1,892 tests** since [F67](../features/bench-run-wizard.md)~~ ~~**1,894 tests** since [Resolved #201](resolved/attached-read-order.md)~~ ~~**1,911 tests** since [F68](../features/conditional-writes.md)~~ ~~**1,921 tests** since [Resolved #92, #198](resolved/composite-partition-key.md)~~ ~~**1,930 tests** since [Resolved #46](resolved/unmarked-directory-refused.md)~~ ~~**1,934 tests** since [Resolved #202](resolved/append-batch-bytes.md)~~ ~~**1,942 tests** since [F69](../features/driver-operation-kinds.md)~~ ~~**1,947 tests** since [F70](../features/storage-faults.md)~~ ~~**1,949 tests** since [Resolved #210](resolved/bench-preload-frame.md)~~ ~~**1,962 tests** since [F71](../features/bench-device-memory.md) and [F72](../features/bench-paced-stream.md)~~ ~~**2,021 tests** since [F73](../features/bodies-across-frames.md), with twenty that the X10 and X11 spikes had added uncounted,~~ ~~**2,022 tests** since [Resolved #213](resolved/x11-setup-fifo.md),~~ ~~**2,029 tests** since [X13](../object-storage/benchmark-shape.md),~~ **2,062 tests** since [X1](../object-storage/stripe-model.md), ~~twelve~~ ~~thirteen~~ fourteen ignored (F66 took it to 1,873 without moving this line), plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ ~~**1,674 tests**~~ ~~**1,685 tests**~~ ~~**1,691 tests**~~ ~~**1,715 tests**~~ ~~**1,725 tests**~~ ~~**1,726 tests**~~ ~~**1,728 tests**~~ ~~**1,782 tests**~~ ~~**1,785 tests**~~ ~~**1,790 tests** since [F65](../features/query-figures-home-tab.md), eleven ignored~~ ~~**1,892 tests** since [F67](../features/bench-run-wizard.md)~~ ~~**1,894 tests** since [Resolved #201](resolved/attached-read-order.md)~~ ~~**1,911 tests** since [F68](../features/conditional-writes.md)~~ ~~**1,921 tests** since [Resolved #92, #198](resolved/composite-partition-key.md)~~ ~~**1,930 tests** since [Resolved #46](resolved/unmarked-directory-refused.md)~~ ~~**1,934 tests** since [Resolved #202](resolved/append-batch-bytes.md)~~ ~~**1,942 tests** since [F69](../features/driver-operation-kinds.md)~~ ~~**1,947 tests** since [F70](../features/storage-faults.md)~~ ~~**1,949 tests** since [Resolved #210](resolved/bench-preload-frame.md)~~ ~~**1,962 tests** since [F71](../features/bench-device-memory.md) and [F72](../features/bench-paced-stream.md)~~ ~~**2,021 tests** since [F73](../features/bodies-across-frames.md), with twenty that the X10 and X11 spikes had added uncounted,~~ ~~**2,022 tests** since [Resolved #213](resolved/x11-setup-fifo.md),~~ ~~**2,029 tests** since [X13](../object-storage/benchmark-shape.md),~~ ~~**2,062 tests** since [X1](../object-storage/stripe-model.md),~~ **2,081 tests** since [X3](../object-storage/bytes-through-groups.md), ~~twelve~~ ~~thirteen~~ fourteen ignored (F66 took it to 1,873 without moving this line), plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
@@ -436,6 +436,106 @@ Record a refusal that sending again cannot cure, such as `PayloadTooLarge`, as f
 than retried: a query that was never sent keeps its attempt count, so it would be retried for
 ever.
 
+### 214. A bench feed keeps 4,096 rows ahead whatever their size
+
+A table's insert feed parses rows ahead of the workers and holds up to `FEED_AHEAD` of them,
+4,096 (`shoal-loadgen/src/feed.rs`), counted in rows and bounded by nothing else. A dataset of
+rows of 1 MiB therefore holds up to 4 GiB in the driver's process before a worker has taken one,
+and one of 4 MiB rows 16 GiB. On the lab the driver shares europa with a node of 8 GiB, so a
+`shoaladm bench run` of wide rows can take the host's memory from its own cluster, or be killed
+by the kernel before its first arm. The preload streams through the same feed.
+
+A second bound beside it judges a run by the file's text rather than by its rows. The frame
+check and the preload's bundle are sized by the file's mean row in bytes of text
+(`TableScan::mean_row_bytes`, with `FRAME_HEADROOM` of four, `shoaladm/src/bench/orchestrate.rs`).
+That is conservative for any honest encoding of bytes, which is larger as text than as a row,
+and wrong for a row whose deserializer expands a short description into its bytes: the check
+passes, the preload goes back to bundles of sixty-four, and the refused rows are lost as
+[item 211](#211-a-bundle-refused-at-its-send-loses-its-queries-from-the-benchs-record) says.
+
+**Established by reading the source**, while choosing how to drive
+[X3](../object-storage/spikes.md#x3-bytes-through-the-tablet-groups), whose rows are 64 KiB to
+4 MiB. X3 did not use the bench for this and other reasons
+([X3's record](../object-storage/bytes-through-groups.md#the-harness)), so neither half has been
+reproduced.
+
+**Fix direction:** bound the feed in bytes as well as rows, by the parsed row's own size, which
+`DeepSizeOf` gives every table's row; and size the frame check and the preload's bundle by the
+largest row the scan parsed, measured the same way, rather than by the file's text.
+
+### 215. A replication lane busy with wide rows is judged silent, and refuses forwarded writes
+
+A write sent to a member that does not lead its group is hopped to the leader over the
+replication lane (`ShardPeer::propose`, `shoal-core/src/server/replication/network.rs`), and the
+hop is refused at once, `NotLeader`, when the lane "has answered nothing" for the hop's silence
+bound. A hop already sent is given up on the same way, `OutcomeUnknown`. The bound is
+`HOP_SILENCE`, raised to three heartbeats of the failover base, 1.5 s at the default, and silence
+is the time since a request outstanding on the link was last answered (`silent_for`). Both came
+from [Resolved #143](resolved/silent-partition-hops.md), where a peer that answered nothing was
+cut off. A lane carrying wide rows over a full 1 GbE link is not cut off and still answers
+nothing for that long. It refuses writes the leader would have taken.
+
+**Reproduced by [X3](../object-storage/bytes-through-groups.md)** on the lab's three hosts at a
+factor of three, with rows written by six streams spread over every member, about 64 MiB in
+flight, the busiest link at 90 to 93% of 1 GbE. Every refusal but 23 shed at admission named the
+lane's silence:
+`NotLeader` with "… has answered nothing on the replication lane for 1.545s; the write was not
+sent" or "the lease of … lapsed: no quorum acknowledged it within 5s", and `OutcomeUnknown` with
+"the peer has answered nothing on the replication lane for 1.50s; the request was sent and may yet
+land". By size, over four rounds:
+
+| Rows | Preload sent again | Puts and overwrites refused | Small writes beside them refused |
+| --- | --- | --- | --- |
+| 64 KiB | none | none | none |
+| 256 KiB | 21,246 to 25,467 times a round, 98,304 rows | 7,867: 5,409 `OutcomeUnknown`, 2,435 `NotLeader`, 23 `Shedding` | 75 |
+| 1 MiB | 2,571 to 4,133 times, 24,576 rows | 1,207 | 13 |
+| 4 MiB | 5 to 67 times, 6,144 rows | 19 | 1 |
+
+A refusal that had in fact landed was sent again and stored twice: at 1 MiB the WAL writer wrote
+1.11 to 1.17 bytes for each byte the preload stored, against 1.00 at the sizes that met no
+refusal. Before the preload was made to send a row again until it was written, one round's
+preload at 256 KiB gave up on 3,471 rows after eight tries each. The same rows on three nodes
+over loopback, at 165 to 290 MiB/s and with nothing between them but loopback, were refused
+nothing in any round. Which queue a hop's answer waited in, and why 256 KiB most, are **not
+established**. By reading, an answer comes back on a link that also carries that peer's appends
+to this node, and for the bytes in flight the appends of 256 KiB rows are the most entries of any
+size that met a refusal.
+
+**Fix direction:** judge a lane silent by what it received, not by what it answered. A link
+that has received bytes on the replication lane within the bound is not cut off, which is the
+only case #143's refusal is for. And keep a forwarded write's answer from queueing behind a
+peer's appends, the way the client wire keeps small answers apart
+([F73](../features/bodies-across-frames.md)).
+
+### 216. Writes faster than a node's merges hold it past its memory budget
+
+A node's budget (`node_memory`, divided among its shards since
+[Resolved #149](resolved/node-memory-budget.md)) is kept by eviction, and eviction takes only
+partitions on the shard's LRU. A partition holding a write no archive has yet is not evictable
+(`shoal-core/src/server/tables/persistent/unsorted.rs`, where every write takes its partition off
+the LRU) until the merge of the segment the write was logged in marks it evictable again
+(`mark_evictable`). So the rows a node holds are its budget plus every row written since its
+merges last caught up, and nothing bounds the second term but the merge rate. A node written to
+faster than it merges grows past its budget for as long as the writes go on, and back under it
+once its merges catch up.
+
+**Reproduced by [X3](../object-storage/bytes-through-groups.md)** on europa: one node at a
+factor of one with a budget of 6 GiB, written rows of 256 KiB to 4 MiB at 560 to 970 MiB/s. Its
+resident set reached 23.0 GiB in one 40 s put arm at 256 KiB, with 22.1 GiB of rows held as the
+shards count them. A put or overwrite arm, or a preload, went past the budget in thirteen of its
+sixteen cells, at 7.3 to 23.0 GiB. Its gets and mixtures, which write half as fast or not at all,
+kept to the budget, and so did every arm of every other leg, since none wrote faster than its
+nodes merged:
+three nodes on the same host at a factor of three each took about 220 MiB/s, and the lab's 1 GbE
+held its nodes to about 60. The settle after each arm brought the node back under its budget.
+On a host with less memory than europa's 43 GiB, such a node would meet the kernel's OOM killer
+before its budget.
+
+**Fix direction:** hold a write's admission, not only a read's partitions, to the budget. A
+shard over its budget with nothing evictable is behind its merges, and can refuse or slow writes
+until they catch up, the way a group's `pending_bytes` bounds what is proposed and not yet
+answered.
+
 ### 132. `ephemeral_sorted_table` aborted once in glibc's thread-cache teardown
 
 One workspace run aborted this test binary with SIGABRT after its first test passed. glibc
@@ -645,6 +745,16 @@ load and not the floor. Under that load a node's links are judged impaired, and 
 moves no lead while they are ([#182](resolved/slow-link-leadership.md)). The workspace run after
 [F64](../features/stats-tui.md) failed it once more the same way, with the heavy node leading 2
 of 6, and it passed alone in 21 s.
+
+The workspace run after [X3](../object-storage/bytes-through-groups.md), at six threads, failed two
+of 2,081, both of which passed alone. `single_node_data_has_a_verified_cluster_migration_path`
+restored 267 of 400 records, the figure X1's run met. And
+`a_source_resuming_a_move_hands_the_lead_on_and_frees_its_driver`, [#197](resolved/retired-driver-holds-slot.md)'s
+test, found node two leading the group where it asserts the source won the election the killed
+driver left: the test pauses node two so that the source's vote request is answered first when it
+resumes, and under the suite's load node two's own campaign got there first. The first of these
+is the deadline this item is about; the second is the test arranging an election by timing, and
+it passed alone in 12 s.
 
 ---
 

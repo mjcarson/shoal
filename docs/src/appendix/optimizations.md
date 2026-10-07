@@ -4004,3 +4004,20 @@ was the bound.
 Filed from item 213's repeat of X11's section 3 ([Resolved #213](resolved/x11-setup-fifo.md)), which
 found that X11's "the low water mark cannot help a read" had measured a server writing first in
 first out: with small frames first the mark helps a read several times.
+
+### O95. A wide row's bytes are copied and faulted in on every write
+
+| | |
+| --- | --- |
+| **Rank** | **medium** while stripes could be rows ([S7](../object-storage/write-path.md)'s candidate A), **low** once they are not: tables of small rows barely pay it |
+| **Impact** | Measured by [X3](../object-storage/bytes-through-groups.md#5-what-the-cpu-went-to) on europa, in a put arm of rows of 1 MiB and 4 MiB: 36 to 48% of a node's cpu was one loop in libc, its AVX-512 `memmove` copying backwards, and 11 to 14% the kernel zeroing pages a node had just allocated (`kernel_init_pages`, 19% of the node inclusive of the fault path at 4 MiB). Shoal's own code was 9 to 10%. Rows of 4 MiB stored about 30% less a core than rows of 1 MiB, on one node and on three, and the copy's share grew with the row, from 41% to 48% on the one node |
+| **Difficulty** | M to find, unknown to fix. perf's DWARF unwinding stopped at the `memmove`, so its caller is not known: a WAL frame built by copying a row in, a row's `Vec<u8>` moved into a batch, rkyv's serializer growing its buffer, or a buffer grown in place by a reallocation that copies. A build of `x3-node` against a libc with frame pointers, or `perf record --call-graph lbr` on a host that has it, would name it. The faults say each copy lands in fresh memory, which a reused buffer would not |
+| **Depends on** | nothing |
+| **Blocks** | nothing; X3's comparison is two writes a byte against one, which no copy changes |
+| **Tradeoff** | Unknown until the caller is: a pool of reused buffers trades the faults for memory held between writes |
+| **Benchmark** | `x3 spike europa --size 4194304` (`shoal-spike-bytes`), its `put` side, with `results/x3-supplement.sh`'s pidstat and perf around it; for the product, `macro/grid/unsorted/r50/*` at its widest rows |
+
+Filed from X3. A node storing rows of 1 MiB at a factor of three received each one, wrote it to its
+WAL, sent it twice over kTLS and merged it, and 58 to 67% of its cpu went to moving the bytes:
+the copy and the zeroing above, kTLS, and the kernel's own copies, sockets' and files', 5 to 7%. How much of the user space copy a row
+needs is the question the caller answers.

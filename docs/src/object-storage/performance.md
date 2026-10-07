@@ -51,7 +51,7 @@ that any change to a node's query path follows
 
 | Experiment | Held constant | What it tells |
 | --- | --- | --- |
-| Stripes as rows against staged stripe chunks, replicated | Hosts, object sizes, concurrency | What a data plane buys at each size, and where it stops paying ([Q14](contract.md#questions-to-answer), [Q27](contract.md#questions-to-answer)) |
+| Stripes as rows against staged stripe chunks, replicated | Hosts, object sizes, concurrency | What a data plane buys at each size, and where it stops paying ([Q14](contract.md#questions-to-answer), [Q27](contract.md#questions-to-answer)). The first half is measured: [X3](bytes-through-groups.md) put stripes as rows at 0.20 to 0.27 of a replicated pool's device on europa's Optane, writing a byte about twice, and is the figure the second half is read against |
 | Replicated against k+m | The pool's devices | What encoding costs a write, and decoding a read |
 | A whole stripe against part of one | The pool | What a write in place costs over a put |
 | A healthy read against one with a holder down | The pool and the range | What a degraded read costs |

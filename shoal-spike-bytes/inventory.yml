@@ -1,0 +1,55 @@
+# Spike X3's cluster on the lab: `tmdb_cluster.yaml` (the lab's three hosts) with a name, ports and
+# storage roots of its own, so it never meets the tmdb deployment. Everything a node is given is
+# tmdb's: six shards and 8 GiB a node, a dedicated control core, three copies of every row,
+# europa's group leading twice as many groups at a 3 ms WAL commit delay, the Zen1 group at 2 ms.
+#
+# The departure, decided with the user on 2026-10-07: titan's and hyperion's WAL root is on the XFS
+# volume X6 fitted beside their root filesystem on the 970 EVO (`/xfs`), and their archive root on
+# a second XFS volume on the same 970 EVO that `results/x3-lab.sh setup` makes for the spike
+# (`/x3-archives`). Each volume is a device of its own to the kernel, so the device counters count
+# the WAL's bytes and the archives' apart. europa's two roots are one directory on its Optane, and
+# its WAL's bytes are told from the rest by the members' own WAL counters.
+#
+# The node program is built for the oldest cpu among the hosts, never native, by:
+#
+#   CARGO_TARGET_DIR=target/lab/x3/znver1 RUSTFLAGS="-C target-cpu=znver1" \
+#       cargo build --release -p shoal-spike-bytes
+#
+# then, from the repository root:
+#
+#   target/lab/x3/znver1/release/x3 bootstrap -i shoal-spike-bytes/inventory.yml
+#   target/lab/x3/znver1/release/x3 destroy -i shoal-spike-bytes/inventory.yml --yes
+name: x3
+server: ../target/lab/x3/znver1/release/x3-node
+ports:
+  client: 12600
+  peer: 12601
+  control: 12602
+replication_factor: 3
+control_voters: 3
+resources:
+  cores: 6
+  memory: 8Gi
+  control_core_shared: false
+groups:
+  bd795i:
+    storage:
+      latency: /optane/shoal-x3
+    wal_commit_delay: 3ms
+    lead_weight: 2
+  v1000:
+    storage:
+      latency: /xfs/shoal-x3
+      throughput: /x3-archives/shoal-x3
+    wal_commit_delay: 2ms
+tracing: Info
+user: shoal
+admin: admin
+nodes:
+- name: europa
+  address: 172.16.2.10
+  group: bd795i
+- name: titan
+  group: v1000
+- name: hyperion
+  group: v1000

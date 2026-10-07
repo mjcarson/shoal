@@ -24,7 +24,7 @@ or larger later is optional, because skipping it costs nothing that has to be un
 whose absence would be baked into a key, a file or a frame is required, because the cheapest
 day to do it is the day before the format exists.
 
-**Where it stands (~~2026-10-03~~ ~~2026-10-05~~ 2026-10-06).** ~~Six~~ Seven of the ten required rows are done, each
+**Where it stands (~~2026-10-03~~ ~~2026-10-05~~ ~~2026-10-06~~ 2026-10-07).** ~~Six~~ Seven of the ten required rows are done, each
 marked ✅ below: every one that waits on no open question. Of the ~~four~~ three left, ~~each waits on a
 question~~ ~~two~~ ~~three~~ two can start now. [X2](placement-simulation.md) settled what placement reads
 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)), and that frees a member's
@@ -59,6 +59,15 @@ and [X7](device-store-hdd.md) ✅ measured the device store on them. It changes 
 either. What a rotational device needs is M19's to build
 ([Q23](contract.md#q23-what-a-rotational-device-needs-2026-10-06)): the disk's write cache
 off, its journal on an SSD of the node, an executor never shared with an SSD's slice, and XFS.
+[X3](bytes-through-groups.md) ✅ priced candidate A, stripes as rows through today's tablet groups,
+on 2026-10-07, and changes no row of this page either: A wrote a byte about twice and reached a
+fifth to a quarter of a replicated pool's device, so replicated SSD pools are not tables and the
+rows above are needed as they stand
+([the record](contract.md#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)). It found two
+defects on the way, neither a prerequisite, since under B no object's bytes are a row: a busy replication lane judged silent
+([item 215](../appendix/known-issues.md#215-a-replication-lane-busy-with-wide-rows-is-judged-silent-and-refuses-forwarded-writes)),
+and a node past its memory budget while its writes outrun its merges
+([item 216](../appendix/known-issues.md#216-writes-faster-than-a-nodes-merges-hold-it-past-its-memory-budget)).
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate
