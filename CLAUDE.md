@@ -248,6 +248,29 @@ target/lab/x3/znver1/release/x3 report shoal-spike-bytes/results/x3.json        
 # on europa only and with the lab free; its summaries are committed beside the rounds' (O95)
 sh shoal-spike-bytes/results/x3-supplement.sh
 
+# the X8 spike: one small write in place, 4 KiB to 256 KiB at depth 1 and 32, three ways: `row` (the
+# bytes as a row of their own), `staged` (S7's B: a Quorum read of the stripe row through its
+# leader, a stage to a holder on every host, a conditional commit once two of three staged, an
+# apply after) and `inline` (the same read, the commit carrying the bytes, a fold after). Its own
+# workspace crate, shoal-spike-small: a schema (StripeRow, StripeMeta with `pending` and the
+# StripeHead projection, Filler), `x8-node`, `x8-holder` (one glommio executor on the sibling of its
+# node's control cpu: X6's ring journal and group commit, a chunk file a slot written ahead, lanes
+# under the product's mutual kTLS on port 13300) and `x8`, the driver with every shoaladm command
+# flattened in, `x8 holders up|check|down` and `x8 local up|down`. Every cell seals each shard's WAL
+# with filler before it reads its counters, waits for every apply and fold, and reads every key's
+# last write back. results/x8-lab.sh runs the lab leg (inventory.yml, keys in groups europa leads)
+# and the loopback leg (three nodes on europa), four rounds, about eight hours; never edit it while
+# it runs, since sh reads it as it goes. IN_PLACE_SYNC=batch is the supplement: one flush covering
+# every apply and fold that completed, where S6 syncs each. The tables are on
+# docs/src/object-storage/small-writes.md
+CARGO_TARGET_DIR=target/lab/x8/znver1 RUSTFLAGS="-C target-cpu=znver1" cargo build --release -p shoal-spike-small
+target/lab/x8/znver1/release/x8 holders check -i shoal-spike-small/inventory-loopback.yml   # a stage, apply, fold, probe each
+QUICK=1 ROUNDS=1 OUT=target/lab/x8/quick sh shoal-spike-small/results/x8-lab.sh   # proves every leg runs
+sh shoal-spike-small/results/x8-lab.sh                                              # the four rounds
+IN_PLACE_SYNC=batch LEGS=lab DEPTHS=32 OUT=shoal-spike-small/results/supplement sh shoal-spike-small/results/x8-lab.sh
+sh shoal-spike-small/results/x8-lab.sh teardown                                     # every cluster and holder down
+target/lab/x8/znver1/release/x8 report shoal-spike-small/results/x8.json           # intervals and verdicts
+
 # the X11 spike: frames of plain bytes between a glommio server and a tokio client, plaintext and
 # under the product's own kTLS, into direct I/O buffers and a file and back - MiB/s a connection and
 # cpu a GiB by frame, the window, a small request's tail on the stream's connection and beside it,
@@ -815,6 +838,15 @@ go through `shoal`.**
   member's `Replication` and `Stats` and every host's device and network counters around each cell,
   and carries every `shoaladm` command. A workspace member, since it adds no crate to the lockfile;
   thrown away like every spike's code
+- **shoal-spike-small** - The X8 spike ([one small write, three ways](docs/src/object-storage/small-writes.md)):
+  a schema of a row of bytes, X10's `StripeMeta` with a `pending` field and its `StripeHead`
+  projection, and filler; its node program `x8-node`; `x8-holder`, S6's holder of a stripe chunk on
+  one glommio executor (X6's ring journal and committer copied, a chunk file a slot, lanes under
+  the product's mutual kTLS); and `x8`, a driver that writes one small write by a row, by S7's B
+  and with its bytes in the commit, times each part, bounds the work a write leaves behind with a
+  gate a holder, counts every member's WAL syncs and every holder's, and carries every `shoaladm`
+  command. The holder's frames (`src/wire.rs`) are the spike's, not the product's. A workspace
+  member, since it adds no crate to the lockfile; thrown away like every spike's code
 - **shoal-model** - The deterministic protocol model ([F36](docs/src/features/cluster-harness.md)):
   the contract P1–P6 as executable checks over a Raft-shaped tablet group, with saved schedules
   under `shoal-model/schedules/`. Since [X1](docs/src/object-storage/stripe-model.md) a second

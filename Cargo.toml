@@ -20,6 +20,10 @@ members = [
     # X3, bytes through the tablet groups: a stripe as a row, its node program and the spike's own
     # driver over shoal-loadgen's (docs/src/object-storage/bytes-through-groups.md)
     "shoal-spike-bytes",
+    # X8, one small write three ways: a row, staged to a holder process then committed, and inside
+    # the commit; its node program, the holder and the spike's own driver
+    # (docs/src/object-storage/small-writes.md)
+    "shoal-spike-small",
     "shoal-top",
     # the admin program and the terminal UI, split in F63: shoalctl depends on shoaladm
     "shoaladm",

@@ -142,6 +142,15 @@ faster than appending, so the zeros are written when it is made
 ([X6](device-store-ssd.md#2-the-journal)). A committer never syncs with nothing new to make
 durable: on ext4 and XFS that still flushes the device.
 
+**An apply's flush is to be shared too, once M14 shows it safe.** As the table has it, each apply
+syncs its own chunk. On the 970 EVO that held a slice to about 720 applies a second however small
+they were, and [X8](small-writes.md#7-the-supplement-one-flush-for-many-applies) found one flush
+covering every apply that had completed, by the journal's committer, raised B's small writes
+1.70× at 4 KiB and changed nothing on the Optane. It relies on one file's `fdatasync` flushing the
+device for every direct write into chunks written ahead, which X6's probes say XFS and ext4 do,
+and which nothing has yet crashed a host to prove. The same flush is what makes a small write in
+its commit worth having on such a device ([S7](write-path.md#small-writes)).
+
 **A staged record holds new values and never a patch.** Parity is staged as the new parity
 bytes, not as the delta that would turn old parity into new. A record that is applied, then
 replayed after a crash that lost the fact of its application, writes the same bytes again

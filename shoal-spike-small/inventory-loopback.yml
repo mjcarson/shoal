@@ -1,0 +1,63 @@
+# Spike X8's loopback leg: three nodes on europa at a factor of three, bounded by its cores and its
+# Optane rather than by 1 GbE. X3's loopback inventory (`shoal-spike-bytes/inventory-loopback.yml`)
+# renamed, on ports of its own. No deployment can make it, since an inventory's ports, unit and
+# remote directory are a deployment's and three nodes on one host would share them all; so
+# `x8 local up` renders each node with shoaladm's own renderer and runs it in a transient unit of
+# its own (`src/local.rs`), and `x8 local down` removes it. It is read the way a deployment is.
+#
+# Each node listens on its own loopback address on one set of ports, and has four physical cores of
+# europa's to itself: a control core (`local.rs`'s CONTROL_CORES, 1, 5 and 9), and six shards on the
+# other three and their siblings, a lab Zen1 node's shape. Each node's holder runs on its control
+# core's sibling (17, 21 and 25), listens on the node's address, and keeps its files beside the
+# node's root on the Optane. Core 0 is left to the system and cores 13 to 15 to the driver. 6 GiB a
+# node, not the lab's 8, so three nodes, their holders, their page cache and the driver fit
+# europa's 43 GiB.
+#
+#   target/lab/x8/znver1/release/x8 local up -i shoal-spike-small/inventory-loopback.yml \
+#       --program target/lab/x8/znver1/release/x8-node
+#   target/lab/x8/znver1/release/x8 holders up -i shoal-spike-small/inventory-loopback.yml \
+#       --program target/lab/x8/znver1/release/x8-holder
+#   target/lab/x8/znver1/release/x8 holders down -i shoal-spike-small/inventory-loopback.yml
+#   target/lab/x8/znver1/release/x8 local down -i shoal-spike-small/inventory-loopback.yml
+name: x8-loopback
+ports:
+  client: 12810
+  peer: 12811
+  control: 12812
+replication_factor: 3
+control_voters: 3
+wal_commit_delay: 3ms
+tracing: Info
+user: shoal
+admin: admin
+nodes:
+- name: loop-a
+  ssh: europa
+  address: 127.0.0.11
+  resources:
+    cores: 6
+    exclude_cores: [0, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    memory: 6Gi
+    control_core_shared: false
+  storage:
+    latency: /optane/shoal-x8-local/loop-a/data
+- name: loop-b
+  ssh: europa
+  address: 127.0.0.12
+  resources:
+    cores: 6
+    exclude_cores: [0, 1, 2, 3, 4, 9, 10, 11, 12, 13, 14, 15]
+    memory: 6Gi
+    control_core_shared: false
+  storage:
+    latency: /optane/shoal-x8-local/loop-b/data
+- name: loop-c
+  ssh: europa
+  address: 127.0.0.13
+  resources:
+    cores: 6
+    exclude_cores: [0, 1, 2, 3, 4, 5, 6, 7, 8, 13, 14, 15]
+    memory: 6Gi
+    control_core_shared: false
+  storage:
+    latency: /optane/shoal-x8-local/loop-c/data

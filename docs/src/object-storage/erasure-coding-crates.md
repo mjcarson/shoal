@@ -490,7 +490,8 @@ again from all k units. On titan cold, for each byte changed:
 
 The delta is cheaper for the core as well as for the devices. The CPU is not what decides
 between them; the reads are, and those are [X8](spikes.md#x8-one-small-write-three-ways)'s and
-[S7](write-path.md)'s.
+[S7](write-path.md)'s. X8 ran only a replicated pool's writes ([X8](small-writes.md#what-x8-does-not-settle)),
+so a partial write's read round is still M18's to measure.
 
 ### One parity chunk
 

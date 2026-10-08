@@ -24,7 +24,7 @@ or larger later is optional, because skipping it costs nothing that has to be un
 whose absence would be baked into a key, a file or a frame is required, because the cheapest
 day to do it is the day before the format exists.
 
-**Where it stands (~~2026-10-03~~ ~~2026-10-05~~ ~~2026-10-06~~ 2026-10-07).** ~~Six~~ Seven of the ten required rows are done, each
+**Where it stands (~~2026-10-03~~ ~~2026-10-05~~ ~~2026-10-06~~ ~~2026-10-07~~ 2026-10-08).** ~~Six~~ Seven of the ten required rows are done, each
 marked ✅ below: every one that waits on no open question. Of the ~~four~~ three left, ~~each waits on a
 question~~ ~~two~~ ~~three~~ two can start now. [X2](placement-simulation.md) settled what placement reads
 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)), and that frees a member's
@@ -68,6 +68,17 @@ defects on the way, neither a prerequisite, since under B no object's bytes are 
 ([item 215](../appendix/known-issues.md#215-a-replication-lane-busy-with-wide-rows-is-judged-silent-and-refuses-forwarded-writes)),
 and a node past its memory budget while its writes outrun its merges
 ([item 216](../appendix/known-issues.md#216-writes-faster-than-a-nodes-merges-hold-it-past-its-memory-budget)).
+[X8](small-writes.md) ✅ ran one small write three ways on 2026-10-08, and changes no row of this
+page either. S7's small-write path is kept, on a device whose sync flushes its cache and below
+64 KiB, once a slice shares one flush among its applies; on a device whose cache writes through,
+every write is staged ([the record](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)).
+What the path needs is M12's and M15's to build: a field of pending bytes in the stripe row, and
+a commit that carries them. The byte bound on an append batch it would lean on is ✅ already built,
+and a commit of less than 64 KiB is far below [item 208](../appendix/known-issues.md#208-a-write-that-fits-a-client-frame-can-make-a-log-entry-no-peer-frame-carries)'s
+frame. It found a client defect on the way, which is not a prerequisite since its fix changes no format
+or frame, though an object stream on a connection set apart meets it as any query does: a pooled
+connection retired at its lifetime while it still owes answers
+([item 217](../appendix/known-issues.md#217-a-pooled-connection-retired-at-its-lifetime-fails-the-answers-it-still-owes)).
 
 **No object storage code is written on top of a required prerequisite that is outstanding.**
 [Milestones](milestones.md) places each required row no later than the start of the first gate

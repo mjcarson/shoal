@@ -3,7 +3,8 @@
 ~~**Nothing here has been run.**~~ ~~**One spike has run**: X4, whose record is
 [its own page](erasure-coding-crates.md) (2026-10-03).~~ ~~**Two spikes have run**~~ ~~**Three
 spikes have run**~~ ~~**Four spikes have run**~~ ~~**Five spikes have run**~~ ~~**Six spikes have
-run**~~ ~~**Seven spikes have run**~~ ~~**Eight spikes have run**~~ ~~**Nine spikes have run**~~ ~~**Ten spikes have run**~~ **Eleven spikes have run**, each with its record on a page of its own: X3,
+run**~~ ~~**Seven spikes have run**~~ ~~**Eight spikes have run**~~ ~~**Nine spikes have run**~~ ~~**Ten spikes have run**~~ ~~**Eleven spikes have run**~~ **Twelve spikes have run**, each with its record on a page of its own: X8,
+[one small write, three ways](small-writes.md) (2026-10-08), X3,
 [bytes through the tablet groups](bytes-through-groups.md) (2026-10-07), X1,
 [the stripe protocol, modelled](stripe-model.md), and X7, [the device store on HDD](device-store-hdd.md) (both 2026-10-06), X2,
 [placement](placement-simulation.md), X4, [the erasure coding crates](erasure-coding-crates.md), and
@@ -119,7 +120,7 @@ The lab is the three hosts of `tmdb_cluster.yaml`
 | ✅ X5 | Checksums, [reported](checksums.md) | Q21, in part | titan, europa | ~~Afternoon~~ Done 2026-10-03 |
 | ✅ X6 | The device store on SSD, [reported](device-store-ssd.md) | Q22 in part, Q27's device half | The lab; XFS, fitted | ~~Week~~ Done 2026-10-04 |
 | ✅ X7 | The device store on HDD, [reported](device-store-hdd.md) | Q23 | ✅ Disks fitted | ~~Days~~ Done 2026-10-06 |
-| X8 | One small write, three ways | Q14, Q27 | The lab; X6 | Days |
+| ✅ X8 | One small write, three ways, [reported](small-writes.md) | Q14, Q27 | The lab; X6 | ~~Days~~ Done 2026-10-08 |
 | X9 | Table latency beside object work | Q15, Q24 | titan; X4, X5 | Days |
 | ✅ X10 | What a stripe row costs, [reported](stripe-row-costs.md) | Q25 in part, Q17's group half | The lab | ~~Days~~ Done 2026-10-04 |
 | ✅ X11 | Streamed bodies, [reported](streamed-bodies.md) | Q26 in part | europa, the lab | ~~Days~~ Done 2026-10-05 |
@@ -323,7 +324,7 @@ instead, and the spike says so if it does. It did not: a row of 4 MiB is far bel
 **Cost.** ~~Days.~~ A day: about ten hours of rounds and an hour's supplement.
 
 **What it is not.** A measurement of B. Only [X8](#x8-one-small-write-three-ways) puts the
-two side by side.
+two side by side, and ✅ it has, for one small write ([X8](small-writes.md)).
 
 ### X4. Erasure coding crates: performance and tradeoffs
 
@@ -563,6 +564,21 @@ is a disk.~~ A day: about ten hours of rounds, the hosts at once, and an hour's 
 
 ### X8. One small write, three ways
 
+**Reported 2026-10-08** on [its own page](small-writes.md), and recorded on S18 as
+[Q27, and Q14 in part](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08).
+**A small write rides inside its commit only on a device whose sync flushes its cache, below
+64 KiB, once a slice shares one flush among its applies; on a device whose cache writes through,
+every write is staged.** Two of the results named below came out, one on each kind of device. On
+the Optane the size is very small: the inline path won no size at either depth, and B won under
+load at every size, by up to 2.01×, so the log path is not worth having there. On the 970 EVO the
+inline path was one durable round faster one write at a time, 5.1 ms against 7.0 at 4 KiB, and
+under load both were held by the holders' syncs, a flush an apply as S6 has it; shared among
+applies in a supplement, the inline path won to 32 KiB under load as well, so the size sits in
+the tens of kibibytes there. It found one defect, a client's pool retiring a connection that
+still owes answers ([item 217](../appendix/known-issues.md#217-a-pooled-connection-retired-at-its-lifetime-fails-the-answers-it-still-owes)),
+which ended the first attempt at the rounds. The plan as written follows, struck where the run
+departed from it.
+
 **Question.** What does one small write in place cost end to end, and should small writes
 ride the metadata log ([Q27](contract.md#questions-to-answer))? It is also the cost half of
 [Q14](contract.md#questions-to-answer).
@@ -573,22 +589,28 @@ replicated pools. If it is very small, the log path is not worth having. If it s
 tens of kibibytes, [S7](write-path.md#small-writes)'s threshold is real and the spike has
 found it.
 
-**Method.** Three paths for the same write, from 4 KiB to 256 KiB, at one write outstanding
-and at thirty-two:
+**Method.** Three paths for the same write, from 4 KiB to 256 KiB ~~,~~ at every power of two
+between, decided with the user, at one write outstanding and at thirty-two:
 
 | Path | How it is run |
 | --- | --- |
-| Through the tablet group, as a row | The existing bench, on the lab's cluster |
-| Staged, then committed | A spike client sends the bytes to a small holder process on each host, which journals and syncs them as X6 found best; then it writes a small row through the real cluster |
-| Bytes inside the commit | The first path with the row carrying the bytes, which is what it would be |
+| Through the tablet group, as a row | ~~The existing bench, on the lab's cluster~~ The spike's own driver (`shoal-spike-small`), on a cluster of the lab's own shape, so every path is timed alike: an insert of a row holding exactly the write's bytes |
+| Staged, then committed | A spike client sends the bytes to a small holder process on each host, which journals and syncs them as X6 found best; then it writes a small row through the real cluster. Added with the user: the client reads the row at `Quorum` first, as S7's coordinator does, goes on at two holders of three, and the holders apply in place after the acknowledgement |
+| Bytes inside the commit | The first path with the row carrying the bytes, which is what it would be. Added with the user: the same read first, and every holder folds the bytes in place after, making them from the write's seed as a replica on its host would hand them over |
+
+The work a write leaves behind runs inside the arm, bounded by a gate a holder, and is counted.
+Added after the quick run: a supplement on the lab with every holder sharing one flush among its
+applies and folds.
 
 **Where.** The lab, where the pool's device and the WAL are one disk and the table says so;
 and loopback on europa.
 
 **Records.** For each path and size: median and p99, writes a second, and syncs issued for
-each write.
+each write. Added: each part of a write, the work left behind and the waits for it, device bytes a
+byte, cpu, the busiest link, each holder's sync floor, and a read back of every key's last write.
 
-**Depends on.** X6, for how a stage is synced. **Cost.** Days.
+**Depends on.** X6, for how a stage is synced. **Cost.** ~~Days.~~ A day and a half: about six
+hours of rounds, an attempt item 217 ended, and two hours of the supplement.
 
 ### X9. Table latency beside object work
 
@@ -848,7 +870,7 @@ flowchart LR
     X5["✅ X5 checksums"]:::done
     X6["✅ X6 device store, SSD"]:::done
     X7["✅ X7 device store, HDD"]:::done
-    X8["X8 one small write"]
+    X8["✅ X8 one small write"]:::done
     X9["X9 table latency"]
     X11["✅ X11 streamed bodies"]:::done
     X12["X12 recovery, scrub"]
@@ -864,8 +886,9 @@ flowchart LR
 Nine depend on no other spike and on nothing that has to be fitted, and can start at once:
 ~~X1,~~ ~~X2,~~ ~~X3,~~ ~~X4,~~ ~~X5,~~ ~~X10,~~ ~~X11,~~ ~~X13~~ and ~~X14~~; all nine have run. ~~X6 can start too, and
 needs an XFS filesystem for one of its legs.~~ X6 has run too, on an XFS filesystem fitted for it.
-~~X8 follows X6, and~~ X8 and X9 ~~follows X5, since X4 has
-reported~~ can start: X4, X5 and X6 have all reported. ~~X7 and the rotational half of X12 wait
+~~X8 follows X6, and~~ ~~X8 and X9~~ X9 ~~follows X5, since X4 has
+reported~~ ~~can start: X4, X5 and X6 have all reported~~ can start: X4, X5 and X6 have all reported, and X8
+has run on X6's journal. ~~X7 and the rotational half of X12 wait
 for disks; X7 reuses X6's harness.~~ The disks were fitted and X7 ran on X6's harness on
 2026-10-06; X12's rotational half waits on X12 alone.
 
@@ -876,8 +899,8 @@ the pages stated that broke a clause, and repaired each without leaving S7's dir
 
 The first gate, [before M11](milestones.md#before-m11-the-object-contract), waits on eight
 of them: X1 and X2 for the decisions themselves, and X3, X8 and X9 for what those decisions
-cost, which bring X4, X5 and X6 with them. X1, X2, X3, X4, X5 and X6 have reported, and X10 and X11
-beside them; X8 and X9 are what is left of it. [What's left to do](whats-left-todo.md) draws every spike into that gate, because the
+cost, which bring X4, X5 and X6 with them. X1, X2, X3, X4, X5, X6 and X8 have reported, and X10 and
+X11 beside them; ~~X8 and X9 are~~ X9 is what is left of it. [What's left to do](whats-left-todo.md) draws every spike into that gate, because the
 milestones stop being provisional only when every decision is on the record, and X14 is among
 them: it read the alternative Q14 is measured against, and it has reported.
 
@@ -934,12 +957,12 @@ its evidence and with what it did not settle:
 
 | Decided | From |
 | --- | --- |
-| The write protocol: Q14, Q15, Q16 and Q18, and the contract agreed | ✅ X1 for safety, Q15, Q16 and Q18 ([the record](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); ✅ X3 for what A, stripes as rows, costs ([the record](contract.md#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)), and X8 for the small write; ✅ X14 for the alternative Q14 is measured against, Ceph's write as `v20.2.0` has it ([the record](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) |
+| The write protocol: Q14, Q15, Q16 and Q18, and the contract agreed | ✅ X1 for safety, Q15, Q16 and Q18 ([the record](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); ✅ X3 for what A, stripes as rows, costs ([the record](contract.md#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)), and ✅ X8 for the small write ([the record](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)); ✅ X14 for the alternative Q14 is measured against, Ceph's write as `v20.2.0` has it ([the record](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) |
 | Placement: Q19 | ✅ X2 ([Q19, in part](contract.md#q19-in-part-placement-2026-10-03)); how a commit checks a generation and its positions ~~is X1's~~ ✅ X1 |
 | The code, the crate and the geometry: Q20. The checksum: Q21 | ✅ X4 for the code and the crate ([Q20, in part](contract.md#q20-in-part-the-code-and-the-crate-2026-10-03)); ✅ X5 for the checksum ([Q21, in part](contract.md#q21-in-part-the-checksum-2026-10-03)); ~~X14,~~ ✅ X14, which took nothing of the geometry from Ceph; the geometry, and the granule ~~and chunk digest~~ Q21 leaves; the chunk digest ✅ X1, which keeps none ([X1](stripe-model.md#the-chunk-digest)) |
 | The device store: Q22, and Q23 for the rotational gate | ✅ X6 for SSDs ([Q22, in part](contract.md#q22-in-part-the-device-store-on-ssd-2026-10-04)); ✅ X7 for rotational disks ([Q23](contract.md#q23-what-a-rotational-device-needs-2026-10-06)) |
 | Where object work runs: Q24 | X9 |
-| Stripe size and the inline threshold: Q25. Small writes: Q27 | ✅ X10 for Q25 ([Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04)); X8 for Q27's other half |
+| Stripe size and the inline threshold: Q25. Small writes: Q27 | ✅ X10 for Q25 ([Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04)); ✅ X8 for Q27's other half ([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)) |
 | The wire: Q26 | ✅ X11 ([Q26, in part](contract.md#q26-in-part-streamed-bodies-2026-10-05)) |
 | Budgets: Q28, Q29 | X12; ✅ X14 for what a deep scrub of k+m verifies, which Ceph's does not ([Q28, in part](contract.md#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)) |
 | The driver: Q30 | ✅ [F69](../features/driver-operation-kinds.md) for the driver's shape ([Q30, in part](contract.md#q30-in-part-the-drivers-shape-2026-10-03)); ✅ X13 for the dataset and the rate of seeded bytes ([Q30](contract.md#q30-the-object-dataset-and-seeded-bytes-2026-10-05)) |

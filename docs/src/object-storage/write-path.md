@@ -303,8 +303,23 @@ One answer is candidate A at small sizes: a write under a threshold rides **insi
 commit command, is durable when the group's log is, and is folded into the stripe
 chunks afterwards. It is one round. Its bytes cross the WAL, the row holds them until they are
 folded, and a read overlays them. Whether the threshold exists, and where, is
-[Q27](contract.md#questions-to-answer); [X8](spikes.md#x8-one-small-write-three-ways) finds
-the size at which the two paths cross on each kind of device.
+[Q27](contract.md#questions-to-answer); ~~[X8](spikes.md#x8-one-small-write-three-ways) finds
+the size at which the two paths cross on each kind of device~~.
+
+**[X8](small-writes.md) found it, and it depends on the device.** One small write at a time, B's
+second round cost 1.7 ms of 7.0 at 4 KiB on the lab's 970 EVO, where the same write in its commit
+took 5.1; on the Optane it cost about 0.1 ms and hid inside the WAL's commit delay. Under load on
+the Optane B won at every size, by up to 2.0×, since bytes in the log cost the nodes' cpu by the
+byte and are written three times a copy against B's two. On the 970 EVO both paths were held by
+the holders' syncs, a flush an apply; with one flush shared among a slice's applies, the bytes in
+the commit won to 32 KiB under load as well. So
+([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)):
+
+- **on a device whose sync flushes a volatile cache, a write below 64 KiB rides inside its
+  commit**, once M14's slice shares one flush among its applies; the stripe row carries a field
+  of pending bytes for it, which a read overlays and a fold clears;
+- **on a device whose cache writes through, every write is staged**, as on the Optane;
+- **above 64 KiB every write is staged**, on every device.
 
 ### The schedules that shaped it
 
@@ -370,7 +385,8 @@ built to avoid.
   until a commit decides them. A slice bounds what it will hold staged and refuses beyond
   it.
 - **A commit command a write**, small: a label for each touched chunk and the holders that
-  missed.
+  missed; and on a device that flushes, a write of less than 64 KiB in it as well
+  ([X8](small-writes.md)).
 - **A strong read of the object's entry** before each write in place.
 
 ## What it breaks
@@ -421,8 +437,11 @@ and [S6](device-store.md). [S16](testing.md#the-model)'s model before any of it.
   2.0 to 2.3 times, reached 0.20 to 0.27 of a replicated pool's device a copy on europa's Optane,
   bound by its nodes' cpu, and slowed a small table beside it a hundredfold at the p99, so B stays
   preferred ([Q14, in part](contract.md#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)).
-- [X8](spikes.md#x8-one-small-write-three-ways): one small write through A, through B, and
-  through B with the bytes in the commit.
+- ✅ [X8](small-writes.md): one small write through A, through B, and
+  through B with the bytes in the commit. Reported 2026-10-08: B's second round is 1.7 ms of
+  7.0 at 4 KiB on the 970 EVO and inside a commit delay on the Optane; bytes in the commit win
+  below 64 KiB on a device that flushes once a slice shares a flush among its applies, and nowhere
+  on the Optane ([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)).
 - The object arms of [S15](performance.md), which record bytes completed and durable, what
   was left staged, and the tail.
 

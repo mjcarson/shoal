@@ -56,7 +56,7 @@ under [What X6 does not settle](#what-x6-does-not-settle).
 Its preferred answer is S6's: a journal written ahead for small updates, and whole files for
 large ones. [Q27](contract.md#questions-to-answer) asks what one small write in place costs, and
 whether small writes should ride the metadata log instead. X6 answers the device half of Q27;
-[X8](spikes.md#x8-one-small-write-three-ways) answers the end-to-end half. X6 also asks how many
+[X8](spikes.md#x8-one-small-write-three-ways) answers the end-to-end half ([reported](small-writes.md)). X6 also asks how many
 slices an SSD needs for its cores to drive it, one core to a slice.
 
 The spike's section named four results in advance that would change the design:
@@ -364,7 +364,8 @@ drive rested.
 
 - **The journal's write in place is two flushes**: one for the stage, one for the apply. On the
   970 EVO that is 2 ms rested and about 6.5 ms loaded at one in flight; on the Optane, whose cache
-  writes through, 81 µs. X8 adds the network and the commit to it.
+  writes through, 81 µs. X8 adds the network and the commit to it, ✅ and
+  [did](small-writes.md): 7.0 ms for a staged 4 KiB write on the lab, 1.5 ms on the Optane.
 - **The clone is dearer in every way but bytes at large sizes.** Its stage writes into a hole or a
   shared block, which is an allocation; its apply remaps extents in a transaction; and the
   `fdatasync` after it commits that transaction: 2.9 ms against the journal apply's 0.9 ms on the
@@ -553,7 +554,8 @@ records it as the choice.
 - **What one small write in place costs on a device**, the half of Q27 X6 owns, is two flushes:
   2 ms rested to 6 ms loaded on the 970 EVO at 4 KiB with one in flight, and 81 µs on the
   Optane. Whether a small write should ride the metadata log instead is X8's to decide, against
-  that floor.
+  that floor. ✅ [X8](small-writes.md) decided it: below 64 KiB on a device that flushes, once a
+  slice shares one flush among its applies, and never on the Optane ([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)).
 
 ## What X6 does not settle
 
@@ -564,7 +566,9 @@ records it as the choice.
   checksum binds it to its place and its label ([P15](contract.md#the-contract)), but M14 states
   it.
 - **The journal's files**: their size and number, and when an applied record's space is reused.
-- **Small writes in the metadata log**, the other half of Q27: [X8](spikes.md#x8-one-small-write-three-ways).
+- ~~**Small writes in the metadata log**, the other half of Q27: [X8](spikes.md#x8-one-small-write-three-ways).~~
+  Recorded by [X8](small-writes.md) ([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)), which also found an apply's flush worth
+  sharing: 1.70× for B's small writes on the 970 EVO.
 - **Rotational disks**: [X7](spikes.md#x7-the-device-store-on-hdd), which reuses this harness.
   The 970 EVO's two regimes are a warning for it: a device's state can decide a figure.
 - **Whether the store survives a crash as designed**: M14's acceptance tests, with

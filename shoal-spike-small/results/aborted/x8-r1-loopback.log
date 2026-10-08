@@ -1,0 +1,47 @@
+loopback: settling the leaders
+sending "activate 7" as 1974f6a2-953b-424a-9a97-217e6430da85
+accepted: Applied { version: 12 }
+loopback: heat for 60s
+loopback | size=4096 depth=32 | heat | 6939/s p50 4735 µs p99 7713 µs | syncs a write 6.30 | wait p50 2 µs | drain 0 ms
+loopback | size=4096 depth=1 | row | 831/s p50 1162 µs p99 3049 µs | syncs a write 4.86 | wait p50 1 µs | drain 0 ms
+loopback | size=4096 depth=1 | staged | 524/s p50 1584 µs p99 3267 µs | syncs a write 10.75 | wait p50 1 µs | drain 0 ms
+loopback | size=4096 depth=1 | inline | 547/s p50 2157 µs p99 3269 µs | syncs a write 7.71 | wait p50 1 µs | drain 0 ms
+loopback | size=4096 depth=32 | row | 8159/s p50 3918 µs p99 6439 µs | syncs a write 0.69 | wait p50 1 µs | drain 0 ms
+loopback | size=4096 depth=32 | staged | 6941/s p50 4698 µs p99 7348 µs | syncs a write 6.32 | wait p50 2 µs | drain 0 ms
+loopback | size=4096 depth=32 | inline | 6842/s p50 4739 µs p99 8831 µs | syncs a write 3.81 | wait p50 2 µs | drain 0 ms
+loopback | size=8192 depth=1 | row | 644/s p50 678 µs p99 3289 µs | syncs a write 4.80 | wait p50 1 µs | drain 0 ms
+loopback | size=8192 depth=1 | staged | 599/s p50 815 µs p99 3281 µs | syncs a write 10.84 | wait p50 1 µs | drain 0 ms
+loopback | size=8192 depth=1 | inline | 536/s p50 2154 µs p99 3262 µs | syncs a write 6.99 | wait p50 1 µs | drain 0 ms
+loopback | size=8192 depth=32 | row | 7915/s p50 3983 µs p99 8651 µs | syncs a write 0.70 | wait p50 1 µs | drain 0 ms
+loopback | size=8192 depth=32 | staged | 6868/s p50 4784 µs p99 7668 µs | syncs a write 6.34 | wait p50 2 µs | drain 0 ms
+loopback | size=8192 depth=32 | inline | 6481/s p50 4870 µs p99 12853 µs | syncs a write 3.84 | wait p50 2 µs | drain 0 ms
+loopback | size=16384 depth=1 | row | 580/s p50 1489 µs p99 3332 µs | syncs a write 4.81 | wait p50 1 µs | drain 0 ms
+loopback | size=16384 depth=1 | staged | 845/s p50 801 µs p99 2533 µs | syncs a write 11.19 | wait p50 1 µs | drain 0 ms
+loopback | size=16384 depth=1 | inline | 552/s p50 862 µs p99 4047 µs | syncs a write 7.65 | wait p50 1 µs | drain 0 ms
+loopback | size=16384 depth=32 | row | 7207/s p50 4123 µs p99 13804 µs | syncs a write 0.74 | wait p50 1 µs | drain 0 ms
+loopback | size=16384 depth=32 | staged | 6822/s p50 4813 µs p99 7594 µs | syncs a write 6.35 | wait p50 2 µs | drain 0 ms
+loopback | size=16384 depth=32 | inline | 5938/s p50 5059 µs p99 18268 µs | syncs a write 3.88 | wait p50 3 µs | drain 0 ms
+loopback | size=32768 depth=1 | row | 637/s p50 912 µs p99 3297 µs | syncs a write 4.81 | wait p50 1 µs | drain 0 ms
+loopback | size=32768 depth=1 | staged | 590/s p50 1471 µs p99 3590 µs | syncs a write 10.70 | wait p50 1 µs | drain 0 ms
+loopback | size=32768 depth=1 | inline | 625/s p50 1060 µs p99 3383 µs | syncs a write 7.84 | wait p50 1 µs | drain 0 ms
+loopback | size=32768 depth=32 | row | 5798/s p50 4596 µs p99 21840 µs | syncs a write 0.84 | wait p50 1 µs | drain 0 ms
+loopback | size=32768 depth=32 | staged | 6516/s p50 5026 µs p99 8659 µs | syncs a write 6.22 | wait p50 2 µs | drain 0 ms
+loopback | size=32768 depth=32 | inline | 4788/s p50 5726 µs p99 25657 µs | syncs a write 4.00 | wait p50 3 µs | drain 0 ms
+loopback | size=65536 depth=1 | row | 608/s p50 1269 µs p99 4065 µs | syncs a write 4.49 | wait p50 1 µs | drain 0 ms
+loopback | size=65536 depth=1 | staged | 640/s p50 1068 µs p99 3228 µs | syncs a write 10.83 | wait p50 1 µs | drain 0 ms
+loopback | size=65536 depth=1 | inline | 620/s p50 1110 µs p99 3592 µs | syncs a write 8.19 | wait p50 1 µs | drain 0 ms
+loopback | size=65536 depth=32 | row | 4188/s p50 6058 µs p99 26853 µs | syncs a write 0.95 | wait p50 1 µs | drain 0 ms
+loopback | size=65536 depth=32 | staged | 4912/s p50 6787 µs p99 11313 µs | syncs a write 6.87 | wait p50 3 µs | drain 0 ms
+loopback | size=65536 depth=32 | inline | 3464/s p50 7500 µs p99 32883 µs | syncs a write 4.14 | wait p50 4 µs | drain 0 ms
+loopback | size=131072 depth=1 | row | 587/s p50 1185 µs p99 5239 µs | syncs a write 5.21 | wait p50 1 µs | drain 0 ms
+loopback | size=131072 depth=1 | staged | 533/s p50 1111 µs p99 4080 µs | syncs a write 11.45 | wait p50 1 µs | drain 0 ms | the read: Server { query_id: Some(01a119b2-89dd-7991-80f3-88fee96907ad), index: None, code: ConnectionLost, msg: "the connection to the server failed: IO(Custom { kind: UnexpectedEof, error: \"early eof\" })" }
+loopback | size=131072 depth=1 | inline | 478/s p50 1396 µs p99 6975 µs | syncs a write 8.22 | wait p50 1 µs | drain 0 ms
+loopback | size=131072 depth=32 | row | 2152/s p50 12067 µs p99 45089 µs | syncs a write 1.24 | wait p50 1 µs | drain 0 ms | Server { query_id: Some(01a119b3-f6f5-77a0-85aa-3f2402000938), index: None, code: ConnectionLost, msg: "the connection to the server failed: IO(Custom { kind: UnexpectedEof, error: \"early eof\" })" }
+loopback | size=131072 depth=32 | staged | 3001/s p50 10502 µs p99 16212 µs | syncs a write 7.18 | wait p50 3 µs | drain 0 ms
+loopback | size=131072 depth=32 | inline | 1768/s p50 15614 µs p99 48464 µs | syncs a write 4.37 | wait p50 5 µs | drain 0 ms
+loopback | size=262144 depth=1 | row | 465/s p50 1727 µs p99 7791 µs | syncs a write 5.30 | wait p50 1 µs | drain 0 ms
+loopback | size=262144 depth=1 | staged | 602/s p50 1161 µs p99 4309 µs | syncs a write 11.49 | wait p50 1 µs | drain 0 ms
+loopback | size=262144 depth=1 | inline | 374/s p50 2006 µs p99 7889 µs | syncs a write 8.27 | wait p50 2 µs | drain 0 ms
+loopback | size=262144 depth=32 | row | 946/s p50 30605 µs p99 83427 µs | syncs a write 1.48 | wait p50 1 µs | drain 0 ms
+loopback | size=262144 depth=32 | staged | 1504/s p50 21053 µs p99 28819 µs | syncs a write 8.08 | wait p50 3 µs | drain 2 ms
+loopback | size=262144 depth=32 | inline | 745/s p50 38306 µs p99 106299 µs | syncs a write 4.59 | wait p50 6 µs | drain 2 ms

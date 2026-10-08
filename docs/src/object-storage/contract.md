@@ -332,8 +332,9 @@ carry their regime. The choice follows the user's instruction to complete X6 and
   metadata sets no higher floor: a stripe row's index at 4 MiB stripes is 0.31 GiB for a node of
   16 TiB.
 - **The pool and the journal**, their sizes and how they recover after a crash: M14.
-- **Q27's other half**, whether small writes ride the metadata log: [X8](spikes.md#x8-one-small-write-three-ways),
-  against the floor above.
+- ~~**Q27's other half**, whether small writes ride the metadata log: [X8](spikes.md#x8-one-small-write-three-ways),
+  against the floor above.~~ Recorded by X8 ([below](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)): only on a device whose sync
+  flushes its cache, below 64 KiB, once a slice shares one flush among its applies.
 - ~~**Rotational devices**: Q23, [X7](spikes.md#x7-the-device-store-on-hdd).~~ Recorded by X7
   ([Q23](#q23-what-a-rotational-device-needs-2026-10-06)).
 - **Whether a slice keeps chunk files open**: a cold open cost 0.6 to 0.9 ms on the 970 EVO, more
@@ -368,7 +369,8 @@ instruction to complete X10 and record it.
   It does not ([X1](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)).
 - **What a group's own state costs** to carry Q17's record of what a slice missed. A row rewritten
   whole costs its size every commit: 196 commits a second at 4 KiB, 30 at 1 MiB.
-- **Small writes in the metadata log**, Q27's other half: [X8](spikes.md#x8-one-small-write-three-ways).
+- ~~**Small writes in the metadata log**, Q27's other half: [X8](spikes.md#x8-one-small-write-three-ways).~~
+  Recorded by X8 ([below](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)); the stripe row gains a field of pending bytes for it.
 - **The followers' reads**, which still park their applies one at a time:
   [O92](../appendix/optimizations.md#o92-a-group-reads-the-rows-its-parked-batch-needs-one-at-a-time).
 
@@ -463,9 +465,10 @@ source before it ran. The choice follows the user's instruction to complete X14 
 - **Versioning.**
 - **Q28's cadence and budgets**: [X12](spikes.md#x12-recovery-and-scrub-rates).
 - **The geometry**: Q20's rest.
-- **Q14 itself**: ~~X1,~~ ~~X3~~ and X8. X1 has recorded its safety
-  ([below](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)), and X3
-  what A costs ([below](#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)).
+- **Q14 itself**: ~~X1,~~ ~~X3~~ ~~and X8~~. X1 has recorded its safety
+  ([below](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)), X3
+  what A costs ([below](#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)), and X8 what one small
+  write costs each way ([below](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)).
 
 #### Q16 and Q18, and Q14, Q15, Q19 in part: the stripe protocol, modelled (2026-10-06)
 
@@ -495,9 +498,9 @@ the schedule that breaks it. The choice follows the user's instruction to comple
 
 **Not settled.** These remain open:
 
-- **What any of it costs**: Q14's cost is ~~X3's and~~ X8's, now that X3 has priced A
-  ([below](#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)), the stager's X9's, a previous state kept
-  in place S6's, at M15.
+- **What any of it costs**: Q14's cost is ~~X3's and~~ ~~X8's~~ recorded, now that X3 has priced A
+  ([below](#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)) and X8 one small write
+  ([below](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)); the stager's is X9's, a previous state kept in place S6's, at M15.
 - **A cheaper default read**, a row at `One` checked against a sequence the entry records: not
   modelled.
 - **Q17's record**: its bound, its granularity and its snapshot, M16's.
@@ -561,15 +564,54 @@ instruction to complete X3 and record it.
 
 **Not settled.** These remain open:
 
-- **The small write**, Q27, and whether a write under a threshold rides the commit: X8, which
-  runs one small write through A, through B and through B with its bytes in the commit.
-- **B's own cost**, which nothing built yet measures: X8 for one write, M15 for the whole path.
+- ~~**The small write**, Q27, and whether a write under a threshold rides the commit: X8, which
+  runs one small write through A, through B and through B with its bytes in the commit.~~
+  Recorded by X8 ([below](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)).
+- **B's own cost**, which nothing built yet measures: ~~X8 for one write,~~ ✅ X8 for one write
+  ([below](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)), M15 for the whole path.
 - **Where A's cpu goes** beyond the profile on X3's page, which an optimization could narrow
   without changing that A writes a byte twice through every table's cores.
 - **The two defects A met on the way**: a busy replication lane judged silent
   ([item 215](../appendix/known-issues.md#215-a-replication-lane-busy-with-wide-rows-is-judged-silent-and-refuses-forwarded-writes)),
   and a node past its memory budget when its writes outrun its merges
   ([item 216](../appendix/known-issues.md#216-writes-faster-than-a-nodes-merges-hold-it-past-its-memory-budget)).
+
+#### Q27, and Q14 in part: one small write, three ways (2026-10-08)
+
+Recorded 2026-10-08 by [X8](small-writes.md), on the tree that adds `shoal-spike-small`. One small
+write in place, 4 KiB to 256 KiB, one at a time and thirty-two at once, was run three ways through
+today's engine and a holder process of the spike's own: as a row of its own bytes; staged to a
+holder on every host, which journals as X6 found best, then a conditional commit of the small
+stripe row once two of three had it, then an apply in place (B); and with its bytes inside that
+commit, then a fold in place. Two legs, each on a cluster brought up for it with its holders: the
+lab's three hosts at a factor of three, `tmdb_cluster.yaml`'s nodes, with every root and holder on
+the host's XFS beside each other, so the WAL and the pool's device are one disk; and three nodes on
+europa over loopback, on its Optane. Four rounds, the order reversing by round, from one `znver1`
+build under the `performance` governor, with no other shoal unit running; then a supplement of
+four rounds on the lab with every holder sharing one flush among its applies. The triggers were
+set before the harness and agreed with the user; the depth's bound was checked. A first attempt
+at the rounds was ended by item 217 and the rounds were started again. The choice follows the
+user's instruction to complete X8 and record it.
+
+| Decision | Evidence |
+| --- | --- |
+| **A small write rides inside its commit only on a device whose sync flushes its cache, below 64 KiB, once a slice shares one flush among its applies; on a device whose cache writes through, every write is staged.** A pool's threshold is set by its devices' kind, and M15 builds the path for the first kind | T2 fired on the Optane: the inline path won no size at either depth, and B won from 128 KiB one write at a time and at every size under load, 1.02× to 2.01×. T3 fired on the 970 EVO behind 1 GbE: at 4 KiB with a flush an apply, where the inline path won every size to 128 KiB one write at a time, 1.39× faster at 4 KiB, and none under load; at 64 KiB in the supplement, with the holders' flushes shared, where it won to 32 KiB under load too, by 1.56× at 4 KiB to 1.11× at 32 KiB ([7](small-writes.md#7-the-supplement-one-flush-for-many-applies)). T1 fired nowhere |
+| **B's second durable round is a small write's latency, and on a device that flushes its throughput** | One write at a time on the lab, a staged write took 7.0 ms at 4 KiB and an inline one 5.1: the stage to two holders of three, 1.7 ms, is the difference. With the holders' flushes shared a staged write cost 1.65 disk flushes and an inline one 1.05. On the Optane a stage cost about 0.1 ms, inside a WAL commit delay of 3 ms ([1](small-writes.md#1-depth-one-a-writes-latency)) |
+| **Above the threshold, bytes in the log cost more than a stage on every device** | From 128 KiB B led on both legs at both depths. Bytes in the commit were written three times a copy, 9.2 device bytes a byte at 256 KiB against B's 6.2, cost the nodes about 40 µs of cpu a KiB, and waited behind other writes' bytes in a shard's WAL batch: a p99 of 107 ms at 256 KiB on the Optane against B's 28 ([5](small-writes.md#5-device-bytes-and-what-the-cpu-went-to)) |
+| **The stripe row carries a field of pending bytes**, empty unless a small write rode its commit, which a read overlays and a fold clears | The path above needs it; an empty field archives in eight bytes, and a field added later is a new row format and so a new cluster ([Q10](../distributed/protocol.md#q10-at-m10a)) |
+
+**Not settled.** These remain open:
+
+- **Whether one flush may stand for many applies after a crash**: M14. The supplement measured it
+  cheap, 1.70× for B at 4 KiB on its own, and crashed nothing. Until M14's faults hold it to P7,
+  each apply syncs its chunk, and the threshold on a device that flushes is none.
+- **How a slice knows its device's kind**: M14. The holders' probe told the two apart at once,
+  about 40 µs a sync against 950 µs, and no drive with power-loss protection was measured.
+- **When a fold's bytes leave the row**: M15. X8's next write replaced them.
+- **A partial write of an erasure coded stripe**, which reads before it stages and touches `d + m`
+  chunks: M18, and its threshold measured then.
+- **The client's pool**, which fails the answers a connection still owes when it retires it
+  ([item 217](../appendix/known-issues.md#217-a-pooled-connection-retired-at-its-lifetime-fails-the-answers-it-still-owes)).
 
 ## Alternatives rejected
 
@@ -622,8 +664,11 @@ staged, then the group's commit. On the lab's Zen1 hosts a flush is about 3 ms f
 and 5.9 ms with six at once, against 0.2 ms on europa's Optane
 ([cluster testing](../cluster-testing/performance.md)), so the floor under a small in-place
 write there is two of those, and a partial write of an erasure coded stripe adds a round of
-reads before them. [X8](spikes.md#x8-one-small-write-three-ways) measures it;
-[Q27](#questions-to-answer) is what to do about it.
+reads before them. ~~[X8](spikes.md#x8-one-small-write-three-ways) measures it;
+[Q27](#questions-to-answer) is what to do about it.~~ [X8](small-writes.md) measured it: 7.0 ms
+for one 4 KiB write on the lab where the same write in its commit took 5.1, and on the Optane both
+inside a WAL commit delay. [Q27](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08) is what is done about it: below 64 KiB on a
+device whose sync flushes its cache, a write rides inside its commit.
 
 **A row for every stripe written in place**, and a conditional commit for every write to one.
 **A label for each stripe chunk** in that row. **State in the group** recording which holders
@@ -673,7 +718,7 @@ Q1–Q13.
 
 | ID | Question and preferred direction | Gate and evidence |
 | --- | --- | --- |
-| Q14 | **What orders a stripe's writes, and how do the bytes stay out of the log?** Preferred: the tablet group that owns the stripe's row, by a conditional commit; holders stage before it and apply after ([S7](write-path.md)). The alternatives are stripes as rows, a group among the holders, and redirect-on-write. **The alternative read, 2026-10-05**: Ceph's write as `v20.2.0` has it ([the record](#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)). **Safe, 2026-10-06**: the direction holds with ten rules repaired ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)). **A priced, 2026-10-07**: stripes as rows write a byte about twice and reach a fifth to a quarter of a replicated pool's device, so replicated SSD pools are not tables ([the record](#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)) | Before M11. ✅ [X1](stripe-model.md) for safety, ✅ [X3](bytes-through-groups.md) and [X8](spikes.md#x8-one-small-write-three-ways) for cost; ✅ [X14](ceph-and-s3-sources.md) for the alternative it is measured against |
+| Q14 | **What orders a stripe's writes, and how do the bytes stay out of the log?** Preferred: the tablet group that owns the stripe's row, by a conditional commit; holders stage before it and apply after ([S7](write-path.md)). The alternatives are stripes as rows, a group among the holders, and redirect-on-write. **The alternative read, 2026-10-05**: Ceph's write as `v20.2.0` has it ([the record](#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)). **Safe, 2026-10-06**: the direction holds with ten rules repaired ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)). **A priced, 2026-10-07**: stripes as rows write a byte about twice and reach a fifth to a quarter of a replicated pool's device, so replicated SSD pools are not tables ([the record](#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)). **B priced for one small write, 2026-10-08**: its second durable round is 1.7 ms of 7.0 at 4 KiB on the 970 EVO and inside a commit delay on the Optane, and under load it wins at every size on the Optane and from 32 KiB on the 970 EVO ([the record](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)) | Before M11. ✅ [X1](stripe-model.md) for safety, ✅ [X3](bytes-through-groups.md) and ✅ [X8](small-writes.md) for cost; ✅ [X14](ceph-and-s3-sources.md) for the alternative it is measured against |
 | Q15 | **Who stages?** Preferred: the node that received the client's bytes, with the group's leader only ordering commits and granting an advisory reservation under contention. The other answer is the leader, which serializes and costs a network crossing while clients do not route by topology. **Recorded 2026-10-06**: the node that received the bytes, with no reservation in the protocol ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)) | Before M11. ✅ X1; [X9](spikes.md#x9-table-latency-beside-object-work) for what a stager's work costs the shard it runs on |
 | Q16 | **The acknowledgement rule.** Preferred: `k + f` current stripe chunks with `f = 1` by default; ~~whether an untouched chunk on a slice that is down counts as current is open~~. What a degraded write does when the rule cannot be met. **Recorded 2026-10-06**: an untouched chunk counts only on its holder's confirmation in the write's round, down or up ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); a write that cannot meet the rule is refused by name | Before M11. ✅ X1 |
 | Q17 | **How does a slice that missed writes learn what it is stale on**, at what granularity, and how does that record survive a checkpoint and reach a new replica? Preferred: a bounded record in the group for each placement group and chunk, derived at apply as the retry table is; past the bound, a backfill from a walk of the tablet's rows. X10 measured what a table can say of it: a group commits about 4,900 small rows a second on the lab, and a row rewritten whole costs its size every commit, 196 commits a second at 4 KiB and 30 at 1 MiB ([the record](stripe-row-costs.md#what-a-group-can-carry-q17)) | M16. ✅ X1 for the rule: a missed mark a position in the row, cleared only by a commit of what its holder holds ([the record](#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)); ✅ [X10](spikes.md#x10-what-a-stripe-row-costs) for a table's half, [X12](spikes.md#x12-recovery-and-scrub-rates) |
@@ -686,7 +731,7 @@ Q1–Q13.
 | Q24 | **Where object work runs**: which executor owns a slice, whether object work shares executors with tables, the lane, the memory budget. X11 found the lane can hand its connections to a slice's executor, and that a kTLS send of a 1 MiB frame holds an executor about a millisecond on Zen1 ([Q26, in part](#q26-in-part-streamed-bodies-2026-10-05)) | M14. X9, ✅ [X11](streamed-bodies.md) for the lane |
 | Q25 | **The metadata rows**: the inline threshold, what a stripe row costs, the stall when a row a commit needs is not in memory, the scale a bucket is designed for. **In part, 2026-10-04**: stripe rows are not kept resident and a commit follows S7's read of its row; 39 bytes of index a cold row, so 27 million rows a GiB a replica and no floor under the stripe above 4 MiB; the inline threshold defaults to 16 KiB; equality on one field is all a commit's condition needs ([the record](#q25-in-part-the-metadata-rows-2026-10-04)); the rows' final layout and a shared stripe table are M12's | M12. ✅ [X10](stripe-row-costs.md) |
 | Q26 | **Streamed bodies**: bounded ranged frames, their size, and what a connection shared with small queries does under them. **In part, 2026-10-05**: object bytes travel on connections of their own, in frames of 1 MiB, four to a window; the object lane hands a connection to the slice's executor; a stream at a device's rate under kTLS is spread over connections ([the record](#q26-in-part-streamed-bodies-2026-10-05)); the window and budget as settings and a read's ranges ahead are M15's | M13. ✅ [X11](streamed-bodies.md) |
-| Q27 | **What one small in-place write costs, and whether small writes ride the metadata log** below a threshold, to be folded into stripe chunks later. **The device's half measured, 2026-10-04**: two flushes, 2 to 6 ms on the 970 EVO at 4 KiB, 81 µs on the Optane ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)) | M15. ✅ [X6](device-store-ssd.md#3-a-partial-write), X8 |
+| Q27 | **What one small in-place write costs, and whether small writes ride the metadata log** below a threshold, to be folded into stripe chunks later. **The device's half measured, 2026-10-04**: two flushes, 2 to 6 ms on the 970 EVO at 4 KiB, 81 µs on the Optane ([the record](#q22-in-part-the-device-store-on-ssd-2026-10-04)). **Recorded 2026-10-08**: a small write rides inside its commit only on a device whose sync flushes its cache, below 64 KiB, once a slice shares one flush among its applies; on a device whose cache writes through, every write is staged ([the record](#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)) | M15. ✅ [X6](device-store-ssd.md#3-a-partial-write), ✅ [X8](small-writes.md) |
 | Q28 | **Scrub**: cadence, byte budgets, what a deep scrub of k+m verifies beyond each stripe chunk's own checksums. **In part, 2026-10-05**: a deep scrub checks the chunks against each other, which Ceph's does not for an overwritable pool ([the record](#q32-and-q14-q20-q28-in-part-ceph-and-s3-at-the-source-2026-10-05)); cadence and budgets are X12's. On a rotational disk, 2026-10-06: no deep scrub budget of 10 MiB/s or more kept a small foreground write's p99 wholly within 1.25×, and on europa's disk 10 MiB/s raised it 1.7 to 2.7 times, so a disk's scrub is paced by the arm's idle time with the budget as its ceiling ([Q23's record](#q23-what-a-rotational-device-needs-2026-10-06)) | M17. X12, ✅ [X14](ceph-and-s3-sources.md), ✅ [X7](device-store-hdd.md#11-a-foreground-beside-a-scrub) for a disk's budget |
 | Q29 | **Budgets for recovery and moves**, for each device | M16. X12 |
 | Q30 | **The benchmark**: how the driver gains object operations, byte metrics and an object dataset. **In part, 2026-10-03**: the one driver is generalized ([the record](#q30-in-part-the-drivers-shape-2026-10-03)). **The rest, 2026-10-05**: a stream makes its own bytes inline, a description's bytes are SplitMix64 in counter mode, read-back makes them again, and a description is integers alone ([the record](#q30-the-object-dataset-and-seeded-bytes-2026-10-05)); the object arms are M13's | ~~M11~~ M11 for the driver, M13 for the dataset. ✅ [F69](../features/driver-operation-kinds.md), ✅ [X13](benchmark-shape.md) |

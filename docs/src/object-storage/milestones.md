@@ -54,7 +54,7 @@ numbered property each, beside the schedule that violates it and the test that o
 when five questions are decided with evidence:
 
 - [Q14](contract.md#questions-to-answer), what orders a stripe's writes: ✅ for safety by
-  [X1](stripe-model.md) ([recorded](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)), for cost ✅ X3's for stripes as rows ([recorded](contract.md#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)) and X8's for the small write;
+  [X1](stripe-model.md) ([recorded](contract.md#q16-and-q18-and-q14-q15-q19-in-part-the-stripe-protocol-modelled-2026-10-06)), for cost ✅ X3's for stripes as rows ([recorded](contract.md#q14-in-part-the-cost-of-stripes-as-rows-2026-10-07)) and ✅ X8's for the small write ([recorded](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08));
 - Q15, who stages: ✅ X1;
 - Q16, the acknowledgement rule: ✅ X1;
 - Q18, size and truncate across tablets: ✅ X1;
@@ -66,7 +66,7 @@ when five questions are decided with evidence:
 The evidence is ✅ [X1](stripe-model.md) for safety,
 ✅ [X2](placement-simulation.md) for placement, and
 ✅ [X3](bytes-through-groups.md),
-[X8](spikes.md#x8-one-small-write-three-ways) and
+✅ [X8](small-writes.md) and
 [X9](spikes.md#x9-table-latency-beside-object-work) for cost. A clause the model contradicts
 is changed with a recorded cause, and the page that leaned on it is changed with it.
 
@@ -124,7 +124,9 @@ commit to a cold row costs ([X10](spikes.md#x10-what-a-stripe-row-costs)). A gen
 is persisted from the first object on, so its layout is fixed here. ✅ Recorded in part by X10 on
 2026-10-04 ([Q25, in part](contract.md#q25-in-part-the-metadata-rows-2026-10-04)): stripe rows
 are not kept resident, the inline threshold defaults to 16 KiB, and the index sets no floor under
-the stripe above X6's. Whether buckets share one stripe table is left to this gate.
+the stripe above X6's. Whether buckets share one stripe table is left to this gate. And since X8
+on 2026-10-08 the stripe row carries a field of pending bytes, empty unless a small write rode
+its commit ([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)).
 
 **Lands first.** ~~A conditional write on unsorted tables, with a typed refusal~~ ✅ landed
 as [F68](../features/conditional-writes.md), for sorted tables too. ~~Known issue
@@ -271,7 +273,11 @@ lane that carries stripe chunks between nodes is M15's, where there is something
 
 **Closed before it.** Q27, what a small write in place costs and whether small writes ride
 the metadata log ([X8](spikes.md#x8-one-small-write-three-ways)). The commit command's shape
-depends on it, and a command is persisted in a log.
+depends on it, and a command is persisted in a log. ✅ Recorded by [X8](small-writes.md) on
+2026-10-08 ([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)): a write below 64 KiB rides inside its commit on a device
+whose sync flushes its cache, once M14's slice shares one flush among its applies, so the commit
+command carries a write's bytes and the stripe row a field of them; on a device whose cache writes
+through every write is staged.
 
 **Delivers.**
 
@@ -496,13 +502,13 @@ The reason this page is provisional, spike by spike.
 | --- | --- | --- |
 | ~~X1~~ | ~~A violation the safe policy cannot be repaired for~~ None: it found ten rules the pages stated broke a clause, each repaired by a local rule ([X1](stripe-model.md)) | ~~Nothing after the first gate stands~~ The gates stand. M15 builds the repaired rules: tags a try, the row's tombstones, the truncate's fence, a holder's confirmation for an untouched chunk, a previous state kept, and rows read at `Quorum` |
 | ~~X2~~ | ~~The rule balances the lab's shape badly~~ It does not: 3.7% over at one placement group a tablet, 0.9% at four ([X2](placement-simulation.md)). It found instead that no function keeps positions, that a replacement needs a seat, and that mixed sizes need fitted weights | ~~M14 carries exceptions from the start, and the planner's part of M16 comes forward~~ M14's pool map carries seats, placement weights and exceptions, and M16's switch records positions |
-| ~~X3,~~ X8 | Rows within reach of the devices' own rate for a replicated pool. ~~X3~~ found them several times short: stripes as rows wrote a byte about twice and stored 0.20 to 0.27 of a replicated pool's device rate a copy, bound by the nodes' cpu, and slowed a table beside them a hundredfold ([X3](bytes-through-groups.md)). X8 asks it again for one small write | ~~Replicated SSD pools stay rows. M15 to M17 are built for erasure coding and rotational disks first~~ Replicated SSD pools are not rows, and M15 to M17 are built in the order they stand. X8 can still move small writes into the commit |
+| ~~X3, X8~~ | Rows within reach of the devices' own rate for a replicated pool. ~~X3~~ found them several times short: stripes as rows wrote a byte about twice and stored 0.20 to 0.27 of a replicated pool's device rate a copy, bound by the nodes' cpu, and slowed a table beside them a hundredfold ([X3](bytes-through-groups.md)). ~~X8 asks it again for one small write~~ X8 found the same for one small write: from 128 KiB a stage beat bytes in the log on every device, and on the Optane at every size under load ([X8](small-writes.md)) | ~~Replicated SSD pools stay rows. M15 to M17 are built for erasure coding and rotational disks first~~ Replicated SSD pools are not rows, and M15 to M17 are built in the order they stand. ~~X8 can still move small writes into the commit~~ X8 moved small writes into the commit on a device that flushes, below 64 KiB, and nowhere else |
 | ~~X4~~ | ~~No candidate has an update form~~ Three have one, the chosen crate in its public API ([X4](erasure-coding-crates.md)) | ~~M18 ends at its second step~~ M18 has all three steps |
 | ~~X4,~~ X9 | ~~A Zen1 core encodes below a device's rate, or~~ shared executors move a table's tail past its budget. X4 measured the first half: a Zen1 core encodes 4+2 at 7.6 GiB/s out of cache ([X4](erasure-coding-crates.md)) | M14 delivers dedicated executors only, and a four-core node gives up a core or serves no pool |
 | ~~X5~~ | ~~gxhash's output is not stable across builds~~ It was stable across every cpu and build, but not across ways of feeding it ([X5](checksums.md)) | ~~A second checksum is a new dependency before M13~~ It is: CRC-64/NVME through `crc-fast`, added at M13 |
 | ~~X6~~ | ~~A file a stripe chunk is not viable at small sizes, or a clone is worth requiring~~ Neither: a file a chunk is viable from 1 MiB on a device that flushes, at the line, and from 256 KiB on the Optane; the clone failed every condition but one ([X6](device-store-ssd.md)) | ~~M14's store changes layout; or a clone call lands in the glommio fork first and the filesystems M14 accepts narrow~~ M14's store keeps S6's layout, with its whole chunks written into files a slice keeps written ahead. No clone call is added, and M14 accepts XFS and ext4 and refuses btrfs |
 | ~~X7~~ | ~~A disk needs a journal on an SSD, or an executor to itself~~ It needs both, and its write cache off: a stage on the disk took 42 to 251 ms beside applies, an SSD's slice on an executor shared with a disk's slowed a hundredfold, and the lab's disks with their cache on stalled a read behind a flush or acknowledged a sync before the platter could ([X7](device-store-hdd.md)) | M19 grows by that, and a shared journal ~~becomes~~ is a failure domain on S5, as S6 says. M19 also drops the offset order, reads whole chunks of 4 MiB or more, and refuses ext4 |
-| X8 | A size below which bytes in the commit win | M15 gains the small-write path, and ~~item 202~~ the append batch bound ([Resolved #202](../appendix/resolved/append-batch-bytes.md)) and item 208 carry more weight |
+| ~~X8~~ | ~~A size below which bytes in the commit win~~ One on a device whose sync flushes its cache, 64 KiB once a slice shares one flush among its applies, and none on a device whose cache writes through ([X8](small-writes.md)) | M15 gains the small-write path ~~, and~~ for pools of the first kind, and M14 a shared flush for a slice's applies. ~~item 202~~ The append batch bound ([Resolved #202](../appendix/resolved/append-batch-bytes.md)) is built, and ~~item 208 carry~~ item 208 carries no more weight: a commit of less than 64 KiB is far below a frame |
 | ~~X10~~ | ~~A commit to a cold stripe row stalls its group~~ It does, under load and not at depth one: 0.62× a group's rate on the 970 EVO. The read S7 already makes, sent to the group's leader, removes the stall ([X10](stripe-row-costs.md)) | ~~The rows of M12 change shape, or M15 keeps stripe rows resident and pays for it in memory~~ M12's rows keep S3's shape and stay cold; M15's commit reads its stripe row at the leader first, and the inline threshold defaults to 16 KiB |
 | ~~X11~~ | ~~A shared connection hurts small queries; a connection cannot be handed to another executor~~ The first came out, ~~9 to 32~~ 4 to 29 times at 1 MiB ([item 213](../appendix/resolved/x11-setup-fifo.md) measured its reads again), and the second did not: a connection under kTLS is handed over at no cost, while bytes hopping cost 1.3 to 1.7 times the cpu ([X11](streamed-bodies.md)) | ~~M13 sets connections aside for object bytes; the hop between executors stays in M14~~ M13's client sets connections apart for object bytes (S1's prerequisite builds them for queries), and M14 hands the object lane's connections to the slice's executor |
 | X12 | A rebuild inside a tolerable budget takes days | The defaults for `k + m` and `f` change before M18, and M16's budget has to adapt to the foreground |

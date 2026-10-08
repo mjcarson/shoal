@@ -187,8 +187,10 @@ two. A peer names a slice, as it names a slot today, and never an executor
 
 **Tables keep their latency.** Object bytes are not rows: they are never serialized by rkyv,
 never held in a shard's row cache and never written to its WAL, with two named exceptions that
-are rows by design (an object small enough to live inline, and whatever
-[Q27](contract.md#questions-to-answer) decides for small writes). A failing device stops no
+are rows by design (an object small enough to live inline, and ~~whatever
+[Q27](contract.md#questions-to-answer) decides for small writes~~ a write in place below 64 KiB
+on a device whose sync flushes its cache, which [Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08) decided
+from [X8](small-writes.md)). A failing device stops no
 tablet group. What object work may cost a table's tail is a budget on
 [S15](performance.md), measured by [X9](spikes.md#x9-table-latency-beside-object-work).
 [X3](bytes-through-groups.md) measured what breaking this rule costs: object bytes as rows moved

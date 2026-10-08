@@ -49,7 +49,8 @@ baseline every measurement is read against: a stripe's bytes are a row of a gene
 replicated by its tablet group like any other row. A needs no device store, no pool and no
 protocol of its own, and gives up erasure coding, storage pools and devices altogether. Every
 byte passes through the WAL, the archives and the compactor, and a 4 KiB change rewrites the
-stripe at the next merge. [X1](stripe-model.md) settled Q14's safety; its cost is X3's and X8's.
+stripe at the next merge. [X1](stripe-model.md) settled Q14's safety; its cost is X3's and
+[X8's](small-writes.md).
 
 X3 asks what A costs today, with no new code in the engine, at the sizes a stripe has: 64 KiB to
 4 MiB. The spike's section named the result in advance that would change the design:
@@ -558,7 +559,7 @@ every page of this part inherits ([the overview](overview.md#the-constraint-ever
 | --- | --- | --- |
 | **T1.** A acknowledges at least half the pool's ceiling at 1 MiB and 4 MiB on the loopback leg | **Does not fire.** 0.27 (0.26–0.28) at 1 MiB and 0.20 (0.20–0.21) at 4 MiB, every round wholly under 0.5; sustained, counting the merges, 0.22 and 0.17 | A is not within reach of a replicated pool's rate on the hardware that could show it: four to five times short of the device a copy, and half to two fifths of what writing every byte twice allows. Its nodes' cpu is the bound, not the device |
 | **T2.** A writes at most 2.5 device bytes a byte stored a copy at 1 MiB and 4 MiB on every host of every factor-three leg | **Fires at 4 MiB** (2.04, every host and round). **Straddles its line at 1 MiB**, by one host in one round: europa's lab node wrote 2.54 in round 3, where item 215's refusals had the preload send 4,133 rows again and 17% more WAL was written than rows stored. Every other host and round was 2.06 to 2.40 | A is near two: once to a WAL, once to an archive. What it writes beyond two is headers, syncs' partly empty pages and the filesystems' journals, which shrink as rows grow |
-| The design moves only if both fire | **It does not move** | B stays the preferred direction. A remains the baseline it is read against, and a candidate for small writes, which is X8's |
+| The design moves only if both fire | **It does not move** | B stays the preferred direction. A remains the baseline it is read against, and a candidate for small writes, which is X8's: ✅ below 64 KiB on a device that flushes, once a slice shares one flush among its applies ([X8](small-writes.md)) |
 
 ## The comparison
 
@@ -572,7 +573,7 @@ the device's own rate a copy (820 MiB/s with three copies on it, the rounds' med
 | **B, as S7 and S6 describe it** | not built: what it would pay is one write of a whole chunk a copy, written ahead and renamed ([X6](device-store-ssd.md#1-a-whole-chunk)), and a small commit of its row | X6 put a slice's whole 1 MiB chunks at 368 to 543 MiB/s on the 970 EVO and 1,978 to 2,379 on the Optane, one to four slices | about 1, the chunk once | On executors of their own ([S13](isolation.md#shared-executors-or-dedicated-ones)); X9 measures the rest |
 
 B's row is not a measurement of B: nothing of B exists, and [X8](spikes.md#x8-one-small-write-three-ways)
-is the spike that runs it beside A. It is what X6 measured a slice's device store to take, so the
+is the spike that runs it beside A, ✅ for one small write ([X8](small-writes.md)). It is what X6 measured a slice's device store to take, so the
 two rows are read as what each path asks of the same device: A writes a byte twice through cores
 that also run every table, and B writes it once from a slice's executor.
 
@@ -595,12 +596,15 @@ with what X3 did not settle:
   either.
 - **A small write may still ride the log.** S7's threshold at which small writes go inside the
   commit stands untouched: that is the cost X8 measures, and nothing here prices a write below
-  64 KiB.
+  64 KiB. ✅ [X8](small-writes.md) did: below 64 KiB on a device whose sync flushes its cache, once
+  a slice shares one flush among its applies, and never on the Optane ([Q27](contract.md#q27-and-q14-in-part-one-small-write-three-ways-2026-10-08)).
 
 ## What X3 does not settle
 
 - **B's own cost.** B is not built; X8 runs a small write through A, through B, and through B
-  with the bytes in its commit, and M15 measures B's whole write.
+  with the bytes in its commit, and M15 measures B's whole write. ✅ [X8](small-writes.md) has: a
+  staged 4 KiB write took 7.0 ms one at a time on the lab and 1.5 ms on the Optane, and from
+  128 KiB beat the same bytes in the log on every device.
 - **Where A's cpu goes, beyond the profile.** [5](#5-what-the-cpu-went-to) names the functions
   a node spent its put arm in; an optimization that took a share of them would move A's rate,
   not the comparison, which is two writes against one.

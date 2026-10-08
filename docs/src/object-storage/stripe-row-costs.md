@@ -614,7 +614,10 @@ is the engine's half: it would let the followers read in parallel too.
 - **What a group's own state costs** to carry Q17's record of what a slice missed, as opposed to a
   row rewritten whole. The checkpoint holding it is rewritten whole
   ([C5](../distributed/replication.md#limitations)), and X10 measured no group state.
-- **Small writes in the metadata log**, Q27's other half: [X8](spikes.md#x8-one-small-write-three-ways).
+- ~~**Small writes in the metadata log**, Q27's other half: [X8](spikes.md#x8-one-small-write-three-ways).~~
+  Recorded by [X8](small-writes.md): below 64 KiB on a device that flushes, once a slice shares
+  one flush among its applies, so the stripe row carries a field of pending bytes; a threshold of
+  writes in place, and another from this page's threshold of whole objects held inline.
   X10's inline cells are puts of whole objects, not writes in place.
 - **The stall on a node whose rows were evicted rather than restarted.** Eviction needs memory
   pressure and leaves the archive map as a restart does, so the read is the same; X10 made rows

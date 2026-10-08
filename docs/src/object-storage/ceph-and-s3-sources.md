@@ -933,7 +933,9 @@ records:
    write. Since Tentacle a partial write writes only the touched data chunk, chunk 0 and the
    parity. X1, X3 and X8 still decide Q14. ✅ X1 has since recorded its safety
    ([X1](stripe-model.md)): B holds under the model with redo alone, so undo is not what it
-   needs.
+   needs. ✅ X3 and X8 have since priced it ([X3](bytes-through-groups.md), [X8](small-writes.md)):
+   B's second round is 1.7 ms of a 7.0 ms small write on the lab's 970 EVO, which is the round
+   Ceph does not pay.
 
 ## What X14 does not settle
 

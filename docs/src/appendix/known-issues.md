@@ -96,7 +96,7 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ ~~**1,674 tests**~~ ~~**1,685 tests**~~ ~~**1,691 tests**~~ ~~**1,715 tests**~~ ~~**1,725 tests**~~ ~~**1,726 tests**~~ ~~**1,728 tests**~~ ~~**1,782 tests**~~ ~~**1,785 tests**~~ ~~**1,790 tests** since [F65](../features/query-figures-home-tab.md), eleven ignored~~ ~~**1,892 tests** since [F67](../features/bench-run-wizard.md)~~ ~~**1,894 tests** since [Resolved #201](resolved/attached-read-order.md)~~ ~~**1,911 tests** since [F68](../features/conditional-writes.md)~~ ~~**1,921 tests** since [Resolved #92, #198](resolved/composite-partition-key.md)~~ ~~**1,930 tests** since [Resolved #46](resolved/unmarked-directory-refused.md)~~ ~~**1,934 tests** since [Resolved #202](resolved/append-batch-bytes.md)~~ ~~**1,942 tests** since [F69](../features/driver-operation-kinds.md)~~ ~~**1,947 tests** since [F70](../features/storage-faults.md)~~ ~~**1,949 tests** since [Resolved #210](resolved/bench-preload-frame.md)~~ ~~**1,962 tests** since [F71](../features/bench-device-memory.md) and [F72](../features/bench-paced-stream.md)~~ ~~**2,021 tests** since [F73](../features/bodies-across-frames.md), with twenty that the X10 and X11 spikes had added uncounted,~~ ~~**2,022 tests** since [Resolved #213](resolved/x11-setup-fifo.md),~~ ~~**2,029 tests** since [X13](../object-storage/benchmark-shape.md),~~ ~~**2,062 tests** since [X1](../object-storage/stripe-model.md),~~ **2,081 tests** since [X3](../object-storage/bytes-through-groups.md), ~~twelve~~ ~~thirteen~~ fourteen ignored (F66 took it to 1,873 without moving this line), plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ ~~**1,414 tests**~~ ~~**1,432 tests**~~ ~~**1,449 tests**~~ ~~**1,467 tests**~~ ~~**1,475 tests**~~ ~~**1,484 tests**~~ ~~**1,492 tests**~~ ~~**1,529 tests**~~ ~~**1,541 tests**~~ ~~**1,543 tests**~~ ~~**1,549 tests**~~ ~~**1,555 tests**~~ ~~**1,564 tests**~~ ~~**1,576 tests**~~ ~~**1,587 tests**~~ ~~**1,589 tests**~~ ~~**1,605 tests**~~ ~~**1,608 tests**~~ ~~**1,611 tests**~~ ~~**1,614 tests**~~ ~~**1,619 tests**~~ ~~**1,629 tests**~~ ~~**1,633 tests**~~ ~~**1,634 tests**~~ ~~**1,635 tests**~~ ~~**1,636 tests**~~ ~~**1,637 tests**~~ ~~**1,639 tests**~~ ~~**1,640 tests**~~ ~~**1,641 tests**~~ ~~**1,642 tests**~~ ~~**1,644 tests**~~ ~~**1,647 tests**~~ ~~**1,651 tests**~~ ~~**1,653 tests**~~ ~~**1,654 tests**~~ ~~**1,655 tests**~~ ~~**1,656 tests**~~ ~~**1,661 tests**~~ ~~**1,663 tests**~~ ~~**1,674 tests**~~ ~~**1,685 tests**~~ ~~**1,691 tests**~~ ~~**1,715 tests**~~ ~~**1,725 tests**~~ ~~**1,726 tests**~~ ~~**1,728 tests**~~ ~~**1,782 tests**~~ ~~**1,785 tests**~~ ~~**1,790 tests** since [F65](../features/query-figures-home-tab.md), eleven ignored~~ ~~**1,892 tests** since [F67](../features/bench-run-wizard.md)~~ ~~**1,894 tests** since [Resolved #201](resolved/attached-read-order.md)~~ ~~**1,911 tests** since [F68](../features/conditional-writes.md)~~ ~~**1,921 tests** since [Resolved #92, #198](resolved/composite-partition-key.md)~~ ~~**1,930 tests** since [Resolved #46](resolved/unmarked-directory-refused.md)~~ ~~**1,934 tests** since [Resolved #202](resolved/append-batch-bytes.md)~~ ~~**1,942 tests** since [F69](../features/driver-operation-kinds.md)~~ ~~**1,947 tests** since [F70](../features/storage-faults.md)~~ ~~**1,949 tests** since [Resolved #210](resolved/bench-preload-frame.md)~~ ~~**1,962 tests** since [F71](../features/bench-device-memory.md) and [F72](../features/bench-paced-stream.md)~~ ~~**2,021 tests** since [F73](../features/bodies-across-frames.md), with twenty that the X10 and X11 spikes had added uncounted,~~ ~~**2,022 tests** since [Resolved #213](resolved/x11-setup-fifo.md),~~ ~~**2,029 tests** since [X13](../object-storage/benchmark-shape.md),~~ ~~**2,062 tests** since [X1](../object-storage/stripe-model.md),~~ ~~**2,081 tests** since [X3](../object-storage/bytes-through-groups.md),~~ **2,114 tests** since [X8](../object-storage/small-writes.md), ~~twelve~~ ~~thirteen~~ ~~fourteen~~ fifteen ignored (F66 took it to 1,873 without moving this line), plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
 its ~~fifty-four~~ ~~sixty-four~~ ~~seventy-one~~ ~~eighty~~ ~~eighty-nine~~ ~~ninety-two~~ ~~ninety-five~~ ninety-seven fail under the load (item 100) and every one of them passes at six;
@@ -536,6 +536,39 @@ shard over its budget with nothing evictable is behind its merges, and can refus
 until they catch up, the way a group's `pending_bytes` bounds what is proposed and not yet
 answered.
 
+### 217. A pooled connection retired at its lifetime fails the answers it still owes
+
+A client takes a connection from its `bb8` pool to write a bundle, and gives it back as soon as
+the bundle is written (`shoal-client/src/client.rs`, the `pool.get()` in the send path, whose
+connection goes back when the function returns). The answers the bundle is owed arrive later on
+that connection's reader. But the pool counts a connection it holds as idle, and retires one past
+its `max_lifetime`, 30 minutes by default, or idle past its `idle_timeout`, 5 minutes
+(`PoolConfig::default`, `shoal-client/src/client/builder.rs`): dropping it closes the client's
+half. The node reads a clean end of stream, which its read relay takes as a client that went
+away, logs nothing and closes its own half (`client_rx_relay`, `shoal-core/src/server/shard.rs`).
+The client's reader then hits that end and fails every query the connection still owed as
+`ConnectionLost` (`fail_waiting`). So a client under a steady load loses a few queries about every
+30 minutes a connection, and a write among them has an unknown outcome. It shows up only in a run
+longer than half an hour, and nothing on either side logs why.
+
+**Seen by [X8](../object-storage/small-writes.md)**, whose driver held one client a member for a
+whole leg, and **established by reading the source.** In the first attempt at its rounds, every
+failure fell about 30 minutes after the driver connected, on three legs of three: 7 writes of one
+cell 30 minutes into round 1's lab leg, 33 and 2 of two cells 30 minutes into its loopback leg,
+and 38 of a cell 31 minutes into round 2's loopback leg, which ended that leg when a filler row it
+did not retry failed the same way. Every one was `ConnectionLost`, "early eof"; a conditional
+commit among them left its stripe's sequence unknown, which the next read found moved. The nodes
+logged no warning or error over the whole leg. One of them authenticated 27 of the driver's
+connections at 04:19 and 04:20 as the leg began, none for thirty minutes, and 13 more at 04:50,
+as the failures came: the pool replacing what it had retired. With the driver's pools given no lifetime and no
+idle timeout, the four rounds ran with no failure at all.
+
+**Fix direction:** keep a connection out of the pool's reach while it owes answers: give it back
+only once its reader holds no waiter, or have the pool's recycle check refuse a connection with
+waiters (`ManageConnection::has_broken` / `is_valid`). The simplest stopgap, and the one X8
+took, is a pool with no lifetime and no idle timeout, which loses the reason they exist: a
+connection to a node that went away is then found only when a write to it fails.
+
 ### 132. `ephemeral_sorted_table` aborted once in glibc's thread-cache teardown
 
 One workspace run aborted this test binary with SIGABRT after its first test passed. glibc
@@ -755,6 +788,10 @@ driver left: the test pauses node two so that the source's vote request is answe
 resumes, and under the suite's load node two's own campaign got there first. The first of these
 is the deadline this item is about; the second is the test arranging an election by timing, and
 it passed alone in 12 s.
+
+The workspace run after [X8](../object-storage/small-writes.md), at six threads, failed one of
+2,114: `single_node_data_has_a_verified_cluster_migration_path` again, restoring 150 of 400
+records, and it passed alone in 8 s.
 
 ---
 
